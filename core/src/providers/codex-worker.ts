@@ -43,6 +43,8 @@ import {
 import {
   addCodexTelemetry,
   codexTokens,
+  codexTurnUsage,
+  modelItem,
   SDK_OPERATIONS,
 } from "./codex-telemetry.js";
 import {
@@ -53,8 +55,9 @@ import {
   providerOutcome,
 } from "./planner.js";
 import {
-  captureRequest,
   captureResponse,
+  describeRequest,
+  firstToken,
   logUsage,
   Tallies,
   usageRecord,
@@ -346,7 +349,10 @@ export class CodexWorker implements Worker {
       effort: this.model.effort,
       item: input.item.id,
     });
-    captureRequest(record, input.prompt);
+    describeRequest(record, {
+      prompt: input.prompt,
+      ...(input.facts ? { facts: input.facts } : {}),
+    });
     try {
       const result = await this.turn(input, record);
       record.outcome = result.kind;
@@ -438,6 +444,9 @@ export class CodexWorker implements Worker {
           }),
         },
       });
+      const callStarted = Date.now();
+      record.sessionTurn = 1;
+      record.sessionMode = "fresh";
       const thread = codex.startThread({
         workingDirectory: resolve(input.worktree),
         approvalPolicy: "never",
@@ -468,6 +477,7 @@ export class CodexWorker implements Worker {
             : undefined;
         watchdog.progress(item ? `${event.type}:${item.type}` : event.type);
         if (event.type === "thread.started") record.thread = event.thread_id;
+        if (modelItem(item)) firstToken(record, callStarted);
         if (item?.type === "agent_message") finalResponse = item.text;
         if (item) codexActivity(input, event.type, item);
         if (item && SDK_OPERATIONS.has(item.type)) {
@@ -477,6 +487,7 @@ export class CodexWorker implements Worker {
         if (event.type === "turn.completed") {
           completed = true;
           record.tokens = codexTokens(event.usage);
+          codexTurnUsage(record, event.usage);
         }
         if (event.type === "turn.failed")
           return outcome(codexFailure(redact(event.error.message, secrets)));

@@ -236,7 +236,14 @@ export interface ObjectiveState {
    * Steps started and not yet finished, with the service run that started
    * each. One found after a restart was interrupted, and runs again.
    */
-  attempts: Record<string, { startedAt: string; run?: string }>;
+  attempts: Record<string, { startedAt: string; run?: string; id?: string }>;
+  /**
+   * Per step: attempts started so far (`n`; an attempt's id is
+   * `<step>#<n>`), and the attempt its next one continues (`parent`: the
+   * continuation, the repair that sent it back, or the interrupted
+   * attempt it reruns). Run-log identity only; nothing decides on it.
+   */
+  stepRuns?: Record<string, { n: number; parent?: string }>;
   /** The service run that last finished a step of this Objective, saved with the step's outcome. */
   finishedRun?: string;
   /**

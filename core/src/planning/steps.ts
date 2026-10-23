@@ -17,8 +17,9 @@ import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
-import type { Planner } from "../providers/planner.js";
+import type { Planner, PlannerAnswer } from "../providers/planner.js";
 import { resolvedProvider } from "../providers/selection.js";
+import { logRefused } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import type { Answer, ObjectiveState } from "../state.js";
@@ -465,7 +466,7 @@ function planRoundStep(
         ...(lookups ? { contextLookups: lookups.data } : {}),
       };
       const local = await localExecutables(inputs, config, signal);
-      const prompt = renderCompilationCall({
+      const { prompt, facts: promptFacts } = renderCompilationCall({
         facts,
         data,
         revising,
@@ -487,6 +488,7 @@ function planRoundStep(
         role: "planner",
         phase: "plan",
         prompt,
+        facts: promptFacts,
         schema: lookups ? lookups.schema(schema) : schema,
         readDir: workDir,
         signal,
@@ -515,7 +517,8 @@ function planRoundStep(
           facts,
           wire,
         );
-        if (revised.invalidShape) return invalidAnswer(revised.findings);
+        if (revised.invalidShape)
+          return refusedAnswer(context.log, answer, revised.findings);
         if (!revised.answer)
           return done({
             ...(g > 1 && n === 1 ? { inputs } : {}),
@@ -525,7 +528,8 @@ function planRoundStep(
         full = revised.answer;
       }
       const decoded = decodePlan(full, facts, wire);
-      if (decoded.invalidShape) return invalidAnswer(decoded.findings);
+      if (decoded.invalidShape)
+        return refusedAnswer(context.log, answer, decoded.findings);
       const round: PlanRound = {
         ...(g > 1 && n === 1 ? { inputs } : {}),
         answer: full,
@@ -598,7 +602,7 @@ function reviewStep(
         signal,
       );
       const scope = lastReview(state, g, n);
-      const prompt = renderGraphReviewCall({
+      const { prompt, facts: promptFacts } = renderGraphReviewCall({
         facts,
         draft,
         evidence,
@@ -634,6 +638,7 @@ function reviewStep(
         role: "reviewer",
         phase: "graph-review",
         prompt,
+        facts: promptFacts,
         schema: graphReviewSchema(),
         readDir: workDir,
         signal,
@@ -644,8 +649,10 @@ function reviewStep(
         evidence,
         draftItems(draft).map((item) => item.id),
       );
-      if (decoded.invalid)
+      if (decoded.invalid) {
+        logRefused(context.log, answer.callId, decoded.reason);
         return errored(`The plan review answer was invalid: ${decoded.reason}`);
+      }
       const result: ReviewRound = { findings: decoded.findings };
       return done(result);
     },
@@ -1366,6 +1373,16 @@ function treeDir(deps: PlanningDeps, issue: number, base: string): string {
 
 function done(result: unknown): Outcome {
   return { kind: "done", result };
+}
+
+/** An answer Factory's checks refused: logged as such (usage.ts logRefused), and retried. */
+function refusedAnswer(
+  log: (event: Record<string, unknown>) => void,
+  answer: PlannerAnswer,
+  findings: Finding[],
+): Extract<Outcome, { kind: "retry" }> {
+  logRefused(log, answer.callId, findings.map((f) => f.message).join("; "));
+  return invalidAnswer(findings);
 }
 
 export function invalidAnswer(

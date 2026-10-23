@@ -1,16 +1,19 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { captureDir } from "./paths.js";
 
 /**
@@ -50,6 +53,30 @@ export const CAPTURE = Symbol("capture");
 export interface CaptureBody {
   request: string;
   response?: string;
+  /** Native tool outputs, in order (usage.ts captureToolOutput). */
+  tools?: { name: string; output: string }[];
+}
+
+/**
+ * How a run ended, in its `run-end` event: `stopped` (a clean stop, or a
+ * one-off run that finished), `handed-off` (a clean stop with the
+ * Objective unfinished: the next run carries it on), or `crashed` (the
+ * process died; the next start detects it and appends this event to the
+ * dead run's files, `endCrashedRun`).
+ */
+export type RunEnd = "stopped" | "handed-off" | "crashed";
+
+/** One run file's line counters: what `log-health` reports. */
+interface FileHealth {
+  path: string;
+  /** The last sequence number given out: every line gets the next, written or not. */
+  seq: number;
+  emitted: number;
+  /** Failed writes: lines (`lost`) and capture files. */
+  failed: number;
+  lost: number;
+  /** `failed` when the last `log-health` went out. */
+  reported: number;
 }
 
 /**
@@ -58,9 +85,16 @@ export interface CaptureBody {
  * `logs/<issue>/<run id>.captures/`. It records what happened for status,
  * diagnostics and analysis. It never drives progress, and losing it loses
  * no work.
+ *
+ * Its formal history (CORE.md#Run log): each file starts with a
+ * `run-header` (Factory's version and the running build's source digest);
+ * every line carries `seq`, consecutive per file from 1, so a missing
+ * number is a lost line; a write that fails is counted, and the next line
+ * that lands is followed by a `log-health` event (emitted, failed and
+ * lost), as is the run's end (`end`), after its `run-end` event.
  */
 export class RunLog {
-  private readonly files = new Map<number, string>();
+  private readonly files = new Map<number, FileHealth>();
 
   constructor(
     private readonly dir: string,
@@ -70,16 +104,54 @@ export class RunLog {
   ) {}
 
   write(issue: number, event: Record<string, unknown>): void {
+    const file = this.file(issue);
+    if (!file) return;
+    if (file.seq === 0) this.append(file, { event: "run-header", ...build() });
+    const body = (event as { [CAPTURE]?: CaptureBody })[CAPTURE];
+    const id = body && this.capture.enabled && this.captured(issue, body);
+    if (body && this.capture.enabled && !id) file.failed += 1;
+    if (!this.append(file, { ...event, ...(id ? { capture: id } : {}) }))
+      return;
+    if (file.failed > file.reported) this.health(file);
+  }
+
+  /**
+   * The run's end: a `run-end` event (`outcome(issue)`) then a
+   * `log-health` event in every file this run wrote. Call it once, last.
+   */
+  end(outcome: (issue: number) => RunEnd): void {
+    for (const [issue, file] of this.files) {
+      this.append(file, { event: "run-end", outcome: outcome(issue) });
+      this.health(file);
+    }
+  }
+
+  /** One line with the file's next `seq`; false, counted, when it couldn't be written. */
+  private append(file: FileHealth, event: Record<string, unknown>): boolean {
+    file.seq += 1;
     try {
-      const body = (event as { [CAPTURE]?: CaptureBody })[CAPTURE];
-      const id = body && this.capture.enabled && this.captured(issue, body);
       appendFileSync(
-        this.file(issue),
-        `${JSON.stringify({ at: new Date().toISOString(), ...event, ...(id ? { capture: id } : {}) })}\n`,
+        file.path,
+        `${JSON.stringify({ at: new Date().toISOString(), seq: file.seq, ...event })}\n`,
       );
+      file.emitted += 1;
+      return true;
     } catch {
       // A full disk or a removed directory must not stop the run: the log only observes.
+      file.failed += 1;
+      file.lost += 1;
+      return false;
     }
+  }
+
+  private health(file: FileHealth): void {
+    file.reported = file.failed;
+    this.append(file, {
+      event: "log-health",
+      emitted: file.emitted,
+      failed: file.failed,
+      lost: file.lost,
+    });
   }
 
   /**
@@ -92,12 +164,24 @@ export class RunLog {
       const dir = join(this.dir, captureDir(issue, this.runId));
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const id = randomUUID();
-      const half = Math.floor(this.capture.maxBytesPerCall / 2);
-      const request = bounded(redact(body.request, this.secrets), half);
+      // Request and response share the bound; tool outputs, when any, take a quarter.
+      const share = Math.floor(
+        this.capture.maxBytesPerCall / (body.tools?.length ? 2.5 : 2),
+      );
+      const request = bounded(redact(body.request, this.secrets), share);
       const response =
         body.response === undefined
           ? undefined
-          : bounded(redact(body.response, this.secrets), half);
+          : bounded(redact(body.response, this.secrets), share);
+      let toolBytes = Math.floor(this.capture.maxBytesPerCall / 4);
+      let toolsCut = false;
+      const tools: { name: string; output: string }[] = [];
+      for (const tool of body.tools ?? []) {
+        const output = bounded(redact(tool.output, this.secrets), toolBytes);
+        tools.push({ name: tool.name, output: output.text });
+        toolBytes -= Buffer.byteLength(output.text);
+        toolsCut ||= output.cut;
+      }
       writeFileSync(
         join(dir, `${id}.json`),
         JSON.stringify({
@@ -105,7 +189,8 @@ export class RunLog {
           run: this.runId,
           request: request.text,
           ...(response ? { response: response.text } : {}),
-          truncated: request.cut || Boolean(response?.cut),
+          ...(tools.length ? { tools } : {}),
+          truncated: request.cut || Boolean(response?.cut) || toolsCut,
         }),
         { mode: 0o600 },
       );
@@ -115,16 +200,118 @@ export class RunLog {
     }
   }
 
-  private file(issue: number): string {
-    let path = this.files.get(issue);
-    if (!path) {
+  private file(issue: number): FileHealth | undefined {
+    let file = this.files.get(issue);
+    if (!file) {
       const dir = join(this.dir, String(issue));
-      mkdirSync(dir, { recursive: true });
-      path = join(dir, `${this.runId}.jsonl`);
-      this.files.set(issue, path);
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
+        // Tried again with the next line; nothing was numbered yet.
+        return undefined;
+      }
+      file = {
+        path: join(dir, `${this.runId}.jsonl`),
+        seq: 0,
+        emitted: 0,
+        failed: 0,
+        lost: 0,
+        reported: 0,
+      };
+      this.files.set(issue, file);
     }
-    return path;
+    return file;
   }
+}
+
+/**
+ * At a start that found the last run dead: append `run-end` (`crashed`)
+ * to that run's files of `issues` (and the service's, 0) that exist,
+ * numbered after their last line, which a torn last line doesn't swallow.
+ * Only the given issues are looked at: the Objectives this start loaded.
+ */
+export function endCrashedRun(
+  dir: string,
+  runId: string,
+  issues: Iterable<number>,
+  detectedBy: string,
+): void {
+  for (const issue of new Set([0, ...issues])) {
+    const path = join(dir, String(issue), `${runId}.jsonl`);
+    try {
+      if (!existsSync(path)) continue;
+      const size = sizeOf(path);
+      const tail = readFrom(path, Math.max(0, size - 64 * 1024), size);
+      const last = parseLines(completeLines(tail).toString("utf8"), true).at(
+        -1,
+      );
+      const seq = typeof last?.seq === "number" ? last.seq + 1 : undefined;
+      appendFileSync(
+        path,
+        `${tail.length && tail[tail.length - 1] !== 10 ? "\n" : ""}${JSON.stringify(
+          {
+            at: new Date().toISOString(),
+            ...(seq ? { seq } : {}),
+            event: "run-end",
+            outcome: "crashed" satisfies RunEnd,
+            detectedBy,
+          },
+        )}\n`,
+      );
+    } catch {
+      // The log only observes.
+    }
+  }
+}
+
+interface Build {
+  factoryVersion: string | null;
+  sourceDigest: string | null;
+}
+let built: Build | undefined;
+
+/**
+ * The running build, once per process: Factory's version (the nearest
+ * package.json above this module) and a sha256 over the build's own
+ * JavaScript files (paths and bytes, in path order).
+ */
+function build(): Build {
+  if (built) return built;
+  const root = dirname(fileURLToPath(import.meta.url));
+  let factoryVersion: string | null = null;
+  for (let dir = root; ; dir = dirname(dir)) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+      factoryVersion = typeof pkg.version === "string" ? pkg.version : null;
+      break;
+    } catch {
+      if (dirname(dir) === dir) break;
+    }
+  }
+  let sourceDigest: string | null = null;
+  try {
+    const hash = createHash("sha256");
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true })
+        .flatMap((entry) =>
+          entry.isDirectory()
+            ? walk(join(dir, entry.name))
+            : entry.name.endsWith(".js")
+              ? [join(dir, entry.name)]
+              : [],
+        )
+        .sort();
+    for (const file of walk(root))
+      hash
+        .update(`${relative(root, file)}\0`)
+        .update(readFileSync(file))
+        .update("\0");
+    sourceDigest = hash.digest("hex");
+  } catch {
+    // Unreadable: the header says so with null.
+  }
+  built = { factoryVersion, sourceDigest };
+  return built;
 }
 
 /** `text` within `bytes` of UTF-8, cut at a character boundary. */

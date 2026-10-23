@@ -6,6 +6,8 @@ import {
   GitHubError,
   issueGone,
   TransientError,
+  type Transport,
+  transport,
 } from "./github.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { type RunLog, redact } from "./log.js";
@@ -238,6 +240,13 @@ export class GitHubSync {
   private readonly trackTried = new Map<number, number>();
   /** Status and tracking jobs failed in a row by something other than GitHub's transient errors, by job key. */
   private readonly failures = new Map<string, number>();
+  /** Per job key: GitHub requests not yet written as `github-call` (`countTransport`). */
+  private readonly transportTally = new Map<
+    string,
+    Transport & { issue: number; since: number; runs: number; ms: number }
+  >();
+  /** Job keys whose last run failed: the next run counts as a retry. */
+  private readonly transportFailed = new Map<string, number>();
   /** Question comments written compact after GitHub refused them in full, by Objective and hold id (`compactAsk`). */
   private readonly compact = new Map<number, Set<string>>();
   /** When each live status edit of the last hour was made, across Objectives (this host's clock). */
@@ -458,6 +467,10 @@ export class GitHubSync {
    * marker makes it idempotent.
    */
   forget(issue: number): void {
+    for (const [key, tally] of this.transportTally)
+      if (tally.issue === issue) this.writeTransport(key);
+    for (const [key, owner] of this.transportFailed)
+      if (owner === issue) this.transportFailed.delete(key);
     this.settled.delete(issue);
     this.queuing.delete(issue);
     this.changed.delete(issue);
@@ -1418,16 +1431,85 @@ export class GitHubSync {
     backoff = true,
     failed?: (error: unknown) => void,
   ): void {
-    this.jobs.run(issue, key, job, {
-      backoff,
-      done: () => failed && this.failures.delete(key),
-      failed: async (error) => {
-        failed?.(error);
-        if (issue && issueGone(error)) await this.confirmGone(issue, key);
+    const counted: Transport = {
+      calls: 0,
+      retries: this.transportFailed.has(key) ? 1 : 0,
+      rateLimited: 0,
+      failed: 0,
+      bytes: 0,
+    };
+    const started = this.now();
+    const ended = (ok: boolean) => {
+      if (ok) this.transportFailed.delete(key);
+      else this.transportFailed.set(key, issue);
+      this.countTransport(issue, key, counted, this.now() - started, !ok);
+    };
+    this.jobs.run(
+      issue,
+      key,
+      (signal) => transport.run(counted, () => job(signal)),
+      {
+        backoff,
+        done: () => {
+          ended(true);
+          if (failed) this.failures.delete(key);
+        },
+        failed: async (error) => {
+          ended(false);
+          failed?.(error);
+          if (issue && issueGone(error)) await this.confirmGone(issue, key);
+        },
       },
-    });
+    );
+  }
+
+  /**
+   * Add one job run's GitHub requests to its key's tally, and write the
+   * tally as a `github-call` event at most once a minute per key (at once
+   * after a failed run), and when its Objective is forgotten: counts, never
+   * bodies.
+   */
+  private countTransport(
+    issue: number,
+    key: string,
+    run: Transport,
+    ms: number,
+    failed: boolean,
+  ): void {
+    const tally = this.transportTally.get(key) ?? {
+      issue,
+      since: this.now(),
+      runs: 0,
+      ms: 0,
+      calls: 0,
+      retries: 0,
+      rateLimited: 0,
+      failed: 0,
+      bytes: 0,
+    };
+    tally.runs += 1;
+    tally.ms += ms;
+    tally.calls += run.calls;
+    tally.retries += run.retries;
+    tally.rateLimited += run.rateLimited;
+    tally.failed += run.failed;
+    tally.bytes += run.bytes;
+    this.transportTally.set(key, tally);
+    if (failed || this.now() - tally.since >= TRANSPORT_EVERY_MS)
+      this.writeTransport(key);
+  }
+
+  private writeTransport(key: string): void {
+    const tally = this.transportTally.get(key);
+    this.transportTally.delete(key);
+    if (!tally?.calls) return;
+    const { issue, since: _since, ...counts } = tally;
+    this.log.write(issue, { event: "github-call", job: key, ...counts });
   }
 }
+
+/** The most often one job key's `github-call` tally is written. */
+const TRANSPORT_EVERY_MS = 60_000;
 
 /** A question's most in a comment: whole up to here, then cut with where the rest is. */
 const QUESTION_LIMIT = 20_000;

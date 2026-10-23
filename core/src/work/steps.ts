@@ -902,6 +902,7 @@ async function workStep(
       .run({
         worktree,
         prompt: prepared.prompt,
+        facts: prepared.facts,
         item: runnable,
         commands: runnable.validation.map((v) => v.command),
         base,

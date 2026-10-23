@@ -366,7 +366,13 @@ async function diagnose(
           "that correction already failed for this same failure (see prior); propose a different correction, or return operator with a question";
       }
     }
-    input.log({ event: "diagnosis-rejected", call, reason: rejected });
+    input.log({
+      event: "diagnosis-rejected",
+      call,
+      reason: rejected,
+      callId: answer.callId,
+      stage: "semantic",
+    });
   }
   return {
     kind: "question",

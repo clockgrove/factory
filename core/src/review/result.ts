@@ -15,6 +15,7 @@
  * invalid, the criteria it left undecided go to the operator. Provider
  * failures escape as `PlannerError` to the engine (workflow.ts `errorOutcome`).
  */
+
 import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -42,6 +43,7 @@ import {
 import { DESIGN_CHECKLIST, ENGINEERING_STANDARD } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
+import { logRefused } from "../providers/usage.js";
 import { type PeerNote, stagePeerSources } from "../work/prompt.js";
 import { hostGit } from "../worktree.js";
 import {
@@ -523,7 +525,13 @@ export async function runReview(
         signal: run.signal,
         log: run.log,
       });
-      return decodeResultReview(answer.value, criteria.length, evidence);
+      const decoded = decodeResultReview(
+        answer.value,
+        criteria.length,
+        evidence,
+      );
+      if (decoded.invalid) logRefused(run.log, answer.callId, decoded.reason);
+      return decoded;
     };
     let decoded = await ask();
     let review = judge(criteria, decoded, evidence, settled, tree, false);

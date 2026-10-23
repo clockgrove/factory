@@ -818,6 +818,8 @@ async function dream(
     if (error instanceof Refusal) throw error;
     process.stderr.write(`factory: ${errorMessage(error)}\n`);
     return 1;
+  } finally {
+    log.end(() => "stopped");
   }
 }
 

@@ -754,10 +754,20 @@ export class ObjectiveRunner {
   }
 
   private start(step: Step): void {
+    let attemptId = "";
+    let parent: string | undefined;
     this.transact(() => {
+      this.state.stepRuns ??= {};
+      const runs = this.state.stepRuns;
+      const n = (runs[step.key]?.n ?? 0) + 1;
+      attemptId = `${step.key}#${n}`;
+      // An interrupted attempt is the one this reruns.
+      parent = this.state.attempts[step.key]?.id ?? runs[step.key]?.parent;
+      runs[step.key] = { n };
       this.state.attempts[step.key] = {
         startedAt: this.now().toISOString(),
         run: this.run.id,
+        id: attemptId,
       };
     });
     crashPoint(`engine:${step.key}:started`);
@@ -770,9 +780,18 @@ export class ObjectiveRunner {
       ...(answer ? { answer } : {}),
       signal: controller.signal,
       log: (event) =>
-        this.log.write(this.state.issue, { step: step.key, ...event }),
+        this.log.write(this.state.issue, {
+          step: step.key,
+          attemptId,
+          ...event,
+        }),
     };
-    this.log.write(this.state.issue, { step: step.key, event: "start" });
+    this.log.write(this.state.issue, {
+      step: step.key,
+      event: "start",
+      attemptId,
+      ...(parent ? { parentAttemptId: parent } : {}),
+    });
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<Outcome>((resolve) => {
       timer = setTimeout(
@@ -819,12 +838,15 @@ export class ObjectiveRunner {
    */
   apply(key: string, outcome: Outcome, replan = false): void {
     const step = this.workflow.steps(this.state).find((s) => s.key === key);
+    const attemptId = this.state.attempts[key]?.id;
+    const attempt = attemptId ? { attemptId } : {};
     if (TERMINAL.includes(this.state.status) && !step) {
       // A step from before cancel: drop its outcome and its open attempt.
       this.log.write(this.state.issue, {
         step: key,
         event: "ignored",
         outcome: outcome.kind,
+        ...attempt,
       });
       if (this.state.attempts[key])
         this.transact(() => {
@@ -833,12 +855,23 @@ export class ObjectiveRunner {
       return;
     }
     crashPoint(`engine:${key}:before-apply`);
-    this.transact(() =>
-      this.applyChange(key, outcome, replan, step?.neverAsks === true),
-    );
+    this.transact(() => {
+      this.applyChange(key, outcome, replan, step?.neverAsks === true);
+      // The attempt a continuation's, or a repair target's, next one continues.
+      const next =
+        outcome.kind === "repair"
+          ? outcome.target
+          : outcome.kind === "retry" && outcome.progress
+            ? key
+            : undefined;
+      const runs = this.state.stepRuns;
+      if (attemptId && next && runs)
+        runs[next] = { n: runs[next]?.n ?? 0, parent: attemptId };
+    });
     this.log.write(this.state.issue, {
       step: key,
       event: "outcome",
+      ...attempt,
       outcome: outcome.kind,
       ...("reason" in outcome ? { reason: outcome.reason } : {}),
       // A retry's wait class, or a continuation: what analysis splits waits by.

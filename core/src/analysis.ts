@@ -185,6 +185,10 @@ export const ANALYSIS_FIELDS = [
   "outcome",
   "tokenSource",
   "hedge",
+  "reportedModel",
+  "stage",
+  "sessionMode",
+  "currency",
 ] as const;
 export type AnalysisField = (typeof ANALYSIS_FIELDS)[number];
 /** The fields a step attempt has too: other filters select model calls only. */
@@ -231,6 +235,16 @@ export interface ToolView {
   partialCalls?: number;
 }
 
+/** Native tool calls beyond their names (usage.ts NativeTools), summed over the calls that report them. */
+export interface ToolStats {
+  reportedCalls: number;
+  rounds: number;
+  outputs: number;
+  failures: number;
+  missingOutputs: number;
+  ms: number;
+}
+
 const CATEGORIES = ["input", "output", "cached", "reasoning", "total"] as const;
 
 export interface CallGroup {
@@ -242,7 +256,31 @@ export interface CallGroup {
   nativeTools: ToolView;
   sdkOperations: ToolView;
   outcomes: Record<string, number>;
+  /** Failed calls by stage (provider, parse, protocol), and answers refused by Factory's checks (semantic). */
+  stages: Record<string, number>;
+  /** The model as the provider reported it, by calls; `unreported` when it didn't. */
+  reportedModels: Record<string, number>;
+  /** Calls whose reported model differs from the one asked for. */
+  modelMismatches: number;
   hedged: number;
+  toolStats: ToolStats;
+  /** Request bytes as sent, and per prompt part (`prompt`, `schema`, `images`, and the builder's sections). */
+  request: {
+    reportedCalls: number;
+    bytes: number;
+    components: Record<string, number>;
+  };
+  /** Distinct prompt, schema and source digests: a repeated prompt shows as fewer distinct than calls. */
+  digests: { prompts: number; schemas: number; sources: number };
+  firstToken: { reportedCalls: number; ms: number; meanMs: number | null };
+  /** Calls by session mode (`fresh`, `resumed`), and the highest session turn seen. */
+  sessions: Record<string, number>;
+  maxSessionTurn: number;
+  imageOutputs: { reportedCalls: number; total: number };
+  /** Calls with the provider's own usage breakdown (`providerUsage`). */
+  providerUsageCalls: number;
+  /** Calls by the currency of their cost; `unknown` without a cost. */
+  currencies: Record<string, number>;
   efficiency: {
     msPerCall: number | null;
     tokensPerCall: number | null;
@@ -265,6 +303,24 @@ export interface Attempt {
   reason?: string;
   /** An error retry, or a hold with the cause `failure`. */
   failed?: true;
+  /** `<step>#<n>` (engine.ts), and the attempt it continues (a continuation, a repair, an interrupted attempt). */
+  id?: string;
+  parentId?: string;
+}
+
+/** One run's formal history (log.ts RunLog): its header, its sequence, its log health and how it ended. */
+export interface RunHistory {
+  run: string;
+  factoryVersion?: string | null;
+  sourceDigest?: string | null;
+  /** Lines with a `seq`; `gaps`: numbers missing below the highest (lost lines); `unsequenced`: lines without one. */
+  lines: number;
+  gaps: number;
+  unsequenced: number;
+  /** The run's last `log-health` (emitted, failed, lost); absent when no write failed and the run hasn't ended. */
+  health?: { emitted: number; failed: number; lost: number };
+  /** `stopped`, `handed-off` or `crashed` (`run-end`); absent while it runs, or for a run that died before the next start saw it. */
+  end?: string;
 }
 
 export interface AnalysisReport {
@@ -357,6 +413,20 @@ export interface AnalysisReport {
     }[];
     completeness: "paired" | "unknown";
     reasons: string[];
+    runs: RunHistory[];
+    /** Attempts that continue another (`parentAttemptId`). */
+    continued: number;
+  };
+  /** GitHub requests of the sync jobs (`github-call`), summed: counts, never bodies. */
+  github: {
+    jobs: number;
+    runs: number;
+    calls: number;
+    retries: number;
+    rateLimited: number;
+    failed: number;
+    bytes: number;
+    ms: number;
   };
   limitations: string[];
 }
@@ -393,7 +463,26 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
     nativeTools: { ...tools(), partialCalls: 0 },
     sdkOperations: tools(),
     outcomes: {},
+    stages: {},
+    reportedModels: {},
+    modelMismatches: 0,
     hedged: 0,
+    toolStats: {
+      reportedCalls: 0,
+      rounds: 0,
+      outputs: 0,
+      failures: 0,
+      missingOutputs: 0,
+      ms: 0,
+    },
+    request: { reportedCalls: 0, bytes: 0, components: {} },
+    digests: { prompts: 0, schemas: 0, sources: 0 },
+    firstToken: { reportedCalls: 0, ms: 0, meanMs: null },
+    sessions: {},
+    maxSessionTurn: 0,
+    imageOutputs: { reportedCalls: 0, total: 0 },
+    providerUsageCalls: 0,
+    currencies: {},
     efficiency: {
       msPerCall: null,
       tokensPerCall: null,
@@ -403,12 +492,20 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
   };
 }
 
-/** Running sums the efficiency figures need, beside the group. */
+/** Running sums the efficiency figures need, and the digests seen, beside the group. */
 interface Rates {
   output: number;
   outputMs: number;
   totalCalls: number;
+  digests: { prompts: Set<string>; schemas: Set<string>; sources: Set<string> };
 }
+
+const emptyRates = (): Rates => ({
+  output: 0,
+  outputMs: 0,
+  totalCalls: 0,
+  digests: { prompts: new Set(), schemas: new Set(), sources: new Set() },
+});
 
 function addTools(view: ToolView, value: unknown): void {
   view.eligibleCalls += 1;
@@ -448,11 +545,75 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
   addTools(group.sdkOperations, event.sdkOperations);
   const outcome = str(event.outcome) ?? "unknown";
   group.outcomes[outcome] = (group.outcomes[outcome] ?? 0) + 1;
+  const stage = str(event.stage);
+  if (stage) bump(group.stages, stage);
+  const reported = str(event.reportedModel);
+  bump(group.reportedModels, reported ?? "unreported");
+  if (reported && str(event.model) && reported !== event.model)
+    group.modelMismatches += 1;
   if (num(event.hedge)) group.hedged += 1;
+  const tools = event.nativeTools as Record<string, unknown> | undefined;
+  if (tools && typeof tools === "object") {
+    const t = group.toolStats;
+    t.reportedCalls += 1;
+    t.rounds += num(tools.rounds) ?? 0;
+    t.outputs += num(tools.outputs) ?? 0;
+    t.failures += num(tools.failures) ?? 0;
+    t.missingOutputs += num(tools.missingOutputs) ?? 0;
+    t.ms += num(tools.ms) ?? 0;
+  }
+  const bytes = num(event.requestBytes);
+  if (bytes !== undefined) {
+    group.request.reportedCalls += 1;
+    group.request.bytes += bytes;
+    const parts = (event.promptComponents ?? {}) as Record<string, unknown>;
+    for (const [part, value] of Object.entries(parts))
+      if (typeof value === "number")
+        bump(group.request.components, part, value);
+      else if (value && typeof value === "object")
+        for (const [section, n] of Object.entries(value))
+          if (typeof n === "number")
+            bump(group.request.components, `${part}.${section}`, n);
+  }
+  for (const [field, kind] of [
+    ["promptDigest", "prompts"],
+    ["schemaDigest", "schemas"],
+    ["sourceDigest", "sources"],
+  ] as const) {
+    const digest = str(event[field]);
+    if (digest) rates.digests[kind].add(digest);
+  }
+  const ttft = num(event.timeToFirstTokenMs);
+  if (ttft !== undefined) {
+    group.firstToken.reportedCalls += 1;
+    group.firstToken.ms += ttft;
+  }
+  const mode = str(event.sessionMode);
+  if (mode) bump(group.sessions, mode);
+  group.maxSessionTurn = Math.max(
+    group.maxSessionTurn,
+    num(event.sessionTurn) ?? 0,
+  );
+  const images = num(event.imageOutputs);
+  if (images !== undefined) {
+    group.imageOutputs.reportedCalls += 1;
+    group.imageOutputs.total += images;
+  }
+  if (event.providerUsage && typeof event.providerUsage === "object")
+    group.providerUsageCalls += 1;
+  bump(group.currencies, str(event.currency) ?? "unknown");
 }
 
 function settle(group: CallGroup, rates: Rates): CallGroup {
   const { cache, usage, efficiency } = group;
+  group.digests = {
+    prompts: rates.digests.prompts.size,
+    schemas: rates.digests.schemas.size,
+    sources: rates.digests.sources.size,
+  };
+  group.firstToken.meanMs = group.firstToken.reportedCalls
+    ? Math.round(group.firstToken.ms / group.firstToken.reportedCalls)
+    : null;
   cache.hitRate =
     cache.input > 0
       ? Math.round((cache.cached / cache.input) * 10_000) / 10_000
@@ -491,7 +652,7 @@ function unionMs(intervals: Interval[]): number {
   return total;
 }
 
-const bump = (map: Record<string, number>, key: string, by = 1) => {
+const bump = (map: Record<string, number>, key: string, by = 1): void => {
   map[key] = (map[key] ?? 0) + by;
 };
 
@@ -521,6 +682,24 @@ class Analysis {
   >();
   /** Steps whose `hold` (cause failure) came before their outcome. */
   private readonly failing = new Set<string>();
+  /** Per run: its formal history, and the sequence numbers seen. */
+  private readonly runHistory = new Map<
+    string,
+    { history: RunHistory; seqs: Set<number>; maxSeq: number }
+  >();
+  /** Each model call's groups, by `callId`, for the semantic refusals that name it. */
+  private readonly callGroups = new Map<string, CallGroup[]>();
+  private readonly githubJobs = new Set<string>();
+  private readonly github: AnalysisReport["github"] = {
+    jobs: 0,
+    runs: 0,
+    calls: 0,
+    retries: 0,
+    rateLimited: 0,
+    failed: 0,
+    bytes: 0,
+    ms: 0,
+  };
   private from?: string;
   private to?: string;
   private outcomesWithoutStart = 0;
@@ -551,7 +730,7 @@ class Analysis {
   constructor(private readonly options: AnalyzeOptions) {
     this.calls = {
       group: emptyGroup({}),
-      rates: { output: 0, outputMs: 0, totalCalls: 0 },
+      rates: emptyRates(),
     };
   }
 
@@ -582,6 +761,7 @@ class Analysis {
     this.to = event.at;
     const at = Date.parse(event.at);
     const step = str(event.step);
+    this.formal(run, event);
     if (LIFECYCLE.has(String(event.event)) || event.event === "outcome")
       this.lifecycle.set(run, {
         run,
@@ -592,6 +772,12 @@ class Analysis {
       });
     if (event.event === "model-usage") {
       this.call(event, at);
+      return;
+    }
+    // A refused answer (the semantic stage) counts on its call's groups.
+    if (event.stage === "semantic") {
+      for (const group of this.callGroups.get(str(event.callId) ?? "") ?? [])
+        bump(group.stages, "semantic");
       return;
     }
     if (!this.stepPasses(event)) return;
@@ -689,7 +875,54 @@ class Analysis {
       case "aborted":
         this.aborted += Array.isArray(event.steps) ? event.steps.length : 1;
         break;
+      case "github-call": {
+        this.githubJobs.add(String(event.job));
+        const g = this.github;
+        for (const field of [
+          "runs",
+          "calls",
+          "retries",
+          "rateLimited",
+          "failed",
+          "bytes",
+          "ms",
+        ] as const)
+          g[field] += num(event[field]) ?? 0;
+        break;
+      }
     }
+  }
+
+  /** The run's header, sequence, log health and end (log.ts RunLog), before any filter. */
+  private formal(run: string, event: LogEvent): void {
+    let entry = this.runHistory.get(run);
+    if (!entry) {
+      entry = {
+        history: { run, lines: 0, gaps: 0, unsequenced: 0 },
+        seqs: new Set(),
+        maxSeq: 0,
+      };
+      this.runHistory.set(run, entry);
+    }
+    const { history } = entry;
+    const seq = num(event.seq);
+    if (seq === undefined) history.unsequenced += 1;
+    else {
+      history.lines += 1;
+      entry.seqs.add(seq);
+      entry.maxSeq = Math.max(entry.maxSeq, seq);
+    }
+    if (event.event === "run-header") {
+      history.factoryVersion = str(event.factoryVersion) ?? null;
+      history.sourceDigest = str(event.sourceDigest) ?? null;
+    }
+    if (event.event === "log-health")
+      history.health = {
+        emitted: num(event.emitted) ?? 0,
+        failed: num(event.failed) ?? 0,
+        lost: num(event.lost) ?? 0,
+      };
+    if (event.event === "run-end") history.end = str(event.outcome);
   }
 
   private call(event: LogEvent, at: number): void {
@@ -705,11 +938,13 @@ class Analysis {
     if (!entry) {
       entry = {
         group: emptyGroup(key),
-        rates: { output: 0, outputMs: 0, totalCalls: 0 },
+        rates: emptyRates(),
       };
       this.groups.set(id, entry);
     }
     addCall(entry.group, entry.rates, event);
+    const callId = str(event.callId);
+    if (callId) this.callGroups.set(callId, [this.calls.group, entry.group]);
     const ms = num(event.ms) ?? 0;
     this.models.push([at - ms, at]);
   }
@@ -724,6 +959,8 @@ class Analysis {
     const item = itemOf(step);
     const wait = str(end?.wait);
     const reason = str(end?.reason);
+    const id = str(start.attemptId);
+    const parentId = str(start.parentAttemptId);
     const error =
       outcome === "retry" &&
       (wait === "error" ||
@@ -740,6 +977,8 @@ class Analysis {
       ...(wait ? { wait } : {}),
       ...(reason ? { reason } : {}),
       ...(error ? { failed: true as const } : {}),
+      ...(id ? { id } : {}),
+      ...(parentId ? { parentId } : {}),
     });
   }
 
@@ -804,6 +1043,12 @@ class Analysis {
     if (this.attempts.some((a) => a.outcome === "unfinished"))
       reasons.push("unfinished-attempt");
     if (!this.attempts.length) reasons.push("no-attempts-observed");
+    const runs = [...this.runHistory.values()].map(
+      ({ history, seqs, maxSeq }) => ({ ...history, gaps: maxSeq - seqs.size }),
+    );
+    if (runs.some((r) => r.gaps)) reasons.push("sequence-gap");
+    if (runs.some((r) => r.health?.lost)) reasons.push("lost-lines");
+    if (runs.some((r) => r.unsequenced)) reasons.push("unsequenced-lines");
     return {
       issue: this.options.issue,
       runs: this.runOrder,
@@ -855,7 +1100,10 @@ class Analysis {
         }),
         completeness: reasons.length ? "unknown" : "paired",
         reasons,
+        runs,
+        continued: this.attempts.filter((a) => a.parentId).length,
       },
+      github: { ...this.github, jobs: this.githubJobs.size },
       limitations: LIMITATIONS,
     };
   }
@@ -866,7 +1114,8 @@ const LIMITATIONS = [
   "A count a provider doesn't report is unknown, not 0: tokens and cost sum only the calls that report them, and each figure says how many did. Cached input and reasoning output are parts of input and output, never extra tokens.",
   "Cost is the provider's list cost when it reports one (Claude, Claude managed), not a bill; subscription use is unknown.",
   "nativeToolActivity (model-visible tool calls) and sdkOperations (the SDK's own items) are two views of the same work and are never added; one tool call can run many commands.",
-  "The run log has no sequence numbers or write-failure counter: a line lost to a full disk can't be detected, so a paired history is not proof of a complete one.",
+  "Sequence numbers count per run file: a gap is a line lost to a failed write (log-health counts them too); a run with no run-end is still running, or died and no later start has seen it yet.",
+  "A refused answer (stage semantic) is a call that succeeded and that Factory's checks then refused; it counts beside the call's outcome, not instead of it.",
   "Filters on role, provider, model, effort, outcome, tokenSource and hedge select model calls only; run, item and phase also select steps.",
 ];
 
@@ -911,8 +1160,28 @@ function groupText(group: CallGroup, indent: string): string[] {
         ]
       : []),
     `${indent}cache: ${cache.hitRate === null ? "unknown" : `${(cache.hitRate * 100).toFixed(1)}% of input`} (${count(cache.cached)} of ${count(cache.input)} in ${cache.pairedCalls}/${cache.eligibleCalls} calls; ${count(cache.uncachedInput)} uncached)`,
-    `${indent}outcomes: ${tally(group.outcomes)}${group.hedged ? ` · ${group.hedged} hedged` : ""}`,
+    `${indent}outcomes: ${tally(group.outcomes)}${group.hedged ? ` · ${group.hedged} hedged` : ""}${Object.keys(group.stages).length ? ` · failed or refused at: ${tally(group.stages)}` : ""}`,
+    `${indent}reported models: ${tally(group.reportedModels)}${group.modelMismatches ? ` · ${group.modelMismatches} differ from the model asked for` : ""}`,
     `${indent}native tools: ${toolText(group.nativeTools)}`,
+    ...(group.toolStats.reportedCalls
+      ? [
+          `${indent}native tool calls: ${group.toolStats.rounds} rounds · ${group.toolStats.outputs} outputs · ${group.toolStats.failures} failed · ${group.toolStats.missingOutputs} unanswered · ${duration(group.toolStats.ms)} · ${group.toolStats.reportedCalls}/${group.usage.calls} calls reported`,
+        ]
+      : []),
+    ...(group.request.reportedCalls
+      ? [
+          `${indent}requests: ${size(group.request.bytes)} in ${group.request.reportedCalls}/${group.usage.calls} calls (${Object.entries(
+            group.request.components,
+          )
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 8)
+            .map(([part, n]) => `${part} ${size(n)}`)
+            .join(
+              ", ",
+            )}) · distinct prompts ${group.digests.prompts}, schemas ${group.digests.schemas}, sources ${group.digests.sources}`,
+        ]
+      : []),
+    `${indent}sessions: ${tally(group.sessions)}${group.maxSessionTurn > 1 ? ` · up to turn ${group.maxSessionTurn}` : ""}${group.firstToken.meanMs === null ? "" : ` · first token after ${duration(group.firstToken.meanMs)} on average (${group.firstToken.reportedCalls} calls)`}${group.imageOutputs.total ? ` · ${group.imageOutputs.total} images out` : ""} · provider usage in ${group.providerUsageCalls}/${group.usage.calls} calls · cost currency: ${tally(group.currencies)}`,
     `${indent}SDK operations: ${toolText(group.sdkOperations)}`,
     `${indent}efficiency: ${
       [
@@ -996,10 +1265,19 @@ export function analysisText(report: AnalysisReport): string {
   const hi = report.history;
   section("History (step attempts, start paired with outcome):", [
     `  ${hi.attempts} attempts · ${hi.failedAttempts.length} failed · ${hi.unfinished} unfinished · ${hi.aborted} aborted · ${hi.completeness}${hi.reasons.length ? ` (${hi.reasons.join(", ")})` : ""}`,
+    ...(hi.continued ? [`  ${hi.continued} attempts continue another`] : []),
     ...hi.lifecycle.map(
       (last) =>
         `  run ${last.run} last: ${last.event}${last.outcome ? ` ${last.outcome}` : ""} at ${displayTime(last.at)}`,
     ),
+    ...hi.runs.map(
+      (r) =>
+        `  run ${r.run}: ${r.end ?? "no run-end"} · Factory ${r.factoryVersion ?? "unknown"}${r.sourceDigest ? ` (${r.sourceDigest.slice(0, 12)})` : ""} · ${r.lines} lines, ${r.gaps} missing${r.unsequenced ? `, ${r.unsequenced} unsequenced` : ""}${r.health ? ` · log health: ${r.health.emitted} written, ${r.health.failed} failed writes, ${r.health.lost} lost` : ""}`,
+    ),
+  ]);
+  const g = report.github;
+  section("GitHub requests (sync jobs):", [
+    `  ${count(g.calls)} requests in ${g.runs} job runs (${g.jobs} jobs) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.ms)}`,
   ]);
   lines.push("", ...report.limitations.map((line) => `Note: ${line}`));
   return `${lines.join("\n")}\n`;

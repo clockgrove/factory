@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
@@ -258,6 +259,23 @@ export interface AsyncMerge {
  */
 /** How long a write-access answer counts (canWrite). */
 const WRITER_TTL_MS = 10 * 60_000;
+
+/**
+ * What one sync job's GitHub requests cost (github-sync.ts `github-call`):
+ * requests sent, re-sends (a 401 retried with a fresh login), rate-limit
+ * answers, other failed answers, and bytes sent and received (request
+ * bodies, response content-length). Counts only, never bodies.
+ */
+export interface Transport {
+  calls: number;
+  retries: number;
+  rateLimited: number;
+  failed: number;
+  bytes: number;
+}
+
+/** The job whose requests `send` counts; outside a job nothing is counted. */
+export const transport = new AsyncLocalStorage<Transport>();
 
 export class GitHub {
   private token: string | undefined;
@@ -823,6 +841,8 @@ export class GitHub {
     if (refused.length) {
       const message = refused.map((e) => e.message).join("; ");
       if (refused.some((e) => e.type === "RATE_LIMITED")) {
+        const counted = transport.getStore();
+        if (counted) counted.rateLimited += 1;
         const reset = Number(response.headers.get("x-ratelimit-reset"));
         throw new TransientError(
           `GitHub GraphQL: ${message}`,
@@ -1494,6 +1514,18 @@ export class GitHub {
     if (this.renamed) throw this.renamed;
     const token = await this.auth(refreshed);
     const deadline = AbortSignal.timeout(TIMEOUT_MS);
+    const sent =
+      body === undefined
+        ? undefined
+        : JSON.stringify(
+            method === "GET" ? body : redactDeep(body, this.secrets),
+          );
+    const counted = transport.getStore();
+    if (counted) {
+      counted.calls += 1;
+      if (refreshed) counted.retries += 1;
+      counted.bytes += sent === undefined ? 0 : Buffer.byteLength(sent);
+    }
     let response: Response;
     try {
       response = await fetch(`${this.api}${path}`, {
@@ -1505,23 +1537,20 @@ export class GitHub {
           ...(body === undefined ? {} : { "content-type": "application/json" }),
           ...headers,
         },
-        ...(body === undefined
-          ? {}
-          : {
-              body: JSON.stringify(
-                method === "GET" ? body : redactDeep(body, this.secrets),
-              ),
-            }),
+        ...(sent === undefined ? {} : { body: sent }),
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
         // Never followed: a redirect is an answer (see `moved`).
         redirect: "manual",
       });
     } catch (error) {
+      if (counted) counted.failed += 1;
       if (signal?.aborted) throw error;
       throw new TransientError(
         `GitHub ${method} ${path}: ${errorMessage(error)}`,
       );
     }
+    if (counted)
+      counted.bytes += Number(response.headers.get("content-length")) || 0;
     if (response.ok) return response;
     const text = await response.text().catch(() => "");
     let answer: unknown;
@@ -1540,6 +1569,10 @@ export class GitHub {
       (response.status === 403 &&
         (response.headers.get("x-ratelimit-remaining") === "0" ||
           /rate limit/i.test(text)));
+    if (counted) {
+      if (limited) counted.rateLimited += 1;
+      else counted.failed += 1;
+    }
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
     if (response.status === 401) throw new GitHubError(detail, 401, answer);
     if (limited)

@@ -8,6 +8,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { HoldScope } from "../engine.js";
 import { redact } from "../log.js";
 import type { WorkItem } from "../planning/types.js";
+import type { PromptFacts } from "../providers/usage.js";
 import type { Answer, HoldOption, Wait } from "../state.js";
 
 /**
@@ -29,6 +30,8 @@ export interface WorkerInput {
   worktree: string;
   /** The complete worker prompt (work/prompt.ts). */
   prompt: string;
+  /** The prompt's parts and pinned sources (providers/usage.ts PromptFacts). */
+  facts?: PromptFacts;
   item: WorkItem;
   /** The item's validation commands, run through the sandbox by Validate. */
   commands: string[];

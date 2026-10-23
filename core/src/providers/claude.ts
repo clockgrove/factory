@@ -33,7 +33,15 @@ import {
   PlannerError,
   type PlannerModels,
 } from "./planner.js";
-import { captureResponse, Tallies, tokens } from "./usage.js";
+import {
+  captureResponse,
+  captureToolOutput,
+  firstToken,
+  NativeTools,
+  providerUsage,
+  Tallies,
+  tokens,
+} from "./usage.js";
 
 export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
 
@@ -561,6 +569,18 @@ function checkInitialization(
     );
 }
 
+/** A tool result's text content, for its capture. */
+export function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part: { type?: unknown; text?: unknown }) =>
+      part.type === "text" && typeof part.text === "string" ? part.text : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+}
+
 /** The runtime's stand-in for a model message it produced itself. */
 export const SYNTHETIC_MODEL = "<synthetic>";
 
@@ -850,6 +870,8 @@ export class ClaudePlanner implements Planner {
     const facts: SessionFacts = { initialized: false, modelResponded: false };
     let session: Query | undefined;
     let root: string | undefined;
+    // Recorded in `finally`, so a call that fails mid-stream keeps its tool calls.
+    const tools = new NativeTools();
     try {
       let credentialDirectory: string;
       let cwd: string;
@@ -883,6 +905,11 @@ export class ClaudePlanner implements Planner {
       const events = session[Symbol.asyncIterator]();
       let result: SDKResultMessage | undefined;
       const calls = new Tallies();
+      const toolNames = new Map<string, string>();
+      let response: string | undefined;
+      record.sessionTurn = 1;
+      record.sessionMode = "fresh";
+      record.imageOutputs = 0;
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
@@ -908,6 +935,17 @@ export class ClaudePlanner implements Planner {
             ? message.retry_delay_ms + (message.no_response?.retry_wait_ms ?? 0)
             : 0,
         );
+        if (message.type === "stream_event") firstToken(record, callStarted);
+        if (
+          message.type === "assistant" &&
+          message.message.model !== SYNTHETIC_MODEL
+        ) {
+          firstToken(record, callStarted);
+          record.reportedModel = message.message.model;
+          // One response may arrive split over several messages with its id.
+          if (message.message.id !== response) tools.response();
+          response = message.message.id;
+        }
         if (message.type === "assistant" || message.type === "user") {
           const content = message.message.content;
           if (Array.isArray(content))
@@ -915,6 +953,18 @@ export class ClaudePlanner implements Planner {
               if (block.type === "tool_use") {
                 calls.add(block.name, block.id);
                 record.nativeToolActivity = calls.value;
+                tools.call(block.id);
+                toolNames.set(block.id, block.name);
+              }
+              if (message.type === "assistant" && block.type === "image")
+                record.imageOutputs = (record.imageOutputs as number) + 1;
+              if (block.type === "tool_result") {
+                tools.result(block.tool_use_id, block.is_error === true);
+                captureToolOutput(
+                  record,
+                  toolNames.get(block.tool_use_id) ?? "unknown",
+                  toolResultText(block.content),
+                );
               }
               if (
                 block.type === "tool_use" &&
@@ -943,6 +993,7 @@ export class ClaudePlanner implements Planner {
         }
         if (message.type === "system" && message.subtype === "init") {
           record.session = message.session_id;
+          record.reportedModel = message.model;
           checkInitialization(message, choice, cwd, tree);
           facts.initialized = true;
         }
@@ -955,6 +1006,16 @@ export class ClaudePlanner implements Planner {
         throw new PlannerError("retry", "Claude SDK ended without a result");
       const usage = usageOf(result);
       record.tokens = tokens({ ...usage });
+      record.providerUsage =
+        providerUsage({ usage: result.usage, modelUsage: result.modelUsage }) ??
+        null;
+      if (
+        result.subtype === "error_max_structured_output_retries" ||
+        (result.subtype === "success" &&
+          !result.is_error &&
+          result.structured_output === undefined)
+      )
+        record.stage = "protocol";
       record.costUsd = result.total_cost_usd;
       captureResponse(
         record,
@@ -988,6 +1049,8 @@ export class ClaudePlanner implements Planner {
       if (call.signal.aborted) throw call.signal.reason ?? error;
       throw error;
     } finally {
+      tools.response();
+      record.nativeTools = tools.value;
       watchdog.signal.removeEventListener("abort", abort);
       watchdog.stop();
       abortController.abort();

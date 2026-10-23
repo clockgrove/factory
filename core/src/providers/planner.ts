@@ -14,7 +14,13 @@ import {
   type Outcome,
 } from "../engine.js";
 import type { Wait } from "../state.js";
-import { captureRequest, logUsage, plannerRole, usageRecord } from "./usage.js";
+import {
+  describeRequest,
+  logUsage,
+  type PromptFacts,
+  plannerRole,
+  usageRecord,
+} from "./usage.js";
 
 export const PLANNER_PHASES = [
   "plan",
@@ -37,6 +43,8 @@ export interface PlannerCall {
   readDir?: string;
   /** Absolute paths of PNG files the model sees beside the prompt. */
   images?: string[];
+  /** The prompt's parts and sources, from its builder (usage.ts PromptFacts). */
+  facts?: PromptFacts;
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
   /** Called on every provider event: the call is alive. */
@@ -51,6 +59,8 @@ export interface PlannerAnswer {
   costUsd?: number;
   turns?: number;
   ms: number;
+  /** The call's `model-usage` id, for a `model-refused` event (usage.ts logRefused). */
+  callId?: string;
 }
 
 export interface Planner {
@@ -169,11 +179,20 @@ export async function loggedCall<Effort extends string>(
     phase: call.phase,
   });
   record.tools = Boolean(call.readDir);
-  captureRequest(record, call.prompt);
+  describeRequest(record, {
+    prompt: call.prompt,
+    schema: call.schema,
+    ...(call.images ? { images: call.images } : {}),
+    ...(call.facts ? { facts: call.facts } : {}),
+  });
   try {
     const answer = await run(record);
     record.outcome = "done";
-    return { ...answer, ms: Date.now() - started };
+    return {
+      ...answer,
+      ms: Date.now() - started,
+      callId: record.callId as string,
+    };
   } catch (error) {
     record.outcome = error instanceof PlannerError ? error.outcome : "error";
     record.error = detail(String(error));

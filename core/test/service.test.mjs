@@ -3047,6 +3047,22 @@ test("the run log: tail, follow, and status reads its end", async () => {
         costUsd: null,
         error: "sk-abcdefghijklmnop",
         capture: "c1",
+        callId: "call-1",
+        reportedModel: "m1-2026",
+        requestBytes: 300,
+        promptComponents: { prompt: 200, schema: 100 },
+        promptDigest: "p1",
+        nativeTools: { rounds: 2, outputs: 3, failures: 1, ms: 50 },
+        sessionMode: "fresh",
+        sessionTurn: 1,
+      },
+      {
+        at: at(3),
+        step: "item:a:review",
+        event: "model-refused",
+        callId: "call-1",
+        stage: "semantic",
+        reason: "criterion 0 has no verdict",
       },
       {
         at: at(3000),
@@ -3138,6 +3154,19 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   assert.equal(analysis.groups[0].key.role, "reviewer");
   assert.equal(analysis.calls.cache.hitRate, 0.5);
+  // The per-call fields and the formal history: the service's own lines
+  // carry seq after a run-header naming the version; the appended ones don't.
+  assert.deepEqual(analysis.calls.stages, { semantic: 1 });
+  assert.equal(analysis.calls.modelMismatches, 1);
+  assert.equal(analysis.calls.toolStats.failures, 1);
+  assert.equal(analysis.calls.request.components.schema, 100);
+  const [history] = analysis.history.runs;
+  assert.equal(
+    history.factoryVersion,
+    JSON.parse(readFileSync("package.json", "utf8")).version,
+  );
+  assert.match(history.sourceDigest, /^[0-9a-f]{64}$/);
+  assert.ok(history.lines > 1 && history.gaps === 0 && history.unsequenced);
   assert.equal(analysis.repairs.byItem.a, 1);
   assert.equal(analysis.phases.review.outcomes.repair, 1);
   assert.equal(
@@ -3265,6 +3294,11 @@ test("the run log: tail, follow, and status reads its end", async () => {
     availability: "partial",
   });
   assert.ok(factoryPacket.factory[0].holds >= 1);
+  // The run's header and the appended call's prompt digest bind the packet.
+  assert.deepEqual(factoryPacket.factory[0].bindings.factoryVersions, [
+    JSON.parse(readFileSync("package.json", "utf8")).version,
+  ]);
+  assert.deepEqual(factoryPacket.factory[0].bindings.promptDigests, ["p1"]);
   assert.equal(factoryPacket.firstTryPlanning, null);
   assert.deepEqual(
     [directPacket.tokens.total, directPacket.tokens.reasoning],

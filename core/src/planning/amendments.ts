@@ -9,6 +9,7 @@ import {
   type StepContext,
 } from "../engine.js";
 import { code, prose } from "../markdown.js";
+import { logRefused } from "../providers/usage.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, facts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
@@ -900,25 +901,25 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         signal,
       );
       const local = await localExecutables(inputs, config, signal);
+      const { prompt, facts: promptFacts } = renderCompilationCall({
+        facts,
+        data,
+        revising: true,
+        repository,
+        workers: workers(config),
+        localExecutables: local.observations,
+        reviewArtifacts: inputs.reviewArtifacts,
+        adaptive: wire.adaptive,
+        recipe: Boolean(inputs.recipe),
+        executionProfiles: Boolean(profiles),
+        ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
+        ...(lookups ? { lookups } : {}),
+      });
       const answer = await deps.planner.answer({
         role: "planner",
         phase: "plan",
-        prompt: renderCompilationCall({
-          facts,
-          data,
-          revising: true,
-          repository,
-          workers: workers(config),
-          localExecutables: local.observations,
-          reviewArtifacts: inputs.reviewArtifacts,
-          adaptive: wire.adaptive,
-          recipe: Boolean(inputs.recipe),
-          executionProfiles: Boolean(profiles),
-          ...(inputs.predecessors
-            ? { prerequisites: inputs.predecessors }
-            : {}),
-          ...(lookups ? { lookups } : {}),
-        }),
+        prompt,
+        facts: promptFacts,
         schema: lookups
           ? lookups.schema(revisionSchema(facts, wire))
           : revisionSchema(facts, wire),
@@ -950,8 +951,13 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         } satisfies AmendRound);
       // An invalid answer gets one retry with its error; a second in a
       // row rejects the amendment, which can be replaced or dropped.
-      const invalid = (findings: Finding[]): Outcome =>
-        lastError?.startsWith(INVALID_ANSWER)
+      const invalid = (findings: Finding[]): Outcome => {
+        logRefused(
+          context.log,
+          answer.callId,
+          findings.map((f) => f.message).join("; "),
+        );
+        return lastError?.startsWith(INVALID_ANSWER)
           ? reject([
               {
                 source: "check",
@@ -959,6 +965,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
               },
             ])
           : invalidAnswer(findings);
+      };
       if (revised.invalidShape) return invalid(revised.findings);
       if (!revised.answer) return reject(revised.findings);
       const decoded = decodePlan(revised.answer, facts, wire);
@@ -1058,29 +1065,31 @@ function amendReviewStep(
         inputs.base,
         signal,
       );
+      const { prompt, facts: promptFacts } = renderGraphReviewCall({
+        facts,
+        draft,
+        evidence,
+        decisions: all,
+        finalCommands: finalCommands(
+          inputs.shown.blocks,
+          config.finalValidation.requiredCommands,
+        ),
+        controllerCapabilities: controllerGuarantees(
+          inputs.reviewArtifacts.length > 0,
+        ),
+        reviewArtifacts: inputs.reviewArtifacts,
+        repository,
+        workers: workers(config),
+        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+        ...(offeredProfiles(config)
+          ? { executionProfiles: offeredProfiles(config) }
+          : {}),
+      });
       const answer = await deps.planner.answer({
         role: "reviewer",
         phase: "graph-review",
-        prompt: renderGraphReviewCall({
-          facts,
-          draft,
-          evidence,
-          decisions: all,
-          finalCommands: finalCommands(
-            inputs.shown.blocks,
-            config.finalValidation.requiredCommands,
-          ),
-          controllerCapabilities: controllerGuarantees(
-            inputs.reviewArtifacts.length > 0,
-          ),
-          reviewArtifacts: inputs.reviewArtifacts,
-          repository,
-          workers: workers(config),
-          ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
-          ...(offeredProfiles(config)
-            ? { executionProfiles: offeredProfiles(config) }
-            : {}),
-        }),
+        prompt,
+        facts: promptFacts,
         schema: graphReviewSchema(),
         readDir: workDir,
         signal,
@@ -1092,6 +1101,8 @@ function amendReviewStep(
         draftItems(draft).map((item) => item.id),
       );
       const invalidReview = "The amendment review answer was invalid";
+      if (decoded.invalid)
+        logRefused(context.log, answer.callId, decoded.reason);
       // One retry with the error; a second invalid answer rejects it.
       if (decoded.invalid)
         return state.retries[

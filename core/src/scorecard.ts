@@ -297,6 +297,23 @@ export interface FactoryObjective {
     resultCommit: string | null;
     resultTree: string | null;
     providerSessionIds: string[];
+    /** From each observed run's `run-header` (log.ts): the Factory version and build digest it ran. */
+    factoryVersions: string[];
+    sourceDigests: string[];
+    /** Distinct `promptDigest`s of the model calls, sorted. */
+    promptDigests: string[];
+  };
+  /**
+   * The providers' own usage views (`providerUsage`): calls that reported
+   * one, and Codex child threads' usage (`descendants`), summed; never
+   * added to `tokens`.
+   */
+  nativeUsage: {
+    reportedCalls: number;
+    descendants: Record<
+      "threads" | "input" | "cached" | "output" | "reasoning" | "total",
+      number
+    > | null;
   };
   modelCalls: number;
   failedModelCalls: number;
@@ -347,12 +364,22 @@ export function factoryObjective(
   const since = (at: string) => !admitted || at >= admitted;
   const events: LogEvent[] = [];
   const observed: string[] = [];
+  const versions = new Set<string>();
+  const builds = new Set<string>();
   for (const file of logFiles(read.logs, objective)) {
     const before = events.length;
+    let header: LogEvent | undefined;
     readRun(file, 0, read.secrets, (event) => {
-      if (since(event.at)) events.push(event);
+      // A run's header can predate the admission it ran: kept per run.
+      if (event.event === "run-header") header = event;
+      else if (since(event.at)) events.push(event);
     });
-    if (events.length > before) observed.push(runOfFile(file));
+    if (events.length === before) continue;
+    observed.push(runOfFile(file));
+    const version = str(header?.factoryVersion);
+    const build = str(header?.sourceDigest);
+    if (version) versions.add(version);
+    if (build) builds.add(build);
   }
   const rotated = rotatedRuns(read.logs, objective)
     .filter((run) => since(run.lastAt))
@@ -373,6 +400,9 @@ export function factoryObjective(
     return tally;
   };
   const sessions = new Set<string>();
+  const prompts = new Set<string>();
+  let nativeCalls = 0;
+  let descendants: FactoryObjective["nativeUsage"]["descendants"] = null;
   const asked = new Map<string, string>();
   let failedModelCalls = 0;
   let workerCalls = 0;
@@ -413,8 +443,31 @@ export function factoryObjective(
         }
         for (const id of [event.thread, event.session])
           if (present(id)) sessions.add(id);
+        const prompt = str(event.promptDigest);
+        if (prompt) prompts.add(prompt);
+        const native = event.providerUsage as
+          | { descendants?: Record<string, unknown> }
+          | undefined;
+        if (native && typeof native === "object") {
+          nativeCalls += 1;
+          if (native.descendants && typeof native.descendants === "object") {
+            descendants ??= {
+              threads: 0,
+              input: 0,
+              cached: 0,
+              output: 0,
+              reasoning: 0,
+              total: 0,
+            };
+            for (const key of Object.keys(
+              descendants,
+            ) as (keyof typeof descendants)[])
+              descendants[key] += num(native.descendants[key]) ?? 0;
+          }
+        }
         break;
       }
+
       case "start":
         if (/^plan:\d+:\d+$/.test(step)) planRounds.add(step);
         break;
@@ -487,7 +540,11 @@ export function factoryObjective(
       resultCommit: final?.commit ?? null,
       resultTree: final?.tree ?? null,
       providerSessionIds: [...sessions],
+      factoryVersions: [...versions],
+      sourceDigests: [...builds],
+      promptDigests: [...prompts].sort(),
     },
+    nativeUsage: { reportedCalls: nativeCalls, descendants },
     modelCalls: all.calls,
     failedModelCalls,
     workerCalls,
@@ -1237,7 +1294,7 @@ export function scorecardText(report: Scorecard): string {
     );
     for (const report of packet.factory)
       lines.push(
-        `  #${report.objective}: ${report.outcome} · ${runsText(report.runs)} · ${report.modelCalls} model calls · ${report.repairs} repairs · ${report.holds} holds`,
+        `  #${report.objective}: ${report.outcome} · ${runsText(report.runs)} · ${report.modelCalls} model calls · ${report.repairs} repairs · ${report.holds} holds · Factory ${report.bindings.factoryVersions.join(", ") || "unknown"} · ${report.bindings.promptDigests.length} distinct prompts${report.nativeUsage.descendants ? ` · child threads ${report.nativeUsage.descendants.threads} (${counter({ known: report.nativeUsage.descendants.total })} tokens)` : ""}`,
       );
   }
   for (const pair of report.pairs) {

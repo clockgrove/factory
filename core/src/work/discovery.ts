@@ -201,7 +201,13 @@ export async function discover(
       const decoded = decodeSemantic(answer.value, entries, vocabulary);
       if (typeof decoded === "string") {
         rejected = decoded;
-        context.log({ event: "discovery-rejected", call, reason: rejected });
+        context.log({
+          event: "discovery-rejected",
+          call,
+          reason: rejected,
+          callId: answer.callId,
+          stage: "semantic",
+        });
         continue;
       }
       rejected = undefined;

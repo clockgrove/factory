@@ -44,9 +44,13 @@ import {
   providerOutcome,
 } from "./planner.js";
 import {
-  captureRequest,
   captureResponse,
+  captureToolOutput,
+  describeRequest,
+  firstToken,
   logUsage,
+  NativeTools,
+  providerUsage,
   Tallies,
   tokens,
   usageRecord,
@@ -56,6 +60,24 @@ export const DEFAULT_COPILOT_MODELS: PlannerModels = {
   planner: { model: "gpt-6.1-sol", effort: "high" },
   reviewer: { model: "gpt-6.1-sol", effort: "medium" },
 };
+
+/**
+ * The additive counts of an `assistant.usage` event kept per model as the
+ * call's `providerUsage`: tokens, Copilot's own cost and duration, and
+ * its billing in nano AI units (not USD).
+ */
+const COPILOT_USAGE_KEYS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "acceptedPredictionTokens",
+  "rejectedPredictionTokens",
+  "cost",
+  "duration",
+  "totalNanoAiu",
+];
 
 /** Silence that ends a planning or review call; a worker turn uses `worker.idleSeconds`. */
 const PLANNER_IDLE_MS = 15 * 60 * 1000;
@@ -266,6 +288,15 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     const usage = { input: 0, output: 0, cached: 0 };
     let reasoning: number | null = null;
     const calls = new Tallies();
+    const tools = new NativeTools();
+    const toolNames = new Map<string, string>();
+    /** The provider's own usage per model, summed over its responses. */
+    const byModel: Record<string, Record<string, number>> = {};
+    let sentAt: number | undefined;
+    // One fresh session per call, one prompt: its first turn.
+    turn.record.sessionTurn = 1;
+    turn.record.sessionMode = "fresh";
+    turn.record.imageOutputs = 0;
     let settle: () => void = () => undefined;
     let fail: (error: PlannerError) => void = () => undefined;
     // The turn ends at idle, or at once on a session error (as sendAndWait does).
@@ -347,7 +378,29 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
                 false,
               ),
             );
+          if (
+            sentAt !== undefined &&
+            (event.type === "assistant.message_delta" ||
+              event.type === "assistant.reasoning_delta" ||
+              event.type === "assistant.message")
+          )
+            firstToken(turn.record, sentAt);
+          if (event.type === "assistant.turn_end") tools.response();
           if (event.type === "assistant.usage") {
+            turn.record.reportedModel = event.data.model;
+            const sums = byModel[event.data.model] ?? { responses: 0 };
+            byModel[event.data.model] = sums;
+            sums.responses = (sums.responses ?? 0) + 1;
+            const counts: Record<string, unknown> = {
+              ...event.data,
+              totalNanoAiu: event.data.copilotUsage?.totalNanoAiu,
+            };
+            for (const key of COPILOT_USAGE_KEYS) {
+              const value = counts[key];
+              if (typeof value === "number" && Number.isFinite(value))
+                sums[key] = (sums[key] ?? 0) + value;
+            }
+            turn.record.providerUsage = providerUsage(byModel) ?? null;
             usage.input += event.data.inputTokens ?? 0;
             usage.output += event.data.outputTokens ?? 0;
             usage.cached += event.data.cacheReadTokens ?? 0;
@@ -358,6 +411,21 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
           if (event.type === "tool.execution_start") {
             calls.add(event.data.toolName, event.data.toolCallId);
             turn.record.nativeToolActivity = calls.value;
+            toolNames.set(event.data.toolCallId, event.data.toolName);
+            tools.call(event.data.toolCallId);
+            turn.record.nativeTools = tools.value;
+          }
+          if (event.type === "tool.execution_complete") {
+            tools.result(event.data.toolCallId, !event.data.success);
+            turn.record.nativeTools = tools.value;
+            const output =
+              event.data.result?.content ?? event.data.error?.message;
+            if (output)
+              captureToolOutput(
+                turn.record,
+                toolNames.get(event.data.toolCallId) ?? "unknown",
+                output,
+              );
           }
           if (event.type === "session.error") fail(sessionFailure(event.data));
           if (event.type === "session.idle" && sent) settle();
@@ -388,6 +456,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
       }),
     );
     sent = true;
+    sentAt = Date.now();
     await watchdog.race(
       session.send({
         prompt: turn.prompt,
@@ -470,6 +539,7 @@ export class CopilotPlanner implements Planner {
         try {
           value = JSON.parse(body);
         } catch {
+          record.stage = "parse";
           throw new PlannerError(
             "retry",
             `Copilot answer is not JSON: ${detail(result.text)}`,
@@ -538,7 +608,10 @@ export class CopilotWorker implements Worker {
       effort: this.options.model.effort,
       item: input.item.id,
     });
-    captureRequest(record, input.prompt);
+    describeRequest(record, {
+      prompt: input.prompt,
+      ...(input.facts ? { facts: input.facts } : {}),
+    });
     /** Running tool calls' names by id, for their completions. */
     const toolNames = new Map<string, string>();
     // Validate, as Claude's (work/self-validate.ts): only declared commands.

@@ -63,9 +63,12 @@ import { pathInsideRoot } from "./claude-worker.js";
 import type { WorkerConfig } from "./config.js";
 import { detail, PlannerError, providerOutcome } from "./planner.js";
 import {
-  captureRequest,
   captureResponse,
+  captureToolOutput,
+  describeRequest,
   logUsage,
+  NativeTools,
+  providerUsage,
   tokens,
   usageRecord,
 } from "./usage.js";
@@ -174,6 +177,24 @@ function saveMarker(worktree: string, marker: Marker): void {
 interface Usage {
   cents: number;
   tokens: number;
+  /** The session's own counts, as reported (the call's `providerUsage`). */
+  reported?: Record<string, number>;
+}
+
+/** Add `counts`' finite numbers into `usage.reported`. */
+function report(usage: Usage, counts: Record<string, unknown>): void {
+  usage.reported ??= {};
+  for (const [key, value] of Object.entries(counts))
+    if (typeof value === "number" && Number.isFinite(value))
+      usage.reported[key] = (usage.reported[key] ?? 0) + value;
+}
+
+/** The model a hosted agent reports: a name, or an object with its `id`. */
+function agentModel(agent: unknown): string | null {
+  const model = (agent as { model?: unknown } | undefined)?.model;
+  if (typeof model === "string") return model;
+  const id = (model as { id?: unknown } | undefined)?.id;
+  return typeof id === "string" ? id : null;
 }
 
 interface Packed {
@@ -498,7 +519,10 @@ abstract class ManagedWorker implements Worker {
       item: input.item.id,
     });
     record.key = key;
-    captureRequest(record, input.prompt);
+    describeRequest(record, {
+      prompt: input.prompt,
+      ...(input.facts ? { facts: input.facts } : {}),
+    });
     const signal = AbortSignal.any([
       input.signal,
       AbortSignal.timeout(this.config.timeoutSeconds * 1000),
@@ -586,14 +610,18 @@ abstract class ManagedWorker implements Worker {
       return { ...result, spend };
     } finally {
       if (marker)
-        await this.cleanUp(marker, input, spend).catch((error: unknown) =>
-          input.log({
-            event: "possible-orphan",
-            provider: this.config.kind,
-            key,
-            ...(marker?.session ? { session: marker.session } : {}),
-            detail: `Cleanup failed at ${new Date().toISOString()}; the next run of this step tries again: ${detail(errorMessage(error))}`,
-          }),
+        await this.cleanUp(marker, input, spend).then(
+          (usage) => {
+            record.providerUsage = providerUsage(usage.reported) ?? null;
+          },
+          (error: unknown) =>
+            input.log({
+              event: "possible-orphan",
+              provider: this.config.kind,
+              key,
+              ...(marker?.session ? { session: marker.session } : {}),
+              detail: `Cleanup failed at ${new Date().toISOString()}; the next run of this step tries again: ${detail(errorMessage(error))}`,
+            }),
         );
       if (scratch) rmSync(scratch, { recursive: true, force: true });
       if (typeof record.finalResponse === "string")
@@ -615,7 +643,7 @@ abstract class ManagedWorker implements Worker {
     marker: Marker,
     input: WorkerInput,
     spend: WorkerSpend,
-  ): Promise<void> {
+  ): Promise<Usage> {
     let usage: Usage;
     try {
       usage = await this.dispose(
@@ -636,6 +664,7 @@ abstract class ManagedWorker implements Worker {
     if (readMarker(input.worktree)?.createdAt === marker.createdAt)
       rmSync(markerPath(input.worktree), { force: true });
     crashPoint("managed:marker-removed");
+    return usage;
   }
 }
 
@@ -762,6 +791,10 @@ export class OpenAIManagedWorker extends ManagedWorker {
     note({ session });
     crashPoint("managed:session-recorded");
     record.session = session;
+    // A fresh session per run, one Work Item message: its first turn.
+    record.sessionTurn = 1;
+    record.sessionMode = "fresh";
+    record.reportedModel = agentModel(created.agent);
     const environment = String(
       (created.environment as { id?: unknown } | undefined)?.id,
     );
@@ -873,11 +906,13 @@ export class OpenAIManagedWorker extends ManagedWorker {
       return { cents: 0, tokens: 0 };
     }
     let tokens = 0;
+    const reported: Usage = { cents: 0, tokens: 0 };
     for (const turn of await this.turns(session, signal)) {
       const usage = turn.usage as
         | { input_tokens?: number; output_tokens?: number }
         | undefined;
       tokens += (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0);
+      if (usage) report(reported, usage);
     }
     await this.request(
       "POST",
@@ -899,7 +934,7 @@ export class OpenAIManagedWorker extends ManagedWorker {
       session,
       key: marker.key,
     });
-    return { cents: 0, tokens };
+    return { ...reported, tokens };
   }
 }
 
@@ -912,6 +947,42 @@ interface ManagedEvent {
   name?: string;
   input?: unknown;
   tool_use_id?: string;
+  is_error?: boolean;
+  content?: { type: string; text?: string }[];
+}
+
+/**
+ * A hosted event into the call's native tool record: a use opens a call, a
+ * result answers it (and ends the response that asked: its uses come
+ * before their results), and an agent message's image blocks count as
+ * image outputs. Runs before managedActivity, which forgets an answered
+ * call's name.
+ */
+function observeTools(
+  record: Record<string, unknown>,
+  tools: NativeTools,
+  event: ManagedEvent,
+  toolNames: Map<string, string>,
+): void {
+  if (event.type === "agent.tool_use") tools.call(event.id);
+  if (event.type === "agent.tool_result" && event.tool_use_id) {
+    tools.response();
+    tools.result(event.tool_use_id, event.is_error === true);
+    const text = (event.content ?? [])
+      .map((block) => block.text ?? "")
+      .join("");
+    if (text)
+      captureToolOutput(
+        record,
+        toolNames.get(event.tool_use_id) ?? "unknown",
+        text,
+      );
+  }
+  if (event.type === "agent.message")
+    record.imageOutputs =
+      Number(record.imageOutputs ?? 0) +
+      (event.content ?? []).filter((block) => block.type === "image").length;
+  record.nativeTools = tools.value;
 }
 
 /** Hosted tools that write the file their `file_path` or `path` names. */
@@ -1104,6 +1175,10 @@ export class ClaudeManagedWorker extends ManagedWorker {
     note({ session });
     crashPoint("managed:session-recorded");
     record.session = session;
+    // A fresh session per run, one Work Item message: its first turn.
+    record.sessionTurn = 1;
+    record.sessionMode = "fresh";
+    record.reportedModel = agentModel(created.agent);
     const agent = created.agent as unknown as {
       tools?: {
         type?: string;
@@ -1151,6 +1226,8 @@ export class ClaudeManagedWorker extends ManagedWorker {
     // Newest first, down to this turn's message: the turn ends at an idle status after it.
     const seen = new Set<string>();
     const toolNames = new Map<string, string>();
+    const native = new NativeTools();
+    record.imageOutputs = 0;
     for (;;) {
       await wait(POLL_MS, signal);
       let end: { stop_reason?: { type?: string } } | undefined;
@@ -1184,6 +1261,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
       });
       for (const e of fresh.reverse()) {
         seen.add(e.id);
+        observeTools(record, native, e, toolNames);
         managedActivity(input, e, toolNames);
       }
       if (terminated)
@@ -1273,6 +1351,11 @@ export class ClaudeManagedWorker extends ManagedWorker {
       usage.tokens +=
         (counted?.input_tokens ?? 0) + (counted?.output_tokens ?? 0);
       usage.cents += Number(counted?.list_cost?.amount ?? 0) || 0;
+      if (counted)
+        report(usage, {
+          ...counted,
+          list_cost_cents: Number(counted.list_cost?.amount ?? 0) || 0,
+        });
       if (found.status === "running" || found.status === "rescheduling") {
         await sdk.beta.sessions.events
           .send(

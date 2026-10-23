@@ -27,7 +27,7 @@ import type {
 } from "./github-sync.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { takeServiceLock } from "./lock.js";
-import { newRunId, RunLog, rotateLogs } from "./log.js";
+import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
@@ -339,6 +339,14 @@ export async function serve(options: ServeOptions): Promise<number> {
       rmSync(path, { force: true });
     }
   const record = startRecord(previous, startedAt, runId, runners, limits);
+  // The last run died: its files end with that, as far as this start knows them.
+  if (previous?.runId && !previous.stopped && previous.runId !== runId)
+    endCrashedRun(
+      paths.logs,
+      previous.runId,
+      [...runners.keys(), ...unreadable.keys()],
+      runId,
+    );
   if (options.unconfigured) {
     record.problem = `No configuration at ${options.unconfigured}, so the service applies requests only and never reads the queue; run factory setup, then restart the service`;
     log.write(0, { event: "unconfigured", config: options.unconfigured });
@@ -1029,6 +1037,10 @@ export async function serve(options: ServeOptions): Promise<number> {
     }
     await new Promise((resolve) => setTimeout(resolve, options.tickMs ?? 1000));
   }
+  // An Objective still unfinished is handed off to the next run.
+  log.end((issue) =>
+    runners.get(issue)?.settled === false ? "handed-off" : "stopped",
+  );
   // A clean stop (an upgrade, a reboot) ends any crash streak.
   heartbeat(true);
   lock.close();

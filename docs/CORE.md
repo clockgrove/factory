@@ -401,7 +401,7 @@ No mocks, fake services, fake providers or scripted responses.
 `factory setup --repo OWNER/NAME [options]` writes the configuration file (mode 0600) and checks it the same way the service does. Then it checks the target: the checkout exists and its origin names the repository, and the queue's Project has the `queue.field` single-select field with every option, plus the `queue.orderField` number field. Factory never creates either field.
 
 - **Create:** give `--checkout PATH` and `--project-id PVT_...`. Every other key has a default.
-- **Repeat:** the same command changes nothing and reports `changed: []`. `--config-only` is accepted, and it is the only mode until `--background`.
+- **Repeat:** the same command changes nothing and reports `changed: []`. Without a service mode, setup is `--config-only` (accepted, not required).
 - **Bindings:** `--checkout`, `--project-id`, `--field` and `--order-field` never change an existing value, defaults included. A different value is refused, because it would move running Objectives to another target. Edit the file by hand when nothing runs.
 - **Refusal:** a value the configuration refuses leaves the file as it was. The report names every problem.
 - **Report:** `--json` prints `{status, config, created, changed, defaultProvider, problems, readiness}`. `status` is `configured` (exit 0), `blocked` (the file is saved but the target isn't ready, or a readiness check is blocked; exit 1) or `refused` (nothing saved; exit 1).
@@ -447,6 +447,31 @@ Provider options need `--provider NAME`. They add the provider or change it:
 - Copilot worker settings: `--copilot-model`, `--copilot-effort` and `--copilot-tools`.
 
 Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
+
+### Background service
+
+The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.
+
+- **`--background`:** setup as above. Only once its status is `configured` does it write the unit and enable and start it, then wait up to 30 s for the service to take its lock.
+  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations and proxies.
+  - It restarts on failure, except on exit 2 (usage) and 78 (a configuration that doesn't load).
+  - `KillMode=mixed`: the service stops at its next tick, and then its children are killed.
+  - Repeated with nothing changed, it leaves the running service alone. The service reads its configuration and credentials once, so it restarts when the unit changed (an upgrade, or a changed environment or credential list), when setup changed the configuration, or when `--credential-file` is given.
+  - A service that exits or restarts before taking its lock blocks `--background` and names the journal.
+- **`--credential-file NAME=FILE`...** (with `--background`): each is a LoadCredential. NAME is one Factory reads from the service's credentials: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a managed worker's credential variable. FILE is an absolute path to a regular file, not a link, that only its owner can read, in a directory no one else can write. Setup never reads it, and readiness counts it as present. Without the option, the unit keeps its credentials, which are checked again.
+- **`--check`:** the unit's enabled and active state, whether the service holds its lock, the credential names, and whether the unit is current. Exit 0 only when it is running.
+- **`--stop`:** stop the service and disable it, so it doesn't start at the next login. `--background` starts it again.
+- **`--uninstall`:** stop the service and remove its unit. The configuration and state stay.
+
+Setup never touches a unit it didn't write: its first line is Factory's marker. A `factory serve` that's already running outside the unit blocks `--background`. Lingering off is a warning, because the service then stops at logout.
+
+**An unconfigured serve is visible.** Without a configuration file, serve applies requests only:
+
+- it logs `unconfigured`;
+- it prints the path;
+- `status` shows the problem.
+
+A configuration that doesn't load prints its problems without a stack trace and exits 78.
 
 ## Migration
 

@@ -51,11 +51,13 @@ export interface ValidationEnvironment {
 export async function readiness(
   config: CoreConfig,
   github: GitHub,
+  /** Credentials the service will load (`--credential-file`): present for it. */
+  bound: readonly string[] = [],
 ): Promise<Readiness> {
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
-    ...providerChecks(config),
+    ...providerChecks(config, bound),
     ...(await repositoryChecks(config, github)),
   ];
   const environment = validationEnvironment(config, scripts);
@@ -199,7 +201,10 @@ const SDK: Record<string, string> = {
 };
 
 /** The login each kind uses, found by presence alone, or why it is missing. */
-function login(kind: string): string | { missing: string; fix: string } {
+function login(
+  kind: string,
+  bound: readonly string[],
+): string | { missing: string; fix: string } {
   const set = (...names: string[]) => names.find((name) => process.env[name]);
   switch (kind) {
     case "codex": {
@@ -224,7 +229,7 @@ function login(kind: string): string | { missing: string; fix: string } {
       const names = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
       const named = set(...names);
       if (named) return `${named} in the environment`;
-      const credential = names.find(loaded);
+      const credential = names.find((name) => loaded(name, bound));
       if (credential) return `${credential} in the service's credentials`;
       if (existsSync(file)) return `the Claude login in ${file}`;
       return {
@@ -240,14 +245,18 @@ function login(kind: string): string | { missing: string; fix: string } {
 }
 
 /** A credential systemd loaded for the service, by presence: never read here. */
-function loaded(name: string): boolean {
+function loaded(name: string, bound: readonly string[]): boolean {
+  if (bound.includes(name)) return true;
   const directory = process.env.CREDENTIALS_DIRECTORY;
   return (
     !!directory && isAbsolute(directory) && existsSync(join(directory, name))
   );
 }
 
-function providerChecks(config: CoreConfig): ReadinessCheck[] {
+function providerChecks(
+  config: CoreConfig,
+  bound: readonly string[],
+): ReadinessCheck[] {
   const checks: ReadinessCheck[] = [];
   for (const [name, provider] of Object.entries(config.providers)) {
     const worker = provider.worker;
@@ -268,7 +277,7 @@ function providerChecks(config: CoreConfig): ReadinessCheck[] {
         });
         continue;
       }
-      const found = login(kind);
+      const found = login(kind, bound);
       checks.push(
         typeof found === "string"
           ? ok(at, `${found}; account access is checked at the first call`)
@@ -309,7 +318,7 @@ function providerChecks(config: CoreConfig): ReadinessCheck[] {
           ? worker.credentialEnv
           : undefined;
     if (credential) {
-      const present = !!process.env[credential] || loaded(credential);
+      const present = !!process.env[credential] || loaded(credential, bound);
       checks.push(
         present
           ? ok(

@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:net";
+import { connect, createServer, type Server } from "node:net";
 
 /**
  * The service lock: a Linux abstract-namespace socket. Binding fails while
@@ -17,5 +17,17 @@ export async function takeServiceLock(name: string): Promise<Server | null> {
       server.unref();
       resolve(server);
     });
+  });
+}
+
+/** Whether a live process holds the service lock `name`. */
+export async function lockHeld(name: string): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = connect(name);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
   });
 }

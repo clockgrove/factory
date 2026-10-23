@@ -76,6 +76,11 @@ export interface ServeOptions {
   dream?: (stored: StoredRequest & { request: DreamRequest }) => RequestResult;
   /** The workflow can rebuild a state from GitHub (`factory reset`, reset.ts): it has configuration. */
   reset?: boolean;
+  /**
+   * The configuration path that doesn't exist: the service applies
+   * requests only, and says so in its log and in `status`.
+   */
+  unconfigured?: string;
 }
 
 /**
@@ -291,6 +296,11 @@ export async function serve(options: ServeOptions): Promise<number> {
       rmSync(path, { force: true });
     }
   const record = startRecord(previous, startedAt, runId, runners, limits);
+  if (options.unconfigured) {
+    record.problem = `No configuration at ${options.unconfigured}, so the service applies requests only and never reads the queue; run factory setup, then restart the service`;
+    log.write(0, { event: "unconfigured", config: options.unconfigured });
+    process.stderr.write(`factory: ${record.problem}\n`);
+  }
   run.resumeAt = Date.parse(record.resumeAt ?? "") || 0;
   if (record.resumeAt)
     log.write(0, {

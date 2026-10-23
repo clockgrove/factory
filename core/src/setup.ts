@@ -20,9 +20,22 @@ import { isObject } from "./checked.js";
 import { configPath, loadConfig } from "./config.js";
 import { originRefusal } from "./git.js";
 import { GitHub } from "./github.js";
+import { lockHeld } from "./lock.js";
+import { installationPaths } from "./paths.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
 import { projectProblems } from "./queue.js";
 import { type Readiness, readiness } from "./readiness.js";
+import {
+  boundCredentials,
+  credentialFiles,
+  hostProblem,
+  install,
+  type ServiceState,
+  serviceState,
+  stop,
+  uninstall,
+  unitHealth,
+} from "./systemd.js";
 import { errorMessage } from "./text.js";
 
 /** How an option's value becomes the key's: loadConfig checks the result. */
@@ -110,6 +123,11 @@ const MANAGED_FIELDS: Record<string, string> = {
 /** Setup's options for the command table, by kind (cli.ts `FlagKind`). */
 export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   "config-only": "switch",
+  background: "switch",
+  check: "switch",
+  stop: "switch",
+  uninstall: "switch",
+  "credential-file": "list",
   provider: "value",
   planner: "value",
   worker: "value",
@@ -221,6 +239,8 @@ function optionValue(read: Read, given: string[]): unknown {
 export async function setup(
   repository: string,
   values: Record<string, string[]>,
+  /** Credentials the background service will load, by name (readiness counts them). */
+  bound: readonly string[] = [],
 ): Promise<SetupReport> {
   const path = configPath(repository);
   const created = !existsSync(path);
@@ -317,7 +337,7 @@ export async function setup(
   } catch (error) {
     problems.push(`Can't read the queue's Project: ${errorMessage(error)}`);
   }
-  const ready = await readiness(config, github);
+  const ready = await readiness(config, github, bound);
   return {
     status: problems.length || !ready.ready ? "blocked" : "configured",
     config: path,
@@ -419,4 +439,169 @@ function providerOptions(
     set(option.key, optionValue(option.read, value), provider, prefix);
   }
   if (values.default) set("defaultProvider", name);
+}
+
+/** Setup's service modes; without one, setup writes and checks the configuration only. */
+export const SERVICE_MODES = [
+  "background",
+  "check",
+  "stop",
+  "uninstall",
+] as const;
+export type ServiceMode = (typeof SERVICE_MODES)[number];
+
+export interface ServiceReport {
+  mode: ServiceMode;
+  /**
+   * `running`: the unit is active and the service holds its lock.
+   * `starting`: started, and not serving yet. `blocked`: nothing started
+   * (`problems` names why). `stopped`, `removed`; or for `--check`, the
+   * unit's state.
+   */
+  status: string;
+  service?: ServiceState;
+  /** `--background`'s configuration step. */
+  setup?: SetupReport;
+  problems: string[];
+  /** Not blockers: lingering off, a service still starting. */
+  warnings: string[];
+}
+
+/** How long `--background` waits for the service to take its lock. */
+const START_WAIT_MS = 30_000;
+
+/**
+ * `--background`: setup as without it, then, once the configuration and
+ * target are ready, install and start the systemd user service and wait
+ * for it to serve. `--check`, `--stop` and `--uninstall` act on the
+ * service alone.
+ */
+export async function serviceSetup(
+  repository: string,
+  mode: ServiceMode,
+  values: Record<string, string[]>,
+): Promise<ServiceReport> {
+  const others = Object.keys(values).filter(
+    (flag) => flag !== mode && flag !== "json" && flag !== "repo",
+  );
+  if (mode !== "background" && others.length)
+    throw new SetupUsage(
+      `--${mode} takes no other option; drop --${others.join(", --")}`,
+    );
+  if (others.includes("config-only"))
+    throw new SetupUsage("give --config-only or --background, not both");
+  const paths = installationPaths(repository);
+  const report: ServiceReport = {
+    mode,
+    status: "blocked",
+    problems: [],
+    warnings: [],
+  };
+  const serving = () => lockHeld(paths.lockName);
+  if (mode === "check") {
+    const service = serviceState(repository, paths, await serving());
+    return {
+      ...report,
+      status: !service.installed
+        ? "not-installed"
+        : service.active === "active" && service.serving
+          ? "running"
+          : service.active,
+      service,
+      warnings: lingerWarning(service),
+    };
+  }
+  if (mode === "stop" || mode === "uninstall") {
+    const problem = hostProblem();
+    if (problem) return { ...report, problems: [problem] };
+    if (mode === "stop") stop(paths);
+    else uninstall(paths);
+    return {
+      ...report,
+      status: mode === "stop" ? "stopped" : "removed",
+      service: serviceState(repository, paths, await serving()),
+    };
+  }
+  const { "credential-file": given, ...rest } = values;
+  // Given bindings replace the unit's; otherwise its own are checked again.
+  const bindings =
+    given ?? boundCredentials(paths).map(({ name, file }) => `${name}=${file}`);
+  report.setup = await setup(
+    repository,
+    rest,
+    bindings.map((binding) => binding.slice(0, binding.indexOf("="))),
+  );
+  if (report.setup.status !== "configured")
+    return {
+      ...report,
+      problems: [
+        "The service wasn't started: setup is not configured (see setup)",
+      ],
+    };
+  const host = hostProblem();
+  if (host) return { ...report, problems: [host] };
+  try {
+    const credentials = credentialFiles(bindings, loadConfig(repository));
+    const before = serviceState(repository, paths, await serving());
+    if (before.serving && before.active !== "active")
+      return {
+        ...report,
+        service: before,
+        problems: [
+          "A `factory serve` for this installation already runs outside the background service; stop it, then repeat",
+        ],
+      };
+    // The service reads its configuration and credentials once, at start.
+    install(
+      repository,
+      paths,
+      credentials,
+      report.setup.changed.length > 0 || given !== undefined,
+    );
+  } catch (error) {
+    return { ...report, problems: [errorMessage(error)] };
+  }
+  const deadline = Date.now() + START_WAIT_MS;
+  let health = unitHealth(paths);
+  while (!(await serving()) && Date.now() < deadline) {
+    health = unitHealth(paths);
+    // A restart since this start means the service died.
+    if (health.active === "failed" || health.restarts > 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const service = serviceState(repository, paths, await serving());
+  if (!service.serving && (health.active === "failed" || health.restarts > 0))
+    return {
+      ...report,
+      service,
+      problems: [
+        `The service exited after it started (unit ${health.active}, ${health.restarts} restarts); read journalctl --user -u ${service.unit}, fix the cause, then repeat`,
+      ],
+    };
+  const warnings = lingerWarning(service);
+  if (!service.serving)
+    warnings.push(
+      `The service hasn't started serving yet (unit ${service.active}); check with factory setup --check, and read journalctl --user -u ${service.unit}`,
+    );
+  return {
+    ...report,
+    status: service.serving ? "running" : "starting",
+    service,
+    warnings,
+  };
+}
+
+function lingerWarning(service: ServiceState): string[] {
+  return [
+    ...(service.installed && service.linger === "no"
+      ? [
+          "Lingering is off, so the service stops when you log out; `loginctl enable-linger` keeps it running",
+        ]
+      : []),
+    ...(service.installed && !service.current
+      ? [
+          "The unit runs another Factory or environment than this one (an upgrade?); repeat factory setup --background to update and restart it",
+        ]
+      : []),
+  ];
 }

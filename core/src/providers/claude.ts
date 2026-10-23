@@ -379,7 +379,7 @@ const CLAUDE_NETWORK_ENVIRONMENT = [
 ];
 
 /** Claude login values a supervised service may load with LoadCredential. */
-const CLAUDE_LOGIN_CREDENTIALS = [
+export const CLAUDE_LOGIN_CREDENTIALS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_API_KEY",
 ];

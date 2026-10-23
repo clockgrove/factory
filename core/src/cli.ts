@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
-import { connect } from "node:net";
 import { isAbsolute, join } from "node:path";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { eventLine, redactDeep } from "./display.js";
@@ -25,6 +24,7 @@ import {
   configureKnowledge,
   type KnowledgeSettings,
 } from "./knowledge/settings.js";
+import { lockHeld } from "./lock.js";
 import {
   completeLines,
   type LogEvent,
@@ -61,7 +61,15 @@ import {
 } from "./requests.js";
 import { rebuildStep, resettable } from "./reset.js";
 import { serve } from "./service.js";
-import { SETUP_FLAGS, type SetupReport, SetupUsage, setup } from "./setup.js";
+import {
+  SERVICE_MODES,
+  SETUP_FLAGS,
+  type ServiceReport,
+  type SetupReport,
+  SetupUsage,
+  serviceSetup,
+  setup,
+} from "./setup.js";
 import {
   type Frozen,
   findState,
@@ -71,6 +79,7 @@ import {
   TERMINAL,
 } from "./state.js";
 import { readStatus, statusText } from "./status.js";
+import { CONFIGURATION_EXIT } from "./systemd.js";
 import { errorMessage } from "./text.js";
 import { adaptiveWorkflow } from "./validate.js";
 import { objectiveWorkflow } from "./workflow.js";
@@ -353,7 +362,14 @@ async function serveCommand(
   let workflow = objectiveWorkflow();
   let frozen: Frozen | undefined;
   if (existsSync(configPath(repository))) {
-    const config = loadConfig(repository);
+    let config: CoreConfig;
+    try {
+      config = loadConfig(repository);
+    } catch (error) {
+      // A restart can't fix it: the unit doesn't restart on this code.
+      process.stderr.write(`factory: ${errorMessage(error)}\n`);
+      return CONFIGURATION_EXIT;
+    }
     loaded = config;
     configureKnowledge(knowledge(config, paths));
     const name = providerName(config, args);
@@ -398,6 +414,7 @@ async function serveCommand(
   return await serve({
     paths,
     workflow,
+    ...(loaded ? {} : { unconfigured: configPath(repository) }),
     ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
     ...(sync ? { sync, reset: true } : {}),
     ...(frozen ? { frozen } : {}),
@@ -560,8 +577,19 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
   const values: Record<string, string[]> = { ...args.lists };
   for (const [flag, value] of Object.entries(args.flags))
     values[flag] = [value];
+  const modes = SERVICE_MODES.filter((mode) => values[mode]);
+  if (modes.length > 1) throw usage(`give one of --${modes.join(", --")}`);
+  if (values["credential-file"] && modes[0] !== "background")
+    throw usage(
+      "--credential-file binds the background service: give --background",
+    );
   let report: SetupReport;
   try {
+    if (modes[0])
+      return printService(
+        await serviceSetup(repository, modes[0], values),
+        args,
+      );
     report = await setup(repository, values);
   } catch (error) {
     if (error instanceof SetupUsage) throw usage(error.message);
@@ -586,6 +614,37 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
     );
   }
   return report.status === "configured" ? 0 : 1;
+}
+
+/** `setup --background|--check|--stop|--uninstall`'s report. */
+function printService(report: ServiceReport, args: Args): number {
+  if (args.flags.json !== undefined)
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+  else {
+    const service = report.service;
+    process.stdout.write(
+      [
+        `Service ${report.status}${service ? `: ${service.unit} (${service.installed ? `${service.enabled}, ${service.active}${service.serving ? ", serving" : ""}` : "not installed"})` : ""}.`,
+        ...(service?.credentials.length
+          ? [`  Credentials: ${service.credentials.join(", ")}`]
+          : []),
+        ...(report.setup && report.setup.status !== "configured"
+          ? [
+              `  Setup ${report.setup.status}:`,
+              ...report.setup.problems.map((problem) => `  - ${problem}`),
+            ]
+          : []),
+        ...report.problems.map((problem) => `- ${problem}`),
+        ...report.warnings.map((warning) => `  Warning: ${warning}`),
+        "",
+      ].join("\n"),
+    );
+  }
+  const ok =
+    report.mode === "check"
+      ? report.status === "running"
+      : report.status !== "blocked";
+  return ok ? 0 : 1;
 }
 
 /** `factory log ISSUE [--tail N] [--follow] [--json]`. */
@@ -851,16 +910,7 @@ async function recipe(repository: string, args: Args): Promise<number> {
 }
 
 /** The service holds its abstract socket while it lives. */
-async function serviceLive(paths: Paths): Promise<boolean> {
-  return await new Promise((resolve) => {
-    const socket = connect(paths.lockName);
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => resolve(false));
-  });
-}
+const serviceLive = (paths: Paths) => lockHeld(paths.lockName);
 
 interface Args {
   positional: string[];

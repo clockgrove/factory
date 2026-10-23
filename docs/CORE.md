@@ -1,6 +1,6 @@
 # Factory core
 
-This is the specification for the rebuilt Factory core. Everything that works today keeps working; the rebuild changes how runs are owned, saved, retried and recovered. Once the core ships, this page replaces the state and recovery parts of [the architecture](ARCHITECTURE.md), and [the lifecycle](LIFECYCLE.md).
+This is the specification for Factory's core. It replaced the old implementation, which kept every capability but changed how runs are owned, saved, retried and recovered.
 
 ## Why a new core
 

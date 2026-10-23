@@ -49,16 +49,16 @@
     "x64"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p core/tsconfig.json",
     "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
-    "test": "npm run build && node --import ./test/isolate-env.mjs --test --test-timeout=300000 test/*.test.mjs",
+    "test": "npm run build && node --test --test-timeout=120000 core/test/*.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check",
-    "build:core": "tsc -p core/tsconfig.json",
-    "prepack": "npm run build:core",
-    "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs"
+    "build:core": "npm run build",
+    "prepack": "npm run build",
+    "test:core": "npm test"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
@@ -70,7 +70,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.129.0",
-    "@octokit/core": "^7.0.8",
     "@openai/codex-sdk": "0.160.0",
     "@secretlint/node": "13.0.5",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.5",
@@ -82,7 +81,6 @@
     "yaml": "2.9.0"
   },
   "bundleDependencies": [
-    "@octokit/core",
     "@openai/codex-sdk",
     "@secretlint/node",
     "@secretlint/secretlint-rule-preset-recommend",

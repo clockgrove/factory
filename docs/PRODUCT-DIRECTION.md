@@ -6,7 +6,7 @@ Give Factory a human-written Objective, check in from a phone a few times a day,
 
 Factory should keep making useful progress between check-ins. The operator interacts with the agent in Codex: short progress updates, questions and human-owned decisions belong in that conversation. GitHub provides the drill-down detail: Objectives, dependency-linked Work Items, pull requests, acceptance evidence and Project status.
 
-This is the agreed product direction, not a claim that every part is implemented. The [user guide](USER-GUIDE.md) describes current behavior, and the [architecture](ARCHITECTURE.md) describes the contracts that changes must preserve.
+This is the agreed product direction, not a claim that every part is implemented. The [user guide](USER-GUIDE.md) describes current behavior, and [the core spec](CORE.md) describes the contracts that changes must preserve.
 
 ## Priorities
 

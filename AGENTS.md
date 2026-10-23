@@ -2,7 +2,7 @@
 
 These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout.
 
-Factory is being rebuilt on a new core: [the core spec](docs/CORE.md) is the design authority. Until cutover, the old tree under `src/` is frozen: no fixes or features there, only deletion as capabilities are ported. [The architecture](docs/ARCHITECTURE.md) and [the lifecycle](docs/LIFECYCLE.md) describe the old tree and are replaced at cutover.
+Factory's code is the core under `core/`: [the core spec](docs/CORE.md) is the design authority, and [the scope ledger](docs/CORE-SCOPE.md) maps each capability of the old Factory to it.
 
 ## Stability rules
 

@@ -1542,8 +1542,9 @@ test("a Codex worker's login or quota hold on one item stops every item, once", 
 });
 
 test("a deferred question asks right after the covering one; stack layers and bare retries respect item holds", async () => {
-  const { ObjectiveRunner, hold, objectiveWide } =
-    await import("../dist/engine.js");
+  const { ObjectiveRunner, hold, objectiveWide } = await import(
+    "../dist/engine.js"
+  );
   const { newObjective } = await import("../dist/state.js");
   const { reviewArtifactSelection } = await import("../dist/work/steps.js");
   const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
@@ -2157,31 +2158,27 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   await stopped(service);
 });
 
-test(
-  "a state file that can't be read now is read again, not marked unreadable",
-  {
-    skip: process.getuid?.() === 0 && "root reads any file",
-  },
-  async () => {
-    const inst = installation();
-    seed(inst, 43);
-    const file = join(inst.objectives, "43.json");
-    chmodSync(file, 0o000);
-    const service = serve(inst);
-    await until(() => status(inst).service === "running", "service");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    chmodSync(file, 0o600);
-    await until(
-      () => stateOf(inst, 43).holds.length,
-      "the Objective runs once readable",
-    );
-    assert.equal(
-      JSON.parse(readFileSync(join(inst.root, "service.json"))).unreadable[43],
-      undefined,
-    );
-    await stopped(service);
-  },
-);
+test("a state file that can't be read now is read again, not marked unreadable", {
+  skip: process.getuid?.() === 0 && "root reads any file",
+}, async () => {
+  const inst = installation();
+  seed(inst, 43);
+  const file = join(inst.objectives, "43.json");
+  chmodSync(file, 0o000);
+  const service = serve(inst);
+  await until(() => status(inst).service === "running", "service");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  chmodSync(file, 0o600);
+  await until(
+    () => stateOf(inst, 43).holds.length,
+    "the Objective runs once readable",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(inst.root, "service.json"))).unreadable[43],
+    undefined,
+  );
+  await stopped(service);
+});
 
 test("a plan's steps run in order, a dependent waits for its dependency's merge, read-only QA validates the default branch, and discovery observes the base", async () => {
   const inst = installation();

@@ -107,6 +107,7 @@ export interface IssueComment {
   id: number;
   body: string;
   created_at: string;
+  updated_at?: string;
   user: { login: string } | null;
 }
 
@@ -286,8 +287,8 @@ export class GitHub {
     issue: number,
     body: string,
     signal?: AbortSignal,
-  ): Promise<void> {
-    await this.rest(
+  ): Promise<IssueComment> {
+    return await this.rest<IssueComment>(
       "POST",
       `/repos/${this.repository}/issues/${issue}/comments`,
       { body },
@@ -343,7 +344,8 @@ export class GitHub {
   /**
    * Post the marked comment, or edit the one already there: found first,
    * so a post whose answer was lost is never repeated. `point` names the
-   * crash points before and after the write.
+   * crash points before and after the write. Returns the comment as GitHub
+   * shows it now, with its times by GitHub's clock.
    */
   async upsertComment(
     issue: number,
@@ -353,19 +355,20 @@ export class GitHub {
     signal?: AbortSignal,
     /** Read comments from here on (a little before the comment was first due). */
     since?: string,
-  ): Promise<void> {
+  ): Promise<IssueComment> {
     const existing = await this.markedComment(issue, marker, since, signal);
-    if (existing?.body === body) return;
+    if (existing?.body === body) return existing;
     crashPoint(`${point}:before`);
-    if (existing)
-      await this.rest(
-        "PATCH",
-        `/repos/${this.repository}/issues/comments/${existing.id}`,
-        { body },
-        signal,
-      );
-    else await this.postComment(issue, body, signal);
+    const written = existing
+      ? await this.rest<IssueComment>(
+          "PATCH",
+          `/repos/${this.repository}/issues/comments/${existing.id}`,
+          { body },
+          signal,
+        )
+      : await this.postComment(issue, body, signal);
     crashPoint(`${point}:after`);
+    return written;
   }
 
   /** Close an issue with a reason, unless it is closed already. */

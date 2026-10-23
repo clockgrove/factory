@@ -50,6 +50,14 @@ export interface Hold {
   answers: string[];
   recommended: string;
   askedAt: string;
+  /**
+   * When its issue comment last changed to what it shows now, by GitHub's
+   * clock (the comment's created_at or updated_at): an answer that names
+   * no question is compared with this, never with a host time.
+   */
+  shownAt?: string;
+  /** The comment shows the short form `/factory <answer>` (it was the one open question). */
+  shortForm?: boolean;
 }
 
 export interface Answer {
@@ -108,11 +116,12 @@ export interface ObjectiveState {
   /** Open questions, oldest first: at most one for the Objective and one per Work Item. */
   holds: Hold[];
   /**
-   * When a question last opened or closed. An answer that names no
-   * question applies only if it was written after this, while one question
-   * was open, so it can't land on a question its author didn't see.
+   * The latest GitHub time at which any question's comment was shown
+   * (posted or edited), closed questions included. An answer that names no
+   * question applies only to a question shown after every other one, so it
+   * can't land on a question its author didn't read (engine.ts `answer`).
    */
-  holdsChangedAt?: string;
+  lastShownAt?: string;
   /** The latest answer per step, read by the step when it runs again. */
   answers: Record<string, Answer>;
   retries: Record<string, Retry>;

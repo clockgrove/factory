@@ -83,10 +83,10 @@ function cli(inst, ...args) {
 }
 
 /**
- * A `/factory <answer>` comment as the GitHub sync turns it into a request
- * (no question named, with the comment's time). Resolves with the result.
+ * A `/factory <answer> [--question ID]` comment as the GitHub sync turns it
+ * into a request, with the comment's time. Resolves with the result.
  */
-async function comment(inst, issue, answer, writtenAt) {
+async function comment(inst, issue, answer, writtenAt, question) {
   mkdirSync(inst.requests, { recursive: true });
   const id = `comment-${Date.now()}`;
   writeFileSync(
@@ -95,7 +95,13 @@ async function comment(inst, issue, answer, writtenAt) {
       id,
       at: new Date().toISOString(),
       by: "octo",
-      request: { kind: "answer", issue, answer, writtenAt },
+      request: {
+        kind: "answer",
+        issue,
+        answer,
+        writtenAt,
+        ...(question ? { question } : {}),
+      },
     }),
   );
   const result = join(inst.requests, `${id}.result`);
@@ -229,7 +235,7 @@ test("one service per installation; the lock dies with the process", async () =>
 test("a step that can't run holds with answers that work", async () => {
   const inst = installation();
   seed(inst, 7);
-  const service = serve(inst);
+  let service = serve(inst);
   await until(() => status(inst).objectives[0]?.holds.length, "hold");
   const [row] = status(inst).objectives;
   assert.equal(row.status, "holding");
@@ -241,21 +247,67 @@ test("a step that can't run holds with answers that work", async () => {
   assert.equal(wrong.code, 1);
   assert.match(wrong.out, /Answers: retry, cancel/);
   assert.equal(status(inst).objectives[0].status, "holding");
-
-  // A comment written before the open questions last changed may have
-  // meant another question: refused, though only one is open.
-  const changed = Date.parse(stateOf(inst, 7).holdsChangedAt);
+  // Not shown on GitHub (no configuration here): a comment must name it.
   assert.match(
-    await comment(inst, 7, "retry", new Date(changed - 1000).toISOString()),
-    /the open questions changed after it was written/,
+    await comment(inst, 7, "retry", new Date().toISOString()),
+    /doesn't show the short form/,
   );
-  // The one open question takes a comment's short form.
-  assert.equal(await comment(inst, 7, "retry", new Date().toISOString()), "ok");
+
+  // GitHub showed its comment in the short form at `shown`, by GitHub's
+  // clock, 5 minutes ahead of the host's; then another question's comment,
+  // since closed. The sync saves these GitHub times (github-sync `ask`).
+  await stopped(service);
+  const shown = Date.now() + 5 * 60_000;
+  const at = (ms) => new Date(shown + ms).toISOString();
+  const showAs = (lastShownAt) => {
+    const state = stateOf(inst, 7);
+    state.holds[0].shownAt = at(0);
+    state.holds[0].shortForm = true;
+    state.lastShownAt = lastShownAt;
+    writeFileSync(join(inst.objectives, "7.json"), JSON.stringify(state));
+  };
+  showAs(at(10_000));
+  service = serve(inst);
+  await until(() => status(inst).service === "running", "restart");
+  assert.match(
+    await comment(inst, 7, "retry", at(20_000)),
+    /another question was shown after the open one/,
+  );
+  await stopped(service);
+  showAs(at(0));
+  service = serve(inst);
+  await until(() => status(inst).service === "running", "restart");
+  // Written after the host asked, but before GitHub showed it: refused.
+  assert.match(
+    await comment(inst, 7, "retry", at(-1000)),
+    /written before the open question was shown/,
+  );
+  // The one open question, shown before the comment: the short form works.
+  assert.equal(await comment(inst, 7, "retry", at(1000)), "ok");
   await until(
     () =>
       status(inst).objectives[0].holds[0]?.id !== undefined &&
       status(inst).objectives[0].holds[0].id !== firstHold,
     "a new hold after retry",
+  );
+  // A comment that names its question applies whatever its time: the id
+  // names one asking (here a host clock 5 minutes ahead of GitHub's).
+  const again = status(inst).objectives[0].holds[0].id;
+  assert.equal(
+    await comment(
+      inst,
+      7,
+      "retry",
+      new Date(Date.now() - 5 * 60_000).toISOString(),
+      again,
+    ),
+    "ok",
+  );
+  await until(
+    () =>
+      status(inst).objectives[0].holds[0]?.id !== undefined &&
+      status(inst).objectives[0].holds[0].id !== again,
+    "a new hold after the bound retry",
   );
 
   assert.equal(cli(inst, "cancel", "7").code, 0);
@@ -662,7 +714,6 @@ test("switch moves an Objective held on a usage limit to the named provider", as
         askedAt: now,
       },
     ],
-    holdsChangedAt: now,
     done: {
       check: {},
       plan: {
@@ -758,7 +809,6 @@ test("an item's question holds only that item and its dependents", async () => {
         askedAt: asked,
       },
     ],
-    holdsChangedAt: asked,
     done: {
       check: {},
       plan: {
@@ -890,7 +940,6 @@ test("an Objective question from an item step stops every item, once", async () 
         askedAt: asked,
       },
     ],
-    holdsChangedAt: asked,
     done: {
       check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
       plan: { items: [item("a"), item("e"), item("c", "aggregate")] },

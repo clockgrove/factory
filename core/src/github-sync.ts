@@ -34,8 +34,8 @@ export interface GitHubModule {
   shownAt?: string;
   /** When the card was set to queued for this run, by GitHub's clock. */
   queuedAt?: string;
-  /** The open holds whose question comment exists, and whether it names its question. */
-  asked?: { id: string; bound: boolean }[];
+  /** An unreadable state's question comment exists (open holds keep theirs: `Hold.shownAt`). */
+  askedUnreadable?: boolean;
   /** Comments are read from here on. */
   commentsSince: string;
   /** Request ids already replied to. */
@@ -215,7 +215,7 @@ export class GitHubSync {
       }
       if (!module) continue;
       this.show(runner, module, sync);
-      this.ask(runner, module);
+      this.ask(runner);
       this.reply(runner, module, sync);
       if (finished) continue;
       this.note(runner, module);
@@ -450,17 +450,17 @@ export class GitHubSync {
 
   /**
    * Post each open question once, with its answers. A comment shows the
-   * short form `/factory <answer>` only while it is the one open question
-   * (an answer that names none applies only then, see engine.ts `answer`);
-   * once another opens, it is edited to name its question.
+   * short form `/factory <answer>` only while it is the one open question;
+   * once another opens, it is edited to name its question. The comment's
+   * GitHub time is saved on the hold (`shownAt`): an answer that names no
+   * question is compared with it (engine.ts `answer`).
    */
-  private ask(runner: ObjectiveRunner, module: GitHubModule): void {
+  private ask(runner: ObjectiveRunner): void {
     const issue = runner.state.issue;
     const holds = runner.state.holds;
     const bound = holds.length > 1;
     for (const hold of holds) {
-      const asked = module.asked?.find((entry) => entry.id === hold.id);
-      if (asked && (asked.bound || !bound)) continue;
+      if (hold.shownAt !== undefined && (!hold.shortForm || !bound)) continue;
       this.background(issue, `ask:${issue}:${hold.id}`, async () => {
         const marker = MARK(issue, "hold", hold.id);
         const named = ` --question ${hold.id}`;
@@ -476,7 +476,7 @@ export class GitHubSync {
         const form = bound
           ? " Other questions are open too, so the answer names this one."
           : ` While this is the only open question, the short form works; \`/factory <answer>${named}\` always does.`;
-        await this.github.upsertComment(
+        const comment = await this.github.upsertComment(
           issue,
           marker,
           `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of: ${answers}. Add text after the answer to explain it.${about}${form}`,
@@ -484,16 +484,13 @@ export class GitHubSync {
           undefined,
           new Date(Date.parse(hold.askedAt) - 10 * 60_000).toISOString(),
         );
-        runner.transact(() => {
-          const github = runner.state.modules.github as GitHubModule;
-          const open = runner.state.holds.map((h) => h.id);
-          github.asked = [
-            ...(github.asked ?? []).filter(
-              (entry) => open.includes(entry.id) && entry.id !== hold.id,
-            ),
-            { id: hold.id, bound },
-          ];
-        });
+        runner.transact(() =>
+          runner.shown(
+            hold.id,
+            comment.updated_at ?? comment.created_at,
+            !bound,
+          ),
+        );
       });
     }
   }
@@ -585,7 +582,7 @@ export class GitHubSync {
         module.shown = option;
         if (at) module.shownAt = at;
       });
-    if (!module.asked?.some((entry) => entry.id === "unreadable"))
+    if (!module.askedUnreadable)
       this.background(issue, `ask:${issue}`, async () => {
         const marker = MARK(issue, "hold", "unreadable");
         const found = await this.github.markedComment(issue, marker);
@@ -598,7 +595,7 @@ export class GitHubSync {
           );
           crashPoint("sync:ask:after");
         }
-        module.asked = [{ id: "unreadable", bound: false }];
+        module.askedUnreadable = true;
       });
     else if (due)
       this.readComments(

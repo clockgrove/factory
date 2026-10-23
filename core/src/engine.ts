@@ -716,7 +716,7 @@ export class ObjectiveRunner {
     );
     if (open && open.step !== key) return;
     const all = answers.includes("cancel") ? answers : [...answers, "cancel"];
-    this.setHolds([
+    state.holds = [
       ...state.holds.filter((hold) => hold !== open),
       {
         id: `${key}@${now}`,
@@ -727,22 +727,35 @@ export class ObjectiveRunner {
         recommended: all.includes(recommended) ? recommended : all[0]!,
         askedAt: now,
       },
-    ]);
+    ];
     state.status = "holding";
   }
 
-  /** Change the open questions, noting when (see `answer`). */
-  private setHolds(holds: Hold[]): void {
-    this.state.holds = holds;
-    this.state.holdsChangedAt = this.now().toISOString();
+  /**
+   * Question `id`'s issue comment now shows it, since `at` by GitHub's
+   * clock, in the short form or naming its id (github-sync `ask`). A
+   * question closed meanwhile was still shown: it counts for `lastShownAt`.
+   */
+  shown(id: string, at: string, shortForm: boolean): void {
+    const hold = this.state.holds.find((open) => open.id === id);
+    if (hold) {
+      hold.shownAt = at;
+      if (shortForm) hold.shortForm = true;
+      else delete hold.shortForm;
+    }
+    if (!(Date.parse(this.state.lastShownAt ?? "") >= Date.parse(at)))
+      this.state.lastShownAt = at;
   }
 
   /**
-   * Answer the open question `question` names (a hold id). An answer that
-   * names none (a `/factory <answer>` comment) applies only if one question
-   * alone was open from before it was written until now, so it can't land
-   * on a question its author didn't see. Returns null when applied, or the
-   * reason it doesn't fit. The caller saves (see `transact`).
+   * Answer the open question `question` names (a hold id): the id names
+   * one asking, so nothing else is checked. An answer that names none (a
+   * `/factory <answer>` comment) applies only when exactly one question is
+   * open, its comment showed the short form before the answer was written,
+   * and no other question's comment was shown after it. All three times
+   * are GitHub's, so a skewed host clock can't land an answer on a question
+   * its author didn't read. Returns null when applied, or the reason it
+   * doesn't fit. The caller saves (see `transact`).
    */
   answer(
     answer: string,
@@ -758,23 +771,17 @@ export class ObjectiveRunner {
       return question === undefined
         ? `#${issue} has no open question.`
         : `#${issue}'s question ${question} was already answered, and no question is open now.`;
-    if (
-      question === undefined &&
-      !(
-        holds.length === 1 &&
-        writtenAt !== undefined &&
-        Date.parse(writtenAt) >= Date.parse(this.state.holdsChangedAt ?? "")
-      )
-    )
-      return `That answer names no question, and ${holds.length > 1 ? "more than one question is open" : "the open questions changed after it was written"}, so it wasn't applied. ${openQuestions(issue, holds)}`;
+    if (question === undefined) {
+      const why = unboundRefusal(holds, this.state.lastShownAt, writtenAt);
+      if (why)
+        return `That answer names no question, and ${why}, so it wasn't applied. ${openQuestions(issue, holds)}`;
+    }
     const hold =
       question === undefined
         ? holds[0]!
         : holds.find((open) => open.id === question);
     if (!hold)
       return `#${issue}'s question ${question} isn't open, so that answer wasn't applied. ${openQuestions(issue, holds)}`;
-    if (writtenAt && Date.parse(writtenAt) < Date.parse(hold.askedAt) - 60_000)
-      return `That answer was written before question ${hold.id} was asked, so it wasn't applied. It asks: ${hold.question.slice(0, 300)} Answers: ${hold.answers.join(", ")}.`;
     if (!hold.answers.includes(answer))
       return `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`;
     let provider: string | undefined;
@@ -866,7 +873,7 @@ export class ObjectiveRunner {
       retry.since = later(retry.since);
       if (retry.grantedUntil) retry.grantedUntil = later(retry.grantedUntil);
     }
-    this.setHolds(rest);
+    this.state.holds = rest;
   }
 
   private otherProviders(): string[] {
@@ -903,7 +910,7 @@ export class ObjectiveRunner {
       return `#${this.state.issue} has already finished (${status}).`;
     if (status === "cancelled") return null;
     this.state.status = "cancelled";
-    this.setHolds([]);
+    this.state.holds = [];
     this.state.attempts = {};
     this.state.retries = {};
     this.state.answers.cancel = {
@@ -945,6 +952,26 @@ export class ObjectiveRunner {
       this.state.endedAt ??= this.state.updatedAt;
     saveState(this.dir, this.state);
   }
+}
+
+/**
+ * Why an answer that names no question, written at `writtenAt` (GitHub's
+ * time), can't tell which question its author read; undefined when it can.
+ */
+function unboundRefusal(
+  holds: readonly Hold[],
+  lastShownAt: string | undefined,
+  writtenAt: string | undefined,
+): string | undefined {
+  if (holds.length > 1) return "more than one question is open";
+  const [hold] = holds;
+  if (!hold?.shortForm || hold.shownAt === undefined)
+    return "the open question's comment doesn't show the short form";
+  if (!(Date.parse(hold.shownAt) < Date.parse(writtenAt ?? "")))
+    return "it was written before the open question was shown";
+  if (lastShownAt !== hold.shownAt)
+    return "another question was shown after the open one";
+  return undefined;
 }
 
 function openQuestions(issue: number, holds: readonly Hold[]): string {

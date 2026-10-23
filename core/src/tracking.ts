@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
-import { type GitHub, GitHubError, type IssueSummary } from "./github.js";
+import {
+  type GitHub,
+  GitHubError,
+  type IssueSummary,
+  issueGone,
+} from "./github.js";
 import { code, mark, prose } from "./markdown.js";
 import { currentPlan } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
-import { type ObjectiveState, sinceRun, TERMINAL } from "./state.js";
+import { CLOCK_SKEW_MS, type ObjectiveState, TERMINAL } from "./state.js";
 import { itemRows } from "./status.js";
 
 /**
@@ -22,8 +27,16 @@ import { itemRows } from "./status.js";
  * pass makes only the writes whose recorded state differs from the plan,
  * and makes no GitHub call when nothing changed. An issue is found by the
  * marker on its body's first line before it is made: on a replay its
- * creation is looked up (the Objective's sub-issues, and one list of
- * Factory's labelled issues since the run began), never repeated.
+ * creation is looked up (the Objective's sub-issues, and, only while a
+ * creation may be unrecorded, one list of Factory's labelled issues since
+ * that creation began), never repeated. A run again of a finished
+ * Objective keeps the issues recorded (service.ts), so one created but
+ * never linked is still found.
+ *
+ * A refusal on one item's issue (deleted, locked, transferred) stops
+ * only that issue's writes: the others are still written and closed.
+ * Only a refusal of the Objective-wide calls (the lists, a create) gives
+ * tracking up for the run (github-sync.ts).
  */
 
 /** The role label of a Work Item issue: the queue never takes one as an Objective. */
@@ -45,13 +58,17 @@ export interface ItemIssue {
   /** The hash of its live comment as last written. */
   comment?: string;
   closed?: true;
+  /** GitHub refused a write to it: only its close is still tried this run. */
+  refused?: true;
+  /** GitHub refused its close too: nothing more is tried this run. It stays unclosed. */
+  unclosed?: true;
 }
 
 /** What tracking keeps in the Objective's state (`modules.github.tracking`). */
 export interface Tracking {
   items: Record<string, ItemIssue>;
-  /** Items whose issue may have been created without being recorded here: looked up first. */
-  creating?: string[];
+  /** Items whose issue may have been created without being recorded here, with when (host time) each create began: looked up first. */
+  creating?: Record<string, string>;
   /** The repository refused the native type: not tried again this run. */
   untyped?: true;
 }
@@ -129,6 +146,9 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
       ...(close ? { close } : {}),
     });
   }
+  // With no plan in force yet (a run again, or a replan, still planning),
+  // the issues recorded earlier stay as they are until one is accepted.
+  if (!plan && !ended) return items;
   for (const id of Object.keys(trackingOf(state)?.items ?? {}))
     if (!items.has(id))
       items.set(id, {
@@ -144,14 +164,38 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
   return items;
 }
 
+/**
+ * The tracking a run again of a finished Objective starts from: the
+ * issues recorded so far, so one created but never linked is found, not
+ * made again. Refusals were this run's: they are tried again.
+ */
+export function carried(tracking: Tracking): Tracking {
+  return {
+    items: Object.fromEntries(
+      Object.entries(tracking.items).map(
+        ([id, { refused: _refused, unclosed: _unclosed, ...issue }]) => [
+          id,
+          issue,
+        ],
+      ),
+    ),
+    ...(tracking.creating ? { creating: tracking.creating } : {}),
+  };
+}
+
 /** Whether a tracking pass has a write to make. */
 export function trackingDue(state: ObjectiveState): boolean {
   const tracking = trackingOf(state);
-  if (tracking?.creating?.length) return true;
+  if (Object.keys(tracking?.creating ?? {}).length) return true;
   for (const [id, want] of wanted(state)) {
     const has = tracking?.items[id];
     if (!has) {
       if (want.planned) return true;
+      continue;
+    }
+    if (has.unclosed) continue;
+    if (has.refused) {
+      if (want.close && !has.closed) return true;
       continue;
     }
     if (
@@ -186,6 +230,7 @@ export interface TrackContext {
  * crash can stop anywhere. Create (recorded as `creating` first), then
  * per issue: its title and body, its type, the sub-issue link, the
  * blocked-by links, the live comment, and the close (or a reopen).
+ * A refusal on one issue is recorded on it, and the pass goes on.
  */
 export async function track(context: TrackContext): Promise<void> {
   const { github, signal } = context;
@@ -197,31 +242,41 @@ export async function track(context: TrackContext): Promise<void> {
   const missing = [...want].filter(
     ([id, item]) => item.planned && !record().items[id],
   );
+  const creating = Object.entries(record().creating ?? {});
   let subIssues: IssueSummary[] | undefined;
   let found: IssueSummary[] = [];
-  if (missing.length || record().creating?.length) {
-    subIssues = await github.subIssues(objective, signal);
-    found = [
-      ...subIssues,
-      ...(await github.issuesByLabel(WORK_ITEM_LABEL, sinceRun(state), signal)),
-    ];
+  if (missing.length || creating.length)
+    found = subIssues = await github.subIssues(objective, signal);
+  if (creating.length) {
     // A creation a crash left unrecorded: adopted (and closed, if no
     // longer wanted). One not found is created below if still planned.
-    for (const id of record().creating ?? []) {
+    // Only issues updated since the earliest such create began are listed.
+    const since = Math.min(...creating.map(([, at]) => Date.parse(at)));
+    found = [
+      ...found,
+      ...(await github.issuesByLabel(
+        WORK_ITEM_LABEL,
+        new Date(since - CLOCK_SKEW_MS).toISOString(),
+        signal,
+      )),
+    ];
+    for (const [id] of creating) {
       const issue = record().items[id]
         ? undefined
         : await github.markedIssue(found, issueMark(id), signal);
       context.save((tracking) => {
         if (issue) tracking.items[id] = adopted(issue);
-        if (tracking.items[id] || !want.get(id)?.planned)
-          tracking.creating = tracking.creating?.filter((c) => c !== id);
+        if (tracking.items[id] || !want.get(id)?.planned) created(tracking, id);
       });
     }
   }
   for (const [id, item] of missing) {
     if (record().items[id]) continue;
     context.save((tracking) => {
-      tracking.creating = [...new Set([...(tracking.creating ?? []), id])];
+      tracking.creating = {
+        ...tracking.creating,
+        [id]: new Date().toISOString(),
+      };
     });
     const issue = await github.ensureIssue(
       found,
@@ -236,7 +291,7 @@ export async function track(context: TrackContext): Promise<void> {
     );
     context.save((tracking) => {
       tracking.items[id] = adopted(issue);
-      tracking.creating = tracking.creating?.filter((c) => c !== id);
+      created(tracking, id);
     });
   }
   const owned = new Set(
@@ -244,9 +299,47 @@ export async function track(context: TrackContext): Promise<void> {
   );
   for (const [id, item] of want) {
     const has = record().items[id];
-    if (!has) continue;
+    if (!has || has.unclosed) continue;
     const update = (change: (issue: ItemIssue) => void) =>
       context.save((tracking) => change(tracking.items[id]!));
+    let closing = false;
+    try {
+      if (!has.refused) await show(id, item, has, update);
+      closing = Boolean(item.close && !has.closed);
+      if (closing) {
+        await github.closeIssue(
+          has.issue,
+          item.close!,
+          "sync:item-issue:close",
+          signal,
+        );
+        update((issue) => {
+          issue.closed = true;
+        });
+      }
+    } catch (error) {
+      if (!refusal(error)) throw error;
+      update((issue) => {
+        issue.refused = true;
+        if (closing) issue.unclosed = true;
+      });
+      context.log({
+        event: "item-issue-refused",
+        item: id,
+        issue: has.issue,
+        status: error.status,
+        close: closing,
+      });
+    }
+  }
+
+  /** The issue's body, type, links, live comment and reopen, as due. */
+  async function show(
+    id: string,
+    item: Wanted,
+    has: ItemIssue,
+    update: (change: (issue: ItemIssue) => void) => void,
+  ): Promise<void> {
     if (item.planned) {
       const body = hash(item.title, item.body);
       if (has.body !== body) {
@@ -315,18 +408,25 @@ export async function track(context: TrackContext): Promise<void> {
         issue.comment = comment;
       });
     }
-    if (item.close && !has.closed) {
-      await github.closeIssue(
-        has.issue,
-        item.close,
-        "sync:item-issue:close",
-        signal,
-      );
-      update((issue) => {
-        issue.closed = true;
-      });
-    }
   }
+}
+
+/** A lasting refusal of a write to one issue: deleted, moved, locked or not allowed (a rejected login is not one). */
+function refusal(error: unknown): error is GitHubError {
+  return (
+    issueGone(error) ||
+    (error instanceof GitHubError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      error.status !== 401)
+  );
+}
+
+/** The create of `id` is recorded, or no longer wanted. */
+function created(tracking: Tracking, id: string): void {
+  if (!tracking.creating) return;
+  delete tracking.creating[id];
+  if (!Object.keys(tracking.creating).length) delete tracking.creating;
 }
 
 /**

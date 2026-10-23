@@ -53,7 +53,7 @@ query($project: ID!, $after: String, $query: String!, $field: String!, $order: S
             ... on ProjectV2ItemFieldNumberValue { number }
           }
           content {
-            ... on Issue { number state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
+            ... on Issue { number state repository { nameWithOwner } }
           }
         }
       }
@@ -66,7 +66,7 @@ fragment Card on Issue {
   number
   state
   repository { nameWithOwner }
-  labels(first: 20) { nodes { name } }
+  body
   projectItems(first: 20) {
     nodes {
       id
@@ -97,11 +97,14 @@ ${ISSUE_FIELDS}`;
 
 type Value = { name?: string; number?: number; updatedAt?: string } | null;
 
-type Labels = { nodes: ({ name: string } | null)[] } | null | undefined;
-
-/** A Work Item issue (tracking.ts) is never an Objective: no read takes it as a card. */
-const workItem = (labels: Labels) =>
-  labels?.nodes.some((label) => label?.name === WORK_ITEM_LABEL) ?? false;
+/**
+ * A Work Item issue (tracking.ts) is never an Objective: the items query
+ * leaves its label out, and an issue read by number is one when its body
+ * starts with Factory's item marker, however many labels it has.
+ */
+const NOT_WORK_ITEM = ` -label:"${WORK_ITEM_LABEL}"`;
+const workItem = (body: string | undefined) =>
+  /^<!-- factory:\d+:item:/.test(body ?? "");
 
 interface ItemsPage {
   node: {
@@ -117,7 +120,6 @@ interface ItemsPage {
           number?: number;
           state?: string;
           repository?: { nameWithOwner?: string };
-          labels?: Labels;
         } | null;
       } | null)[];
     };
@@ -128,7 +130,7 @@ interface Card {
   number: number;
   state: string;
   repository: { nameWithOwner: string };
-  labels?: Labels;
+  body?: string;
   projectItems: {
     nodes: ({
       id: string;
@@ -192,7 +194,7 @@ async function readItems(
       {
         project: config.queue.projectId,
         after,
-        query,
+        query: query + NOT_WORK_ITEM,
         field: config.queue.field,
         order: config.queue.orderField,
       },
@@ -207,8 +209,7 @@ async function readItems(
         node.isArchived ||
         typeof content?.number !== "number" ||
         content.repository?.nameWithOwner?.toLowerCase() !==
-          config.repository.toLowerCase() ||
-        workItem(content.labels)
+          config.repository.toLowerCase()
       )
         continue;
       each({
@@ -320,7 +321,7 @@ export async function readQueue(
     );
   }
   function read(issue: Card): void {
-    if (workItem(issue.labels)) return;
+    if (workItem(issue.body)) return;
     const node = issue.projectItems.nodes.find(
       (n) => n?.project.id === config.queue.projectId && !n.isArchived,
     );

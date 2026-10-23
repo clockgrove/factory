@@ -60,6 +60,7 @@ import {
   saveState,
   TERMINAL,
 } from "./state.js";
+import { carried } from "./tracking.js";
 import { built, RERUN, RERUN_CLEANUP, startedItems } from "./work/steps.js";
 import { objectiveWorkflow, started } from "./workflow.js";
 
@@ -887,7 +888,13 @@ export async function serve(options: ServeOptions): Promise<number> {
           asked?.request.deadline,
         );
         if (deadline) state.deadline = deadline;
-        state.modules.github = github;
+        // The earlier run's Work Item issues stay recorded (tracking.ts).
+        const tracking = (
+          previous?.state.modules.github as GitHubModule | undefined
+        )?.tracking;
+        state.modules.github = tracking
+          ? { ...github, tracking: carried(tracking) }
+          : github;
         // The earlier run's PRs and worktrees go before the new run plans.
         if (previous) state.kept[RERUN] = true;
         saveState(paths.objectives, state);

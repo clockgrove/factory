@@ -88,7 +88,7 @@ export interface GitHubModule {
   statusGivenUp?: boolean;
   /** The Work Item issues as last written (tracking.ts). */
   tracking?: Tracking;
-  /** This run's Work Item issues can't be written (a lasting refusal): they count as shown. */
+  /** This run's Work Item issues can't be written (the repository refused a list or a create): they count as shown. A refusal on one item's issue is kept on that item (tracking.ts), never here. */
   trackingGivenUp?: boolean;
 }
 
@@ -841,7 +841,8 @@ export class GitHubSync {
    * and each item's state by a background job, at most once per
    * STATUS_EVERY_MS while the Objective runs and at once when it has
    * finished, and only when a write is due. A finished Objective settles
-   * only once every item issue shows its end and is closed.
+   * only once every item issue shows its end and is closed, or GitHub
+   * refused that issue's close (it is never counted closed).
    */
   private track(runner: ObjectiveRunner): void {
     const { state } = runner;
@@ -887,7 +888,9 @@ export class GitHubSync {
    * A status or tracking job failed. GitHub's transient errors (network,
    * 5xx, rate limits) retry on; a lasting refusal (a 4xx), or anything
    * else three times in a row (a render that keeps throwing), gives it up
-   * for this run, so it never holds back settling.
+   * for this run, so it never holds back settling. Tracking handles a
+   * refusal on one item's issue itself, so one reaching here is the
+   * repository's (issues off, no access, gone).
    */
   private givenUp(
     runner: ObjectiveRunner,

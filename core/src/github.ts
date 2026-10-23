@@ -183,6 +183,7 @@ export interface IssueSummary {
   title: string;
   body: string | null;
   user: { login: string } | null;
+  created_at?: string;
   /** Its native issue type, where the repository has them. */
   type?: { name: string } | null;
 }
@@ -598,8 +599,9 @@ export class GitHub {
 
   /**
    * Issues with `label` that Factory's login opened, updated from `since`
-   * on, newest first: one bounded, paginated list. Past `maxPages` pages
-   * it throws, so a lookup never misses an issue and makes it again.
+   * on, newest first: one bounded, paginated list that stops at the first
+   * page reaching issues created before `since`. Past `maxPages` pages it
+   * throws, so a lookup never misses an issue and makes it again.
    */
   async issuesByLabel(
     label: string,
@@ -621,6 +623,9 @@ export class GitHub {
       signal,
       undefined,
       maxPages + 1,
+      (listed) =>
+        !since ||
+        !(Date.parse(listed.at(-1)?.created_at ?? "") < Date.parse(since)),
     );
     if (found.length > maxPages * 100)
       throw new Error(
@@ -812,6 +817,8 @@ export class GitHub {
     signal?: AbortSignal,
     pick: (body: unknown) => unknown = (body) => body,
     maxPages = 50,
+    /** Whether to read on past this full page. */
+    more: (listed: T[]) => boolean = () => true,
   ): Promise<T[]> {
     const all: T[] = [];
     const join = path.includes("?") ? "&" : "?";
@@ -827,7 +834,7 @@ export class GitHub {
       if (!Array.isArray(listed))
         throw new TransientError(`GitHub GET ${path}: not a list`);
       all.push(...(listed as T[]));
-      if (listed.length < 100) break;
+      if (listed.length < 100 || !more(listed as T[])) break;
     }
     return all;
   }

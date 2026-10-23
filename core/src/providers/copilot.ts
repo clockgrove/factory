@@ -33,6 +33,7 @@ import { pathInsideRoot } from "./claude-worker.js";
 import {
   callImages,
   detail,
+  freshOnOverflow,
   IdleWatchdog,
   loggedCall,
   type ModelChoice,
@@ -47,8 +48,12 @@ import {
 import {
   type Conversation,
   openTurn,
+  overflowed,
+  ResumeOverflow,
+  type Session,
   type Turn as SessionTurn,
   turnFields,
+  withoutPrevious,
 } from "./session.js";
 import {
   captureRequest,
@@ -220,8 +225,7 @@ function sessionFailure(
       : // A short rate limit is an unknown transient cause: back off.
         new PlannerError("retry", `Copilot rate limit: ${shown}`);
   if (data.errorType === "context_limit")
-    return new PlannerError(
-      "fail",
+    return PlannerError.contextOverflow(
       `The request is larger than the model's context window: ${shown}`,
     );
   return new PlannerError("retry", `Copilot call failed: ${shown}`);
@@ -539,6 +543,11 @@ function copilotTurn(
   }
 }
 
+/** The session a turn left, as an answer's or result's field. */
+function withSession(session: Session | undefined): { session?: Session } {
+  return session ? { session } : {};
+}
+
 /** A turn's conversation for runTurn: the session it continues or replaces. */
 function replacing(
   turn: SessionTurn | undefined,
@@ -561,6 +570,10 @@ export class CopilotPlanner implements Planner {
   ) {}
 
   answer(call: PlannerCall): Promise<PlannerAnswer> {
+    return freshOnOverflow(call, (once) => this.once(once));
+  }
+
+  private once(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
     return loggedCall("copilot", call, choice, async (record) => {
       const started = Date.now();
@@ -617,8 +630,10 @@ export class CopilotPlanner implements Planner {
           model: choice.model,
           effort: choice.effort,
           usage: result.usage,
-          ...(turn ? { session: turn.end(result.session) } : {}),
+          ...withSession(turn?.end(result.session)),
         };
+      } catch (error) {
+        throw overflowed(error, turn);
       } finally {
         if (empty && !call.conversation)
           rmSync(empty, { recursive: true, force: true });
@@ -668,6 +683,19 @@ export class CopilotWorker implements Worker {
   constructor(private readonly options: CopilotWorkerOptions) {}
 
   async run(input: WorkerInput): Promise<WorkerResult> {
+    try {
+      return await this.once(input);
+    } catch (error) {
+      // A continued session ran out of context: once more, fresh.
+      if (!(error instanceof ResumeOverflow)) throw error;
+      return this.once({
+        ...input,
+        conversation: withoutPrevious(input.conversation),
+      });
+    }
+  }
+
+  private async once(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
     const tools = copilotTools(this.options.tools);
     const record = usageRecord({
@@ -759,9 +787,13 @@ export class CopilotWorker implements Worker {
         kind: "finished",
         finalResponse: result.text,
         ...(tree && { validated: { tree, commands: [...input.commands] } }),
-        ...(turn ? { session: turn.end(result.session) } : {}),
+        ...withSession(turn?.end(result.session)),
       };
     } catch (error) {
+      if (turn?.resumed && error instanceof PlannerError && error.tooLarge) {
+        record.outcome = error.outcome;
+        throw new ResumeOverflow();
+      }
       if (!(error instanceof PlannerError)) {
         record.outcome = "error";
         record.error = detail(String(error));

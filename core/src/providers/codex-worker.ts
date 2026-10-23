@@ -47,6 +47,7 @@ import {
   type CodexBaseline,
   codexBaseline,
   codexSessionRecord,
+  codexTelemetry,
   codexTokens,
   codexTurnUsage,
   modelItem,
@@ -60,7 +61,13 @@ import {
   PlannerError,
   providerOutcome,
 } from "./planner.js";
-import { openTurn, type Turn, turnFields } from "./session.js";
+import {
+  openTurn,
+  ResumeOverflow,
+  type Turn,
+  turnFields,
+  withoutPrevious,
+} from "./session.js";
 import {
   captureRequest,
   captureResponse,
@@ -352,6 +359,19 @@ export class CodexWorker implements Worker {
   }
 
   async run(input: WorkerInput): Promise<WorkerResult> {
+    try {
+      return await this.once(input);
+    } catch (error) {
+      // A continued thread ran out of context: once more, fresh.
+      if (!(error instanceof ResumeOverflow)) throw error;
+      return this.once({
+        ...input,
+        conversation: withoutPrevious(input.conversation),
+      });
+    }
+  }
+
+  private async once(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
     const record = usageRecord({
       role: "worker",
@@ -437,6 +457,11 @@ export class CodexWorker implements Worker {
       input.signal,
     );
     let events: AsyncGenerator<ThreadEvent> | undefined;
+    // A continued thread out of context runs again fresh (`run`).
+    const failed = (error: PlannerError): WorkerResult => {
+      if (turn.resumed && error.tooLarge) throw new ResumeOverflow();
+      return outcome(error);
+    };
     let group: number | undefined;
     turnFields(record, turn);
     let baseline: CodexBaseline | undefined;
@@ -530,34 +555,44 @@ export class CodexWorker implements Worker {
           codexTurnUsage(record, event.usage);
         }
         if (event.type === "turn.failed")
-          return outcome(codexFailure(redact(event.error.message, secrets)));
+          return failed(codexFailure(redact(event.error.message, secrets)));
         // A stream error can precede a CLI retry; read through to the
         // terminal turn and natural EOF before it counts.
         if (event.type === "error") streamError = event.message;
       }
       if (!completed)
         return streamError
-          ? outcome(codexFailure(redact(streamError, secrets)))
+          ? failed(codexFailure(redact(streamError, secrets)))
           : { kind: "retry", reason: "Codex ended without a completed turn" };
       captureResponse(record, finalResponse);
       const threadId =
         (record.thread as string | undefined) ?? turn.resumed?.id;
+      const session =
+        threadId &&
+        turn.end(threadId, {
+          compacted: Boolean(
+            codexTelemetry(
+              join(home.root, "codex-home"),
+              threadId,
+              baseline?.size,
+            )?.compacted,
+          ),
+        });
       return {
         kind: "finished",
         finalResponse,
-        ...(input.conversation && threadId
-          ? { session: turn.end(threadId) }
-          : {}),
+        ...(session ? { session } : {}),
       };
     } catch (error) {
-      if (error instanceof PlannerError) return outcome(error);
+      if (error instanceof ResumeOverflow) throw error;
+      if (error instanceof PlannerError) return failed(error);
       const idle = watchdog.expired;
       // An idle model is an error: three in a row hold.
       if (idle) return errored(idle.message);
       // Cancelled or past the step deadline: the engine decides.
       if (input.signal.aborted) throw input.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.
-      return outcome(codexFailure(redact(errorMessage(error), secrets)));
+      return failed(codexFailure(redact(errorMessage(error), secrets)));
     } finally {
       clearInterval(polling);
       watchdog.stop();
@@ -580,8 +615,10 @@ export class CodexWorker implements Worker {
       addCodexTelemetry(record, join(home.root, "codex-home"), baseline?.size);
       // A retained conversation's Codex state stays for the item's next
       // repair; its HOME, caches and scratch go now, as for any turn.
-      if (input.conversation) trimCodexHome(home.root);
-      else rmSync(home.root, { recursive: true, force: true });
+      // A later turn may have taken the directory: then it isn't this one's.
+      if (input.conversation) {
+        if (turn.owns()) trimCodexHome(home.root);
+      } else rmSync(home.root, { recursive: true, force: true });
     }
   }
 }

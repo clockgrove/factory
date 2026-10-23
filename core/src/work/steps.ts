@@ -108,7 +108,11 @@ import {
   type WorkItem,
 } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
-import { conversationDir, type Session } from "../providers/session.js";
+import {
+  conversationDir,
+  type Session,
+  scopeOf,
+} from "../providers/session.js";
 import { moveStatusOffDone } from "../queue.js";
 import {
   type Correction,
@@ -885,6 +889,7 @@ async function workStep(
       state,
       deps,
       `work-${item.id}`,
+      runnable,
       fact(state, "workSession", item.id),
     );
     const { spend, session, ...result } = await deps
@@ -1098,15 +1103,33 @@ function retained(
   state: ObjectiveState,
   deps: BuildDeps,
   name: string,
+  /** What it reviews or builds: its Work Item's design, or the whole plan; an amendment that changes it starts fresh. */
+  design: unknown,
   previous: Session | undefined,
 ): ReviewConversation | undefined {
   if (!deps.config.sessions.enabled) return undefined;
   return {
     dir: conversationDir(deps.workDir(state.issue), name),
-    scope: String(state.kept[ACCEPTED_AT] ?? ""),
+    // The accepted plan, the design and the frozen configuration: a
+    // replan, a reset, an amendment or `adopt` starts fresh.
+    scope: scopeOf(state.kept[ACCEPTED_AT], design, state.frozen?.digest),
     policy: deps.config.sessions,
     ...(previous ? { previous } : {}),
   };
+}
+
+/**
+ * An answer or fact that asks for an independent second look (`retry`,
+ * `revalidate`, a rereview): the review starts fresh, not from its own
+ * earlier verdict.
+ */
+function secondLook(context: StepContext, item?: string): boolean {
+  const answer = context.answer?.answer;
+  return (
+    answer === "retry" ||
+    answer === "revalidate" ||
+    (item !== undefined && fact(context.state, "rereview", item) !== undefined)
+  );
 }
 
 /** Add facts to keep to any outcome that can carry them. */
@@ -2085,7 +2108,10 @@ async function reviewStep(
     state,
     deps,
     `review-${item.id}`,
-    fact(state, "reviewSession", item.id),
+    item,
+    secondLook(context, item.id)
+      ? undefined
+      : fact(state, "reviewSession", item.id),
   );
   const review = await reviewResult({
     planner: deps.planner,
@@ -3839,7 +3865,8 @@ function finalReviewStep(deps: BuildDeps): Step {
         state,
         deps,
         "final-review",
-        fact(state, "session:final-review"),
+        plan,
+        secondLook(context) ? undefined : fact(state, "session:final-review"),
       );
       const review = await reviewObjective({
         planner: deps.planner,
@@ -4334,7 +4361,8 @@ async function closeFactoryPulls(
 /**
  * Every worktree and selection ref of the Objective, whatever plan made
  * them, then its whole work directory: captured media, review artifacts,
- * final media and review scratch, and the planning tree.
+ * final media and review scratch, the planning tree, and the retained
+ * conversations (`sessions/`: Codex session records, Claude transcripts).
  */
 async function removeWorkFiles(
   issue: number,

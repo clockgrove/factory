@@ -19,7 +19,11 @@ import { prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
 import type { Planner, PlannerAnswer } from "../providers/planner.js";
 import { resolvedProvider } from "../providers/selection.js";
-import { type Conversation, conversationDir } from "../providers/session.js";
+import {
+  type Conversation,
+  conversationDir,
+  scopeOf,
+} from "../providers/session.js";
 import { logRefused } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
@@ -1504,7 +1508,7 @@ export type PlanningConversation = "planner" | "graph-review";
 /**
  * The planner's or plan reviewer's retained conversation for one call
  * (providers/session.ts): it continues the kept session of the same plan
- * generation `g`, so a replan starts fresh. None with `sessions.enabled` off.
+ * generation `g` and frozen configuration, so a replan or `adopt` starts fresh. None with `sessions.enabled` off.
  */
 export function planningConversation(
   deps: PlanningDeps,
@@ -1517,7 +1521,9 @@ export function planningConversation(
   const previous = fact(state, `session:${name}`);
   return {
     dir: conversationDir(deps.workDir(state.issue), name),
-    scope: `${name}:${g}`,
+    // The generation and the frozen configuration: a replan or `adopt`
+    // starts fresh.
+    scope: scopeOf(name, g, state.frozen?.digest),
     prompt,
     policy: deps.config.sessions,
     ...(previous ? { previous } : {}),

@@ -27,6 +27,7 @@ import {
   type CodexBaseline,
   codexBaseline,
   codexSessionRecord,
+  codexTelemetry,
   codexTokens,
   codexTurnUsage,
   modelItem,
@@ -36,6 +37,7 @@ import {
 import {
   callImages,
   detail,
+  freshOnOverflow,
   IdleWatchdog,
   loggedCall,
   type ModelChoice,
@@ -46,7 +48,7 @@ import {
   PlannerError,
   type PlannerModels,
 } from "./planner.js";
-import { openTurn, type Turn, turnFields } from "./session.js";
+import { openTurn, overflowed, type Turn, turnFields } from "./session.js";
 import {
   captureRequest,
   captureResponse,
@@ -245,8 +247,6 @@ export function privateCodexHome<T>(options: {
     if (options.root) {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       trimCodexHome(root);
-      for (const entry of ["config.toml", "auth.json", "models_cache.json"])
-        rmSync(join(root, "codex-home", entry), { force: true });
     }
     if (outside && within(realpathSync(root), realpathSync(outside.directory)))
       throw new Error(`Codex homes must stay outside the ${outside.name}`);
@@ -287,12 +287,16 @@ export function privateCodexHome<T>(options: {
 
 /**
  * A retained home between turns: only its Codex state (`codex-home`, with
- * the thread's session record) stays; scratch, HOME and caches go.
+ * the thread's session record) stays; scratch, HOME, caches, the login
+ * link and the configuration go.
  */
 export function trimCodexHome(root: string): void {
   for (const entry of readdirSync(root))
     if (entry !== "codex-home")
       rmSync(join(root, entry), { recursive: true, force: true });
+  // The login link and Factory's configuration are made again each turn.
+  for (const entry of ["config.toml", "auth.json", "models_cache.json"])
+    rmSync(join(root, "codex-home", entry), { force: true });
 }
 
 /** Where a retained conversation keeps its Codex home, inside its directory. */
@@ -366,8 +370,7 @@ export function codexFailure(message: string): PlannerError {
       "context window exceeded",
     )
   )
-    return new PlannerError(
-      "fail",
+    return PlannerError.contextOverflow(
       `The request is larger than the model's context window: ${shown}`,
     );
   const usageLimit = /you[’']ve hit your usage limit\b/.test(text);
@@ -461,8 +464,10 @@ export class CodexPlanner implements Planner {
 
   async answer(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
-    return loggedCall("codex", call, choice, (record) =>
-      this.run(call, choice, record),
+    return freshOnOverflow(call, (once) =>
+      loggedCall("codex", once, choice, (record) =>
+        this.run(once, choice, record),
+      ),
     );
   }
 
@@ -677,25 +682,31 @@ export class CodexPlanner implements Planner {
       }
       const threadId =
         (record.thread as string | undefined) ?? turn.resumed?.id;
+      const session =
+        threadId &&
+        turn.end(threadId, {
+          compacted: Boolean(
+            codexTelemetry(home.env.CODEX_HOME!, threadId, baseline?.size)
+              ?.compacted,
+          ),
+        });
       return {
         value,
         model: choice.model,
         effort: choice.effort,
         ...(usage && { usage }),
         turns: 1,
-        ...(call.conversation && threadId
-          ? { session: turn.end(threadId) }
-          : {}),
+        ...(session ? { session } : {}),
       };
     } catch (error) {
-      if (error instanceof PlannerError) throw error;
+      if (error instanceof PlannerError) throw overflowed(error, turn);
       const idle = watchdog.expired;
       if (idle)
         throw new PlannerError("retry", idle.message, { kind: "error" });
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.
-      throw codexFailure(errorMessage(error));
+      throw overflowed(codexFailure(errorMessage(error)), turn);
     } finally {
       watchdog.stop();
       // Closing the stream makes the SDK kill a codex process still running.
@@ -712,9 +723,11 @@ export class CodexPlanner implements Planner {
       }
       saveModelsCache(home.env.CODEX_HOME!);
       addCodexTelemetry(record, home.env.CODEX_HOME!, baseline?.size);
-      // A retained conversation's home stays for its next turn.
-      if (call.conversation) trimCodexHome(home.root);
-      else
+      // A retained conversation's home stays for its next turn, unless a
+      // later turn has taken it (a hedge's loser, an aborted attempt).
+      if (call.conversation) {
+        if (turn.owns()) trimCodexHome(home.root);
+      } else
         keepOrRemove(home.root, record.thread as string | undefined, call.log);
     }
   }

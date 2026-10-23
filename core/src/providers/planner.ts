@@ -15,7 +15,12 @@ import {
   type Outcome,
 } from "../engine.js";
 import type { Wait } from "../state.js";
-import type { Conversation, Session } from "./session.js";
+import {
+  type Conversation,
+  ResumeOverflow,
+  type Session,
+  withoutPrevious,
+} from "./session.js";
 import {
   describeRequest,
   logUsage,
@@ -113,6 +118,31 @@ export class PlannerError extends Error {
   /** A hold whose cause is one Work Item's own: it stops that item only. */
   static itemHold(reason: string): PlannerError {
     return new PlannerError("hold", reason, undefined, undefined, "item");
+  }
+
+  /** The request is larger than the model's context window (`fail`); a continued conversation then starts fresh (session.ts ResumeOverflow). */
+  tooLarge = false;
+
+  static contextOverflow(reason: string): PlannerError {
+    const error = new PlannerError("fail", reason);
+    error.tooLarge = true;
+    return error;
+  }
+}
+
+/**
+ * Run `once`, and when a continued conversation ran out of context
+ * (session.ts ResumeOverflow), once more with no session: fresh.
+ */
+export async function freshOnOverflow<T>(
+  call: PlannerCall,
+  once: (call: PlannerCall) => Promise<T>,
+): Promise<T> {
+  try {
+    return await once(call);
+  } catch (error) {
+    if (!(error instanceof ResumeOverflow)) throw error;
+    return once({ ...call, conversation: withoutPrevious(call.conversation) });
   }
 }
 
@@ -365,17 +395,21 @@ export class HedgedPlanner implements Planner {
       let running = 0;
       let hedged = false;
       let failure: unknown;
+      const attempts: Promise<unknown>[] = [];
       const finish = (settle: () => void) => {
         if (settled) return;
         settled = true;
         clearInterval(timer);
         for (const controller of controllers)
           controller.abort(new Error("hedged"));
-        settle();
+        // The first call's conversation directory is its own until it has
+        // stopped: the step's next call must not open it before then.
+        if (call.conversation) void Promise.allSettled(attempts).then(settle);
+        else settle();
       };
       const start = (n: number) => {
         running += 1;
-        this.inner
+        const attempt = this.inner
           .answer({
             ...call,
             // The hedge never shares the first call's conversation: it
@@ -400,6 +434,7 @@ export class HedgedPlanner implements Planner {
               if (running === 0) finish(() => reject(failure));
             },
           );
+        attempts.push(attempt);
       };
       call.signal.addEventListener(
         "abort",

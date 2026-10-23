@@ -387,13 +387,21 @@ export class GitHubSync {
     return "ceded";
   }
 
+  /**
+   * Admit a queued card. Its comments are read from when it was queued, by
+   * GitHub's clock (the option's `updatedAt`), never the host's: a comment
+   * written right after queuing is read even when the host runs ahead, and
+   * one from before (an earlier run's) never counts. GitHub always sends
+   * the time with a set option; without it, a later read admits it.
+   */
   private admitItem(item: QueueItem, sync: SyncView): void {
+    if (!item.optionAt) return;
     sync.admit(item.issue, {
       itemId: item.itemId,
       order: item.order,
       seen: item.option,
-      ...(item.optionAt ? { queuedAt: item.optionAt } : {}),
-      commentsSince: new Date(this.now()).toISOString(),
+      queuedAt: item.optionAt,
+      commentsSince: item.optionAt,
     });
   }
 

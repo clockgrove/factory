@@ -183,6 +183,7 @@ interface MergeResult {
  */
 export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   const plan = state.done.plan as Plan;
+  if (plan.split) return [splitPending(plan.split.children.length)];
   const stacked =
     deps.config.delivery.kind === "native-stack" ? units(plan) : undefined;
   if (stacked && "problem" in stacked) return [unitsProblem(stacked.problem)];
@@ -282,7 +283,9 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
 /** Whether every item has merged (or, for aggregates, completed). */
 export function built(state: ObjectiveState): boolean {
   const plan = state.done.plan as Plan | undefined;
-  return Boolean(plan?.items.every((item) => mergeOf(state, item.id)));
+  // A split delivers through its children, which aren't created yet.
+  if (!plan || plan.split) return false;
+  return plan.items.every((item) => mergeOf(state, item.id));
 }
 
 /**
@@ -349,6 +352,25 @@ function unitsProblem(problem: string): Step {
         ? replanOutcome(context.state)
         : hold(
             `${problem}, so Factory can't deliver the plan as native stacks. Answer replan to plan again, or cancel.`,
+            ["replan", "cancel"],
+          ),
+  };
+}
+
+/**
+ * A plan that splits the Objective into child Objectives. Creating the
+ * children is not ported yet (slice 6), so the plan holds rather than
+ * report done with nothing delivered.
+ */
+function splitPending(children: number): Step {
+  return {
+    key: "build:split",
+    deadlineMs: MINUTE,
+    run: async (context) =>
+      context.answer?.answer === "replan"
+        ? replanOutcome(context.state)
+        : hold(
+            `The accepted plan splits this Objective into ${children} child Objectives, and Factory can't create child Objectives yet. Answer replan to plan it without a split, or cancel.`,
             ["replan", "cancel"],
           ),
   };

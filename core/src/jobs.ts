@@ -136,17 +136,28 @@ export class Jobs {
     return this.running.has(key);
   }
 
+  /** Whether `key` is in flight or backing off after a failure. */
+  pending(key: string): boolean {
+    return this.running.has(key) || this.waits.has(key);
+  }
+
   /** Whether any job of Objective `issue` is in flight. */
   busy(issue: number): boolean {
     return [...this.running.values()].some((entry) => entry.issue === issue);
   }
 
-  /** Abort and drop an Objective's jobs (`issue`), or one key's; their backoffs go too. */
-  forget(owner: number | string): void {
+  /**
+   * Abort and drop an Objective's jobs (`issue`), or one key's; their
+   * backoffs go too. A running job `spare` names finishes instead.
+   */
+  forget(
+    owner: number | string,
+    spare: (key: string) => boolean = () => false,
+  ): void {
     const mine = (key: string, issue: number) =>
       typeof owner === "number" ? issue === owner : key === owner;
     for (const [key, entry] of this.running)
-      if (mine(key, entry.issue)) {
+      if (mine(key, entry.issue) && !spare(key)) {
         this.running.delete(key);
         entry.controller.abort(new Error(`forgotten: ${key}`));
       }

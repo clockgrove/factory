@@ -311,13 +311,15 @@ export class GitHubSync {
   /**
    * Forget an Objective the service let go of, or whose run was replaced:
    * its running jobs are aborted and its backoffs dropped, so nothing of
-   * the old run writes, and the new run's jobs start at once.
+   * the old run writes, and the new run's jobs start at once. A reply in
+   * flight still lands: it answers a command the old run applied, and its
+   * marker makes it idempotent.
    */
   forget(issue: number): void {
     this.settled.delete(issue);
     this.changed.delete(issue);
     this.wroteAt.delete(issue);
-    this.jobs.forget(issue);
+    this.jobs.forget(issue, (key) => key.startsWith("reply:"));
   }
 
   /** The service withdrew a dequeued run: forget it, and keep the dequeue's edge. */

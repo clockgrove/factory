@@ -271,10 +271,17 @@ export async function serve(options: ServeOptions): Promise<number> {
    */
   const release = (state: ObjectiveState): void => {
     if (!options.observer) return;
+    const key = observeKey(state);
+    // A finished run's settled observation not landed yet (never made, in
+    // flight or backing off) goes on late, under the same key, so the
+    // replacing run never loses it. Anything else of the run is dropped.
+    const owed =
+      TERMINAL.includes(state.status) &&
+      (observed.get(state.issue) !== `${state.status}:true` ||
+        observing.pending(key));
     observed.delete(state.issue);
-    // Its observation in flight ends too: one landing later would mark
-    // the next run of the issue.
-    observing.forget(observeKey(state));
+    if (owed) observeLate(state);
+    else observing.forget(key);
     try {
       options.observer.release(structuredClone(state));
     } catch (error) {
@@ -282,7 +289,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         event: "release-deferred",
         error: String(error),
       });
-      observeLate(state);
+      if (!owed) observeLate(state);
     }
   };
 
@@ -666,13 +673,19 @@ export async function serve(options: ServeOptions): Promise<number> {
       const { state } = runner;
       const mark = observeMark(runner);
       if (observed.get(state.issue) === mark) continue;
-      // The mark is kept only once the observation succeeded.
+      // The mark is kept only once the observation succeeded, and only
+      // while this run is the issue's (a released one goes on late).
       const end = settled(runner);
       observing.run(
         state.issue,
         observeKey(state),
         (signal) => observer!.observe(structuredClone(state), end, signal),
-        { done: () => observed.set(state.issue, mark) },
+        {
+          done: () => {
+            if (runners.get(state.issue) === runner)
+              observed.set(state.issue, mark);
+          },
+        },
       );
     }
     for (const [key, entry] of observer ? late : [])

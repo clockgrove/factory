@@ -1895,12 +1895,16 @@ export async function verifyOriginMedia(input: {
       return hold(
         `Origin does not serve the selected Git LFS objects for ${unheld.join(", ")}, and Factory's checkout no longer holds them to push again. Push them to origin's LFS storage, then answer retry; or cancel.`,
       );
+    // By object id: a rerun after a crash verifies again and pushes once
+    // more at most.
+    crashPoint("final:lfs-repush:before");
     const pushed = await lfsPush({
       checkout,
       repository: input.repository,
       oids: [...new Set(missing.map((m) => m.sha256))],
       signal,
     });
+    crashPoint("final:lfs-repush:after");
     if (pushed) return pushed;
     return {
       kind: "retry",

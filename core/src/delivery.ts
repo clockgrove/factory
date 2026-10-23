@@ -316,7 +316,9 @@ export function publish(
         if (input.allowSecret !== digest)
           return { kind: "secret", finding, digest };
       }
-      // Only before a push: a branch that holds the result already has its objects.
+      // Only before a push: a branch that holds the result already has its
+      // objects. The upload is by object id, so a rerun repeats it safely.
+      crashPoint("deliver:lfs-push:before");
       const media = await lfsPushIfPointers({
         checkout: context.checkout,
         repository: github.repository,
@@ -324,6 +326,7 @@ export function publish(
         commit: input.commit,
         signal,
       });
+      crashPoint("deliver:lfs-push:after");
       if (media.kind === "retry") return retry(media.reason);
       if (media.kind !== "done") return media;
       const pushed = await pushBranch(context, branch, input.commit, remote);

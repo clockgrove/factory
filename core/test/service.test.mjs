@@ -381,9 +381,10 @@ test("unreadable state holds with cancel, and cancel works", async () => {
 // applied once and no stray files.
 // Crash points around GitHub effects: the hold, reply, note and reminder
 // comments, the Status write, the plan, report and cancel comments, the
-// issue close, the PR close, the branch delete, and a re-queue's move of
-// the built-in Status off Done and its reopen. CI has no GitHub, so
-// the drill covers them.
+// issue close, the PR close, the branch delete, a re-queue's move of the
+// built-in Status off Done and its reopen, and delivery's effects (LFS
+// upload, push, PR, branch update, merge, native stack, the final LFS
+// re-push). CI has no GitHub, so the drill covers them.
 const GITHUB_CRASH_POINTS = [
   "serve:admitted",
   "sync:show:before",
@@ -421,6 +422,22 @@ const GITHUB_CRASH_POINTS = [
   "rerun:reopen:before",
   "rerun:reopen:after",
   "serve:withdrawn",
+  "deliver:lfs-push:before",
+  "deliver:lfs-push:after",
+  "deliver:push:before",
+  "deliver:push:after",
+  "deliver:pr-create:before",
+  "deliver:pr-create:after",
+  "deliver:update-branch:before",
+  "deliver:update-branch:after",
+  "deliver:merge:before",
+  "deliver:merge:after",
+  "stack:create:before",
+  "stack:create:after",
+  "stack:merge:before",
+  "stack:merge:after",
+  "final:lfs-repush:before",
+  "final:lfs-repush:after",
 ];
 for (const point of GITHUB_CRASH_POINTS)
   test(`crash at ${point}, restart, finish once`, {

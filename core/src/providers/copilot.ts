@@ -26,6 +26,7 @@ import {
 } from "../work/self-validate.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
+import { ACTIVE_TOOL_IDLE_MS } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
 import {
   callImages,
@@ -188,7 +189,13 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     );
   }
   const root = resolve(turn.directory);
-  const watchdog = new IdleWatchdog(turn.idleMs, turn.signal);
+  // A running tool sends no events (Validate takes minutes): it gets the
+  // longer bound, as Claude's do, never less than the turn's own.
+  const watchdog = new IdleWatchdog(
+    turn.idleMs,
+    turn.signal,
+    Math.max(ACTIVE_TOOL_IDLE_MS, turn.idleMs),
+  );
   const client: CopilotClient = new sdk.CopilotClient({
     mode: "empty",
     workingDirectory: root,
@@ -290,7 +297,16 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
         onPermissionRequest: permit,
         onEvent: (event: SessionEvent) => {
           turn.onEvent(event);
-          watchdog.progress(event.type);
+          watchdog.progress(
+            event.type,
+            event.type === "tool.execution_start" ||
+              event.type === "tool.execution_complete"
+              ? {
+                  id: event.data.toolCallId,
+                  active: event.type === "tool.execution_start",
+                }
+              : undefined,
+          );
           if (event.type === "assistant.message" && event.data.content)
             text = event.data.content;
           // Copilot quietly serves another model for one it can't: refuse that.

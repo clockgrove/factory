@@ -1454,7 +1454,7 @@ const DECLINE: HoldOption = {
   needsText: true,
 };
 
-/** Take in `proposal` on the operator's `amend`; else ask again with why. */
+/** Take in `proposal` (a worker's, or a blame's on `amend`); else ask with why. */
 function propose(
   state: ObjectiveState,
   proposal: AmendmentProposal,
@@ -1514,12 +1514,16 @@ function amendedAttempt(
 }
 
 /**
- * A worker's in-scope `.factory-discovery.json`: the item holds with it,
- * `amend` proposes it as amendment `worker-<item>-<attempt>`, and
- * `decline-discovery <reason>` carries on with the result as collected.
- * Accepted, the item starts a new attempt (`amendedAttempt`); rejected and
- * continued past, it carries on as declined. A backlog discovery is only
- * logged: it is for later Objectives. Undefined: collection goes on.
+ * A worker's in-scope `.factory-discovery.json` is proposed at once as
+ * amendment `worker-<item>-<attempt>`, as the old Factory did: the item
+ * waits for its outcome with no question, and the amendment's independent
+ * review judges it. Accepted, the item starts a new attempt
+ * (`amendedAttempt`); rejected and continued past, or declined by the
+ * operator (`factory decline-discovery`, planning/amendments.ts
+ * `declineDiscovery`), it carries on with the result as collected. Only a
+ * proposal intake refuses (no planning revision left) asks, offering
+ * `decline-discovery <reason>`. A backlog discovery is only logged: it is
+ * for later Objectives. Undefined: collection goes on.
  */
 function discoveryOutcome(
   item: WorkItem,
@@ -1598,22 +1602,22 @@ function discoveryOutcome(
         ),
       },
     };
-  const question = (problems?: string) =>
-    `Work Item ${item.id}'s worker (attempt ${attempt}) stopped to propose work the plan lacks:\n\n${discoveryText(discovery)}${problems ? `\n\nIt can't be proposed as an amendment: ${problems}` : `\n\n\`amend\` asks the planner to amend the plan for it (amendment ${code(id)}), reviewed independently; it uses a planning revision, and ${item.id} then runs again on the amended plan with no repair charged.`}\n\n\`decline-discovery <reason>\` carries on with the result as the worker left it.`;
-  if (answer?.answer !== AMEND.answer)
-    return withKeep(hold(question(), [AMEND, DECLINE, "cancel"]), held);
   return propose(
     state,
     {
       id,
-      actor: answer.by,
+      actor: `Work Item ${item.id}'s worker`,
       at: new Date().toISOString(),
       plan: String(state.kept[ACCEPTED_AT]),
       discovery,
       worker: { itemId: item.id, attempt },
     },
     held,
-    (problems) => failure(question(problems), [DECLINE, "cancel"]),
+    (problems) =>
+      failure(
+        `Work Item ${item.id}'s worker (attempt ${attempt}) stopped to propose work the plan lacks:\n\n${discoveryText(discovery)}\n\nIt can't be proposed as amendment ${code(id)}: ${problems}\n\n\`decline-discovery <reason>\` carries on with the result as the worker left it.`,
+        [DECLINE, "cancel"],
+      ),
   );
 }
 

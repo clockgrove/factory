@@ -3697,6 +3697,20 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     done: { check: {}, plan: plan(83) },
     kept: { "plan:acceptedAt": accepted },
   });
+  // A worker's discovery, proposed at once, waits on its amendment.
+  seed(inst, 84, "building", {
+    done: { check: {}, plan: plan(84) },
+    kept: {
+      "plan:acceptedAt": accepted,
+      "item:a:base": "0".repeat(40),
+      "amend:worker-a-1:proposal": {
+        ...proposal,
+        id: "worker-a-1",
+        actor: "Work Item a's worker",
+        worker: { itemId: "a", attempt: 1 },
+      },
+    },
+  });
   const file = join(inst.root, "proposal.json");
   writeFileSync(file, JSON.stringify(discovery));
   const touched = (state, prefix) =>
@@ -3788,7 +3802,50 @@ test("an amendment comes before the build: intake is checked where it enters, a 
   const malformed = cli(inst, "propose-amendment", "83", "--file", file);
   assert.equal(refusal(malformed), "amendment_refused");
   assert.match(malformed.err, /lacks ownership/);
-  for (const issue of [81, 82, 83])
+  for (const issue of [81, 82])
+    assert.equal(cli(inst, "cancel", String(issue)).code, 0);
+
+  // The operator's override declines the pending worker proposal: the
+  // amendment settles as declined, and a's work goes on.
+  await until(
+    () => touched(stateOf(inst, 84), "amend:worker-a-1:plan").length,
+    "#84's worker proposal is planned",
+  );
+  const unknown = cli(
+    inst,
+    "decline-discovery",
+    "84",
+    "--item",
+    "z",
+    "--reason",
+    "x",
+  );
+  console.log(
+    "UNKNOWN",
+    spawnSync(
+      "sh",
+      ["-c", `grep -rh "request-failed" ${inst.logs} | tail -2`],
+      { encoding: "utf8" },
+    ).stdout,
+  );
+  assert.equal(refusal(unknown), "amendment_refused");
+  assert.equal(
+    cli(inst, "decline-discovery", "84", "--item", "a", "--reason", "obsolete")
+      .code,
+    0,
+  );
+  const declined = stateOf(inst, 84);
+  assert.match(
+    declined.done["amend:worker-a-1"].rejected,
+    /Declined by .*: obsolete/,
+  );
+  assert.ok(declined.done["amend:worker-a-1:continue"]);
+  assert.equal(declined.kept["item:a:declined"].reason, "obsolete");
+  await until(
+    () => touched(stateOf(inst, 84), "item:a:work").length,
+    "a's work goes on after the decline",
+  );
+  for (const issue of [83, 84])
     assert.equal(cli(inst, "cancel", String(issue)).code, 0);
   await stopped(service);
 });

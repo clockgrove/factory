@@ -45,6 +45,8 @@ export type Request =
    * the service where it enters (planning/amendments.ts `proposeAmendment`).
    */
   | { kind: "propose-amendment"; issue: number; proposal: unknown }
+  /** `factory decline-discovery N --item ITEM --reason R` (planning/amendments.ts `declineDiscovery`). */
+  | { kind: "decline-discovery"; issue: number; item: string; reason: string }
   /** Queue-wide control (issue 0); it survives restarts. */
   | { kind: "queue"; issue: 0; mode: QueueMode }
   | RunRequest
@@ -115,7 +117,7 @@ export type RefusalCode =
   | "service_not_running"
   /** The knowledge store refused a `dream` write: the message says why (a changed or decided draft, an unreadable store). */
   | "dream_refused"
-  /** `propose-amendment` wasn't taken: the message names each problem and what would pass. */
+  /** `propose-amendment` or `decline-discovery` wasn't taken: the message names each problem and what would pass. */
   | "amendment_refused";
 
 /** A request's result: applied (no code), or refused with a stable code. */

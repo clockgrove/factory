@@ -326,6 +326,16 @@ const COMMANDS: Record<string, Command> = {
         ? undefined
         : "propose-amendment needs --file ABSOLUTE_PATH"),
   },
+  "decline-discovery": {
+    args: "ISSUE",
+    flags: { item: "value", reason: "value" },
+    help: "Decline Work Item --item ITEM's pending discovery proposal (the worker's .factory-discovery.json, proposed as an amendment) with --reason TEXT: the item carries on with its result as collected; the planning revision stays spent",
+    check: (args) =>
+      issueCheck(args) ??
+      (args.flags.item && args.flags.reason?.trim()
+        ? undefined
+        : "decline-discovery needs --item ITEM and --reason TEXT"),
+  },
   retry: {
     args: "ISSUE",
     flags: { question: "value" },
@@ -531,6 +541,13 @@ async function main(argv: string[]): Promise<number> {
         proposal,
       });
     }
+    case "decline-discovery":
+      return await request(paths, {
+        kind: "decline-discovery",
+        issue: issueOf(args),
+        item: args.flags.item!,
+        reason: args.flags.reason!,
+      });
     case "retry":
       return await request(paths, {
         kind: "retry",

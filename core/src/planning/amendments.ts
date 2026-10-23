@@ -10,7 +10,7 @@ import {
 } from "../engine.js";
 import { code, prose } from "../markdown.js";
 import type { ObjectiveState } from "../state.js";
-import { fact } from "../work/facts.js";
+import { fact, facts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
 import { forgetting, plannerLookups } from "./lookup.js";
@@ -198,7 +198,7 @@ export interface AmendmentLedger {
 
 /** An item's work attempt: 1, plus one per repair of its work step. */
 export function itemAttempt(state: ObjectiveState, itemId: string): number {
-  return (state.repairs[`item:${itemId}:work`]?.count ?? 0) + 1;
+  return (state.repairs?.[`item:${itemId}:work`]?.count ?? 0) + 1;
 }
 
 export function amendmentLedger(state: ObjectiveState): AmendmentLedger {
@@ -375,6 +375,55 @@ export function proposeAmendment(
   const problems = proposalProblems(proposal, state, amendmentAllowance(state));
   if (!problems.length) state.kept[proposalKey(id)] = proposal;
   return problems;
+}
+
+/**
+ * `factory decline-discovery N --item ITEM --reason R` (service.ts, in the
+ * request's save): the operator's override of Work Item `itemId`'s
+ * pending discovery proposal at its current attempt. Its amendment is
+ * settled as declined (rejected and continued past, still charged), the
+ * item's `declined` fact is recorded, its planning steps' open questions
+ * and waits are dropped, and the item carries on with its
+ * result as collected. Refused once the amendment's review is done (its
+ * acceptance may be posting), or when no such proposal is pending. The
+ * problems, or none when it was declined.
+ */
+export function declineDiscovery(
+  state: ObjectiveState,
+  itemId: string,
+  reason: string,
+  by: string,
+  at: string,
+): string[] {
+  const attempt = itemAttempt(state, itemId);
+  const pending = amendmentStatus(state, `worker-${itemId}-${attempt}`);
+  if (pending?.status !== "pending")
+    return [
+      `Work Item ${itemId} has no pending discovery proposal at its current attempt (${attempt})${pending ? `; amendment ${pending.id} is ${pending.status}` : ""}`,
+    ];
+  if (!reason.trim()) return ["decline-discovery needs a reason"];
+  const key = KEY(pending.id);
+  if (state.done[`${key}:review`] || state.attempts[key])
+    return [
+      `Amendment ${pending.id} has been reviewed and is being accepted; it can't be declined now`,
+    ];
+  state.done[key] = {
+    rejected: `Declined by ${by}: ${reason.trim()}`,
+  } satisfies AmendmentResult;
+  state.done[`${key}:continue`] = {};
+  // Its planning steps' questions and waits are moot now: an open one
+  // would stop every step for an amendment that no longer runs.
+  const moot = (step: string) => step.startsWith(`${key}:`);
+  state.holds = state.holds.filter((open) => !moot(open.step));
+  for (const step of Object.keys(state.retries))
+    if (moot(step)) delete state.retries[step];
+  for (const step of Object.keys(state.answers))
+    if (moot(step)) delete state.answers[step];
+  Object.assign(
+    state.kept,
+    facts({ declined: { attempt, reason: reason.trim(), by, at } }, itemId),
+  );
+  return [];
 }
 
 /** Where a proposal stands, following its replacements. */

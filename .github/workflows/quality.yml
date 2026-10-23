@@ -2,6 +2,9 @@ name: Quality
 
 on:
   pull_request:
+  # The merge queue runs the checks on each pull request on top of main and
+  # everything queued ahead of it; package-gate is the check it waits for.
+  merge_group:
   push:
     branches: [main]
 
@@ -25,8 +28,9 @@ jobs:
       - run: npm run notices:check
 
   # The old src/ tree is frozen until cutover. Its suite runs on every push
-  # to main, and on a pull request only when the pull request changes a file
-  # outside core/ and docs/ (the only places the rebuilt core lives).
+  # to main, and on a pull request or a merge-queue group only when it
+  # changes a file outside core/ and docs/ (the only places the rebuilt core
+  # lives).
   legacy:
     runs-on: ubuntu-24.04
     outputs:
@@ -37,7 +41,7 @@ jobs:
           fetch-depth: 0
       - id: scope
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           if [ -z "$BASE" ]; then echo run=true >> "$GITHUB_OUTPUT"; exit 0; fi
           outside=$(git diff --name-only "$BASE"...HEAD | grep -Ev '^(core|docs)/' || true)

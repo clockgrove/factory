@@ -233,17 +233,34 @@ export async function stagePeerSources(
   signal?: AbortSignal,
 ): Promise<PeerSource[][]> {
   const options = signal ? { signal } : {};
-  const blob = async (commit: string, path: string) => {
+  // One ls-tree per commit over every path cited at it, not one per path.
+  const wanted = new Map<string, Set<string>>();
+  for (const note of notes)
+    for (const commit of [note.commit, base])
+      for (const path of note.paths)
+        wanted.set(commit, (wanted.get(commit) ?? new Set()).add(path));
+  const blobs = new Map<string, { oid: string; bytes: number }>();
+  for (const [commit, paths] of wanted) {
     const listed = (
       await hostGit(
         checkout,
-        ["ls-tree", "-z", "--long", commit, "--", path],
+        ["ls-tree", "-z", "--long", commit, "--", ...paths],
         options,
       )
     ).toString("utf8");
-    const match = /^(100644|100755) blob ([a-f0-9]+)\s+(\d+)\t/.exec(listed);
-    return match ? { oid: match[2]!, bytes: Number(match[3]) } : undefined;
-  };
+    for (const record of listed.split("\0")) {
+      const match = /^(100644|100755) blob ([a-f0-9]+)\s+(\d+)\t(.*)$/s.exec(
+        record,
+      );
+      if (match)
+        blobs.set(`${commit}\0${match[4]}`, {
+          oid: match[2]!,
+          bytes: Number(match[3]),
+        });
+    }
+  }
+  const blob = (commit: string, path: string) =>
+    blobs.get(`${commit}\0${path}`);
   let total = 0;
   let count = 0;
   const staged = new Map<string, string>();
@@ -251,12 +268,12 @@ export async function stagePeerSources(
   for (const note of notes) {
     const sources: PeerSource[] = [];
     for (const path of note.paths) {
-      const theirs = await blob(note.commit, path);
+      const theirs = blob(note.commit, path);
       if (!theirs) {
         sources.push({ path, availability: "absent" });
         continue;
       }
-      if ((await blob(base, path))?.oid === theirs.oid) {
+      if (blob(base, path)?.oid === theirs.oid) {
         sources.push({ path, availability: "in-checkout" });
         continue;
       }

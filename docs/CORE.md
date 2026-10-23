@@ -395,6 +395,43 @@ No mocks, fake services, fake providers or scripted responses.
 - **CI** runs the real `factory serve` on real Git repositories and files for everything that needs no GitHub or model: state saves, step order, restart at every crash point, request files, cancel, deadlines, log rotation.
 - **Drill.** At each milestone, a small real Objective runs on a scratch GitHub repository with real providers. The drill kills the service at every crash point and restarts it. It also cuts the network for a minute and stops a model mid-turn. It passes when the Objective finishes with no duplicate PR, comment or merge, and every hold had an answer that worked.
 
+## Setup
+
+`factory setup --repo OWNER/NAME [options]` writes the configuration file (mode 0600) and checks it the same way the service does. Then it checks the target: the checkout exists and its origin names the repository, and the queue's Project has the `queue.field` single-select field with every option, plus the `queue.orderField` number field. Factory never creates either field.
+
+- **Create:** give `--checkout PATH` and `--project-id PVT_...`. Every other key has a default.
+- **Repeat:** the same command changes nothing and reports `changed: []`. `--config-only` is accepted, and it is the only mode until `--background`.
+- **Bindings:** `--checkout`, `--project-id`, `--field` and `--order-field` never change an existing value, defaults included. A different value is refused, because it would move running Objectives to another target. Edit the file by hand when nothing runs.
+- **Refusal:** a value the configuration refuses leaves the file as it was. The report names every problem.
+- **Report:** `--json` prints `{status, config, created, changed, defaultProvider, problems}`. `status` is `configured` (exit 0), `blocked` (the file is saved but the target isn't ready; exit 1) or `refused` (nothing saved; exit 1).
+
+Installation options, each setting one key:
+
+| Option                                                                                         | Key                                              |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives` |
+| `--concurrency`, `--workers`, `--validations`                                                  | `execution.*`                                    |
+| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                          |
+| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                   |
+| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                  |
+| `--sandbox-network off\|package-install`, `--package-store DIR`                                | `sandbox.network`, `sandbox.packageStore`        |
+| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`   |
+| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                              |
+| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                      |
+
+An option marked `...` repeats, and the values given replace the whole list.
+
+Provider options need `--provider NAME`. They add the provider or change it:
+
+- `--planner codex|claude|copilot` and `--worker codex|claude|copilot`. Changing a kind drops that kind's settings.
+- `--default`. The first provider is the default until `--default` moves it.
+- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`.
+- Codex worker settings: `--codex-network`, `--codex-model`, `--codex-effort` and `--codex-service-tier`.
+- Claude worker settings: `--claude-model`, `--claude-effort`, `--claude-max-turns`, `--claude-tools`, `--claude-allowed-tools`, `--claude-permission-mode` and `--claude-setting-sources`.
+- Copilot worker settings: `--copilot-model`, `--copilot-effort` and `--copilot-tools`.
+
+Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
+
 ## Migration
 
 Pre-release, with no compatibility layer:

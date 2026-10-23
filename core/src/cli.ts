@@ -1,13 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { isAbsolute, join } from "node:path";
 import {
@@ -53,7 +46,6 @@ import {
   selectRecipe,
 } from "./planning/recipes.js";
 import { planningRevisions } from "./planning/steps.js";
-import { PLANNERS, WORKERS } from "./providers/config.js";
 import type { Planner } from "./providers/planner.js";
 import {
   freezeConfig,
@@ -72,6 +64,7 @@ import {
 } from "./requests.js";
 import { RESET, type ResetRecord, rebuildStep, resettable } from "./reset.js";
 import { serve } from "./service.js";
+import { SETUP_FLAGS, type SetupReport, SetupUsage, setup } from "./setup.js";
 import {
   answerForm,
   type Frozen,
@@ -88,23 +81,13 @@ import { errorMessage } from "./text.js";
 import { adaptiveWorkflow } from "./validate.js";
 import { objectiveWorkflow } from "./workflow.js";
 
-/** Worker kinds setup can write: the managed ones need settings by hand. */
-const SETUP_WORKERS = ["codex", "claude", "copilot"];
-
-/** The settings a managed worker needs, which setup doesn't take. */
-const MANAGED_FIELDS: Record<string, string> = {
-  "openai-agents": '"model", "effort", "containerSize", "apiKeyEnv"',
-  "claude-managed-agents":
-    '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
-};
-
 /**
- * Every command: its arguments, its options (true: takes a value), and its
- * help. The one table both `factory help` and the option check read.
+ * Every command: its arguments, its options (true: takes a value; "many":
+ * takes one each time it is given), and its help. The one table both `factory help` and the option check read.
  */
 const COMMANDS: Record<
   string,
-  { args: string; flags: Record<string, boolean>; help: string }
+  { args: string; flags: Record<string, boolean | "many">; help: string }
 > = {
   serve: {
     args: "",
@@ -113,14 +96,8 @@ const COMMANDS: Record<
   },
   setup: {
     args: "",
-    flags: {
-      provider: true,
-      planner: true,
-      worker: true,
-      default: false,
-      json: false,
-    },
-    help: "Add or change a named provider (--provider NAME [--planner codex|claude|copilot] [--worker codex|claude|copilot] [--default])",
+    flags: SETUP_FLAGS,
+    help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; see docs/CORE.md#Setup for every option",
   },
   status: {
     args: "[ISSUE]",
@@ -199,7 +176,7 @@ ${Object.entries(COMMANDS)
     const flags = Object.entries(command.flags)
       .map(
         ([flag, value]) =>
-          ` [--${flag}${value ? ` ${flag === "tail" ? "N" : flag.toUpperCase()}` : ""}]`,
+          ` [--${flag}${value ? ` ${flag === "tail" ? "N" : flag.toUpperCase()}` : ""}]${value === "many" ? "..." : ""}`,
       )
       .join("");
     return `  ${`${name} ${command.args}${flags}`.trimEnd()}\n      ${command.help}`;
@@ -241,7 +218,7 @@ async function main(argv: string[]): Promise<number> {
     case "serve":
       return await serveCommand(repository, paths, args);
     case "setup":
-      return setup(repository, args);
+      return await setupCommand(repository, args);
     case "status":
       return await status(paths, repository, args);
     case "log":
@@ -865,88 +842,30 @@ function serviceRecord(paths: Paths): ServiceView {
   }
 }
 
-/**
- * `setup --provider NAME`: add a named provider to the configuration, or
- * change its planner or worker kind, and verify the result loads. The
- * first provider, or `--default`, becomes defaultProvider. Managed
- * workers need settings written by hand. An Objective holds while the
- * configuration differs from the one it froze; restart the service to use
- * the change, and answer adopt.
- */
-function setup(repository: string, args: Args): number {
-  const name = args.flags.provider;
-  const path = configPath(repository);
-  if (!name) throw usage("setup needs --provider NAME");
-  let raw: Record<string, unknown>;
-  let text: string;
+/** `factory setup`: setup.ts writes and checks; this prints its report. */
+async function setupCommand(repository: string, args: Args): Promise<number> {
+  const values: Record<string, string[]> = { ...args.lists };
+  for (const [flag, value] of Object.entries(args.flags))
+    values[flag] = [value];
+  let report: SetupReport;
   try {
-    text = readFileSync(path, "utf8");
-    raw = JSON.parse(text) as Record<string, unknown>;
+    report = await setup(repository, values);
   } catch (error) {
-    throw new Refusal(
-      "no_configuration",
-      `can't read ${path}: ${String(error)}`,
+    if (error instanceof SetupUsage) throw usage(error.message);
+    throw error;
+  }
+  if (args.flags.json !== undefined)
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+  else {
+    const what =
+      report.status === "refused"
+        ? `${report.config} was not changed`
+        : `${report.config} ${report.created ? "created" : report.changed.length ? `changed: ${report.changed.join(", ")}` : "unchanged"}; default provider ${report.defaultProvider}`;
+    process.stdout.write(
+      `Setup ${report.status}: ${what}.\n${report.problems.map((problem) => `- ${problem}\n`).join("")}${report.status === "refused" || report.created || !report.changed.length ? "" : "Restart the service to use the change.\n"}`,
     );
   }
-  const planner = args.flags.planner;
-  const worker = args.flags.worker;
-  if (planner && !(PLANNERS as readonly string[]).includes(planner))
-    throw usage(`--planner is one of ${PLANNERS.join(", ")}`);
-  if (worker && !SETUP_WORKERS.includes(worker))
-    throw usage(
-      (WORKERS as readonly string[]).includes(worker)
-        ? `a ${worker} worker needs settings setup doesn't take: write providers.${name}.worker = { "kind": "${worker}", ${MANAGED_FIELDS[worker]} } in ${path} by hand`
-        : `--worker is one of ${SETUP_WORKERS.join(", ")}`,
-    );
-  // Without providers the configuration has one: codex, the default.
-  const providers = (raw.providers ?? {
-    codex: { planner: "codex", worker: { kind: "codex" } },
-  }) as Record<string, Record<string, unknown>>;
-  // Keep the effective default (the first provider) unless --default moves it.
-  raw.defaultProvider ??= Object.keys(providers)[0] ?? name;
-  const existing = providers[name];
-  const kind = planner ?? (existing?.planner as string | undefined) ?? "codex";
-  const current = existing?.worker as Record<string, unknown> | undefined;
-  // Model choices belong to one planner kind.
-  const { models, ...kept } = existing ?? {};
-  providers[name] = {
-    ...kept,
-    ...(models && kind === existing?.planner ? { models } : {}),
-    planner: kind,
-    worker:
-      worker && worker !== current?.kind
-        ? { kind: worker }
-        : (current ?? { kind: worker ?? kind }),
-  };
-  raw.providers = providers;
-  if (args.flags.default !== undefined) raw.defaultProvider = name;
-  const save = (body: string) => {
-    const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync(temporary, body, { mode: 0o600 });
-    renameSync(temporary, path);
-  };
-  save(`${JSON.stringify(raw, null, 2)}\n`);
-  try {
-    loadConfig(repository);
-  } catch (error) {
-    save(text);
-    process.stderr.write(
-      `factory: the provider was not saved: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    return 1;
-  }
-  const summary = {
-    provider: name,
-    planner: kind,
-    worker: (providers[name]!.worker as { kind: string }).kind,
-    defaultProvider: raw.defaultProvider,
-  };
-  process.stdout.write(
-    args.flags.json !== undefined
-      ? `${JSON.stringify(summary)}\n`
-      : `Provider ${name}: ${summary.planner} plans, ${summary.worker} works; default is ${summary.defaultProvider}. Restart the service to use it.\n`,
-  );
-  return 0;
+  return report.status === "configured" ? 0 : 1;
 }
 
 function eventLine(event: LogEvent): string {
@@ -1254,6 +1173,8 @@ async function serviceLive(paths: Paths): Promise<boolean> {
 interface Args {
   positional: string[];
   flags: Record<string, string>;
+  /** Each value of an option that may repeat, in order. */
+  lists: Record<string, string[]>;
 }
 
 function issueOf(args: Args): number {
@@ -1274,8 +1195,9 @@ function issueOf(args: Args): number {
 function parse(argv: string[]): Args {
   const positional: string[] = [];
   const flags: Record<string, string> = {};
+  const lists: Record<string, string[]> = {};
   if (argv.includes("--help") || argv.includes("-h"))
-    return { positional: ["help"], flags };
+    return { positional: ["help"], flags, lists };
   // The command is the first word that isn't an option or an option's
   // value, so options may come before it.
   let command: string | undefined;
@@ -1303,7 +1225,8 @@ function parse(argv: string[]): Args {
       throw usage(
         `--${name} needs a value: factory ${command ?? "<command>"} --${name} ${name.toUpperCase()}`,
       );
-    flags[name] = value;
+    if (takesValue === "many") lists[name] = [...(lists[name] ?? []), value];
+    else flags[name] = value;
     i++;
   }
   const most = command
@@ -1313,14 +1236,13 @@ function parse(argv: string[]): Args {
     throw usage(
       `factory ${command} takes ${spec?.args || "no arguments"}; unexpected ${positional.slice(most).join(" ")}`,
     );
-  return { positional, flags };
+  return { positional, flags, lists };
 }
 
 /** Whether any command's option `name` takes a value (`--repo` does everywhere). */
 function takesValueAnywhere(name: string): boolean {
   return (
-    name === "repo" ||
-    Object.values(COMMANDS).some((spec) => spec.flags[name] === true)
+    name === "repo" || Object.values(COMMANDS).some((spec) => spec.flags[name])
   );
 }
 

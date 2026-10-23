@@ -455,6 +455,71 @@ export class QueueDisplay {
   }
 }
 
+const FIELDS = `
+query($project: ID!, $field: String!, $order: String!) {
+  node(id: $project) {
+    ... on ProjectV2 {
+      field(name: $field) {
+        ... on ProjectV2SingleSelectField { options { name } }
+      }
+      order: field(name: $order) {
+        ... on ProjectV2Field { dataType }
+      }
+    }
+  }
+}`;
+
+/**
+ * What the queue's Project lacks, empty when Factory can use it: the
+ * single-select field with every configured option, and the number field
+ * that orders the queue. Factory never creates them; setup reads them.
+ */
+export async function projectProblems(
+  github: GitHub,
+  config: CoreConfig,
+): Promise<string[]> {
+  const { projectId, field, orderField, options } = config.queue;
+  // A field the Project lacks is a NOT_FOUND error at its path, with null data.
+  const { data } = await github.graphqlPartial<{
+    node: {
+      field?: { options?: { name: string }[] } | null;
+      order?: { dataType?: string } | null;
+    } | null;
+  }>(
+    FIELDS,
+    { project: projectId, field, order: orderField },
+    undefined,
+    (error) =>
+      error.type === "NOT_FOUND" &&
+      error.path?.[0] === "node" &&
+      (error.path[1] === "field" || error.path[1] === "order"),
+  );
+  if (!data.node || !("field" in data.node))
+    return [
+      `queue.projectId ${projectId} is not a Project this login can read`,
+    ];
+  const problems: string[] = [];
+  const names = data.node.field?.options?.map((option) => option.name);
+  if (!names)
+    problems.push(
+      `The Project has no single-select field "${field}": create it with the options ${Object.values(options).join(", ")}`,
+    );
+  else {
+    const missing = Object.values(options).filter(
+      (option) => !names.includes(option),
+    );
+    if (missing.length)
+      problems.push(
+        `The Project field "${field}" lacks the options ${missing.join(", ")}: add them`,
+      );
+  }
+  if (data.node.order?.dataType !== "NUMBER")
+    problems.push(
+      `The Project has no number field "${orderField}": create it, so queued Objectives run in order`,
+    );
+  return problems;
+}
+
 /** The Project's built-in status field and the option its "Auto-close issue" workflow closes on. */
 const BUILT_IN_STATUS = "Status";
 const DONE = "Done";

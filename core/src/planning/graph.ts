@@ -901,36 +901,7 @@ function expansionFindings(
         );
     // The future join, on a copy: the template as a child of the producer
     // and its own dependencies, and every barrier waiting for it.
-    const joined: WorkItem[] = draft.items.map((item) =>
-      envelope.integrationBarrierItemIds.includes(item.id)
-        ? {
-            ...item,
-            dependencies: [
-              ...new Set([
-                ...item.dependencies,
-                envelope.input.producerItemId,
-                envelope.template.id,
-              ]),
-            ],
-            ...(item.kind === "aggregate"
-              ? {
-                  children: [
-                    ...new Set([
-                      ...(item.children ?? []),
-                      envelope.template.id,
-                    ]),
-                  ],
-                }
-              : {}),
-          }
-        : item,
-    );
-    joined.push({
-      ...envelope.template,
-      dependencies: [
-        ...new Set([...envelope.dependencies, envelope.input.producerItemId]),
-      ],
-    });
+    const joined = joinTemplates(draft.items, [envelope]);
     const { expansions: _expansions, ...rest } = draft;
     for (const finding of checkGraphShape(
       { ...rest, items: joined },
@@ -942,7 +913,56 @@ function expansionFindings(
         `Expansion ${envelope.id}, with its template joined: ${finding.message}`,
       );
   }
+  // Each joins without a cycle alone; joined together, barriers of one
+  // envelope may still feed another's producer or dependencies.
+  if (valid.length > 1) {
+    const { cycle } = orderItems(joinTemplates(draft.items, valid));
+    if (cycle.length)
+      found(
+        `With every expansion's template joined, the dependencies of ${cycle.join(", ")} form a cycle; change an envelope's dependencies or integration barriers so the joined graph is acyclic`,
+      );
+  }
   return findings;
+}
+
+/**
+ * `items` with each envelope's template joined as its children will be:
+ * depending on the envelope's dependencies and its producer, with every
+ * integration barrier depending on it (an aggregate barrier counts it as
+ * a child too).
+ */
+export function joinTemplates(
+  items: readonly WorkItem[],
+  envelopes: readonly GraphExpansionEnvelope[],
+): WorkItem[] {
+  const joined = items.map((item) => {
+    const templates = envelopes.filter((envelope) =>
+      envelope.integrationBarrierItemIds.includes(item.id),
+    );
+    if (!templates.length) return item;
+    const ids = templates.map((envelope) => envelope.template.id);
+    return {
+      ...item,
+      dependencies: [
+        ...new Set([
+          ...item.dependencies,
+          ...templates.map((envelope) => envelope.input.producerItemId),
+          ...ids,
+        ]),
+      ],
+      ...(item.kind === "aggregate"
+        ? { children: [...new Set([...(item.children ?? []), ...ids])] }
+        : {}),
+    };
+  });
+  for (const envelope of envelopes)
+    joined.push({
+      ...envelope.template,
+      dependencies: [
+        ...new Set([...envelope.dependencies, envelope.input.producerItemId]),
+      ],
+    });
+  return joined;
 }
 
 /**

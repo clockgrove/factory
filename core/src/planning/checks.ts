@@ -14,7 +14,13 @@ import {
   unknownCheckMessage,
   unknownCheckNames,
 } from "./facts.js";
-import { coverageCriterion, pathsOverlap, validateGraph } from "./graph.js";
+import {
+  coverageCriterion,
+  isRecord,
+  joinTemplates,
+  pathsOverlap,
+  validateGraph,
+} from "./graph.js";
 import type {
   Citation,
   CoverageObligation,
@@ -53,8 +59,22 @@ export async function checkPlan(
   const shapes = workShapes(draft);
   await commandFindings(shapes, facts, files, found);
   await boundaryFindings(shapes, facts, files, found);
+  // Templates lint as their children will join: an envelope's selectors
+  // must not overlap independent work.
   graphLint(
-    draft,
+    {
+      ...draft,
+      items: joinTemplates(
+        draft.items,
+        (draft.expansions ?? []).filter(
+          (envelope) =>
+            isRecord(envelope?.template) &&
+            isRecord(envelope.input) &&
+            Array.isArray(envelope.dependencies) &&
+            Array.isArray(envelope.integrationBarrierItemIds),
+        ),
+      ),
+    },
     new Map(),
     facts.authorizedCommands,
     facts.coverageObligations,

@@ -231,3 +231,72 @@ export function withExpansions(state: ObjectiveState, plan: Plan): Plan {
   });
   return { ...plan, items: [...items, ...children] };
 }
+
+/**
+ * A producer's settled records as the issue comments that carry them, so
+ * `factory reset` can rebuild the children (reset.ts): each comment is its
+ * marker, `part k of n`, and a JSON slice of at most `size` characters.
+ */
+export function expansionComments(
+  issue: number,
+  producer: string,
+  expansions: readonly Expanded[],
+  size: number,
+): { marker: string; body: string }[] {
+  const json = JSON.stringify(expansions);
+  const parts: string[] = [];
+  for (let at = 0; at < json.length; at += size)
+    parts.push(json.slice(at, at + size));
+  return parts.map((part, index) => {
+    const marker = EXPANSION_MARK(issue, producer, index + 1);
+    return {
+      marker,
+      body: `${marker}\nExpansion data of ${producer}, part ${index + 1} of ${parts.length}:\n\n\`\`\`json\n${part}\n\`\`\``,
+    };
+  });
+}
+
+const EXPANSION_MARK = (issue: number, producer: string, part: number) =>
+  `<!-- factory:${issue}:expansion:${producer}:${part} -->`;
+
+/**
+ * The records `expansionComments` wrote for `producer`, joined from the
+ * comment `marked` finds for each part; undefined when any part is missing
+ * or not exactly what Factory writes.
+ */
+export function readExpansionComments(
+  issue: number,
+  producer: string,
+  marked: (marker: string) => string | undefined,
+): Expanded[] | undefined {
+  let json = "";
+  let count: number | undefined;
+  for (let part = 1; count === undefined || part <= count; part++) {
+    const marker = EXPANSION_MARK(issue, producer, part);
+    const found = new RegExp(
+      `^${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\nExpansion data of [^\\n]*, part ${part} of (\\d+):\\n\\n\`\`\`json\\n([^\\n]*)\\n\`\`\`$`,
+    ).exec(marked(marker) ?? "");
+    if (!found) return undefined;
+    const total = Number(found[1]);
+    if (count !== undefined && total !== count) return undefined;
+    count = total;
+    json += found[2];
+  }
+  try {
+    const records = JSON.parse(json) as Expanded[];
+    return Array.isArray(records) &&
+      records.every(
+        (record) =>
+          typeof record?.envelopeId === "string" &&
+          Array.isArray(record.children) &&
+          record.children.every(
+            (child) =>
+              typeof child?.id === "string" && Array.isArray(child.paths),
+          ),
+      )
+      ? records
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}

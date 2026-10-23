@@ -48,7 +48,11 @@ import {
 } from "../media.js";
 import { checkObjective, objectiveText } from "../objective.js";
 import { forceRemove } from "../paths.js";
-import { expandAt, expansionsOf } from "../planning/expansion.js";
+import {
+  expandAt,
+  expansionComments,
+  expansionsOf,
+} from "../planning/expansion.js";
 import {
   BaseFiles,
   finalCommands,
@@ -72,6 +76,7 @@ import {
   type ScheduleView,
 } from "../planning/schedule.js";
 import {
+  COMMENT_LIMIT,
   OBJECTIVE_ACCEPTED,
   type PlanningDeps,
   REOPENED,
@@ -1840,6 +1845,42 @@ function delivery(context: StepContext, deps: BuildDeps): DeliveryContext {
   };
 }
 
+/**
+ * Before an expansion child's first PR, its producer's settled records go
+ * on the issue (planning/expansion.ts expansionComments), so `factory
+ * reset` can rebuild the children (reset.ts). Upserting an unchanged
+ * comment writes nothing.
+ */
+async function postExpansion(
+  state: ObjectiveState,
+  item: WorkItem,
+  deps: BuildDeps,
+  signal: AbortSignal,
+): Promise<void> {
+  const settled = expansionsOf(state, currentPlan(state)!).find(
+    ({ expanded }) => expanded?.children.some((child) => child.id === item.id),
+  );
+  if (!settled) return;
+  const producer = settled.envelope.input.producerItemId;
+  const records = expansionsOf(state, currentPlan(state)!).flatMap(
+    ({ envelope, expanded }) =>
+      expanded && envelope.input.producerItemId === producer ? [expanded] : [],
+  );
+  for (const { marker, body } of expansionComments(
+    state.issue,
+    producer,
+    records,
+    COMMENT_LIMIT - 1000,
+  ))
+    await deps.github.upsertComment(
+      state.issue,
+      marker,
+      body,
+      "expansion:post",
+      signal,
+    );
+}
+
 async function publishStep(
   item: WorkItem,
   context: StepContext,
@@ -1849,6 +1890,7 @@ async function publishStep(
   const { state } = context;
   const changed = await objectiveEdited(context, deps);
   if (changed) return changed;
+  await postExpansion(state, item, deps, context.signal);
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const validated = state.done[stepKey(item.id, "validate")] as ValidateResult;
   const pushed = fact(state, "pushed", item.id) ?? [];

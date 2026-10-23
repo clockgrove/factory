@@ -192,9 +192,10 @@ const COMMANDS: Record<string, Command> = {
       summary: "switch",
       run: "value",
       "all-runs": "switch",
+      "show-captures": "switch",
       json: "switch",
     },
-    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail, --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps; the latest run, or --run ID, or --all-runs",
+    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps; the latest run, or --run ID, or --all-runs",
     check: (args) => {
       const { flags } = args;
       return (
@@ -205,7 +206,9 @@ const COMMANDS: Record<string, Command> = {
             ? "--follow goes with the timeline or --logs ITEM, not --summary"
             : flags.run !== undefined && flags["all-runs"] !== undefined
               ? "give --run ID or --all-runs, not both"
-              : undefined)
+              : flags["show-captures"] !== undefined && flags.logs === undefined
+                ? "--show-captures goes with --logs ITEM"
+                : undefined)
       );
     },
   },
@@ -853,7 +856,7 @@ async function logCommand(
   return 0;
 }
 
-/** `factory diagnostics ISSUE [--follow] [--logs ITEM] [--summary] [--run ID | --all-runs] [--json]`. */
+/** `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--run ID | --all-runs] [--json]`. */
 async function diagnosticsCommand(
   paths: Paths,
   repository: string,
@@ -885,6 +888,7 @@ async function diagnosticsCommand(
       ...(flags.logs !== undefined ? { item: flags.logs } : {}),
       summary: flags.summary !== undefined,
       follow: flags.follow !== undefined,
+      captures: flags["show-captures"] !== undefined,
       json: flags.json !== undefined,
       secrets: configOf(repository)?.secrets ?? [],
     },

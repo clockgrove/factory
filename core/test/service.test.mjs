@@ -2901,6 +2901,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
         },
         costUsd: null,
         error: "sk-abcdefghijklmnop",
+        capture: "c1",
       },
       {
         at: at(3000),
@@ -2913,6 +2914,17 @@ test("the run log: tail, follow, and status reads its end", async () => {
     ]
       .map((event) => `${JSON.stringify(event)}\n`)
       .join(""),
+  );
+  const captures = join(inst.logs, "54", `${run.split(".")[0]}.captures`);
+  mkdirSync(captures, { recursive: true });
+  writeFileSync(
+    join(captures, "c1.json"),
+    JSON.stringify({
+      id: "c1",
+      request: "review ghp_abcdefghijklmnop",
+      response: "refused",
+      truncated: false,
+    }),
   );
   const timeline = cli(inst, "diagnostics", "54");
   assert.equal(timeline.code, 0, timeline.err);
@@ -2933,6 +2945,14 @@ test("the run log: tail, follow, and status reads its end", async () => {
     .split("\n")
     .map((line) => JSON.parse(line));
   assert.ok(entries.length >= 4);
+  assert.match(
+    cli(inst, "diagnostics", "54", "--logs", "a", "--show-captures").out,
+    /capture: \S+c1\.json\n {8}request:\nreview \[REDACTED\]\n {8}response:\nrefused\n/,
+  );
+  assert.match(
+    cli(inst, "diagnostics", "54", "--logs", "b").out,
+    /No captured model calls for b: .*capture\.enabled/,
+  );
   assert.ok(
     entries.every(
       (entry) => entry.item === "a" && entry.run === run.split(".")[0],

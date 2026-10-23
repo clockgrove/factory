@@ -7,6 +7,8 @@
  * run file is streamed in chunks, so a large log costs time, not memory.
  * Every event is redacted as it is read. It never writes anything.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { displayTime, duration, redactDeep } from "./display.js";
 import { itemOf } from "./engine.js";
 import {
@@ -35,6 +37,8 @@ export interface DiagnosticsOptions {
   item?: string;
   summary?: boolean;
   follow?: boolean;
+  /** With `item`: print each model call's captured request and response, not only its capture file. */
+  captures?: boolean;
   json?: boolean;
   secrets: readonly string[];
 }
@@ -155,9 +159,15 @@ export async function diagnostics(
   }
   const timeline = new Timeline(options.item);
   let lastRun: string | undefined;
+  let captured = false;
   const print = (entry: Entry) => {
+    const capture =
+      options.item === undefined
+        ? undefined
+        : captureOf(options, entry, Boolean(options.captures));
+    if (capture) captured = true;
     if (options.json) {
-      write(`${JSON.stringify(entry)}\n`);
+      write(`${JSON.stringify(capture ? { ...entry, capture } : entry)}\n`);
       return;
     }
     if (entry.run !== lastRun) {
@@ -170,6 +180,19 @@ export async function diagnostics(
         ? entry.text
         : withDetail(entry.text, entry.event);
     write(`${relative(entry.elapsedMs)}  ${text}\n`);
+    if (!capture) return;
+    write(`        capture: ${capture.path}\n`);
+    if (capture.request !== undefined)
+      write(`        request:\n${capture.request}\n`);
+    if (capture.response !== undefined)
+      write(`        response:\n${capture.response}\n`);
+    if (capture.truncated) write("        (cut to capture.maxBytesPerCall)\n");
+  };
+  const captureNote = () => {
+    if (options.item !== undefined && !captured && !options.json)
+      write(
+        `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (CORE.md#Content capture).\n`,
+      );
   };
   const visit = (event: LogEvent) => {
     for (const entry of timeline.add(event)) print(entry);
@@ -181,8 +204,10 @@ export async function diagnostics(
   if (!options.follow) {
     // Steps still running when the log ends: their activity so far.
     for (const entry of timeline.running()) print(entry);
+    captureNote();
     return;
   }
+  captureNote();
   await untilInterrupted(() => {
     // The latest run, or all: a run that starts meanwhile is followed too.
     if (options.runs.kind !== "run") {
@@ -194,6 +219,42 @@ export async function diagnostics(
     for (const [file, from] of [...offsets].sort())
       offsets.set(file, read(file, from, visit));
   });
+}
+
+/** A model call's capture file, and with `bodies` its redacted request and response; undefined when the call has none. */
+function captureOf(
+  options: DiagnosticsOptions,
+  entry: Entry,
+  bodies: boolean,
+):
+  | { path: string; request?: string; response?: string; truncated?: boolean }
+  | undefined {
+  const id = entry.event.capture;
+  if (entry.kind !== "model" || typeof id !== "string" || !/^[\w-]+$/.test(id))
+    return undefined;
+  const path = join(
+    options.logs,
+    String(options.issue),
+    `${entry.run}.captures`,
+    `${id}.json`,
+  );
+  if (!bodies) return { path };
+  try {
+    // Stored redacted and cut to capture.maxBytesPerCall; redacted again with today's secrets.
+    const body = redactDeep(
+      JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>,
+      options.secrets,
+    );
+    return {
+      path,
+      ...(typeof body.request === "string" ? { request: body.request } : {}),
+      ...(typeof body.response === "string" ? { response: body.response } : {}),
+      ...(body.truncated === true ? { truncated: true } : {}),
+    };
+  } catch {
+    // Rotated away or unreadable: the path alone.
+    return { path };
+  }
 }
 
 /** `+4:05`, `+1:02:03`: a time since the run's start. */

@@ -438,7 +438,8 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         passed,
         exitCode: run.exitCode,
         durationMs,
-        tail: output.slice(-PASSED_OUTPUT_TAIL),
+        // A failed command keeps what its repair sees: its head and tail.
+        tail: passed ? output.slice(-PASSED_OUTPUT_TAIL) : failedOutput(output),
       });
       if (passed) {
         results.push({

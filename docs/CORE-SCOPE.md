@@ -23,6 +23,7 @@ Each entry is marked **ported**, **in progress**, **slice N**, or **replaced**. 
    - predecessor blame and `requiredEnvironment`;
 
    Done early, in the lean sweep after slice 3: the check refuses a malformed Quality checkpoint, Package manager update or Workspace package additions section.
+
 6. Capability ports:
    - Planning options: context lookup, recipes, discovery, expansions, conditions, splits, amendments.
    - Retained conversations: resuming a session by id across revisions.

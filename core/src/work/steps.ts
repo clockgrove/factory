@@ -99,6 +99,7 @@ import {
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
 import { type Answer, type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { headAndTail } from "../text.js";
+import { itemIssueOf } from "../tracking.js";
 import { validateTree, validationDeadlineMs } from "../validate.js";
 import {
   addWorktree,
@@ -1721,6 +1722,9 @@ async function publishStep(
     ...(context.answer?.answer === RESET_BRANCH ? { reset: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
     run: runOf(state),
+    ...(itemIssueOf(state, item.id)
+      ? { itemIssue: itemIssueOf(state, item.id) }
+      : {}),
     secrets: deps.config.secrets,
     // The operator's `publish` counts only for the finding it answered:
     // the digest kept when the hold was raised, never the hold's text,

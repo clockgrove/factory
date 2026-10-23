@@ -174,6 +174,19 @@ export interface IssueComment {
   user: { login: string } | null;
 }
 
+/** An issue as the issue lists show it. */
+export interface IssueSummary {
+  /** The issue's database id: sub-issue and blocked-by links take it. */
+  id: number;
+  number: number;
+  state: string;
+  title: string;
+  body: string | null;
+  user: { login: string } | null;
+  /** Its native issue type, where the repository has them. */
+  type?: { name: string } | null;
+}
+
 export interface PullRequest {
   number: number;
   state: "open" | "closed";
@@ -574,6 +587,163 @@ export class GitHub {
       signal,
     );
     crashPoint(`${point}:after`);
+  }
+
+  // ── Issue primitives (tracking.ts) ──────────────────────────────────────
+  //
+  // Each is found before it is made: an issue by the marker on its body's
+  // first line (Factory's own login only), a sub-issue or blocked-by link
+  // by the issue's links. A write whose answer was lost is found by the
+  // next run, never made twice.
+
+  /**
+   * Issues with `label` that Factory's login opened, updated from `since`
+   * on, newest first: one bounded, paginated list. Past `maxPages` pages
+   * it throws, so a lookup never misses an issue and makes it again.
+   */
+  async issuesByLabel(
+    label: string,
+    since: string | undefined,
+    signal?: AbortSignal,
+    maxPages = 10,
+  ): Promise<IssueSummary[]> {
+    const self = await this.login(signal);
+    const query = [
+      `labels=${encodeURIComponent(label)}`,
+      "state=all",
+      `creator=${encodeURIComponent(self)}`,
+      "sort=created",
+      "direction=desc",
+      ...(since ? [`since=${encodeURIComponent(since)}`] : []),
+    ].join("&");
+    const found = await this.pages<IssueSummary & { pull_request?: unknown }>(
+      `/repos/${this.repository}/issues?${query}`,
+      signal,
+      undefined,
+      maxPages + 1,
+    );
+    if (found.length > maxPages * 100)
+      throw new Error(
+        `More than ${maxPages * 100} issues labelled ${label} were updated since ${since}: too many to look up`,
+      );
+    return found.filter((issue) => issue.pull_request === undefined);
+  }
+
+  /** The issue among `found` whose body Factory marked with `marker`. */
+  async markedIssue(
+    found: readonly IssueSummary[],
+    marker: string,
+    signal?: AbortSignal,
+  ): Promise<IssueSummary | undefined> {
+    const self = await this.login(signal);
+    return found.find(
+      (issue) =>
+        (issue.body ?? "").startsWith(marker) &&
+        issue.user !== null &&
+        sameLogin(issue.user.login, self),
+    );
+  }
+
+  /**
+   * Make sure the marked issue exists: found first among `found` (a
+   * lookup by label, or the parent's sub-issues), and created only when it
+   * isn't there. `body` starts with `marker`.
+   */
+  async ensureIssue(
+    found: readonly IssueSummary[],
+    marker: string,
+    issue: { title: string; body: string; labels: string[] },
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<IssueSummary> {
+    const existing = await this.markedIssue(found, marker, signal);
+    if (existing) return existing;
+    crashPoint(`${point}:before`);
+    const created = await this.rest<IssueSummary>(
+      "POST",
+      `/repos/${this.repository}/issues`,
+      issue,
+      signal,
+    );
+    crashPoint(`${point}:after`);
+    return created;
+  }
+
+  /** Edit an issue's title, body or native type; unchanged fields are left out. */
+  async editIssue(
+    issue: number,
+    fields: { title?: string; body?: string; type?: string },
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "PATCH",
+      `/repos/${this.repository}/issues/${issue}`,
+      fields,
+      signal,
+    );
+    crashPoint(`${point}:after`);
+  }
+
+  /** An issue's sub-issues, bounded (GitHub allows 100 per parent). */
+  subIssues(parent: number, signal?: AbortSignal): Promise<IssueSummary[]> {
+    return this.pages<IssueSummary>(
+      `/repos/${this.repository}/issues/${parent}/sub_issues`,
+      signal,
+      undefined,
+      3,
+    );
+  }
+
+  /** Make `child` a sub-issue of `parent`, unless it is among `existing` (the parent's sub-issues). */
+  async ensureSubIssue(
+    parent: number,
+    child: Pick<IssueSummary, "id" | "number">,
+    existing: readonly IssueSummary[],
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (existing.some((issue) => issue.number === child.number)) return;
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "POST",
+      `/repos/${this.repository}/issues/${parent}/sub_issues`,
+      { sub_issue_id: child.id },
+      signal,
+    );
+    crashPoint(`${point}:after`);
+  }
+
+  /**
+   * Make `issue`'s blocked-by links mirror `blockers`: the links it has are
+   * read first, missing ones are added, and a link to one of `owned` (the
+   * issues these links are Factory's to manage) that isn't wanted is
+   * removed. Links to other issues are never touched.
+   */
+  async ensureBlockedBy(
+    issue: number,
+    blockers: readonly Pick<IssueSummary, "id" | "number">[],
+    owned: ReadonlySet<number>,
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const path = `/repos/${this.repository}/issues/${issue}/dependencies/blocked_by`;
+    const linked = await this.pages<IssueSummary>(path, signal, undefined, 3);
+    const want = new Set(blockers.map((blocker) => blocker.number));
+    const has = new Set(linked.map((blocker) => blocker.number));
+    for (const blocker of blockers)
+      if (!has.has(blocker.number)) {
+        crashPoint(`${point}:before`);
+        await this.rest("POST", path, { issue_id: blocker.id }, signal);
+        crashPoint(`${point}:after`);
+      }
+    for (const blocker of linked)
+      if (owned.has(blocker.number) && !want.has(blocker.number)) {
+        crashPoint(`${point}:before`);
+        await this.rest("DELETE", `${path}/${blocker.id}`, undefined, signal);
+        crashPoint(`${point}:after`);
+      }
   }
 
   /** Branch names under `prefix` (such as `factory/12/`) on the repository. */

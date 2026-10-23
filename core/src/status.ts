@@ -299,7 +299,7 @@ const DONE_AS: Record<string, string> = {
 };
 
 /** The Work Item table: each item's step, PR, repairs and question. */
-function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
+export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
   const phase = (key: string) => key.split(":")[2] ?? key;
   return plan.items.map((item) => {
     const own = (key: string) => key.startsWith(`item:${item.id}:`);

@@ -163,6 +163,13 @@ export interface CoreConfig {
    * started Objective.
    */
   progress: { enabled: boolean };
+  /**
+   * One display-only issue per Work Item (tracking.ts), on by default:
+   * a sub-issue of the Objective with blocked-by links that mirror the
+   * plan, `issueType` as its native type, and a live comment. Operational,
+   * like `progress`.
+   */
+  tracking: { enabled: boolean; issueType: string };
 }
 
 /** The operator's `sandbox` section, with defaults filled in. */
@@ -616,6 +623,7 @@ export function loadConfig(repository: string): CoreConfig {
       sandbox: sandboxSection,
       media: object({ localAssetRoots }),
       progress: object({ enabled: flag(true) }),
+      tracking: object({ enabled: flag(true), issueType: text("Task") }),
     },
     problems,
     RETIRED[""],

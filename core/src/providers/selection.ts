@@ -166,6 +166,8 @@ export const OPERATIONAL: readonly string[] = [
   "reviewArtifacts",
   // The live status comment: display only.
   "progress",
+  // The Work Item issues: display only.
+  "tracking",
   // A validation command's time limit.
   "validation.commandTimeoutSeconds",
   // A worker run's time, idle and turn limits.

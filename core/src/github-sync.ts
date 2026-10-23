@@ -9,7 +9,7 @@ import {
 } from "./github.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import type { RunLog } from "./log.js";
-import { code, prose } from "./markdown.js";
+import { code, mark, prose } from "./markdown.js";
 import {
   decisionsOf,
   RunTally,
@@ -36,6 +36,7 @@ import {
 } from "./state.js";
 import { type ObjectiveView, statusOf } from "./status.js";
 import { errorMessage } from "./text.js";
+import { type Tracking, track, trackingDue } from "./tracking.js";
 
 /** What the sync keeps in an Objective's state (`modules.github`). */
 export interface GitHubModule {
@@ -85,6 +86,10 @@ export interface GitHubModule {
   status?: { hash: string; shown: ObjectiveStatus; at: string };
   /** This run's live status comment can't be written (a lasting refusal or render failure): it counts as shown. */
   statusGivenUp?: boolean;
+  /** The Work Item issues as last written (tracking.ts). */
+  tracking?: Tracking;
+  /** This run's Work Item issues can't be written (a lasting refusal): they count as shown. */
+  trackingGivenUp?: boolean;
 }
 
 /** A `/factory` comment waiting for its author's access to be read. */
@@ -131,9 +136,6 @@ export interface SyncView {
   result(id: string): string | undefined;
 }
 
-const MARK = (issue: number, kind: string, id: string) =>
-  `<!-- factory:${issue}:${kind}:${id} -->`;
-
 /** The option each status shows; checking shows none (the card stays queued). */
 const OPTION: Record<ObjectiveStatus, QueueOption | undefined> = {
   checking: undefined,
@@ -148,8 +150,8 @@ const OPTION: Record<ObjectiveStatus, QueueOption | undefined> = {
 
 /** Live status edits per hour, across the installation's Objectives. */
 const STATUS_EDITS_PER_HOUR = 300;
-/** Status job failures in a row, other than GitHub's transient errors, before the comment is given up. */
-const STATUS_GIVE_UP_AFTER = 3;
+/** Status or tracking job failures in a row, other than GitHub's transient errors, before it is given up. */
+const GIVE_UP_AFTER = 3;
 
 /** A sync job that failed waits this long, doubling, up to MAX_BACKOFF_MS. */
 const BASE_BACKOFF_MS = 10_000;
@@ -217,8 +219,10 @@ export class GitHubSync {
   private tally?: RunTally;
   /** When each Objective's live status comment was last due to be written (this host's clock). */
   private readonly statusTried = new Map<number, number>();
-  /** Status jobs failed in a row by something other than GitHub's transient errors, per Objective. */
-  private readonly statusFailures = new Map<number, number>();
+  /** When each Objective's Work Item issues were last due to be projected (this host's clock). */
+  private readonly trackTried = new Map<number, number>();
+  /** Status and tracking jobs failed in a row by something other than GitHub's transient errors, by job key. */
+  private readonly failures = new Map<string, number>();
   /** When each live status edit of the last hour was made, across Objectives (this host's clock). */
   private statusEdits: number[] = [];
 
@@ -328,6 +332,7 @@ export class GitHubSync {
       this.show(runner, module, sync);
       this.ask(runner);
       this.status(runner, sync);
+      this.track(runner);
       this.reply(runner, module, sync);
       if (finished) continue;
       this.note(runner, module);
@@ -416,7 +421,10 @@ export class GitHubSync {
       !unreplied(state, module).length &&
       (!this.config.progress.enabled ||
         module.statusGivenUp === true ||
-        module.status?.shown === state.status)
+        module.status?.shown === state.status) &&
+      (!this.config.tracking.enabled ||
+        module.trackingGivenUp === true ||
+        !trackingDue(state))
     );
   }
 
@@ -433,7 +441,9 @@ export class GitHubSync {
     this.changed.delete(issue);
     this.wroteAt.delete(issue);
     this.statusTried.delete(issue);
-    this.statusFailures.delete(issue);
+    this.trackTried.delete(issue);
+    this.failures.delete(`status:${issue}`);
+    this.failures.delete(`track:${issue}`);
     this.tally?.forget(issue);
     this.jobs.forget(issue, (key) => key.startsWith("reply:"));
   }
@@ -698,7 +708,7 @@ export class GitHubSync {
           lastShownAt > Date.parse(hold.shownAt ?? ""));
       if (hold.shownAt !== undefined && (!hold.shortForm || !bound)) continue;
       this.background(issue, `ask:${issue}:${hold.id}`, async (signal) => {
-        const marker = MARK(issue, "hold", hold.id);
+        const marker = mark(issue, "hold", hold.id);
         const named = `--question ${hold.id}`;
         const answers = hold.options
           .map(
@@ -758,7 +768,7 @@ export class GitHubSync {
       `status:${issue}`,
       async (signal) => {
         this.tally ??= new RunTally(sync.logs);
-        const marker = MARK(issue, "status", runOf(state));
+        const marker = mark(issue, "status", runOf(state));
         const view = statusOf(
           { kind: "ok", state },
           {
@@ -822,30 +832,84 @@ export class GitHubSync {
         });
       },
       true,
-      (error) => this.statusFailed(runner, error),
+      (error) => this.givenUp(runner, "status", error),
     );
   }
 
   /**
-   * A status job failed. GitHub's transient errors (network, 5xx, rate
-   * limits) retry on; a lasting refusal (a 4xx), or anything else three
-   * times in a row (a render that keeps throwing), gives the comment up
+   * The Work Item issues (tracking.ts): projected from the plan in force
+   * and each item's state by a background job, at most once per
+   * STATUS_EVERY_MS while the Objective runs and at once when it has
+   * finished, and only when a write is due. A finished Objective settles
+   * only once every item issue shows its end and is closed.
+   */
+  private track(runner: ObjectiveRunner): void {
+    const { state } = runner;
+    const issue = state.issue;
+    const module = state.modules.github as GitHubModule;
+    if (
+      !this.config.tracking.enabled ||
+      state.withdrawing ||
+      module.trackingGivenUp
+    )
+      return;
+    const now = this.now();
+    if (
+      !TERMINAL.includes(state.status) &&
+      now - (this.trackTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS
+    )
+      return;
+    if (this.jobs.pending(`track:${issue}`) || !trackingDue(state)) return;
+    this.trackTried.set(issue, now);
+    this.background(
+      issue,
+      `track:${issue}`,
+      (signal) =>
+        track({
+          github: this.github,
+          state: () => runner.state,
+          issueType: this.config.tracking.issueType,
+          save: (change) =>
+            runner.transact(() => {
+              const github = runner.state.modules.github as GitHubModule;
+              github.tracking ??= { items: {} };
+              change(github.tracking);
+            }),
+          log: (event) => this.log.write(issue, event),
+          signal,
+        }),
+      true,
+      (error) => this.givenUp(runner, "track", error),
+    );
+  }
+
+  /**
+   * A status or tracking job failed. GitHub's transient errors (network,
+   * 5xx, rate limits) retry on; a lasting refusal (a 4xx), or anything
+   * else three times in a row (a render that keeps throwing), gives it up
    * for this run, so it never holds back settling.
    */
-  private statusFailed(runner: ObjectiveRunner, error: unknown): void {
+  private givenUp(
+    runner: ObjectiveRunner,
+    job: "status" | "track",
+    error: unknown,
+  ): void {
     if (error instanceof TransientError) return;
     const issue = runner.state.issue;
-    const failures = (this.statusFailures.get(issue) ?? 0) + 1;
-    this.statusFailures.set(issue, failures);
+    const key = `${job}:${issue}`;
+    const failures = (this.failures.get(key) ?? 0) + 1;
+    this.failures.set(key, failures);
     const refused =
       error instanceof GitHubError && error.status >= 400 && error.status < 500;
-    if (!refused && failures < STATUS_GIVE_UP_AFTER) return;
-    this.statusFailures.delete(issue);
+    if (!refused && failures < GIVE_UP_AFTER) return;
+    this.failures.delete(key);
     runner.transact(() => {
-      (runner.state.modules.github as GitHubModule).statusGivenUp = true;
+      const github = runner.state.modules.github as GitHubModule;
+      if (job === "status") github.statusGivenUp = true;
+      else github.trackingGivenUp = true;
     });
     this.log.write(issue, {
-      event: "status-given-up",
+      event: job === "status" ? "status-given-up" : "tracking-given-up",
       failures,
       error: errorMessage(error),
     });
@@ -872,7 +936,7 @@ export class GitHubSync {
       const [step, retry] = transient;
       const id = `${step}@${retry.since}`;
       this.background(issue, `note:${issue}`, async (signal) => {
-        const marker = MARK(issue, "waiting", "note");
+        const marker = mark(issue, "waiting", "note");
         await this.github.upsertComment(
           issue,
           marker,
@@ -895,7 +959,7 @@ export class GitHubSync {
       const id = `${step}@${retry.since}`;
       const what = retry.wait?.kind === "gate" ? retry.wait.gate : step;
       this.background(issue, `remind:${issue}`, async (signal) => {
-        const marker = MARK(issue, "remind", id);
+        const marker = mark(issue, "remind", id);
         await this.github.ensureComment(
           issue,
           marker,
@@ -940,7 +1004,7 @@ export class GitHubSync {
       this.background(issue, `ask:${issue}`, async (signal) => {
         // This incident's question: an earlier incident's question, and
         // the answers to it, never count for this one.
-        const marker = MARK(issue, "hold", `unreadable:${entry.incident}`);
+        const marker = mark(issue, "hold", `unreadable:${entry.incident}`);
         const question = await this.github.ensureComment(
           issue,
           marker,
@@ -1096,7 +1160,7 @@ export class GitHubSync {
     const issue = runner.state.issue;
     for (const request of unreplied(runner.state, module)) {
       this.background(issue, `reply:${issue}:${request.id}`, async (signal) => {
-        const marker = MARK(issue, "reply", request.id);
+        const marker = mark(issue, "reply", request.id);
         const message = sync.result(request.id) ?? request.message;
         await this.github.ensureComment(
           issue,
@@ -1157,7 +1221,7 @@ export class GitHubSync {
   ): void {
     this.jobs.run(issue, key, job, {
       backoff,
-      done: () => failed && this.statusFailures.delete(issue),
+      done: () => failed && this.failures.delete(key),
       failed: async (error) => {
         failed?.(error);
         if (issue && issueGone(error)) await this.confirmGone(issue, key);

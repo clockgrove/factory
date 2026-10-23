@@ -185,6 +185,8 @@ export interface PublishInput {
   baseBranch?: string;
   /** The Objective's run (state.ts runOf), marked in the PR body for `factory reset`. */
   run?: string;
+  /** The Work Item's issue (tracking.ts), once it exists: the PR body closes it on merge. */
+  itemIssue?: number;
 }
 
 /**
@@ -616,6 +618,9 @@ async function pullRequestBody(
     safe(input.item.goal).trim().slice(0, 4000) ||
       "This candidate contains the changes listed below.",
     `Work Item: ${code(input.item.id)} · Objective: [#${input.issue}](${issues}/${input.issue})`,
+    // GitHub closes the item's issue when this PR merges into the default
+    // branch; the tracking job closes it otherwise (a stack layer).
+    ...(input.itemIssue ? [`Closes #${input.itemIssue}.`] : []),
   ];
   const entries = (
     await localGit(

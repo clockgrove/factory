@@ -1,6 +1,7 @@
 import type { CoreConfig } from "./config.js";
 import { crashPoint } from "./crash.js";
 import type { GitHub, GraphQLError } from "./github.js";
+import { WORK_ITEM_LABEL } from "./tracking.js";
 
 /** One Objective card on the Project. */
 export interface QueueItem {
@@ -52,7 +53,7 @@ query($project: ID!, $after: String, $query: String!, $field: String!, $order: S
             ... on ProjectV2ItemFieldNumberValue { number }
           }
           content {
-            ... on Issue { number state repository { nameWithOwner } }
+            ... on Issue { number state repository { nameWithOwner } labels(first: 20) { nodes { name } } }
           }
         }
       }
@@ -65,6 +66,7 @@ fragment Card on Issue {
   number
   state
   repository { nameWithOwner }
+  labels(first: 20) { nodes { name } }
   projectItems(first: 20) {
     nodes {
       id
@@ -95,6 +97,12 @@ ${ISSUE_FIELDS}`;
 
 type Value = { name?: string; number?: number; updatedAt?: string } | null;
 
+type Labels = { nodes: ({ name: string } | null)[] } | null | undefined;
+
+/** A Work Item issue (tracking.ts) is never an Objective: no read takes it as a card. */
+const workItem = (labels: Labels) =>
+  labels?.nodes.some((label) => label?.name === WORK_ITEM_LABEL) ?? false;
+
 interface ItemsPage {
   node: {
     items?: {
@@ -109,6 +117,7 @@ interface ItemsPage {
           number?: number;
           state?: string;
           repository?: { nameWithOwner?: string };
+          labels?: Labels;
         } | null;
       } | null)[];
     };
@@ -119,6 +128,7 @@ interface Card {
   number: number;
   state: string;
   repository: { nameWithOwner: string };
+  labels?: Labels;
   projectItems: {
     nodes: ({
       id: string;
@@ -197,7 +207,8 @@ async function readItems(
         node.isArchived ||
         typeof content?.number !== "number" ||
         content.repository?.nameWithOwner?.toLowerCase() !==
-          config.repository.toLowerCase()
+          config.repository.toLowerCase() ||
+        workItem(content.labels)
       )
         continue;
       each({
@@ -309,6 +320,7 @@ export async function readQueue(
     );
   }
   function read(issue: Card): void {
+    if (workItem(issue.labels)) return;
     const node = issue.projectItems.nodes.find(
       (n) => n?.project.id === config.queue.projectId && !n.isArchived,
     );

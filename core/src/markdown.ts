@@ -69,3 +69,12 @@ export function prose(text: string): string {
     .replace(/>/g, "&gt;")
     .replace(/@/g, "&#64;");
 }
+
+/**
+ * Factory's hidden marker, `<!-- factory:<issue>:<kind>:<id> -->`, on the
+ * first line of a comment or issue body it writes: found by it (by
+ * Factory's own login only) before it writes again (CORE.md#Idempotence).
+ */
+export function mark(issue: number, kind: string, id: string): string {
+  return `<!-- factory:${issue}:${kind}:${id} -->`;
+}

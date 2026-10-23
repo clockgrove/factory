@@ -106,19 +106,19 @@ const MANAGED_FIELDS: Record<string, string> = {
     '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
 };
 
-/** Setup's options for the command table: true takes a value, "many" repeats. */
-export const SETUP_FLAGS: Record<string, boolean | "many"> = {
-  "config-only": false,
-  provider: true,
-  planner: true,
-  worker: true,
-  default: false,
-  json: false,
+/** Setup's options for the command table, by kind (cli.ts `FlagKind`). */
+export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
+  "config-only": "switch",
+  provider: "value",
+  planner: "value",
+  worker: "value",
+  default: "switch",
+  json: "switch",
   ...Object.fromEntries(
     Object.entries({ ...CONFIG_OPTIONS, ...PROVIDER_OPTIONS }).map(
       ([flag, { read }]) => [
         flag,
-        read === "list" || read === "env" ? "many" : true,
+        read === "list" || read === "env" ? "list" : "value",
       ],
     ),
   ),

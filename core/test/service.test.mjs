@@ -2384,15 +2384,48 @@ test("the run log: tail, follow, and status reads its end", async () => {
   await stopped(service);
 });
 
-test("status shows times in the display zone and redacts named secrets", () => {
+/** A planned Work Item with no more than status reads. */
+function item(id, fields = {}) {
+  return {
+    id,
+    title: id,
+    goal: id,
+    acceptance: [],
+    nonGoals: [],
+    citations: [],
+    dependencies: [],
+    ownedPaths: [],
+    validation: [],
+    brief: id,
+    ...fields,
+  };
+}
+
+test("status: one model, the Work Item table, the full --json and the list view", () => {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1", { MY_TOKEN: "s3cret-value-123" });
   const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
   config.policy = { allowedSecretNames: ["MY_TOKEN"] };
   config.autonomy = { allowances: { implementationRepairs: 5 } };
   writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
-  seed(inst, 55, "building", {
-    done: { check: {}, plan: { items: [] }, "item:a:validate": { tree: "t1" } },
+  seed(inst, 55, "holding", {
+    done: {
+      check: {},
+      plan: { items: [item("a"), item("b", { kind: "aggregate" })] },
+      "item:a:validate": { tree: "t1" },
+      "item:a:publish": { pr: 12, head: "h1", merged: false },
+    },
+    holds: [
+      {
+        id: "q1",
+        step: "item:b:merge",
+        item: "b",
+        question: "Which way?",
+        options: offered("retry", "cancel"),
+        cause: "question",
+        askedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
     kept: {
       "item:a:flaky": { tree: "t1", command: "npm test" },
       "allowances:rereviews": 1,
@@ -2409,8 +2442,28 @@ test("status shows times in the display zone and redacts named secrets", () => {
       },
     },
   });
+  // Finished two days ago: the list view hides it, --all and ISSUE show it.
+  seed(inst, 56, "done", {
+    ended: { at: new Date(Date.now() - 48 * 3600_000).toISOString() },
+  });
   inst.env.FACTORY_DISPLAY_TIMEZONE = "Asia/Tokyo";
   const text = cli(inst, "status").out;
+  assert.match(
+    text,
+    /#55: building, a question open\n {2}Next: factory answer 55 retry --question q1\n/,
+  );
+  assert.match(
+    text,
+    / {4}ID +KIND +PHASE +PR +REPAIRS +HOLD\n {4}a +work +published +#12 +4 +-\n {4}b +aggregate +merge \(held\) +- +0 +q1\n/,
+  );
+  assert.match(
+    text,
+    /Question q1 \(Work Item b\): Which way\?\n {4}retry \(recommended\)/,
+  );
+  assert.doesNotMatch(text, /#56/);
+  assert.match(text, /1 Objective finished more than 24 h ago/);
+  assert.match(cli(inst, "status", "--all").out, /#56: done/);
+  assert.match(cli(inst, "status", "56").out, /#56: done/);
   assert.match(text, /retries at 2026-01-01 09:30:00 GMT\+9/);
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
   assert.match(
@@ -2425,7 +2478,30 @@ test("status shows times in the display zone and redacts named secrets", () => {
   assert.match(text, /\[REDACTED\]/);
   const json = cli(inst, "status", "--json").out;
   assert.doesNotMatch(json, /s3cret/);
-  const [row] = JSON.parse(json).objectives;
+  const [row, old] = JSON.parse(json).objectives;
+  assert.equal(old.issue, 56, "--json is the full model");
+  assert.deepEqual(
+    row.plan.items.map((each) => each.id),
+    ["a", "b"],
+  );
+  assert.deepEqual(row.items, [
+    {
+      id: "a",
+      kind: "work",
+      phase: "published",
+      pr: 12,
+      repairs: 4,
+      hold: null,
+    },
+    {
+      id: "b",
+      kind: "aggregate",
+      phase: "merge (held)",
+      pr: null,
+      repairs: 0,
+      hold: "q1",
+    },
+  ]);
   assert.equal(
     row.waiting[0].nextAt,
     "2026-01-01T00:30:00.000Z",

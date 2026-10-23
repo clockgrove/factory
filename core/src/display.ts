@@ -1,4 +1,4 @@
-import { redact } from "./log.js";
+import { type LogEvent, redact } from "./log.js";
 
 /**
  * Times for people: `YYYY-MM-DD HH:MM:SS ZONE` in the host's zone, or in
@@ -60,4 +60,11 @@ export function redactDeep<T>(value: T, secrets: readonly string[]): T {
       ]),
     ) as T;
   return value;
+}
+
+/** A run log event as one line of text. */
+export function eventLine(event: LogEvent): string {
+  const { at, step, event: kind, ...rest } = event;
+  const detail = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : "";
+  return `${displayTime(at)}${step ? ` ${step}` : ""} ${kind ?? ""}${detail}`;
 }

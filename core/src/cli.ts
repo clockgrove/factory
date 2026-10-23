@@ -3,25 +3,23 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { isAbsolute, join } from "node:path";
-import {
-  implementationRepairs,
-  perPath,
-  resultRereviews,
-  type Usage,
-} from "./allowances.js";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
-import { displayTime, redactDeep } from "./display.js";
+import { eventLine, redactDeep } from "./display.js";
 import {
   DEFAULT_LIMITS,
   type EngineLimits,
   hostLimits,
-  hold as question,
   settled,
 } from "./engine.js";
 import { gitEnvironment } from "./git.js";
 import { GitHub } from "./github.js";
 import { GitHubSync, moved } from "./github-sync.js";
-import { applyDream, dreamCommand, runDream } from "./knowledge/dream.js";
+import {
+  applyDream,
+  type DreamCommand,
+  dreamCommand,
+  runDream,
+} from "./knowledge/dream.js";
 import { knowledgeObserver } from "./knowledge/index.js";
 import {
   configureKnowledge,
@@ -45,7 +43,6 @@ import {
   recipeInstallation,
   selectRecipe,
 } from "./planning/recipes.js";
-import { planningRevisions } from "./planning/steps.js";
 import type { Planner } from "./providers/planner.js";
 import {
   freezeConfig,
@@ -62,36 +59,60 @@ import {
   type RequestResult,
   writeRequest,
 } from "./requests.js";
-import { RESET, type ResetRecord, rebuildStep, resettable } from "./reset.js";
+import { rebuildStep, resettable } from "./reset.js";
 import { serve } from "./service.js";
 import { SETUP_FLAGS, type SetupReport, SetupUsage, setup } from "./setup.js";
 import {
-  answerForm,
   type Frozen,
   findState,
-  type Hold,
   listAllObjectives,
   loadQueueControl,
   type ObjectiveState,
-  type ObjectiveStatus,
-  type QueueControl,
   TERMINAL,
 } from "./state.js";
+import { readStatus, statusText } from "./status.js";
 import { errorMessage } from "./text.js";
 import { adaptiveWorkflow } from "./validate.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /**
- * Every command: its arguments, its options (true: takes a value; "many":
- * takes one each time it is given), and its help. The one table both `factory help` and the option check read.
+ * An option's kind: a switch takes no value, a value takes one, and a list
+ * takes one each time it is given (`Args.lists`).
  */
-const COMMANDS: Record<
-  string,
-  { args: string; flags: Record<string, boolean | "many">; help: string }
-> = {
+type FlagKind = "switch" | "value" | "list";
+
+interface Command {
+  args: string;
+  flags: Record<string, FlagKind>;
+  help: string;
+  /** What is wrong with this command line beyond its options' shape, if anything. */
+  check?: (args: Args) => string | undefined;
+}
+
+/** The command line names an issue number as its first argument. */
+const issueCheck = (args: Args): string | undefined => {
+  const command = args.positional[0]!;
+  const issue = Number(args.positional[1]);
+  return Number.isInteger(issue) && issue > 0
+    ? undefined
+    : `${command} needs an issue number: factory ${command} ${COMMANDS[command]?.args}`;
+};
+
+const QUEUE_MODES: Record<string, QueueMode> = {
+  pause: "paused",
+  drain: "draining",
+  resume: "running",
+};
+
+/**
+ * Every command: its arguments, its options, its help and its check. The
+ * one table `factory help`, the option parser and the checks read, so the
+ * help covers every command by construction.
+ */
+const COMMANDS: Record<string, Command> = {
   serve: {
     args: "",
-    flags: { provider: true },
+    flags: { provider: "value" },
     help: "Run the service (the only writer of state); new Objectives use --provider NAME, else defaultProvider",
   },
   setup: {
@@ -101,83 +122,145 @@ const COMMANDS: Record<
   },
   status: {
     args: "[ISSUE]",
-    flags: { json: false },
-    help: "Show the service, the queue, Objectives, open questions, waits and the next step",
+    flags: { json: "switch", all: "switch" },
+    help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago",
+    check: (args) =>
+      args.positional[1] === undefined ? undefined : issueCheck(args),
   },
   log: {
     args: "ISSUE",
-    flags: { tail: true, follow: false, json: false },
+    flags: { tail: "value", follow: "switch", json: "switch" },
     help: "Show an Objective's run log: the last --tail N events (50), --follow for new ones",
+    check: (args) => {
+      const tail = Number(args.flags.tail ?? 0);
+      return (
+        issueCheck(args) ??
+        (Number.isInteger(tail) && tail >= 0
+          ? undefined
+          : "--tail takes a whole number of events, such as --tail 100")
+      );
+    },
   },
   answer: {
     args: "ISSUE ANSWER [ARG]",
-    flags: { question: true, text: true },
+    flags: { question: "value", text: "value" },
     help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`), --text the explanation",
+    check: (args) => {
+      const answer = args.positional[2];
+      if (!answer)
+        return (
+          issueCheck(args) ??
+          "answer needs an answer: factory answer ISSUE ANSWER --question ID"
+        );
+      // Bound to the question the operator read, so a delayed answer
+      // never lands on a newer one. Cancel needs no question.
+      if (answer !== "cancel" && args.flags.question === undefined)
+        return `answer needs --question with the open question's id, so it can't answer a newer one: see \`factory status ${args.positional[1]}\``;
+      return issueCheck(args);
+    },
   },
   retry: {
     args: "ISSUE",
-    flags: { question: true },
+    flags: { question: "value" },
     help: "Retry the waiting steps no open question stops now; with --question ID, answer retry to it",
+    check: issueCheck,
   },
-  cancel: { args: "ISSUE", flags: {}, help: "Cancel an Objective" },
+  cancel: {
+    args: "ISSUE",
+    flags: {},
+    help: "Cancel an Objective",
+    check: issueCheck,
+  },
   reset: {
     args: "ISSUE",
     flags: {},
     help: "Rebuild an Objective's state from GitHub: its plan comment, PRs and report",
+    check: issueCheck,
   },
   pause: {
     args: "ISSUE",
     flags: {},
     help: "Pause an Objective: no step starts until resume",
+    check: issueCheck,
   },
   drain: {
     args: "ISSUE",
     flags: {},
     help: "Drain an Objective: started Work Items finish, no new one starts",
+    check: issueCheck,
   },
   resume: {
     args: "ISSUE",
     flags: {},
     help: "Resume a paused or drained Objective",
+    check: issueCheck,
   },
   queue: {
     args: "list|pause|resume|drain",
-    flags: { json: false },
+    flags: { json: "switch" },
     help: "List the Project's queued, candidate and inert cards, or pause, drain or resume the whole queue",
+    check: (args) => {
+      const action = args.positional[1];
+      if (action === "list") return undefined;
+      if (!action || !QUEUE_MODES[action])
+        return `Unknown queue action ${action ?? "(none)"}; use factory queue list, pause, resume or drain`;
+      return args.flags.json === undefined
+        ? undefined
+        : `--json belongs to factory queue list; use factory queue ${action}`;
+    },
   },
   dream: {
     args: "",
     flags: {
-      preview: false,
-      record: false,
-      show: false,
-      objective: true,
-      file: true,
-      approve: true,
-      reject: true,
-      "budget-bytes": true,
-      "input-budget-bytes": true,
-      provider: true,
+      preview: "switch",
+      record: "switch",
+      show: "switch",
+      objective: "value",
+      file: "value",
+      approve: "value",
+      reject: "value",
+      "budget-bytes": "value",
+      "input-budget-bytes": "value",
+      provider: "value",
     },
     help: "Propose a playbook from settled episodes ([--preview] [--budget-bytes N] [--input-budget-bytes N] [--provider NAME]); --record --objective N records one; --file PATH --approve|--reject SHA256 decides a draft; --show shows the playbook",
+    check: (args) => {
+      const parsed = dreamCommand(args.flags);
+      return typeof parsed === "string" ? parsed : undefined;
+    },
   },
   recipe: {
     args: "",
-    flags: { file: true },
+    flags: { file: "value" },
     help: "Preview the Workflow recipe of the Objective in --file ABSOLUTE_PATH (Markdown) at the checkout's HEAD, with no model call; exits 1 when it can't be used",
+    check: (args) => {
+      const file = args.flags.file;
+      if (!file || !isAbsolute(file))
+        return "recipe needs --file ABSOLUTE_OBJECTIVE";
+      return lstatSync(file, { throwIfNoEntry: false })?.isFile()
+        ? undefined
+        : `recipe --file ${file} isn't a regular file`;
+    },
   },
   help: { args: "", flags: {}, help: "Show this help" },
 };
+
+/** How an option is written in help and fixes: `--tail N`, `--json`. */
+function flagForm(name: string, kind: FlagKind | undefined): string {
+  const value = name === "tail" ? "N" : name.toUpperCase();
+  return kind === "switch"
+    ? `--${name}`
+    : kind === "list"
+      ? `--${name} ${value}...`
+      : `--${name} ${value}`;
+}
 
 const USAGE = `Usage: factory <command> --repo OWNER/NAME (or FACTORY_REPOSITORY)
 
 ${Object.entries(COMMANDS)
   .map(([name, command]) => {
     const flags = Object.entries(command.flags)
-      .map(
-        ([flag, value]) =>
-          ` [--${flag}${value ? ` ${flag === "tail" ? "N" : flag.toUpperCase()}` : ""}]${value === "many" ? "..." : ""}`,
-      )
+      .map(([flag, kind]) => ` [${flagForm(flag, kind)}]`)
       .join("");
     return `  ${`${name} ${command.args}${flags}`.trimEnd()}\n      ${command.help}`;
   })
@@ -203,6 +286,7 @@ class Refusal extends Error {
 
 const usage = (message: string) => new Refusal("usage", message);
 
+/** Runs a command line `parse` has checked: its arguments are trusted here. */
 async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
   const command = args.positional[0];
@@ -229,46 +313,32 @@ async function main(argv: string[]): Promise<number> {
       return await dream(repository, paths, args);
     case "recipe":
       return await recipe(repository, args);
-    default: {
-      const issue = issueOf(args);
-      if (command === "answer") {
-        const answer = args.positional[2];
-        if (!answer)
-          throw usage(
-            "answer needs an answer: factory answer ISSUE ANSWER --question ID",
-          );
-        // Bound to the question the operator read, so a delayed answer
-        // never lands on a newer one. Cancel needs no question.
-        const question = args.flags.question;
-        if (answer !== "cancel" && question === undefined)
-          throw usage(
-            `answer needs --question with the open question's id, so it can't answer a newer one: see \`factory status ${issue}\``,
-          );
-        // `answer ISSUE switch NAME`: the option's argument, never the text.
-        const arg = args.positional[3];
-        const text = args.flags.text;
-        return await request(paths, {
-          kind: "answer",
-          issue,
-          answer,
-          ...(arg ? { arg } : {}),
-          ...(text ? { text } : {}),
-          ...(question !== undefined ? { question } : {}),
-        });
-      }
-      if (command === "retry")
-        return await request(paths, {
-          kind: "retry",
-          issue,
-          ...(args.flags.question !== undefined
-            ? { question: args.flags.question }
-            : {}),
-        });
+    case "answer": {
+      // `answer ISSUE switch NAME`: the option's argument, never the text.
+      const arg = args.positional[3];
+      const { question, text } = args.flags;
       return await request(paths, {
-        kind: command as "cancel" | "reset" | "pause" | "drain" | "resume",
-        issue,
+        kind: "answer",
+        issue: issueOf(args),
+        answer: args.positional[2]!,
+        ...(arg ? { arg } : {}),
+        ...(text ? { text } : {}),
+        ...(question !== undefined ? { question } : {}),
       });
     }
+    case "retry":
+      return await request(paths, {
+        kind: "retry",
+        issue: issueOf(args),
+        ...(args.flags.question !== undefined
+          ? { question: args.flags.question }
+          : {}),
+      });
+    default:
+      return await request(paths, {
+        kind: command as "cancel" | "reset" | "pause" | "drain" | "resume",
+        issue: issueOf(args),
+      });
   }
 }
 
@@ -357,8 +427,8 @@ async function dream(
   paths: Paths,
   args: Args,
 ): Promise<number> {
-  const parsed = dreamCommand(args.flags);
-  if (typeof parsed === "string") throw usage(parsed);
+  // Checked by its COMMANDS check.
+  const parsed = dreamCommand(args.flags) as DreamCommand;
   const config = loadConfig(repository);
   const name = providerName(config, args);
   const log = new RunLog(paths.logs, "dream");
@@ -463,383 +533,26 @@ function configOf(repository: string): CoreConfig | undefined {
   }
 }
 
-interface StatusRow {
-  issue: number;
-  status: ObjectiveStatus | "unreadable";
-  /** The operator's control of this Objective; `running` when none. */
-  mode: "running" | "paused" | "draining";
-  /** Open questions, oldest first. */
-  holds: Hold[];
-  /** The configuration frozen at admission (or by a `switch` or `adopt` answer): its provider, what chose it, and its digest. */
-  frozen?: Pick<Frozen, "provider" | "selectedBy" | "digest">;
-  waiting: {
-    step: string;
-    nextAt: string;
-    lastError: string;
-    since: string;
-    /** A person outside Factory the step waits on, such as an environment approval. */
-    gate?: string;
-  }[];
-  /** Waiting for a slot, or for an earlier Objective that owns overlapping paths. */
-  waitsOn: { slot: true } | { paths: number } | null;
-  /** Steps started and not finished. */
-  running: string[];
-  /** Work Items whose validation failed once and passed on its one rerun. */
-  flakyRerun: { item: string; command: string }[];
-  /**
-   * Each autonomy allowance, used and allowed with the operator's grants:
-   * across the Objective, and repairs per repair path (target step).
-   */
-  allowances?: {
-    planningRevisions: Usage;
-    implementationRepairs: Usage;
-    resultRereviews: Usage;
-    perPath: Record<string, Usage>;
-  };
-  /** A reset rebuilding the state from GitHub. */
-  reset?: { requestedAt: string; hadState: boolean };
-  /** What happens next, and the command that moves it, if one does. */
-  nextAction: { command: string | null; reason: string };
-  /** The latest run log event. */
-  lastEvent: LogEvent | null;
-  error?: string;
-}
-
-/** What `status` reads from the running service's `service.json`. */
-interface ServiceView {
-  crashLoop?: { crashes: number; resumeAt: string };
-  problem?: string;
-  waits: Record<string, { slot: true } | { paths: number }>;
-}
-
 async function status(
   paths: Paths,
   repository: string,
   args: Args,
 ): Promise<number> {
   const only = args.positional[1] ? issueOf(args) : undefined;
-  const live = await serviceLive(paths);
-  const service: ServiceView = live ? serviceRecord(paths) : { waits: {} };
-  const queue = loadQueueControl(paths.root);
-  const rows: StatusRow[] = [];
-  for (const issue of listAllObjectives(paths.objectives)) {
-    if (only !== undefined && issue !== only) continue;
-    let loaded: ReturnType<typeof findState>;
-    try {
-      loaded = findState(paths.objectives, issue);
-    } catch (error) {
-      process.stderr.write(`#${issue}: can't read its state now: ${error}\n`);
-      continue;
-    }
-    if (!loaded) continue;
-    const lastEvent = readLog(paths.logs, issue, 1).events[0] ?? null;
-    if (loaded.kind === "unreadable") {
-      rows.push({
-        issue,
-        status: "unreadable",
-        mode: "running",
-        holds: [
-          {
-            id: "unreadable",
-            step: "state",
-            question: `Factory can't read this Objective's state (${loaded.error}).`,
-            options: question("", [
-              {
-                answer: RESET,
-                family: "reset",
-                consequence:
-                  "Rebuilds the state from the plan comment and PRs on GitHub.",
-              },
-              "cancel",
-            ]).options,
-            cause: "question",
-            askedAt: "",
-          },
-        ],
-        waiting: [],
-        waitsOn: null,
-        running: [],
-        flakyRerun: [],
-        nextAction: {
-          command: `factory reset ${issue}`,
-          reason:
-            "Its state can't be read: reset rebuilds it from GitHub (or cancel).",
-        },
-        lastEvent,
-        error: loaded.error,
-      });
-      continue;
-    }
-    const { state } = loaded;
-    const reset = state.kept?.[RESET] as ResetRecord | undefined;
-    const row: StatusRow = {
-      issue,
-      status: state.status,
-      mode: state.control?.mode ?? "running",
-      holds: state.holds,
-      ...(state.frozen
-        ? {
-            frozen: {
-              provider: state.frozen.provider,
-              selectedBy: state.frozen.selectedBy,
-              digest: state.frozen.digest,
-            },
-          }
-        : {}),
-      waiting: Object.entries(state.retries).map(([step, retry]) => ({
-        step,
-        nextAt: retry.nextAt,
-        lastError: retry.lastError,
-        since: retry.since,
-        ...(retry.wait?.kind === "gate" ? { gate: retry.wait.gate } : {}),
-      })),
-      waitsOn: service.waits[issue] ?? null,
-      running: Object.keys(state.attempts),
-      flakyRerun: flakyReruns(state),
-      allowances: {
-        planningRevisions: planningRevisions(state),
-        implementationRepairs: implementationRepairs(state),
-        resultRereviews: resultRereviews(state),
-        perPath: perPath(state),
-      },
-      ...(reset && !TERMINAL.includes(state.status)
-        ? {
-            reset: {
-              requestedAt: reset.requestedAt,
-              hadState: reset.hadState,
-            },
-          }
-        : {}),
-      nextAction: { command: null, reason: "" },
-      lastEvent,
-    };
-    row.nextAction = nextAction(row, queue, live);
-    rows.push(row);
-  }
-  // Every string is redacted before it is formatted, so no escaped form
-  // of a secret slips past.
-  const shown = redactDeep(rows, configOf(repository)?.secrets ?? []);
-  const { waits: _waits, ...record } = service;
-  if (args.flags.json !== undefined) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          service: live ? "running" : "stopped",
-          ...record,
-          queue,
-          objectives: shown,
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    return 0;
-  }
-  const lines = [`Service: ${live ? "running" : "stopped"}`];
-  if (record.problem)
-    lines.push(`  Problem: ${record.problem}. GitHub effects are paused.`);
-  const loop = record.crashLoop;
-  if (loop)
-    lines.push(
-      `  Crash loop: the service restarted after ${loop.crashes} deaths in a row; interrupted steps ${Date.parse(loop.resumeAt) > Date.now() ? "resume" : "resumed"} at ${displayTime(loop.resumeAt)}.`,
-    );
-  if (queue.mode !== "running")
-    lines.push(
-      `Queue: ${queue.mode}${queue.at ? ` since ${displayTime(queue.at)}` : ""}${queue.by ? ` (by ${queue.by})` : ""}; factory queue resume undoes it`,
-    );
-  if (shown.length === 0) lines.push("No Objectives.");
-  for (const row of shown) {
-    lines.push(
-      `#${row.issue}: ${row.status}${row.mode !== "running" ? ` (${row.mode})` : ""}`,
-    );
-    if (row.frozen)
-      lines.push(
-        `  Provider: ${row.frozen.provider} (selectedBy: ${row.frozen.selectedBy}); configuration ${row.frozen.digest.slice(0, 12)}`,
-      );
-    for (const hold of row.holds)
-      lines.push(
-        `  Question ${hold.id}${hold.item ? ` (Work Item ${hold.item})` : ""}: ${hold.question}`,
-        ...hold.options.map(
-          (option) =>
-            `    ${answerForm(option)}${option.recommended ? " (recommended)" : ""}: ${option.consequence}`,
-        ),
-        `  Answer with: factory answer ${row.issue} <answer> --question ${hold.id}`,
-      );
-    if (row.reset)
-      lines.push(
-        `  Resetting since ${displayTime(row.reset.requestedAt)}: rebuilding the state from GitHub`,
-      );
-    for (const step of row.running) lines.push(`  Running: ${step}`);
-    for (const wait of row.waiting)
-      lines.push(
-        wait.gate
-          ? `  Waiting on ${wait.gate} (${wait.step}, since ${displayTime(wait.since)})`
-          : `  Waiting: ${wait.step} retries at ${displayTime(wait.nextAt)} (${wait.lastError})`,
-      );
-    if (row.waitsOn)
-      lines.push(
-        "slot" in row.waitsOn
-          ? "  Waiting on a free slot (queue.maxActiveObjectives)"
-          : `  Waiting on Objective #${row.waitsOn.paths} (overlapping owned paths)`,
-      );
-    for (const flaky of row.flakyRerun)
-      lines.push(
-        `  Possibly flaky: ${flaky.item}: \`${flaky.command}\` failed once; its rerun passed`,
-      );
-    if (row.allowances) {
-      const { perPath: paths, ...objective } = row.allowances;
-      const used = ({ used, allowed }: Usage) => `${used}/${allowed}`;
-      const each = Object.entries(paths).map(
-        ([path, usage]) => `${path} ${used(usage)}`,
-      );
-      lines.push(
-        `  Allowances: planning revisions ${used(objective.planningRevisions)}, implementation repairs ${used(objective.implementationRepairs)}, result rereviews ${used(objective.resultRereviews)}${each.length ? `; repairs per path: ${each.join(", ")}` : ""}`,
-      );
-    }
-    if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
-    lines.push(
-      row.nextAction.command
-        ? `  Next: ${row.nextAction.command}\n    ${row.nextAction.reason}`
-        : `  Next: ${row.nextAction.reason}`,
-    );
-  }
-  process.stdout.write(`${lines.join("\n")}\n`);
+  const view = readStatus(paths, {
+    ...(only !== undefined ? { only } : {}),
+    live: await serviceLive(paths),
+    secrets: configOf(repository)?.secrets ?? [],
+  });
+  process.stdout.write(
+    args.flags.json !== undefined
+      ? `${JSON.stringify(view, null, 2)}\n`
+      : statusText(view, {
+          list: only === undefined,
+          all: args.flags.all !== undefined,
+        }),
+  );
   return 0;
-}
-
-/** Validation reruns that passed: the rerun's tree is the validated tree. */
-function flakyReruns(state: ObjectiveState): StatusRow["flakyRerun"] {
-  const reruns: StatusRow["flakyRerun"] = [];
-  for (const [key, value] of Object.entries(state.kept ?? {})) {
-    const item = /^item:(.+):flaky$/.exec(key)?.[1];
-    const rerun = value as { tree?: string; command?: string } | null;
-    const validated = state.done[`item:${item}:validate`] as
-      | { tree?: string }
-      | undefined;
-    if (item && rerun?.command && rerun.tree && validated?.tree === rerun.tree)
-      reruns.push({ item, command: rerun.command });
-  }
-  return reruns;
-}
-
-/** The one thing that moves the Objective on, or what it waits for. */
-function nextAction(
-  row: StatusRow,
-  queue: QueueControl,
-  live: boolean,
-): StatusRow["nextAction"] {
-  const issue = row.issue;
-  // The question that stops the most: the Objective's, else the oldest.
-  const hold =
-    row.holds.find((open) => open.item === undefined) ?? row.holds[0];
-  const recommended = hold?.options.find((option) => option.recommended);
-  if (hold && recommended)
-    return {
-      command: `factory answer ${issue} ${recommended.answer}${recommended.arg !== undefined ? ` ${recommended.arg}` : ""} --question ${hold.id}${recommended.needsText ? ' --text "<text>"' : ""}`,
-      reason: `The recommended answer to ${hold.item ? `Work Item ${hold.item}'s` : "the"} question: ${recommended.consequence} Others: ${hold.options
-        .filter((option) => option !== recommended)
-        .map((option) => answerForm(option))
-        .join(", ")}.`,
-    };
-  if (TERMINAL.includes(row.status as ObjectiveStatus))
-    return row.running.length || row.waiting.length
-      ? {
-          command: null,
-          reason: `It has ${row.status}; Factory is cleaning up.`,
-        }
-      : { command: null, reason: `It has ${row.status}.` };
-  if (row.reset && !live)
-    return {
-      command: "factory serve",
-      reason:
-        "The reset waits for the service (start it with its systemd unit).",
-    };
-  if (row.reset)
-    return {
-      command: null,
-      reason: "Factory is rebuilding its state from GitHub.",
-    };
-  if (row.mode !== "running")
-    return {
-      command: `factory resume ${issue}`,
-      reason: `The operator ${row.mode === "paused" ? "paused it: no step starts" : "drained it: no new Work Item starts"} until resume.`,
-    };
-  if (queue.mode === "paused")
-    return {
-      command: "factory queue resume",
-      reason: "The queue is paused: no step starts until resume.",
-    };
-  if (!live)
-    return {
-      command: "factory serve",
-      reason: "The service isn't running (start it with its systemd unit).",
-    };
-  const gate = row.waiting.find((wait) => wait.gate);
-  if (gate)
-    return {
-      command: null,
-      reason: `Waiting on ${gate.gate}; Factory carries on by itself once that is done.`,
-    };
-  if (row.running.length)
-    return { command: null, reason: `Running ${row.running.join(", ")}.` };
-  if (row.waiting.length) {
-    const first = [...row.waiting].sort((a, b) =>
-      a.nextAt.localeCompare(b.nextAt),
-    )[0]!;
-    return {
-      command: `factory retry ${issue}`,
-      reason: `${first.step} retries by itself at ${displayTime(first.nextAt)}; retry runs it now.`,
-    };
-  }
-  if (row.waitsOn)
-    return {
-      command: null,
-      reason:
-        "slot" in row.waitsOn
-          ? "Waiting on a free slot."
-          : `Waiting on Objective #${row.waitsOn.paths}, which owns overlapping paths.`,
-    };
-  return {
-    command: null,
-    reason: `The next ${row.status} step starts shortly.`,
-  };
-}
-
-/**
- * The running service's record, from `service.json`: its crash loop (the
- * deaths in a row before this start, and when it resumes interrupted
- * steps; shown until the run has lived 10 min past that time), a problem
- * that pauses its GitHub effects, and the Objectives waiting for a slot or
- * on another's paths.
- */
-function serviceRecord(paths: Paths): ServiceView {
-  try {
-    const record = JSON.parse(
-      readFileSync(join(paths.root, "service.json"), "utf8"),
-    ) as {
-      starts?: string[];
-      resumeAt?: string;
-      problem?: string;
-      waits?: ServiceView["waits"];
-    };
-    return {
-      ...(record.resumeAt &&
-      Date.now() <= Date.parse(record.resumeAt) + 10 * 60 * 1000
-        ? {
-            crashLoop: {
-              crashes: (record.starts?.length ?? 1) - 1,
-              resumeAt: record.resumeAt,
-            },
-          }
-        : {}),
-      ...(typeof record.problem === "string"
-        ? { problem: record.problem }
-        : {}),
-      waits: record.waits ?? {},
-    };
-  } catch {
-    return { waits: {} };
-  }
 }
 
 /** `factory setup`: setup.ts writes and checks; this prints its report. */
@@ -868,12 +581,6 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
   return report.status === "configured" ? 0 : 1;
 }
 
-function eventLine(event: LogEvent): string {
-  const { at, step, event: kind, ...rest } = event;
-  const detail = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : "";
-  return `${displayTime(at)}${step ? ` ${step}` : ""} ${kind ?? ""}${detail}`;
-}
-
 /** `factory log ISSUE [--tail N] [--follow] [--json]`. */
 async function logCommand(
   paths: Paths,
@@ -882,8 +589,6 @@ async function logCommand(
 ): Promise<number> {
   const issue = issueOf(args);
   const tail = args.flags.tail === undefined ? 50 : Number(args.flags.tail);
-  if (!Number.isInteger(tail) || tail < 0)
-    throw usage("--tail takes a whole number of events, such as --tail 100");
   const secrets = configOf(repository)?.secrets ?? [];
   // Redacted before formatting, so no escaped form of a secret slips past.
   const print = (event: LogEvent) => {
@@ -932,29 +637,13 @@ async function queueCommand(
   repository: string,
   args: Args,
 ): Promise<number> {
-  const action = args.positional[1];
-  if (args.positional.length > 2)
-    throw usage(`queue ${action} takes no issue numbers`);
-  const modes: Record<string, QueueMode> = {
-    pause: "paused",
-    drain: "draining",
-    resume: "running",
-  };
-  if (action && modes[action]) {
-    if (args.flags.json !== undefined)
-      throw usage(
-        `--json belongs to factory queue list; use factory queue ${action}`,
-      );
+  const action = args.positional[1]!;
+  if (action !== "list")
     return await request(paths, {
       kind: "queue",
       issue: 0,
-      mode: modes[action],
+      mode: QUEUE_MODES[action]!,
     });
-  }
-  if (action !== "list")
-    throw usage(
-      `Unknown queue action ${action ?? "(none)"}; use factory queue list, pause, resume or drain`,
-    );
   const config = configOf(repository);
   if (!config)
     throw new Refusal(
@@ -1107,11 +796,7 @@ async function sent(
  * No model call, no request, no state. Exit 1 when it can't be used.
  */
 async function recipe(repository: string, args: Args): Promise<number> {
-  const file = args.flags.file;
-  if (!file || !isAbsolute(file))
-    throw usage("recipe needs --file ABSOLUTE_OBJECTIVE");
-  if (!lstatSync(file, { throwIfNoEntry: false })?.isFile())
-    throw usage(`recipe --file ${file} isn't a regular file`);
+  const file = args.flags.file!;
   const config = loadConfig(repository);
   // A local file has no GitHub rendering: its sections come from the
   // Markdown itself.
@@ -1172,32 +857,26 @@ async function serviceLive(paths: Paths): Promise<boolean> {
 
 interface Args {
   positional: string[];
+  /** Switches (as "") and values, by name. */
   flags: Record<string, string>;
-  /** Each value of an option that may repeat, in order. */
+  /** Each list option's values, in order. */
   lists: Record<string, string[]>;
 }
 
+/** The issue number a checked command line names. */
 function issueOf(args: Args): number {
-  const command = args.positional[0];
-  const issue = Number(args.positional[1]);
-  if (!Number.isInteger(issue) || issue <= 0)
-    throw usage(
-      `${command} needs an issue number: factory ${command} ${COMMANDS[command!]?.args}`,
-    );
-  return issue;
+  return Number(args.positional[1]);
 }
 
 /**
  * The command line, checked where it enters: an unknown command, an option
- * the command doesn't take, a missing value or an extra argument is
- * refused with how to write it.
+ * the command doesn't take, a missing value, an extra argument, or what the
+ * command's own check refuses, with how to write it.
  */
 function parse(argv: string[]): Args {
-  const positional: string[] = [];
-  const flags: Record<string, string> = {};
-  const lists: Record<string, string[]> = {};
+  const args: Args = { positional: [], flags: {}, lists: {} };
   if (argv.includes("--help") || argv.includes("-h"))
-    return { positional: ["help"], flags, lists };
+    return { ...args, positional: ["help"] };
   // The command is the first word that isn't an option or an option's
   // value, so options may come before it.
   let command: string | undefined;
@@ -1210,39 +889,44 @@ function parse(argv: string[]): Args {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (!arg.startsWith("--")) {
-      positional.push(arg);
+      args.positional.push(arg);
       continue;
     }
     const name = arg.slice(2);
-    const takesValue = name === "repo" ? true : spec?.flags[name];
-    if (takesValue === undefined) throw usage(misplaced(name, command));
-    if (!takesValue) {
-      flags[name] = "";
+    const kind = name === "repo" ? "value" : spec?.flags[name];
+    if (kind === undefined) throw usage(misplaced(name, command));
+    if (kind === "switch") {
+      args.flags[name] = "";
       continue;
     }
     const value = argv[i + 1];
     if (value === undefined || value.startsWith("--"))
       throw usage(
-        `--${name} needs a value: factory ${command ?? "<command>"} --${name} ${name.toUpperCase()}`,
+        `--${name} needs a value: factory ${command ?? "<command>"} ${flagForm(name, kind)}`,
       );
-    if (takesValue === "many") lists[name] = [...(lists[name] ?? []), value];
-    else flags[name] = value;
+    if (kind === "list")
+      args.lists[name] = [...(args.lists[name] ?? []), value];
+    else args.flags[name] = value;
     i++;
   }
-  const most = command
-    ? 1 + (spec?.args.split(" ").filter(Boolean).length ?? 0)
-    : 0;
-  if (command && positional.length > most)
+  if (!command || !spec) return args;
+  const most = 1 + spec.args.split(" ").filter(Boolean).length;
+  if (args.positional.length > most)
     throw usage(
-      `factory ${command} takes ${spec?.args || "no arguments"}; unexpected ${positional.slice(most).join(" ")}`,
+      `factory ${command} takes ${spec.args || "no arguments"}; unexpected ${args.positional.slice(most).join(" ")}`,
     );
-  return { positional, flags, lists };
+  const problem = spec.check?.(args);
+  if (problem) throw usage(problem);
+  return args;
 }
 
 /** Whether any command's option `name` takes a value (`--repo` does everywhere). */
 function takesValueAnywhere(name: string): boolean {
   return (
-    name === "repo" || Object.values(COMMANDS).some((spec) => spec.flags[name])
+    name === "repo" ||
+    Object.values(COMMANDS).some(
+      (spec) => spec.flags[name] !== undefined && spec.flags[name] !== "switch",
+    )
   );
 }
 
@@ -1253,11 +937,13 @@ function misplaced(name: string, command: string | undefined): string {
   const owners = Object.entries(COMMANDS)
     .filter(([, spec]) => name in spec.flags)
     .map(([owner]) => owner);
-  if (owners.length)
-    return `--${name} belongs to factory ${owners.join(", ")}; use factory ${owners[0]} ${COMMANDS[owners[0]!]!.args} --${name}${COMMANDS[owners[0]!]!.flags[name] ? ` ${name.toUpperCase()}` : ""}`.replace(
+  if (owners.length) {
+    const owner = COMMANDS[owners[0]!]!;
+    return `--${name} belongs to factory ${owners.join(", ")}; use factory ${owners[0]} ${owner.args} ${flagForm(name, owner.flags[name])}`.replace(
       /\s+/g,
       " ",
     );
+  }
   return `Unknown option --${name} for factory ${command ?? "(no command)"}; see factory help`;
 }
 

@@ -44,6 +44,8 @@ Run `factory status ISSUE --json`. Each entry in `objectives` has:
 
 - `status`: `checking`, `planning`, `building`, `finishing`, `holding`, `done`, `failed`, `cancelled`, or `unreadable`.
 - `mode`: `running`, `paused` or `draining`, the operator's control of this Objective.
+- `phase`: the headline: the stage (`checking`, `planning`, `building`, `finishing`) and how many questions are open, or the status when it ended. `endedAt`: when it reached `done` or `cancelled`.
+- `items`: the Work Item table, each `{id, kind, phase, pr, repairs, hold}`: `phase` is its step now (`review (running)`, `ci (waiting)`, `work (held)`), else the last phase done (`validated`, `merged`), else `pending`; `repairs` counts the repairs used; `hold` is the id of the question that stops it. `plan`: the full current plan.
 - `holds`: the open questions, oldest first, each `{id, step, item?, question, options, cause, askedAt}` (see Answer a hold). A hold with `item` stops only that Work Item and the items that depend on it; one without stops the whole Objective.
 - `waiting`: steps that will retry on their own, each with `step`, `nextAt`, `lastError` and `since`. With `gate` set, the step waits on a person outside Factory, such as an environment approval or a required review; name that gate to the operator.
 - `waitsOn`: `{slot: true}` (no free slot) or `{paths: N}` (Objective #N owns overlapping paths), else `null`.

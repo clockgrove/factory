@@ -14,7 +14,6 @@ import type {
   PermissionRequest,
   SessionEvent,
 } from "@github/copilot-sdk";
-import { hold } from "../engine.js";
 import { errorMessage } from "../text.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
@@ -31,6 +30,7 @@ import {
   type PlannerCall,
   PlannerError,
   type PlannerModels,
+  providerOutcome,
 } from "./planner.js";
 
 export const DEFAULT_COPILOT_MODELS: PlannerModels = {
@@ -465,16 +465,7 @@ export class CopilotWorker implements Worker {
       }
       record.outcome = error.outcome;
       record.reason = error.message;
-      if (error.outcome === "retry")
-        return {
-          kind: "retry",
-          reason: error.message,
-          ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
-          ...(error.wait && { wait: error.wait }),
-        };
-      return error.outcome === "hold"
-        ? hold(error.message, error.answers)
-        : hold(`${error.message}. Narrow the Work Item, then answer retry.`);
+      return providerOutcome(error);
     } finally {
       record.ms = Date.now() - started;
       input.log(record);

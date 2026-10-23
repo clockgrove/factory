@@ -47,7 +47,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { create, extract, list } from "tar";
 import { crashPoint } from "../crash.js";
-import { hold, objectiveWide } from "../engine.js";
+import { hold } from "../engine.js";
 import { validPath } from "../objective.js";
 import { ContainedError, copyContained } from "../paths.js";
 import { errorMessage } from "../text.js";
@@ -61,7 +61,7 @@ import { hostGit } from "../worktree.js";
 import { serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
 import type { WorkerConfig } from "./config.js";
-import { detail, PlannerError } from "./planner.js";
+import { detail, PlannerError, providerOutcome } from "./planner.js";
 
 const RESULT_MAX_BYTES = 200 * 1024 * 1024;
 const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
@@ -219,8 +219,7 @@ async function pack(
         await copyContained(worktree, path, copy, Number.MAX_SAFE_INTEGER);
       } catch (error) {
         if (!(error instanceof ContainedError)) throw error;
-        throw new PlannerError(
-          "hold",
+        throw PlannerError.itemHold(
           `Managed workers carry regular files only, reached without links, and ${path} isn't one (${error.message}). Run this Work Item on a local worker provider, or cancel.`,
         );
       }
@@ -382,16 +381,7 @@ function retryAt(header: string | null | undefined): string | undefined {
 
 /** A classified failure as the worker's outcome; anything else is retried. */
 function outcome(error: unknown, signal: AbortSignal): WorkerResult {
-  if (error instanceof PlannerError) {
-    if (error.outcome === "retry")
-      return {
-        kind: "retry",
-        reason: error.message,
-        ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
-        ...(error.wait && { wait: error.wait }),
-      };
-    return objectiveWide(hold(error.message));
-  }
+  if (error instanceof PlannerError) return providerOutcome(error);
   if (signal.aborted) throw signal.reason ?? error;
   return {
     kind: "retry",
@@ -706,8 +696,7 @@ export class OpenAIManagedWorker extends ManagedWorker {
   ): Promise<string> {
     const { packed, scratch, record, signal, marker, note, spend } = run;
     if (packed.bytes > OPENAI_INPUT_MAX_BYTES)
-      throw new PlannerError(
-        "hold",
+      throw PlannerError.itemHold(
         `This Work Item's files are ${packed.bytes} bytes, over the OpenAI Agents API's 5 MiB inline input limit. Run it on another worker provider, or cancel.`,
       );
     apiKey(this.config.apiKeyEnv);
@@ -1134,8 +1123,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
       if (!reason) continue;
       record.finalResponse = message;
       if (reason === "budget_reached")
-        throw new PlannerError(
-          "hold",
+        throw PlannerError.itemHold(
           `The Claude managed session reached its budget of ${this.config.budgetCents} cents before finishing. Answer retry to start a fresh session (it counts against this Work Item's runs and itemBudgetCents), or cancel.`,
         );
       if (reason === "retries_exhausted")

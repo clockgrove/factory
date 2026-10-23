@@ -194,9 +194,11 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
     capture?.planned &&
     plannedReviewArtifactsProblem(capture.planned, capture.configured);
   if (dropped)
-    return hold(
-      `${dropped}. Restore these selectors in the installation's reviewArtifacts (others may stay or be added) and answer retry, answer replan to plan again with the current selectors, or cancel.`,
-      ["retry", "replan", "cancel"],
+    return objectiveWide(
+      hold(
+        `${dropped}. Restore these selectors in the installation's reviewArtifacts (others may stay or be added) and answer retry, answer replan to plan again with the current selectors, or cancel.`,
+        ["retry", "replan", "cancel"],
+      ),
     );
   const selectors = capture ? selectorsFor(capture.configured, item) : [];
   const refusal = await pinRefusal(

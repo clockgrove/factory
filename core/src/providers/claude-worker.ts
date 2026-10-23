@@ -69,7 +69,12 @@ import {
   usageOf,
 } from "./claude.js";
 import { CLAUDE_TOOLS } from "./config.js";
-import { detail, IdleWatchdog, PlannerError } from "./planner.js";
+import {
+  detail,
+  IdleWatchdog,
+  PlannerError,
+  providerOutcome,
+} from "./planner.js";
 
 // Configuration
 
@@ -987,9 +992,11 @@ function failure(
   const failed = failedResult(result, facts, ended);
   switch (failed.kind) {
     case "billing":
-      return objectiveWide(hold(failed.message));
+      return providerOutcome(new PlannerError("hold", failed.message));
     case "login":
-      return objectiveWide(hold(`${LOGIN_HOLD} (${ended})`));
+      return providerOutcome(
+        new PlannerError("hold", `${LOGIN_HOLD} (${ended})`),
+      );
     case "too-long":
       return hold(
         `The Work Item's prompt is larger than the worker model's context window; choose a model with a larger window or replan the item smaller, then answer retry (${ended})`,
@@ -1051,8 +1058,9 @@ export class ClaudeWorker implements Worker {
         import("zod"),
       ]);
     } catch (error) {
-      return objectiveWide(
-        hold(
+      return providerOutcome(
+        new PlannerError(
+          "hold",
           `The Claude worker needs the optional @anthropic-ai/claude-agent-sdk package; install it, then answer retry (${detail(String(error))})`,
         ),
       );
@@ -1061,8 +1069,7 @@ export class ClaudeWorker implements Worker {
     try {
       login = serviceLoginEnvironment();
     } catch (error) {
-      if (error instanceof PlannerError)
-        return objectiveWide(hold(error.message));
+      if (error instanceof PlannerError) return providerOutcome(error);
       throw error;
     }
     const { config } = this;

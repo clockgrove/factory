@@ -936,6 +936,48 @@ test("an Objective question from an item step stops every item, once", async () 
   await stopped(service);
 });
 
+test("a Codex worker's login or quota hold on one item stops every item, once", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { codexFailure } = await import("../dist/providers/codex.js");
+  const { providerOutcome } = await import("../dist/providers/planner.js");
+  const { newObjective } = await import("../dist/state.js");
+  // The messages a failed Codex turn reports (codex.ts codexFailure), as
+  // the Codex worker maps them (codex-worker.ts outcome).
+  for (const failure of [
+    "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
+    "Quota exceeded. Check your plan and billing details.",
+  ]) {
+    const started = [];
+    const step = (key) => ({
+      key,
+      deadlineMs: 60_000,
+      run: async () => {
+        started.push(key);
+        return { kind: "done" };
+      },
+    });
+    const runner = new ObjectiveRunner(
+      newObjective(1, new Date()),
+      {
+        steps: () => [step("item:a:work"), step("item:b:work")],
+        status: () => "building",
+      },
+      mkdtempSync(join(tmpdir(), "factory-scope-")),
+      { write() {} },
+      { id: "run", finished: 0, resumeAt: 0 },
+    );
+    const held = providerOutcome(codexFailure(failure));
+    runner.apply("item:a:work", held);
+    assert.equal(runner.state.holds.length, 1, failure);
+    assert.equal(runner.state.holds[0].item, undefined, "an Objective hold");
+    runner.tick();
+    assert.deepEqual(started, [], "item b waits too");
+    // b, already running, meets the same failure: still one question.
+    runner.apply("item:b:work", held);
+    assert.equal(runner.state.holds.length, 1);
+  }
+});
+
 test("a new wait class starts its own budget and ends a run of errors", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);

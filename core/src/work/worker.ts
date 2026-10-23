@@ -4,6 +4,7 @@
  * providers/claude-worker.ts). Factory, not the worker, collects and commits
  * the result (work/collect.ts).
  */
+import type { HoldScope } from "../engine.js";
 import type { WorkItem } from "../planning/types.js";
 import type { Answer, Wait } from "../state.js";
 
@@ -50,7 +51,14 @@ export type WorkerResult = (
   /** Usage or rate limit (`wait`), lost turn; an idle timeout has `afterMs: -1` (an error). */
   | { kind: "retry"; reason: string; afterMs?: number; wait?: Wait }
   /** Login expired, sandbox unavailable, configuration fault. */
-  | { kind: "hold"; question: string; answers: string[]; recommended: string }
+  | {
+      kind: "hold";
+      question: string;
+      answers: string[];
+      recommended: string;
+      /** Absent: the Work Item's (see planner.ts PlannerError.scope). */
+      scope?: HoldScope;
+    }
 ) & {
   /** The Work Item's spend after this run, kept in state. */
   spend?: WorkerSpend;

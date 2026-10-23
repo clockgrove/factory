@@ -12,7 +12,11 @@ import { defaultHead } from "../git.js";
 import { type GitHub, githubOutcome } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { checkObjective } from "../objective.js";
-import { type Planner, PlannerError } from "../providers/planner.js";
+import {
+  type Planner,
+  PlannerError,
+  providerOutcome,
+} from "../providers/planner.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import type { Answer, ObjectiveState } from "../state.js";
@@ -1091,26 +1095,18 @@ export async function guarded(
   try {
     return await work();
   } catch (error) {
-    if (error instanceof PlannerError) {
-      // A usage limit waits for its reset; an idle model is an error
-      // (afterMs -1); anything else is a transient provider failure.
-      if (error.outcome === "retry")
-        return {
-          kind: "retry",
-          reason: error.message,
-          ...(error.afterMs !== undefined ? { afterMs: error.afterMs } : {}),
-          ...(error.wait ? { wait: error.wait } : {}),
-        };
-      if (error.outcome === "hold")
-        return objectiveWide(hold(error.message, error.answers));
-      // Too large for the model, or refused: the Objective has to change.
-      return objectiveWide(
-        hold(
-          `${error.message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
-          ["replan", "retry", "cancel"],
+    // A usage limit waits for its reset; an idle model is an error
+    // (afterMs -1); a hold takes the provider error's scope. Too large
+    // for the model, or refused: the Objective has to change.
+    if (error instanceof PlannerError)
+      return providerOutcome(error, (message) =>
+        objectiveWide(
+          hold(
+            `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
+            ["replan", "retry", "cancel"],
+          ),
         ),
       );
-    }
     const outcome = githubOutcome(
       error,
       repository,

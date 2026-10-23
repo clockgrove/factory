@@ -5,6 +5,7 @@
  */
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { type HoldScope, hold, type Outcome } from "../engine.js";
 import type { Wait } from "../state.js";
 
 export const PLANNER_PHASES = [
@@ -53,6 +54,15 @@ export interface Planner {
  * error the engine retries.
  */
 export class PlannerError extends Error {
+  /**
+   * What a `hold` stops (engine.ts HoldScope). A provider failure that
+   * holds is about its login, billing, quota or model, its package or
+   * setup, or the host: installation-, account- or provider-wide, so it is
+   * the Objective's, asked once for every item (CORE.md#Holds and answers).
+   * Only a cause that is one Work Item's own (its files, its review images,
+   * its session's budget) is `item`.
+   */
+  readonly scope: HoldScope;
   constructor(
     readonly outcome: "retry" | "hold" | "fail",
     reason: string,
@@ -62,9 +72,50 @@ export class PlannerError extends Error {
     readonly wait?: Wait,
     /** For `hold`: its answers, when not `retry` and `cancel`. */
     readonly answers?: string[],
+    /** For `hold`: `item` when the cause is the Work Item's own. */
+    scope?: HoldScope,
   ) {
     super(reason);
+    this.scope = scope ?? (outcome === "hold" ? "objective" : "item");
   }
+
+  /** A hold whose cause is one Work Item's own: it stops that item only. */
+  static itemHold(reason: string): PlannerError {
+    return new PlannerError(
+      "hold",
+      reason,
+      undefined,
+      undefined,
+      undefined,
+      "item",
+    );
+  }
+}
+
+type Retried = Extract<Outcome, { kind: "retry" }>;
+type Held = Extract<Outcome, { kind: "hold" }>;
+
+/**
+ * A classified provider failure as a step's outcome: the one rule every
+ * provider's planner and workers share. A hold takes the error's scope;
+ * `fail` (a turn too large for the model) is the Work Item's, worded by
+ * `failed`.
+ */
+export function providerOutcome(
+  error: PlannerError,
+  failed: (message: string) => Held = (message) =>
+    hold(`${message}. Narrow the Work Item, then answer retry.`),
+): Retried | Held {
+  if (error.outcome === "retry")
+    return {
+      kind: "retry",
+      reason: error.message,
+      ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
+      ...(error.wait && { wait: error.wait }),
+    };
+  if (error.outcome === "fail") return failed(error.message);
+  const held = hold(error.message, error.answers);
+  return error.scope === "objective" ? { ...held, scope: "objective" } : held;
 }
 
 /** One model choice. `serviceTier` is Codex-only: "fast" asks for priority. */
@@ -147,8 +198,7 @@ export function callImages(call: PlannerCall): string[] {
       readable = false;
     }
     if (!readable)
-      throw new PlannerError(
-        "hold",
+      throw PlannerError.itemHold(
         `Review image ${image} is not a readable absolute PNG file; restore it, then answer retry`,
       );
   }

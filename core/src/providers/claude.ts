@@ -831,8 +831,7 @@ export class ClaudePlanner implements Planner {
       prompt = claudePrompt(call.prompt, callImages(call));
     } catch (error) {
       if (error instanceof PlannerError) throw error;
-      throw new PlannerError(
-        "hold",
+      throw PlannerError.itemHold(
         `A review image could not be read; restore it, then answer retry (${detail(String(error))})`,
       );
     }

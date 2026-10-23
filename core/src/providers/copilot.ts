@@ -38,9 +38,8 @@ export const DEFAULT_COPILOT_MODELS: PlannerModels = {
   reviewer: { model: "gpt-6.1-sol", effort: "medium" },
 };
 
-/** Silence that ends a call: planning and review, then a worker turn. */
+/** Silence that ends a planning or review call; a worker turn uses `worker.idleSeconds`. */
 const PLANNER_IDLE_MS = 15 * 60 * 1000;
-const WORKER_IDLE_MS = 15 * 60 * 1000;
 const CLEANUP_MS = 5_000;
 
 const READ_TOOLS = ["view", "rg", "glob"];
@@ -413,7 +412,8 @@ export interface CopilotWorkerOptions {
   model: ModelChoice;
   /** The tool ceiling, from providers/config.ts COPILOT_TOOLS. */
   tools: string[];
-  idleMs?: number;
+  /** `worker.idleSeconds`, in ms. */
+  idleMs: number;
 }
 
 /** Implementation turns through Copilot with file tools inside the worktree. */
@@ -442,7 +442,7 @@ export class CopilotWorker implements Worker {
         writes: !readOnly,
         system: WORKER_SYSTEM,
         prompt: input.prompt,
-        idleMs: this.options.idleMs ?? WORKER_IDLE_MS,
+        idleMs: this.options.idleMs,
         signal: input.signal,
         onEvent: (event) => {
           if (event.type === "tool.execution_start")

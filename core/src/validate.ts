@@ -69,6 +69,37 @@ import {
 
 const MINUTE = 60_000;
 
+/** `validation.commandTimeoutSeconds` when the configuration leaves it out. */
+export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 30 * 60;
+
+/** Room in a validation deadline for the checkout, Git LFS, pins and capture. */
+const VALIDATION_MARGIN_MS = 15 * MINUTE;
+
+/**
+ * The deadline of a step that validates a Work Item, or a plan's final
+ * validation: every command it runs at its full limit, plus a margin. It
+ * grows with the commands, so a long command list never outlasts it.
+ */
+export function validationDeadlineMs(
+  of: WorkItem | Plan,
+  commandTimeoutMs: number,
+): number {
+  const { preparation, commands } =
+    "validation" in of ? validationSequence(of) : finalSequence(of);
+  return (
+    (preparation.length + commands.length) * commandTimeoutMs +
+    VALIDATION_MARGIN_MS
+  );
+}
+
+/** A Work Item's commands, with no preparation. */
+function validationSequence(item: WorkItem): {
+  preparation: string[];
+  commands: string[];
+} {
+  return { preparation: [], commands: item.validation.map((v) => v.command) };
+}
+
 export interface ValidateInput {
   /** The target clone; the fresh worktree is linked from it. */
   checkout: string;
@@ -84,8 +115,8 @@ export interface ValidateInput {
   /** The commit a later item started from, when not the base: its new scripts stay fixed too. */
   predecessor?: string;
   sandbox: SandboxConfig;
-  /** Each command's limit; past it the command failed. */
-  commandTimeoutMs?: number;
+  /** Each command's limit (`validation.commandTimeoutSeconds`); past it the command failed. */
+  commandTimeoutMs: number;
   /**
    * The worker's checkout, for its own Validate: files the commands produce
    * under the item's owned paths that Git ignores come back to it.
@@ -176,7 +207,7 @@ export type Validation =
 export async function validateTree(input: ValidateInput): Promise<Validation> {
   const { checkout, commit, plan, item } = input;
   const { preparation, commands } = item
-    ? { preparation: [], commands: item.validation.map((v) => v.command) }
+    ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   const { signal } = input;
@@ -355,7 +386,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         readOnlyFiles: linked.map((file) => file.path),
         ...(limit ? { outputLimit: limit } : {}),
         signal: input.signal,
-        timeoutMs: input.commandTimeoutMs ?? 30 * MINUTE,
+        timeoutMs: input.commandTimeoutMs,
       });
       if (run.kind === "fault")
         return objectiveWide(
@@ -389,7 +420,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       const overflow =
         run.diskOverflow ??
         (run.timedOut
-          ? `the command ran longer than ${Math.round((input.commandTimeoutMs ?? 30 * MINUTE) / 1000)} s and was stopped`
+          ? `the command ran longer than ${Math.round(input.commandTimeoutMs / 1000)} s and was stopped`
           : undefined);
       const passed = run.exitCode === 0 && !overflow;
       input.log({

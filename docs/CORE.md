@@ -170,14 +170,16 @@ A step's kept facts (`state.kept`) outlive repairs. A step forgets one by keepin
 | ---------------------- | -------------------------------------------------- | ----------------------------- |
 | GitHub request         | 60 s                                               | retry                         |
 | Plan, plan review      | 45 min each, 15 min idle                           | retry; hold after 3           |
-| Worker turn            | 2 h total, 15 min idle                             | retry; hold after 3           |
-| One validation command | from configuration                                 | repair                        |
+| Worker turn            | 2 h total, 15 min idle (Copilot: `idleSeconds`)    | retry; hold after 3           |
+| One validation command | `validation.commandTimeoutSeconds` (30 min)        | repair                        |
+| Validation step        | its commands × the command timeout, + 15 min       | retry; hold after 3           |
+| Final validation       | its commands × the command timeout, + 30 min       | retry; hold after 3           |
 | Result or final review | 45 min, 15 min idle                                | retry; hold after 3           |
 | CI on a PR             | a needed check registers within 15 min of the push | hold                          |
 | CI queued or running   | 3 h of transient waiting (see [Waits](#waits))     | hold with `wait`              |
 | Hold                   | none: it waits for a person                        | a reminder comment after 24 h |
 
-Step deadlines are fixed in the code; the engine's limits take shorter test timings from the environment (`FACTORY_DEADLINE_MS`, `FACTORY_WAIT_MS`, `FACTORY_NOTE_MS`, `FACTORY_REMIND_MS`, `FACTORY_BACKOFF_MS`).
+Step deadlines are fixed in the code, with two configured bounds: `validation.commandTimeoutSeconds` (default 1800) limits each validation command and sets the validation deadlines above, so a plan with many commands never outlasts its step, and a Copilot provider's `worker.idleSeconds` (default 900) is its worker's idle bound. The engine's limits take shorter test timings from the environment (`FACTORY_DEADLINE_MS`, `FACTORY_WAIT_MS`, `FACTORY_NOTE_MS`, `FACTORY_REMIND_MS`, `FACTORY_BACKOFF_MS`).
 
 ## Queue
 

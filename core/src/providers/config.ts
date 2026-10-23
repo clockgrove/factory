@@ -52,6 +52,8 @@ export type WorkerConfig =
       effort: string;
       /** The tool ceiling; the SDK names grep `rg`. */
       tools: string[];
+      /** Seconds without a Copilot event before the run counts as idle. */
+      idleSeconds: number;
     }
   | {
       kind: "openai-agents";
@@ -309,6 +311,7 @@ const WORKER_SPECS: Record<WorkerKind, Spec> = {
       value === undefined
         ? COPILOT_TOOLS
         : names(COPILOT_TOOLS, false)(value, path, problems),
+    idleSeconds: whole(1, 15 * 60),
   },
   "openai-agents": {
     kind: text(),

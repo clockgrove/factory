@@ -124,6 +124,8 @@ export interface ClaudeWorkerOptions {
   repository: string;
   /** Operator variables the worker's commands may see, by name. */
   allowedSecretNames?: readonly string[];
+  /** Each Validate command's limit: `validation.commandTimeoutSeconds`, in ms. */
+  commandTimeoutMs: number;
 }
 
 // Prompts
@@ -742,6 +744,7 @@ class Attempt {
       plan: options.plan,
       blocks: options.blocks,
       sandbox: options.sandbox,
+      commandTimeoutMs: options.commandTimeoutMs,
       returnTo: input.worktree,
       predecessor: input.base !== options.plan.base ? input.base : undefined,
       signal,

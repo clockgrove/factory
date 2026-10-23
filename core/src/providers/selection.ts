@@ -60,11 +60,13 @@ export function providerWorker(
           repository: config.repository,
           config: worker.settings,
           allowedSecretNames,
+          commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
         });
       case "copilot":
         return new CopilotWorker({
           model: { model: worker.model, effort: worker.effort },
           tools: worker.tools,
+          idleMs: worker.idleSeconds * 1000,
         });
       case "openai-agents":
         return new OpenAIManagedWorker(worker);
@@ -90,9 +92,17 @@ export interface ProviderRoute {
   settings: ProviderConfig;
 }
 
-/** Settings as state stores them, so a frozen copy compares equal. */
+/**
+ * Settings as state stores them, so a frozen copy compares equal. Copilot's
+ * `idleSeconds` is a bound, not a choice the Objective froze: changing it
+ * strands nothing.
+ */
 export const frozenSettings = (settings: ProviderConfig): ProviderConfig =>
-  JSON.parse(JSON.stringify(settings)) as ProviderConfig;
+  JSON.parse(
+    JSON.stringify(settings, (key, value) =>
+      key === "idleSeconds" ? undefined : value,
+    ),
+  ) as ProviderConfig;
 
 /**
  * Route each Objective to the provider it froze at admission. It runs only

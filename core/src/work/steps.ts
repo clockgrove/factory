@@ -83,7 +83,7 @@ import {
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
 import { type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { headAndTail } from "../text.js";
-import { validateTree } from "../validate.js";
+import { validateTree, validationDeadlineMs } from "../validate.js";
 import {
   addWorktree,
   hostGit,
@@ -202,7 +202,7 @@ export function deliverySteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   const steps = !built(state)
     ? buildSteps(state, deps)
     : !state.done.final
-      ? [finalStep(deps)]
+      ? [finalStep(state.done.plan as Plan, deps)]
       : !state.done["final-review"]
         ? [finalReviewStep(deps)]
         : !state.done.report
@@ -474,10 +474,17 @@ function itemStep(item: WorkItem, phase: Phase, deps: BuildDeps): Step {
         ? 2 * 60 * MINUTE
         : phase === "ci"
           ? 10 * MINUTE
-          : 45 * MINUTE,
+          : phase === "validate"
+            ? validationDeadlineMs(item, commandTimeoutMs(deps))
+            : 45 * MINUTE,
     run: (context) =>
       guarded(deps.config.repository, () => run(item, context, deps)),
   };
+}
+
+/** Each validation command's limit, in ms. */
+function commandTimeoutMs(deps: BuildDeps): number {
+  return deps.config.validation.commandTimeoutSeconds * 1000;
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1140,7 @@ async function validateStep(
     },
     media: validationMembers(plan, item, selection(state)),
     sandbox: config.sandbox,
+    commandTimeoutMs: commandTimeoutMs(deps),
     signal,
     log: context.log,
   });
@@ -2007,11 +2015,13 @@ interface FinalResult {
 const REPUSHED = "final:repushed";
 
 /** `final`: the final commands on the default branch head after every merge. */
-function finalStep(deps: BuildDeps): Step {
+function finalStep(plan: Plan, deps: BuildDeps): Step {
   return {
     key: "final",
     resource: "cpu",
-    deadlineMs: 60 * MINUTE,
+    // Final validation, then origin's media check.
+    deadlineMs:
+      validationDeadlineMs(plan, commandTimeoutMs(deps)) + 15 * MINUTE,
     run: (context) =>
       guarded(deps.config.repository, async () => {
         const { state, signal } = context;
@@ -2051,6 +2061,7 @@ function finalStep(deps: BuildDeps): Step {
           },
           media: members,
           sandbox: config.sandbox,
+          commandTimeoutMs: commandTimeoutMs(deps),
           signal,
           log: context.log,
         });

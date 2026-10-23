@@ -28,6 +28,7 @@ import {
   type ReviewArtifactSelector,
 } from "./review/artifacts.js";
 import { localRootRefusal, real } from "./sandbox.js";
+import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from "./validate.js";
 
 /** The installation's configuration, checked once when it's loaded. */
 export interface CoreConfig {
@@ -83,6 +84,13 @@ export interface CoreConfig {
    * the allowedSecretNames values and each managed provider's credential.
    */
   secrets: string[];
+  validation: {
+    /**
+     * Each validation command's limit; past it the command failed. A
+     * validation step's deadline is its commands times this, plus a margin.
+     */
+    commandTimeoutSeconds: number;
+  };
   finalValidation: {
     /** Commands every Objective's result must pass. */
     requiredCommands: string[];
@@ -492,6 +500,9 @@ export function loadConfig(repository: string): CoreConfig {
         },
         RETIRED.policy,
       ),
+      validation: object({
+        commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
+      }),
       finalValidation: object({
         requiredCommands: strings,
         ciOnlyCommands: strings,

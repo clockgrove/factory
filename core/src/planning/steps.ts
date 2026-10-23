@@ -4,6 +4,7 @@ import type { CoreConfig } from "../config.js";
 import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
 import { defaultHead } from "../git.js";
 import { type GitHub, GitHubError, TransientError } from "../github.js";
+import { planningKnowledge } from "../knowledge/index.js";
 import { parseObjective } from "../objective.js";
 import { type Planner, PlannerError } from "../providers/planner.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
@@ -873,8 +874,14 @@ async function planningFacts(
     requiredCommands: config.finalValidation.requiredCommands,
     ciOnlyCommands: config.finalValidation.ciOnlyCommands,
     extraCommands: allowedCommands(state),
-    // No playbook in the target reads as empty.
-    playbook: (await files.text(config.planning.playbook)) ?? "",
+    // No playbook in the target reads as empty. Knowledge adds the pinned
+    // Dream playbook and, for Adaptive workflow, planning context and memory.
+    playbook: await planningKnowledge({
+      issue: state.issue,
+      body: inputs.body,
+      files,
+      playbook: (await files.text(config.planning.playbook)) ?? "",
+    }),
     ...(files.signal ? { signal: files.signal } : {}),
   });
 }

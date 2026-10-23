@@ -12,6 +12,13 @@ import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { DEFAULT_LIMITS, hostLimits } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
+import { dreamCommand, runDream } from "./knowledge/dream.js";
+import { observeState } from "./knowledge/index.js";
+import {
+  configureKnowledge,
+  type KnowledgeSettings,
+  loadKnowledgeSettings,
+} from "./knowledge/settings.js";
 import { RunLog } from "./log.js";
 import { installationPaths, type Paths } from "./paths.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
@@ -31,8 +38,11 @@ import {
   type Hold,
   listObjectives,
   loadState,
+  type ObjectiveState,
   type ObjectiveStatus,
+  TERMINAL,
 } from "./state.js";
+import { errorMessage } from "./text.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /** Worker kinds setup can write: the managed ones need settings by hand. */
@@ -49,6 +59,12 @@ const USAGE = `Usage: factory <command> --repo OWNER/NAME
   answer ISSUE ANSWER [--text T] Answer an Objective's open question
   cancel ISSUE                   Cancel an Objective
   retry ISSUE                    Retry an Objective's waiting steps now
+  dream [--preview] [--budget-bytes N] [--input-budget-bytes N]
+                                 Propose a playbook from settled episodes
+  dream --record --objective N   Record a settled Objective's episode
+  dream --file PATH --approve|--reject SHA256
+                                 Decide a reviewed draft's exact bytes
+  dream --show                   Show the approved playbook and pending drafts
 `;
 
 interface StatusRow {
@@ -82,6 +98,7 @@ async function main(argv: string[]): Promise<number> {
       if (existsSync(configPath(repository))) {
         const config = loadConfig(repository);
         loaded = config;
+        configureKnowledge(knowledge(config, paths));
         const name = args.flags.provider ?? config.defaultProvider;
         if (!config.providers[name]) {
           process.stderr.write(
@@ -125,6 +142,7 @@ async function main(argv: string[]): Promise<number> {
         ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
         ...(sync ? { sync } : {}),
         ...(provider ? { provider } : {}),
+        ...(loaded ? { observe: observeState } : {}),
         ...(process.env.FACTORY_TICK_MS
           ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
           : {}),
@@ -150,6 +168,27 @@ async function main(argv: string[]): Promise<number> {
     case "cancel":
     case "retry":
       return await request(paths, command, args);
+    case "dream": {
+      const parsed = dreamCommand(args.flags);
+      if (typeof parsed === "string") {
+        process.stderr.write(`factory: ${parsed}\n`);
+        return 2;
+      }
+      const config = loadConfig(repository);
+      const log = new RunLog(paths.logs, "dream");
+      try {
+        return await runDream(parsed, {
+          settings: knowledge(config, paths),
+          planner: () => planner(config),
+          log: (event) => log.write(0, event),
+          settledState: (issue) => settledState(paths, issue),
+          out: (text) => process.stdout.write(text),
+        });
+      } catch (error) {
+        process.stderr.write(`factory: ${errorMessage(error)}\n`);
+        return 1;
+      }
+    }
     default:
       process.stderr.write(USAGE);
       return 2;
@@ -168,6 +207,31 @@ function planner(
   const provider = config.providers[name];
   if (!provider) throw new Error(`No provider ${JSON.stringify(name)}`);
   return providerPlanner(provider);
+}
+
+function knowledge(config: CoreConfig, paths: Paths): KnowledgeSettings {
+  return loadKnowledgeSettings({
+    repository: config.repository,
+    root: paths.root,
+    checkout: config.checkout,
+    allowedSecretNames: config.policy.allowedSecretNames,
+  });
+}
+
+/** An Objective's state once it is terminal with nothing left to run, or why not. */
+function settledState(paths: Paths, issue: number): ObjectiveState | string {
+  const loaded = loadState(paths.objectives, issue);
+  if (!loaded) return `Factory has no Objective #${issue}`;
+  if (loaded.kind === "unreadable")
+    return `#${issue} has unreadable state (${loaded.error})`;
+  const { state } = loaded;
+  if (
+    !TERMINAL.includes(state.status) ||
+    Object.keys(state.attempts).length > 0 ||
+    objectiveWorkflow().steps(state).length > 0
+  )
+    return `Objective #${issue} is ${state.status} and hasn't settled; record it once it is done, failed or cancelled and cleaned up`;
+  return state;
 }
 
 async function status(paths: Paths, args: Args): Promise<number> {
@@ -392,6 +456,9 @@ async function serviceLive(paths: Paths): Promise<boolean> {
   });
 }
 
+/** Flags that take no value. */
+const SWITCHES = ["json", "default", "record", "preview", "show"];
+
 interface Args {
   positional: string[];
   flags: Record<string, string>;
@@ -408,7 +475,7 @@ function parse(argv: string[]): Args {
     }
     const name = arg.slice(2);
     const next = argv[i + 1];
-    if (name === "json" || name === "default") flags[name] = "";
+    if (SWITCHES.includes(name)) flags[name] = "";
     else if (next !== undefined) {
       flags[name] = next;
       i++;

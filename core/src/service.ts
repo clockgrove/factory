@@ -49,6 +49,12 @@ export interface ServeOptions {
   sync?: GitHubSync;
   /** The provider each newly admitted Objective freezes. */
   provider?: FrozenProvider;
+  /**
+   * Observes an Objective whenever its status changes, and each one once
+   * at startup; `settled` is terminal with nothing left to run. It reads
+   * the state and never changes it (knowledge records memory here).
+   */
+  observe?: (state: ObjectiveState, settled: boolean) => void;
 }
 
 const KEEP_REQUEST_IDS = 50;
@@ -75,6 +81,8 @@ export async function serve(options: ServeOptions): Promise<number> {
   const log = new RunLog(paths.logs, runId);
   const runners = new Map<number, ObjectiveRunner>();
   const unreadable = new Map<number, string>();
+  /** The status (and settledness) each Objective was last observed at. */
+  const observed = new Map<number, string>();
 
   // Only the lock holder writes state, so leftover temporary files are from a crash.
   for (const name of readdirSync(paths.objectives))
@@ -212,6 +220,22 @@ export async function serve(options: ServeOptions): Promise<number> {
         // A failed save: that Objective's state stays as on disk and is tried again next tick.
         log.write(runner.state.issue, {
           event: "tick-failed",
+          error: String(error),
+        });
+      }
+    }
+    for (const runner of options.observe ? runners.values() : []) {
+      const { state } = runner;
+      const settled = TERMINAL.includes(state.status) && !runner.hasWork;
+      const mark = `${state.status}:${settled}`;
+      if (observed.get(state.issue) === mark) continue;
+      observed.set(state.issue, mark);
+      try {
+        options.observe!(state, settled);
+      } catch (error) {
+        // Observation never changes a run; the next status change tries again.
+        log.write(state.issue, {
+          event: "observe-failed",
           error: String(error),
         });
       }

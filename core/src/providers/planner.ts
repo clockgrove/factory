@@ -11,7 +11,8 @@ export type PlannerPhase =
   | "graph-review"
   | "result-review"
   | "objective-review"
-  | "diagnosis";
+  | "diagnosis"
+  | "dream";
 
 export interface PlannerCall {
   role: "planner" | "reviewer";

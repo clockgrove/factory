@@ -26,6 +26,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome } from "./engine.js";
+import { knowledgeSettings } from "./knowledge/settings.js";
 import { githubEmptyField, markdownLines } from "./markdown.js";
 import {
   hydrateTree,
@@ -1405,7 +1406,37 @@ export function declarationProblems(body: string): string[] {
   }
   const workspace = workspaceAdditions(body).problem;
   if (workspace) problems.push(workspace);
+  const adaptive = adaptiveWorkflow(body);
+  if (adaptive.problem) problems.push(adaptive.problem);
+  else if (adaptive.enabled && !knowledgeSettings()?.planningContext)
+    problems.push(
+      "Adaptive workflow is enabled, but this installation admits no planning context. Add a planningContext section (enabled, bounds, selectors, memory) to the configuration and restart the service, or set the section to disabled.",
+    );
   return problems;
+}
+
+/** The Objective's Adaptive workflow section: on only when it reads `enabled`. */
+export function adaptiveWorkflow(body: string): {
+  enabled: boolean;
+  problem?: string;
+} {
+  const found = declaration(body, "adaptive workflow", "Adaptive workflow");
+  if (!found.lines)
+    return { enabled: false, ...(found.problem && { problem: found.problem }) };
+  const entries = found.lines.filter((line) => line.text.trim());
+  if (entries.length === 1 && githubEmptyField(entries[0]!))
+    return { enabled: false };
+  const selection =
+    entries.length === 1 && !entries[0]!.fenced
+      ? entries[0]!.text.trim()
+      : undefined;
+  if (selection !== "enabled" && selection !== "disabled")
+    return {
+      enabled: false,
+      problem:
+        "Adaptive workflow requires exactly enabled or disabled as its only line.",
+    };
+  return { enabled: selection === "enabled" };
 }
 
 // ---------------------------------------------------------------------------

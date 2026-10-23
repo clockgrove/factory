@@ -1098,6 +1098,83 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   await stopped(service);
 });
 
+test("an execution profile frozen at admission is kept through a config change; a removed one holds with retry", async () => {
+  const inst = installation();
+  const providers = {
+    codex: { planner: "codex", worker: { kind: "codex" } },
+    claude: { planner: "claude", worker: { kind: "claude" } },
+  };
+  const profiles = {
+    careful: { provider: "claude", description: "Delicate changes." },
+  };
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    { providers, defaultProvider: "codex", execution: { profiles } },
+  );
+  seed(inst, 46);
+  const admitted = stateOf(inst, 46).frozen;
+  const careful = () =>
+    stateOf(inst, 46).frozen.config.execution.profiles.careful;
+  assert.equal(careful().settings.planner, "claude");
+  const model = careful().settings.worker.settings.model;
+  // The profile's provider changes model: the Objective holds and keeps
+  // the frozen worker settings.
+  const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+  config.providers.claude.worker.model = "another-model";
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  let service = serve(inst);
+  await until(() => stateOf(inst, 46).holds.length > 0, "the question");
+  const [changed] = stateOf(inst, 46).holds;
+  assert.equal(changed.step, "config");
+  assert.match(
+    changed.question,
+    /execution\.profiles\.careful\.settings\.worker\.settings\.model/,
+  );
+  assert.equal(careful().settings.worker.settings.model, model);
+  assert.equal(stateOf(inst, 46).frozen.digest, admitted.digest);
+  await stopped(service);
+  // The profile is gone: only restoring it helps.
+  config.providers.claude.worker = { kind: "claude" };
+  config.execution = {};
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  service = serve(inst);
+  await until(() => status(inst).service === "running", "service");
+  // adopt would freeze a configuration without the profile: the question
+  // is asked again, and offers only restoring it.
+  const late = cli(inst, "answer", "46", "adopt", "--question", changed.id);
+  assert.equal(refusal(late), "stale_question");
+  await until(
+    () => stateOf(inst, 46).holds.some((open) => open.id !== changed.id),
+    "the removed profile's question",
+  );
+  const [removed] = stateOf(inst, 46).holds;
+  assert.deepEqual(
+    removed.options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
+  assert.match(removed.question, /execution profile "careful"/);
+  await stopped(service);
+  // Restored and retried, it runs on the profile it froze.
+  config.execution = { profiles };
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  service = serve(inst);
+  await until(() => status(inst).service === "running", "service");
+  assert.equal(
+    cli(inst, "answer", "46", "retry", "--question", removed.id).code,
+    0,
+  );
+  await until(
+    () => stateOf(inst, 46).done.check || stateOf(inst, 46).retries.check,
+    "the check runs",
+  );
+  assert.ok(stateOf(inst, 46).holds.every((open) => open.step !== "config"));
+  assert.deepEqual(stateOf(inst, 46).frozen, admitted);
+  assert.equal(cli(inst, "cancel", "46").code, 0);
+  await stopped(service);
+});
+
 test("a held Objective and one waiting on its paths don't stall the queue", async () => {
   const inst = installation();
   const plan = (paths) => ({

@@ -846,14 +846,14 @@ export interface RecipeInstallation {
 /**
  * What the installation offers a recipe, and the planner the same: the
  * adaptive graph only with planning.adaptiveGraph, the planning context's
- * scope, and no execution profiles yet (the core runs every item on its
- * provider's worker). When profiles are offered, the wire's `profiles`
- * option comes from here too, so recipe admission and the planner agree.
+ * scope, and the execution profiles. The wire's `profiles` option comes
+ * from here too (planning/steps.ts offeredProfiles), so recipe admission
+ * and the planner agree.
  */
 export function recipeInstallation(config: CoreConfig): RecipeInstallation {
   return {
     adaptiveGraph: config.planning.adaptiveGraph,
-    profileIds: [],
+    profileIds: Object.keys(config.execution.profiles ?? {}),
     ...(config.planning.context
       ? { contextSelectors: config.planning.context.selectors }
       : {}),

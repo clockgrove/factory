@@ -45,8 +45,8 @@ type ObjectValue = Record<string, unknown>;
 export interface WireOptions {
   /** This Objective is itself a split child: children never split again. */
   child?: boolean;
-  /** Execution profiles the planner chooses from, by id. */
-  profiles?: { id: string }[];
+  /** Execution profiles the planner chooses from, by id, with what each is for. */
+  profiles?: { id: string; description?: string; selectionHints?: string[] }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
   /**
@@ -1578,6 +1578,12 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
     if (typeof profile.id !== "string" || typeof profile.reason !== "string")
       throw new Refusal(
         "Planner executionProfile needs an id and a reason",
+        id,
+      );
+    const offered = (wire.profiles ?? []).map((entry) => entry.id);
+    if (!offered.includes(profile.id))
+      throw new Refusal(
+        `Planner executionProfile ${profile.id} is not offered: choose from ${offered.join(", ") || "none (leave it out)"}`,
         id,
       );
     decoded.executionProfile = { id: profile.id, reason: profile.reason };

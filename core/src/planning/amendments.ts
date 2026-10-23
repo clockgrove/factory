@@ -35,11 +35,12 @@ import {
   invalidAnswer,
   localExecutables,
   type ObjectiveInputs,
+  offeredProfiles,
   type PlanningDeps,
   planningFacts,
   planningTree,
   postPlan,
-  WORKERS,
+  workers,
 } from "./steps.js";
 import type { Draft, Finding, Plan, WorkItem } from "./types.js";
 import { units } from "./units.js";
@@ -638,6 +639,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const { facts } = built;
       const plan = currentPlan(state)!;
       const progress = amendmentProgress(state, plan, proposal);
+      const profiles = offeredProfiles(config);
       const wire = {
         child: inputs.child === true,
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
@@ -645,6 +647,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           inputs.shown.blocks,
           inputs.adaptiveGraph === true,
         ),
+        ...(profiles ? { profiles } : {}),
       };
       const lastError = state.retries[key]?.lastError;
       const corrections: Finding[] = [
@@ -694,11 +697,12 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           data,
           revising: true,
           repository,
-          workers: WORKERS,
+          workers: workers(config),
           localExecutables: local.observations,
           reviewArtifacts: inputs.reviewArtifacts,
           adaptive: wire.adaptive,
           recipe: Boolean(inputs.recipe),
+          executionProfiles: Boolean(profiles),
         }),
         schema: revisionSchema(facts, wire),
         readDir: workDir,
@@ -844,8 +848,11 @@ function amendReviewStep(
           ),
           reviewArtifacts: inputs.reviewArtifacts,
           repository,
-          workers: WORKERS,
+          workers: workers(config),
           ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+          ...(offeredProfiles(config)
+            ? { executionProfiles: offeredProfiles(config) }
+            : {}),
         }),
         schema: graphReviewSchema(),
         readDir: workDir,

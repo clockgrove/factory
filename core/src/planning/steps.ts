@@ -17,6 +17,7 @@ import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { checkObjective } from "../objective.js";
 import type { Planner } from "../providers/planner.js";
+import { resolvedProvider } from "../providers/selection.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import type { Answer, ObjectiveState } from "../state.js";
@@ -64,6 +65,7 @@ import {
   planningReviewEvidence,
   type ReviewFinding,
 } from "./review.js";
+import type { WorkerCommandAccess } from "./rubric.js";
 import type {
   Draft,
   Finding,
@@ -78,6 +80,7 @@ import {
   planChoices,
   planSchema,
   revisionSchema,
+  type WireOptions,
 } from "./wire.js";
 
 const MINUTE = 60_000;
@@ -247,7 +250,63 @@ function decisionsBefore(
 }
 
 /** Workers get a sandboxed shell (docs/CORE.md). */
-export const WORKERS = { default: "shell" } as const;
+const WORKERS = { default: "shell" } as const;
+
+/**
+ * What the workers the planner may assign can execute: the Objective's
+ * provider's (a sandboxed shell, as before), or with execution profiles,
+ * each profile's provider's worker by kind. A Claude worker's shell needs
+ * Write and Validate granted; the host's sandbox is checked when it runs.
+ */
+export function workers(
+  config: CoreConfig,
+): Readonly<Record<string, WorkerCommandAccess>> {
+  const offered = recipeInstallation(config).profileIds;
+  if (!offered.length) return WORKERS;
+  return Object.fromEntries(
+    offered.map((id) => {
+      const provider =
+        config.providers[config.execution.profiles![id]!.provider]!;
+      const worker = resolvedProvider(provider).worker;
+      const claude = worker.kind === "claude" && worker.settings;
+      const granted = (tool: string) =>
+        claude &&
+        claude.tools!.includes(tool as never) &&
+        claude.allowedTools!.includes(tool as never);
+      const access: WorkerCommandAccess =
+        worker.kind === "codex"
+          ? "shell"
+          : worker.kind === "claude"
+            ? granted("Write") && granted("Validate")
+              ? "shell"
+              : "validation-only"
+            : worker.kind === "copilot"
+              ? "validation-only"
+              : "undeclared";
+      return [id, access];
+    }),
+  );
+}
+
+/**
+ * The execution profiles the planner is offered, with what each is for:
+ * the ones a recipe's expansions are checked against (recipeInstallation),
+ * so the two agree. Undefined without any: the planner assigns none.
+ */
+export function offeredProfiles(
+  config: CoreConfig,
+): WireOptions["profiles"] | undefined {
+  const ids = recipeInstallation(config).profileIds;
+  if (!ids.length) return undefined;
+  return ids.map((id) => {
+    const { description, selectionHints } = config.execution.profiles![id]!;
+    return {
+      id,
+      description,
+      ...(selectionHints.length ? { selectionHints } : {}),
+    };
+  });
+}
 
 export const INVALID_ANSWER = "The planner's answer didn't match the schema";
 
@@ -346,6 +405,7 @@ function planRoundStep(
           : []),
       ];
       const revising = Boolean(previous?.answer);
+      const profiles = offeredProfiles(config);
       const wire = {
         child: inputs.child === true,
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
@@ -353,6 +413,7 @@ function planRoundStep(
           inputs.shown.blocks,
           inputs.adaptiveGraph === true,
         ),
+        ...(profiles ? { profiles } : {}),
       };
       // An enabled section still plans, with its context and memory but
       // without the graph kinds; say so once per generation.
@@ -394,12 +455,13 @@ function planRoundStep(
         data,
         revising,
         repository,
-        workers: WORKERS,
+        workers: workers(config),
         citedSections: cited,
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
         adaptive: wire.adaptive,
         recipe: Boolean(inputs.recipe),
+        executionProfiles: Boolean(profiles),
       });
       const answer = await deps.planner.answer({
         role: "planner",
@@ -522,8 +584,11 @@ function reviewStep(
         ),
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
-        workers: WORKERS,
+        workers: workers(config),
         ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+        ...(offeredProfiles(config)
+          ? { executionProfiles: offeredProfiles(config) }
+          : {}),
         ...(scope
           ? {
               scope: revisionScope(

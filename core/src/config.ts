@@ -29,7 +29,13 @@ import { type PlanningContext, planningContext } from "./knowledge/settings.js";
 import { stateRoot, within } from "./paths.js";
 import { DISCOVERY_LIMITS, type DiscoveryLimits } from "./planning/types.js";
 import { serviceCredential } from "./providers/claude.js";
-import { type ProviderConfig, providersConfig } from "./providers/config.js";
+import {
+  type ExecutionProfile,
+  executionProfiles,
+  type ProviderConfig,
+  profileProblems,
+  providersConfig,
+} from "./providers/config.js";
 import {
   loadReviewArtifacts,
   type ReviewArtifactSelector,
@@ -95,6 +101,11 @@ export interface CoreConfig {
     memoryMiB: number;
     /** MiB a worker run, a validation and a planner call each reserve. */
     reservations: Reservations;
+    /**
+     * Named providers' workers the planner assigns per Work Item, by id;
+     * absent, every item runs on its Objective's provider.
+     */
+    profiles?: Record<string, ExecutionProfile>;
   };
   /** How much an Objective may do unattended; frozen with it. */
   autonomy: {
@@ -462,8 +473,8 @@ const RETIRED: Record<string, Retired> = {
     claudeWorker: PROVIDERS_HINT,
     kind: PROVIDERS_HINT,
     harness: PROVIDERS_HINT,
-    profiles: PROVIDERS_HINT,
-    defaultProfile: PROVIDERS_HINT,
+    defaultProfile:
+      "removed: a Work Item without a profile runs on its Objective's provider",
   },
   policy: {
     network: "use providers.<name>.worker.network for a Codex worker",
@@ -577,6 +588,7 @@ export function loadConfig(repository: string): CoreConfig {
               ]),
             ) as Record<keyof Reservations, Check<number>>,
           ),
+          profiles: executionProfiles,
         },
         RETIRED.execution,
       ),
@@ -650,6 +662,12 @@ export function loadConfig(repository: string): CoreConfig {
     defaultProvider,
     secrets: secretValues(checked.policy.allowedSecretNames, providers),
   };
+  profileProblems(
+    config.execution.profiles,
+    providers,
+    config.secrets,
+    problems,
+  );
   if (config.repository !== repository)
     problems.push(
       `repository is ${config.repository}, but the command named ${repository}`,

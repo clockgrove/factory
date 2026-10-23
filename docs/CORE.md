@@ -92,6 +92,7 @@ An Objective runs on the configuration it was admitted with. `frozen` holds its 
 
 - **Operational keys** may change under a running Objective: they operate the host or present the run, never decide the work. They are the derived secret values (never written to state), `queue` (polling, slots, the Project fields), `execution.concurrency`, `execution.workers`, `execution.validations`, `execution.planners`, `execution.memoryMiB`, `execution.reservations`, `sandbox.limits`, `sandbox.packageStore`, `reviewArtifacts`, `validation.commandTimeoutSeconds`, and a worker's `timeoutSeconds`, `idleSeconds` and `settings.maxTurns`.
 - **A change holds once.** The service reads its configuration at start. When it differs from an Objective's frozen configuration in any other key, the Objective holds, and the question names the changed keys and both digests. `adopt` freezes the configuration as it is now and continues; `switch NAME` freezes it on another configured provider; `cancel` ends it. To keep the frozen values, restore them, restart the service and answer `adopt`. `adopt` freezes only the configuration its question named: after a further change and restart it is refused (`stale_question`) and the question is asked again with the current changes. A frozen provider the configuration no longer names offers `switch NAME`, `retry` (after restoring it and restarting) and `cancel`.
+- **Execution profiles** freeze with it: each `execution.profiles.<id>` with its provider's resolved settings as `settings`, the same operational keys excluded. A change to a profile, or to the provider it names, holds like any change. A frozen profile the configuration no longer names offers only `retry` (after restoring it and restarting) and `cancel`, since `adopt` or `switch` would freeze a configuration without it.
 - `status` shows the provider, `selectedBy` and the digest.
 
 ### Allowances
@@ -110,6 +111,10 @@ How much an Objective may correct itself unattended is `autonomy.allowances` (al
 - **A replan starts afresh.** It clears the repairs, the grants and the rereview counts with the plan.
 - `status` shows each allowance as used/allowed, with grants, and repairs per repair path.
 - **`autonomy.requiredEnvironment`** names operator variables (each also in `policy.allowedSecretNames`, and none starting `GH_`, `GITHUB_`, `GIT_` or `SSH_`, which workers never receive) that must be set, non-empty, in the service's environment before planning. The check step tests them first; a missing one holds the whole Objective, naming only the missing names, with `retry` (after setting it and restarting the service) and `cancel`. Values are never read past that test, logged or shown.
+
+### Execution profiles
+
+`execution.profiles.<id> = {provider, description, selectionHints?}` names a configured provider's worker the planner may assign to a Work Item. The planner and the plan review are offered the ids with their descriptions (planning/steps.ts `offeredProfiles`, from the same list a recipe's `eligibleProfileIds` are checked against), and every work item gets one with a reason. The item's worker runs on that provider's worker settings; planning, reviews and the rest stay on the Objective's provider, and a usage-limit `switch` moves only those. Without profiles every item runs on the Objective's provider.
 
 ## Steps
 

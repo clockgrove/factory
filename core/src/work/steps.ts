@@ -124,8 +124,12 @@ const KEPT_OUTPUT_TAIL = 96_000;
 
 /** What execution needs from the installation, beyond planning. */
 export interface BuildDeps extends PlanningDeps {
-  /** The worker for an Objective's plan. */
-  worker(plan: Plan, blocks: readonly ObjectiveBlock[]): Worker;
+  /** The worker for an Objective's plan, on the item's execution profile when it has one. */
+  worker(
+    plan: Plan,
+    blocks: readonly ObjectiveBlock[],
+    profile?: string,
+  ): Worker;
 }
 
 /*
@@ -687,7 +691,7 @@ async function workStep(
       deps.config.secrets,
     );
     const { spend, ...result } = await deps
-      .worker(plan, shown.blocks)
+      .worker(plan, shown.blocks, item.executionProfile?.id)
       .run({
         worktree,
         prompt: prepared.prompt,

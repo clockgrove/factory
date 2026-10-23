@@ -15,6 +15,7 @@ import {
   type Retired,
   type Spec,
   section,
+  strings,
   text,
   whole,
 } from "../checked.js";
@@ -139,6 +140,12 @@ const RETIRED_PROVIDER: Retired = {
   planning: "name the planner with planner and models",
   execution:
     "name the worker with worker; worker runs at once are the top-level execution.workers",
+};
+
+/** What replaced each key of the earlier execution profile shape. */
+const RETIRED_PROFILE: Retired = {
+  harness:
+    "a profile names a provider; put its worker under providers.<name>.worker",
 };
 
 /** An environment variable's name. */
@@ -375,4 +382,76 @@ function workerConfig(
   return (
     kind === "claude" ? { kind, settings } : { kind, ...settings }
   ) as WorkerConfig;
+}
+
+/**
+ * An execution profile: a named provider's worker the planner may assign
+ * to a Work Item, described for the planner. Its worker settings are that
+ * provider's; a profile has no worker settings of its own.
+ */
+export interface ExecutionProfile {
+  /** A key of `providers`. */
+  provider: string;
+  /** What the profile is for, shown to the planner and the plan review. */
+  description: string;
+  /** When to choose it, shown to the planner. */
+  selectionHints: string[];
+}
+
+/**
+ * `execution.profiles`: `{<id>: {provider, description, selectionHints?}}`.
+ * Absent, there are none and every Work Item runs on its Objective's
+ * provider. That each `provider` is configured is checked by
+ * profileProblems, once the providers are known.
+ */
+export const executionProfiles: Check<
+  Record<string, ExecutionProfile> | undefined
+> = (value, path, problems) => {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) {
+    problems.push(`${path} must be an object`);
+    return undefined;
+  }
+  const profiles: Record<string, ExecutionProfile> = {};
+  for (const [id, entry] of Object.entries(value)) {
+    if (!NAME.test(id)) {
+      problems.push(
+        `${path}.${id}: a profile id is lower-case letters, digits and dashes`,
+      );
+      continue;
+    }
+    profiles[id] = section(
+      entry,
+      `${path}.${id}`,
+      { provider: text(), description: text(), selectionHints: strings },
+      problems,
+      RETIRED_PROFILE,
+    );
+  }
+  return profiles;
+};
+
+/**
+ * Problems with the execution profiles once the providers are known: each
+ * names a configured provider, and no profile text, which the planner
+ * sees, holds a secret value.
+ */
+export function profileProblems(
+  profiles: Readonly<Record<string, ExecutionProfile>> | undefined,
+  providers: Readonly<Record<string, ProviderConfig>>,
+  secrets: readonly string[],
+  problems: string[],
+): void {
+  for (const [id, profile] of Object.entries(profiles ?? {})) {
+    const path = `execution.profiles.${id}`;
+    if (!providers[profile.provider])
+      problems.push(
+        `${path}.provider ${JSON.stringify(profile.provider)} is not one of providers (${Object.keys(providers).join(", ")})`,
+      );
+    const shown = [profile.description, ...profile.selectionHints];
+    if (secrets.some((secret) => shown.some((text) => text.includes(secret))))
+      problems.push(
+        `${path}: the description and selectionHints are shown to the planner, so they may not hold a secret value`,
+      );
+  }
 }

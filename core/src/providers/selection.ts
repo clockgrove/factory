@@ -90,14 +90,19 @@ export function providerPlanner(provider: ProviderConfig): Planner {
   }
 }
 
-/** The provider's worker for one Objective's plan. */
+/**
+ * The worker for one Objective's plan: the Objective's provider's, or for
+ * an item the planner gave an execution profile, that profile's provider's.
+ */
 export function providerWorker(
   provider: ProviderConfig,
   config: CoreConfig,
-): (plan: Plan, blocks: readonly ObjectiveBlock[]) => Worker {
-  const worker = resolvedProvider(provider).worker;
+): (plan: Plan, blocks: readonly ObjectiveBlock[], profile?: string) => Worker {
   const allowedSecretNames = config.policy.allowedSecretNames;
-  return (plan, blocks) => {
+  return (plan, blocks, profile) => {
+    const worker = resolvedProvider(
+      profileProvider(config, profile) ?? provider,
+    ).worker;
     switch (worker.kind) {
       case "claude":
         return new ClaudeWorker({
@@ -138,6 +143,24 @@ export function providerWorker(
       }
     }
   };
+}
+
+/**
+ * The settings of the provider an execution profile names; undefined
+ * without a profile. The workflow runs only on the configuration the
+ * Objective froze, which holds every profile its plan could name, so an
+ * unknown one is a bug.
+ */
+function profileProvider(
+  config: CoreConfig,
+  profile: string | undefined,
+): ProviderConfig | undefined {
+  if (profile === undefined) return undefined;
+  const settings =
+    config.providers[config.execution.profiles?.[profile]?.provider ?? ""];
+  if (!settings)
+    throw new Error(`Execution profile ${profile} is not configured`);
+  return settings;
 }
 
 /**
@@ -194,10 +217,46 @@ export function freezeConfig(
   const settings = config.providers[provider];
   if (!settings) return undefined;
   const { providers: _all, defaultProvider: _default, ...rest } = config;
+  const profiles = config.execution.profiles;
   const frozen = JSON.parse(
-    JSON.stringify({ ...rest, provider: resolvedProvider(settings) }),
+    JSON.stringify({
+      ...rest,
+      provider: resolvedProvider(settings),
+      // Each profile with its provider's resolved settings: a change to
+      // either holds the Objective.
+      ...(profiles
+        ? {
+            execution: {
+              ...rest.execution,
+              profiles: Object.fromEntries(
+                Object.entries(profiles).map(([id, profile]) => [
+                  id,
+                  {
+                    ...profile,
+                    settings: resolvedProvider(
+                      config.providers[profile.provider]!,
+                    ),
+                  },
+                ]),
+              ),
+            },
+          }
+        : {}),
+    }),
   ) as Record<string, unknown>;
-  for (const path of OPERATIONAL) {
+  // A profile's provider settings have the provider's operational keys.
+  const operational = OPERATIONAL.flatMap((path) =>
+    path.startsWith("provider.")
+      ? [
+          path,
+          ...Object.keys(profiles ?? {}).map(
+            (id) =>
+              `execution.profiles.${id}.settings.${path.slice("provider.".length)}`,
+          ),
+        ]
+      : [path],
+  );
+  for (const path of operational) {
     const keys = path.split(".");
     const last = keys.pop()!;
     let at: unknown = frozen;
@@ -315,6 +374,24 @@ function changed(
             "cancel",
           ],
         );
+      // A profile the plan may run on is gone: only restoring it helps,
+      // since `adopt` or `switch` would freeze a configuration without it.
+      const missing = Object.keys(profilesOf(frozen.config)).filter(
+        (id) => !Object.hasOwn(profilesOf(live.config), id),
+      );
+      if (missing.length)
+        return hold(
+          `This Objective froze execution profile${missing.length === 1 ? "" : "s"} ${missing.map((id) => `"${id}"`).join(", ")}, which the configuration no longer names. Restore ${missing.length === 1 ? "it" : "them"} as ${missing.length === 1 ? "it was" : "they were"}, restart the service and answer retry; or cancel.`,
+          [
+            {
+              answer: "retry",
+              family: "retry",
+              consequence:
+                "Runs on the frozen profiles again, once they are restored and the service restarted.",
+            },
+            "cancel",
+          ],
+        );
       const keys = frozenChanges(frozen.config, live.config);
       // `adopt` freezes exactly the configuration this question names
       // (engine.ts ADOPTS); a later change asks again.
@@ -327,4 +404,12 @@ function changed(
       };
     },
   };
+}
+
+/** The execution profiles a frozen configuration holds, by id. */
+function profilesOf(config: Record<string, unknown>): Record<string, unknown> {
+  const execution = config.execution;
+  return isObject(execution) && isObject(execution.profiles)
+    ? execution.profiles
+    : {};
 }

@@ -672,7 +672,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           : []),
       ];
       const base = currentAnswer(state);
-      const lookups = plannerLookups(state, key, inputs.shown.blocks, config);
+      const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
         ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),

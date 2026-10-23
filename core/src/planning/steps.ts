@@ -33,7 +33,7 @@ import {
   objectiveCommandProblems,
   sectionText,
 } from "./facts.js";
-import { forgetting, plannerLookups } from "./lookup.js";
+import { forgetting, lookupsKey, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
   currentPlan,
@@ -441,7 +441,7 @@ function planRoundStep(
       const cited = revising
         ? await citedSections(previous!.draft, fixes, facts, files)
         : [];
-      const lookups = plannerLookups(state, key, inputs.shown.blocks, config);
+      const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
         ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
@@ -796,11 +796,16 @@ export function planningReplan(
 ): Outcome {
   const decision = decisionOf(answer);
   if (!key.startsWith("decide:"))
-    return done({
-      replan: true,
-      decision,
-      ...(key.startsWith("review:") ? { findings: [] } : {}),
-    } satisfies PlanRound | ReviewRound);
+    return {
+      kind: "done",
+      result: {
+        replan: true,
+        decision,
+        ...(key.startsWith("review:") ? { findings: [] } : {}),
+      } satisfies PlanRound | ReviewRound,
+      // A plan step's kept lookup rounds end with it.
+      ...(key.startsWith("plan:") ? { keep: { [lookupsKey(key)]: null } } : {}),
+    };
   // An `approve` that found the Objective edited (see changedHold).
   const approvedKey = `${key}:approved`;
   const approved = state.kept?.[approvedKey] as PlannerDecision | undefined;

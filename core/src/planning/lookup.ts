@@ -17,7 +17,7 @@ import { memoryLookup } from "../knowledge/index.js";
 import { admitted, type PlanningContext } from "../knowledge/settings.js";
 import { redact } from "../log.js";
 import { validPath } from "../objective.js";
-import type { ObjectiveBlock } from "../shown.js";
+import { type ShownObjective, shownDigest } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import { errorMessage } from "../text.js";
 import { adaptiveWorkflow } from "../validate.js";
@@ -37,8 +37,18 @@ interface LookupAnswer extends LookupRequest {
   content?: string;
 }
 
-/** The answered rounds of one planner step, kept until the step is done. */
-const keptKey = (step: string) => `lookups:${step}`;
+/** The answered rounds of one planner step, kept until the step is done or replanned. */
+export const lookupsKey = (step: string) => `lookups:${step}`;
+
+/** The rounds, with the base and the Objective as shown that they were answered for. */
+interface KeptLookups {
+  base: string;
+  shown: string;
+  rounds: LookupAnswer[][];
+}
+
+/** Echoed request fields are kept to this many characters. */
+const ECHO_CHARS = 256;
 
 /** One planner step's lookups. */
 export interface Lookups {
@@ -73,13 +83,21 @@ export interface Lookups {
 export function plannerLookups(
   state: ObjectiveState,
   step: string,
-  blocks: readonly ObjectiveBlock[],
+  inputs: { base: string; shown: ShownObjective },
   config: CoreConfig,
 ): Lookups | undefined {
   const context = config.planning.context;
-  if (!context || !adaptiveWorkflow(blocks).enabled) return undefined;
+  if (!context || !adaptiveWorkflow(inputs.shown.blocks).enabled)
+    return undefined;
   const { bounds, selectors } = context;
-  const rounds = (state.kept[keptKey(step)] ?? []) as LookupAnswer[][];
+  // Rounds answered for another base or another issue body (a replan's
+  // re-read moved) no longer hold: start fresh.
+  const binding = { base: inputs.base, shown: shownDigest(inputs.shown) };
+  const kept = state.kept[lookupsKey(step)] as KeptLookups | undefined;
+  const rounds =
+    kept?.base === binding.base && kept.shown === binding.shown
+      ? kept.rounds
+      : [];
   // Each round adds one planner call, so both bounds cap the rounds.
   const roundsLeft = Math.max(
     0,
@@ -135,19 +153,14 @@ export function plannerLookups(
       if (!asked?.length) return { value: rest };
       const round: LookupAnswer[] = [];
       let left = bytesLeft;
-      for (const [at, raw] of asked.entries()) {
+      for (const raw of asked.slice(0, bounds.maxRequestsPerRound)) {
         const request = decodeRequest(raw);
         const answer = !request
           ? refused(
               { kind: "file", path: "", heading: "", query: "" },
               "not a lookup request: give exactly kind, path, heading and query as strings",
             )
-          : at >= bounds.maxRequestsPerRound
-            ? refused(
-                request,
-                `over the cap of ${bounds.maxRequestsPerRound} requests per round (planning.context.bounds.maxRequestsPerRound); ask again next round${roundsLeft > 1 ? "" : ", though this was the last"}`,
-              )
-            : await answerRequest(request, context, left, input);
+          : await answerRequest(request, context, left, input);
         const bytes = Buffer.byteLength(answer.content ?? "");
         if (bytes > left)
           round.push(
@@ -161,6 +174,15 @@ export function plannerLookups(
           round.push(answer);
         }
       }
+      // Requests past the cap are refused as one entry, so they cost no state.
+      const over = asked.length - bounds.maxRequestsPerRound;
+      if (over > 0)
+        round.push(
+          refused(
+            { kind: "file", path: "", heading: "", query: "" },
+            `${over} more request${over === 1 ? " was" : "s were"} refused: over the cap of ${bounds.maxRequestsPerRound} requests per round (planning.context.bounds.maxRequestsPerRound); ask again next round${roundsLeft > 1 ? "" : ", though this was the last"}`,
+          ),
+        );
       const count = (disposition: LookupAnswer["disposition"]) =>
         round.filter((answer) => answer.disposition === disposition).length;
       input.log({
@@ -176,7 +198,12 @@ export function plannerLookups(
           kind: "retry",
           reason: `Answered the planner's context lookups (round ${rounds.length + 1})`,
           progress: true,
-          keep: { [keptKey(step)]: [...rounds, round] },
+          keep: {
+            [lookupsKey(step)]: {
+              ...binding,
+              rounds: [...rounds, round],
+            } satisfies KeptLookups,
+          },
         },
       };
     },
@@ -192,7 +219,7 @@ export function forgetting(step: Step): Step {
     ...step,
     async run(context) {
       const outcome = await step.run(context);
-      const key = keptKey(step.key);
+      const key = lookupsKey(step.key);
       return outcome.kind === "done" && context.state.kept[key] !== undefined
         ? { ...outcome, keep: { ...outcome.keep, [key]: null } }
         : outcome;
@@ -213,8 +240,13 @@ function decodeRequest(raw: unknown): LookupRequest | undefined {
 }
 
 function refused(request: LookupRequest, detail: string): LookupAnswer {
-  const { kind, path, heading, query } = request;
-  return { kind, path, heading, query, disposition: "refused", detail };
+  return { ...echo(request), disposition: "refused", detail };
+}
+
+/** The request as kept and shown again: its fields cut to a fixed length. */
+function echo({ kind, path, heading, query }: LookupRequest): LookupRequest {
+  const cut = (field: string) => field.slice(0, ECHO_CHARS);
+  return { kind, path: cut(path), heading: cut(heading), query: cut(query) };
 }
 
 /** A relative file, or a directory prefix ending in a slash, with no traversal. */
@@ -236,10 +268,7 @@ async function answerRequest(
     detail: string,
     content?: string,
   ): LookupAnswer => ({
-    kind,
-    path,
-    heading,
-    query,
+    ...echo(request),
     disposition,
     detail,
     ...(content === undefined

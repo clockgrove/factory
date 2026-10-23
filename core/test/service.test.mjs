@@ -469,6 +469,8 @@ const GITHUB_CRASH_POINTS = [
   "sync:item-issue:label:after",
   "sync:item-issue:card:before",
   "sync:item-issue:card:after",
+  "sync:item-issue:status:before",
+  "sync:item-issue:status:after",
   "sync:item-duplicate:comment:before",
   "sync:item-duplicate:comment:after",
   "sync:item-duplicate:close:before",

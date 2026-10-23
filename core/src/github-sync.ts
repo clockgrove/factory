@@ -969,6 +969,16 @@ export class GitHubSync {
             }),
           log: (event) => this.log.write(issue, event),
           signal,
+          cardStatus: {
+            project: this.config.queue.projectId,
+            set: async (item, option, signal) => {
+              await this.display.set(
+                item,
+                this.config.queue.options[option],
+                signal,
+              );
+            },
+          },
         }),
       true,
       (error) => this.givenUp(runner, "track", error),

@@ -668,14 +668,16 @@ export async function addCard(
   project: string,
   content: string,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   crashPoint("sync:item-issue:card:before");
   const added = await github.graphql<{
     addProjectV2ItemById: { item: { id: string } | null } | null;
   }>(ADD_ITEM, { project, content }, signal);
-  if (!added.addProjectV2ItemById?.item?.id)
+  const id = added.addProjectV2ItemById?.item?.id;
+  if (!id)
     throw new Error(`The Project didn't add the Work Item issue ${content}`);
   crashPoint("sync:item-issue:card:after");
+  return id;
 }
 
 /**

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { QueueOption } from "./config.js";
+import { crashPoint } from "./crash.js";
 import {
   type GitHub,
   GitHubError,
@@ -83,6 +85,10 @@ export interface ItemIssue {
   labels?: string[];
   /** It has its card on the Project. */
   card?: true;
+  /** The card's Project item id: its Factory field shows the item's phase. */
+  cardItem?: string;
+  /** The Factory option last written on the card. */
+  status?: QueueOption;
   closed?: true;
   /** GitHub refused a write to it: only its close is still tried this run. */
   refused?: true;
@@ -108,6 +114,8 @@ export interface Tracking {
   project?: string | null;
   /** The Project refused a card: not tried again this run. */
   uncarded?: true;
+  /** The cards aren't on the queue's Project, so no Factory field shows their phase. */
+  statusless?: true;
 }
 
 /** What one Work Item's issue should show. */
@@ -120,6 +128,8 @@ interface Wanted {
   comment: string;
   /** Closed, and how; open when absent. */
   close?: "completed" | "not_planned";
+  /** The card's Factory option for the item's phase; none before it starts, or skipped. */
+  status?: QueueOption;
 }
 
 /** The issue of `item`, once tracking has recorded it: a PR body names it. */
@@ -163,8 +173,20 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
           : state.status === "cancelled"
             ? "not planned: the Objective was cancelled."
             : "not planned: the Objective finished without it.";
+    // As the Objective's card, by the item's phase.
+    const status: QueueOption | undefined =
+      row.phase === "merged"
+        ? "done"
+        : row.phase === "skipped" || row.phase === "pending"
+          ? undefined
+          : ended
+            ? "cancelled"
+            : row.hold
+              ? "holding"
+              : "building";
     items.set(item.id, {
       planned: !ended,
+      ...(status ? { status } : {}),
       // A title is plain text, never Markdown: only cut to one line.
       title: cut(item.title, 200),
       body: issueBody(objective, item, plan!),
@@ -200,6 +222,7 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
           `**Closed:** not planned: ${state.status === "cancelled" ? "the Objective was cancelled" : "it is not in the current plan (replanned or amended)"}.`,
         ]),
         close: "not_planned",
+        status: "cancelled",
       });
   return items;
 }
@@ -265,6 +288,13 @@ export function trackingDue(state: ObjectiveState, now = Date.now()): boolean {
       continue;
     }
     if (
+      want.status &&
+      has.card &&
+      !tracking?.statusless &&
+      has.status !== want.status
+    )
+      return true;
+    if (
       has.comment !== hash(want.comment) ||
       Boolean(has.closed) !== Boolean(want.close) ||
       (want.planned &&
@@ -291,6 +321,14 @@ export interface TrackContext {
   /** Log an event on the Objective's run log. */
   log(event: Record<string, unknown>): void;
   signal: AbortSignal;
+  /**
+   * The queue's Project and how to set a card's Factory option on it
+   * (queue.ts QueueDisplay); absent, the cards show no phase.
+   */
+  cardStatus?: {
+    project: string;
+    set(item: string, option: QueueOption, signal: AbortSignal): Promise<void>;
+  };
 }
 
 /**
@@ -628,6 +666,8 @@ export async function track(context: TrackContext): Promise<void> {
         delete issue.closed;
       });
     }
+    if (item.status && has.card && has.status !== item.status)
+      await status(has, item.status, update);
     const comment = hash(item.comment);
     if (has.comment !== comment) {
       await github.upsertComment(
@@ -644,6 +684,70 @@ export async function track(context: TrackContext): Promise<void> {
   }
 
   /**
+   * The card's Factory option, as the Objective's card shows its own
+   * phase. Only on the queue's Project, where the field is; the queue's
+   * reads leave out the Work Item label, so a card never reaches the queue.
+   */
+  async function status(
+    has: ItemIssue,
+    option: QueueOption,
+    update: (change: (issue: ItemIssue) => void) => void,
+  ): Promise<void> {
+    const display = context.cardStatus;
+    const project = record().project;
+    if (record().statusless) return;
+    if (!display || !project || project !== display.project) {
+      context.save((tracking) => {
+        tracking.statusless = true;
+      });
+      return;
+    }
+    // A card recorded before its item id was: the Project returns it again.
+    const item =
+      has.cardItem ??
+      (await addCard(github, project, has.node ?? (await node(has)), signal));
+    try {
+      crashPoint("sync:item-issue:status:before");
+      await display.set(item, option, signal);
+      crashPoint("sync:item-issue:status:after");
+    } catch (error) {
+      // The field or its option, not this issue, refused (or is missing):
+      // no card shows a phase this run, and the issue's other writes go on.
+      if (
+        error instanceof TransientError ||
+        (error instanceof GitHubError && error.status === 401) ||
+        signal.aborted
+      )
+        throw error;
+      context.save((tracking) => {
+        tracking.statusless = true;
+      });
+      context.log({
+        event: "item-status-refused",
+        issue: has.issue,
+        error: errorMessage(error),
+      });
+      return;
+    }
+    update((issue) => {
+      issue.cardItem = item;
+      issue.status = option;
+    });
+  }
+
+  /** The issue's node id, which a Project card takes. */
+  async function node(has: ItemIssue): Promise<string> {
+    return (
+      await github.rest<{ node_id: string }>(
+        "GET",
+        `/repos/${github.repository}/issues/${has.issue}`,
+        undefined,
+        signal,
+      )
+    ).node_id;
+  }
+
+  /**
    * The issue's card on the Project. A refusal (no access to the Project,
    * a Project that's gone) is logged and not tried again this run: the
    * issue stays tracked without its card.
@@ -653,18 +757,10 @@ export async function track(context: TrackContext): Promise<void> {
     project: string,
     update: (change: (issue: ItemIssue) => void) => void,
   ): Promise<void> {
-    const node =
-      has.node ??
-      (
-        await github.rest<{ node_id: string }>(
-          "GET",
-          `/repos/${github.repository}/issues/${has.issue}`,
-          undefined,
-          signal,
-        )
-      ).node_id;
+    const content = has.node ?? (await node(has));
+    let item: string;
     try {
-      await addCard(github, project, node, signal);
+      item = await addCard(github, project, content, signal);
     } catch (error) {
       if (
         error instanceof TransientError ||
@@ -684,7 +780,8 @@ export async function track(context: TrackContext): Promise<void> {
     }
     update((issue) => {
       issue.card = true;
-      issue.node = node;
+      issue.node = content;
+      issue.cardItem = item;
     });
   }
 }

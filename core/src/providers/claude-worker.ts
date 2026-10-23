@@ -37,6 +37,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
 import { hold, objectiveWide } from "../engine.js";
+import { GitRefusal } from "../git.js";
 import { openParent, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
@@ -55,7 +56,7 @@ import {
 } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
-import { GitRefusal, hasGitlink, validationEnvironment } from "../worktree.js";
+import { hasGitlink, validationEnvironment } from "../worktree.js";
 import {
   ACTIVE_TOOL_IDLE_MS,
   apiErrorStatus,

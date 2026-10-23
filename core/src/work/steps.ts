@@ -83,7 +83,6 @@ import { type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { validateTree } from "../validate.js";
 import {
   addWorktree,
-  GitRefusal,
   hostGit,
   hostGitExit,
   isAncestor,
@@ -458,7 +457,8 @@ function itemStep(item: WorkItem, phase: Phase, deps: BuildDeps): Step {
         : phase === "ci"
           ? 10 * MINUTE
           : 45 * MINUTE,
-    run: (context) => guardedItem(deps, () => run(item, context, deps)),
+    run: (context) =>
+      guarded(deps.config.repository, () => run(item, context, deps)),
   };
 }
 
@@ -485,7 +485,7 @@ async function workStep(
   // branch), else its published one. It keeps that base across repairs.
   const below = stackBelow(plan, deps, item);
   const start = async () => {
-    if (!below) return defaultHead(config.checkout, signal);
+    if (!below) return defaultHead(config.checkout, config.repository, signal);
     const delivered = (phase: Phase) =>
       (state.done[stepKey(below.id, phase)] as { head: string } | undefined)
         ?.head;
@@ -1830,11 +1830,15 @@ function finalStep(deps: BuildDeps): Step {
     resource: "cpu",
     deadlineMs: 60 * MINUTE,
     run: (context) =>
-      guardedItem(deps, async () => {
+      guarded(deps.config.repository, async () => {
         const { state, signal } = context;
         const { config } = deps;
         const plan = state.done.plan as Plan;
-        const head = await defaultHead(config.checkout, signal);
+        const head = await defaultHead(
+          config.checkout,
+          config.repository,
+          signal,
+        );
         for (const item of plan.items) {
           const merged = state.done[stepKey(item.id, "merge")] as
             | MergeResult
@@ -1912,7 +1916,7 @@ function finalReviewStep(deps: BuildDeps): Step {
     key: "final-review",
     deadlineMs: 45 * MINUTE,
     run: (context) =>
-      guardedItem(deps, async () => {
+      guarded(deps.config.repository, async () => {
         const { state, signal } = context;
         // A `retry` to the refusal (never to an error or a wait question):
         // the operator fixed the default branch, so validate the new head
@@ -2083,22 +2087,6 @@ async function pinnedSources(
   return sources;
 }
 
-/** Item steps map Git refusals to a hold; everything else goes through planning's mapping. */
-async function guardedItem(
-  deps: BuildDeps,
-  work: () => Promise<Outcome>,
-): Promise<Outcome> {
-  return guarded(deps.config.repository, async () => {
-    try {
-      return await work();
-    } catch (error) {
-      if (error instanceof GitRefusal)
-        return objectiveWide(hold(error.message));
-      throw error;
-    }
-  });
-}
-
 // ---------------------------------------------------------------------------
 // report and cancel cleanup
 
@@ -2108,7 +2096,7 @@ function reportStep(deps: BuildDeps): Step {
     key: "report",
     deadlineMs: 10 * MINUTE,
     run: (context) =>
-      guardedItem(deps, async () => {
+      guarded(deps.config.repository, async () => {
         const { state, signal } = context;
         const { github } = deps;
         // The report is this run's: an earlier run of the same issue (queued
@@ -2221,7 +2209,7 @@ export function rerunCleanupStep(deps: BuildDeps): Step {
     resource: "github",
     deadlineMs: 10 * MINUTE,
     run: (context) =>
-      guardedItem(deps, async () => {
+      guarded(deps.config.repository, async () => {
         const { state, signal } = context;
         const closed =
           (await deps.github.issue(state.issue, signal)).state !== "open";

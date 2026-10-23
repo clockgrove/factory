@@ -1,6 +1,6 @@
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { CoreConfig } from "../config.js";
+import { type CoreConfig, ownRepositoryProblem } from "../config.js";
 import {
   hold,
   type Outcome,
@@ -8,7 +8,7 @@ import {
   type Step,
   type StepContext,
 } from "../engine.js";
-import { defaultHead } from "../git.js";
+import { defaultHead, GitRefusal } from "../git.js";
 import { type GitHub, githubOutcome } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { checkObjective } from "../objective.js";
@@ -921,6 +921,18 @@ export async function readObjective(
   const { config } = deps;
   const { state, signal } = context;
   const issue = state.issue;
+  // The checkout can change under a running service.
+  const own = ownRepositoryProblem(config.repository, config.checkout);
+  if (own)
+    return {
+      hold: objectiveWide(
+        hold(
+          `${own}. Fix the configuration and restart the service; or cancel.`,
+          ["cancel", "retry"],
+          "cancel",
+        ),
+      ),
+    };
   const found = await deps.github.renderedIssue(issue, signal);
   if (found.state !== "open") {
     const by = found.closed_by?.login ? `@${found.closed_by.login}` : "someone";
@@ -953,7 +965,7 @@ export async function readObjective(
     shown,
     ...(writer && { writer: true as const }),
     ...(childIdentity(found.body ?? "") && { child: true as const }),
-    base: await defaultHead(config.checkout, signal),
+    base: await defaultHead(config.checkout, config.repository, signal),
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,
   };
@@ -1116,8 +1128,10 @@ function invalidAnswer(findings: Finding[]): Outcome {
 }
 
 /**
- * Map provider and GitHub failures to outcomes (CORE.md#Waits); anything
- * else escapes to the engine as an error.
+ * Map provider and GitHub failures to outcomes (CORE.md#Waits), and a Git
+ * refusal (the checkout's configuration, or an origin that no longer names
+ * the target) to an Objective-wide hold; anything else escapes to the
+ * engine as an error.
  */
 export async function guarded(
   repository: string,
@@ -1126,6 +1140,7 @@ export async function guarded(
   try {
     return await work();
   } catch (error) {
+    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
     // A usage limit waits for its reset; an idle model is an error
     // (afterMs -1); a hold takes the provider error's scope. Too large
     // for the model, or refused: the Objective has to change.

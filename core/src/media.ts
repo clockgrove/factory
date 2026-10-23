@@ -44,10 +44,11 @@ import { hold, objectiveWide } from "./engine.js";
 import {
   blobSizes,
   type CatFile,
+  GitRefusal,
   LFS_POINTER_MAX_BYTES,
   lfsPointer,
-  operatorGit,
   readBlobs,
+  remoteGit,
   secretSearch,
   sha256,
 } from "./git.js";
@@ -73,7 +74,6 @@ import {
   hasGitlink,
   hostGit,
   hostGitExit,
-  originProblem,
   removeWorktree,
 } from "./worktree.js";
 
@@ -1647,33 +1647,31 @@ async function lfsFetch(input: {
   signal: AbortSignal;
 }): Promise<Exclude<MediaOutcome<never>, { kind: "repair" }> | undefined> {
   const { checkout, signal } = input;
-  const problem = await originProblem(checkout, input.repository, signal);
-  if (problem)
-    return objectiveWide(
-      hold(
-        `${problem}. Factory fetches LFS objects from origin's default route. Fix origin, then answer retry; or cancel.`,
-      ),
-    );
   const plain = input.paths.every((path) => !/[,*?[\]\\!]/.test(path));
-  const fetched = await operatorGit(
-    checkout,
-    [
-      "-c",
-      "protocol.file.allow=never",
-      ...(input.storage ? ["-c", `lfs.storage=${input.storage}`] : []),
-      ...LFS,
-      "lfs",
-      "fetch",
-      "origin",
-      input.commit,
-      ...(plain ? ["--include", input.paths.join(",")] : []),
-    ],
-    { signal, timeoutMs: 30 * MINUTE },
-  ).then(
-    () => undefined,
-    (error: unknown) => errorMessage(error),
-  );
-  if (fetched !== undefined && !(await reachable(checkout, signal)))
+  let fetched: string | undefined;
+  try {
+    await remoteGit(
+      checkout,
+      input.repository,
+      [
+        ...(input.storage ? ["-c", `lfs.storage=${input.storage}`] : []),
+        ...LFS,
+        "lfs",
+        "fetch",
+        "origin",
+        input.commit,
+        ...(plain ? ["--include", input.paths.join(",")] : []),
+      ],
+      { signal, timeoutMs: 30 * MINUTE },
+    );
+  } catch (error) {
+    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
+    fetched = errorMessage(error);
+  }
+  if (
+    fetched !== undefined &&
+    !(await reachable(checkout, input.repository, signal))
+  )
     return {
       kind: "retry",
       reason: `Fetching LFS objects from origin: ${fetched}`,
@@ -1691,34 +1689,16 @@ async function lfsPush(input: {
   oids: readonly string[];
   signal: AbortSignal;
 }): Promise<MediaOutcome<never> | undefined> {
-  const problem = await originProblem(
-    input.checkout,
-    input.repository,
-    input.signal,
-  );
-  if (problem)
-    return objectiveWide(
-      hold(
-        `${problem}. Factory uploads LFS objects to origin's default route. Fix origin, then answer retry; or cancel.`,
-      ),
-    );
   try {
-    await operatorGit(
+    await remoteGit(
       input.checkout,
-      [
-        "-c",
-        "protocol.file.allow=never",
-        ...LFS,
-        "lfs",
-        "push",
-        "--object-id",
-        "origin",
-        ...input.oids,
-      ],
+      input.repository,
+      [...LFS, "lfs", "push", "--object-id", "origin", ...input.oids],
       { signal: input.signal, timeoutMs: 30 * MINUTE },
     );
   } catch (error) {
     input.signal.throwIfAborted();
+    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
     return {
       kind: "retry",
       reason: `git lfs push of ${input.oids.length} object(s): ${errorMessage(error)}`,
@@ -1841,14 +1821,14 @@ export async function verifyOriginMedia(input: {
 /** Whether origin answers at all. */
 async function reachable(
   checkout: string,
+  repository: string,
   signal: AbortSignal,
 ): Promise<boolean> {
   try {
-    await operatorGit(
-      checkout,
-      ["-c", "protocol.file.allow=never", "ls-remote", "origin", "HEAD"],
-      { signal },
-    );
+    await remoteGit(checkout, repository, ["ls-remote", "origin", "HEAD"], {
+      signal,
+      timeoutMs: MINUTE,
+    });
     return true;
   } catch {
     signal.throwIfAborted();

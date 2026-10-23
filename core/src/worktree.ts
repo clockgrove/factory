@@ -24,8 +24,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   type GitExit,
+  GitRefusal,
   gitEnvironment,
-  operatorGit,
   pinnedGitExit,
 } from "./git.js";
 import { TransientError } from "./github.js";
@@ -34,20 +34,6 @@ import { errorMessage } from "./text.js";
 
 const run = promisify(execFile);
 const MINUTE = 60_000;
-
-/**
- * Host Git refused to run: the tree's Git metadata or repository
- * configuration would let it run a program outside the sandbox. `fix` names
- * what the operator does.
- */
-export class GitRefusal extends Error {
-  constructor(
-    readonly detail: string,
-    readonly fix: string,
-  ) {
-    super(`${detail}. ${fix}`);
-  }
-}
 
 /**
  * Program-running configuration named by attributes or used by Git LFS. A
@@ -638,160 +624,4 @@ export function validationEnvironment(
   const env = workerEnvironment(credentialDirectory);
   if (process.env.PATH !== undefined) env.PATH = process.env.PATH;
   return env;
-}
-
-/** `owner/name` of a supported GitHub clone URL; never credentials or raw URLs. */
-function remoteRepository(remote: string): string | undefined {
-  const scp =
-    /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(
-      remote,
-    );
-  if (scp) return `${scp[1]}/${scp[2]}`.toLowerCase();
-  try {
-    const url = new URL(remote);
-    // A credential in the URL would reach logs; HTTPS credentials come from
-    // a credential helper.
-    const https =
-      url.protocol === "https:" &&
-      url.hostname === "github.com" &&
-      !url.port &&
-      !url.username &&
-      !url.password;
-    const ssh =
-      url.protocol === "ssh:" &&
-      url.username === "git" &&
-      !url.password &&
-      ((url.hostname === "github.com" && (!url.port || url.port === "22")) ||
-        (url.hostname === "ssh.github.com" && url.port === "443"));
-    if ((!https && !ssh) || url.search || url.hash) return undefined;
-    const path = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(
-      url.pathname,
-    );
-    return path ? `${path[1]}/${path[2]}`.toLowerCase() : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Why origin's fetch or push URLs (after insteadOf) don't name `repository`. */
-async function remoteProblem(
-  checkout: string,
-  repository: string,
-  push: boolean,
-  signal?: AbortSignal,
-): Promise<string | undefined> {
-  const direction = push ? "push" : "fetch";
-  let output: string;
-  try {
-    output = (
-      await operatorGit(
-        checkout,
-        ["remote", "get-url", ...(push ? ["--push"] : []), "--all", "origin"],
-        { signal },
-      )
-    ).trim();
-  } catch {
-    signal?.throwIfAborted();
-    return `Cannot resolve origin ${direction} URLs; configure origin for the target GitHub repository`;
-  }
-  for (const remote of output.split("\n")) {
-    const found = remoteRepository(remote);
-    if (!found)
-      return `Origin ${direction} URL is not a supported GitHub repository URL; use the target repository's HTTPS clone URL without embedded credentials (with a credential helper such as \`gh auth setup-git\`) or its SSH clone URL`;
-    if (found !== repository.toLowerCase())
-      return `Origin ${direction} repository does not match configured repository ${repository.toLowerCase()}; correct the remote binding before using Factory`;
-  }
-  return undefined;
-}
-
-const LFS_ROUTING_KEYS =
-  "^(lfs\\.(url|pushurl|remote\\.(autodetect|searchall)|standalonetransferagent|customtransfer\\..*|transfer\\.enablehrefrewrite)|remote\\.(lfsdefault|lfspushdefault|.+\\.(lfsurl|lfspushurl)))$";
-
-const LFS_ROUTING_PROBLEM =
-  "Custom LFS routing is unsupported for target binding; remove LFS URL, alternate-remote, rewrite, or custom-transfer settings and use origin's default GitHub LFS endpoint";
-
-/**
- * Why LFS would not use origin's default route: custom routing can't be
- * proven from clone URLs. Read from the configuration, the working
- * `.lfsconfig`, and the committed one a fresh clone would use.
- */
-async function lfsRoutingProblem(
-  checkout: string,
-  signal?: AbortSignal,
-): Promise<string | undefined> {
-  const check = async (source: string[]): Promise<string | undefined> => {
-    let output: string;
-    try {
-      output = await operatorGit(
-        checkout,
-        [
-          "config",
-          "--includes",
-          ...source,
-          "--null",
-          "--get-regexp",
-          LFS_ROUTING_KEYS,
-        ],
-        { signal },
-      );
-    } catch (error) {
-      if ((error as { code?: unknown }).code === 1) return undefined;
-      signal?.throwIfAborted();
-      return "Cannot inspect LFS routing configuration; repair Git/.lfsconfig settings before using Factory";
-    }
-    for (const entry of output.split("\0").filter(Boolean)) {
-      const newline = entry.indexOf("\n");
-      const key = (newline < 0 ? entry : entry.slice(0, newline)).toLowerCase();
-      const value = newline < 0 ? undefined : entry.slice(newline + 1).trim();
-      if (value === "") continue;
-      if (
-        /^lfs\.(remote\.(autodetect|searchall)|transfer\.enablehrefrewrite)$/.test(
-          key,
-        ) &&
-        value !== undefined &&
-        /^(false|no|off|0)$/i.test(value)
-      )
-        continue;
-      if (/^remote\.lfs(push)?default$/.test(key) && value === "origin")
-        continue;
-      return LFS_ROUTING_PROBLEM;
-    }
-    return undefined;
-  };
-  const sources: string[][] = [[]];
-  if (existsSync(join(checkout, ".lfsconfig")))
-    sources.push(["--file", join(checkout, ".lfsconfig")]);
-  for (const blob of [":.lfsconfig", "HEAD:.lfsconfig"]) {
-    try {
-      await operatorGit(checkout, ["cat-file", "-e", blob], { signal });
-      sources.push(["--blob", blob]);
-    } catch {
-      signal?.throwIfAborted();
-      // No such blob.
-    }
-  }
-  for (const source of sources) {
-    const problem = await check(source);
-    if (problem) return problem;
-  }
-  return undefined;
-}
-
-/**
- * Why `checkout` must not run a remote Git command for `repository`, or
- * undefined: origin's fetch and push URLs, after insteadOf rewriting, must
- * name it, and LFS must use origin's default route. Call it before every
- * fetch, push, ls-remote or LFS transfer; a problem is a hold that names
- * the fix.
- */
-export async function originProblem(
-  checkout: string,
-  repository: string,
-  signal?: AbortSignal,
-): Promise<string | undefined> {
-  return (
-    (await remoteProblem(checkout, repository, false, signal)) ??
-    (await remoteProblem(checkout, repository, true, signal)) ??
-    (await lfsRoutingProblem(checkout, signal))
-  );
 }

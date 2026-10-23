@@ -1,5 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { TransientError } from "./github.js";
 import { errorMessage } from "./text.js";
@@ -207,7 +209,7 @@ export function lfsPointer(
  * insteadOf rewrites: never prompting, with C messages. Returns standard
  * output; a non-zero exit rejects with execFile's error (code, stdout).
  */
-export async function operatorGit(
+async function operatorGit(
   checkout: string,
   args: string[],
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
@@ -224,8 +226,214 @@ export async function operatorGit(
 }
 
 /**
- * Fetch the target and return its default branch head. Runs with the
- * operator's configuration, which holds the fetch credentials.
+ * Git refused to run: the tree's Git metadata or repository configuration
+ * would let it run a program outside the sandbox, or origin no longer names
+ * the target (`remoteGit`). `fix` names what the operator does.
+ */
+export class GitRefusal extends Error {
+  constructor(
+    readonly detail: string,
+    readonly fix: string,
+  ) {
+    super(`${detail}. ${fix}`);
+  }
+}
+
+/** `owner/name` of a supported GitHub clone URL; never credentials or raw URLs. */
+export function remoteRepository(remote: string): string | undefined {
+  const scp =
+    /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(
+      remote,
+    );
+  if (scp) return `${scp[1]}/${scp[2]}`.toLowerCase();
+  try {
+    const url = new URL(remote);
+    // A credential in the URL would reach logs; HTTPS credentials come from
+    // a credential helper.
+    const https =
+      url.protocol === "https:" &&
+      url.hostname === "github.com" &&
+      !url.port &&
+      !url.username &&
+      !url.password;
+    const ssh =
+      url.protocol === "ssh:" &&
+      url.username === "git" &&
+      !url.password &&
+      ((url.hostname === "github.com" && (!url.port || url.port === "22")) ||
+        (url.hostname === "ssh.github.com" && url.port === "443"));
+    if ((!https && !ssh) || url.search || url.hash) return undefined;
+    const path = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(
+      url.pathname,
+    );
+    return path ? `${path[1]}/${path[2]}`.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why origin's fetch or push URLs (after insteadOf) don't name `repository`. */
+async function remoteProblem(
+  checkout: string,
+  repository: string,
+  push: boolean,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const direction = push ? "push" : "fetch";
+  let output: string;
+  try {
+    output = (
+      await operatorGit(
+        checkout,
+        ["remote", "get-url", ...(push ? ["--push"] : []), "--all", "origin"],
+        { signal },
+      )
+    ).trim();
+  } catch {
+    signal?.throwIfAborted();
+    return `Cannot resolve origin ${direction} URLs; configure origin for the target GitHub repository`;
+  }
+  for (const remote of output.split("\n")) {
+    const found = remoteRepository(remote);
+    if (!found)
+      return `Origin ${direction} URL is not a supported GitHub repository URL; use the target repository's HTTPS clone URL without embedded credentials (with a credential helper such as \`gh auth setup-git\`) or its SSH clone URL`;
+    if (found !== repository.toLowerCase())
+      return `Origin ${direction} repository does not match configured repository ${repository.toLowerCase()}; correct the remote binding before using Factory`;
+  }
+  return undefined;
+}
+
+const LFS_ROUTING_KEYS =
+  "^(lfs\\.(url|pushurl|remote\\.(autodetect|searchall)|standalonetransferagent|customtransfer\\..*|transfer\\.enablehrefrewrite)|remote\\.(lfsdefault|lfspushdefault|.+\\.(lfsurl|lfspushurl)))$";
+
+const LFS_ROUTING_PROBLEM =
+  "Custom LFS routing is unsupported for target binding; remove LFS URL, alternate-remote, rewrite, or custom-transfer settings and use origin's default GitHub LFS endpoint";
+
+/**
+ * Why LFS would not use origin's default route: custom routing can't be
+ * proven from clone URLs. Read from the configuration, the working
+ * `.lfsconfig`, and the committed one a fresh clone would use.
+ */
+async function lfsRoutingProblem(
+  checkout: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const check = async (source: string[]): Promise<string | undefined> => {
+    let output: string;
+    try {
+      output = await operatorGit(
+        checkout,
+        [
+          "config",
+          "--includes",
+          ...source,
+          "--null",
+          "--get-regexp",
+          LFS_ROUTING_KEYS,
+        ],
+        { signal },
+      );
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 1) return undefined;
+      signal?.throwIfAborted();
+      return "Cannot inspect LFS routing configuration; repair Git/.lfsconfig settings before using Factory";
+    }
+    for (const entry of output.split("\0").filter(Boolean)) {
+      const newline = entry.indexOf("\n");
+      const key = (newline < 0 ? entry : entry.slice(0, newline)).toLowerCase();
+      const value = newline < 0 ? undefined : entry.slice(newline + 1).trim();
+      if (value === "") continue;
+      if (
+        /^lfs\.(remote\.(autodetect|searchall)|transfer\.enablehrefrewrite)$/.test(
+          key,
+        ) &&
+        value !== undefined &&
+        /^(false|no|off|0)$/i.test(value)
+      )
+        continue;
+      if (/^remote\.lfs(push)?default$/.test(key) && value === "origin")
+        continue;
+      return LFS_ROUTING_PROBLEM;
+    }
+    return undefined;
+  };
+  const sources: string[][] = [[]];
+  if (existsSync(join(checkout, ".lfsconfig")))
+    sources.push(["--file", join(checkout, ".lfsconfig")]);
+  for (const blob of [":.lfsconfig", "HEAD:.lfsconfig"]) {
+    try {
+      await operatorGit(checkout, ["cat-file", "-e", blob], { signal });
+      sources.push(["--blob", blob]);
+    } catch {
+      signal?.throwIfAborted();
+      // No such blob.
+    }
+  }
+  for (const source of sources) {
+    const problem = await check(source);
+    if (problem) return problem;
+  }
+  return undefined;
+}
+
+/**
+ * Why `checkout` must not run a remote Git command for `repository`, or
+ * undefined: origin's fetch and push URLs, after insteadOf rewriting, must
+ * name it, and LFS must use origin's default route. Call it before every
+ * fetch, push, ls-remote or LFS transfer; a problem is a hold that names
+ * the fix. `remoteGit` checks it; delivery also holds on it before a merge.
+ */
+async function originProblem(
+  checkout: string,
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  return (
+    (await remoteProblem(checkout, repository, false, signal)) ??
+    (await remoteProblem(checkout, repository, true, signal)) ??
+    (await lfsRoutingProblem(checkout, signal))
+  );
+}
+
+/** `originProblem` as a GitRefusal that names the fix, or undefined. */
+export async function originRefusal(
+  checkout: string,
+  repository: string,
+  signal?: AbortSignal,
+): Promise<GitRefusal | undefined> {
+  const problem = await originProblem(checkout, repository, signal);
+  return problem
+    ? new GitRefusal(
+        problem,
+        `Point origin's fetch and push URLs (and any insteadOf rewrite) at ${repository} with its default LFS route, then answer retry; or cancel`,
+      )
+    : undefined;
+}
+
+/**
+ * Git that reaches origin (fetch, push, ls-remote, LFS transfer), with the
+ * operator's configuration and credentials, once `originProblem` finds
+ * origin still bound to `repository`; otherwise a GitRefusal that names
+ * the fix, so the step holds instead of reaching the wrong place. Every
+ * remote Git call in core goes through here.
+ */
+export async function remoteGit(
+  checkout: string,
+  repository: string,
+  args: string[],
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<string> {
+  const refusal = await originRefusal(checkout, repository, options.signal);
+  if (refusal) throw refusal;
+  return operatorGit(checkout, ["-c", "protocol.file.allow=never", ...args], {
+    ...options,
+    timeoutMs: options.timeoutMs ?? 5 * MINUTE,
+  });
+}
+
+/**
+ * Fetch the target and return its default branch head, through
+ * `remoteGit`: origin must still name `repository`.
  *
  * Fetches in one checkout run one at a time: concurrent fetches fail
  * against each other whenever the default branch moves ("incorrect old
@@ -236,10 +444,11 @@ export async function operatorGit(
  */
 export async function defaultHead(
   checkout: string,
+  repository: string,
   signal: AbortSignal,
 ): Promise<string> {
   signal.throwIfAborted();
-  const head = sharedFetch(checkout);
+  const head = sharedFetch(checkout, repository);
   return await new Promise<string>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
@@ -256,18 +465,18 @@ const flights = new Map<
 >();
 
 /** The next fetch of `checkout` to start: now, or once the running one ends. */
-function sharedFetch(checkout: string): Promise<string> {
+function sharedFetch(checkout: string, repository: string): Promise<string> {
   const flight = flights.get(checkout);
-  if (!flight) return fetchHead(checkout);
+  if (!flight) return fetchHead(checkout, repository);
   if (!flight.next) {
-    const start = () => fetchHead(checkout);
+    const start = () => fetchHead(checkout, repository);
     flight.next = flight.running.then(start, start);
   }
   return flight.next;
 }
 
-function fetchHead(checkout: string): Promise<string> {
-  const running = fetchOnce(checkout);
+function fetchHead(checkout: string, repository: string): Promise<string> {
+  const running = fetchOnce(checkout, repository);
   const flight: { running: Promise<string>; next?: Promise<string> } = {
     running,
   };
@@ -281,12 +490,23 @@ function fetchHead(checkout: string): Promise<string> {
   return running;
 }
 
-async function fetchOnce(checkout: string): Promise<string> {
+async function fetchOnce(
+  checkout: string,
+  repository: string,
+): Promise<string> {
   try {
-    await operatorGit(checkout, ["fetch", "--quiet", "--prune", "origin"], {
-      timeoutMs: 5 * MINUTE,
-    });
-    await operatorGit(checkout, ["remote", "set-head", "origin", "--auto"]);
+    await remoteGit(checkout, repository, [
+      "fetch",
+      "--quiet",
+      "--prune",
+      "origin",
+    ]);
+    await remoteGit(checkout, repository, [
+      "remote",
+      "set-head",
+      "origin",
+      "--auto",
+    ]);
     return (
       await operatorGit(checkout, [
         "rev-parse",
@@ -295,6 +515,7 @@ async function fetchOnce(checkout: string): Promise<string> {
       ])
     ).trim();
   } catch (error) {
+    if (error instanceof GitRefusal) throw error;
     throw new TransientError(
       `git fetch in ${checkout}: ${errorMessage(error)}`,
     );

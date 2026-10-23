@@ -171,6 +171,24 @@ function configured(inst, api, env = {}, fields = {}) {
   });
 }
 
+/**
+ * Bind `checkout`'s origin to github.com/`repository` over SSH, served by
+ * the local bare repository `bare`: Factory fetches only from an origin
+ * that names the target.
+ */
+function githubOrigin(checkout, bare, repository = REPO) {
+  for (const args of [
+    ["remote", "set-url", "origin", `ssh://git@github.com/${repository}.git`],
+    ["config", "ssh.variant", "simple"],
+    ["config", "core.sshCommand", `sh -c 'exec git upload-pack "$0"' ${bare}`],
+  ]) {
+    const result = spawnSync("git", ["-C", checkout, ...args], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+}
+
 /** A local port nothing listens on. */
 async function closedPort() {
   const server = createServer();
@@ -743,8 +761,8 @@ test("a knowledge store that can't open never holds back retirement", async () =
   await stopped(service);
 });
 
-test("concurrent defaultHead calls in one checkout all see the moved default branch", async () => {
-  const { defaultHead } = await import("../dist/git.js");
+test("concurrent defaultHead calls in one checkout all see the moved default branch, and none fetches once origin moves", async () => {
+  const { defaultHead, GitRefusal } = await import("../dist/git.js");
   const dir = mkdtempSync(join(tmpdir(), "factory-fetch-"));
   const git = (cwd, ...args) => {
     const result = spawnSync(
@@ -762,6 +780,7 @@ test("concurrent defaultHead calls in one checkout all see the moved default bra
   git(work, "push", "--quiet", "origin", "HEAD:main");
   git(dir, "clone", "--quiet", "origin.git", "checkout");
   const checkout = join(dir, "checkout");
+  githubOrigin(checkout, join(dir, "origin.git"));
   for (let round = 1; round <= 3; round++) {
     // The default branch moves, as every merge moves it.
     git(work, "commit", "--quiet", "--allow-empty", "-m", String(round));
@@ -769,11 +788,22 @@ test("concurrent defaultHead calls in one checkout all see the moved default bra
     const head = git(work, "rev-parse", "HEAD");
     const heads = await Promise.all(
       Array.from({ length: 8 }, () =>
-        defaultHead(checkout, AbortSignal.timeout(60_000)),
+        defaultHead(checkout, REPO, AbortSignal.timeout(60_000)),
       ),
     );
     assert.deepEqual(heads, Array(8).fill(head), `round ${round}`);
   }
+  // Origin moved to another repository: no fetch, a refusal naming the fix.
+  githubOrigin(checkout, join(dir, "origin.git"), "someone/else");
+  await assert.rejects(
+    defaultHead(checkout, REPO, AbortSignal.timeout(60_000)),
+    (error) =>
+      error instanceof GitRefusal &&
+      /does not match configured repository drill\/target/.test(
+        error.message,
+      ) &&
+      /Point origin's fetch and push URLs/.test(error.fix),
+  );
 });
 
 test("a step past its deadline retries, then holds after three", async () => {
@@ -1072,6 +1102,7 @@ test("an Objective question from an item step stops every item, once", async () 
     "base",
   );
   git("-C", checkout, "push", "--quiet", "origin", "HEAD:main");
+  githubOrigin(checkout, origin);
   git("-C", checkout, "config", "filter.evil.clean", "cat");
   const item = (id, kind) => ({
     id,

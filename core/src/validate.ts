@@ -26,6 +26,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
+import { GitRefusal } from "./git.js";
 import { knowledgeSettings } from "./knowledge/settings.js";
 import {
   hydrateTree,
@@ -59,7 +60,6 @@ import { errorMessage, headAndTail } from "./text.js";
 import { privateStagingPath } from "./work/collect.js";
 import {
   addWorktree,
-  GitRefusal,
   hasGitlink,
   hostGit,
   removeWorktree,

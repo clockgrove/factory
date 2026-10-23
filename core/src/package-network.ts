@@ -13,7 +13,8 @@
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isScalar, parse, parseAllDocuments, visit } from "yaml";
-import { GitRefusal, hostGit } from "./worktree.js";
+import { GitRefusal } from "./git.js";
+import { hostGit } from "./worktree.js";
 
 /** Files that choose where an install fetches from and what it runs. */
 const CONFIGURATION = [

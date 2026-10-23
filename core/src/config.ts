@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { remoteRepository } from "./git.js";
 import { serviceCredential } from "./providers/claude.js";
 import { type ProviderConfig, providersConfig } from "./providers/config.js";
 import {
@@ -359,6 +361,51 @@ const DEFAULT_OPTIONS: Record<QueueOption, string> = {
   cancelled: "Cancelled",
 };
 
+/** A directory's package.json name, or undefined. */
+function packageName(directory: string): string | undefined {
+  try {
+    const { name } = JSON.parse(
+      readFileSync(join(directory, "package.json"), "utf8"),
+    ) as { name?: unknown };
+    return typeof name === "string" ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Why Factory must not run on this target, or undefined: Factory never
+ * runs on its own repository, by name or by a checkout whose package is
+ * Factory, since its work would change the code that runs it. Factory's
+ * name and repository come from its own package.json. Checked when the
+ * configuration loads (setup, serve) and when an Objective is checked.
+ */
+export function ownRepositoryProblem(
+  repository: string,
+  checkout: string,
+): string | undefined {
+  let own: { name?: string; repository?: { url?: string } | string } = {};
+  let directory = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    try {
+      own = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+      break;
+    } catch {
+      if (dirname(directory) === directory)
+        return "Factory can't read its own package.json to tell itself from the target; reinstall Factory";
+      directory = dirname(directory);
+    }
+  }
+  const url =
+    typeof own.repository === "string" ? own.repository : own.repository?.url;
+  const ownRepository = url && remoteRepository(url.replace(/^git\+/, ""));
+  if (ownRepository && repository.toLowerCase() === ownRepository)
+    return `${repository} is Factory's own repository, and Factory never runs on the code that runs it; name another target repository`;
+  if (own.name && checkout && packageName(checkout) === own.name)
+    return `The checkout ${checkout} is a Factory checkout (its package is ${own.name}), and Factory never runs on the code that runs it; point checkout at a clone of the target repository`;
+  return undefined;
+}
+
 export function configPath(repository: string): string {
   return (
     process.env.FACTORY_CONFIG ??
@@ -522,6 +569,8 @@ export function loadConfig(repository: string): CoreConfig {
     problems.push(
       `repository is ${config.repository}, but the command named ${repository}`,
     );
+  const own = ownRepositoryProblem(config.repository, config.checkout);
+  if (own) problems.push(own);
   if (problems.length) throw new Error(`${path}: ${problems.join("; ")}`);
   return config;
 }

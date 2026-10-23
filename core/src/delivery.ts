@@ -16,9 +16,11 @@ import { crashPoint } from "./crash.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
   defaultHead,
-  operatorGit,
+  GitRefusal,
+  originRefusal,
   pathsHoldingSecrets,
   pinnedGitExit,
+  remoteGit,
   sha256,
 } from "./git.js";
 import {
@@ -38,7 +40,7 @@ import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
 import { errorMessage } from "./text.js";
 import { FACTORY_EMAIL } from "./work/collect.js";
-import { GitRefusal, hostGit, isAncestor, originProblem } from "./worktree.js";
+import { hostGit, isAncestor } from "./worktree.js";
 
 const MINUTE = 60_000;
 /** How long GitHub may not yet show what Factory just did. */
@@ -450,7 +452,7 @@ export async function deleteFactoryBranch(
     return `${branch} holds commits Factory did not make`;
   crashPoint(`${point}:before`);
   try {
-    await remoteGit(context, [
+    await originGit(context, [
       "push",
       "--porcelain",
       `--force-with-lease=refs/heads/${branch}:${remote}`,
@@ -487,7 +489,7 @@ async function pushBranch(
 ): Promise<Retry | Hold | undefined> {
   crashPoint("deliver:push:before");
   try {
-    await remoteGit(context, [
+    await originGit(context, [
       "push",
       "--porcelain",
       `--force-with-lease=refs/heads/${branch}:${remote ?? ""}`,
@@ -547,7 +549,7 @@ async function remoteHead(
 ): Promise<string | undefined> {
   let listed: string;
   try {
-    listed = await remoteGit(context, [
+    listed = await originGit(context, [
       "ls-remote",
       "origin",
       `refs/heads/${branch}`,
@@ -559,31 +561,20 @@ async function remoteHead(
   return listed.split(/\s+/)[0] || undefined;
 }
 
-/**
- * Git that reaches origin, with the operator's configuration and
- * credentials, after the origin check, as git.ts defaultHead does.
- */
-function remoteGit(context: DeliveryContext, args: string[]): Promise<string> {
-  return operatorGit(
-    context.checkout,
-    ["-c", "protocol.file.allow=never", ...args],
-    { signal: context.signal, timeoutMs: 5 * MINUTE },
-  );
+/** Git that reaches origin, after the origin check (git.ts remoteGit). */
+function originGit(context: DeliveryContext, args: string[]): Promise<string> {
+  return remoteGit(context.checkout, context.github.repository, args, {
+    signal: context.signal,
+  });
 }
 
 async function originHold(context: DeliveryContext): Promise<Hold | undefined> {
-  const problem = await originProblem(
+  const refusal = await originRefusal(
     context.checkout,
     context.github.repository,
     context.signal,
   );
-  return problem
-    ? objectiveWide(
-        hold(
-          `${problem}. Point origin's fetch and push URLs (and any insteadOf rewrite) at ${context.github.repository} with its default LFS route, then answer retry; or cancel.`,
-        ),
-      )
-    : undefined;
+  return refusal ? objectiveWide(hold(refusal.message)) : undefined;
 }
 
 // ── PR body ─────────────────────────────────────────────────────────────
@@ -934,7 +925,7 @@ async function renamedChecks(
   const { checkout, signal } = context;
   const jobs = async (commit: string) =>
     new Set(await workflowCheckNames(new BaseFiles(checkout, commit, signal)));
-  const tip = await recentDefaultHead(checkout, signal);
+  const tip = await recentDefaultHead(context);
   const defined = await jobs(tip);
   const own = required.length ? await jobs(at.head) : new Set<string>();
   const gone = [
@@ -956,13 +947,11 @@ const fetchedHeads = new Map<string, { head: string; at: number }>();
  * The default branch head, fetched at most once per DEFAULT_HEAD_REUSE_MS
  * per checkout: a renamed job stays renamed, so CI polls need not fetch.
  */
-async function recentDefaultHead(
-  checkout: string,
-  signal: AbortSignal,
-): Promise<string> {
+async function recentDefaultHead(context: DeliveryContext): Promise<string> {
+  const { checkout, github, signal } = context;
   const known = fetchedHeads.get(checkout);
   if (known && Date.now() - known.at < DEFAULT_HEAD_REUSE_MS) return known.head;
-  const head = await defaultHead(checkout, signal);
+  const head = await defaultHead(checkout, github.repository, signal);
   fetchedHeads.set(checkout, { head, at: Date.now() });
   return head;
 }
@@ -1303,7 +1292,7 @@ async function updateMerge(
     pinnedGitExit(context.checkout, args, { signal: context.signal });
   if ((await git(["cat-file", "-e", `${commit.sha}^{commit}`])).code !== 0)
     try {
-      await remoteGit(context, [
+      await originGit(context, [
         "fetch",
         "--quiet",
         "--no-tags",
@@ -1473,7 +1462,11 @@ async function integrate(
   integrated: string | undefined,
   mergeSha: string,
 ): Promise<Extract<MergeResult, { kind: "merged" }> | Retry | Hold> {
-  const tip = await defaultHead(context.checkout, context.signal);
+  const tip = await defaultHead(
+    context.checkout,
+    context.github.repository,
+    context.signal,
+  );
   if (!(await isAncestor(context.checkout, mergeSha, tip, context.signal)))
     return lagging(
       context,
@@ -1616,7 +1609,7 @@ async function acceptUnit(
 ): Promise<UnitMergeResult> {
   const { github, signal } = context;
   const top = input[input.length - 1]!;
-  const tip = await defaultHead(context.checkout, signal);
+  const tip = await defaultHead(context.checkout, github.repository, signal);
   const missing: string[] = [];
   const shas: string[] = [];
   for (const [index, layer] of input.entries()) {

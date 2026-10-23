@@ -14,7 +14,13 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { crashPoint } from "./crash.js";
-import { type HoldAfter, hold, type Outcome, objectiveWide } from "./engine.js";
+import {
+  type HoldAfter,
+  hold,
+  type Offer,
+  type Outcome,
+  objectiveWide,
+} from "./engine.js";
 import {
   defaultHead,
   GitRefusal,
@@ -98,6 +104,11 @@ export interface Repair {
  *   the new PR's number reaches the later steps.
  */
 export const REPUBLISH = "republish";
+const REPUBLISHING: Offer = {
+  answer: REPUBLISH,
+  family: "retry",
+  consequence: "Opens a new PR for the current result.",
+};
 
 /**
  * The answer that replaces a Factory branch holding commits Factory did not
@@ -264,7 +275,7 @@ export async function publish(
       if (await updates(context, pull.head.sha, earlier, bases))
         return hold(
           `PR #${pull.number} merged an earlier head of ${branch} (${pull.head.sha}), not the current result ${input.commit}, so that result is not on ${baseBranch}. Answer ${REPUBLISH} to open a new PR for the current result, or cancel.`,
-          [REPUBLISH, "cancel"],
+          [REPUBLISHING, "cancel"],
         );
   const remote = await remoteHead(context, branch);
   // The branch's head once pushed: the commit, or GitHub's update of it.
@@ -282,7 +293,21 @@ export async function publish(
     )
       return hold(
         `Remote branch ${branch} holds commits Factory did not make (head ${remote}; Factory pushed ${[...known].join(", ")}). Move them off the branch and answer retry; answer ${RESET_BRANCH} to replace the branch with Factory's result, dropping them from it; or cancel.`,
-        ["retry", RESET_BRANCH, "cancel"],
+        [
+          {
+            answer: "retry",
+            family: "retry",
+            consequence:
+              "Pushes again once the commits are moved off the branch.",
+          },
+          {
+            answer: RESET_BRANCH,
+            family: "reset",
+            consequence:
+              "Replaces the branch with Factory's result, dropping the commits Factory did not make.",
+          },
+          "cancel",
+        ],
       );
     // Nothing Factory pushes carries a secret value it knows (config.secrets).
     const leaked = [
@@ -729,7 +754,7 @@ async function judge(
     return lagging(
       `PR #${pr} is closed without a merge`,
       `${closed}. Answer ${REPUBLISH} to open a new PR for this result, or cancel.`,
-      [REPUBLISH, "cancel"],
+      [REPUBLISHING, "cancel"],
     );
   }
   const { expected, defaultBranch, bases } = await acceptedBases(
@@ -1598,7 +1623,13 @@ function pin(result: Retry | Repair | Hold | Republish, item: PullInput) {
  * mergeUnit as `accept`.
  */
 export const ACCEPT = "accept";
-const UNIT_ANSWERS = ["retry", ACCEPT, "cancel"];
+const ACCEPTING: Offer = {
+  answer: ACCEPT,
+  family: "accept",
+  consequence:
+    "Takes the stack as delivered, once every layer is merged on the default branch.",
+};
+const UNIT_ANSWERS: Offer[] = ["retry", ACCEPTING, "cancel"];
 const ACCEPT_HELP = `answer ${ACCEPT} to take the unit as delivered once every layer is merged on the default branch`;
 
 /**
@@ -1636,8 +1667,7 @@ async function acceptUnit(
     return pin(
       hold(
         `The native stack is not delivered yet: ${missing.join("; ")}. Merge the rest, then ${ACCEPT_HELP}; or answer retry to merge it as a stack; or cancel.`,
-        UNIT_ANSWERS,
-        ACCEPT,
+        [ACCEPTING, "retry", "cancel"],
       ),
       top,
     );
@@ -2021,7 +2051,7 @@ async function confirmUnit(
         `The native stack's layers do not all show one merge commit${expected ? ` (${expected})` : ""} yet`,
         `The native stack's layers ${layers.map((layer) => `PR #${layer.input.pr}`).join(", ")} show the merge commits ${shas.join(", ")}${expected ? `, not GitHub's stack merge ${expected}` : ""}: they did not merge as one stack. Inspect the stack and the default branch, then ${ACCEPT_HELP}; or answer retry; or cancel.`,
         // Merge commits never change, so retry alone can't pass.
-        [ACCEPT, "retry", "cancel"],
+        [ACCEPTING, "retry", "cancel"],
       ),
       top,
     );
@@ -2062,13 +2092,17 @@ function retry(reason: string): Retry {
  * Something GitHub may not show yet: a retry, which the engine turns into
  * the question once the step has waited GitHub's lag window.
  */
-function lagging(reason: string, question: string, answers?: string[]): Retry {
+function lagging(
+  reason: string,
+  question: string,
+  offers?: readonly Offer[],
+): Retry {
   return {
     ...retry(reason),
     holdAfter: {
       ms: GITHUB_LAG_MS,
       question,
-      ...(answers ? { answers } : {}),
+      ...(offers ? { offers } : {}),
     },
   };
 }

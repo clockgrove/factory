@@ -14,7 +14,7 @@
 import { BaseFiles } from "../planning/facts.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
-import { runOf, TERMINAL } from "../state.js";
+import { answersOf, runOf, TERMINAL } from "../state.js";
 import { mergeOf } from "../work/merged.js";
 import {
   admitted,
@@ -331,7 +331,7 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
       authority: "observation",
       validity: "historical",
       summary: `${label} held at ${hold.step}: ${firstLine(hold.question)}`,
-      body: `${hold.question}\n\nAnswers: ${hold.answers.join(", ")}`,
+      body: `${hold.question}\n\nAnswers: ${answersOf(hold).join(", ")}`,
       paths,
       digests: {},
     });

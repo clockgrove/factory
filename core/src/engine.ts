@@ -4,9 +4,11 @@ import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
 import {
   type Answer,
+  answersOf,
   type Frozen,
   type Hold,
   type HoldCause,
+  type HoldOption,
   type ObjectiveState,
   type ObjectiveStatus,
   type Retry,
@@ -47,14 +49,12 @@ export type Outcome =
   | {
       kind: "hold";
       question: string;
-      answers: string[];
-      recommended: string;
+      /** Exactly one is `recommended` (see `hold`). */
+      options: HoldOption[];
       /** What the question stops; absent: `item` (see `HoldScope`). */
       scope?: HoldScope;
       /** Absent: `question` (see `HoldCause`). */
       cause?: HoldCause;
-      /** Answers that need text after them (see `Hold.needsText`). */
-      needsText?: string[];
       keep?: Record<string, unknown>;
     }
   /**
@@ -85,6 +85,9 @@ export type Outcome =
       keep?: Record<string, unknown>;
     };
 
+/** A question outcome (see `hold`). */
+export type Held = Extract<Outcome, { kind: "hold" }>;
+
 /**
  * A wait that becomes a question once it has gone on `ms`: from `since`
  * when given (a push's time), else from when the step's run of retries of
@@ -95,7 +98,7 @@ export interface HoldAfter {
   ms: number;
   question: string;
   /** Absent: `retry` and `cancel`. */
-  answers?: string[];
+  offers?: readonly Offer[];
   since?: string;
 }
 
@@ -126,13 +129,68 @@ export function switchTargets(
     .map(([name]) => name);
 }
 
-/** A question for the operator; the first answer is recommended unless another is named. */
+/**
+ * The answers whose consequence is the same wherever they are offered,
+ * written once. `switch` stands for one option per provider it can move
+ * to: the engine expands it when it asks (`switchTargets`).
+ */
+const COMMON = {
+  retry: { family: "retry", consequence: "Runs the step again." },
+  replan: {
+    family: "replan",
+    consequence:
+      "Plans again from the issue as it reads now; after acceptance, the plan and build are dropped first.",
+  },
+  cancel: {
+    family: "cancel",
+    consequence: "Ends the Objective at once and closes its PRs and the issue.",
+  },
+  wait: {
+    family: "wait",
+    consequence:
+      "Keeps waiting until the limit resets, with no question until then.",
+  },
+  switch: {
+    family: "switch",
+    consequence:
+      "Runs this Objective on another configured provider from now on.",
+  },
+  adopt: {
+    family: "adopt",
+    consequence: "Freezes the configuration as it is now and continues.",
+  },
+} as const satisfies Record<string, Omit<HoldOption, "answer">>;
+
+/** An answer a step offers: a common one by name, or any other written out. */
+export type Offer = keyof typeof COMMON | HoldOption;
+
+/**
+ * A question for the operator, with the answers it offers. The option
+ * marked `recommended`, else the first, is the recommended one.
+ */
 export function hold(
   question: string,
-  answers = ["retry", "cancel"],
-  recommended = answers[0]!,
+  offers: readonly Offer[] = ["retry", "cancel"],
 ): Extract<Outcome, { kind: "hold" }> {
-  return { kind: "hold", question, answers, recommended };
+  const options = offers.map((offer) =>
+    typeof offer === "string" ? common(offer) : offer,
+  );
+  return { kind: "hold", question, options: recommend(options) };
+}
+
+function common(answer: keyof typeof COMMON): HoldOption {
+  return { answer, ...COMMON[answer] };
+}
+
+/** The options with exactly one recommended: the one marked, else the first. */
+function recommend(options: readonly HoldOption[]): HoldOption[] {
+  const chosen = Math.max(
+    0,
+    options.findIndex((option) => option.recommended),
+  );
+  return options.map(({ recommended: _, ...option }, index) =>
+    index === chosen ? { ...option, recommended: true } : option,
+  );
 }
 
 /**
@@ -141,9 +199,9 @@ export function hold(
  */
 export function failure(
   question: string,
-  answers = ["retry", "cancel"],
+  offers?: readonly Offer[],
 ): Extract<Outcome, { kind: "hold" }> {
-  return { ...hold(question, answers), cause: "failure" };
+  return { ...hold(question, offers), cause: "failure" };
 }
 
 /** An error: it retries with backoff, and `maxErrors` in a row hold. */
@@ -706,6 +764,14 @@ export class ObjectiveRunner {
             outcome.target,
             failure(
               `${outcome.target} has been repaired ${repair.count - 1} times and still fails:\n\n${outcome.finding}\n\n\`retry\` allows one more repair.`,
+              [
+                {
+                  answer: "retry",
+                  family: "retry",
+                  consequence: "Allows one more repair.",
+                },
+                "cancel",
+              ],
             ),
             true,
           );
@@ -754,7 +820,7 @@ export class ObjectiveRunner {
     let question: Extract<Outcome, { kind: "hold" }> | undefined;
     const after = outcome.holdAfter;
     if (after && now - Date.parse(after.since ?? since) >= after.ms)
-      question = hold(after.question, after.answers);
+      question = hold(after.question, after.offers);
     else if (isError) {
       if (count >= this.limits.maxErrors)
         question = failure(`Step ${key} keeps failing (${outcome.reason}).`);
@@ -768,7 +834,7 @@ export class ObjectiveRunner {
         question = {
           ...hold(
             `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${new Date(at).toISOString()}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets${others.length === 1 ? `; \`${SWITCH}\` runs this Objective on provider ${named} instead` : others.length ? `; \`${SWITCH} NAME\` runs this Objective on another configured provider: ${named}` : ""}; or cancel.`,
-            [WAIT, ...(others.length ? [SWITCH] : []), "cancel"],
+            ["wait", ...(others.length ? ["switch" as const] : []), "cancel"],
           ),
           // A limit is the account's, not the step's: one question for all.
           scope: "objective",
@@ -783,7 +849,19 @@ export class ObjectiveRunner {
       // the display shows it and a reminder follows a day later.
       question = hold(
         `Step ${key} has been retrying since ${since}, for more than ${hours(this.limits.maxWaitMs)}. It began with: ${(previous?.cause ?? outcome.reason).slice(0, 500)}\n\nLast error: ${outcome.reason.slice(0, 500)}\n\n\`${WAIT}\` keeps retrying for another ${hours(this.limits.maxWaitMs)}; \`retry\` tries again now; or cancel.`,
-        [WAIT, "retry", "cancel"],
+        [
+          {
+            answer: WAIT,
+            family: "wait",
+            consequence: `Keeps retrying for another ${hours(this.limits.maxWaitMs)}.`,
+          },
+          {
+            answer: "retry",
+            family: "retry",
+            consequence: "Tries the step again now.",
+          },
+          "cancel",
+        ],
       );
     const record: Retry = {
       count,
@@ -875,7 +953,7 @@ export class ObjectiveRunner {
   ): void {
     const state = this.state;
     const now = this.now().toISOString();
-    const { question, scope, needsText } = asked;
+    const { question, scope } = asked;
     const cause = asked.cause ?? "question";
     const item = scope === "objective" ? undefined : itemOf(key);
     const open = state.holds.find(
@@ -886,8 +964,7 @@ export class ObjectiveRunner {
       if (saved)
         state.asking[key] = {
           question,
-          answers: asked.answers,
-          recommended: asked.recommended,
+          options: asked.options,
           ...(scope ? { scope } : {}),
           ...(cause === "failure" ? { cause } : {}),
         };
@@ -897,15 +974,32 @@ export class ObjectiveRunner {
       }
       return;
     }
-    const all = asked.answers.includes("cancel")
-      ? [...asked.answers]
-      : [...asked.answers, "cancel"];
+    // Each provider `switch` can move to is its own option; cancel always
+    // works, and a failure offers replan where the workflow can plan again.
+    const options = asked.options.flatMap((option) =>
+      option.answer === SWITCH && option.arg === undefined
+        ? this.otherProviders().map((name) => ({
+            ...option,
+            arg: name,
+            consequence:
+              name === state.frozen?.provider
+                ? `Runs this Objective on provider ${name}'s configuration as it is now.`
+                : `Runs this Objective on provider ${name} from now on.`,
+          }))
+        : [option],
+    );
+    if (!options.some((option) => option.answer === "cancel"))
+      options.push(common("cancel"));
     if (
       cause === "failure" &&
-      !all.includes(REPLAN) &&
+      !options.some((option) => option.answer === REPLAN) &&
       this.workflow.replannable?.(state, key)
     )
-      all.splice(all.indexOf("cancel"), 0, REPLAN);
+      options.splice(
+        options.findIndex((option) => option.answer === "cancel"),
+        0,
+        common(REPLAN),
+      );
     state.holds = [
       ...state.holds.filter((hold) => hold !== open),
       {
@@ -913,12 +1007,8 @@ export class ObjectiveRunner {
         step: key,
         ...(item !== undefined ? { item } : {}),
         question,
-        answers: all,
-        recommended: all.includes(asked.recommended)
-          ? asked.recommended
-          : all[0]!,
+        options: recommend(options),
         cause,
-        ...(needsText?.length ? { needsText } : {}),
         askedAt: now,
       },
     ];
@@ -987,12 +1077,13 @@ export class ObjectiveRunner {
         "stale_question",
         `#${issue}'s question ${question} isn't open, so that answer wasn't applied. ${openQuestions(issue, holds)}`,
       );
-    if (!hold.answers.includes(answer))
+    const offered = hold.options.filter((option) => option.answer === answer);
+    if (!offered.length)
       return refused(
         "invalid_answer",
-        `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`,
+        `"${answer}" isn't an answer to question ${hold.id}. Answers: ${answersOf(hold).join(", ")}.`,
       );
-    if (hold.needsText?.includes(answer) && !text?.trim())
+    if (offered.some((option) => option.needsText) && !text?.trim())
       return refused(
         "invalid_answer",
         `\`${answer}\` needs text after it, for example \`/factory ${answer} <your text>\`.`,
@@ -1018,7 +1109,7 @@ export class ObjectiveRunner {
       if (!current || !live)
         return refused(
           "invalid_answer",
-          `This Objective's provider "${current?.provider}" isn't configured, so there is nothing to adopt. Answers: ${hold.answers.join(", ")}.`,
+          `This Objective's provider "${current?.provider}" isn't configured, so there is nothing to adopt. Answers: ${answersOf(hold).join(", ")}.`,
         );
       if (live.digest !== this.state.kept[ADOPTS]) {
         // The configuration changed again after the question named it:
@@ -1167,10 +1258,10 @@ export class ObjectiveRunner {
     const holds = this.state.holds;
     if (question !== undefined) {
       const hold = holds.find((open) => open.id === question);
-      if (hold && !hold.answers.includes("retry"))
+      if (hold && !answersOf(hold).includes("retry"))
         return refused(
           "invalid_answer",
-          `#${issue}'s question ${hold.id} has no retry answer. Answers: ${hold.answers.join(", ")}.`,
+          `#${issue}'s question ${hold.id} has no retry answer. Answers: ${answersOf(hold).join(", ")}.`,
         );
       return this.answer("retry", undefined, by, undefined, question);
     }
@@ -1232,7 +1323,7 @@ function unboundRefusal(
 
 function openQuestions(issue: number, holds: readonly Hold[]): string {
   return holds.length
-    ? `Open questions: ${holds.map((hold) => `${hold.id} (${hold.answers.join(", ")})`).join("; ")}. Name one: \`factory answer ${issue} <answer> --question <id>\`, or comment \`/factory <answer> --question <id>\`.`
+    ? `Open questions: ${holds.map((hold) => `${hold.id} (${answersOf(hold).join(", ")})`).join("; ")}. Name one: \`factory answer ${issue} <answer> --question <id>\`, or comment \`/factory <answer> --question <id>\`.`
     : "No question is open now.";
 }
 

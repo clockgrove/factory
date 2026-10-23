@@ -509,8 +509,15 @@ abstract class ManagedWorker implements Worker {
         return {
           ...hold(
             `Work Item ${input.item.id} has used ${over} across its hosted runs. Answer more to allow as much again, or cancel.`,
-            ["more", "cancel"],
-            "cancel",
+            [
+              "cancel",
+              {
+                answer: "more",
+                family: "retry",
+                consequence:
+                  "Allows as much hosted spend again for this Work Item.",
+              },
+            ],
           ),
           spend,
         };

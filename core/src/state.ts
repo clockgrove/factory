@@ -17,15 +17,16 @@ import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
 
 /**
- * 5: a Work Item's refused and replayed result is one `refused` fact, and
- * its diagnosis one `diagnosis` fact (work/facts.ts).
+ * 6: a hold carries its answers as `options`, each with its family and
+ * consequence. 5: a Work Item's refused and replayed result is one
+ * `refused` fact, and its diagnosis one `diagnosis` fact (work/facts.ts).
  * 4: a hold has a cause, an error retry is a wait class, cancel and the
  * end are one `ended` record (3: one frozen configuration in place of the
  * frozen provider). Another version is unreadable, with no migration;
  * `factory reset` rebuilds it from GitHub (reset.ts), with no open
  * question.
  */
-const STATE_VERSION = 5;
+const STATE_VERSION = 6;
 
 export type ObjectiveStatus =
   | "checking"
@@ -48,6 +49,36 @@ export const TERMINAL: readonly ObjectiveStatus[] = ["done", "cancelled"];
  */
 export type HoldCause = "question" | "failure";
 
+/** What kind of choice an answer is: a host groups a long list of options by it. */
+export type AnswerFamily =
+  | "retry"
+  | "replan"
+  | "cancel"
+  | "wait"
+  | "switch"
+  | "adopt"
+  | "accept"
+  | "refuse"
+  | "select"
+  | "answer"
+  | "repair"
+  | "reset";
+
+/** One answer a hold offers (CORE.md#Holds and answers). */
+export interface HoldOption {
+  /** The literal answer token: `/factory <answer>`. */
+  answer: string;
+  family: AnswerFamily;
+  /** What goes after the token, for a parameterized answer (`switch NAME`). */
+  arg?: string;
+  /** One short sentence: what happens on this answer. */
+  consequence: string;
+  /** The answer needs text after it: one without is refused, with no change. */
+  needsText?: boolean;
+  /** Exactly one option per hold. */
+  recommended?: boolean;
+}
+
 /** A question only a person can answer. Every answer it lists works. */
 export interface Hold {
   id: string;
@@ -60,11 +91,8 @@ export interface Hold {
    */
   item?: string;
   question: string;
-  answers: string[];
-  recommended: string;
+  options: HoldOption[];
   cause: HoldCause;
-  /** Answers that need text after them: one without is refused, with no change. */
-  needsText?: string[];
   askedAt: string;
   /**
    * When its issue comment last changed to what it shows now, by GitHub's
@@ -74,6 +102,24 @@ export interface Hold {
   shownAt?: string;
   /** The comment shows the short form `/factory <answer>` (it was the one open question). */
   shortForm?: boolean;
+}
+
+/**
+ * How an option is written after `/factory`: `switch codex`, `answer
+ * <text>`; `bound` (`--question ID`) goes right after the answer.
+ */
+export function answerForm(option: HoldOption, bound?: string): string {
+  return [
+    option.answer,
+    ...(bound ? [bound] : []),
+    ...(option.arg !== undefined ? [option.arg] : []),
+    ...(option.needsText ? ["<text>"] : []),
+  ].join(" ");
+}
+
+/** The answer tokens a hold offers, once each, for a reply that names them. */
+export function answersOf(hold: Pick<Hold, "options">): string[] {
+  return [...new Set(hold.options.map((option) => option.answer))];
 }
 
 export interface Answer {
@@ -125,8 +171,7 @@ export interface Retry {
  */
 export interface PendingQuestion {
   question: string;
-  answers: string[];
-  recommended: string;
+  options: HoldOption[];
   scope?: HoldScope;
   cause?: HoldCause;
 }

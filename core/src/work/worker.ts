@@ -6,7 +6,7 @@
  */
 import type { HoldScope } from "../engine.js";
 import type { WorkItem } from "../planning/types.js";
-import type { Answer, Wait } from "../state.js";
+import type { Answer, HoldOption, Wait } from "../state.js";
 
 /**
  * What a paid worker has spent on one Work Item across attempts and
@@ -54,8 +54,7 @@ export type WorkerResult = (
   | {
       kind: "hold";
       question: string;
-      answers: string[];
-      recommended: string;
+      options: HoldOption[];
       /** Absent: the Work Item's (see planner.ts PlannerError.scope). */
       scope?: HoldScope;
     }

@@ -21,7 +21,7 @@ Drive Objectives on a target repository through the installed `factory` CLI. `fa
 ```sh
 factory status [ISSUE] [--json]                 # where each Objective is, open holds, the next step
 factory log ISSUE [--tail N] [--follow] [--json] # what happened, from the run log
-factory answer ISSUE ANSWER [NAME] --question HOLD_ID [--text T]
+factory answer ISSUE ANSWER [ARG] --question HOLD_ID [--text T]
 factory retry ISSUE [--question HOLD_ID]         # run unheld waiting steps now; with --question, answer retry
 factory cancel ISSUE
 factory pause|drain|resume ISSUE                # this Objective only
@@ -44,7 +44,7 @@ Run `factory status ISSUE --json`. Each entry in `objectives` has:
 
 - `status`: `checking`, `planning`, `building`, `finishing`, `holding`, `done`, `failed`, `cancelled`, or `unreadable`.
 - `mode`: `running`, `paused` or `draining`, the operator's control of this Objective.
-- `holds`: the open questions, oldest first, each `{id, step, item?, question, answers, recommended, askedAt}`. A hold with `item` stops only that Work Item and the items that depend on it; one without stops the whole Objective.
+- `holds`: the open questions, oldest first, each `{id, step, item?, question, options, cause, askedAt}` (see Answer a hold). A hold with `item` stops only that Work Item and the items that depend on it; one without stops the whole Objective.
 - `waiting`: steps that will retry on their own, each with `step`, `nextAt`, `lastError` and `since`. With `gate` set, the step waits on a person outside Factory, such as an environment approval or a required review; name that gate to the operator.
 - `waitsOn`: `{slot: true}` (no free slot) or `{paths: N}` (Objective #N owns overlapping paths), else `null`.
 - `running`: steps started and not finished. `lastEvent`: the latest run log event.
@@ -64,31 +64,15 @@ For why an Objective is where it is, read `factory log ISSUE --json` (`--tail N`
 
 ## Answer a hold
 
-A hold is the only time Factory needs a person. Every listed answer works, and `cancel` is always valid.
+A hold is the only time Factory needs a person. Every listed option works, and `cancel` is always one of them.
 
 An Objective can have several holds at once: at most one per Work Item and one for the whole Objective. Each has its own id and is answered on its own.
 
-1. Read `holds` from `status ISSUE --json`.
-2. Ask with AskUserQuestion, one question per hold (several in one call when there are several holds): the hold's `question` as the text, naming its Work Item when `item` is set; one option per entry in `answers`, the `recommended` one first and labelled recommended; and a one-line consequence for each. Keep free text available. Without a structured question tool, ask in plain text the same way.
-3. For each hold, run `factory answer ISSUE ANSWER --question HOLD_ID` with that hold's own id. For `retry`, `factory retry ISSUE --question HOLD_ID` does the same. Add `--text` when the answer takes text (`answer` and `allow` do; the question says what goes in it). For `switch NAME`, pass the provider name after the answer. Always pass `--question`: an answer bound to an id lands only on that question, and a re-asked question gets a new id.
-4. Read `status` again and report the new state. A hold that is re-asked has a new id, so ask again rather than reuse the old one.
-
-Common answers, so you can explain them:
-
-| Answer                     | Effect                                                                                                                           |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `retry`                    | Run the stopped step again.                                                                                                      |
-| `wait`                     | Keep waiting on a slow cause or a usage limit.                                                                                   |
-| `switch NAME`              | Run this Objective on provider NAME, or re-freeze the same provider's changed settings. Plain `switch` when there is one target. |
-| `adopt`                    | Re-freeze the changed configuration the service runs now, and continue.                                                          |
-| `answer` + text            | A correction or decision the planner or worker uses next.                                                                        |
-| `allow` + an exact command | Authorize that validation command for this Objective.                                                                            |
-| `approve`, `more`          | Accept the reviewed plan; grant more plan revisions.                                                                             |
-| `replan`                   | Discard the plan and plan again from the current issue and default branch.                                                       |
-| `recheck`, `continue`      | Check the edited Objective again; carry on after an edit Factory noticed.                                                        |
-| `revalidate`               | The refused result was right and Factory's check was wrong: validate it again.                                                   |
-| `reset`                    | Rebuild unreadable state from GitHub.                                                                                            |
-| `cancel`                   | End the Objective: close its PRs and the issue.                                                                                  |
+1. Read `holds` from `status ISSUE --json`. Each option is `{answer, family, arg?, consequence, needsText?, recommended?}`, and exactly one is `recommended`. Explain an answer only with its `consequence`; never from memory.
+2. Ask with AskUserQuestion, one question per hold (several in one call when there are several holds): the hold's `question` as the text, naming its Work Item when `item` is set. Each option is one choice: label `answer` plus `arg` when set (`switch claude`), the recommended one first and labelled recommended, and `consequence` as its description. Keep free text available. Without a structured question tool, ask in plain text the same way.
+3. **More than 4 options.** AskUserQuestion takes at most 4, so ask in two steps. First ask for the family: one choice per distinct `family`, in the order the options first appear (the recommended option's family first), each described by its options' answers. Then ask for the specific option within the chosen family; a family with one option needs no second question. A family with more than 4 options (one per set id, say) offers its first 4, recommended first, and names the rest in the question text; the operator can type one of them as free text.
+4. For each hold, run `factory answer ISSUE ANSWER [ARG] --question HOLD_ID` with that hold's own id, passing `arg` when the option has one. For `retry`, `factory retry ISSUE --question HOLD_ID` does the same. When the option has `needsText`, ask the operator for the text and pass it with `--text` (the question says what goes in it); text on any other answer is optional and recorded as the reason. Always pass `--question`: an answer bound to an id lands only on that question, and a re-asked question gets a new id.
+5. Read `status` again and report the new state. A hold that is re-asked has a new id, so ask again rather than reuse the old one.
 
 ## Refusals
 
@@ -99,7 +83,7 @@ A refused command exits 1 and prints `{"kind":"lifecycle-refusal","code":"..."}`
 | `stale_question`                    | The question changed or was re-asked. Read `status` again and ask about the current holds.                                                                |
 | `no_open_question`                  | No hold with that id is open. Read `status` again; the message names the open ones.                                                                       |
 | `question_required`                 | The answer named no question. Run it again with `--question HOLD_ID` from `status`. A `/factory` comment gets this too when it can't be tied to one hold. |
-| `invalid_answer`                    | Not one of the hold's answers. Ask again with the listed `answers`.                                                                                       |
+| `invalid_answer`                    | Not one of the hold's options, or text missing on a `needsText` option. Read `status` again and ask with the listed `options`.                            |
 | `state_unreadable`                  | The hold `unreadable` offers `reset` and `cancel`. Ask the operator.                                                                                      |
 | `objective_finished`                | The Objective is done, failed or cancelled, so its hold no longer takes answers. Report it; don't retry.                                                  |
 | `no_factory_state`                  | Factory has no state for that issue: check the number and whether it's queued.                                                                            |

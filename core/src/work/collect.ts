@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
-import { hold, objectiveWide } from "../engine.js";
+import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
 import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
@@ -96,7 +96,7 @@ export type Collection =
     }
   /** The worker's result is wrong; the finding goes back to it. */
   | { kind: "repair"; finding: string; discovery?: WorkDiscovery }
-  | { kind: "hold"; question: string; answers: string[]; recommended: string }
+  | Held
   | { kind: "retry"; reason: string };
 
 /** A deterministic problem with the worker's result. */
@@ -970,7 +970,19 @@ function secretHold(
     .join(", ");
   return hold(
     `Secretlint found suspected secret in ${found}. Publication stopped. Operator: review the finding; remove or rotate the value, or name a reviewed Secretlint config outside the target checkout in policy.secretlintConfig, restart the service and explicitly retry. Answer repair to have the worker remove the value, retry to collect again, or cancel.`,
-    ["repair", "retry", "cancel"],
+    [
+      {
+        answer: "repair",
+        family: "repair",
+        consequence: "The worker removes the value.",
+      },
+      {
+        answer: "retry",
+        family: "retry",
+        consequence: "Collects the result again.",
+      },
+      "cancel",
+    ],
   );
 }
 

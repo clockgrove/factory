@@ -120,7 +120,18 @@ export function errorOutcome(
           redo === "replan"
             ? `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`
             : `${message}\n\n\`refuse\` rejects this amendment, so it can be replaced or the plan can continue without it.`,
-          [redo, "retry", "cancel"],
+          [
+            redo === "replan"
+              ? "replan"
+              : {
+                  answer: "refuse",
+                  family: "refuse",
+                  consequence:
+                    "Rejects the amendment, so it can be replaced or the plan runs without it.",
+                },
+            "retry",
+            "cancel",
+          ],
         ),
         cause: "failure",
       }),

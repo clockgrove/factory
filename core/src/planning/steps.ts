@@ -5,6 +5,7 @@ import {
   errored,
   failure,
   hold,
+  type Offer,
   type Outcome,
   objectiveWide,
   type Step,
@@ -589,7 +590,25 @@ function lastReview(
 // ---------------------------------------------------------------------------
 // decide:g:n
 
-const ASK = ["answer", "allow", "replan", "cancel"];
+// Text is required (`needsText`): the engine refuses an answer without it.
+const ANSWERING: Offer = {
+  answer: "answer",
+  family: "answer",
+  consequence: "Sends your decision back to the planner.",
+  needsText: true,
+};
+const ASK: Offer[] = [
+  ANSWERING,
+  {
+    answer: "allow",
+    family: "answer",
+    consequence:
+      "Authorizes that exact validation command for this Objective and plans again.",
+    needsText: true,
+  },
+  "replan",
+  "cancel",
+];
 
 function decideStep(
   key: string,
@@ -660,7 +679,7 @@ function decideStep(
             );
           case "answer":
           case "allow": {
-            // Text is required (`needsText`): the engine refuses an answer without it.
+            // Text is required (ASK): the engine refuses an answer without it.
             const decision = record((answer.text ?? "").trim());
             return done({
               decision,
@@ -669,11 +688,7 @@ function decideStep(
           }
         }
       }
-      if (question)
-        return {
-          ...hold(question.text, question.answers, question.recommended),
-          needsText: ["answer", "allow"],
-        };
+      if (question) return hold(question.text, question.offers);
       if (findings.length === 0) {
         // Before accepting, the Objective must still read as planning read it.
         if (answer?.answer !== "continue") {
@@ -724,7 +739,15 @@ function changedHold(
 ): Extract<Outcome, { kind: "hold" }> {
   return hold(
     `Objective #${state.issue} was edited after planning read it. \`replan\` plans again from the new text; \`continue\` keeps this plan.`,
-    ["replan", "continue", "cancel"],
+    [
+      "replan",
+      {
+        answer: "continue",
+        family: "accept",
+        consequence: "Keeps this plan and accepts the issue as it reads now.",
+      },
+      "cancel",
+    ],
   );
 }
 
@@ -771,26 +794,31 @@ function questionFor(
   fixes: Finding[],
   asks: Finding[],
   deps: PlanningDeps,
-): { text: string; answers: string[]; recommended: string } | undefined {
+): { text: string; offers: Offer[] } | undefined {
   const list = (items: Finding[]) =>
     items.map((f, i) => `${i + 1}. ${f.message}`).join("\n");
   if (planned.question)
     return {
       text: `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,
-      answers: ASK,
-      recommended: "answer",
+      offers: ASK,
     };
   if (asks.length && !fixes.length && !state.done[`review:${g}:${n}`])
     return {
       text: `Factory's plan checks found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`answer <decision>\` sends your decision back to the planner.`,
-      answers: ASK,
-      recommended: "answer",
+      offers: ASK,
     };
   if (asks.length && !fixes.length)
     return {
       text: `The plan reviewer found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`approve\` runs the plan as it is; \`answer <decision>\` sends your decision back to the planner.`,
-      answers: ["approve", ...ASK],
-      recommended: "answer",
+      offers: [
+        ANSWERING,
+        {
+          answer: "approve",
+          family: "accept",
+          consequence: "Runs the plan as it is.",
+        },
+        ...ASK.slice(1),
+      ],
     };
   if (!fixes.length) return undefined;
   const previous =
@@ -798,15 +826,20 @@ function questionFor(
   if (previous?.corrections && sameFindings(previous.corrections, fixes))
     return {
       text: `Plan round ${n} came back with the same problems as round ${n - 1}:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`,
-      answers: ASK,
-      recommended: "answer",
+      offers: ASK,
     };
   const allowance = deps.config.planning.revisions + granted(state, g, n);
   if (fixRounds(state, g, n) > allowance)
     return {
       text: `The plan still has ${fixes.length} problem${fixes.length === 1 ? "" : "s"} after ${n} rounds:\n\n${list(fixes)}\n\n\`more\` allows two more rounds.`,
-      answers: ["more", ...ASK],
-      recommended: "more",
+      offers: [
+        {
+          answer: "more",
+          family: "retry",
+          consequence: "Allows two more plan rounds.",
+        },
+        ...ASK,
+      ],
     };
   return undefined;
 }
@@ -996,7 +1029,6 @@ export async function readObjective(
         hold(
           `${own}. Fix the configuration and restart the service; or cancel.`,
           ["cancel", "retry"],
-          "cancel",
         ),
       ),
     };
@@ -1015,8 +1047,7 @@ export async function readObjective(
     return {
       hold: hold(
         `Issue #${issue} is closed (${by} closed it${reason}). Reopen it and answer \`${again}\`, or cancel. If the Project's "Auto-close issue" workflow closes it again, set the item's Status off Done first.`,
-        [again, "cancel"],
-        "cancel",
+        ["cancel", againOffer(again)],
       ),
     };
   }
@@ -1108,15 +1139,36 @@ function authorHold(
   return objectiveWide(
     hold(
       `Issue #${state.issue} was written by ${author ? `@${author}` : "a deleted account"}, who has no write access; approve to plan it.\n\nFactory plans from what GitHub shows of it (digest \`${digest}\`), so content GitHub hides never reaches a model. Diagram and math sources aren't planner input either: each mermaid diagram is \`[mermaid diagram]\` and each math block \`[math]\`, as you see only the drawing. Nothing in it counts until you approve, and an edit asks again.`,
-      ["approve", "cancel"],
+      [
+        {
+          answer: "approve",
+          family: "accept",
+          consequence: "Plans the Objective as GitHub shows it now.",
+        },
+        "cancel",
+      ],
     ),
   );
 }
 
-function objectiveProblemsHold(problems: string[], again: string): Outcome {
+/** The answer that checks an edited Objective again: before planning `recheck`, after it `replan`. */
+function againOffer(again: "recheck" | "replan"): Offer {
+  return again === "replan"
+    ? "replan"
+    : {
+        answer: "recheck",
+        family: "retry",
+        consequence: "Checks the edited Objective again.",
+      };
+}
+
+function objectiveProblemsHold(
+  problems: string[],
+  again: "recheck" | "replan",
+): Outcome {
   return hold(
     `This Objective needs fixing before Factory can plan it:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nEdit the issue, then answer \`${again}\`.`,
-    [again, "cancel"],
+    [againOffer(again), "cancel"],
   );
 }
 

@@ -7,7 +7,7 @@ import type { RunLog } from "./log.js";
 import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
 import type { ObjectiveState, ObjectiveStatus } from "./state.js";
-import { CLOCK_SKEW_MS, TERMINAL } from "./state.js";
+import { answerForm, CLOCK_SKEW_MS, TERMINAL } from "./state.js";
 import { errorMessage } from "./text.js";
 
 /** What the sync keeps in an Objective's state (`modules.github`). */
@@ -553,13 +553,13 @@ export class GitHubSync {
       if (hold.shownAt !== undefined && (!hold.shortForm || !bound)) continue;
       this.background(issue, `ask:${issue}:${hold.id}`, async (signal) => {
         const marker = MARK(issue, "hold", hold.id);
-        const named = ` --question ${hold.id}`;
-        const answers = hold.answers
+        const named = `--question ${hold.id}`;
+        const answers = hold.options
           .map(
-            (a) =>
-              `\`/factory ${a}${bound ? named : ""}\`${a === hold.recommended ? " (recommended)" : ""}`,
+            (option) =>
+              `- \`/factory ${answerForm(option, bound ? named : undefined)}\`${option.recommended ? " (recommended)" : ""}: ${option.consequence}`,
           )
-          .join(", ");
+          .join("\n");
         const about = hold.item
           ? ` It stops Work Item \`${hold.item}\` and the items that depend on it; other work goes on.`
           : "";
@@ -567,11 +567,11 @@ export class GitHubSync {
           ? " Other questions are open too, so the answer names this one."
           : bound
             ? " Another question was shown after this one, so the answer names this one."
-            : ` While this is the only open question, the short form works; \`/factory <answer>${named}\` always does.`;
+            : ` While this is the only open question, the short form works; \`/factory <answer> ${named}\` always does.`;
         const comment = await this.github.upsertComment(
           issue,
           marker,
-          `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of: ${answers}. Add text after the answer to explain it.${about}${form}`,
+          `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of:\n${answers}\n\nAdd text after the answer to explain it.${about}${form}`,
           "sync:ask",
           signal,
           new Date(Date.parse(hold.askedAt) - CLOCK_SKEW_MS).toISOString(),

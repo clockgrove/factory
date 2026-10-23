@@ -930,7 +930,30 @@ async function repairContext(
     return {
       hold: hold(
         `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer with \`answer <decision>\` to send the worker a correction, or \`retry\` to diagnose the failure again.${recheck}`,
-        ["answer", "retry", ...(recheck ? ["revalidate"] : []), "cancel"],
+        [
+          {
+            answer: "answer",
+            family: "answer",
+            consequence: "Sends the worker your correction.",
+            needsText: true,
+          },
+          {
+            answer: "retry",
+            family: "retry",
+            consequence: "Diagnoses the failure again.",
+          },
+          ...(recheck
+            ? [
+                {
+                  answer: "revalidate",
+                  family: "accept",
+                  consequence:
+                    "Validates, reviews and delivers the same result again, without the worker.",
+                } as const,
+              ]
+            : []),
+          "cancel",
+        ],
       ),
     };
   }
@@ -1141,7 +1164,12 @@ async function selectStep(
     };
     decided = own.selection;
   } else {
-    if (!answer || !question.answers.includes(answer.answer.toLowerCase()))
+    if (
+      !answer ||
+      !question.options.some(
+        (option) => option.answer === answer.answer.toLowerCase(),
+      )
+    )
       return question;
     read = readSelection(plan, item, work.sets, answer);
     decided = answer;
@@ -1354,7 +1382,19 @@ function reviewOutcome(
   return {
     ...hold(
       `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n\`accept\` accepts ${review.questions.length === 1 ? "it" : "them all"}; \`refuse <reason>\` sends the result back for repair.`,
-      ["accept", "refuse", "cancel"],
+      [
+        {
+          answer: "accept",
+          family: "accept",
+          consequence: "Accepts the result as it is.",
+        },
+        {
+          answer: "refuse",
+          family: "refuse",
+          consequence: "Sends the result back for repair with your reason.",
+        },
+        "cancel",
+      ],
     ),
     keep: pending(review.questions.map((q) => q.criterion)),
   };
@@ -1451,7 +1491,20 @@ async function publishStep(
       : {
           ...hold(
             `${result.finding}\n\nPublication stopped; nothing was pushed (finding \`${result.digest}\`). Answer repair to have the worker remove the value; publish if the matched text isn't a secret, which lets exactly this finding on this commit through once; or cancel. Rotate the secret if the worker may have written it anywhere else.`,
-            ["repair", "publish", "cancel"],
+            [
+              {
+                answer: "repair",
+                family: "repair",
+                consequence: "The worker removes the value.",
+              },
+              {
+                answer: "publish",
+                family: "accept",
+                consequence:
+                  "Lets exactly this finding on this commit through, and publishes.",
+              },
+              "cancel",
+            ],
           ),
           keep: facts({ secret: result.digest }, item.id),
         };
@@ -1879,8 +1932,7 @@ function notYet(item: WorkItem, what: string): Step {
     async run(): Promise<Outcome> {
       return hold(
         `Work Item ${item.id} is one of the ${what}, which this Factory build can't run yet.`,
-        ["retry", "replan", "cancel"],
-        "cancel",
+        ["cancel", "retry", "replan"],
       );
     },
   };
@@ -2117,16 +2169,29 @@ async function objectiveEdited(
     return objectiveWide(
       hold(
         `Issue #${state.issue} was closed while Factory was building it. Reopen it and answer \`continue\`, or cancel.`,
-        ["continue", "cancel"],
-        "cancel",
+        [
+          "cancel",
+          {
+            answer: "continue",
+            family: "accept",
+            consequence: "Builds on, once the issue is reopened.",
+          },
+        ],
       ),
     );
   if (digest !== accepted)
     return objectiveWide(
       hold(
         `Objective #${state.issue} was edited after its plan was accepted. \`continue\` keeps building this plan; \`replan\` plans again from the new text.`,
-        ["continue", "replan", "cancel"],
-        "replan",
+        [
+          "replan",
+          {
+            answer: "continue",
+            family: "accept",
+            consequence: "Keeps building this plan.",
+          },
+          "cancel",
+        ],
       ),
     );
   return undefined;

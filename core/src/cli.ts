@@ -16,6 +16,7 @@ import {
   DEFAULT_LIMITS,
   type EngineLimits,
   hostLimits,
+  hold as question,
   settled,
 } from "./engine.js";
 import { gitEnvironment } from "./git.js";
@@ -65,6 +66,7 @@ import {
 import { RESET, type ResetRecord, rebuildStep, resettable } from "./reset.js";
 import { serve } from "./service.js";
 import {
+  answerForm,
   type Frozen,
   findState,
   type Hold,
@@ -550,8 +552,15 @@ async function status(
             id: "unreadable",
             step: "state",
             question: `Factory can't read this Objective's state (${loaded.error}).`,
-            answers: ["reset", "cancel"],
-            recommended: "reset",
+            options: question("", [
+              {
+                answer: RESET,
+                family: "reset",
+                consequence:
+                  "Rebuilds the state from the plan comment and PRs on GitHub.",
+              },
+              "cancel",
+            ]).options,
             cause: "question",
             askedAt: "",
           },
@@ -653,7 +662,10 @@ async function status(
     for (const hold of row.holds)
       lines.push(
         `  Question ${hold.id}${hold.item ? ` (Work Item ${hold.item})` : ""}: ${hold.question}`,
-        `  Answers: ${hold.answers.join(", ")} (recommended: ${hold.recommended})`,
+        ...hold.options.map(
+          (option) =>
+            `    ${answerForm(option)}${option.recommended ? " (recommended)" : ""}: ${option.consequence}`,
+        ),
         `  Answer with: factory answer ${row.issue} <answer> --question ${hold.id}`,
       );
     if (row.reset)
@@ -713,10 +725,14 @@ function nextAction(
   // The question that stops the most: the Objective's, else the oldest.
   const hold =
     row.holds.find((open) => open.item === undefined) ?? row.holds[0];
-  if (hold)
+  const recommended = hold?.options.find((option) => option.recommended);
+  if (hold && recommended)
     return {
-      command: `factory answer ${issue} ${hold.recommended} --question ${hold.id}`,
-      reason: `The recommended answer to ${hold.item ? `Work Item ${hold.item}'s` : "the"} question. Others: ${hold.answers.filter((a) => a !== hold.recommended).join(", ")}.`,
+      command: `factory answer ${issue} ${recommended.answer}${recommended.arg !== undefined ? ` ${recommended.arg}` : ""} --question ${hold.id}${recommended.needsText ? ' --text "<text>"' : ""}`,
+      reason: `The recommended answer to ${hold.item ? `Work Item ${hold.item}'s` : "the"} question: ${recommended.consequence} Others: ${hold.options
+        .filter((option) => option !== recommended)
+        .map((option) => answerForm(option))
+        .join(", ")}.`,
     };
   if (TERMINAL.includes(row.status as ObjectiveStatus))
     return row.running.length || row.waiting.length

@@ -70,7 +70,7 @@ Each Objective has one JSON file: `objectives/<issue>.json` under the installati
     },
   },
   "frozen": { "provider", "selectedBy", "digest", "config": {/* see Frozen configuration */} },
-  "holds": [], // open questions, oldest first: { "id", "step", "item"?, "question", "answers": [...], "recommended", "cause", "needsText"?, "askedAt" }
+  "holds": [], // open questions, oldest first: { "id", "step", "item"?, "question", "options": [...], "cause", "askedAt" }
   // each hold also has "shownAt" (its comment's GitHub time) and "shortForm" once posted
   "lastShownAt": "<latest GitHub time any question's comment was shown>",
   "retries": { "<step key>": { "count": 2, "nextAt": "<time>", "wait"?: { "kind": "error | reset | gate" } } },
@@ -84,7 +84,7 @@ Each Objective has one JSON file: `objectives/<issue>.json` under the installati
 - **Trusted.** The state belongs to the installation's user, as do Factory's code and credentials. There are no digests, seals, witnesses or tamper checks.
 - **Small.** Large bodies (prompts, worker transcripts, review packets) go in the run log directory, never in state.
 - **Rebuildable.** `factory reset N` rebuilds the state from GitHub: the plan comment (and its `plan-data` continuations), the PRs whose head is a Work Item branch, and the report comment. It's how a corrupt file, an incompatible version or a new machine is recovered. The service saves a resetting record at once (status `resetting`; the old state kept inside it), and one step, `rebuild`, reads GitHub and replaces the record with the rebuilt state, so its deadline, retries and questions are the engine's and cancel (either form) replaces it at once. The old run's steps are stopped, and the rebuild starts only once they have ended (each by its deadline at the latest), so an effect already in flight (a merge) can't land after the rebuild read GitHub. A reset that replaces a run still waiting this way waits for the same steps, and a dequeue meanwhile withdraws only once they have ended; a cancel meanwhile doesn't wait. What it finds is bound to the current run and plan: only comments by Factory's own login count; the plan data only from Factory's own data block at the end of the plan comment, or the continuations it names (anything else refuses with `plan_unreadable`); a PR counts only if it was opened after the plan comment was last written and names no other run (Factory marks its run in its PR bodies and its report marker; the newest wins); the report only if it is newer than the plan comment; and the plan comment only if the old state, when readable, had accepted a plan. Merged items stay merged; every other item starts fresh on the current start. The operator's pause or drain, a provider switch, the card and the comment cursor carry over. A reset with no state, plan comment or card is refused (`no_factory_state`), and one that would create an Objective follows the queue's mode (`queue_not_running`). A refused reset restores the old state; the request is answered when the rebuild lands.
-- **One version.** If the file's version isn't the current one, or it doesn't parse, the Objective holds with the answers `reset` and `cancel`. The hold is posted on the issue and shown as "Needs you" like any other, and `/factory reset` or `/factory cancel` answers it. The question belongs to one incident: its marker names the unreadable file's digest, and only comments created after that question count, so an earlier incident's question and its `/factory cancel` never act on a later one. Nothing overwrites the file except that answer. There are no migrations. The version 5 state (one `refused` and one `diagnosis` fact per Work Item; 4 brought a hold's cause, the error wait class and the `ended` record; 3 one `frozen` configuration) makes every earlier file unreadable; `reset` rebuilds it. A read that fails for a moment (EMFILE, EIO) is tried again every tick, never taken as unreadable.
+- **One version.** If the file's version isn't the current one, or it doesn't parse, the Objective holds with the answers `reset` and `cancel`. The hold is posted on the issue and shown as "Needs you" like any other, and `/factory reset` or `/factory cancel` answers it. The question belongs to one incident: its marker names the unreadable file's digest, and only comments created after that question count, so an earlier incident's question and its `/factory cancel` never act on a later one. Nothing overwrites the file except that answer. There are no migrations. The version 6 state (a hold's answers as `options`; 5 brought one `refused` and one `diagnosis` fact per Work Item, 4 a hold's cause, the error wait class and the `ended` record; 3 one `frozen` configuration) makes every earlier file unreadable; `reset` rebuilds it. A read that fails for a moment (EMFILE, EIO) is tried again every tick, never taken as unreadable.
 
 ### Frozen configuration
 
@@ -218,21 +218,41 @@ A failed check is a hold. It names each problem and how to fix it, and Status go
 
 ## Holds and answers
 
-A hold is a question with named answers:
+A hold is a question with named answers. Each answer is an option, core data that says what it does:
 
 ```jsonc
 {
   "id": "plan-1",
   "question": "...",
-  "answers": ["answer", "replan", "cancel"],
-  "recommended": "answer",
+  "options": [
+    {
+      "answer": "answer",
+      "family": "answer",
+      "consequence": "Sends your decision back to the planner.",
+      "needsText": true,
+      "recommended": true,
+    },
+    {
+      "answer": "switch",
+      "family": "switch",
+      "arg": "claude",
+      "consequence": "Runs this Objective on provider claude from now on.",
+    },
+    {
+      "answer": "cancel",
+      "family": "cancel",
+      "consequence": "Ends the Objective at once and closes its PRs and the issue.",
+    },
+  ],
 }
 ```
+
+- **Options.** `answer` is the literal token (`/factory <answer>`); `arg` is what follows it for a parameterized answer (`switch NAME`); `family` groups options (retry, replan, cancel, wait, switch, adopt, accept, refuse, select, answer, repair, reset); `consequence` is one short sentence; `needsText` marks an answer that needs text after it; exactly one option is `recommended`. Every place that raises a hold supplies its options through one helper (engine.ts `hold`), which writes the consequences of the common answers (retry, replan, cancel, wait, switch, adopt) once. The engine expands `switch` into one option per provider it can move to (`switchTargets`), and adds `cancel` (and `replan` to a failure where the workflow can plan again).
 
 - **Scope.** A hold outcome declares its scope, `item` (the default) or `objective`. An `item` hold from a Work Item's step (`item:<id>:…`) stops only that item, the items that depend on it (they aren't runnable until it merges), and the native-stack layers above it (they run once the layer below is published, so the workflow names a layer's predecessors and their holds stop it too: work/steps.ts `layersBelow`). Other items keep starting and finishing. An `objective` hold stops every step. A cause that is installation-, account- or provider-wide is `objective` wherever it is raised: the issue closed or edited after planning, a non-writer's Objective awaiting approval, a full disk, repository or origin access (a GitHub login, permission or missing-repository refusal, a push the login or the repository refuses, merge commits or native stacks the repository doesn't allow, the checkout's Git refusal or origin problem), a provider's login, billing, quota or model, its setup or missing SDK package, running as root, the package or offline-install environment, an unavailable sandbox, the installation's configuration (reviewArtifacts, delivery kind, Secretlint), and a limit that resets too far away (`wait`/`switch`: the limit is the account's). Provider holds are classified in one place, for every provider: a `PlannerError` that holds is Objective-wide unless the cause is one Work Item's own (its files, review images or session budget: `PlannerError.itemHold`), and `providerOutcome` maps it for the planner and every worker (providers/planner.ts). Every hold from a step that isn't a Work Item's stops the Objective too: planning, final, final review, report, cleanup and unreadable state. Final and report wait until every item is settled, so they wait for every item hold. The engine's error and transient-wait questions, the repair-budget and crash-loop suspect questions, and media, select, revalidate, review and secret-scan questions take the scope of the step that asks.
 - **Several at once.** At most one hold per Work Item and one for the Objective are open. A step that asks while a hold covering its scope is open (the Objective's, or its own item's) opens nothing; its retry comes due at once, so it runs again right after that answer and asks then if the cause remains, so an Objective-wide cause is asked once. A question that running the step again wouldn't ask (a repair over budget, a crash-loop suspect) is saved for the step in `asking`, apart from its retry, so no change to a retry (a `switch`, a done step, a repair) drops it. It is asked as soon as no open hold stops the step, before it runs, and dropped only when asked or when a repair or replan clears the step. Answering `wait` to a limit grants the wait to every step waiting on that limit; `switch` runs every step waiting on a provider's limit again at once on the new provider. Each hold has its own id, question and answers. The Objective shows `holding` (Status "Needs you") while any hold is open. A held Objective takes no queue slot only when its holds stop every step it could start.
 - **Saved.** Open holds are in the state file, so a restart restores them. A repair that clears a held step drops its hold (the question is about work that is gone); cancel drops them all.
-- Each hold is posted as one issue comment with its own marker, and it lists the answers.
+- Each hold is posted as one issue comment with its own marker, and it lists the options, each with its consequence.
 - **Answering:** a comment `/factory <answer> [--question <id>] [text]` from a user with write access to the repository, or `factory answer <issue> <answer> --question <id> [--text ...]`. An answer must never land on a question its author didn't read:
   - The CLI always names the question. `factory retry <issue> --question <id>` answers `retry` to it. Without `--question`, `factory retry` never answers a hold: it runs now the waiting steps no open hold stops, and is refused while an Objective hold is open (or when every waiting step waits on a hold).
   - A bound answer (`--question <id>`) is checked against nothing else: the id names one asking, and a re-ask gets a new id.
@@ -241,8 +261,8 @@ A hold is a question with named answers:
   - An answer that names a hold that isn't open is refused, naming the open ones. `factory status` lists every open hold with its id and the command that answers it.
 - **Comments are read by GitHub's clock.** A run reads comments from when its card was queued (the option's `updatedAt`), and an unreadable state's from its question; the cursor only moves forward. GitHub's `since` filters on `updated_at`, so only a comment created at or after the cursor counts: an earlier run's comment, or an old one edited later, never acts.
 - The service checks for comments every 30 s while it is holding. If someone without write access answers (or the user doesn't exist), that's ignored and logged. A comment whose author's access GitHub can't report now waits in a list of up to 20 per Objective and is checked again with backoff; the comments after it go on.
-- **In an agent host.** The director skill shows each open hold with the host's question tool (Claude Code's AskUserQuestion, or its Codex equivalent): the question, each answer with the recommended one first, and a one-line consequence for each. That gives the operator an app notification. The chosen answer runs `factory answer`. `factory status --json` lists open holds in this shape so the skill needs no parsing.
-- An answer that doesn't match its hold gets a reply naming the valid answers. Nothing else changes. So does an answer the hold says needs text (`needsText`, such as planning's `answer` and `allow`) when it has none.
+- **In an agent host.** The director skill shows each open hold with the host's question tool (Claude Code's AskUserQuestion, or its Codex equivalent): the question, and each option with the recommended one first and its consequence. A hold with more than 4 options (the tool's limit) is asked in two steps: the family, then the option. That gives the operator an app notification. The chosen answer runs `factory answer`. `factory status --json` lists open holds in this shape, so the skill needs no answer table and no parsing; the text status lists the options too.
+- An answer that matches none of its hold's options gets a reply naming the valid answers. Nothing else changes. So does an answer whose option needs text (`needsText`, such as planning's `answer` and `allow`) when it has none.
 - `cancel` is valid at every hold and at any time.
 - **Provider model.** A model the provider's login can't serve holds with `switch NAME` and `cancel`. Copilot checks its model list before it opens a session, so this hold costs no request, and it also offers `retry`: the retry reads the list again before any session, so it bills nothing and succeeds once an admin enables the model. A session that served another model offers no `retry`, because each one bills a request. The operator sets the model and restarts the service, then answers `switch` with the same provider's name, which re-freezes its changed configuration, or with another configured provider's name.
 - **Configuration changed.** An Objective whose frozen configuration differs from the service's holds once with `adopt`, `switch NAME` and `cancel` (see Frozen configuration). The `switch` targets are the ones the engine accepts (engine.ts switchTargets): every other configured provider, and this one when its configuration changed, which `switch` re-freezes.

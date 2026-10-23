@@ -141,13 +141,23 @@ function frozen(inst, provider = "codex") {
   }
 }
 
+/** A seeded hold's options: the first is recommended. */
+function offered(...answers) {
+  return answers.map((answer, index) => ({
+    answer,
+    family: answer,
+    consequence: `Answers ${answer}.`,
+    ...(index === 0 ? { recommended: true } : {}),
+  }));
+}
+
 function seed(inst, issue, status = "checking", fields = {}) {
   mkdirSync(inst.objectives, { recursive: true });
   const now = new Date().toISOString();
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 5,
+      version: 6,
       issue,
       status,
       frozen: frozen(inst),
@@ -278,7 +288,10 @@ test("a step that can't run holds with answers that work", async () => {
   await until(() => status(inst).objectives[0]?.holds.length, "hold");
   const [row] = status(inst).objectives;
   assert.equal(row.status, "holding");
-  assert.deepEqual(row.holds[0].answers, ["retry", "cancel"]);
+  assert.deepEqual(
+    row.holds[0].options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
 
   const firstHold = row.holds[0].id;
   const unnamed = cli(inst, "answer", "7", "retry");
@@ -385,7 +398,10 @@ test("unreadable state holds with cancel, and cancel works", async () => {
   await until(() => status(inst).service === "running", "service");
   const [row] = status(inst).objectives;
   assert.equal(row.status, "unreadable");
-  assert.deepEqual(row.holds[0].answers, ["reset", "cancel"]);
+  assert.deepEqual(
+    row.holds[0].options.map((option) => option.answer),
+    ["reset", "cancel"],
+  );
   assert.equal(row.nextAction.command, "factory reset 9");
   const answered = cli(
     inst,
@@ -671,7 +687,10 @@ test("the one step running at three deaths, with progress between, holds", async
     hold.question,
     /^The service died 3 times in a row while step check ran/,
   );
-  assert.deepEqual(hold.answers, ["retry", "cancel"]);
+  assert.deepEqual(
+    hold.options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
   const record = JSON.parse(
     readFileSync(join(inst.root, "service.json"), "utf8"),
   );
@@ -750,7 +769,10 @@ test("every step running at three deaths, with progress between, holds with its 
   for (const issue of [63, 64]) {
     const [hold] = stateOf(inst, issue).holds;
     assert.match(hold.question, /while step check ran.*1 other step ran/s);
-    assert.deepEqual(hold.answers, ["retry", "cancel"]);
+    assert.deepEqual(
+      hold.options.map((option) => option.answer),
+      ["retry", "cancel"],
+    );
   }
   await stopped(service);
 });
@@ -873,7 +895,10 @@ test("a step past its deadline retries, then holds after three", async () => {
   await until(() => stateOf(inst, 21).holds.length, "hold");
   const [hold] = stateOf(inst, 21).holds;
   assert.match(hold.question, /keeps failing \(deadline\)/);
-  assert.deepEqual(hold.answers, ["retry", "cancel"]);
+  assert.deepEqual(
+    hold.options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
   assert.equal(stateOf(inst, 21).retries.check.count, 3);
   await stopped(service);
 });
@@ -893,8 +918,14 @@ test("a transient wait retries without counting errors, then asks, and wait wait
   const [asked] = first.holds;
   assert.match(asked.question, /has been retrying since/);
   assert.match(asked.question, /Last error: GitHub GET/);
-  assert.deepEqual(asked.answers, ["wait", "retry", "cancel"]);
-  assert.equal(asked.recommended, "wait");
+  assert.deepEqual(
+    asked.options.map((option) => option.answer),
+    ["wait", "retry", "cancel"],
+  );
+  assert.equal(
+    asked.options.find((option) => option.recommended).answer,
+    "wait",
+  );
 
   assert.equal(
     cli(inst, "answer", "22", "wait", "--question", asked.id).code,
@@ -947,8 +978,7 @@ test("switch moves an Objective held on a usage limit to the named provider", as
         id,
         step: "item:a:work",
         question: "Codex usage limit: weekly.",
-        answers: ["wait", "switch", "cancel"],
-        recommended: "wait",
+        options: offered("wait", "switch", "cancel"),
         askedAt: now,
       },
     ],
@@ -999,7 +1029,10 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   await until(() => stateOf(inst, 44).holds.length > 0, "the question");
   const [stale] = stateOf(inst, 44).holds;
   assert.equal(stale.step, "config");
-  assert.deepEqual(stale.answers, ["adopt", "cancel"]);
+  assert.deepEqual(
+    stale.options.map((option) => option.answer),
+    ["adopt", "cancel"],
+  );
   assert.match(
     stale.question,
     /changed since this Objective froze it .*: planning\.revisions\./,
@@ -1054,8 +1087,7 @@ test("a held Objective and one waiting on its paths don't stall the queue", asyn
         step: "item:a:work",
         item: "a",
         question: "Step item:a:work keeps failing (error: broken).",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
+        options: offered("retry", "cancel"),
         askedAt: asked,
       },
     ],
@@ -1098,8 +1130,7 @@ test("an item's question holds only that item and its dependents", async () => {
         step: "item:a:work",
         item: "a",
         question: "Which asset set?",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
+        options: offered("retry", "cancel"),
         askedAt: asked,
       },
     ],
@@ -1231,8 +1262,7 @@ test("an Objective question from an item step stops every item, once", async () 
         id: `item:a:work@${asked}`,
         step: "item:a:work",
         question: "The checkout refuses Git.",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
+        options: offered("retry", "cancel"),
         askedAt: asked,
       },
     ],
@@ -1497,7 +1527,10 @@ test("a replan answer is the workflow's, spent once applied, and the new plan st
   const [asked] = runner.state.holds;
   assert.equal(asked?.step, "final");
   assert.equal(asked.cause, "failure");
-  assert.deepEqual(asked.answers, ["retry", "replan", "cancel"]);
+  assert.deepEqual(
+    asked.options.map((option) => option.answer),
+    ["retry", "replan", "cancel"],
+  );
   assert.equal(
     runner.transact(() =>
       runner.answer("replan", undefined, "op", undefined, asked.id),
@@ -1559,8 +1592,7 @@ test("an open question pauses other steps' wait clocks", async () => {
         id: `plan@${asked}`,
         step: "plan",
         question: "A question",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
+        options: offered("retry", "cancel"),
         askedAt: asked,
       },
     ],
@@ -1609,8 +1641,7 @@ test("an open question pauses other steps' wait clocks", async () => {
         step: "item:a:publish",
         item: "a",
         question: "A question",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
+        options: offered("retry", "cancel"),
         askedAt: asked,
       },
     ],
@@ -1779,8 +1810,7 @@ test("a plan's steps run in order, and a dependent waits for its dependency's me
         step: "item:a:publish",
         item: "a",
         question: "A question",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
+        options: offered("retry", "cancel"),
         askedAt: asked,
       },
     ],

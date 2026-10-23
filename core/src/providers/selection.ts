@@ -316,7 +316,16 @@ function changed(
       if (!live)
         return hold(
           `This Objective froze provider "${frozen.provider}", which the configuration no longer names. ${switching ? `${switching}; or restore` : "Restore"} the provider as it was, restart the service and answer retry; or cancel.`,
-          [...(switching ? ["switch"] : []), "retry", "cancel"],
+          [
+            ...(switching ? ["switch" as const] : []),
+            {
+              answer: "retry",
+              family: "retry",
+              consequence:
+                "Runs on the frozen provider again, once it is restored and the service restarted.",
+            },
+            "cancel",
+          ],
         );
       const keys = frozenChanges(frozen.config, live.config);
       // `adopt` freezes exactly the configuration this question names
@@ -324,7 +333,7 @@ function changed(
       return {
         ...hold(
           `The configuration changed since this Objective froze it (${frozen.digest.slice(0, 12)}): ${keys.join(", ")}. \`adopt\` runs it on the configuration as it is now (${live.digest.slice(0, 12)})${switching ? `; ${switching}` : ""}; or cancel. To keep the frozen values, restore them, restart the service and answer adopt.`,
-          ["adopt", ...(switching ? ["switch"] : []), "cancel"],
+          ["adopt", ...(switching ? ["switch" as const] : []), "cancel"],
         ),
         keep: { [ADOPTS]: live.digest },
       };

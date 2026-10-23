@@ -135,7 +135,6 @@ export function githubOutcome(
       hold(
         `GitHub says this moved out of ${repository} (${detail}${error.location ? `; now at ${error.location}` : ""}). The repository itself still answers as ${repository}, so this was transferred away, and Factory acts only on ${repository}: cancel; or answer retry once it is back.`,
         ["cancel", "retry"],
-        "cancel",
       ),
     );
   if (error.status === 401)
@@ -148,8 +147,7 @@ export function githubOutcome(
     return objectiveWide(
       hold(
         `GitHub says issue #${error.missingIssue} doesn't exist or Factory can't see it (${detail}).`,
-        ["retry", "cancel"],
-        "cancel",
+        ["cancel", "retry"],
       ),
     );
   if (error.status === 403 || error.status === 404)

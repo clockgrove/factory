@@ -5,7 +5,14 @@
  */
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { failure, type HoldScope, hold, type Outcome } from "../engine.js";
+import {
+  failure,
+  type Held,
+  type HoldScope,
+  hold,
+  type Offer,
+  type Outcome,
+} from "../engine.js";
 import type { Wait } from "../state.js";
 
 export const PLANNER_PHASES = [
@@ -72,7 +79,7 @@ export class PlannerError extends Error {
      */
     readonly wait?: Wait,
     /** For `hold`: its answers, when not `retry` and `cancel`. */
-    readonly answers?: string[],
+    readonly offers?: readonly Offer[],
     /** For `hold`: `item` when the cause is the Work Item's own. */
     scope?: HoldScope,
   ) {
@@ -87,7 +94,6 @@ export class PlannerError extends Error {
 }
 
 type Retried = Extract<Outcome, { kind: "retry" }>;
-type Held = Extract<Outcome, { kind: "hold" }>;
 
 /**
  * A classified provider failure as a step's outcome: the one rule every
@@ -107,7 +113,7 @@ export function providerOutcome(
       ...(error.wait && { wait: error.wait }),
     };
   if (error.outcome === "fail") return tooLarge(error.message);
-  const held = hold(error.message, error.answers);
+  const held = hold(error.message, error.offers);
   return error.scope === "objective" ? { ...held, scope: "objective" } : held;
 }
 

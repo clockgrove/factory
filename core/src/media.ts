@@ -47,7 +47,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import { crashPoint } from "./crash.js";
-import { hold, objectiveWide } from "./engine.js";
+import { type Held, hold, type Offer, objectiveWide } from "./engine.js";
 import {
   blobSizes,
   type CatFile,
@@ -101,7 +101,7 @@ export type MediaOutcome<T> =
   | { kind: "done"; value: T }
   /** The worker's result is wrong; the finding goes back to the work step. */
   | { kind: "repair"; finding: string }
-  | { kind: "hold"; question: string; answers: string[]; recommended: string }
+  | Held
   /** Transient; `repushed` is set once verifyOriginMedia has re-pushed, for the step to keep. */
   | { kind: "retry"; reason: string; repushed?: true };
 
@@ -930,7 +930,7 @@ export function selectionQuestion(
   item: WorkItem,
   sets: readonly CandidateSet[],
   directory: string,
-): { kind: "hold"; question: string; answers: string[]; recommended: string } {
+): Held {
   const listed = sets
     .map(
       (set) =>
@@ -943,8 +943,34 @@ export function selectionQuestion(
     : "";
   return hold(
     `Work Item ${item.id} produced ${sets.length} candidate set${sets.length === 1 ? "" : "s"}, in ${join(directory, "candidates")}:\n${listed}\n\nLook at them, then answer with the id of the set to deliver; any text after it is recorded with the selection as your reason.${bind} Answer repair to have the worker make new candidates, or cancel.`,
-    [...sets.map((set) => set.id.toLowerCase()), "repair", "cancel"],
+    [
+      ...sets.map(
+        (set): Offer => ({
+          answer: set.id.toLowerCase(),
+          family: "select",
+          consequence: `Delivers set ${set.id}; text after the id is recorded as your reason.`,
+        }),
+      ),
+      NEW_CANDIDATES,
+      "cancel",
+    ],
   );
+}
+
+/** `repair` to a media question: the worker makes new candidates. */
+const NEW_CANDIDATES: Offer = {
+  answer: "repair",
+  family: "repair",
+  consequence: "The worker makes new candidates.",
+};
+
+/** The chosen set's id again: write the set once more. */
+function rewrite(again: string): Offer {
+  return {
+    answer: again,
+    family: "retry",
+    consequence: "Writes the set again (give the same bind text, if any).",
+  };
 }
 
 /**
@@ -1045,7 +1071,7 @@ export async function materializeSelection(input: {
   if (lost)
     return hold(
       `Factory's copy of candidate ${set.id} ${lost.role} (${lost.file}) is missing or changed since capture. Answer repair to have the worker make new candidates, or cancel.`,
-      ["repair", "cancel"],
+      [NEW_CANDIDATES, "cancel"],
     );
   await removeWorktree(checkout, directory, signal);
   await addWorktree(checkout, directory, input.commit, signal);
@@ -1080,7 +1106,7 @@ export async function materializeSelection(input: {
           }
         : hold(
             `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that the repository's .gitattributes doesn't route through Git LFS: ${listed}. Work Item ${item.id} doesn't own .gitattributes. Answer repair to have the worker make smaller candidates, replan to give an item that rule, or cancel.`,
-            ["repair", "replan", "cancel"],
+            [NEW_CANDIDATES, "replan", "cancel"],
           );
     }
     if (uncovered.length) {
@@ -1121,7 +1147,7 @@ export async function materializeSelection(input: {
     )
       return hold(
         `Writing set ${set.id} staged ${staged.join(", ") || "nothing"}, not exactly its destinations ${destinations.join(", ")}. Answer ${again} (with the same bind text, if any) to write it again; if it repeats, report it. Or answer repair or cancel.`,
-        [again, "repair", "cancel"],
+        [rewrite(again), NEW_CANDIDATES, "cancel"],
       );
     await git([
       "-c",
@@ -1146,7 +1172,7 @@ export async function materializeSelection(input: {
       )
         return hold(
           `Git LFS did not store ${member.destination} as the selected bytes (sha256 ${member.sha256}, ${member.bytes} bytes). Check that git-lfs is installed for the service, then answer ${again} (with the same bind text, if any) to write the set again; or cancel.`,
-          [again, "cancel"],
+          [rewrite(again), "cancel"],
         );
     }
     const tree = (await git(["rev-parse", "HEAD^{tree}"]))

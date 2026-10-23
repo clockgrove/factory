@@ -13,11 +13,14 @@ import { pinnedPlaybook } from "./dream.js";
 import {
   memorySection,
   observeObjective,
+  pathDigest,
+  releaseRun,
   retain,
+  runOf,
   sourceRecords,
 } from "./memory.js";
 import { knowledgeSettings } from "./settings.js";
-import { type Database, openStore, sha256, withStore } from "./store.js";
+import { type Database, openStore, withStore } from "./store.js";
 
 /**
  * The advisory text planning appends to its prompts: the target's curated
@@ -28,7 +31,7 @@ import { type Database, openStore, sha256, withStore } from "./store.js";
  * is named in the text; it never stops planning.
  */
 export async function planningKnowledge(input: {
-  issue: number;
+  state: ObjectiveState;
   body: string;
   files: BaseFiles;
   /** The target's curated playbook at the base; empty when there is none. */
@@ -43,27 +46,26 @@ export async function planningKnowledge(input: {
   const sources = context?.memory
     ? (await planningSources(input.body, input.files)).sources
     : [];
+  const issue = input.state.issue;
+  const run = runOf(input.state);
   const parts = [input.playbook.trim() ? input.playbook : ""];
   let db: Database | undefined;
   try {
     db = openStore(settings.root);
-    parts.push(pinnedPlaybook(db, input.issue));
+    parts.push(pinnedPlaybook(db, issue, run));
     if (context) {
       parts.push(
         `Adaptive workflow: planning context is admitted for ${context.selectors.join(", ")}. Read those paths with your repository tools as needed.`,
       );
       if (context.memory) {
-        retain(db, sourceRecords(input.issue, input.files.base, sources));
+        retain(db, sourceRecords(issue, run, input.files.base, sources));
         parts.push(
           await memorySection(db, {
-            objective: input.issue,
+            objective: issue,
             body: input.body,
             context,
             supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
-            digest: async (path) => {
-              const bytes = await input.files.blob(path);
-              return bytes && sha256(bytes);
-            },
+            digest: (path) => pathDigest(input.files, path),
           }),
         );
       }
@@ -79,11 +81,21 @@ export async function planningKnowledge(input: {
   return parts.filter(Boolean).join("\n\n");
 }
 
-/** Record what an Objective's state shows. `settled`: terminal with nothing left to run. */
-export function observeState(state: ObjectiveState, settled: boolean): number {
-  const settings = knowledgeSettings();
-  if (!settings) return 0;
-  return withStore(settings.root, (db) =>
-    observeObjective(db, settings.repository, state, settled),
-  );
-}
+/**
+ * The service's observer: records what an Objective's state shows as it
+ * moves (`settled`: terminal with nothing left to run), and ends a run
+ * that a new admission of the same issue replaces.
+ */
+export const knowledgeObserver = {
+  async observe(state: ObjectiveState, settled: boolean): Promise<void> {
+    const settings = knowledgeSettings();
+    if (settings) await observeObjective(settings, state, settled);
+  },
+  release(state: ObjectiveState): void {
+    const settings = knowledgeSettings();
+    if (settings)
+      withStore(settings.root, (db) =>
+        releaseRun(db, settings.repository, state),
+      );
+  },
+};

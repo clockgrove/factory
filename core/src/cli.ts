@@ -13,7 +13,7 @@ import { DEFAULT_LIMITS, hostLimits } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
 import { dreamCommand, runDream } from "./knowledge/dream.js";
-import { observeState } from "./knowledge/index.js";
+import { knowledgeObserver } from "./knowledge/index.js";
 import {
   configureKnowledge,
   type KnowledgeSettings,
@@ -59,7 +59,7 @@ const USAGE = `Usage: factory <command> --repo OWNER/NAME
   answer ISSUE ANSWER [--text T] Answer an Objective's open question
   cancel ISSUE                   Cancel an Objective
   retry ISSUE                    Retry an Objective's waiting steps now
-  dream [--preview] [--budget-bytes N] [--input-budget-bytes N]
+  dream [--preview] [--budget-bytes N] [--input-budget-bytes N] [--provider NAME]
                                  Propose a playbook from settled episodes
   dream --record --objective N   Record a settled Objective's episode
   dream --file PATH --approve|--reject SHA256
@@ -142,7 +142,7 @@ async function main(argv: string[]): Promise<number> {
         ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
         ...(sync ? { sync } : {}),
         ...(provider ? { provider } : {}),
-        ...(loaded ? { observe: observeState } : {}),
+        ...(loaded ? { observer: knowledgeObserver } : {}),
         ...(process.env.FACTORY_TICK_MS
           ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
           : {}),
@@ -175,11 +175,18 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       const config = loadConfig(repository);
+      const name = args.flags.provider ?? config.defaultProvider;
+      if (!config.providers[name]) {
+        process.stderr.write(
+          `factory: no provider ${JSON.stringify(name)}; the configuration names ${Object.keys(config.providers).join(", ")}\n`,
+        );
+        return 2;
+      }
       const log = new RunLog(paths.logs, "dream");
       try {
         return await runDream(parsed, {
           settings: knowledge(config, paths),
-          planner: () => planner(config),
+          planner: () => planner(config, name),
           log: (event) => log.write(0, event),
           settledState: (issue) => settledState(paths, issue),
           out: (text) => process.stdout.write(text),

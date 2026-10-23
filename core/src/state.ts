@@ -94,6 +94,10 @@ export interface ObjectiveState {
   /** Per-capability data. Modules own their key. */
   modules: Record<string, unknown>;
   updatedAt: string;
+  /** When this run was admitted: with the issue, it names the run. */
+  startedAt?: string;
+  /** The first save at a terminal status. */
+  endedAt?: string;
 }
 
 export function newObjective(
@@ -116,6 +120,7 @@ export function newObjective(
     appliedRequests: [],
     modules: {},
     updatedAt: now.toISOString(),
+    startedAt: now.toISOString(),
   };
 }
 

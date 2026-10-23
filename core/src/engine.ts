@@ -556,6 +556,8 @@ export class ObjectiveRunner {
 
   private save(): void {
     this.state.updatedAt = this.now().toISOString();
+    if (TERMINAL.includes(this.state.status))
+      this.state.endedAt ??= this.state.updatedAt;
     saveState(this.dir, this.state);
   }
 }

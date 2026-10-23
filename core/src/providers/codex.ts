@@ -388,6 +388,7 @@ export class CodexPlanner implements Planner {
     const lowerEffortReview =
       call.phase !== "plan" &&
       call.phase !== "diagnosis" &&
+      call.phase !== "dream" &&
       ["minimal", "low", "medium"].includes(choice.effort);
     const watchdog = new IdleWatchdog(
       lowerEffortReview ? LOWER_EFFORT_REVIEW_IDLE_MS : PLANNER_IDLE_MS,

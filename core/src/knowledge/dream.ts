@@ -21,7 +21,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { crashPoint } from "../crash.js";
 import { redact } from "../log.js";
 import type { Planner } from "../providers/planner.js";
-import { episodes, observeObjective } from "./memory.js";
+import { episodes, observeObjective, runOf } from "./memory.js";
 import {
   DEFAULT_BOUNDS,
   type KnowledgeSettings,
@@ -30,6 +30,11 @@ import {
 import { type Database, sha256, transaction, withStore } from "./store.js";
 
 export const DEFAULT_PLAYBOOK_BUDGET_BYTES = 16_384;
+
+/** A `dream` command waits up to 10 s for the service's short writes. */
+function cliStore<T>(settings: KnowledgeSettings, use: (db: Database) => T): T {
+  return withStore(settings.root, use, 10_000);
+}
 const DREAM_DEADLINE_MS = 45 * 60_000;
 
 interface Entry {
@@ -87,14 +92,19 @@ function latest(db: Database): Revision | undefined {
  * to when it first planned (pinning the newest now if it has none). Empty
  * when no version was approved by then.
  */
-export function pinnedPlaybook(db: Database, objective: number): string {
-  db.prepare("INSERT OR IGNORE INTO pins VALUES (?, ?)").run(
+export function pinnedPlaybook(
+  db: Database,
+  objective: number,
+  run: string,
+): string {
+  db.prepare("INSERT OR IGNORE INTO pins VALUES (?, ?, ?)").run(
     objective,
+    run,
     latest(db)?.version ?? 0,
   );
   const pin = db
-    .prepare("SELECT version FROM pins WHERE objective = ?")
-    .get(objective);
+    .prepare("SELECT version FROM pins WHERE objective = ? AND run = ?")
+    .get(objective, run);
   const row = db
     .prepare("SELECT body FROM playbook WHERE version = ?")
     .get(Number(pin?.version ?? 0));
@@ -579,7 +589,7 @@ export async function runDream(
     options.out(`${JSON.stringify(value, null, 2)}\n`);
   switch (command.kind) {
     case "show":
-      print(withStore(settings.root, (db) => show(db, settings)));
+      print(cliStore(settings, (db) => show(db, settings)));
       return 0;
     case "record": {
       const state = options.settledState?.(command.objective);
@@ -588,11 +598,13 @@ export async function runDream(
           state ??
             `Objective #${command.objective} has no settled terminal state`,
         );
-      const added = withStore(settings.root, (db) =>
-        observeObjective(db, settings.repository, state, true),
-      );
-      const episode = withStore(settings.root, (db) =>
-        episodes(db).find((record) => record.objective === command.objective),
+      const added = await observeObjective(settings, state, true, 10_000);
+      const episode = cliStore(settings, (db) =>
+        episodes(db).find(
+          (record) =>
+            record.objective === command.objective &&
+            record.run === runOf(state),
+        ),
       );
       print({
         recorded: added > 0,
@@ -601,7 +613,7 @@ export async function runDream(
       return 0;
     }
     case "preview": {
-      const selection = withStore(settings.root, (db) =>
+      const selection = cliStore(settings, (db) =>
         selectInput(db, settings, {
           playbook: command.budgetBytes,
           input: command.inputBudgetBytes,
@@ -684,7 +696,7 @@ async function dream(
 ): Promise<number> {
   const { settings } = options;
   const id = randomUUID();
-  const selection = withStore(settings.root, (db) => {
+  const selection = cliStore(settings, (db) => {
     const selected = selectInput(db, settings, {
       playbook: command.budgetBytes,
       input: command.inputBudgetBytes,
@@ -723,7 +735,7 @@ async function dream(
       throw error;
     }
     try {
-      draft = withStore(settings.root, (db) => draftOf(db, answer, selection));
+      draft = cliStore(settings, (db) => draftOf(db, answer, selection));
     } catch (error) {
       refusal = error instanceof Error ? error.message : String(error);
     }
@@ -743,7 +755,7 @@ async function dream(
     draft,
   };
   const text = `${JSON.stringify(proposal, null, 2)}\n`;
-  withStore(settings.root, (db) =>
+  cliStore(settings, (db) =>
     transaction(db, "dream:proposal", () => {
       db.prepare("INSERT INTO proposals VALUES (?, ?, ?)").run(
         id,
@@ -779,7 +791,7 @@ function settle(
   outcome: string,
   detail: string,
 ): void {
-  withStore(settings.root, (db) =>
+  cliStore(settings, (db) =>
     db
       .prepare("UPDATE dream_calls SET outcome = ?, detail = ? WHERE id = ?")
       .run(outcome, redact(detail, settings.secrets).slice(0, 2000), id),
@@ -818,7 +830,7 @@ function decide(
     );
   const actor = process.env.USER ?? "operator";
   const at = new Date().toISOString();
-  return withStore(settings.root, (db) => {
+  return cliStore(settings, (db) => {
     const row = db
       .prepare("SELECT body FROM proposals WHERE id = ?")
       .get(String(edited.id));

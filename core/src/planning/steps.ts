@@ -877,7 +877,7 @@ async function planningFacts(
     // No playbook in the target reads as empty. Knowledge adds the pinned
     // Dream playbook and, for Adaptive workflow, planning context and memory.
     playbook: await planningKnowledge({
-      issue: state.issue,
+      state,
       body: inputs.body,
       files,
       playbook: (await files.text(config.planning.playbook)) ?? "",

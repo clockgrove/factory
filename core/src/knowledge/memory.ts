@@ -11,11 +11,12 @@
  * (current when recorded, nothing to compare), `stale` (its files changed)
  * or `historical` (an observation of what happened then).
  */
+import { BaseFiles } from "../planning/facts.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
 import { TERMINAL } from "../state.js";
 import { admitted, type PlanningContext } from "./settings.js";
-import { type Database, sha256, transaction } from "./store.js";
+import { type Database, sha256, transaction, withStore } from "./store.js";
 
 export type MemoryKind =
   | "failure"
@@ -27,6 +28,8 @@ export type MemoryKind =
 export interface MemoryRecord {
   kind: MemoryKind;
   objective: number;
+  /** The run of that Objective, by its admission time. */
+  run: string;
   item?: string;
   authority: "observation" | "advisory" | "human-decision";
   validity: "current" | "historical";
@@ -38,6 +41,8 @@ export interface MemoryRecord {
   digests: Record<string, string>;
   /** A reference record's Source, `path#heading`. */
   source?: string;
+  /** The tree or commit `paths` are cited at; their digests are taken there. Not stored. */
+  tree?: string;
 }
 
 interface StoredRecord extends MemoryRecord {
@@ -52,7 +57,7 @@ export function retain(db: Database, records: MemoryRecord[]): number {
   return transaction(db, "knowledge:retain", () => {
     let added = 0;
     const insert = db.prepare(
-      "INSERT OR IGNORE INTO memory VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO memory VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     const index = db.prepare(
       "INSERT INTO memory_text (id, summary, body) VALUES (?, ?, ?)",
@@ -63,6 +68,7 @@ export function retain(db: Database, records: MemoryRecord[]): number {
         id,
         record.kind,
         record.objective,
+        record.run,
         record.item ?? null,
         record.authority,
         record.validity,
@@ -81,19 +87,23 @@ export function retain(db: Database, records: MemoryRecord[]): number {
   });
 }
 
-/** A record's identity is its content, so the same observation is kept once. */
+/**
+ * A record's identity is its content, so the same observation is kept
+ * once. Digests are left out: the first observation's stand, even if the
+ * tree they were taken at is gone later. An episode is also unique per run.
+ */
 function recordId(record: MemoryRecord): string {
   return sha256(
     JSON.stringify([
       record.kind,
       record.objective,
+      record.run,
       record.item ?? null,
       record.authority,
       record.validity,
       record.summary,
       record.body,
       record.paths,
-      Object.entries(record.digests).sort(),
       record.source ?? null,
     ]),
   );
@@ -101,23 +111,117 @@ function recordId(record: MemoryRecord): string {
 
 /**
  * Record what an Objective's state shows: repairs and holds as failures,
- * worker learnings as handoffs, operator answers as decisions, and, once it
- * has settled, its Dream episode. Also unpins its playbook version once it
- * has settled, so a later run of the same issue takes the newest one.
+ * worker learnings as handoffs and operator answers as decisions, each
+ * with its cited files' digests at the item's tree. Once it has settled,
+ * also its Dream episode and the release of its playbook pin. Git reads
+ * come first; the store is opened only for the write.
  */
-export function observeObjective(
+export async function observeObjective(
+  settings: { root: string; repository: string; checkout: string },
+  state: ObjectiveState,
+  settled: boolean,
+  busyMs?: number,
+): Promise<number> {
+  const records = await withDigests(stateRecords(state), settings.checkout);
+  return withStore(
+    settings.root,
+    (db) =>
+      settled
+        ? releaseRun(db, settings.repository, state, records)
+        : retain(db, records),
+    busyMs,
+  );
+}
+
+/**
+ * The end of a run: its Dream episode (once per run: the first record
+ * stands), kept in one transaction with `records`, and the release of its
+ * playbook pin. For a settled run, or one a new admission of the same
+ * issue replaces.
+ */
+export function releaseRun(
   db: Database,
   repository: string,
   state: ObjectiveState,
-  settled: boolean,
+  records: MemoryRecord[] = [],
 ): number {
-  const records = stateRecords(state);
-  if (settled && TERMINAL.includes(state.status))
-    records.push(episodeRecord(repository, state));
-  const added = retain(db, records);
-  if (settled)
-    db.prepare("DELETE FROM pins WHERE objective = ?").run(state.issue);
+  const added = retain(db, [
+    ...records,
+    ...(TERMINAL.includes(state.status)
+      ? [episodeRecord(repository, state)]
+      : []),
+  ]);
+  db.prepare("DELETE FROM pins WHERE objective = ? AND run = ?").run(
+    state.issue,
+    runOf(state),
+  );
   return added;
+}
+
+/** A run's identity: its admission time. A record from before runs had one reads as `unknown`. */
+export function runOf(state: ObjectiveState): string {
+  return state.startedAt ?? "unknown";
+}
+
+/** Fill each record's digests: its cited files at its tree. A tree Git can't read leaves them out. */
+async function withDigests(
+  records: MemoryRecord[],
+  checkout: string,
+): Promise<MemoryRecord[]> {
+  const trees = new Map<string, BaseFiles>();
+  for (const record of records) {
+    if (!record.tree) continue;
+    let files = trees.get(record.tree);
+    if (!files) {
+      files = new BaseFiles(checkout, record.tree);
+      trees.set(record.tree, files);
+    }
+    for (const path of record.paths) {
+      try {
+        const digest = await pathDigest(files, path);
+        if (digest) record.digests[path] = digest;
+      } catch {
+        // The tree is gone (an unmerged branch was pruned): unverified.
+        break;
+      }
+    }
+  }
+  return records;
+}
+
+/** A directory prefix past this many files gets no digest: it reads as unverified. */
+const MAX_DIGEST_FILES = 512;
+
+/**
+ * A path's digest in a tree: a file's SHA-256, or for a directory prefix
+ * (ending in /) the SHA-256 of its files' paths and digests. Undefined
+ * when the tree has nothing there.
+ */
+export async function pathDigest(
+  files: BaseFiles,
+  path: string,
+): Promise<string | undefined> {
+  if (!path.endsWith("/")) {
+    const bytes = await files.blob(path);
+    return bytes && sha256(bytes);
+  }
+  const under = (await files.paths()).filter((p) => p.startsWith(path)).sort();
+  if (!under.length || under.length > MAX_DIGEST_FILES) return undefined;
+  const lines: string[] = [];
+  for (const file of under) {
+    const bytes = await files.blob(file);
+    lines.push(`${file}\0${bytes ? sha256(bytes) : "-"}`);
+  }
+  return sha256(lines.join("\n"));
+}
+
+/** The tree an item's paths are cited at: its last work result, else its merge. */
+function itemTree(state: ObjectiveState, item: string): string | undefined {
+  const work = state.done[`item:${item}:work`] as { tree?: string } | undefined;
+  const merge = state.done[`item:${item}:merge`] as
+    | { mergeSha?: string }
+    | undefined;
+  return work?.tree ?? merge?.mergeSha;
 }
 
 function stateRecords(state: ObjectiveState): MemoryRecord[] {
@@ -125,6 +229,7 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
   const items = new Map((plan?.items ?? []).map((item) => [item.id, item]));
   const allPaths = [...new Set(plan?.items.flatMap((i) => i.ownedPaths))];
   const objective = state.issue;
+  const run = runOf(state);
   const scope = (step: string) => {
     const id = /^item:(.+):[a-z-]+$/.exec(step)?.[1];
     const item = id ? items.get(id) : undefined;
@@ -133,17 +238,20 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
           item: item.id,
           paths: item.ownedPaths,
           label: `Work Item ${item.id} (${item.title})`,
+          tree: itemTree(state, item.id),
         }
-      : { paths: allPaths, label: `Objective #${objective}` };
+      : { paths: allPaths, label: `Objective #${objective}`, tree: undefined };
   };
   const records: MemoryRecord[] = [];
   for (const [step, repair] of Object.entries(state.repairs)) {
     if (!repair.count || !repair.findings.length) continue;
-    const { item, paths, label } = scope(step);
+    const { item, paths, label, tree } = scope(step);
     records.push({
       kind: "failure",
       objective,
+      run,
       ...(item ? { item } : {}),
+      ...(tree ? { tree } : {}),
       authority: "observation",
       validity: "historical",
       summary: `${label} needed ${repair.count} repair${repair.count === 1 ? "" : "s"} at ${step}: ${firstLine(repair.findings.at(-1)!)}`,
@@ -153,11 +261,13 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
     });
   }
   if (state.hold) {
-    const { item, paths, label } = scope(state.hold.step);
+    const { item, paths, label, tree } = scope(state.hold.step);
     records.push({
       kind: "failure",
       objective,
+      run,
       ...(item ? { item } : {}),
+      ...(tree ? { tree } : {}),
       authority: "observation",
       validity: "historical",
       summary: `${label} held at ${state.hold.step}: ${firstLine(state.hold.question)}`,
@@ -179,7 +289,9 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
     records.push({
       kind: "handoff",
       objective,
+      run,
       item: item.id,
+      ...(itemTree(state, item.id) ? { tree: itemTree(state, item.id) } : {}),
       authority: "advisory",
       validity: "current",
       summary: learnings
@@ -199,6 +311,7 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
     records.push({
       kind: "decision",
       objective,
+      run,
       authority: "human-decision",
       validity: "current",
       summary: `Planning question answered ${decision.answer}${decision.text ? `: ${firstLine(decision.text)}` : ""}`,
@@ -213,6 +326,7 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
     records.push({
       kind: "decision",
       objective,
+      run,
       ...(item ? { item } : {}),
       authority: "human-decision",
       validity: "current",
@@ -259,7 +373,7 @@ function episodeRecord(
     objective: state.issue,
     title: title ?? null,
     outcome: state.status,
-    endedAt: state.updatedAt,
+    endedAt: state.endedAt ?? state.updatedAt,
     sourceLinks: links,
     items,
     objectiveRepairs: Object.entries(state.repairs)
@@ -276,6 +390,7 @@ function episodeRecord(
   return {
     kind: "episode",
     objective: state.issue,
+    run: runOf(state),
     authority: "observation",
     validity: "historical",
     summary: `Objective #${state.issue}${title ? ` (${title})` : ""}: ${state.status}; historical outcome, no inherited acceptance`,
@@ -288,6 +403,7 @@ function episodeRecord(
 /** Records of the Sources one planning call was given, so later plans can see what they said. */
 export function sourceRecords(
   objective: number,
+  run: string,
   base: string,
   sources: { path: string; heading?: string; content: string }[],
 ): MemoryRecord[] {
@@ -296,6 +412,7 @@ export function sourceRecords(
     .map((source) => ({
       kind: "reference" as const,
       objective,
+      run,
       authority: "observation" as const,
       validity: "current" as const,
       summary: `Source ${source.path}${source.heading ? `#${source.heading} (that section only)` : ""} as pinned by Objective #${objective} at base ${base.slice(0, 12)}`,
@@ -400,14 +517,14 @@ async function render(
   const changed: string[] = [];
   for (const [path, digest] of Object.entries(record.digests))
     if ((await query.digest(path)) !== digest) changed.push(path);
-  const disposition =
-    record.validity === "historical"
+  // Changed files make any record stale, a historical one too.
+  const disposition = changed.length
+    ? "stale"
+    : record.validity === "historical"
       ? "historical"
-      : changed.length
-        ? "stale"
-        : Object.keys(record.digests).length
-          ? "current"
-          : "unverified";
+      : Object.keys(record.digests).length
+        ? "current"
+        : "unverified";
   const about = [
     `Objective #${record.objective}`,
     ...(record.item ? [`Work Item ${record.item}`] : []),
@@ -421,6 +538,7 @@ function stored(row: Record<string, unknown>): StoredRecord {
     id: String(row.id),
     kind: row.kind as MemoryKind,
     objective: Number(row.objective),
+    run: String(row.run),
     ...(row.item ? { item: String(row.item) } : {}),
     authority: row.authority as MemoryRecord["authority"],
     validity: row.validity as MemoryRecord["validity"],

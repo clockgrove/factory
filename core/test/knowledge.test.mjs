@@ -2,13 +2,20 @@
 // real files and a real SQLite store, killed with SIGKILL at the store's
 // commit points. A rerun finishes the change exactly once.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -121,6 +128,8 @@ function seedDone(inst, issue) {
       appliedRequests: [],
       modules: {},
       updatedAt: "2026-10-02T00:00:00.000Z",
+      startedAt: "2026-10-01T00:00:00.000Z",
+      endedAt: "2026-10-02T00:00:00.000Z",
     }),
   );
 }
@@ -224,4 +233,91 @@ test("approve crashes before its commit; the rerun approves version 1 once", () 
   assert.match(shown.approved.playbook, /empty-input test/);
   assert.deepEqual(shown.pendingProposals, []);
   assert.equal(count(inst, "SELECT count(*) FROM playbook"), 1);
+});
+
+const services = new Set();
+after(() => {
+  for (const child of services) child.kill("SIGKILL");
+});
+
+/** The real service. Its GitHub reads fail (a token GitHub refuses) and are retried, as a run's are. */
+function serve(inst) {
+  const child = spawn(process.execPath, [CLI, "serve", "--repo", REPO], {
+    env: {
+      ...inst.env,
+      FACTORY_TICK_MS: "50",
+      FACTORY_GITHUB_TOKEN: "refused",
+    },
+    stdio: "ignore",
+  });
+  services.add(child);
+  const exit = new Promise((resolve) => child.on("exit", resolve));
+  return {
+    async stop() {
+      child.kill("SIGTERM");
+      await exit;
+      services.delete(child);
+    },
+  };
+}
+
+async function until(predicate, what, ms = 20_000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+function logged(inst, issue, event) {
+  const dir = join(inst.root, "logs", String(issue));
+  if (!existsSync(dir)) return false;
+  return readdirSync(dir).some((name) =>
+    readFileSync(join(dir, name), "utf8").includes(`"event":"${event}"`),
+  );
+}
+
+test("the service retries a failed observation, and one run keeps one episode across restarts and --record", async () => {
+  const inst = installation();
+  seedDone(inst, 7);
+  assert.equal(dream(inst, undefined, "--show").code, 0); // creates the store
+  // Another writer holds the store's write lock: the service's observation fails.
+  const blocker = store(inst);
+  blocker.exec("BEGIN IMMEDIATE");
+  const first = serve(inst);
+  await until(() => logged(inst, 7, "observe-failed"), "a failed observation");
+  blocker.exec("COMMIT");
+  blocker.close();
+  await until(
+    () =>
+      count(inst, "SELECT count(*) FROM memory WHERE kind = 'episode'") === 1,
+    "the retried observation",
+  );
+  await first.stop();
+
+  // A save after the run settled (a display or reply update) moves updatedAt.
+  const path = join(inst.objectives, "7.json");
+  const state = JSON.parse(readFileSync(path, "utf8"));
+  state.updatedAt = "2026-10-05T00:00:00.000Z";
+  state.modules.github = {
+    itemId: "PVTI_x",
+    shown: "Done",
+    commentsSince: state.updatedAt,
+  };
+  writeFileSync(path, JSON.stringify(state));
+  const second = serve(inst);
+  // Its startup observation runs on the first tick.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await second.stop();
+  const record = dream(inst, undefined, "--record", "--objective", "7");
+  assert.equal(record.code, 0, record.err);
+  const { recorded, episode } = JSON.parse(record.out);
+  assert.equal(recorded, false);
+  assert.equal(episode.endedAt, "2026-10-02T00:00:00.000Z");
+  assert.equal(
+    count(inst, "SELECT count(*) FROM memory WHERE kind = 'episode'"),
+    1,
+  );
+  assert.equal(count(inst, "SELECT count(*) FROM memory"), 4);
 });

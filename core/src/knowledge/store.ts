@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS memory (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
   objective INTEGER NOT NULL,
+  run TEXT NOT NULL,
   item TEXT,
   authority TEXT NOT NULL,
   validity TEXT NOT NULL,
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS memory (
   created TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memory_objective ON memory (objective, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS memory_episode ON memory (objective, run) WHERE kind = 'episode';
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_text USING fts5(id UNINDEXED, summary, body);
 CREATE TABLE IF NOT EXISTS proposals (id TEXT PRIMARY KEY, body TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS playbook (
@@ -45,12 +47,16 @@ CREATE TABLE IF NOT EXISTS playbook (
   at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS rejections (proposal TEXT PRIMARY KEY, reviewed TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS pins (objective INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pins (objective INTEGER NOT NULL, run TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (objective, run));
 CREATE TABLE IF NOT EXISTS dream_calls (id TEXT PRIMARY KEY, at TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT NOT NULL);
 `;
 
-/** Open the store; the caller closes it. node:sqlite is loaded only when knowledge is used. */
-export function openStore(root: string): Database {
+/**
+ * Open the store; the caller closes it. node:sqlite is loaded only when
+ * knowledge is used. `busyMs` is how long a write waits for another
+ * writer: short in the service, whose loop it blocks.
+ */
+export function openStore(root: string, busyMs = 1000): Database {
   const dir = knowledgeDir(root);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const sqlite = createRequire(import.meta.url)(
@@ -59,7 +65,7 @@ export function openStore(root: string): Database {
   const db = new sqlite.DatabaseSync(join(dir, "knowledge.sqlite"));
   try {
     db.exec(
-      `PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; ${SCHEMA}`,
+      `PRAGMA busy_timeout=${busyMs}; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; ${SCHEMA}`,
     );
     return db;
   } catch (error) {
@@ -69,8 +75,12 @@ export function openStore(root: string): Database {
 }
 
 /** Open the store, run `use`, close it. */
-export function withStore<T>(root: string, use: (db: Database) => T): T {
-  const db = openStore(root);
+export function withStore<T>(
+  root: string,
+  use: (db: Database) => T,
+  busyMs?: number,
+): T {
+  const db = openStore(root, busyMs);
   try {
     return use(db);
   } finally {

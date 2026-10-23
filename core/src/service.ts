@@ -49,13 +49,24 @@ export interface ServeOptions {
   sync?: GitHubSync;
   /** The provider each newly admitted Objective freezes. */
   provider?: FrozenProvider;
-  /**
-   * Observes an Objective whenever its status changes, and each one once
-   * at startup; `settled` is terminal with nothing left to run. It reads
-   * the state and never changes it (knowledge records memory here).
-   */
-  observe?: (state: ObjectiveState, settled: boolean) => void;
+  /** Reads Objectives as they move; never changes them (knowledge records memory here). */
+  observer?: StateObserver;
 }
+
+/**
+ * `observe` sees an Objective once each time its status (or settledness:
+ * terminal with nothing left to run) changes, and once at startup. It gets
+ * a copy and runs beside the loop; a failure is retried with backoff until
+ * it succeeds. `release` ends a run that a new admission of the same issue
+ * replaces, before the new run starts; if it throws, the admission waits.
+ */
+export interface StateObserver {
+  observe(state: ObjectiveState, settled: boolean): Promise<void>;
+  release(state: ObjectiveState): void;
+}
+
+const OBSERVE_BACKOFF_MS = 1000;
+const OBSERVE_MAX_BACKOFF_MS = 5 * 60 * 1000;
 
 const KEEP_REQUEST_IDS = 50;
 const RESULT_TTL_MS = 60 * 60 * 1000;
@@ -81,8 +92,11 @@ export async function serve(options: ServeOptions): Promise<number> {
   const log = new RunLog(paths.logs, runId);
   const runners = new Map<number, ObjectiveRunner>();
   const unreadable = new Map<number, string>();
-  /** The status (and settledness) each Objective was last observed at. */
-  const observed = new Map<number, string>();
+  /** Per Objective: the mark last observed, an observation in flight, the failure backoff. */
+  const observed = new Map<
+    number,
+    { mark?: string; busy: boolean; failures: number; nextAt: number }
+  >();
 
   // Only the lock holder writes state, so leftover temporary files are from a crash.
   for (const name of readdirSync(paths.objectives))
@@ -224,21 +238,45 @@ export async function serve(options: ServeOptions): Promise<number> {
         });
       }
     }
-    for (const runner of options.observe ? runners.values() : []) {
+    for (const runner of options.observer ? runners.values() : []) {
       const { state } = runner;
       const settled = TERMINAL.includes(state.status) && !runner.hasWork;
       const mark = `${state.status}:${settled}`;
-      if (observed.get(state.issue) === mark) continue;
-      observed.set(state.issue, mark);
-      try {
-        options.observe!(state, settled);
-      } catch (error) {
-        // Observation never changes a run; the next status change tries again.
-        log.write(state.issue, {
-          event: "observe-failed",
-          error: String(error),
+      const entry = observed.get(state.issue) ?? {
+        busy: false,
+        failures: 0,
+        nextAt: 0,
+      };
+      observed.set(state.issue, entry);
+      if (entry.busy || entry.mark === mark || Date.now() < entry.nextAt)
+        continue;
+      entry.busy = true;
+      // The mark is kept only once the observation succeeded.
+      options
+        .observer!.observe(structuredClone(state), settled)
+        .then(
+          () => {
+            entry.mark = mark;
+            entry.failures = 0;
+          },
+          (error: unknown) => {
+            entry.failures += 1;
+            entry.nextAt =
+              Date.now() +
+              Math.min(
+                OBSERVE_BACKOFF_MS * 2 ** (entry.failures - 1),
+                OBSERVE_MAX_BACKOFF_MS,
+              );
+            log.write(state.issue, {
+              event: "observe-failed",
+              error: String(error),
+              retryAt: new Date(entry.nextAt).toISOString(),
+            });
+          },
+        )
+        .finally(() => {
+          entry.busy = false;
         });
-      }
     }
     options.sync?.tick({
       runners,
@@ -250,6 +288,19 @@ export async function serve(options: ServeOptions): Promise<number> {
         ).length < maxActive,
       admit: (issue: number, github: GitHubModule) => {
         // A new run, or a run again after the operator queued a finished one.
+        const previous = runners.get(issue);
+        if (previous && options.observer)
+          try {
+            options.observer.release(previous.state);
+          } catch (error) {
+            // The item stays queued: the next queue read admits it again.
+            log.write(issue, {
+              event: "admit-deferred",
+              error: String(error),
+            });
+            return;
+          }
+        observed.delete(issue);
         const state = newObjective(issue, new Date(), options.provider);
         state.modules.github = github;
         saveState(paths.objectives, state);

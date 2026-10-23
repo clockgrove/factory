@@ -93,6 +93,8 @@ export interface ServeOptions {
    * requests only, and says so in its log and in `status`.
    */
   unconfigured?: string;
+  /** Stops the service like SIGTERM: a host serving in its own process (library.ts serveFactory). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1029,6 +1031,8 @@ export async function serve(options: ServeOptions): Promise<number> {
   };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
+  if (options.signal?.aborted) stop();
+  options.signal?.addEventListener("abort", stop, { once: true });
   // A stray rejection must not end the service: log it and keep serving.
   process.on("unhandledRejection", (reason) =>
     log.write(0, { event: "unhandled-rejection", error: String(reason) }),

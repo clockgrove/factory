@@ -60,7 +60,7 @@ export interface CaptureRow {
 }
 
 /** The model calls the chosen runs captured, from their `model-usage` events. */
-function captureRows(options: AnalysisRead): {
+export function captureRows(options: AnalysisRead): {
   runs: string[];
   rows: CaptureRow[];
 } {
@@ -1131,14 +1131,19 @@ const LIMITATIONS = [
   "Filters on role, provider, model, effort, outcome, tokenSource and hedge select model calls only; run, item and phase also select steps.",
 ];
 
+/** The analysis views over the chosen runs (library.ts analyzeInteractions). */
+export function analysisReport(options: AnalyzeOptions): AnalysisReport {
+  const analysis = new Analysis(options);
+  readChosen(options, (event) => analysis.add(event));
+  return analysis.report();
+}
+
 /** `--analyze`: the analysis views over the chosen runs. */
 export function analyze(
   options: AnalyzeOptions,
   write: (text: string) => void,
 ): void {
-  const analysis = new Analysis(options);
-  readChosen(options, (event) => analysis.add(event));
-  const report = analysis.report();
+  const report = analysisReport(options);
   write(options.json ? `${JSON.stringify(report)}\n` : analysisText(report));
 }
 

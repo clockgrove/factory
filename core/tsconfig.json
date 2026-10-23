@@ -8,6 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
+    "declaration": true,
     "types": ["node"]
   },
   "include": ["src/**/*.ts"]

@@ -23,6 +23,13 @@
   "bin": {
     "factory": "./core/dist/cli.js"
   },
+  "exports": {
+    ".": {
+      "types": "./core/dist/index.d.ts",
+      "default": "./core/dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "core/dist",
     "skills",

@@ -13,6 +13,7 @@ import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
 import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
+import { isHostKind, unregisteredKinds } from "./kinds.js";
 import { networkToolOfCommand } from "./planning/facts.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { executable, sandboxStatus } from "./sandbox.js";
@@ -261,7 +262,30 @@ function providerChecks(
   const checks: ReadinessCheck[] = [];
   for (const [name, provider] of Object.entries(config.providers)) {
     const worker = provider.worker;
-    const kinds = new Map<string, string>([[provider.planner, "planner"]]);
+    // A host kind is built by the process that registered it (kinds.ts).
+    for (const [kind, role] of [
+      [provider.planner, "planner"],
+      [worker.kind, "worker"],
+    ] as const)
+      if (isHostKind(kind))
+        checks.push(
+          unregisteredKinds({ [name]: provider }).some((missing) =>
+            missing.endsWith(`(${role})`),
+          )
+            ? {
+                name: `provider ${name}: ${kind} ${role}`,
+                status: "blocked",
+                detail: `${kind} is a host kind this process hasn't registered`,
+                fix: "Serve this installation from the host program that registers it (serveFactory)",
+              }
+            : ok(
+                `provider ${name}: ${kind} ${role}`,
+                "registered by this process",
+              ),
+        );
+    const kinds = new Map<string, string>(
+      provider.planner in SDK ? [[provider.planner, "planner"]] : [],
+    );
     if (worker.kind in SDK)
       kinds.set(
         worker.kind,

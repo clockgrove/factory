@@ -10,6 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isObject } from "../checked.js";
 import type { CoreConfig } from "../config.js";
 import { ADOPTS, hold, type Step, type Workflow } from "../engine.js";
+import { hostKind, isHostKind } from "../kinds.js";
 import { profilesLacking } from "../planning/plan.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
@@ -54,8 +55,9 @@ export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
   const worker = provider.worker;
   return {
     ...provider,
-    models:
-      provider.planner === "claude"
+    models: isHostKind(provider.planner)
+      ? { ...provider.models }
+      : provider.planner === "claude"
         ? { ...DEFAULT_CLAUDE_MODELS, ...provider.models }
         : provider.planner === "copilot"
           ? { ...DEFAULT_COPILOT_MODELS, ...provider.models }
@@ -75,6 +77,11 @@ export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
 /** The provider's planner, hedged against stalled calls. */
 export function providerPlanner(provider: ProviderConfig): Planner {
   const resolved = resolvedProvider(provider);
+  // A host's planner (kinds.ts) handles its own stalls: it isn't hedged.
+  if (isHostKind(resolved.planner))
+    return hostKind(resolved.planner, "planner").planner!(
+      resolved.models ?? {},
+    );
   switch (resolved.planner) {
     case "claude":
       return new HedgedPlanner(
@@ -104,6 +111,15 @@ export function providerWorker(
     const worker = resolvedProvider(
       profileProvider(config, profile) ?? provider,
     ).worker;
+    if (isHostKind(worker.kind)) {
+      const { kind, ...settings } = worker as { kind: string };
+      return hostKind(kind, "worker").worker!(settings, {
+        plan,
+        blocks,
+        ...(profile !== undefined ? { profile } : {}),
+        config,
+      });
+    }
     switch (worker.kind) {
       case "claude":
         return new ClaudeWorker({

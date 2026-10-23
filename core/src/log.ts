@@ -408,20 +408,22 @@ function ofRun(file: string, events: LogEvent[]): LogEvent[] {
 }
 
 /**
- * Call `poll` every `everyMs` until SIGINT or SIGTERM, or until it returns
- * a result (anything but undefined): a follow's loop. Returns that result,
- * undefined when interrupted.
+ * Call `poll` every `everyMs` until SIGINT, SIGTERM or `signal`, or until
+ * it returns a result (anything but undefined): a follow's loop. Returns
+ * that result, undefined when interrupted.
  */
 export async function untilInterrupted<T>(
   poll: () => T | undefined | Promise<T | undefined>,
+  signal?: AbortSignal,
   everyMs = 500,
 ): Promise<T | undefined> {
-  let stop = false;
+  let stop = signal?.aborted ?? false;
   const stopping = () => {
     stop = true;
   };
   process.once("SIGINT", stopping);
   process.once("SIGTERM", stopping);
+  signal?.addEventListener("abort", stopping, { once: true });
   try {
     while (!stop) {
       await new Promise((resolve) => setTimeout(resolve, everyMs));
@@ -433,6 +435,7 @@ export async function untilInterrupted<T>(
   } finally {
     process.off("SIGINT", stopping);
     process.off("SIGTERM", stopping);
+    signal?.removeEventListener("abort", stopping);
   }
 }
 

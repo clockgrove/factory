@@ -2199,6 +2199,14 @@ for (const point of ["reset:recorded", "engine:rebuild:started"])
       n.endsWith(".json"),
     );
     assert.equal(pending.length, 1, "the reset is answered when it lands");
+    // A second reset is refused while this one rebuilds, and a control
+    // sent meanwhile applies to the live record (the rebuild carries the
+    // live record's controls over when it lands).
+    const again = cli(inst, "reset", "56");
+    assert.equal(again.code, 1);
+    assert.equal(refusal(again), "reset_in_progress");
+    assert.equal(cli(inst, "drain", "56").code, 0);
+    assert.equal(stateOf(inst, 56).control.mode, "draining");
     // Creating an Objective is an admission: not while the queue drains.
     assert.equal(cli(inst, "queue", "drain").code, 0);
     assert.equal(refusal(cli(inst, "reset", "77")), "queue_not_running");

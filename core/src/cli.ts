@@ -1064,6 +1064,11 @@ async function request(paths: Paths, body: Request): Promise<number> {
       const result = JSON.parse(readFileSync(file, "utf8")) as RequestResult;
       rmSync(file, { force: true });
       if (result.code) throw new Refusal(result.code, result.message);
+      // Anything but "ok" is a refusal, even one that names no code.
+      if (result.message !== "ok") {
+        process.stderr.write(`factory: ${result.message}\n`);
+        return 1;
+      }
       process.stdout.write("Done.\n");
       return 0;
     }

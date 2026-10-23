@@ -71,6 +71,8 @@ export type RefusalCode =
   | "plan_unreadable"
   /** A later cancel replaced this request before it applied. */
   | "superseded"
+  /** A reset of this Objective is already rebuilding it. */
+  | "reset_in_progress"
   /** The queue is paused or draining, so nothing new is admitted (a reset of an Objective Factory has no state for). */
   | "queue_not_running";
 

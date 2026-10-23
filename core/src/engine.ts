@@ -57,7 +57,16 @@ export type Outcome =
    * the rebuilt Objective, or, with `withdraw`, the record is withdrawn as
    * if never admitted (service.ts). Only that step returns it.
    */
-  | { kind: "replace"; state: ObjectiveState; withdraw?: boolean }
+  | {
+      kind: "replace";
+      /**
+       * The new record, built from the live state at apply time, so what
+       * the operator and the sync changed while the step ran (a pause, an
+       * applied request, the comment cursor) is kept.
+       */
+      build: (live: ObjectiveState) => ObjectiveState;
+      withdraw?: boolean;
+    }
   /**
    * The work is wrong (validation, review or CI refused it): clear `clear`
    * from the finished steps and run `target` again with the finding, within
@@ -508,7 +517,7 @@ export class ObjectiveRunner {
       // The rebuilt record stands whole; the steps of the one it replaces
       // are gone with it.
       this.abortRunning(Object.keys(this.state.attempts));
-      this.state = structuredClone(outcome.state);
+      this.state = outcome.build(structuredClone(this.state));
       this.state.finishedRun = this.run.id;
       if (outcome.withdraw) this.state.withdrawing = true;
       return;

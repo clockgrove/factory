@@ -92,34 +92,64 @@ export function rebuildStep(github: GitHub, config: CoreConfig): Step {
       guarded(config.repository, async (): Promise<Outcome> => {
         const record = state.kept[RESET] as ResetRecord;
         const found = await rebuildState(github, config, state, signal);
-        const answered = (base: ObjectiveState, result: RequestResult) => ({
-          ...base,
-          appliedRequests: [
-            ...base.appliedRequests,
-            { id: record.request, ...result },
-          ].slice(-50),
-        });
         if ("version" in found)
           return {
             kind: "replace",
-            state: answered(found, { message: "ok" }),
+            build: (live) =>
+              carried(found, live, record.request, { message: "ok" }),
           };
         // Refused: the old state stands again, or, with none, the record
         // goes as if never admitted. With an unreadable old state and a
         // plan it can't read, only the operator can say.
-        if (record.old)
-          return { kind: "replace", state: answered(record.old, found) };
+        if (record.old) {
+          const old = record.old;
+          return {
+            kind: "replace",
+            build: (live) => carried(old, live, record.request, found),
+          };
+        }
         if (found.code === "plan_unreadable")
           return hold(
             `${found.message} Answer retry once the plan comment is fixed or deleted (then Factory plans afresh); or cancel.`,
           );
         return {
           kind: "replace",
-          state: answered(state, found),
+          build: (live) => carried(live, live, record.request, found),
           withdraw: true,
         };
       }),
   };
+}
+
+/**
+ * The record that replaces the resetting one: `base` (rebuilt from GitHub,
+ * or the old state restored), with what the operator and the sync own
+ * taken from the live record when the rebuild lands: a pause or drain, the
+ * provider (a `switch`), the card and comment cursor, and every request
+ * applied meanwhile, plus this reset's own answer.
+ */
+function carried(
+  base: ObjectiveState,
+  live: ObjectiveState,
+  request: string,
+  result: RequestResult,
+): ObjectiveState {
+  const state = structuredClone(base);
+  if (live.control) state.control = live.control;
+  else delete state.control;
+  if (live.provider) state.provider = live.provider;
+  const kept = live.modules.github as GitHubModule | undefined;
+  const card = base.modules.github as GitHubModule | undefined;
+  if (kept)
+    state.modules.github = {
+      ...kept,
+      ...(card ? { itemId: card.itemId, order: card.order ?? null } : {}),
+    };
+  state.appliedRequests = [
+    ...live.appliedRequests.filter((applied) => applied.id !== request),
+    { id: request, ...result },
+  ].slice(-50);
+  return state;
 }
 
 /**
@@ -135,9 +165,14 @@ export function rebuildStep(github: GitHub, config: CoreConfig): Step {
  * comments it names; anything else refuses with `plan_unreadable`. A PR
  * counts only if it was opened after the plan comment was last written and
  * names no other run (the newest wins); the report counts only if it is
- * newer than the plan comment and names no other run. The operator's own
- * choices (pause or drain, a provider switch, the Project card and the
- * comment cursor) carry over from the resetting record.
+ * newer than the plan comment and names no other run. Without a readable old
+ * state the run is unknown: then the plan comment, the PRs and the report
+ * must be newer than when this run was queued (the card's queue time), and
+ * with no queue time a plan comment refuses with `plan_unreadable`. An
+ * Objective Factory has no state or plan comment for needs a card that is
+ * queued. The operator's own choices (pause or drain, a provider switch,
+ * the card and the comment cursor) are taken from the live record when the
+ * rebuild lands (`carried`).
  *
  * The rebuilt state checks the issue again and then carries on: a merged
  * Work Item stays merged; every other item starts fresh on the current
@@ -172,41 +207,47 @@ export async function rebuildState(
   );
   const marked = (marker: string): IssueComment | undefined =>
     mine.find((comment) => comment.body.startsWith(marker));
-  // A replan or a re-run that hasn't accepted its plan yet: the comment is
-  // an earlier plan's.
-  const planComment =
-    old && !old.done.plan
-      ? undefined
-      : marked(`<!-- factory:${issue}:plan -->`);
-  if (!hadState && !planComment && !card)
+  const planned = marked(`<!-- factory:${issue}:plan -->`);
+  // Only a card queued under this configuration admits an Objective
+  // Factory has no state for; a candidate or inert card doesn't.
+  const queued = card?.option === config.queue.options.queued;
+  if (!hadState && !planned && !queued)
     return refused(
       "no_factory_state",
-      `Factory has no state, plan comment or Project card for #${issue}, so there is nothing to reset.`,
+      `Factory has no state or plan comment for #${issue}, and its card isn't queued, so there is nothing to reset.`,
     );
+  // The run is known only from a readable old state. Otherwise what is
+  // found must be newer than when this run was queued (the card's queue
+  // time); with neither, an earlier run's results can't be told apart.
+  const run = old?.startedAt;
+  const queuedAt =
+    (record.modules.github as GitHubModule | undefined)?.queuedAt ??
+    card?.optionAt ??
+    undefined;
+  if (!run && !queuedAt && planned)
+    return refused(
+      "plan_unreadable",
+      `#${issue}'s plan comment can't be tied to this run: its state can't be read and its card has no queue time.`,
+    );
+  const planAt = planned && (planned.updated_at ?? planned.created_at);
+  // A replan or a re-run that hasn't accepted its plan yet, or a plan from
+  // before this run was queued: the comment is an earlier plan's.
+  const planComment =
+    (old && !old.done.plan) || (!run && planAt && planAt < queuedAt!)
+      ? undefined
+      : planned;
 
   const state = newObjective(issue, new Date(requestedAt), record.provider);
   if (record.startedAt) state.startedAt = record.startedAt;
-  // The run is known only from a readable old state; otherwise only the
-  // times bind what is found.
-  const run = old?.startedAt;
-  if (record.control) state.control = record.control;
-  state.appliedRequests = record.appliedRequests;
-  const planAt =
-    planComment && (planComment.updated_at ?? planComment.created_at);
-  const module = record.modules.github as GitHubModule | undefined;
-  if (module || card) {
-    const base: GitHubModule = module ?? {
-      itemId: card!.itemId,
-      commentsSince: planAt ?? requestedAt,
-      seen: card!.option,
-      ...(card!.option ? { shown: card!.option } : {}),
-      ...(card!.optionAt ? { shownAt: card!.optionAt } : {}),
-    };
+  if (card)
     state.modules.github = {
-      ...base,
-      ...(card ? { itemId: card.itemId, order: card.order } : {}),
-    };
-  }
+      itemId: card.itemId,
+      order: card.order,
+      commentsSince: planAt ?? requestedAt,
+      seen: card.option,
+      ...(card.option ? { shown: card.option } : {}),
+      ...(card.optionAt ? { shownAt: card.optionAt } : {}),
+    } satisfies GitHubModule;
 
   if (planComment && planAt) {
     const plan = planOf(issue, planComment.body, marked);

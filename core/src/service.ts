@@ -530,7 +530,10 @@ export async function serve(options: ServeOptions): Promise<number> {
     const running = known?.state.kept?.[RESET] as ResetRecord | undefined;
     if (running?.request === stored.id) return undefined;
     if (running && !TERMINAL.includes(known!.state.status))
-      return { message: "A reset of this Objective is already rebuilding it." };
+      return refused(
+        "reset_in_progress",
+        `A reset of #${issue} is already rebuilding it; factory status ${issue} shows it.`,
+      );
     const hadState = Boolean(known) || unreadable.has(issue);
     // Creating an Objective is an admission: not while the queue isn't running.
     if (!hadState && queue.mode !== "running")
@@ -546,6 +549,9 @@ export async function serve(options: ServeOptions): Promise<number> {
       unreadable.get(issue)?.github,
       options.provider,
     );
+    // Its steps are stopped, not waited for: an effect already in flight
+    // (a merge) may land after the rebuild read GitHub (deferred to the
+    // engine outcomes rework, W1-03).
     known?.stop();
     runners.delete(issue);
     unreadable.delete(issue);

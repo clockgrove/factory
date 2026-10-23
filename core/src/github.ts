@@ -543,6 +543,22 @@ export class GitHub {
     crashPoint(`${point}:after`);
   }
 
+  /** Close a PR, between the crash points `<point>:before` and `<point>:after`. */
+  async closePull(
+    number: number,
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "PATCH",
+      this.repo(`pulls/${number}`),
+      { state: "closed" },
+      signal,
+    );
+    crashPoint(`${point}:after`);
+  }
+
   /** Reopen a closed issue, unless it is open already. */
   async reopenIssue(
     issue: number,

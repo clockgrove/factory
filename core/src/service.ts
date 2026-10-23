@@ -344,7 +344,7 @@ export async function serve(options: ServeOptions): Promise<number> {
   if (record.resumeAt)
     log.write(0, {
       event: "crash-loop",
-      crashes: record.starts.length - 1,
+      crashes: crashStreak(record.deaths),
       resumeAt: record.resumeAt,
     });
   const heartbeat = (stopped = false): void => {
@@ -366,11 +366,11 @@ export async function serve(options: ServeOptions): Promise<number> {
   const id = (r: { issue: number; step: string }) => `${r.issue} ${r.step}`;
   const culprits = [
     ...(previous?.suspected ?? []),
-    ...suspects(record.crashes),
+    ...suspects(record.deaths),
   ].filter((r, at, all) => all.findIndex((o) => id(o) === id(r)) === at);
   if (culprits.length) {
     // Another question needs three new deaths.
-    record.crashes = [];
+    for (const death of record.deaths) death.spent = true;
     record.suspected = culprits;
     heartbeat();
   }
@@ -606,10 +606,10 @@ export async function serve(options: ServeOptions): Promise<number> {
         by: stored.by,
       });
     }
-    const shownAt = (known?.state.modules.github as GitHubModule | undefined)
-      ?.shownAt;
+    const shown = (known?.state.modules.github as GitHubModule | undefined)
+      ?.shown;
     // The card's outcome answers whichever request waits for it by then.
-    sync.queue(issue, Boolean(known), { at: stored.at, shownAt }, (result) => {
+    sync.queue(issue, Boolean(known), { at: stored.at, shown }, (result) => {
       const waiting = runs.get(issue);
       if (waiting) answer(waiting, result);
     });
@@ -1156,19 +1156,18 @@ interface ServiceRecord {
   at: string;
   startedAt: string;
   /**
-   * The starts of this crash streak, oldest first: each start after the
-   * first follows a run that died (no clean stop) within STREAK_MS of
-   * resuming its interrupted steps.
+   * The latest deaths (runs that ended without a clean stop), oldest
+   * first, at most MAX_DEATHS. A clean stop empties it. The crash streak is
+   * its trailing deaths that lived less than STREAK_MS after resuming; the
+   * suspect evidence, its last SUSPECT_CRASHES deaths not yet spent.
    */
-  starts: string[];
+  deaths: Death[];
   /** When this run resumes interrupted steps; absent when it did at once. */
   resumeAt?: string;
   /** Step attempts that finished in this run. */
   finished: number;
-  /** The latest deaths, oldest first: the steps running at each, and whether the run that died finished any step. */
-  crashes: Crash[];
   /** Steps the spent evidence names, until their questions are saved. */
-  suspected?: Crash["running"];
+  suspected?: Death["running"];
   /** Set by a clean stop. */
   stopped?: boolean;
   unreadable: Record<string, string>;
@@ -1182,10 +1181,30 @@ interface ServiceRecord {
   waits?: Record<string, { slot: true } | { paths: number }>;
 }
 
-interface Crash {
+export interface Death {
+  /** When the next run started: about when this one died. */
   at: string;
+  /** How long the run lived after resuming; null when its record didn't say. */
+  lived: number | null;
+  /** The steps running when it died. */
   running: { issue: number; step: string }[];
+  /** Whether the run finished any step. */
   progressed: boolean;
+  /** Set once a suspect question used it as evidence. */
+  spent?: true;
+}
+
+/** Deaths kept: enough for any streak the resume delay still grows on. */
+const MAX_DEATHS = 20;
+
+/** The crash streak's deaths: the trailing ones that died soon after resuming. */
+export function crashStreak(deaths: readonly Death[]): number {
+  let streak = 0;
+  for (let at = deaths.length - 1; at >= 0; at--) {
+    if ((deaths[at]!.lived ?? Number.POSITIVE_INFINITY) >= STREAK_MS) break;
+    streak++;
+  }
+  return streak;
 }
 
 /** A run that dies this soon after resuming continues a crash streak. */
@@ -1224,15 +1243,12 @@ function startRecord(
   const lived =
     Date.parse(previous?.at ?? "") -
     Date.parse(previous?.resumeAt ?? previous?.startedAt ?? "");
-  const starts = [
-    ...(crashed && lived < STREAK_MS ? (previous.starts ?? []) : []),
-    now,
-  ].slice(-20);
-  const crashes: Crash[] = crashed
+  const deaths: Death[] = crashed
     ? [
-        ...(previous.crashes ?? []),
+        ...(previous.deaths ?? []),
         {
           at: now,
+          lived: Number.isFinite(lived) ? lived : null,
           running: [...runners.values()].flatMap((runner) =>
             Object.entries(runner.state.attempts)
               .filter(([, attempt]) => attempt.run === previous.runId)
@@ -1245,12 +1261,14 @@ function startRecord(
               (runner) => runner.state.finishedRun === previous.runId,
             ),
         },
-      ].slice(-SUSPECT_CRASHES)
+      ].slice(-MAX_DEATHS)
     : [];
+  // This start is the streak's deaths plus one.
+  const starts = crashStreak(deaths) + 1;
   const delay =
-    starts.length >= LOOP_STARTS
+    starts >= LOOP_STARTS
       ? backoffMs(
-          starts.length - LOOP_STARTS + 1,
+          starts - LOOP_STARTS + 1,
           limits.baseBackoffMs,
           MAX_RESUME_DELAY_MS,
         )
@@ -1260,12 +1278,11 @@ function startRecord(
     runId,
     at: now,
     startedAt: now,
-    starts,
+    deaths,
     ...(delay
       ? { resumeAt: new Date(startedAt.getTime() + delay).toISOString() }
       : {}),
     finished: 0,
-    crashes,
     unreadable: {},
   };
 }
@@ -1277,10 +1294,11 @@ function startRecord(
  * crash streak ends in questions within SUSPECT_CRASHES deaths however
  * many steps keep being interrupted together.
  */
-function suspects(crashes: Crash[]): Crash["running"] {
-  if (crashes.length < SUSPECT_CRASHES) return [];
-  const last = crashes.slice(-SUSPECT_CRASHES);
-  if (!last.slice(1).every((crash) => crash.progressed)) return [];
+function suspects(deaths: Death[]): Death["running"] {
+  const last = deaths.slice(-SUSPECT_CRASHES);
+  if (last.length < SUSPECT_CRASHES || last.some((death) => death.spent))
+    return [];
+  if (!last.slice(1).every((death) => death.progressed)) return [];
   const id = (r: { issue: number; step: string }) => `${r.issue} ${r.step}`;
   return last[0]!.running.filter((r) =>
     last.every((crash) => crash.running.some((o) => id(o) === id(r))),

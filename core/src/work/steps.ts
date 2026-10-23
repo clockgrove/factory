@@ -1,7 +1,6 @@
 import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resultRereviews } from "../allowances.js";
-import { crashPoint } from "../crash.js";
 import {
   ACCEPT,
   type DeliveryContext,
@@ -3122,14 +3121,11 @@ async function closeFactoryPulls(
   text: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const { config, github } = deps;
+  const { github } = deps;
   const point = kind === "cancelled" ? "cancel" : "rerun";
   for (const branch of await github.branches(`factory/${issue}/`, signal)) {
-    const pulls = await github.rest<{ number: number }[]>(
-      "GET",
-      `/repos/${config.repository}/pulls?head=${encodeURIComponent(`${github.owner}:${branch}`)}&state=open`,
-      undefined,
-      signal,
+    const pulls = (await github.pullsByHead(branch, signal)).filter(
+      (pull) => pull.state === "open",
     );
     for (const pull of pulls) {
       const marker = `<!-- factory:${issue}:pr-${kind}:${branch.slice(`factory/${issue}/`.length)} -->`;
@@ -3140,14 +3136,7 @@ async function closeFactoryPulls(
         `${point}:pr-comment`,
         signal,
       );
-      crashPoint(`${point}:pr-close:before`);
-      await github.rest(
-        "PATCH",
-        `/repos/${config.repository}/pulls/${pull.number}`,
-        { state: "closed" },
-        signal,
-      );
-      crashPoint(`${point}:pr-close:after`);
+      await github.closePull(pull.number, `${point}:pr-close`, signal);
     }
   }
 }

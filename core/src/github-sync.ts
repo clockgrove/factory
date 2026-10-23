@@ -58,9 +58,11 @@ export interface GitHubModule {
   ceded?: string;
   /** An option Factory began writing: a card showing it is Factory's own write, landed or not. */
   writing?: string;
-  /** When Factory last wrote the option, by GitHub's clock. */
-  shownAt?: string;
-  /** When the card was set to queued for this run, by GitHub's clock. */
+  /**
+   * When the card was set to queued for this run, by GitHub's clock: a
+   * stale read after a dequeue never admits the issue again (`withdrawnAt`),
+   * and `reset` tells this run's plan comment from an earlier run's.
+   */
   queuedAt?: string;
   /** An unreadable state's question comment exists (open holds keep theirs: `Hold.shownAt`). */
   askedUnreadable?: boolean;
@@ -117,7 +119,7 @@ export interface SyncView {
    * started.
    */
   withdraw(issue: number): "withdrawn" | "pending" | false;
-  /** Checked and waiting for a slot: still shown as queued. */
+  /** Checked and waiting for a slot: its card stays as the operator set it until Factory shows a status. */
   waitingForSlot(issue: number): boolean;
   /** What the Objective waits on before it can start, as `factory status` shows it. */
   waitsOn(issue: number): ObjectiveView["waitsOn"];
@@ -132,8 +134,9 @@ export interface SyncView {
 const MARK = (issue: number, kind: string, id: string) =>
   `<!-- factory:${issue}:${kind}:${id} -->`;
 
-const OPTION: Record<ObjectiveStatus, QueueOption> = {
-  checking: "queued",
+/** The option each status shows; checking shows none (the card stays queued). */
+const OPTION: Record<ObjectiveStatus, QueueOption | undefined> = {
+  checking: undefined,
   planning: "planning",
   building: "building",
   finishing: "building",
@@ -168,15 +171,14 @@ const QUESTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
  * the rate limit the others need. A finished Objective stays until its
  * final option and replies are written.
  *
- * The queue is read by edges, never by levels: Factory writes the queued
- * option itself (while an Objective is checked or waits for a slot), so a
- * card that reads queued means nothing alone. A finished Objective queues
- * again only when its option was set after Factory's own last write
- * (GitHub's `updatedAt` of the option, against the `shownAt` and
- * `queuedAt` Factory saved), so a stale card never re-admits a finished or
- * cancelled run. An unfinished one dequeues when its card changes from
- * queued to anything else, cleared or off the Project included, against
- * the option Factory last saw or wrote (`seen`), which has no clock to need.
+ * The queue is read by levels: Factory never writes the queued option, so
+ * a card that reads queued is always the operator's input. A finished
+ * Objective queues again once its final option is written (`finalShown`)
+ * and a read that began after Factory's last write shows it queued; any
+ * read after a restart began after the last write. An unfinished one
+ * dequeues when its card changes from queued to anything else, cleared or
+ * off the Project included, against the option Factory last saw or wrote
+ * (`seen`), which has no clock to need.
  */
 export class GitHubSync {
   private view: QueueItem[] = [];
@@ -357,7 +359,7 @@ export class GitHubSync {
   queue(
     issue: number,
     closed: boolean,
-    since: { at: string; shownAt?: string | undefined },
+    since: { at: string; shown?: string | undefined },
     answer: (result: RequestResult) => void,
   ): void {
     if (this.problem() || this.queuing.has(issue)) return;
@@ -410,10 +412,7 @@ export class GitHubSync {
     const module = state.modules.github as GitHubModule | undefined;
     if (!module) return true;
     return (
-      TERMINAL.includes(state.status) &&
-      [module.shown, module.ceded].includes(
-        this.config.queue.options[OPTION[state.status]],
-      ) &&
+      finalShown(state, this.config) &&
       !unreplied(state, module).length &&
       (!this.config.progress.enabled ||
         module.statusGivenUp === true ||
@@ -443,10 +442,8 @@ export class GitHubSync {
   withdrawn(state: ObjectiveState): void {
     this.forget(state.issue);
     const module = state.modules.github as GitHubModule | undefined;
-    const marks = [module?.queuedAt, module?.shownAt]
-      .map((mark) => Date.parse(mark ?? ""))
-      .filter(Number.isFinite);
-    if (marks.length) this.withdrawnAt.set(state.issue, Math.max(...marks));
+    const at = Date.parse(module?.queuedAt ?? "");
+    if (Number.isFinite(at)) this.withdrawnAt.set(state.issue, at);
   }
 
   /**
@@ -497,9 +494,10 @@ export class GitHubSync {
           // Queued again after it finished: its cleanup ends first. The new
           // run reopens a closed issue (rerun:cleanup).
           if (
-            item?.option === queuedOption &&
+            item &&
+            requeued(item, state, this.config) &&
             runner.settled &&
-            moved(item, state)
+            this.synced(state)
           )
             this.admitItem(item, sync);
           continue;
@@ -546,7 +544,18 @@ export class GitHubSync {
     const queued = this.config.queue.options.queued;
     const module = runner.state.modules.github as GitHubModule;
     if (TERMINAL.includes(runner.state.status)) {
-      if (option === queued) return "requeued";
+      if (option === queued) {
+        // The operator's re-queue stands over the final option Factory
+        // hadn't shown yet: that counts as shown, so intake can admit it.
+        const final = this.desired(runner, sync);
+        runner.transact(() => {
+          const github = runner.state.modules.github as GitHubModule;
+          github.seen = option;
+          if (final !== undefined) github.ceded = final;
+        });
+        this.log.write(issue, { event: "card-changed", option, ceded: final });
+        return "requeued";
+      }
     } else if (module.seen === queued && option !== queued) {
       const withdrawn = sync.withdraw(issue);
       if (withdrawn === "pending")
@@ -589,16 +598,26 @@ export class GitHubSync {
     });
   }
 
-  /** The option the Objective's status shows. */
-  private desired(runner: ObjectiveRunner, sync: SyncView): string {
-    const status = runner.state.status;
-    return this.config.queue.options[
-      !TERMINAL.includes(status) &&
-      status !== "holding" &&
-      sync.waitingForSlot(runner.state.issue)
-        ? "queued"
-        : OPTION[status]
-    ];
+  /**
+   * The option the Objective's status shows, or undefined to leave the
+   * card as it is: while checking, and while it waits for a slot before
+   * Factory has shown anything (the operator's queued stands). After a
+   * hold is answered it shows its status (Planning, Building) while it
+   * waits.
+   */
+  private desired(runner: ObjectiveRunner, sync: SyncView): string | undefined {
+    const { status, issue } = runner.state;
+    const module = runner.state.modules.github as GitHubModule | undefined;
+    const option = OPTION[status];
+    if (
+      !option ||
+      (module?.shown === undefined &&
+        !TERMINAL.includes(status) &&
+        status !== "holding" &&
+        sync.waitingForSlot(issue))
+    )
+      return undefined;
+    return this.config.queue.options[option];
   }
 
   /**
@@ -616,6 +635,7 @@ export class GitHubSync {
     const issue = runner.state.issue;
     const option = this.desired(runner, sync);
     if (
+      option === undefined ||
       runner.state.withdrawing ||
       module.shown === option ||
       module.ceded === option ||
@@ -636,13 +656,12 @@ export class GitHubSync {
           this.changed.add(issue);
         return;
       }
-      let at = card.at;
       if (card.option !== option) {
         runner.transact(() => {
           github().writing = option;
         });
         crashPoint("sync:show:before");
-        at = await this.display.set(github().itemId, option, signal);
+        await this.display.set(github().itemId, option, signal);
         crashPoint("sync:show:after");
         this.wroteAt.set(issue, this.now());
       }
@@ -652,7 +671,6 @@ export class GitHubSync {
         module.seen = option;
         delete module.writing;
         delete module.ceded;
-        if (at) module.shownAt = at;
       });
     });
   }
@@ -914,10 +932,9 @@ export class GitHubSync {
     if (module.shown !== option)
       this.background(issue, `show:${issue}`, async (signal) => {
         crashPoint("sync:show:before");
-        const at = await this.display.set(module.itemId, option, signal);
+        await this.display.set(module.itemId, option, signal);
         crashPoint("sync:show:after");
         module.shown = option;
-        if (at) module.shownAt = at;
       });
     if (!module.askedUnreadable)
       this.background(issue, `ask:${issue}`, async (signal) => {
@@ -1173,18 +1190,39 @@ function unreplied(
 }
 
 /**
- * Whether the card's option was set after Factory's own last write for
- * this run (by GitHub's clock): an operator's queue or dequeue. A run with
- * no GitHub time saved falls back to its last save.
+ * Whether a finished Objective's card is a re-queue: it reads queued, its
+ * final option is shown (`finalShown`), and it was set to queued after the
+ * queue that started this run (`queuedAt`, by GitHub's clock), so a stale
+ * read of that first queue never runs a finished or cancelled run again.
  */
-export function moved(item: QueueItem, state: ObjectiveState): boolean {
-  const at = Date.parse(item.optionAt ?? "");
-  if (!Number.isFinite(at)) return false;
+export function requeued(
+  item: QueueItem,
+  state: ObjectiveState,
+  config: CoreConfig,
+): boolean {
   const module = state.modules.github as GitHubModule | undefined;
-  const marks = [module?.shownAt, module?.queuedAt]
-    .map((mark) => Date.parse(mark ?? ""))
-    .filter(Number.isFinite);
-  return at > (marks.length ? Math.max(...marks) : Date.parse(state.updatedAt));
+  const since = Date.parse(module?.queuedAt ?? "");
+  return (
+    item.option === config.queue.options.queued &&
+    finalShown(state, config) &&
+    (!Number.isFinite(since) || Date.parse(item.optionAt ?? "") > since)
+  );
+}
+
+/**
+ * Whether a finished Objective's card shows its final option (Factory
+ * wrote it, or wrote over nothing because someone else's change stood):
+ * from then on a card that reads queued is the operator's re-queue.
+ */
+export function finalShown(state: ObjectiveState, config: CoreConfig): boolean {
+  const module = state.modules.github as GitHubModule | undefined;
+  if (!module) return true;
+  const option = OPTION[state.status];
+  return (
+    TERMINAL.includes(state.status) &&
+    option !== undefined &&
+    [module.shown, module.ceded].includes(config.queue.options[option])
+  );
 }
 
 /** Why a `factory run` request isn't admitted. */

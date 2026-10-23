@@ -250,7 +250,6 @@ export async function rebuildState(
       commentsSince: planAt ?? requestedAt,
       seen: card.option,
       ...(card.option ? { shown: card.option } : {}),
-      ...(card.optionAt ? { shownAt: card.optionAt } : {}),
     } satisfies GitHubModule;
 
   if (planComment && planAt) {

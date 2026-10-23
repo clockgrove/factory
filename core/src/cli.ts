@@ -28,7 +28,7 @@ import {
 } from "./engine.js";
 import { gitEnvironment } from "./git.js";
 import { GitHub } from "./github.js";
-import { GitHubSync, moved } from "./github-sync.js";
+import { finalShown, GitHubSync, requeued } from "./github-sync.js";
 import {
   applyDream,
   type DreamCommand,
@@ -950,11 +950,13 @@ async function queueCommand(
           option: card.option,
           ...(state ? { status: state.status } : {}),
         });
-    } else if (finished && !moved(card, state))
+    } else if (finished && !requeued(card, state, config))
       inert.push({
         issue: card.issue,
         option: card.option,
-        reason: `It has ${state.status}, and the card was set to queued before that. Set it to queued again to run it again.`,
+        reason: finalShown(state, config)
+          ? `It has ${state.status}, and the card still reads the queue it ran from. Move it off queued and back to run it again.`
+          : `It has ${state.status}, and its final status isn't on the card yet; it runs again once the service shows it.`,
       });
     else if (control.mode !== "running" && (!state || finished))
       inert.push({

@@ -678,11 +678,10 @@ test("the one step running at three deaths, with progress between, holds", async
       runId: "dead",
       at,
       startedAt: at,
-      starts: [at],
       finished: 0,
-      crashes: [
-        { at, running: running(61, 62), progressed: false },
-        { at, running: running(61), progressed: true },
+      deaths: [
+        { at, lived: null, running: running(61, 62), progressed: false },
+        { at, lived: null, running: running(61), progressed: true },
       ],
       unreadable: {},
     }),
@@ -701,7 +700,10 @@ test("the one step running at three deaths, with progress between, holds", async
   const record = JSON.parse(
     readFileSync(join(inst.root, "service.json"), "utf8"),
   );
-  assert.deepEqual(record.crashes, [], "the evidence is spent");
+  assert.ok(
+    record.deaths.every((death) => death.spent),
+    "the evidence is spent",
+  );
   await stopped(service);
 });
 
@@ -759,11 +761,10 @@ test("every step running at three deaths, with progress between, holds with its 
       runId: "dead",
       at,
       startedAt: at,
-      starts: [at],
       finished: 0,
-      crashes: [
-        { at, running, progressed: false },
-        { at, running, progressed: true },
+      deaths: [
+        { at, lived: null, running, progressed: false },
+        { at, lived: null, running, progressed: true },
       ],
       unreadable: {},
     }),

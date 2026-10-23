@@ -551,12 +551,13 @@ async function runIssue(
 /**
  * `factory run N`: set issue N's card to the queued option, adding the
  * issue to the Project (or unarchiving its card) first when it has no
- * card there, so the next queue read admits it by the normal edges. A
- * closed issue is queued only when `closed` allows it (a finished
- * Objective runs again; its new run reopens the issue). The operator's
- * latest action wins: a card someone moved to another option after the
- * request was written (`since.at`) and after Factory's own last write
- * (`since.shownAt`) is `dequeued`, and left alone. Idempotent otherwise:
+ * card there, so the next queue read admits it, as the operator's queue
+ * (this write is the operator's request). A closed issue is queued only
+ * when `closed` allows it (a finished Objective runs again; its new run
+ * reopens the issue). The operator's latest action wins: a card someone
+ * moved to another option after the request was written (`since.at`),
+ * other than the option Factory last showed (`since.shown`), is
+ * `dequeued`, and left alone. Idempotent otherwise:
  * the Project returns an existing item, and the option is set again.
  */
 export async function queueIssue(
@@ -565,7 +566,7 @@ export async function queueIssue(
   display: QueueDisplay,
   issue: number,
   closed: boolean,
-  since: { at: string; shownAt?: string | undefined },
+  since: { at: string; shown?: string | undefined },
   signal?: AbortSignal,
 ): Promise<"queued" | "no_such_issue" | "issue_closed" | "dequeued"> {
   const found = await runIssue(github, config, issue, signal);
@@ -578,7 +579,7 @@ export async function queueIssue(
     card?.option?.name &&
     card.option.name !== config.queue.options.queued &&
     changedAt > Date.parse(since.at) &&
-    !(changedAt <= Date.parse(since.shownAt ?? ""))
+    card.option.name !== since.shown
   )
     return "dequeued";
   let itemId = card?.id;

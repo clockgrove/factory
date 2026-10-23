@@ -15,6 +15,7 @@ import { currentPlan } from "./planning/plan.js";
 import { planningRevisions } from "./planning/steps.js";
 import type { ItemKind, Plan } from "./planning/types.js";
 import { RESET, type ResetRecord } from "./reset.js";
+import { crashStreak, type Death } from "./service.js";
 import {
   answerForm,
   type Frozen,
@@ -447,7 +448,7 @@ function serviceRecord(paths: Paths): ServiceView {
     const record = JSON.parse(
       readFileSync(join(paths.root, "service.json"), "utf8"),
     ) as {
-      starts?: string[];
+      deaths?: Death[];
       resumeAt?: string;
       problem?: string;
       capacity?: CapacityUse;
@@ -458,7 +459,7 @@ function serviceRecord(paths: Paths): ServiceView {
       Date.now() <= Date.parse(record.resumeAt) + 10 * 60 * 1000
         ? {
             crashLoop: {
-              crashes: (record.starts?.length ?? 1) - 1,
+              crashes: crashStreak(record.deaths ?? []),
               resumeAt: record.resumeAt,
             },
           }

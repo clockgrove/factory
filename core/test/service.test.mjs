@@ -607,6 +607,45 @@ test("an Objective dequeued during its check is withdrawn once the check ends, a
   await stopped(service);
 });
 
+test("every step running at three deaths, with progress between, holds with its own question", async () => {
+  const inst = installation();
+  const at = new Date().toISOString();
+  // A killer and an innocent long step, interrupted together every time.
+  for (const issue of [63, 64])
+    seed(inst, issue, "checking", {
+      attempts: { check: { startedAt: at, run: "dead" } },
+      finishedRun: "dead",
+    });
+  const running = [63, 64].map((issue) => ({ issue, step: "check" }));
+  writeFileSync(
+    join(inst.root, "service.json"),
+    JSON.stringify({
+      pid: 1,
+      runId: "dead",
+      at,
+      startedAt: at,
+      starts: [at],
+      finished: 0,
+      crashes: [
+        { at, running, progressed: false },
+        { at, running, progressed: true },
+      ],
+      unreadable: {},
+    }),
+  );
+  const service = serve(inst);
+  await until(
+    () => [63, 64].every((issue) => stateOf(inst, issue).holds.length),
+    "both hold",
+  );
+  for (const issue of [63, 64]) {
+    const [hold] = stateOf(inst, issue).holds;
+    assert.match(hold.question, /while step check ran.*1 other step ran/s);
+    assert.deepEqual(hold.answers, ["retry", "cancel"]);
+  }
+  await stopped(service);
+});
+
 test("two spellings of one state directory share one lock", async () => {
   const inst = installation();
   const first = serve(inst);

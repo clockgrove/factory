@@ -299,14 +299,14 @@ export async function serve(options: ServeOptions): Promise<number> {
   // Saved before any hold below, so a crash in between never counts the
   // same death twice.
   heartbeat();
-  const culprit = suspect(record.crashes);
-  if (culprit) {
+  const culprits = suspects(record.crashes);
+  for (const culprit of culprits)
     try {
       runners
         .get(culprit.issue)
         ?.suspect(
           culprit.step,
-          `The service died ${SUSPECT_CRASHES} times in a row while step ${culprit.step} ran, and other steps finished in between, so this step may be what stops it (for example, by running the host out of memory). \`retry\` runs it again; or cancel.`,
+          `The service died ${SUSPECT_CRASHES} times in a row while step ${culprit.step} ran, and other steps finished in between, so this step may be what stops it (for example, by running the host out of memory).${culprits.length > 1 ? ` ${culprits.length - 1} other step${culprits.length > 2 ? "s" : ""} ran at every one of those deaths too, and each holds with a question like this one.` : ""} \`retry\` runs it again; or cancel.`,
         );
     } catch (error) {
       log.write(culprit.issue, {
@@ -314,6 +314,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         error: String(error),
       });
     }
+  if (culprits.length) {
     // The evidence is spent: the question is asked, or saved to ask as
     // soon as no open question stops the step (engine.ts `hold`); another
     // needs three new deaths.
@@ -800,7 +801,7 @@ const STREAK_MS = 10 * 60 * 1000;
 /** Starts in a streak before interrupted steps are delayed: 30 s, doubling, up to MAX_RESUME_DELAY_MS. */
 const LOOP_STARTS = 3;
 const MAX_RESUME_DELAY_MS = 30 * 60 * 1000;
-/** Deaths in a row with one step running at each before that step holds. */
+/** Deaths in a row with a step running at each before that step holds. */
 const SUSPECT_CRASHES = 3;
 
 function readServiceRecord(root: string): Partial<ServiceRecord> | undefined {
@@ -877,20 +878,20 @@ function startRecord(
 }
 
 /**
- * The one step running at each of the last SUSPECT_CRASHES deaths, when
+ * Every step running at each of the last SUSPECT_CRASHES deaths, when
  * other steps finished in the runs between them: the strongest sign the
- * saved state gives that this step stops the service. Two or more such
- * steps prove nothing about either.
+ * saved state gives that one of them stops the service. Each holds, so a
+ * crash streak ends in questions within SUSPECT_CRASHES deaths however
+ * many steps keep being interrupted together.
  */
-function suspect(crashes: Crash[]): Crash["running"][number] | undefined {
-  if (crashes.length < SUSPECT_CRASHES) return undefined;
+function suspects(crashes: Crash[]): Crash["running"] {
+  if (crashes.length < SUSPECT_CRASHES) return [];
   const last = crashes.slice(-SUSPECT_CRASHES);
-  if (!last.slice(1).every((crash) => crash.progressed)) return undefined;
+  if (!last.slice(1).every((crash) => crash.progressed)) return [];
   const id = (r: { issue: number; step: string }) => `${r.issue} ${r.step}`;
-  const common = last[0]!.running.filter((r) =>
+  return last[0]!.running.filter((r) =>
     last.every((crash) => crash.running.some((o) => id(o) === id(r))),
   );
-  return common.length === 1 ? common[0] : undefined;
 }
 
 function writeServiceRecord(

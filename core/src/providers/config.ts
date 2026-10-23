@@ -37,6 +37,10 @@ export type WorkerConfig =
       /** The controller variable (or service credential) holding the API key. */
       apiKeyEnv: string;
       timeoutSeconds: number;
+      /** Hosted runs per Work Item before Factory asks (`more` grants as many again). */
+      maxRuns: number;
+      /** Tokens per Work Item, across runs, before Factory asks. */
+      itemBudgetTokens?: number;
     }
   | {
       kind: "claude-managed-agents";
@@ -48,6 +52,10 @@ export type WorkerConfig =
       /** A positive whole-cent list-cost ceiling per session. */
       budgetCents?: string;
       timeoutSeconds: number;
+      /** Hosted runs per Work Item before Factory asks (`more` grants as many again). */
+      maxRuns: number;
+      /** List cost per Work Item, across runs, before Factory asks. */
+      itemBudgetCents?: number;
     };
 
 export interface ProviderConfig {
@@ -65,6 +73,9 @@ export const COPILOT_TOOLS = [
   "grep",
   "glob",
 ];
+
+/** A hosted run's limit: well inside the work step's 2-hour deadline. */
+export const MAX_HOSTED_SECONDS = 6000;
 
 /** Settings that moved into `providers`. */
 const MOVED = [
@@ -185,13 +196,24 @@ function workerConfig(
     problems.push(`${path}.${name} must be one of ${values.join(", ")}`);
     return values[0]!;
   };
-  const seconds = (name: string, fallback: number): number => {
+  const whole = (name: string, fallback: number, most: number): number => {
     const entry = worker[name] ?? fallback;
-    if (Number.isSafeInteger(entry) && (entry as number) > 0)
+    if (
+      Number.isSafeInteger(entry) &&
+      (entry as number) > 0 &&
+      (entry as number) <= most
+    )
       return entry as number;
-    problems.push(`${path}.${name} must be a positive whole number of seconds`);
+    problems.push(`${path}.${name} must be a whole number from 1 to ${most}`);
     return fallback;
   };
+  // A hosted run ends before the work step's 2-hour deadline.
+  const seconds = () => whole("timeoutSeconds", 3600, MAX_HOSTED_SECONDS);
+  const runs = () => whole("maxRuns", 3, 100);
+  const optional = (name: string) =>
+    worker[name] === undefined
+      ? {}
+      : { [name]: whole(name, 1, Number.MAX_SAFE_INTEGER) };
   let config: WorkerConfig;
   switch (worker.kind) {
     case "codex":
@@ -236,6 +258,8 @@ function workerConfig(
           "containerSize",
           "apiKeyEnv",
           "timeoutSeconds",
+          "maxRuns",
+          "itemBudgetTokens",
         ],
         path,
         problems,
@@ -246,7 +270,9 @@ function workerConfig(
         effort: oneOf("effort", ["low", "medium", "high"]),
         containerSize: oneOf("containerSize", ["small", "medium", "large"]),
         apiKeyEnv: string("apiKeyEnv", ENV),
-        timeoutSeconds: seconds("timeoutSeconds", 3600),
+        timeoutSeconds: seconds(),
+        maxRuns: runs(),
+        ...optional("itemBudgetTokens"),
       };
       break;
     case "claude-managed-agents": {
@@ -261,6 +287,8 @@ function workerConfig(
           "credentialEnv",
           "budgetCents",
           "timeoutSeconds",
+          "maxRuns",
+          "itemBudgetCents",
         ],
         path,
         problems,
@@ -286,7 +314,9 @@ function workerConfig(
         workspaceId: string("workspaceId"),
         credentialEnv: string("credentialEnv", ENV),
         ...(typeof budget === "string" ? { budgetCents: budget } : {}),
-        timeoutSeconds: seconds("timeoutSeconds", 3600),
+        timeoutSeconds: seconds(),
+        maxRuns: runs(),
+        ...optional("itemBudgetCents"),
       };
       break;
     }

@@ -10,31 +10,52 @@
  * entry, then writes the result back into the kept worktree, where the
  * usual collection, validation and review decide.
  *
- * Every hosted session carries the worktree's key in its metadata. A run
- * deletes its session when it ends. A session whose create response was
- * lost, or whose deletion failed, is logged as `possible-orphan` with that
- * key; Claude sessions so tagged are also found and deleted when the step
- * runs again.
+ * Hosted resources are crash-safe through a marker beside the worktree
+ * (`<worktree>.managed.json`): it is written before anything is created
+ * and records each upload and the session as they are made. The next run
+ * of the step first stops and deletes whatever a marker names, and the
+ * marker goes only once that succeeded. What can't be found (a create or
+ * upload whose response was lost and that the API can't look up) is
+ * logged as `possible-orphan` with the work key.
+ *
+ * Cost is bounded per Work Item, across retries, restarts and repairs: a
+ * failure that billed a hosted run is a counted error (three in a row
+ * hold), and the runs, list cost (Claude) and tokens a Work Item spent are
+ * kept in state; past `maxRuns`, `itemBudgetCents` or `itemBudgetTokens`
+ * the step holds, and `more` grants as much again.
  */
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   createReadStream,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { hostname } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { create, extract, list } from "tar";
+import { crashPoint } from "../crash.js";
 import { hold } from "../engine.js";
 import { validPath } from "../objective.js";
 import { errorMessage } from "../text.js";
-import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
+import type {
+  Worker,
+  WorkerInput,
+  WorkerResult,
+  WorkerSpend,
+} from "../work/worker.js";
 import { hostGit } from "../worktree.js";
 import { serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
@@ -45,8 +66,10 @@ const RESULT_MAX_BYTES = 200 * 1024 * 1024;
 const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
 const POLL_MS = 5_000;
 const REQUEST_MS = 120_000;
-/** Look this far back for tagged sessions a crashed run left behind. */
-const ORPHAN_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
+/** Cleanup's own deadline: it runs after a cancel or a missed deadline too. */
+const DISPOSE_MS = 90_000;
+/** A session created in a lost request is at most this much older than its marker. */
+const CLOCK_SKEW_MS = 10 * 60 * 1000;
 const PRIVATE_STAGING = ".factory-inputs";
 
 /** Archives what Git would keep in the hosted checkout; run by the agent. */
@@ -62,10 +85,14 @@ type Managed = Extract<
   { kind: "openai-agents" | "claude-managed-agents" }
 >;
 
-/** A stable key for one kept worktree: an Objective's Work Item. */
+/**
+ * A key for one kept worktree on this host: an installation's Work Item.
+ * The worktree lies under the installation's state directory, and the host
+ * name keeps two hosts with the same layout apart.
+ */
 function workKey(worktree: string): string {
   return createHash("sha256")
-    .update(resolve(worktree))
+    .update(`${hostname()}\0${resolve(worktree)}`)
     .digest("hex")
     .slice(0, 32);
 }
@@ -81,6 +108,66 @@ function apiKey(name: string): string {
   return value;
 }
 
+/** A failure after a hosted run billed: a counted error, so three in a row hold. */
+function billed(reason: string): PlannerError {
+  return new PlannerError("retry", reason, -1);
+}
+
+/** The hosted resources one run made, recorded as they are made. */
+export interface Marker {
+  key: string;
+  createdAt: string;
+  session?: string;
+  /** Claude file ids uploaded. */
+  uploads: string[];
+  /** An upload sent and not yet answered; its file is named by the key. */
+  uploading?: string;
+  /** The session create was sent; without `session`, its answer was lost. */
+  creating?: boolean;
+}
+
+const markerPath = (worktree: string) => `${worktree}.managed.json`;
+
+function readMarker(worktree: string): Marker | undefined {
+  let text: string;
+  try {
+    text = readFileSync(markerPath(worktree), "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const marker = JSON.parse(text) as Marker;
+    return { ...marker, uploads: marker.uploads ?? [] };
+  } catch {
+    // Saved atomically, so unreadable means damaged: clean up by key.
+    return {
+      key: workKey(worktree),
+      createdAt: new Date(0).toISOString(),
+      uploads: [],
+    };
+  }
+}
+
+/** Save the marker whole: temporary file, fsync, rename. */
+function saveMarker(worktree: string, marker: Marker): void {
+  const path = markerPath(worktree);
+  const temporary = `${path}.${process.pid}.tmp`;
+  const fd = openSync(temporary, "w", 0o600);
+  try {
+    writeSync(fd, JSON.stringify(marker));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
+}
+
+/** Usage a run's hosted session reported. */
+interface Usage {
+  cents: number;
+  tokens: number;
+}
+
 interface Packed {
   archive: string;
   bytes: number;
@@ -92,7 +179,7 @@ interface Packed {
 /** The worktree's files Git would keep, plus private staging, as one archive. */
 async function pack(
   worktree: string,
-  scratch: string,
+  archive: string,
   signal: AbortSignal,
 ): Promise<Packed> {
   const listed = (
@@ -125,7 +212,6 @@ async function pack(
         "hold",
         `Managed workers carry regular files only, and ${path} is a link or other special file. Run this Work Item on a local worker provider, or cancel.`,
       );
-  const archive = join(scratch, "input.tar");
   await create(
     { cwd: worktree, file: archive, portable: true, noMtime: true },
     paths,
@@ -230,24 +316,6 @@ function hostedPrompt(
 You work in a hosted sandbox without network. The checkout is ${repo}. Factory's validation and review run after you finish. When your work is complete, run exactly this command once as your last action, so Factory receives your files: ${exportCommand}`;
 }
 
-/** A classified failure as the worker's outcome; anything else is retried. */
-function outcome(error: unknown, signal: AbortSignal): WorkerResult {
-  if (error instanceof PlannerError) {
-    if (error.outcome === "retry")
-      return {
-        kind: "retry",
-        reason: error.message,
-        ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
-      };
-    return hold(error.message);
-  }
-  if (signal.aborted) throw signal.reason ?? error;
-  return {
-    kind: "retry",
-    reason: `Managed worker failed: ${detail(errorMessage(error))}`,
-  };
-}
-
 /** Classify an HTTP status from a managed API. */
 function statusFailure(
   status: number | undefined,
@@ -270,8 +338,30 @@ function statusFailure(
   );
 }
 
+/** A classified failure as the worker's outcome; anything else is retried. */
+function outcome(error: unknown, signal: AbortSignal): WorkerResult {
+  if (error instanceof PlannerError) {
+    if (error.outcome === "retry")
+      return {
+        kind: "retry",
+        reason: error.message,
+        ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
+      };
+    return hold(error.message);
+  }
+  if (signal.aborted) throw signal.reason ?? error;
+  return {
+    kind: "retry",
+    reason: `Managed worker failed: ${detail(errorMessage(error))}`,
+  };
+}
+
 const wait = (ms: number, signal: AbortSignal) =>
   new Promise<void>((done, fail) => {
+    if (signal.aborted) {
+      fail(signal.reason);
+      return;
+    }
     const timer = setTimeout(done, ms);
     signal.addEventListener(
       "abort",
@@ -283,42 +373,140 @@ const wait = (ms: number, signal: AbortSignal) =>
     );
   });
 
+/** One request's signal: the run's, bounded by the request deadline. */
+const bounded = (signal: AbortSignal) =>
+  AbortSignal.any([signal, AbortSignal.timeout(REQUEST_MS)]);
+
+/** The Work Item's allowance: its spend, with the operator's latest grant. */
+function allowance(
+  input: WorkerInput,
+  config: Managed,
+): { spend: WorkerSpend; over?: string } {
+  const spend: WorkerSpend = {
+    runs: 0,
+    cents: 0,
+    tokens: 0,
+    allotments: 1,
+    ...input.spend,
+  };
+  const answer = input.answer;
+  if (answer?.answer === "more" && answer.at !== spend.grantedAt) {
+    spend.allotments += 1;
+    spend.grantedAt = answer.at;
+  }
+  const n = spend.allotments;
+  const cents =
+    config.kind === "claude-managed-agents"
+      ? config.itemBudgetCents
+      : undefined;
+  const tokens =
+    config.kind === "openai-agents" ? config.itemBudgetTokens : undefined;
+  const over =
+    spend.runs >= n * config.maxRuns
+      ? `${spend.runs} hosted runs (maxRuns ${config.maxRuns})`
+      : cents !== undefined && spend.cents >= n * cents
+        ? `${spend.cents} cents of list cost (itemBudgetCents ${cents})`
+        : tokens !== undefined && spend.tokens >= n * tokens
+          ? `${spend.tokens} tokens (itemBudgetTokens ${tokens})`
+          : undefined;
+  return over ? { spend, over } : { spend };
+}
+
 abstract class ManagedWorker implements Worker {
   constructor(protected readonly config: Managed) {}
 
+  /**
+   * Create the session, run the turn and download the exported archive into
+   * `scratch`. Record every upload and the session in `marker` (with `note`)
+   * as soon as it exists. `spend.runs` is counted before the session is
+   * created.
+   */
   protected abstract turn(
     input: WorkerInput,
-    packed: Packed,
-    scratch: string,
-    record: Record<string, unknown>,
-    signal: AbortSignal,
+    run: {
+      packed: Packed;
+      scratch: string;
+      record: Record<string, unknown>;
+      signal: AbortSignal;
+      marker: Marker;
+      note: (change: Partial<Marker>) => void;
+      spend: WorkerSpend;
+    },
   ): Promise<string>;
+
+  /**
+   * Stop and delete everything `marker` names, finding what a lost
+   * response left where the API allows. Returns the usage the deleted
+   * session reported. Throws when something may still exist.
+   */
+  protected abstract dispose(
+    marker: Marker,
+    input: WorkerInput,
+    signal: AbortSignal,
+  ): Promise<Usage>;
 
   async run(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
+    const key = workKey(input.worktree);
     const record: Record<string, unknown> = {
       event: "worker-call",
       provider: this.config.kind,
       item: input.item.id,
-      key: workKey(input.worktree),
+      key,
     };
-    const scratch = `${input.worktree}.managed`;
     const signal = AbortSignal.any([
       input.signal,
       AbortSignal.timeout(this.config.timeoutSeconds * 1000),
     ]);
+    const { spend, over } = allowance(input, this.config);
+    let marker: Marker | undefined;
+    let scratch: string | undefined;
     try {
       if (input.item.kind === "discovery")
         return hold(
           `Work Item ${input.item.id} is a read-only discovery item, which a managed worker can't run with enforced read-only access. Replan it.`,
           ["replan", "cancel"],
         );
-      rmSync(scratch, { recursive: true, force: true });
-      mkdirSync(scratch, { recursive: true, mode: 0o700 });
-      writeFileSync(join(scratch, "factory-export.sh"), EXPORT_SCRIPT);
-      const packed = await pack(input.worktree, scratch, signal);
+      // A crashed or abandoned earlier run: stop and delete what it left first.
+      const left = readMarker(input.worktree);
+      if (left) {
+        await this.cleanUp(left, input, spend);
+        removeScratch(input.worktree);
+      }
+      if (over)
+        return {
+          ...hold(
+            `Work Item ${input.item.id} has used ${over} across its hosted runs. Answer more to allow as much again, or cancel.`,
+            ["more", "cancel"],
+            "cancel",
+          ),
+          spend,
+        };
+      scratch = mkdtempSync(`${input.worktree}.managed-`);
+      const packed = await pack(
+        input.worktree,
+        join(scratch, `factory-${key}-input.tar`),
+        signal,
+      );
       record.inputBytes = packed.bytes;
-      const result = await this.turn(input, packed, scratch, record, signal);
+      marker = { key, createdAt: new Date().toISOString(), uploads: [] };
+      saveMarker(input.worktree, marker);
+      crashPoint("managed:marker-written");
+      const current = marker;
+      const result = await this.turn(input, {
+        packed,
+        scratch,
+        record,
+        signal,
+        marker: current,
+        note: (change) => {
+          Object.assign(current, change);
+          saveMarker(input.worktree, current);
+        },
+        spend,
+      });
+      // A cancelled or overdue run never writes into the worktree.
+      signal.throwIfAborted();
       record.changed = await apply(
         input.worktree,
         result,
@@ -329,12 +517,12 @@ abstract class ManagedWorker implements Worker {
       return {
         kind: "finished",
         finalResponse: String(record.finalResponse ?? ""),
+        spend,
       };
     } catch (error) {
       const result = outcome(
         !input.signal.aborted && signal.aborted
-          ? new PlannerError(
-              "retry",
+          ? billed(
               `The managed worker passed its ${this.config.timeoutSeconds} s timeout`,
             )
           : error,
@@ -347,20 +535,71 @@ abstract class ManagedWorker implements Worker {
           : result.kind === "hold"
             ? result.question
             : undefined;
-      return result;
+      return { ...result, spend };
     } finally {
+      if (marker)
+        await this.cleanUp(marker, input, spend).catch((error: unknown) =>
+          input.log({
+            event: "possible-orphan",
+            provider: this.config.kind,
+            key,
+            ...(marker?.session ? { session: marker.session } : {}),
+            detail: `Cleanup failed at ${new Date().toISOString()}; the next run of this step tries again: ${detail(errorMessage(error))}`,
+          }),
+        );
+      if (scratch) rmSync(scratch, { recursive: true, force: true });
       delete record.finalResponse;
-      rmSync(scratch, { recursive: true, force: true });
+      record.spend = spend;
       record.ms = Date.now() - started;
       input.log(record);
     }
   }
+
+  /** Dispose of a marker's resources under cleanup's own deadline, then drop it. */
+  private async cleanUp(
+    marker: Marker,
+    input: WorkerInput,
+    spend: WorkerSpend,
+  ): Promise<void> {
+    let usage: Usage;
+    try {
+      usage = await this.dispose(
+        marker,
+        input,
+        AbortSignal.timeout(DISPOSE_MS),
+      );
+    } catch (error) {
+      if (error instanceof PlannerError) throw error;
+      throw new PlannerError(
+        "retry",
+        `Factory could not yet delete the hosted resources of an earlier run (${detail(errorMessage(error))})`,
+      );
+    }
+    spend.cents += usage.cents;
+    spend.tokens += usage.tokens;
+    // An abandoned run cleans up late: never drop a newer run's marker.
+    if (readMarker(input.worktree)?.createdAt === marker.createdAt)
+      rmSync(markerPath(input.worktree), { force: true });
+    crashPoint("managed:marker-removed");
+  }
 }
+
+/** Scratch directories runs that crashed or were abandoned left beside the worktree. */
+function removeScratch(worktree: string): void {
+  const prefix = `${basename(worktree)}.managed-`;
+  for (const name of readdirSync(dirname(worktree)))
+    if (name.startsWith(prefix))
+      rmSync(join(dirname(worktree), name), { recursive: true, force: true });
+}
+
+const gone = (error: unknown) =>
+  (error as { status?: unknown } | null)?.status === 404;
 
 // OpenAI Agents API
 
 type OpenAI = Extract<Managed, { kind: "openai-agents" }>;
 const OPENAI_REPO = "/workspace/repo";
+const OPENAI_EXPORT = "/workspace/outputs/factory-result.tar";
 
 /** One Work Item turn in an OpenAI-hosted environment. */
 export class OpenAIManagedWorker extends ManagedWorker {
@@ -368,16 +607,19 @@ export class OpenAIManagedWorker extends ManagedWorker {
     super(config);
   }
 
+  /** One API request; a 404 is `null` when `missing` allows it. */
   private async request(
     method: "GET" | "POST" | "DELETE",
     path: string,
+    signal: AbortSignal,
     body?: unknown,
-  ): Promise<Response> {
+    missing = false,
+  ): Promise<Response | null> {
     let response: Response;
     try {
       response = await fetch(`https://api.openai.com/v1${path}`, {
         method,
-        signal: AbortSignal.timeout(REQUEST_MS),
+        signal: bounded(signal),
         headers: {
           Authorization: `Bearer ${apiKey(this.config.apiKeyEnv)}`,
           "OpenAI-Beta": "agents=v1",
@@ -387,11 +629,13 @@ export class OpenAIManagedWorker extends ManagedWorker {
       });
     } catch (error) {
       if (error instanceof PlannerError) throw error;
+      signal.throwIfAborted();
       throw new PlannerError(
         "retry",
         `OpenAI Agents API ${method} ${path}: ${detail(errorMessage(error))}`,
       );
     }
+    if (response.status === 404 && missing) return null;
     if (!response.ok)
       throw statusFailure(
         response.status,
@@ -404,194 +648,199 @@ export class OpenAIManagedWorker extends ManagedWorker {
   private async json(
     method: "GET" | "POST",
     path: string,
+    signal: AbortSignal,
     body?: unknown,
   ): Promise<Record<string, unknown>> {
-    const text = await (await this.request(method, path, body)).text();
+    const text = await (await this.request(method, path, signal, body))!.text();
     return text.trim() ? (JSON.parse(text) as Record<string, unknown>) : {};
   }
 
   protected async turn(
     input: WorkerInput,
-    packed: Packed,
-    scratch: string,
-    record: Record<string, unknown>,
-    signal: AbortSignal,
+    run: Parameters<ManagedWorker["turn"]>[1],
   ): Promise<string> {
+    const { packed, scratch, record, signal, marker, note, spend } = run;
     if (packed.bytes > OPENAI_INPUT_MAX_BYTES)
       throw new PlannerError(
         "hold",
         `This Work Item's files are ${packed.bytes} bytes, over the OpenAI Agents API's 5 MiB inline input limit. Run it on another worker provider, or cancel.`,
       );
-    const exported = "/workspace/outputs/factory-result.tar";
-    const key = String(record.key);
-    let session: string | undefined;
-    let done = false;
-    try {
-      let created: Record<string, unknown>;
-      try {
-        created = await this.json("POST", "/agents/sessions", {
-          agent: {
-            model: this.config.model,
-            reasoning: { effort: this.config.effort },
-            multi_agent: { enabled: false },
-            tools: [],
-            instructions: `Perform only the supplied Work Item in ${OPENAI_REPO}. Preserve HEAD. Export the finished work with the command the Work Item gives before finishing.`,
-          },
-          environment: {
-            type: "openai_hosted",
-            container_size: this.config.containerSize,
-            network: { access: "disabled" },
-            files: [
-              {
-                type: "inline",
-                path: "/workspace/input.tar",
-                data: readFileSync(packed.archive).toString("base64"),
-              },
-              {
-                type: "inline",
-                path: "/workspace/factory-export.sh",
-                data: Buffer.from(EXPORT_SCRIPT).toString("base64"),
-              },
-            ],
-            setup_commands: [
-              {
-                command: `set -e; echo '${packed.sha256}  /workspace/input.tar' | sha256sum -c -; mkdir -p ${OPENAI_REPO}; tar -xf /workspace/input.tar -C ${OPENAI_REPO}; cd ${OPENAI_REPO}; git init -q; git add -A; git -c user.name=factory -c user.email=factory@localhost commit -qm base --no-verify`,
-              },
-            ],
-          },
-          metadata: { factory_work: key },
-        });
-      } catch (error) {
-        // A lost create response may have left a session: report it.
-        if (error instanceof PlannerError && error.outcome === "retry")
-          input.log({
-            event: "possible-orphan",
-            provider: "openai-agents",
-            resource: "session",
-            key,
-            detail: `Session create for work key ${key} lost its response at ${new Date().toISOString()}; a session with metadata factory_work=${key} may hold the input archive`,
-          });
-        throw error;
-      }
-      session = String(created.id);
-      const environment = String(
-        (created.environment as { id?: unknown } | undefined)?.id,
-      );
-      record.session = session;
-      input.log({
-        event: "managed-session",
-        provider: "openai-agents",
-        session,
-        key,
-      });
-      for (;;) {
-        const state = await this.json(
-          "GET",
-          `/agents/environments/${environment}`,
-        );
-        if (state.status === "connected") break;
-        if (state.status !== "provisioning")
-          throw new PlannerError(
-            "retry",
-            `The OpenAI hosted environment ended as ${String(state.status)} during setup`,
-          );
-        await wait(POLL_MS, signal);
-      }
-      await this.json("POST", `/agents/sessions/${session}/events`, {
-        events: [
+    apiKey(this.config.apiKeyEnv);
+    // Counted before the create: a create whose answer is lost may still bill.
+    spend.runs += 1;
+    note({ creating: true });
+    crashPoint("managed:creating");
+    const created = await this.json("POST", "/agents/sessions", signal, {
+      agent: {
+        model: this.config.model,
+        reasoning: { effort: this.config.effort },
+        multi_agent: { enabled: false },
+        tools: [],
+        instructions: `Perform only the supplied Work Item in ${OPENAI_REPO}. Preserve HEAD. Export the finished work with the command the Work Item gives before finishing.`,
+      },
+      environment: {
+        type: "openai_hosted",
+        container_size: this.config.containerSize,
+        network: { access: "disabled" },
+        files: [
           {
-            type: "agent.session.input.message",
-            input: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "input_text",
-                    text: hostedPrompt(
-                      input,
-                      OPENAI_REPO,
-                      `sh /workspace/factory-export.sh ${OPENAI_REPO} ${exported}`,
-                    ),
-                  },
-                ],
-              },
-            ],
+            type: "inline",
+            path: "/workspace/input.tar",
+            data: readFileSync(packed.archive).toString("base64"),
+          },
+          {
+            type: "inline",
+            path: "/workspace/factory-export.sh",
+            data: Buffer.from(EXPORT_SCRIPT).toString("base64"),
           },
         ],
-      });
-      let turn: Record<string, unknown> | undefined;
-      for (;;) {
-        await wait(POLL_MS, signal);
-        const turns = (
-          await this.json("GET", `/agents/sessions/${session}/turns?order=asc`)
-        ).data;
-        turn = Array.isArray(turns)
-          ? (turns[0] as Record<string, unknown> | undefined)
-          : undefined;
-        if (
-          turn &&
-          ["completed", "failed", "cancelled"].includes(String(turn.status))
-        )
-          break;
-      }
-      record.usage = turn.usage ?? null;
-      if (turn.status !== "completed")
-        throw new PlannerError(
-          "retry",
-          `The OpenAI hosted turn ended as ${String(turn.status)}`,
-        );
-      const artifacts = (
-        await this.json(
-          "GET",
-          `/agents/sessions/${session}/artifacts?order=asc`,
-        )
-      ).data;
-      const artifact = (Array.isArray(artifacts) ? artifacts : []).find(
-        (entry: Record<string, unknown>) =>
-          entry.path === exported && entry.turn_id === turn.id,
-      ) as Record<string, unknown> | undefined;
-      if (!artifact)
-        throw new PlannerError(
-          "retry",
-          "The hosted agent finished without exporting its files",
-        );
-      const content = await this.request(
+        setup_commands: [
+          {
+            command: `set -e; echo '${packed.sha256}  /workspace/input.tar' | sha256sum -c -; mkdir -p ${OPENAI_REPO}; tar -xf /workspace/input.tar -C ${OPENAI_REPO}; cd ${OPENAI_REPO}; git init -q; git add -A; git -c user.name=factory -c user.email=factory@localhost commit -qm base --no-verify`,
+          },
+        ],
+      },
+      metadata: { factory_work: marker.key },
+    });
+    const session = String(created.id);
+    note({ session });
+    crashPoint("managed:session-recorded");
+    record.session = session;
+    const environment = String(
+      (created.environment as { id?: unknown } | undefined)?.id,
+    );
+    for (;;) {
+      const state = await this.json(
         "GET",
-        `/agents/sessions/${session}/artifacts/${String(artifact.id)}/content`,
+        `/agents/environments/${environment}`,
+        signal,
       );
-      const bytes = Buffer.from(await content.arrayBuffer());
-      const path = join(scratch, "result.tar");
-      writeFileSync(path, bytes);
-      done = true;
-      return path;
-    } finally {
-      if (session) await this.dispose(input, session, key, done);
+      if (state.status === "connected") break;
+      if (state.status !== "provisioning")
+        throw billed(
+          `The OpenAI hosted environment ended as ${String(state.status)} during setup`,
+        );
+      await wait(POLL_MS, signal);
     }
+    await this.json("POST", `/agents/sessions/${session}/events`, signal, {
+      events: [
+        {
+          type: "agent.session.input.message",
+          input: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: hostedPrompt(
+                    input,
+                    OPENAI_REPO,
+                    `sh /workspace/factory-export.sh ${OPENAI_REPO} ${OPENAI_EXPORT}`,
+                  ),
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    let turn: Record<string, unknown> | undefined;
+    for (;;) {
+      await wait(POLL_MS, signal);
+      turn = (await this.turns(session, signal))[0];
+      if (
+        turn &&
+        ["completed", "failed", "cancelled"].includes(String(turn.status))
+      )
+        break;
+    }
+    if (turn.status !== "completed")
+      throw billed(`The OpenAI hosted turn ended as ${String(turn.status)}`);
+    const artifacts = (
+      await this.json(
+        "GET",
+        `/agents/sessions/${session}/artifacts?order=asc`,
+        signal,
+      )
+    ).data;
+    const artifact = (Array.isArray(artifacts) ? artifacts : []).find(
+      (entry: Record<string, unknown>) =>
+        entry.path === OPENAI_EXPORT && entry.turn_id === turn.id,
+    ) as Record<string, unknown> | undefined;
+    if (!artifact)
+      throw billed("The hosted agent finished without exporting its files");
+    const content = await this.request(
+      "GET",
+      `/agents/sessions/${session}/artifacts/${String(artifact.id)}/content`,
+      signal,
+    );
+    const path = join(scratch, "result.tar");
+    writeFileSync(path, Buffer.from(await content!.arrayBuffer()));
+    return path;
   }
 
-  /** Cancel a turn still running, then delete the session. */
-  private async dispose(
-    input: WorkerInput,
+  private async turns(
     session: string,
-    key: string,
-    done: boolean,
-  ): Promise<void> {
-    try {
-      if (!done)
-        await this.request("POST", `/agents/sessions/${session}/events`, {
-          events: [{ type: "agent.session.input.cancel" }],
-        }).catch(() => undefined);
-      await this.request("DELETE", `/agents/sessions/${session}`);
-    } catch (error) {
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>[]> {
+    const response = await this.request(
+      "GET",
+      `/agents/sessions/${session}/turns?order=asc`,
+      signal,
+      undefined,
+      true,
+    );
+    if (!response) return [];
+    const data = ((await response.json()) as { data?: unknown }).data;
+    return Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
+  }
+
+  /** Read the session's usage, cancel a turn still running, then delete it. */
+  protected async dispose(
+    marker: Marker,
+    input: WorkerInput,
+    signal: AbortSignal,
+  ): Promise<Usage> {
+    const session = marker.session;
+    if (!session) {
+      if (!marker.creating) return { cents: 0, tokens: 0 };
       input.log({
         event: "possible-orphan",
         provider: "openai-agents",
         resource: "session",
-        session,
-        key,
-        detail: `Deleting session ${session} failed at ${new Date().toISOString()}: ${detail(errorMessage(error))}`,
+        key: marker.key,
+        detail: `A run for work key ${marker.key} started at ${marker.createdAt} ended before its session was recorded; a session with metadata factory_work=${marker.key} may exist`,
       });
+      return { cents: 0, tokens: 0 };
     }
+    let tokens = 0;
+    for (const turn of await this.turns(session, signal)) {
+      const usage = turn.usage as
+        | { input_tokens?: number; output_tokens?: number }
+        | undefined;
+      tokens += (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0);
+    }
+    await this.request(
+      "POST",
+      `/agents/sessions/${session}/events`,
+      signal,
+      { events: [{ type: "agent.session.input.cancel" }] },
+      true,
+    ).catch(() => undefined);
+    await this.request(
+      "DELETE",
+      `/agents/sessions/${session}`,
+      signal,
+      undefined,
+      true,
+    );
+    input.log({
+      event: "managed-session-deleted",
+      provider: "openai-agents",
+      session,
+      key: marker.key,
+    });
+    return { cents: 0, tokens };
   }
 }
 
@@ -618,7 +867,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
 
   private async client(): Promise<{
     sdk: Anthropic;
-    failure: (error: unknown, what: string) => PlannerError;
+    call: <T>(what: string, operation: () => Promise<T>) => Promise<T>;
   }> {
     let Sdk: typeof import("@anthropic-ai/sdk").default;
     try {
@@ -636,10 +885,12 @@ export class ClaudeManagedWorker extends ManagedWorker {
       maxRetries: 2,
       timeout: REQUEST_MS,
     });
-    const failure = (error: unknown, what: string) =>
-      error instanceof PlannerError
-        ? error
-        : error instanceof Sdk.APIError
+    const call = async <T>(what: string, operation: () => Promise<T>) => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (error instanceof PlannerError) throw error;
+        throw error instanceof Sdk.APIError && error.status !== undefined
           ? statusFailure(
               error.status,
               `Claude Managed Agents ${what}`,
@@ -649,31 +900,25 @@ export class ClaudeManagedWorker extends ManagedWorker {
               "retry",
               `Claude Managed Agents ${what}: ${detail(errorMessage(error))}`,
             );
-    return { sdk, failure };
+      }
+    };
+    return { sdk, call };
   }
 
   protected async turn(
     input: WorkerInput,
-    packed: Packed,
-    scratch: string,
-    record: Record<string, unknown>,
-    signal: AbortSignal,
+    run: Parameters<ManagedWorker["turn"]>[1],
   ): Promise<string> {
-    const { sdk, failure } = await this.client();
-    const key = String(record.key);
-    const call = async <T>(
-      what: string,
-      operation: () => Promise<T>,
-    ): Promise<T> => {
-      try {
-        return await operation();
-      } catch (error) {
-        throw failure(error, what);
-      }
-    };
+    const { packed, scratch, record, signal, marker, note, spend } = run;
+    const { sdk, call } = await this.client();
+    const options = { signal };
     // The environment must deny all outbound network and package installs.
     const environment = await call("environment", () =>
-      sdk.beta.environments.retrieve(this.config.environmentId, this.scope),
+      sdk.beta.environments.retrieve(
+        this.config.environmentId,
+        this.scope,
+        options,
+      ),
     );
     const config = environment.config as unknown as {
       type?: string;
@@ -700,35 +945,26 @@ export class ClaudeManagedWorker extends ManagedWorker {
         "hold",
         `Claude environment ${this.config.environmentId} must be a cloud environment with limited networking, no allowed hosts, MCP servers, package managers or packages. Fix it, then answer retry.`,
       );
-    await this.removeOrphans(sdk, input, key, call);
-    const uploads: string[] = [];
-    let session: string | undefined;
-    let done = false;
-    try {
-      for (const [name, path] of [
-        ["input.tar", packed.archive],
-        ["factory-export.sh", join(scratch, "factory-export.sh")],
-      ] as const) {
-        const file = await call("upload", () =>
-          sdk.beta.files.upload({
-            file: createReadStream(path),
-            ...this.scope,
-          }),
-        ).catch((error: unknown) => {
-          if (error instanceof PlannerError && error.outcome === "retry")
-            input.log({
-              event: "possible-orphan",
-              provider: "claude-managed-agents",
-              resource: "file",
-              key,
-              detail: `Upload of ${name} for work key ${key} lost its response at ${new Date().toISOString()}; the workspace may hold an unreferenced copy`,
-            });
-          throw error;
-        });
-        uploads.push(file.id);
-      }
-      const created = await call("session create", () =>
-        sdk.beta.sessions.create({
+    // Uploads are named by the work key, so a lost upload can be found.
+    const exportScript = join(scratch, `factory-${marker.key}-export.sh`);
+    writeFileSync(exportScript, EXPORT_SCRIPT);
+    for (const path of [packed.archive, exportScript]) {
+      note({ uploading: basename(path) });
+      const file = await call("upload", () =>
+        sdk.beta.files.upload(
+          { file: createReadStream(path), ...this.scope },
+          options,
+        ),
+      );
+      note({ uploads: [...marker.uploads, file.id], uploading: undefined });
+    }
+    // Counted before the create: a create whose answer is lost may still bill.
+    spend.runs += 1;
+    note({ creating: true });
+    crashPoint("managed:creating");
+    const created = await call("session create", () =>
+      sdk.beta.sessions.create(
+        {
           ...this.scope,
           agent: {
             type: "agent",
@@ -736,16 +972,16 @@ export class ClaudeManagedWorker extends ManagedWorker {
             version: this.config.agentVersion,
           },
           environment_id: this.config.environmentId,
-          metadata: { factory_work: key },
+          metadata: { factory_work: marker.key },
           resources: [
             {
               type: "file",
-              file_id: uploads[0]!,
+              file_id: marker.uploads[0]!,
               mount_path: `${CLAUDE_UPLOADS}/input.tar`,
             },
             {
               type: "file",
-              file_id: uploads[1]!,
+              file_id: marker.uploads[1]!,
               mount_path: `${CLAUDE_UPLOADS}/factory-export.sh`,
             },
           ],
@@ -759,233 +995,223 @@ export class ClaudeManagedWorker extends ManagedWorker {
               },
             },
           }),
-        }),
-      );
-      session = created.id;
-      record.session = session;
-      input.log({
-        event: "managed-session",
-        provider: "claude-managed-agents",
-        session,
-        key,
-      });
-      const agent = created.agent as unknown as {
-        tools?: {
-          type?: string;
-          default_config?: { enabled?: boolean };
-          configs?: { name?: string; enabled?: boolean }[];
-        }[];
-        mcp_servers?: unknown[];
-        skills?: unknown[];
-        multiagent?: unknown;
-      };
-      const tools = agent.tools?.[0];
-      if (
-        agent.mcp_servers?.length ||
-        agent.skills?.length ||
-        (agent.multiagent ?? null) !== null ||
-        agent.tools?.length !== 1 ||
-        tools?.default_config?.enabled !== false ||
-        tools.configs?.some(
-          (tool) => tool.enabled && !CLAUDE_TOOLS.includes(String(tool.name)),
-        )
+        },
+        options,
+      ),
+    );
+    const session = created.id;
+    note({ session });
+    crashPoint("managed:session-recorded");
+    record.session = session;
+    const agent = created.agent as unknown as {
+      tools?: {
+        type?: string;
+        default_config?: { enabled?: boolean };
+        configs?: { name?: string; enabled?: boolean }[];
+      }[];
+      mcp_servers?: unknown[];
+      skills?: unknown[];
+      multiagent?: unknown;
+    };
+    const tools = agent.tools?.[0];
+    if (
+      agent.mcp_servers?.length ||
+      agent.skills?.length ||
+      (agent.multiagent ?? null) !== null ||
+      agent.tools?.length !== 1 ||
+      tools?.default_config?.enabled !== false ||
+      tools.configs?.some(
+        (tool) => tool.enabled && !CLAUDE_TOOLS.includes(String(tool.name)),
       )
-        throw new PlannerError(
-          "hold",
-          `Claude agent ${this.config.agentId} v${this.config.agentVersion} must disable the default toolset, enable only ${CLAUDE_TOOLS.join(", ")}, and have no MCP servers, skills or subagents. Pin a version that does, then answer retry.`,
-        );
-      const exported = `${CLAUDE_OUTPUTS}/factory-result.tar`;
-      const setup = `set -e; echo '${packed.sha256}  ${CLAUDE_UPLOADS}/input.tar' | sha256sum -c -; mkdir -p ${CLAUDE_REPO}; tar -xf ${CLAUDE_UPLOADS}/input.tar -C ${CLAUDE_REPO}; cd ${CLAUDE_REPO}; git init -q; git add -A; git -c user.name=factory -c user.email=factory@localhost commit -qm base --no-verify`;
-      const text = `First prepare the checkout by running exactly this command once:\n${setup}\n\n${hostedPrompt(input, CLAUDE_REPO, `sh ${CLAUDE_UPLOADS}/factory-export.sh ${CLAUDE_REPO} ${exported}`)}`;
-      const sent = await call("send", () =>
-        sdk.beta.sessions.events.send(session!, {
+    )
+      throw new PlannerError(
+        "hold",
+        `Claude agent ${this.config.agentId} v${this.config.agentVersion} must disable the default toolset, enable only ${CLAUDE_TOOLS.join(", ")}, and have no MCP servers, skills or subagents. Pin a version that does, then answer retry.`,
+      );
+    const exported = `${CLAUDE_OUTPUTS}/factory-result.tar`;
+    const setup = `set -e; echo '${packed.sha256}  ${CLAUDE_UPLOADS}/input.tar' | sha256sum -c -; mkdir -p ${CLAUDE_REPO}; tar -xf ${CLAUDE_UPLOADS}/input.tar -C ${CLAUDE_REPO}; cd ${CLAUDE_REPO}; git init -q; git add -A; git -c user.name=factory -c user.email=factory@localhost commit -qm base --no-verify`;
+    const text = `First prepare the checkout by running exactly this command once:\n${setup}\n\n${hostedPrompt(input, CLAUDE_REPO, `sh ${CLAUDE_UPLOADS}/factory-export.sh ${CLAUDE_REPO} ${exported}`)}`;
+    const sent = await call("send", () =>
+      sdk.beta.sessions.events.send(
+        session,
+        {
           ...this.scope,
           events: [{ type: "user.message", content: [{ type: "text", text }] }],
-        }),
+        },
+        options,
+      ),
+    );
+    const inputEvent = (sent as unknown as { data?: { id: string }[] })
+      .data?.[0]?.id;
+    if (!inputEvent)
+      throw billed(
+        "Claude Managed Agents did not acknowledge the Work Item message",
       );
-      const inputEvent = (sent as unknown as { data?: { id: string }[] })
-        .data?.[0]?.id;
-      if (!inputEvent)
-        throw new PlannerError(
-          "retry",
-          "Claude Managed Agents did not acknowledge the Work Item message",
-        );
-      // Newest first, down to this turn's message: the turn ends at an idle status after it.
-      for (;;) {
-        await wait(POLL_MS, signal);
-        let end: { stop_reason?: { type?: string } } | undefined;
-        let message = "";
-        let terminated = false;
-        await call("events", async () => {
-          for await (const event of sdk.beta.sessions.events.list(session!, {
-            ...this.scope,
-            order: "desc",
-          })) {
-            const e = event as unknown as {
-              id: string;
-              type: string;
-              stop_reason?: { type?: string };
-              content?: { type: string; text?: string }[];
-            };
-            if (e.id === inputEvent) break;
-            if (
-              e.type === "session.status_terminated" ||
-              e.type === "session.deleted"
-            )
-              terminated = true;
-            if (e.type === "session.status_idle" && !end) end = e;
-            if (e.type === "session.status_running" && !end) end = undefined;
-            if (e.type === "agent.message" && !message)
-              message = (e.content ?? [])
-                .map((block) => block.text ?? "")
-                .join("");
-          }
-        });
-        if (terminated)
-          throw new PlannerError(
-            "retry",
-            "The Claude managed session terminated before the turn finished",
-          );
-        const reason = end?.stop_reason?.type;
-        if (!reason) continue;
-        record.finalResponse = message;
-        if (reason === "budget_reached")
-          throw new PlannerError(
-            "hold",
-            `The Claude managed session reached its budget of ${this.config.budgetCents} cents before finishing. Raise budgetCents and restart the service, then answer retry; or cancel.`,
-          );
-        if (reason === "retries_exhausted")
-          throw new PlannerError(
-            "retry",
-            "Claude Managed Agents exhausted its retries",
-          );
-        if (reason === "requires_action")
-          throw new PlannerError(
-            "hold",
-            `Claude agent ${this.config.agentId} asked for a tool decision; give its tools always_allow permission, then answer retry.`,
-          );
-        break;
-      }
-      const final = await call("session", () =>
-        sdk.beta.sessions.retrieve(session!, this.scope),
-      );
-      record.usage = (final as unknown as { usage?: unknown }).usage ?? null;
-      let file: { id: string } | undefined;
-      await call("files", async () => {
-        for await (const entry of sdk.beta.files.list({
-          ...this.scope,
-          scope_id: session,
-        }))
+    // Newest first, down to this turn's message: the turn ends at an idle status after it.
+    for (;;) {
+      await wait(POLL_MS, signal);
+      let end: { stop_reason?: { type?: string } } | undefined;
+      let message = "";
+      let terminated = false;
+      await call("events", async () => {
+        for await (const event of sdk.beta.sessions.events.list(
+          session,
+          { ...this.scope, order: "desc" },
+          options,
+        )) {
+          const e = event as unknown as {
+            id: string;
+            type: string;
+            stop_reason?: { type?: string };
+            content?: { type: string; text?: string }[];
+          };
+          if (e.id === inputEvent) break;
           if (
-            (entry as { filename?: string }).filename === "factory-result.tar"
+            e.type === "session.status_terminated" ||
+            e.type === "session.deleted"
           )
-            file = entry as { id: string };
+            terminated = true;
+          if (e.type === "session.status_idle" && !end) end = e;
+          if (e.type === "session.status_running" && !end) end = undefined;
+          if (e.type === "agent.message" && !message)
+            message = (e.content ?? [])
+              .map((block) => block.text ?? "")
+              .join("");
+        }
       });
-      if (!file)
-        throw new PlannerError(
-          "retry",
-          "The hosted agent finished without exporting its files",
+      if (terminated)
+        throw billed(
+          "The Claude managed session terminated before the turn finished",
         );
-      const response = await call("download", () =>
-        sdk.beta.files.download(file!.id, this.scope),
-      );
-      const path = join(scratch, "result.tar");
-      writeFileSync(path, Buffer.from(await response.arrayBuffer()));
-      done = true;
-      return path;
-    } finally {
-      await this.dispose(sdk, input, key, session, uploads, done);
+      const reason = end?.stop_reason?.type;
+      if (!reason) continue;
+      record.finalResponse = message;
+      if (reason === "budget_reached")
+        throw new PlannerError(
+          "hold",
+          `The Claude managed session reached its budget of ${this.config.budgetCents} cents before finishing. Answer retry to start a fresh session (it counts against this Work Item's runs and itemBudgetCents), or cancel.`,
+        );
+      if (reason === "retries_exhausted")
+        throw billed("Claude Managed Agents exhausted its retries");
+      if (reason === "requires_action")
+        throw new PlannerError(
+          "hold",
+          `Claude agent ${this.config.agentId} asked for a tool decision; give its tools always_allow permission, then answer retry.`,
+        );
+      break;
     }
-  }
-
-  /** Delete sessions a crashed earlier run of this Work Item left behind. */
-  private async removeOrphans(
-    sdk: Anthropic,
-    input: WorkerInput,
-    key: string,
-    call: <T>(what: string, operation: () => Promise<T>) => Promise<T>,
-  ): Promise<void> {
-    const found: string[] = [];
-    await call("session list", async () => {
-      for await (const session of sdk.beta.sessions.list({
-        ...this.scope,
-        agent_id: this.config.agentId,
-        "created_at[gte]": new Date(
-          Date.now() - ORPHAN_WINDOW_MS,
-        ).toISOString(),
-      }))
-        if (
-          (session as { metadata?: Record<string, string> }).metadata
-            ?.factory_work === key
-        )
-          found.push((session as { id: string }).id);
+    let file: { id: string } | undefined;
+    await call("files", async () => {
+      for await (const entry of sdk.beta.files.list(
+        { ...this.scope, scope_id: session },
+        options,
+      ))
+        if ((entry as { filename?: string }).filename === "factory-result.tar")
+          file = entry as { id: string };
     });
-    for (const session of found) {
-      await this.dispose(sdk, input, key, session, [], false);
-      input.log({
-        event: "managed-orphan-removed",
-        provider: "claude-managed-agents",
-        session,
-        key,
-      });
-    }
+    if (!file)
+      throw billed("The hosted agent finished without exporting its files");
+    const response = await call("download", () =>
+      sdk.beta.files.download(file!.id, this.scope, options),
+    );
+    const path = join(scratch, "result.tar");
+    writeFileSync(path, Buffer.from(await response.arrayBuffer()));
+    return path;
   }
 
-  /** Interrupt a turn still running, then delete the session and uploads. */
-  private async dispose(
-    sdk: Anthropic,
+  /**
+   * Interrupt, read and delete the marker's session (or, when its create
+   * was lost, every session tagged with its key since the marker), then its
+   * uploads (or, when an upload was lost, files named by its key).
+   */
+  protected async dispose(
+    marker: Marker,
     input: WorkerInput,
-    key: string,
-    session: string | undefined,
-    uploads: string[],
-    done: boolean,
-  ): Promise<void> {
-    const gone = (error: unknown) =>
-      (error as { status?: number }).status === 404;
-    const remove = async (
-      resource: string,
-      id: string,
-      operation: () => Promise<unknown>,
-    ) => {
-      try {
-        await operation();
-      } catch (error) {
-        if (gone(error)) return;
-        input.log({
-          event: "possible-orphan",
-          provider: "claude-managed-agents",
-          resource,
-          id,
-          key,
-          detail: `Deleting ${resource} ${id} failed at ${new Date().toISOString()}: ${detail(errorMessage(error))}`,
-        });
-      }
-    };
-    if (session) {
-      if (!done) {
-        await sdk.beta.sessions.events
-          .send(session, {
+    signal: AbortSignal,
+  ): Promise<Usage> {
+    const { sdk, call } = await this.client();
+    const options = { signal };
+    const sessions = marker.session ? [marker.session] : [];
+    if (!marker.session && marker.creating)
+      await call("session list", async () => {
+        for await (const found of sdk.beta.sessions.list(
+          {
             ...this.scope,
-            events: [{ type: "user.interrupt" }],
-          })
+            agent_id: this.config.agentId,
+            "created_at[gte]": new Date(
+              Date.parse(marker.createdAt) - CLOCK_SKEW_MS,
+            ).toISOString(),
+          },
+          options,
+        ))
+          if (found.metadata?.factory_work === marker.key)
+            sessions.push(found.id);
+      });
+    const usage: Usage = { cents: 0, tokens: 0 };
+    for (const session of sessions) {
+      const found = await sdk.beta.sessions
+        .retrieve(session, this.scope, options)
+        .catch((error: unknown) =>
+          gone(error) ? undefined : Promise.reject(error),
+        );
+      if (!found) continue;
+      const counted = (
+        found as unknown as {
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            list_cost?: { amount?: string } | null;
+          };
+        }
+      ).usage;
+      usage.tokens +=
+        (counted?.input_tokens ?? 0) + (counted?.output_tokens ?? 0);
+      usage.cents += Number(counted?.list_cost?.amount ?? 0) || 0;
+      if (found.status === "running" || found.status === "rescheduling") {
+        await sdk.beta.sessions.events
+          .send(
+            session,
+            { ...this.scope, events: [{ type: "user.interrupt" }] },
+            options,
+          )
           .catch(() => undefined);
-        // A running session can't be deleted: give the interrupt a minute.
-        for (let i = 0; i < 12; i++) {
-          const status = await sdk.beta.sessions
-            .retrieve(session, this.scope)
+        // A running session can't be deleted: wait for the interrupt.
+        for (let i = 0; i < 6; i++) {
+          await wait(POLL_MS, signal);
+          const now = await sdk.beta.sessions
+            .retrieve(session, this.scope, options)
             .then(
-              (found) => (found as { status?: string }).status,
+              (current) => current.status as string,
               () => "unknown",
             );
-          if (status !== "running" && status !== "rescheduling") break;
-          await new Promise((settle) => setTimeout(settle, POLL_MS));
+          if (now !== "running" && now !== "rescheduling") break;
         }
       }
-      await remove("session", session, () =>
-        sdk.beta.sessions.delete(session, this.scope),
-      );
+      await sdk.beta.sessions
+        .delete(session, this.scope, options)
+        .catch((error: unknown) => {
+          if (!gone(error)) throw error;
+        });
+      input.log({
+        event: "managed-session-deleted",
+        provider: "claude-managed-agents",
+        session,
+        key: marker.key,
+      });
     }
-    for (const id of uploads)
-      await remove("file", id, () => sdk.beta.files.delete(id, this.scope));
+    const files = [...marker.uploads];
+    if (marker.uploading)
+      await call("file list", async () => {
+        for await (const entry of sdk.beta.files.list(this.scope, options))
+          if (entry.filename?.startsWith(`factory-${marker.key}-`))
+            files.push(entry.id);
+      });
+    for (const id of new Set(files))
+      await sdk.beta.files
+        .delete(id, this.scope, options)
+        .catch((error: unknown) => {
+          if (!gone(error)) throw error;
+        });
+    return usage;
   }
 }

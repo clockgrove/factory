@@ -17,6 +17,7 @@ import type {
 import { hold } from "../engine.js";
 import { errorMessage } from "../text.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
+import { workerEnvironment } from "../worktree.js";
 import { pathInsideRoot } from "./claude-worker.js";
 import {
   callImages,
@@ -70,6 +71,23 @@ interface TurnResult {
   text: string;
   usage: { input: number; output: number; cached: number };
   session: string;
+}
+
+/** Copilot login values the runtime may see, beside a worker's environment. */
+const COPILOT_LOGIN = ["COPILOT_HOME", "COPILOT_GITHUB_TOKEN"];
+
+/**
+ * The Copilot runtime's environment: a worker's (worktree.ts
+ * workerEnvironment, nothing of GitHub, Git or SSH, no API keys, no
+ * COPILOT_ALLOW_ALL) plus Copilot's own login: its home, its token, and
+ * the gh CLI's configuration, which holds the login when Copilot signs in
+ * through gh. The model has no shell, so these stay with the runtime.
+ */
+function copilotEnvironment(): Record<string, string> {
+  const gh =
+    process.env.GH_CONFIG_DIR ??
+    join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "gh");
+  return workerEnvironment(gh, COPILOT_LOGIN);
 }
 
 /** The SDK names grep `rg`. */
@@ -132,6 +150,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     workingDirectory: root,
     // The login lives here (or in gh); sessions are deleted after the turn.
     baseDirectory: process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
+    env: copilotEnvironment(),
     builtinPluginDirectories: [],
     logLevel: "error",
     useLoggedInUser: true,
@@ -154,12 +173,17 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
         `${LOGIN_HOLD} (${detail(auth.statusMessage ?? "not authenticated")})`,
       );
     let text = "";
-    let failure: PlannerError | undefined;
+
     const usage = { input: 0, output: 0, cached: 0 };
     let settle: () => void = () => undefined;
-    const idle = new Promise<void>((done) => {
+    let fail: (error: PlannerError) => void = () => undefined;
+    // The turn ends at idle, or at once on a session error (as sendAndWait does).
+    const idle = new Promise<void>((done, reject) => {
       settle = done;
+      fail = reject;
     });
+    // An error before the turn is awaited is still seen there.
+    idle.catch(() => undefined);
     let sent = false;
     const permit = (request: PermissionRequest) => {
       if (
@@ -195,13 +219,24 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
           watchdog.progress(event.type);
           if (event.type === "assistant.message" && event.data.content)
             text = event.data.content;
+          // Copilot quietly serves another model for one it can't: refuse that.
+          if (
+            event.type === "assistant.usage" &&
+            event.data.model &&
+            event.data.model !== turn.choice.model
+          )
+            fail(
+              new PlannerError(
+                "hold",
+                `Copilot served ${event.data.model}, not the configured ${turn.choice.model}. Choose a model the Copilot login can use in the provider's settings, then answer retry.`,
+              ),
+            );
           if (event.type === "assistant.usage") {
             usage.input += event.data.inputTokens ?? 0;
             usage.output += event.data.outputTokens ?? 0;
             usage.cached += event.data.cacheReadTokens ?? 0;
           }
-          if (event.type === "session.error")
-            failure ??= sessionFailure(event.data);
+          if (event.type === "session.error") fail(sessionFailure(event.data));
           if (event.type === "session.idle" && sent) settle();
         },
         workingDirectory: root,
@@ -244,7 +279,6 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
       }),
     );
     await watchdog.race(idle);
-    if (failure) throw failure;
     finished = true;
     return { text, usage, session: session.sessionId };
   } catch (error) {

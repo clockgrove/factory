@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { crashPoint } from "./crash.js";
+import type { ProviderConfig } from "./providers/config.js";
 
 const STATE_VERSION = 1;
 
@@ -64,6 +65,8 @@ export interface FrozenProvider {
   name: string;
   /** Why: the configured default, or `serve --provider`. */
   selectedBy: "defaultProvider" | "--provider";
+  /** The provider's planner, models and worker as they were at admission. */
+  settings: ProviderConfig;
 }
 
 export interface ObjectiveState {

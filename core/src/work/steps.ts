@@ -74,7 +74,7 @@ import {
 } from "../worktree.js";
 import { collect, type HandoffNote } from "./collect.js";
 import { prepareWorkPrompt, type RepairContext } from "./prompt.js";
-import type { Worker } from "./worker.js";
+import type { Worker, WorkerSpend } from "./worker.js";
 
 const MINUTE = 60_000;
 
@@ -568,7 +568,8 @@ async function workStep(
         keepAll,
       );
 
-    const result = await deps.worker(plan, body).run({
+    const spent = kept<WorkerSpend>(state, item.id, "spend");
+    const { spend, ...result } = await deps.worker(plan, body).run({
       worktree,
       prompt: prepared.prompt,
       item,
@@ -576,7 +577,11 @@ async function workStep(
       base,
       signal,
       log: context.log,
+      ...(spent ? { spend: spent } : {}),
+      ...(context.answer ? { answer: context.answer } : {}),
     });
+    // A paid worker's spend outlives retries, restarts and repairs.
+    if (spend) keepAll = { ...keepAll, [keptKey(item.id, "spend")]: spend };
     if (result.kind !== "finished") return withKeep(result, keepAll);
     finished = {
       finalResponse: result.finalResponse,

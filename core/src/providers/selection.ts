@@ -4,10 +4,12 @@
  * was admitted (state.provider), whatever the configuration or
  * `serve --provider` says later. Cancel needs no provider.
  */
+
+import { isDeepStrictEqual } from "node:util";
 import type { CoreConfig } from "../config.js";
 import { hold, type Step, type Workflow } from "../engine.js";
 import type { Plan } from "../planning/types.js";
-import type { ObjectiveState } from "../state.js";
+import { type ObjectiveState, TERMINAL } from "../state.js";
 import type { Worker } from "../work/worker.js";
 import {
   ClaudePlanner,
@@ -91,40 +93,67 @@ export function providerWorker(
   };
 }
 
+/** A provider's workflow, with the settings it was built from. */
+export interface ProviderRoute {
+  workflow: Workflow;
+  settings: ProviderConfig;
+}
+
+/** Settings as state stores them, so a frozen copy compares equal. */
+export const frozenSettings = (settings: ProviderConfig): ProviderConfig =>
+  JSON.parse(JSON.stringify(settings)) as ProviderConfig;
+
 /**
- * Route each Objective to its frozen provider's workflow. An Objective
- * whose provider is no longer configured holds until it is restored;
- * `cancel` always works.
+ * Route each Objective to the provider it froze at admission. It runs only
+ * while that provider is configured with the same planner, models and
+ * worker; otherwise it holds until they are restored. A finished Objective
+ * has no steps, and `cancel` always works.
  */
 export function providerWorkflow(
-  workflows: ReadonlyMap<string, Workflow>,
+  routes: ReadonlyMap<string, ProviderRoute>,
   fallback: Workflow,
 ): Workflow {
-  const frozen = (state: ObjectiveState) =>
-    state.provider ? workflows.get(state.provider.name) : undefined;
+  const frozen = (state: ObjectiveState) => {
+    const route = state.provider && routes.get(state.provider.name);
+    return route &&
+      isDeepStrictEqual(
+        frozenSettings(route.settings),
+        state.provider!.settings,
+      )
+      ? route.workflow
+      : undefined;
+  };
   return {
     steps(state) {
       // Cancel cleanup is the same on every provider.
       if (state.status === "cancelled") return fallback.steps(state);
+      if (TERMINAL.includes(state.status)) return [];
       const workflow = frozen(state);
-      return workflow ? workflow.steps(state) : [missingProvider(state)];
+      return workflow ? workflow.steps(state) : [unavailable(state, routes)];
     },
     status: (state) => (frozen(state) ?? fallback).status(state),
   };
 }
 
-function missingProvider(state: ObjectiveState): Step {
+function unavailable(
+  state: ObjectiveState,
+  routes: ReadonlyMap<string, ProviderRoute>,
+): Step {
   return {
     key: "provider",
     deadlineMs: 60_000,
     async run() {
-      if (!state.provider)
+      const provider = state.provider;
+      if (!provider)
         return hold(
           "This Objective has no frozen provider: it was admitted by a Factory build that didn't record one. Cancel it and queue it again.",
           ["cancel"],
         );
+      const what = routes.has(provider.name)
+        ? `whose settings changed since then. It needs them as they were: ${JSON.stringify(provider.settings)}. Restore them`
+        : "which the configuration no longer names. Restore it with the settings it had";
       return hold(
-        `This Objective started on provider "${state.provider.name}", which the configuration no longer names. Restore that provider in the configuration and restart the service, then answer retry; or cancel.`,
+        `This Objective started on provider "${provider.name}", ${what} and restart the service, then answer retry; or cancel.`,
       );
     },
   };

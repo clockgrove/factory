@@ -9,14 +9,17 @@ import {
 import { connect } from "node:net";
 import { join } from "node:path";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
-import { DEFAULT_LIMITS, hostLimits, type Workflow } from "./engine.js";
+import { DEFAULT_LIMITS, hostLimits } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
 import { RunLog } from "./log.js";
 import { installationPaths, type Paths } from "./paths.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
+
 import type { Planner } from "./providers/planner.js";
 import {
+  frozenSettings,
+  type ProviderRoute,
   providerPlanner,
   providerWorker,
   providerWorkflow,
@@ -32,12 +35,15 @@ import {
 } from "./state.js";
 import { objectiveWorkflow } from "./workflow.js";
 
+/** Worker kinds setup can write: the managed ones need settings by hand. */
+const SETUP_WORKERS = ["codex", "claude", "copilot"];
+
 const USAGE = `Usage: factory <command> --repo OWNER/NAME
 
   serve [--provider NAME]        Run the service (the only writer of state);
                                  new Objectives use NAME, else defaultProvider
   setup --provider NAME [--planner codex|claude|copilot]
-        [--worker codex|claude|copilot|openai-agents|claude-managed-agents]
+        [--worker codex|claude|copilot]
         [--default]              Add or change a named provider in the configuration
   status [ISSUE] [--json]        Show Objectives and open questions
   answer ISSUE ANSWER [--text T] Answer an Objective's open question
@@ -86,6 +92,7 @@ async function main(argv: string[]): Promise<number> {
         provider = {
           name,
           selectedBy: args.flags.provider ? "--provider" : "defaultProvider",
+          settings: frozenSettings(config.providers[name]!),
         };
         const github = new GitHub(config.repository).redacting(
           config.policy.allowedSecretNames.flatMap(
@@ -93,19 +100,19 @@ async function main(argv: string[]): Promise<number> {
           ),
         );
         sync = new GitHubSync(github, config, new RunLog(paths.logs, "sync"));
-        const workflows = new Map<string, Workflow>();
+        const routes = new Map<string, ProviderRoute>();
         for (const [each, settings] of Object.entries(config.providers))
-          workflows.set(
-            each,
-            objectiveWorkflow({
+          routes.set(each, {
+            settings,
+            workflow: objectiveWorkflow({
               config,
               github,
               planner: planner(config, each),
               workDir: (issue) => join(paths.root, "work", String(issue)),
               worker: providerWorker(settings, config),
             }),
-          );
-        workflow = providerWorkflow(workflows, workflows.get(name)!);
+          });
+        workflow = providerWorkflow(routes, routes.get(name)!.workflow);
       }
       if (loaded)
         hostLimits.configure({
@@ -233,8 +240,10 @@ async function status(paths: Paths, args: Args): Promise<number> {
 /**
  * `setup --provider NAME`: add a named provider to the configuration, or
  * change its planner or worker kind, and verify the result loads. The
- * first provider, or `--default`, becomes defaultProvider. Started
- * Objectives keep the provider they froze; restart the service to use it.
+ * first provider, or `--default`, becomes defaultProvider. Managed
+ * workers need settings written by hand. An Objective that started on a
+ * provider holds while that provider's settings differ from the ones it
+ * froze; restart the service to use the change.
  */
 function setup(repository: string, args: Args): number {
   const name = args.flags.provider;
@@ -260,15 +269,20 @@ function setup(repository: string, args: Args): number {
     );
     return 2;
   }
-  if (worker && !(WORKERS as readonly string[]).includes(worker)) {
-    process.stderr.write(`factory: --worker is one of ${WORKERS.join(", ")}\n`);
+  if (worker && !SETUP_WORKERS.includes(worker)) {
+    process.stderr.write(
+      (WORKERS as readonly string[]).includes(worker)
+        ? `factory: a ${worker} worker needs settings setup doesn't take (account, model, key variable, limits): write providers.${name}.worker in ${path} by hand, as the user guide's managed execution section shows\n`
+        : `factory: --worker is one of ${SETUP_WORKERS.join(", ")}\n`,
+    );
     return 2;
   }
   // Without providers the configuration has one: codex, the default.
   const providers = (raw.providers ?? {
     codex: { planner: "codex", worker: { kind: "codex" } },
   }) as Record<string, Record<string, unknown>>;
-  raw.defaultProvider ??= raw.providers ? undefined : "codex";
+  // Keep the effective default (the first provider) unless --default moves it.
+  raw.defaultProvider ??= Object.keys(providers)[0] ?? name;
   const existing = providers[name];
   const kind = planner ?? (existing?.planner as string | undefined) ?? "codex";
   const current = existing?.worker as Record<string, unknown> | undefined;
@@ -284,8 +298,7 @@ function setup(repository: string, args: Args): number {
         : (current ?? { kind: worker ?? kind }),
   };
   raw.providers = providers;
-  if (!raw.defaultProvider || args.flags.default !== undefined)
-    raw.defaultProvider = name;
+  if (args.flags.default !== undefined) raw.defaultProvider = name;
   const save = (body: string) => {
     const temporary = `${path}.${process.pid}.tmp`;
     writeFileSync(temporary, body, { mode: 0o600 });

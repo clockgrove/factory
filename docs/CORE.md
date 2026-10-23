@@ -231,7 +231,19 @@ A hold is a question with named answers:
 - **Provider unavailable.** An Objective whose frozen provider is no longer configured, or whose settings changed, holds with `switch NAME` (recommended; plain `switch` when there is one target) when there is a target, `retry` (after restoring the provider and restarting) and `cancel`. The targets are the ones the engine accepts (engine.ts switchTargets): every other configured provider, and this one when it is still configured with changed settings, which `switch` re-freezes.
 - **Final review.** `retry` to final review's refusal means the default branch was fixed: final validation runs again on the new head, then the review. A `retry` to an error or wait question on final review only runs the review again.
 - **Edited during planning.** `continue` to the question about an Objective edited while it was planned keeps the plan and accepts the text GitHub shows then, so building asks again only after a later edit.
+- **Configuration.** The service reads its configuration once at start. A hold that asks for a configuration change says to restart the service before answering.
+- **Media selection.** The select question's answer is a candidate set id, then optionally `bind ITEM...` (direct dependents that get the set as read-only input), then any text: the text is recorded with the selection as the operator's reason and shown to review.
 - **Repair diagnosis.** When diagnosing a refused result needs a decision, the work step holds with `answer <decision>` (a correction for the worker), `retry` (diagnose again) and `cancel`. While the refused result is kept, still exists on the item's base and (for media) its selection stands, it also offers `revalidate`: the result was correct and Factory's check was at fault. The work step then finishes with that same result, without the worker or collection, and the selection, validation, review and delivery run again. It isn't counted as a repair, and a rerun after a crash does the same. Only a repair that refuses the result itself (validate, review, CI, merge, a secret the result writes) records it as refused, so the next result must differ. A select or publish media repair (new candidates, a selection that couldn't be written, missing LFS objects) records nothing: its correct fix may leave the tracked tree unchanged.
+
+## Delivery
+
+`delivery.kind` in the installation's configuration picks how Work Items reach the default branch. The service reads it once at start.
+
+- **`regular`** (default): one PR per Work Item, merged with a merge commit once its checks pass.
+- **`native-stack`**: each linear chain of the plan is one GitHub native stack. Each layer's PR targets the branch below it, and the top layer's merge step merges the whole stack with one shared merge commit. An item off a chain is an ordinary PR. When the layer below moves (GitHub updates it with the default branch, or it is repaired), GitHub merges its new head into the layer above, with no worker; only a conflict is that layer's repair.
+- **Strict protection.** A PR BEHIND the default branch is updated by GitHub (update-branch), not by a worker; a conflict is the item's repair. A repair that only replays the refused change onto a moved base, and applies cleanly, runs no worker either.
+- **`accept`.** A stack that merged by other means (layer by layer, or with different merge commits) is a question with `accept`, `retry` and `cancel`. `accept` takes the unit as delivered once every layer is merged at Factory's head with its merge commit on the default branch; otherwise the question names what is missing.
+- **Changing it.** A plan is split by the setting it ran with, so a retry never switches it. To deliver an Objective without native stacks: cancel it, set `delivery.kind` to `regular`, restart the service and queue it again.
 
 ## Cancel
 

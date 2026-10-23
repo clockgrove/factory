@@ -12,11 +12,13 @@ import {
 } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
-import type {
-  CoverageObligation,
-  PinnedSource,
-  PlanningFacts,
-  ValidationCommand,
+import {
+  type CoverageObligation,
+  DISCOVERY_LIMITS,
+  type DiscoveryLimits,
+  type PinnedSource,
+  type PlanningFacts,
+  type ValidationCommand,
 } from "./types.js";
 
 const run = promisify(execFile);
@@ -1035,6 +1037,8 @@ export interface FactsArgs {
   playbook?: string;
   /** The operator's media.localAssetRoots. */
   localAssetRoots?: readonly string[];
+  /** The operator's planning.discoveryLimits. */
+  discoveryLimits?: DiscoveryLimits;
   signal?: AbortSignal;
 }
 
@@ -1082,6 +1086,7 @@ export async function buildFacts(
     coverageObligations: coverageObligations(args.shown.blocks),
     playbook: args.playbook ?? "",
     localAssetRoots: args.localAssetRoots ?? [],
+    discoveryLimits: args.discoveryLimits ?? DISCOVERY_LIMITS,
   };
   return { facts };
 }

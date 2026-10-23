@@ -2173,11 +2173,49 @@ function discoveryStep(item: WorkItem, deps: BuildDeps): Step {
     run: (context) =>
       discover(item, context, {
         checkout: deps.config.checkout,
-        repository: deps.config.repository,
         planner: deps.planner,
+        limits: deps.config.planning.discoveryLimits,
         dir: `${worktreePath(deps.workDir(context.state.issue), context.state.issue, item.id)}.discovery`,
+        base: () => discoveryBase(item, context, deps),
       }),
   };
+}
+
+/**
+ * The commit a discovery item observes: the plan base, unless something
+ * it depends on, directly or not, has merged; then the default branch,
+ * once every merge of this Objective is still on it (integrationProblem,
+ * as QA checks). An Objective made only of QA and discovery observes the
+ * plan base.
+ */
+async function discoveryBase(
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+): Promise<string | Outcome> {
+  const { state, signal } = context;
+  const plan = currentPlan(state)!;
+  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
+  const upstream = new Set<string>();
+  const visit = (id: string) => {
+    for (const dependency of byId.get(id)?.dependencies ?? [])
+      if (!upstream.has(dependency)) {
+        upstream.add(dependency);
+        visit(dependency);
+      }
+  };
+  visit(item.id);
+  if (
+    baselineQa(plan.items) ||
+    ![...upstream].some((id) => mergeOf(state, id)?.mergeSha)
+  )
+    return plan.base;
+  const head = await defaultHead(
+    deps.config.checkout,
+    deps.config.repository,
+    signal,
+  );
+  return (await integrationProblem(state, plan, head, deps, signal)) ?? head;
 }
 
 /** The merge step of an item that delivers nothing (aggregate, QA, discovery): it settles. */

@@ -871,11 +871,6 @@ export class ClaudeWorker implements Worker {
 
   async run(input: WorkerInput): Promise<WorkerResult> {
     input.signal.throwIfAborted();
-    if (input.item.kind === "discovery")
-      return hold(
-        `Work Item ${input.item.id} is a read-only discovery item, which the Claude worker can't run with enforced read-only access. Replan it.`,
-        ["replan", "cancel"],
-      );
     let sdk: SdkModule;
     let z: Zod;
     try {

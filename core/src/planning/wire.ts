@@ -655,9 +655,22 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
           },
           completeness: { type: "string", enum: ["complete"] },
           allowance: strict({
-            maxEntries: { type: "integer", minimum: 1 },
-            maxBytes: { type: "integer", minimum: 1 },
-            maxAttempts: { type: "integer", minimum: 1 },
+            // The controller's ceiling (planning.discoveryLimits); graph.ts checks it too.
+            maxEntries: {
+              type: "integer",
+              minimum: 1,
+              maximum: facts.discoveryLimits.maxEntries,
+            },
+            maxBytes: {
+              type: "integer",
+              minimum: 1,
+              maximum: facts.discoveryLimits.maxBytes,
+            },
+            maxAttempts: {
+              type: "integer",
+              minimum: 1,
+              maximum: facts.discoveryLimits.maxAttempts,
+            },
           }),
         });
         item.required!.push("discovery");

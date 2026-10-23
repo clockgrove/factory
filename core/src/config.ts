@@ -22,6 +22,7 @@ import {
 import { remoteRepository } from "./git.js";
 import { type PlanningContext, planningContext } from "./knowledge/settings.js";
 import { stateRoot, within } from "./paths.js";
+import { DISCOVERY_LIMITS, type DiscoveryLimits } from "./planning/types.js";
 import { serviceCredential } from "./providers/claude.js";
 import { type ProviderConfig, providersConfig } from "./providers/config.js";
 import {
@@ -66,6 +67,8 @@ export interface CoreConfig {
      * branches, and an expansion would add no children.
      */
     adaptiveGraph: boolean;
+    /** The ceiling on a discovery item's entry, byte and attempt allowance: the wire and graph.ts refuse more. */
+    discoveryLimits: DiscoveryLimits;
   };
   execution: {
     /** Steps of one Objective running at once (independent Work Items run in parallel). */
@@ -527,6 +530,11 @@ export function loadConfig(repository: string): CoreConfig {
           playbook: text(".factory/playbook.md"),
           context: optional(planningContext),
           adaptiveGraph: flag(false),
+          discoveryLimits: object({
+            maxEntries: whole(1, DISCOVERY_LIMITS.maxEntries, 100_000),
+            maxBytes: whole(1, DISCOVERY_LIMITS.maxBytes, 1024 * 1024 * 1024),
+            maxAttempts: whole(1, DISCOVERY_LIMITS.maxAttempts, 10),
+          }),
         },
         RETIRED.planning,
       ),

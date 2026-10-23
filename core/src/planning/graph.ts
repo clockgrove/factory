@@ -1,12 +1,14 @@
-import type {
-  AcceptanceCoverage,
-  CoverageObligation,
-  DeclaredWorkCondition,
-  Draft,
-  Finding,
-  GraphExpansionEnvelope,
-  PinnedSource,
-  WorkItem,
+import {
+  type AcceptanceCoverage,
+  type CoverageObligation,
+  type DeclaredWorkCondition,
+  DISCOVERY_LIMITS,
+  type DiscoveryLimits,
+  type Draft,
+  type Finding,
+  type GraphExpansionEnvelope,
+  type PinnedSource,
+  type WorkItem,
 } from "./types.js";
 
 /**
@@ -264,8 +266,11 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
   return usable;
 }
 
-/** A discovery specification's literal shape; returns what is wrong, or undefined. */
-export function discoveryProblem(value: unknown): string | undefined {
+/** A discovery specification's literal shape within the controller's `limits`; returns what is wrong, or undefined. */
+export function discoveryProblem(
+  value: unknown,
+  limits: DiscoveryLimits = DISCOVERY_LIMITS,
+): string | undefined {
   if (!isRecord(value)) return "it has no discovery specification";
   if (
     Object.keys(value).sort().join() !==
@@ -294,6 +299,11 @@ export function discoveryProblem(value: unknown): string | undefined {
     )
   )
     return "its allowance needs positive integer maxEntries, maxBytes and maxAttempts";
+  const over = (["maxEntries", "maxBytes", "maxAttempts"] as const).filter(
+    (limit) => (allowance[limit] as number) > limits[limit],
+  );
+  if (over.length)
+    return `its allowance may be at most ${over.map((limit) => `${limits[limit]} ${limit}`).join(", ")} (planning.discoveryLimits)`;
   return undefined;
 }
 
@@ -333,6 +343,7 @@ function checkGraphShape(
   draft: Draft,
   base: string,
   pinned: ReadonlySet<string>,
+  limits: DiscoveryLimits = DISCOVERY_LIMITS,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
   const { findings, found } = collector();
   if (draft.base !== base)
@@ -392,7 +403,7 @@ function checkGraphShape(
         item.id,
       );
     if (kind === "discovery") {
-      const problem = discoveryProblem(item.discovery);
+      const problem = discoveryProblem(item.discovery, limits);
       if (problem)
         found(`Discovery item ${item.id} is invalid: ${problem}`, item.id);
       if (
@@ -503,7 +514,7 @@ function checkGraphShape(
         );
   }
   findings.push(...conditionFindings(draft, byId));
-  findings.push(...expansionFindings(draft, byId, base, pinned));
+  findings.push(...expansionFindings(draft, byId, base, pinned, limits));
   const { order, cycle } = orderItems(items);
   if (cycle.length)
     found(
@@ -779,6 +790,7 @@ function expansionFindings(
   byId: ReadonlyMap<string, WorkItem>,
   base: string,
   pinned: ReadonlySet<string>,
+  limits: DiscoveryLimits,
 ): Finding[] {
   const { findings, found } = collector();
   if (draft.expansions === undefined) return findings;
@@ -924,6 +936,7 @@ function expansionFindings(
       { ...rest, items: joined },
       base,
       pinned,
+      limits,
     ).findings)
       found(
         `Expansion ${envelope.id}, with its template joined: ${finding.message}`,
@@ -1396,11 +1409,17 @@ export function validateGraph(
     coverageObligations: readonly CoverageObligation[];
     /** The checks a push to the default branch reports: integrated-ci's only names. */
     integratedCheckNames: readonly string[];
+    discoveryLimits?: DiscoveryLimits;
   },
   previous?: Draft,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
   const pinned = new Set(["OBJECTIVE", ...facts.sources.map((s) => s.path)]);
-  const shape = checkGraphShape(draft, facts.base, pinned);
+  const shape = checkGraphShape(
+    draft,
+    facts.base,
+    pinned,
+    facts.discoveryLimits,
+  );
   // Coverage reads items; a draft whose items are unusable stops at shape.
   if (!shape.usable) return shape;
   return {

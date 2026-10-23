@@ -33,6 +33,20 @@ export interface DiscoverySpecification {
   allowance: { maxEntries: number; maxBytes: number; maxAttempts: number };
 }
 
+/** The controller's ceiling on a discovery allowance (config.ts planning.discoveryLimits). */
+export interface DiscoveryLimits {
+  maxEntries: number;
+  maxBytes: number;
+  maxAttempts: number;
+}
+
+/** The ceiling when the configuration sets none. */
+export const DISCOVERY_LIMITS: DiscoveryLimits = {
+  maxEntries: 5000,
+  maxBytes: 64 * 1024 * 1024,
+  maxAttempts: 3,
+};
+
 /** Every kind a saved plan may hold; graph.ts knows each shape. */
 export type ItemKind = "work" | "qa" | "aggregate" | "discovery";
 
@@ -313,4 +327,6 @@ export interface PlanningFacts {
   playbook: string;
   /** The operator's media.localAssetRoots: the only places a local source asset may come from. */
   localAssetRoots: readonly string[];
+  /** The ceiling on every discovery allowance the plan declares. */
+  discoveryLimits: DiscoveryLimits;
 }

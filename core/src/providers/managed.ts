@@ -494,11 +494,6 @@ abstract class ManagedWorker implements Worker {
     let marker: Marker | undefined;
     let scratch: string | undefined;
     try {
-      if (input.item.kind === "discovery")
-        return hold(
-          `Work Item ${input.item.id} is a read-only discovery item, which a managed worker can't run with enforced read-only access. Replan it.`,
-          ["replan", "cancel"],
-        );
       // A crashed or abandoned earlier run: stop and delete what it left first.
       const left = readMarker(input.worktree);
       if (left) {

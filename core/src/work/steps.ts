@@ -2013,6 +2013,8 @@ export function replanOutcome(state: ObjectiveState): Outcome {
  * `Workflow.freshable`): a Work Item of the current plan that runs a worker
  * and hasn't merged, asked before its merge step. A merge step's question
  * may come after GitHub merged the PR, so it keeps retry and replan only.
+ * Aggregate, QA and discovery items keep no worker result or worktree to
+ * discard (`retry` already checks or observes again), so they don't offer it.
  */
 export function freshable(state: ObjectiveState, key: string): boolean {
   const plan = currentPlan(state);
@@ -2022,7 +2024,7 @@ export function freshable(state: ObjectiveState, key: string): boolean {
     key !== stepKey(item.id, "merge") &&
     !plan?.split &&
     executable(item.kind) &&
-    item.kind !== "aggregate" &&
+    !["aggregate", "qa", "discovery"].includes(item.kind ?? "") &&
     !mergeOf(state, item.id)
   );
 }

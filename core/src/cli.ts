@@ -401,6 +401,9 @@ async function serveCommand(
     ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
     ...(sync ? { sync, reset: true } : {}),
     ...(frozen ? { frozen } : {}),
+    ...(loaded?.queue.objectiveDeadlineSeconds
+      ? { deadlineSeconds: loaded.queue.objectiveDeadlineSeconds }
+      : {}),
     ...(loaded ? { observer: knowledgeObserver, dream: applyDream } : {}),
     ...(process.env.FACTORY_TICK_MS
       ? { tickMs: Number(process.env.FACTORY_TICK_MS) }

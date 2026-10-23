@@ -49,6 +49,12 @@ export interface CoreConfig {
     pollSeconds: number;
     /** Objectives that may run at once; building waits on overlapping owned paths. */
     maxActiveObjectives: number;
+    /**
+     * Each Objective's deadline, counted from its admission and saved then
+     * (state.ts `deadline`), so a later change moves no admitted one; at
+     * it the Objective is cancelled. Absent: no deadline.
+     */
+    objectiveDeadlineSeconds?: number;
   };
   /** Named planner and worker pairs (providers/config.ts). */
   providers: Record<string, ProviderConfig>;
@@ -424,7 +430,6 @@ const RETIRED: Record<string, Retired> = {
     controlItemId: "removed: Factory has no control card",
     factoryManagedFields:
       "removed: Factory manages queue.field and queue.orderField",
-    objectiveDeadlineSeconds: "removed: each step has its own deadline",
   },
   planning: {
     provider: PROVIDERS_HINT,
@@ -520,6 +525,7 @@ export function loadConfig(repository: string): CoreConfig {
           ),
           pollSeconds: whole(5, 30),
           maxActiveObjectives: whole(1, 3),
+          objectiveDeadlineSeconds: optional(whole(60)),
         },
         RETIRED.queue,
       ),

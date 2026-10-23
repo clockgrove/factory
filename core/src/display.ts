@@ -68,3 +68,12 @@ export function eventLine(event: LogEvent): string {
   const detail = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : "";
   return `${displayTime(at)}${step ? ` ${step}` : ""} ${kind ?? ""}${detail}`;
 }
+
+/** A span for people: `45 s`, `12 min`, `3 h 5 min`. */
+export function duration(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return `${Math.max(0, Math.round(ms / 1000))} s`;
+  if (minutes < 60) return `${minutes} min`;
+  const rest = minutes % 60;
+  return `${Math.floor(minutes / 60)} h${rest ? ` ${rest} min` : ""}`;
+}

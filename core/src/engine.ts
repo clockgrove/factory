@@ -10,6 +10,7 @@ import {
   rereviewQuestion,
 } from "./allowances.js";
 import { crashPoint } from "./crash.js";
+import { duration } from "./display.js";
 import type { RunLog } from "./log.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
@@ -352,6 +353,8 @@ export interface EngineLimits {
 }
 
 const HOUR = 60 * 60 * 1000;
+/** Who cancelled an Objective at its deadline (`ended.by`). */
+export const DEADLINE = "deadline";
 
 export const DEFAULT_LIMITS: EngineLimits = {
   maxErrors: 3,
@@ -1024,7 +1027,11 @@ export class ObjectiveRunner {
         id: `${key}@${now}`,
         step: key,
         ...(item !== undefined ? { item } : {}),
-        question: named.length ? `${question}\n\n${named.join(" ")}` : question,
+        question: [
+          question,
+          ...(named.length ? [named.join(" ")] : []),
+          ...deadlineNote(state.deadline, this.now()),
+        ].join("\n\n"),
         options: recommend(
           options.map((option) =>
             option === chosen ? { ...option, recommended: true } : option,
@@ -1310,6 +1317,30 @@ export class ObjectiveRunner {
   }
 
   /**
+   * Cancel at the Objective's deadline (`state.deadline`), through the
+   * normal cancel, so cleanup runs. The deadline is absolute: an open
+   * question, a pause, a human gate or a wait for a slot doesn't stop it,
+   * so the service calls this every tick for every Objective, and a
+   * restart past it cancels at once. A reset's rebuild finishes first, and
+   * a withdrawal goes as if never admitted. Returns whether it cancelled.
+   */
+  expire(): boolean {
+    const { deadline, status, withdrawing } = this.state;
+    if (
+      deadline === undefined ||
+      withdrawing ||
+      status === "resetting" ||
+      TERMINAL.includes(status) ||
+      this.now().getTime() < Date.parse(deadline)
+    )
+      return false;
+    crashPoint("engine:deadline:before-cancel");
+    this.transact(() => this.cancel(DEADLINE));
+    crashPoint("engine:deadline:cancelled");
+    return true;
+  }
+
+  /**
    * Cancel at once: stop running steps and mark the Objective cancelled.
    * Cleanup steps follow. A finished Objective stays as it is.
    */
@@ -1440,6 +1471,16 @@ export function settled(
     !busy &&
     workflow.steps(state).length === 0
   );
+}
+
+/** A question asked within the last hour before the deadline says so. */
+function deadlineNote(deadline: string | undefined, now: Date): string[] {
+  const left = Date.parse(deadline ?? "") - now.getTime();
+  return left >= 0 && left <= HOUR
+    ? [
+        `This Objective's deadline is ${deadline}, ${duration(left)} from now: Factory cancels it then, answered or not.`,
+      ]
+    : [];
 }
 
 function hours(ms: number): string {

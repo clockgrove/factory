@@ -245,8 +245,31 @@ export interface ObjectiveState {
   updatedAt: string;
   /** When this run was admitted: with the issue, it names the run. */
   startedAt?: string;
-  /** The first save at a terminal status; `by` names who cancelled. */
+  /**
+   * The absolute deadline, saved at admission (`deadlineAt`): at it the
+   * engine cancels the Objective, whatever it waits on (engine.ts
+   * `expire`). Nothing moves it: not a restart, a reset or a later
+   * configuration. Absent: no deadline.
+   */
+  deadline?: string;
+  /** The first save at a terminal status; `by` names who cancelled (`deadline`: the deadline did). */
   ended?: { at: string; by?: string };
+}
+
+/**
+ * The deadline of a run admitted at `at`: the admitting request's own
+ * absolute time when it names one, else `seconds` (the configuration's
+ * `queue.objectiveDeadlineSeconds`) later; none without either.
+ */
+export function deadlineAt(
+  at: Date,
+  seconds: number | undefined,
+  requested?: string,
+): string | undefined {
+  if (requested !== undefined) return new Date(requested).toISOString();
+  return seconds === undefined
+    ? undefined
+    : new Date(at.getTime() + seconds * 1000).toISOString();
 }
 
 export function newObjective(

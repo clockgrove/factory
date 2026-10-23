@@ -40,6 +40,7 @@ import {
 } from "./requests.js";
 import { RESET, type ResetRecord, resetRecord } from "./reset.js";
 import {
+  deadlineAt,
   type Frozen,
   findState,
   finishState,
@@ -70,6 +71,8 @@ export interface ServeOptions {
   sync?: GitHubSync;
   /** The configuration each newly admitted Objective freezes. */
   frozen?: Frozen;
+  /** Each newly admitted Objective's deadline, from its admission (`queue.objectiveDeadlineSeconds`). */
+  deadlineSeconds?: number;
   /** Reads Objectives as they move; never changes them (knowledge records memory here). */
   observer?: StateObserver;
   /** Applies a `dream` request to the knowledge store, which only the service writes. */
@@ -604,6 +607,16 @@ export async function serve(options: ServeOptions): Promise<number> {
     waitingForSlot.clear();
     waitingOnPaths.clear();
     for (const runner of ordered) {
+      // The deadline is absolute: checked for every Objective, whatever
+      // it waits on, before what it may run is decided.
+      try {
+        runner.expire();
+      } catch (error) {
+        log.write(runner.state.issue, {
+          event: "tick-failed",
+          error: String(error),
+        });
+      }
       const { state } = runner;
       // Dequeued while its check or a re-run's cleanup ran: it goes once
       // that ends, and nothing past them starts. A cleanup the service's
@@ -724,7 +737,10 @@ export async function serve(options: ServeOptions): Promise<number> {
         // before the new one exists, so only one run ever writes the file.
         void previous?.stop();
         options.sync?.forget(issue);
-        const state = newObjective(issue, new Date(), options.frozen);
+        const now = new Date();
+        const state = newObjective(issue, now, options.frozen);
+        const deadline = deadlineAt(now, options.deadlineSeconds);
+        if (deadline) state.deadline = deadline;
         state.modules.github = github;
         // The earlier run's PRs and worktrees go before the new run plans.
         if (previous) state.kept[RERUN] = true;

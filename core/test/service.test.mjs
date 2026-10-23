@@ -2303,6 +2303,60 @@ test("an answer or retry bound to a question that changed is refused", async () 
   await stopped(service);
 });
 
+test("the deadline cancels an Objective whatever it waits on, shows in status and in a late question", async () => {
+  const inst = installation();
+  const soon = new Date(Date.now() + 30 * 60_000).toISOString();
+  seed(inst, 61, "checking", { deadline: soon });
+  // Paused and held: neither stops the clock.
+  seed(inst, 62, "checking", {
+    deadline: new Date(Date.now() + 1500).toISOString(),
+    control: { mode: "paused", by: "octo", at: new Date().toISOString() },
+  });
+  const service = serve(inst);
+  await until(() => stateOf(inst, 61).holds.length, "#61's question");
+  assert.match(
+    stateOf(inst, 61).holds[0].question,
+    /deadline is .*min from now/,
+  );
+  const row = status(inst).objectives.find((each) => each.issue === 61);
+  assert.equal(row.deadline.at, soon);
+  assert.ok(row.deadline.leftSeconds > 0 && row.deadline.leftSeconds <= 1800);
+  assert.match(cli(inst, "status", "61").out, /Deadline: .* \(\d+ min left\)/);
+  await until(
+    () => stateOf(inst, 62).done["cancel:cleanup"] === true,
+    "#62 cancelled at its deadline and cleaned up",
+  );
+  assert.equal(stateOf(inst, 62).ended.by, "deadline");
+  const ended = status(inst).objectives.find((each) => each.issue === 62);
+  assert.equal(ended.endedBy, "deadline");
+  assert.equal(ended.deadline, undefined);
+  assert.match(ended.nextAction.reason, /cancelled at its deadline/);
+  assert.equal(stateOf(inst, 61).status, "holding");
+  await stopped(service);
+});
+
+for (const point of [
+  "engine:deadline:before-cancel",
+  "engine:deadline:cancelled",
+])
+  test(`crash at ${point}, restart, cancel once at the deadline`, async () => {
+    const inst = installation();
+    seed(inst, 63, "checking", {
+      deadline: new Date(Date.now() - 1000).toISOString(),
+    });
+    const death = await serve(inst, point).exit;
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    const service = serve(inst);
+    await until(
+      () => stateOf(inst, 63).done["cancel:cleanup"] === true,
+      "cleanup after restart",
+    );
+    await stopped(service);
+    const state = stateOf(inst, 63);
+    assert.equal(state.status, "cancelled");
+    assert.equal(state.ended.by, "deadline");
+  });
+
 test("pause, drain and resume, per Objective and for the queue, survive restarts", async () => {
   const inst = installation();
   seed(inst, 52);

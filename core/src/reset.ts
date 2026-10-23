@@ -36,7 +36,7 @@ export interface ResetRecord {
 
 /**
  * The record that stands while the state is rebuilt: the old run's
- * identity (`startedAt`), frozen configuration, Project card and comment cursor, and
+ * identity (`startedAt`), deadline, frozen configuration, Project card and comment cursor, and
  * the operator's pause or drain, so nothing the operator did or wrote is
  * lost meanwhile.
  */
@@ -52,6 +52,7 @@ export function resetRecord(
   const state = newObjective(issue, now, old?.frozen ?? frozen);
   state.status = "resetting";
   if (old?.startedAt) state.startedAt = old.startedAt;
+  if (old?.deadline) state.deadline = old.deadline;
   if (old?.control) state.control = old.control;
   if (old) state.appliedRequests = old.appliedRequests;
   const module = (old?.modules.github as GitHubModule | undefined) ?? github;
@@ -236,6 +237,7 @@ export async function rebuildState(
 
   const state = newObjective(issue, new Date(requestedAt), record.frozen);
   if (record.startedAt) state.startedAt = record.startedAt;
+  if (record.deadline) state.deadline = record.deadline;
   if (card)
     state.modules.github = {
       itemId: card.itemId,

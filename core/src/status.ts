@@ -6,8 +6,8 @@ import {
   resultRereviews,
   type Usage,
 } from "./allowances.js";
-import { displayTime, eventLine, redactDeep } from "./display.js";
-import { hold as question } from "./engine.js";
+import { displayTime, duration, eventLine, redactDeep } from "./display.js";
+import { DEADLINE, hold as question } from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
 import { currentPlan } from "./planning/plan.js";
@@ -90,8 +90,15 @@ export interface ObjectiveView {
   };
   /** A reset rebuilding the state from GitHub. */
   reset?: { requestedAt: string; hadState: boolean };
+  /**
+   * Its absolute deadline, saved at admission, and the seconds left (0
+   * once it has passed); shown until it ends. At it, Factory cancels it.
+   */
+  deadline?: { at: string; leftSeconds: number };
   /** When it reached done or cancelled. */
   endedAt?: string;
+  /** Who cancelled it: `deadline` when its deadline did. */
+  endedBy?: string;
   /** What happens next, and the command that moves it, if one does. */
   nextAction: { command: string | null; reason: string };
   /** The latest run log event. */
@@ -244,7 +251,19 @@ export function statusOf(
           reset: { requestedAt: reset.requestedAt, hadState: reset.hadState },
         }
       : {}),
+    ...(state.deadline && !TERMINAL.includes(state.status)
+      ? {
+          deadline: {
+            at: state.deadline,
+            leftSeconds: Math.max(
+              0,
+              Math.floor((Date.parse(state.deadline) - Date.now()) / 1000),
+            ),
+          },
+        }
+      : {}),
     ...(state.ended ? { endedAt: state.ended.at } : {}),
+    ...(state.ended?.by ? { endedBy: state.ended.by } : {}),
     nextAction: { command: null, reason: "" },
     lastEvent,
   };
@@ -343,13 +362,12 @@ function nextAction(
         .map((option) => answerForm(option))
         .join(", ")}.`,
     };
-  if (TERMINAL.includes(row.status as ObjectiveStatus))
+  if (TERMINAL.includes(row.status as ObjectiveStatus)) {
+    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : ""}`;
     return row.running.length || row.waiting.length
-      ? {
-          command: null,
-          reason: `It has ${row.status}; Factory is cleaning up.`,
-        }
-      : { command: null, reason: `It has ${row.status}.` };
+      ? { command: null, reason: `${how}; Factory is cleaning up.` }
+      : { command: null, reason: `${how}.` };
+  }
   if (row.reset && !live)
     return {
       command: "factory serve",
@@ -489,6 +507,10 @@ function objectiveText(row: ObjectiveView): string[] {
       ? `  Next: ${row.nextAction.command}\n    ${row.nextAction.reason}`
       : `  Next: ${row.nextAction.reason}`,
   ];
+  if (row.deadline)
+    lines.push(
+      `  Deadline: ${displayTime(row.deadline.at)} (${row.deadline.leftSeconds ? `${duration(row.deadline.leftSeconds * 1000)} left` : "passed: Factory cancels it"})`,
+    );
   if (row.items.length) lines.push("  Work Items:", ...itemTable(row.items));
   if (row.frozen)
     lines.push(

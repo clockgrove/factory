@@ -72,9 +72,10 @@ Each Objective has one JSON file: `objectives/<issue>.json` under the installati
   "withdrawing": true, // optional: dequeued while its check or a re-run's cleanup ran
   "modules": { "github": {/* the card and the comment cursor */} },
   "startedAt": "<admission time: with the issue, it names the run>",
+  "deadline": "<optional: the absolute deadline, saved at admission; nothing moves it>",
   "finishedRun": "<the service run that last finished a step>",
   "updatedAt": "<time>",
-  "ended": { "at": "<first save at a terminal status>", "by": "<who cancelled>" },
+  "ended": { "at": "<first save at a terminal status>", "by": "<who cancelled; `deadline` at the deadline>" },
 }
 ```
 
@@ -214,6 +215,9 @@ A step's kept facts (`state.kept`) outlive repairs. Every read and write goes th
 | CI on a PR             | a needed check registers within 15 min of the push | hold                   |
 | CI queued or running   | 3 h of transient waiting (see [Waits](#waits))     | hold with `wait`       |
 | Hold                   | none: it waits for a person                        | nothing yet (slice 5B) |
+| Objective              | `queue.objectiveDeadlineSeconds` from admission    | cancel                 |
+
+The Objective deadline is optional (no default) and absolute: admission saves it in the state as a time (`deadline`), so a restart, a reset or a later configuration never moves it (W3-03's `factory run N --deadline` request sets its own time in place of the default). On every tick, for every Objective, whatever it waits on (a question, a pause, a human gate, a slot), the engine checks it (engine.ts `expire`); past it, it cancels through the normal cancel, recording `ended.by: "deadline"`, so cleanup runs; a restart past it cancels at once. Status shows the deadline and the time left, and a question asked within its last hour says when it falls. Crash points `engine:deadline:before-cancel` and `engine:deadline:cancelled` bracket the save.
 
 Step deadlines are fixed in the code, with two configured bounds: `validation.commandTimeoutSeconds` (default 1800) limits each validation command and sets the validation deadlines above, so a plan with many commands never outlasts its step, and a Copilot provider's `worker.idleSeconds` (default 900) is its worker's idle bound. A managed worker's `timeoutSeconds` (default 3600, at most 6000) fits inside the worker deadline. Idle bounds are the adapter's: 15 min for Codex planning and workers (5 min for a Codex review at medium effort or lower), 2 or 5 min by effort for a Claude call, and 45 min while a model's tool runs; a Claude or Copilot worker's running Validate or shell command may be silent for the item's whole validation deadline, if longer, still inside the 2 h turn. The only reminder after 24 h is a human gate's (see [Waits](#waits)). The engine's limits take shorter test timings from the environment (`FACTORY_DEADLINE_MS`, `FACTORY_WAIT_MS`, `FACTORY_NOTE_MS`, `FACTORY_REMIND_MS`, `FACTORY_BACKOFF_MS`).
 
@@ -305,7 +309,7 @@ A hold is a question with named answers. Each answer is an option, core data tha
 
 ## Cancel
 
-`/factory cancel` or `factory cancel <issue>`:
+`/factory cancel`, `factory cancel <issue>`, or the Objective's deadline (see [Deadlines](#deadlines)):
 
 1. Abort the Objective's running steps. This kills the process groups the service started for those steps; it tracks them in memory, and they die with the service anyway.
 2. Close every open Factory PR of the Objective (each branch under `factory/<issue>/`, whatever plan made it) with a comment, delete those branches Factory made (see [Idempotence](#idempotence)), close the issue as not planned, and set Status to Cancelled.

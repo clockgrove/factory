@@ -25,6 +25,9 @@ export type Outcome =
   /**
    * Try again. `afterMs: -1` is an error (an escaped exception, a missed
    * deadline, an idle model or an invalid answer): three in a row hold.
+   * `progress`: the step kept what it did (`keep`) and goes on at once (a
+   * continuation, such as collecting captured media): not a wait, so it
+   * ends any run of retries, and no note or wait clock counts it.
    * An attempt the service's death interrupted is never an outcome: it
    * runs again (see `ObjectiveRunner.tick`).
    * Anything else is a wait, classed by `wait` (CORE.md#Waits).
@@ -33,6 +36,7 @@ export type Outcome =
       kind: "retry";
       reason: string;
       afterMs?: number;
+      progress?: boolean;
       wait?: Wait;
       keep?: Record<string, unknown>;
     }
@@ -524,7 +528,8 @@ export class ObjectiveRunner {
         delete state.answers[key];
         break;
       case "retry":
-        this.retry(key, outcome);
+        if (outcome.progress) delete state.retries[key];
+        else this.retry(key, outcome);
         break;
       case "hold":
         this.hold(

@@ -1005,7 +1005,7 @@ function authorHold(
     return {
       kind: "retry",
       reason: "Planning the approved Objective.",
-      afterMs: 0,
+      progress: true,
       keep: {
         [AUTHOR_APPROVAL]: { digest, by: answer.by, at: answer.at },
       },

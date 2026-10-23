@@ -661,7 +661,7 @@ async function workStep(
         kind: "retry",
         reason:
           "The repair staged new candidate sets, so the operator chooses again",
-        afterMs: 0,
+        progress: true,
         keep: { ...keepAll, [finishedKey]: finished, [selectionKey]: null },
       };
     finished = { ...finished, sets: own.sets };
@@ -683,7 +683,7 @@ async function workStep(
       return {
         kind: "retry",
         reason: "Candidate media sets captured; collecting the result",
-        afterMs: 0,
+        progress: true,
         keep: {
           ...keepAll,
           [finishedKey]: { ...finished, sets: captured.value },
@@ -1063,7 +1063,7 @@ async function validateStep(
         return {
           kind: "retry",
           reason: `\`${result.failed.command}\` failed on a tree the worker's own validation passed; running it once more.`,
-          afterMs: 0,
+          progress: true,
           keep: {
             [flakyKey]: { tree: result.tree, command: result.failed.command },
           },
@@ -1881,6 +1881,9 @@ export function finalStep(deps: BuildDeps): Step {
   };
 }
 
+/** Final review's refusal is the open question: its `retry` means the default branch was fixed. */
+const REFUSED = "final-review:refused";
+
 /** `final-review`: every Objective criterion against the integrated result. */
 export function finalReviewStep(deps: BuildDeps): Step {
   return {
@@ -1890,13 +1893,16 @@ export function finalReviewStep(deps: BuildDeps): Step {
       guardedItem(deps, async () => {
         const { state, signal } = context;
         if (context.answer?.answer === "replan") return replanOutcome(state);
-        // A fix on the default branch: validate the new head before reviewing again.
-        if (context.answer?.answer === "retry")
+        // A `retry` to the refusal (never to an error or a wait question):
+        // the operator fixed the default branch, so validate the new head
+        // before reviewing again.
+        if (context.answer?.answer === "retry" && (state.kept ?? {})[REFUSED])
           return {
             kind: "repair",
             finding: "Final review runs again after the operator's fix.",
             target: "final",
             clear: ["final", "final-review"],
+            keep: { [REFUSED]: null },
           };
         const plan = state.done.plan as Plan;
         const final = state.done.final as FinalResult;
@@ -1960,12 +1966,13 @@ export function finalReviewStep(deps: BuildDeps): Step {
           signal,
           log: context.log,
         });
-        return reviewOutcome(review, "final:questions", () =>
-          hold(
+        return reviewOutcome(review, "final:questions", () => ({
+          ...hold(
             `Final review refused the integrated result:\n\n${review.kind === "refused" ? review.refused.map((r) => `- ${r.criterion}: ${r.detail}`).join("\n") : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.`,
             ["retry", "replan", "cancel"],
           ),
-        );
+          keep: { [REFUSED]: true },
+        }));
       }),
   };
 }
@@ -1996,7 +2003,7 @@ async function objectiveEdited(
       : {
           kind: "retry",
           reason: "Continuing with the edited Objective.",
-          afterMs: 0,
+          progress: true,
           keep: { [OBJECTIVE_ACCEPTED]: digest },
         };
   if (issue.state !== "open")

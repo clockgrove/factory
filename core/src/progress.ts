@@ -88,16 +88,13 @@ export class RunTally {
       }
     for (const event of readNew(this.dir, issue, tally.offsets)) {
       if (event.at < run) continue;
-      // `model-usage` is one event per model call (CORE.md "Model usage");
-      // `planner-call` and `worker-call` are the events it replaces.
+      // One `model-usage` event per model call (CORE.md#Model usage).
       if (event.event === "model-usage") {
         if (event.role === "worker") tally.calls.worker += 1;
         else tally.calls.planner += 1;
-        const total = (event.tokens as { total?: unknown } | undefined)?.total;
+        const total = (event.tokens as { total?: unknown } | null)?.total;
         if (typeof total === "number") tally.calls.tokens += total;
-      } else if (event.event === "planner-call") tally.calls.planner += 1;
-      else if (event.event === "worker-call") tally.calls.worker += 1;
-      else if (
+      } else if (
         event.event === "worker-activity" &&
         typeof event.item === "string"
       )

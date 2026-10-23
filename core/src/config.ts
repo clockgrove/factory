@@ -26,6 +26,7 @@ import {
 } from "./checked.js";
 import { remoteRepository } from "./git.js";
 import { type PlanningContext, planningContext } from "./knowledge/settings.js";
+import { CAPTURE_OFF, type CaptureSettings } from "./log.js";
 import { stateRoot, within } from "./paths.js";
 import { DISCOVERY_LIMITS, type DiscoveryLimits } from "./planning/types.js";
 import { serviceCredential } from "./providers/claude.js";
@@ -181,6 +182,11 @@ export interface CoreConfig {
    * like `progress`.
    */
   tracking: { enabled: boolean; issueType: string };
+  /**
+   * Model call bodies to capture files (log.ts CaptureSettings); off by
+   * default. Operational: never frozen with an Objective.
+   */
+  capture: CaptureSettings;
 }
 
 /** The operator's `sandbox` section, with defaults filled in. */
@@ -450,9 +456,8 @@ const RETIRED: Record<string, Retired> = {
   "": {
     schemaVersion: "the configuration has no schema version; remove it",
     gitPersistence: "removed: Factory keeps no remote state history",
-    capture: "session capture isn't configurable here yet; leave it out",
     nativeBoundaryTelemetry:
-      "session capture isn't configurable here yet; leave it out",
+      "removed: Codex native telemetry is always read into each call's model-usage event",
     planningContext: "moved to planning.context",
     githubManagement:
       "removed: Factory always writes queue.field and progress comments",
@@ -636,6 +641,20 @@ export function loadConfig(repository: string): CoreConfig {
       media: object({ localAssetRoots }),
       progress: object({ enabled: flag(true) }),
       tracking: object({ enabled: flag(true), issueType: text("Task") }),
+      capture: object(
+        {
+          enabled: flag(CAPTURE_OFF.enabled),
+          maxBytesPerCall: whole(
+            1024,
+            CAPTURE_OFF.maxBytesPerCall,
+            256 * 1024 * 1024,
+          ),
+        },
+        {
+          maxBytesPerInvocation: "renamed capture.maxBytesPerCall",
+          retainInRecovery: "removed: Factory keeps no recovery archive",
+        },
+      ),
     },
     problems,
     RETIRED[""],

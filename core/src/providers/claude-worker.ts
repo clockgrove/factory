@@ -74,6 +74,15 @@ import {
   PlannerError,
   providerOutcome,
 } from "./planner.js";
+import {
+  addTokens,
+  captureRequest,
+  captureResponse,
+  logUsage,
+  Tallies,
+  tokens,
+  usageRecord,
+} from "./usage.js";
 
 // Configuration
 
@@ -484,12 +493,8 @@ class Attempt {
     const ms = Date.now() - started;
     if (run.kind === "fault") throw new Error(`${run.detail}. ${run.fix}`);
     if (!run.sandboxed) throw new Error("The command sandbox is unavailable");
-    this.input.log({
-      event: "worker-command",
-      exitCode: run.exitCode,
-      timedOut: run.timedOut,
-      ms,
-    });
+    if (run.timedOut || run.exitCode !== 0)
+      this.input.activity({ kind: "command-failed" });
     // What it wrote counts whether it finished or was stopped.
     if (run.diskOverflow)
       throw new Error(`the command ran, but ${run.diskOverflow}`);
@@ -926,29 +931,6 @@ function failure(
   }
 }
 
-/** Which tool a call used and the worktree file or program it targeted, never its content. */
-function toolActivity(
-  worktree: string,
-  name: string,
-  input: unknown,
-): { tool: string; target?: string } {
-  const args =
-    input && typeof input === "object"
-      ? (input as Record<string, unknown>)
-      : {};
-  const path = [args.file_path, args.path, args.to].find(
-    (value) => typeof value === "string",
-  ) as string | undefined;
-  let target: string | undefined;
-  if (path !== undefined) {
-    const inTree = relative(resolve(worktree), resolve(worktree, path));
-    if (inTree && !inTree.startsWith("..") && !isAbsolute(inTree))
-      target = inTree;
-  } else if (typeof args.command === "string")
-    target = args.command.trim().split(/\s+/, 1)[0]?.split("/").pop();
-  return { tool: name, ...(target && { target: target.slice(0, 200) }) };
-}
-
 /** Built-in tools whose path argument names the file they write. */
 const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", COPY_TOOL];
 
@@ -1046,9 +1028,26 @@ export class ClaudeWorker implements Worker {
       validate,
       worktreeRead: attempt.grants.read,
     });
+    const record = usageRecord({
+      role: "worker",
+      provider: "claude",
+      model: config.model,
+      effort: config.effort,
+      item: input.item.id,
+    });
+    captureRequest(record, input.prompt);
+    const started = Date.now();
     try {
-      return await this.converse(attempt, sdk, login);
+      const result = await this.converse(attempt, sdk, login, record);
+      record.outcome = result.kind;
+      return result;
+    } catch (error) {
+      record.outcome = "error";
+      record.error = detail(String(error));
+      throw error;
     } finally {
+      record.ms = Date.now() - started;
+      logUsage(input.log, record);
       await attempt.close();
     }
   }
@@ -1152,6 +1151,7 @@ export class ClaudeWorker implements Worker {
     attempt: Attempt,
     sdk: SdkModule,
     login: Record<string, string>,
+    record: Record<string, unknown>,
   ): Promise<WorkerResult> {
     const { input } = attempt;
     // A running Validate or shell command sends no events; its silence is
@@ -1190,9 +1190,13 @@ export class ClaudeWorker implements Worker {
     // A query's results report its running total; credential retries add queries.
     let spentUsd = 0;
     let queryUsd = 0;
+    // Tokens likewise: the queries a credential retry ended, and the running one.
+    let spentTokens = tokens({ input: 0, output: 0, cached: 0 });
+    let queryTokens = spentTokens;
     let result: SDKResultMessage | undefined;
     /** Running tool calls' names by id, for their results. */
     const toolNames = new Map<string, string>();
+    const calls = new Tallies();
     try {
       let events = start(input.prompt);
       for (;;) {
@@ -1210,7 +1214,6 @@ export class ClaudeWorker implements Worker {
         );
         if (message.type === "assistant" || message.type === "user") {
           const content = message.message.content;
-          const tools: { tool: string; target?: string }[] = [];
           if (Array.isArray(content))
             for (const block of content)
               if (block.type === "tool_use") {
@@ -1218,9 +1221,8 @@ export class ClaudeWorker implements Worker {
                   id: block.id,
                   active: true,
                 });
-                tools.push(
-                  toolActivity(input.worktree, block.name, block.input),
-                );
+                calls.add(block.name, block.id);
+                record.nativeToolActivity = calls.value;
                 toolNames.set(block.id, block.name);
                 reportToolUse(input, block.name, block.input);
               } else if (block.type === "tool_result") {
@@ -1238,8 +1240,6 @@ export class ClaudeWorker implements Worker {
             message.message.model !== SYNTHETIC_MODEL
           )
             input.activity({ kind: "turn" });
-          if (tools.length)
-            input.log({ event: "worker-tools", tools: tools.slice(0, 16) });
         }
         if (
           message.type === "rate_limit_event" &&
@@ -1253,20 +1253,18 @@ export class ClaudeWorker implements Worker {
         }
         if (message.type === "system" && message.subtype === "init") {
           facts.initialized = true;
-          input.log({ event: "worker-session", session: message.session_id });
+          record.session = message.session_id;
         }
         if (message.type !== "result") continue;
         result = message;
         if (Number.isFinite(message.total_cost_usd))
           queryUsd = message.total_cost_usd;
-        input.log({
-          event: "worker-result",
-          subtype: message.subtype,
-          turns: message.num_turns,
-          usage: usageOf(message),
-          queryCostUsd: message.total_cost_usd,
-          ...(message.stop_reason && { stopReason: message.stop_reason }),
-        });
+        queryTokens = tokens({ ...usageOf(message) });
+        record.tokens = addTokens(spentTokens, queryTokens);
+        record.costUsd = spentUsd + queryUsd;
+        record.turns = message.num_turns;
+        record.resultSubtype = message.subtype;
+        if (message.stop_reason) record.stopReason = message.stop_reason;
         const error = resultError(message);
         if (
           facts.initialized &&
@@ -1293,6 +1291,8 @@ export class ClaudeWorker implements Worker {
           result = undefined;
           spentUsd += queryUsd;
           queryUsd = 0;
+          spentTokens = addTokens(spentTokens, queryTokens);
+          queryTokens = tokens({ input: 0, output: 0, cached: 0 });
           events = start(`${input.prompt}${CREDENTIAL_RESTART}`);
           continue;
         }
@@ -1357,14 +1357,12 @@ export class ClaudeWorker implements Worker {
     const tree = attempt.grants.validate
       ? await attempt.validator.finalTree()
       : undefined;
-    input.log({
-      event: "worker-finished",
-      costUsd: spentUsd + queryUsd,
-      ...(attempt.grants.validate && { finalTreeValidated: Boolean(tree) }),
-    });
+    if (attempt.grants.validate) record.finalTreeValidated = Boolean(tree);
+    const finalResponse = result.subtype === "success" ? result.result : "";
+    captureResponse(record, finalResponse);
     return {
       kind: "finished",
-      finalResponse: result.subtype === "success" ? result.result : "",
+      finalResponse,
       ...(tree && { validated: { tree, commands: [...input.commands] } }),
     };
   }

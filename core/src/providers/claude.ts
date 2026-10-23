@@ -33,6 +33,7 @@ import {
   PlannerError,
   type PlannerModels,
 } from "./planner.js";
+import { captureResponse, Tallies, tokens } from "./usage.js";
 
 export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
 
@@ -881,6 +882,7 @@ export class ClaudePlanner implements Planner {
       const callStarted = Date.now();
       const events = session[Symbol.asyncIterator]();
       let result: SDKResultMessage | undefined;
+      const calls = new Tallies();
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
@@ -910,6 +912,10 @@ export class ClaudePlanner implements Planner {
           const content = message.message.content;
           if (Array.isArray(content))
             for (const block of content) {
+              if (block.type === "tool_use") {
+                calls.add(block.name, block.id);
+                record.nativeToolActivity = calls.value;
+              }
               if (
                 block.type === "tool_use" &&
                 TREE_REVIEW_TOOLS.includes(block.name)
@@ -948,8 +954,16 @@ export class ClaudePlanner implements Planner {
       if (!result)
         throw new PlannerError("retry", "Claude SDK ended without a result");
       const usage = usageOf(result);
-      record.usage = usage;
+      record.tokens = tokens({ ...usage });
       record.costUsd = result.total_cost_usd;
+      captureResponse(
+        record,
+        result.subtype === "success"
+          ? result.structured_output === undefined
+            ? result.result
+            : JSON.stringify(result.structured_output)
+          : result.subtype,
+      );
       record.turns = result.num_turns;
       if (result.stop_reason) record.stopReason = result.stop_reason;
       const value = settle(result, facts, call.schema);

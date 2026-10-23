@@ -43,6 +43,7 @@ import {
 import { lockHeld } from "./lock.js";
 import {
   type LogEvent,
+  newRunId,
   RunLog,
   readLog,
   readNew,
@@ -470,6 +471,7 @@ async function serveCommand(
   let workflow = objectiveWorkflow();
   let frozen: Frozen | undefined;
   let freeze: ((provider: string) => Frozen | undefined) | undefined;
+  let log: RunLog | undefined;
   if (existsSync(configPath(repository))) {
     let config: CoreConfig;
     try {
@@ -491,12 +493,9 @@ async function serveCommand(
       config.repository,
       process.env.FACTORY_GITHUB_API,
     ).redacting(config.secrets);
-    sync = new GitHubSync(
-      github,
-      config,
-      new RunLog(paths.logs, "sync"),
-      limits,
-    );
+    // One log per service run: the sync's events go to the run's files too.
+    log = new RunLog(paths.logs, newRunId(), config.capture, config.secrets);
+    sync = new GitHubSync(github, config, log, limits);
     const routes = new Map<string, ProviderRoute>();
     for (const [each, settings] of Object.entries(config.providers))
       routes.set(each, {
@@ -530,6 +529,7 @@ async function serveCommand(
     ...(loaded ? {} : { unconfigured: configPath(repository) }),
     ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
     ...(sync ? { sync, reset: true } : {}),
+    ...(log ? { log } : {}),
     ...(frozen ? { frozen } : {}),
     ...(freeze ? { freeze } : {}),
     ...(loaded?.queue.objectiveDeadlineSeconds
@@ -565,7 +565,12 @@ async function dream(
   const parsed = dreamCommand(args.flags) as DreamCommand;
   const config = loadConfig(repository);
   const name = providerName(config, args);
-  const log = new RunLog(paths.logs, "dream");
+  const log = new RunLog(
+    paths.logs,
+    newRunId(),
+    config.capture,
+    config.secrets,
+  );
   try {
     return await runDream(parsed, {
       settings: knowledge(config, paths),

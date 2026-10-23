@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
@@ -7,30 +8,109 @@ import {
   readSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+
+/**
+ * A new run id: the start time, then the process id. Ids sort by start
+ * time, contain no dot, and name a run's log file and capture directory.
+ */
+export function newRunId(at = new Date()): string {
+  return `${at.toISOString().replace(/[:.]/g, "-")}-${process.pid}`;
+}
+
+/** The run a run-log file or capture directory belongs to: its name up to the first dot. */
+export const runOfFile = (path: string): string =>
+  basename(path).split(".")[0]!;
+
+/**
+ * Content capture (CORE.md#Content capture): off by default. Enabled, the
+ * request and response bodies of each model call go to their own file,
+ * redacted and cut to `maxBytesPerCall`, and the run log references it.
+ */
+export interface CaptureSettings {
+  enabled: boolean;
+  maxBytesPerCall: number;
+}
+
+export const CAPTURE_OFF: CaptureSettings = {
+  enabled: false,
+  maxBytesPerCall: 8 * 1024 * 1024,
+};
+
+/**
+ * The key a model-usage event carries its bodies under. A symbol is never
+ * serialized, so a body can't reach the run log; it survives the spreads
+ * that add a step or hedge on the way to `RunLog.write`.
+ */
+export const CAPTURE = Symbol("capture");
+
+export interface CaptureBody {
+  request: string;
+  response?: string;
+}
 
 /**
  * The run log: one append-only JSON-lines file per Objective per service
- * start. It records what happened for status, diagnostics and analysis. It
- * never drives progress, and losing it loses no work.
+ * run, `logs/<issue>/<run id>.jsonl`, and with capture on its bodies under
+ * `logs/<issue>/<run id>.captures/`. It records what happened for status,
+ * diagnostics and analysis. It never drives progress, and losing it loses
+ * no work.
  */
 export class RunLog {
   private readonly files = new Map<number, string>();
 
   constructor(
     private readonly dir: string,
-    private readonly runId: string,
+    readonly runId: string,
+    private readonly capture: CaptureSettings = CAPTURE_OFF,
+    private readonly secrets: readonly string[] = [],
   ) {}
 
   write(issue: number, event: Record<string, unknown>): void {
     try {
+      const body = (event as { [CAPTURE]?: CaptureBody })[CAPTURE];
+      const id = body && this.capture.enabled && this.captured(issue, body);
       appendFileSync(
         this.file(issue),
-        `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`,
+        `${JSON.stringify({ at: new Date().toISOString(), ...event, ...(id ? { capture: id } : {}) })}\n`,
       );
     } catch {
       // A full disk or a removed directory must not stop the run: the log only observes.
+    }
+  }
+
+  /**
+   * One call's bodies as `<id>.json`, 0600 in a 0700 directory: each body
+   * redacted, then cut so the file stays within the bound. Its id, or
+   * undefined when it couldn't be written.
+   */
+  private captured(issue: number, body: CaptureBody): string | undefined {
+    try {
+      const dir = join(this.dir, String(issue), `${this.runId}.captures`);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const id = randomUUID();
+      const half = Math.floor(this.capture.maxBytesPerCall / 2);
+      const request = bounded(redact(body.request, this.secrets), half);
+      const response =
+        body.response === undefined
+          ? undefined
+          : bounded(redact(body.response, this.secrets), half);
+      writeFileSync(
+        join(dir, `${id}.json`),
+        JSON.stringify({
+          id,
+          run: this.runId,
+          request: request.text,
+          ...(response ? { response: response.text } : {}),
+          truncated: request.cut || Boolean(response?.cut),
+        }),
+        { mode: 0o600 },
+      );
+      return id;
+    } catch {
+      return undefined;
     }
   }
 
@@ -44,6 +124,20 @@ export class RunLog {
     }
     return path;
   }
+}
+
+/** `text` within `bytes` of UTF-8, cut at a character boundary. */
+function bounded(text: string, bytes: number): { text: string; cut: boolean } {
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length <= bytes) return { text, cut: false };
+  // A cut inside a character decodes to U+FFFD; drop it.
+  return {
+    text: buffer
+      .subarray(0, bytes)
+      .toString("utf8")
+      .replace(/\uFFFD$/, ""),
+    cut: true,
+  };
 }
 
 /** One run log event: when, and what (step, event, outcome, ...). */
@@ -77,7 +171,9 @@ export function readLog(
     const start = Math.max(0, size - bytes);
     const complete = completeLines(readFrom(file, start, size));
     ends.set(file, start + complete.length);
-    events.push(...parseLines(complete.toString("utf8"), start > 0));
+    events.push(
+      ...ofRun(file, parseLines(complete.toString("utf8"), start > 0)),
+    );
   }
   return {
     events: events.sort((a, b) => a.at.localeCompare(b.at)).slice(-tail),
@@ -101,9 +197,16 @@ export function readNew(
     const complete = completeLines(readFrom(file, from, sizeOf(file)));
     if (!complete.length) continue;
     offsets.set(file, from + complete.length);
-    fresh.push(...parseLines(complete.toString("utf8")));
+    fresh.push(...ofRun(file, parseLines(complete.toString("utf8"))));
   }
   return fresh.sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/** Each event marked with the run whose file it was read from. */
+function ofRun(file: string, events: LogEvent[]): LogEvent[] {
+  const run = runOfFile(file);
+  for (const event of events) event.run ??= run;
+  return events;
 }
 
 /**
@@ -193,27 +296,51 @@ const DEFAULT_RETENTION: Retention = {
 
 /**
  * Keep the newest runs per Objective, then the newest runs overall within
- * the byte cap. Run ids sort by start time, so name order is age order.
+ * the byte cap. A run is its log file and its capture directory, removed
+ * together. Run ids sort by start time, so id order is age order.
  */
 export function rotateLogs(dir: string, retention = DEFAULT_RETENTION): void {
-  const runs: { path: string; name: string; bytes: number }[] = [];
+  const runs: { paths: string[]; id: string; bytes: number }[] = [];
   for (const issue of safeList(dir)) {
     const issueDir = join(dir, issue);
-    const names = safeList(issueDir).sort();
-    const excess = names.length - retention.runsPerObjective;
-    names.forEach((name, i) => {
-      const path = join(issueDir, name);
-      if (i < excess) rmSync(path, { recursive: true, force: true });
-      else runs.push({ path, name, bytes: sizeOf(path) });
+    const byRun = new Map<string, string[]>();
+    for (const name of safeList(issueDir)) {
+      const id = runOfFile(name);
+      byRun.set(id, [...(byRun.get(id) ?? []), join(issueDir, name)]);
+    }
+    const ids = [...byRun.keys()].sort();
+    const excess = ids.length - retention.runsPerObjective;
+    ids.forEach((id, i) => {
+      const paths = byRun.get(id)!;
+      if (i < excess) remove(paths);
+      else runs.push({ paths, id, bytes: paths.reduce(addSize, 0) });
     });
   }
-  runs.sort((a, b) => (a.name < b.name ? 1 : -1));
+  runs.sort((a, b) => (a.id < b.id ? 1 : -1));
   let total = 0;
   for (const run of runs) {
     total += run.bytes;
-    if (total > retention.totalBytes)
-      rmSync(run.path, { recursive: true, force: true });
+    if (total > retention.totalBytes) remove(run.paths);
   }
+}
+
+function remove(paths: string[]): void {
+  for (const path of paths) rmSync(path, { recursive: true, force: true });
+}
+
+/** A file's size, or a capture directory's files' sizes. */
+function addSize(sum: number, path: string): number {
+  const own = sizeOf(path);
+  try {
+    if (statSync(path).isDirectory())
+      return safeList(path).reduce(
+        (inner, name) => inner + sizeOf(join(path, name)),
+        sum,
+      );
+  } catch {
+    // Gone meanwhile: counts nothing.
+  }
+  return sum + own;
 }
 
 function safeList(dir: string): string[] {

@@ -62,6 +62,13 @@ import { serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
 import type { WorkerConfig } from "./config.js";
 import { detail, PlannerError, providerOutcome } from "./planner.js";
+import {
+  captureRequest,
+  captureResponse,
+  logUsage,
+  tokens,
+  usageRecord,
+} from "./usage.js";
 
 const RESULT_MAX_BYTES = 200 * 1024 * 1024;
 const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
@@ -480,17 +487,24 @@ abstract class ManagedWorker implements Worker {
   async run(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
     const key = workKey(input.worktree);
-    const record: Record<string, unknown> = {
-      event: "worker-call",
+    const record = usageRecord({
+      role: "worker",
       provider: this.config.kind,
+      model:
+        this.config.kind === "openai-agents"
+          ? this.config.model
+          : `${this.config.agentId}@${this.config.agentVersion}`,
+      effort: this.config.kind === "openai-agents" ? this.config.effort : null,
       item: input.item.id,
-      key,
-    };
+    });
+    record.key = key;
+    captureRequest(record, input.prompt);
     const signal = AbortSignal.any([
       input.signal,
       AbortSignal.timeout(this.config.timeoutSeconds * 1000),
     ]);
     const { spend, over } = allowance(input, this.config);
+    const before = { cents: spend.cents, tokens: spend.tokens };
     let marker: Marker | undefined;
     let scratch: string | undefined;
     try {
@@ -582,10 +596,17 @@ abstract class ManagedWorker implements Worker {
           }),
         );
       if (scratch) rmSync(scratch, { recursive: true, force: true });
+      if (typeof record.finalResponse === "string")
+        captureResponse(record, record.finalResponse);
       delete record.finalResponse;
       record.spend = spend;
+      // The hosted session reports a total only: no input, output or cache
+      // split. It includes what a crashed earlier run left, collected above.
+      record.tokens = tokens({ total: spend.tokens - before.tokens });
+      if (this.config.kind === "claude-managed-agents")
+        record.costUsd = (spend.cents - before.cents) / 100;
       record.ms = Date.now() - started;
-      input.log(record);
+      logUsage(input.log, record);
     }
   }
 

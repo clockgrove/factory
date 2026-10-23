@@ -353,16 +353,74 @@ Cancel reads only the Objective's state file and its open PRs, so its cost doesn
 
 ## Run log
 
-Each service run appends to `logs/<issue>/<service run>.jsonl`: step start and end, outcome, durations, tokens, cost, errors, and references to body files in the same directory.
+Each service run appends to `logs/<issue>/<run id>.jsonl`: step start and end, outcome, durations, one `model-usage` event per model call, errors, and references to capture files. Issue 0 holds the service's own events.
 
+- **Run ids.** A run id is the run's start time and process id (`2026-10-23T04-12-09-125Z-4242`, log.ts `newRunId`): ids sort by start time. The service, its GitHub sync and every Objective share the run's id, so one service run is one file per issue. A `factory dream` call is a run of its own. Readers (`factory log --json`, watch, status) mark each event with `run`, from its file's name.
 - `factory status` reads the state file plus the end of the log.
 - `factory watch [ISSUE]` follows the log like `log --follow` and shows one row per Work Item: its step, its last outcome or hold, and its worker's activity. It reads the log only.
 - Diagnostics, capture export, accounting, scorecards and analysis read logs. They never write state.
-- The service keeps the last 20 runs per Objective and 2 GB in total, deleting the oldest first.
+- **Retention.** A run is its log file and its capture directory, kept or deleted together. The service keeps the last 20 runs per Objective and 2 GB in total, deleting the oldest first.
+
+### Model usage
+
+Every model call writes one `model-usage` event when it ends, whatever its outcome: planning, plan and result review, final review, diagnosis, semantic discovery, Dream and every worker run. The shape is the same for Codex, Claude, Copilot and managed workers (providers/usage.ts). A count the provider doesn't report is `null`, never 0. Diagnostics, analysis and the scorecard (wave 5) read this event.
+
+```json
+{
+  "at": "...",
+  "step": "item:a:work",
+  "event": "model-usage",
+  "role": "worker",
+  "provider": "codex",
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "item": "a",
+  "outcome": "finished",
+  "ms": 81234,
+  "tokens": {
+    "input": 993817,
+    "output": 2974,
+    "cached": 936192,
+    "reasoning": 752,
+    "total": 996791
+  },
+  "tokenSource": "sdk",
+  "costUsd": null,
+  "sdkOperations": {
+    "total": 14,
+    "byName": { "command_execution": 11, "file_change": 3 }
+  },
+  "nativeToolActivity": { "total": 16, "byName": { "exec": 16 } },
+  "cacheEffectiveness": { "hitRate": 0.942, "uncachedInput": 57625 },
+  "capture": "4f0c..."
+}
+```
+
+- `role`: `planner`, `reviewer`, `worker`, `discovery` or `dream`. A planner-seam call also has `phase` (`plan`, `graph-review`, `result-review`, `objective-review`, `diagnosis`, `discovery`, `dream`) and `tools` (it could read a tree); a worker has `item`.
+- `outcome`: a planner call's `done`, `retry`, `hold`, `fail` or `error` (with `error`); a worker's result kind (`finished`, `retry`, `hold`) or `error`. `ms` is the call's wall time. A hedged second call (planner.ts HedgedPlanner) logs its own event with `hedge: 1`.
+- `tokens`: `input` includes `cached`; `output` includes `reasoning`; `total` is input plus output, or the provider's own total when it reports no split (managed workers). Claude and Copilot report no reasoning count; a Claude worker sums its queries, credential retries included.
+- `tokenSource` (Codex only): `sdk`, from the SDK's `turn.completed`, or `native`, from Codex's session record when the stream ended before it.
+- `costUsd`: list cost when the provider reports it (Claude, Claude managed), else `null`.
+- `sdkOperations`: the SDK's own operation items, each item id once across its started, updated and completed events (Codex: command executions, file changes, MCP calls, web searches, to-do lists); `null` where the SDK has no such view (Claude, Copilot, managed).
+- `nativeToolActivity`: the model-visible tool calls by name, each call id once (Codex: from its session record, providers/codex-telemetry.ts; Claude: `tool_use` blocks; Copilot: tool executions); `null` where unseen. One call can run many commands. `nativePartial: true` when the Codex record was past its 8 MiB read bound.
+- `cacheEffectiveness`: this call's `hitRate` (cached over input, 4 places; `null` with no input) and `uncachedInput` (input minus cached); `null` when either count is unknown. Aggregates weight by input; never average hit rates.
+- `capture`: the id of the call's capture file, only when capture is on and the file was written.
+- An adapter adds its own fields: `session` or `thread`, `turns`, `stopReason`, `finalTreeValidated`, managed `key` and `spend`.
+
+**Codex native telemetry.** Each Codex call runs in a private `CODEX_HOME`. Before it is removed, providers/codex-telemetry.ts reads the thread's session record (`sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`, its last 8 MiB): the last `token_count` gives the thread's counts (reasoning included), and the `function_call`, `custom_tool_call`, `local_shell_call` and `web_search_call` items give `nativeToolActivity`. Unreadable or missing, it adds nothing.
+
+### Content capture
+
+Off by default. With `"capture": {"enabled": true}` in the configuration, the request and response bodies of each model call go to `logs/<issue>/<run id>.captures/<id>.json`, and the call's `model-usage` event names the file by `capture`. Bodies never enter the run log itself.
+
+- A capture file is `{id, run, request, response, truncated}`: the request is the prompt the call sent (a worker's whole prompt), the response its answer or final message; a call with no answer has no `response`.
+- Each body is redacted (log.ts `redact`, with the configuration's secrets), then cut to half of `capture.maxBytesPerCall` (default 8 MiB, at least 1 KiB, at most 256 MiB); `truncated` says a body was cut. Redaction is best effort.
+- Files are `0600` in a `0700` directory and rotate with their run. A capture that can't be written is skipped; the call and its event are unaffected.
+- Capture is operational, never frozen with an Objective: turning it on or off applies from the next service start and changes no run.
 
 ### Worker activity
 
-Every worker (Codex, Claude, Copilot, managed) reports what it is doing through one hook, `WorkerInput.activity` (work/worker.ts): a tool started or finished (its name), a file edited (its path), a command run (its command line) or a model turn. `ActivityLog` writes it to the run log as one event, at most one per Work Item per 5 s: the first report after a quiet interval at once, the rest coalesced, and what is pending when the run ends. The shape is stable: the live status comment and other log readers build on it.
+Every worker (Codex, Claude, Copilot, managed) reports what it is doing through one hook, `WorkerInput.activity` (work/worker.ts): a tool started or finished (its name), a file edited (its path), a command run (its command line), a command failed, or a model turn. The adapters write no other per-tool lines. `ActivityLog` writes it to the run log as one event, at most one per Work Item per 5 s: the first report after a quiet interval at once, the rest coalesced, and what is pending when the run ends. The shape is stable: the live status comment and other log readers build on it.
 
 ```json
 {
@@ -375,6 +433,7 @@ Every worker (Codex, Claude, Copilot, managed) reports what it is doing through 
     "toolsFinished": 3,
     "edits": 2,
     "commands": 1,
+    "commandsFailed": 0,
     "turns": 2
   },
   "tools": ["Edit", "Bash"],
@@ -383,7 +442,7 @@ Every worker (Codex, Claude, Copilot, managed) reports what it is doing through 
 }
 ```
 
-- `counts`: what happened since the previous event; every field is always present.
+- `counts`: what happened since the previous event; every field is always present. `commandsFailed` counts commands that ended with a non-zero exit, a signal or their time limit (Codex's shell, Claude's Factory shell).
 - `tools`: the distinct tools started in that window, at most 8; `paths`: the distinct files edited, relative to the worktree when inside it, at most 8.
 - `command`: the last command started in the window, on one line and cut to 200 characters; absent when none ran.
 - Every string is redacted (log.ts `redact`, with the configuration's secrets) before it is cut. File contents, tool output and model text are never reported.
@@ -392,7 +451,7 @@ Every worker (Codex, Claude, Copilot, managed) reports what it is doing through 
 
 Each Objective run has one live status comment on its issue (progress.ts), posted once and then edited in place. Its marker names the run (`status:<run>`). github-sync.ts writes it as a background job, so it never blocks a step, and a failed write retries with the job's backoff.
 
-- **Body.** The `factory status` model (status.ts `statusOf`), redacted with the configuration's secrets before it is rendered: the phase and the next action, the Work Item table, each running item's worker (active, or quiet for 5 min or more, from its latest `worker-activity` event), waits, open questions with their answers, the decisions taken (planning decisions and step answers), and run details: admission, provider, the frozen configuration's digest and the model calls so far (`model-usage` events, by role, with their reported tokens; the older `planner-call` and `worker-call` events count too). Times are UTC ISO, with "N min ago" as of the edit. It lists the first 50 Work Items, 20 questions and the newest 20 decisions, then "+N more" and `factory status N`, and cuts whole lines to stay under the plan comment's size limit. Untrusted text is escaped: inline code takes a fence longer than any backtick run inside (markdown.ts `code`), and prose escapes `<`, `>` and `@` (`prose`); the hold comments use the same helpers.
+- **Body.** The `factory status` model (status.ts `statusOf`), redacted with the configuration's secrets before it is rendered: the phase and the next action, the Work Item table, each running item's worker (active, or quiet for 5 min or more, from its latest `worker-activity` event), waits, open questions with their answers, the decisions taken (planning decisions and step answers), and run details: admission, provider, the frozen configuration's digest and the model calls so far (`model-usage` events, by role, with their reported tokens). Times are UTC ISO, with "N min ago" as of the edit. It lists the first 50 Work Items, 20 questions and the newest 20 decisions, then "+N more" and `factory status N`, and cuts whole lines to stay under the plan comment's size limit. Untrusted text is escaped: inline code takes a fence longer than any backtick run inside (markdown.ts `code`), and prose escapes `<`, `>` and `@` (`prose`); the hold comments use the same helpers.
 - **Edits.** At most one per Objective per 60 s, and only when the body's stable part changed, by its hash. The stable part leaves out the ages, the edit time and each worker's last report and counts, so liveness moves only with the 10 min refresh while a step runs. Edits share an installation-wide budget of 300 an hour; over it an edit waits, except the one that shows a finished Objective's final status. The run log is read forward from where the last render stopped, and files last written before the run began are skipped.
 - **Settling.** A finished Objective settles only once the comment shows its final status. A lasting refusal (a 4xx that isn't a rate limit), or any other failure three times in a row (a render that keeps throwing), gives the comment up for the run (`statusGivenUp`, logged as `status-given-up`), and it then counts as shown.
 - **Off.** `progress.enabled: false` turns it off. The setting is operational, so changing it never holds a started Objective.

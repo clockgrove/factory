@@ -27,7 +27,7 @@ import type {
 } from "./github-sync.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { takeServiceLock } from "./lock.js";
-import { RunLog, rotateLogs } from "./log.js";
+import { newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { pathsOverlap } from "./planning/graph.js";
 import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
@@ -73,6 +73,8 @@ export interface ServeOptions {
   tickMs?: number;
   /** GitHub queue, display and comments. Absent without configuration. */
   sync?: GitHubSync;
+  /** This run's log, shared with `sync`; absent, a new one without capture. */
+  log?: RunLog;
   /** The configuration each newly admitted Objective freezes. */
   frozen?: Frozen;
   /** The configuration an Objective admitted for `factory run --provider NAME` freezes; undefined for a provider it lacks. */
@@ -147,8 +149,8 @@ export async function serve(options: ServeOptions): Promise<number> {
   for (const dir of [paths.objectives, paths.requests, paths.logs])
     mkdirSync(dir, { recursive: true });
   const startedAt = new Date();
-  const runId = `${startedAt.toISOString().replace(/[:.]/g, "-")}-${process.pid}`;
-  const log = new RunLog(paths.logs, runId);
+  const log = options.log ?? new RunLog(paths.logs, newRunId(startedAt));
+  const { runId } = log;
   const run: ServiceRun = { id: runId, finished: 0, resumeAt: 0 };
   // The last run's record, read before this run's first heartbeat replaces it.
   const previous = readServiceRecord(paths.root);

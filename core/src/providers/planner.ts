@@ -14,6 +14,7 @@ import {
   type Outcome,
 } from "../engine.js";
 import type { Wait } from "../state.js";
+import { captureRequest, logUsage, plannerRole, usageRecord } from "./usage.js";
 
 export const PLANNER_PHASES = [
   "plan",
@@ -148,7 +149,11 @@ export function detail(text: string): string {
   return text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
 }
 
-/** Run one call and log it as a `planner-call` event with its outcome and duration. */
+/**
+ * Run one call and log it as its `model-usage` event (usage.ts), with its
+ * outcome and duration. The adapter fills the record's tokens, cost and
+ * operations, and attaches the bodies for capture.
+ */
 export async function loggedCall<Effort extends string>(
   provider: string,
   call: PlannerCall,
@@ -156,15 +161,15 @@ export async function loggedCall<Effort extends string>(
   run: (record: Record<string, unknown>) => Promise<Omit<PlannerAnswer, "ms">>,
 ): Promise<PlannerAnswer> {
   const started = Date.now();
-  const record: Record<string, unknown> = {
-    event: "planner-call",
+  const record = usageRecord({
+    role: plannerRole(call.role, call.phase),
     provider,
-    role: call.role,
-    phase: call.phase,
     model: choice.model,
     effort: choice.effort,
-    tools: Boolean(call.readDir),
-  };
+    phase: call.phase,
+  });
+  record.tools = Boolean(call.readDir);
+  captureRequest(record, call.prompt);
   try {
     const answer = await run(record);
     record.outcome = "done";
@@ -175,7 +180,7 @@ export async function loggedCall<Effort extends string>(
     throw error;
   } finally {
     record.ms = Date.now() - started;
-    call.log(record);
+    logUsage(call.log, record);
   }
 }
 

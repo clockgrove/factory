@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
 import { errored } from "../engine.js";
@@ -41,12 +41,24 @@ import {
   saveModelsCache,
 } from "./codex.js";
 import {
+  addCodexTelemetry,
+  codexTokens,
+  SDK_OPERATIONS,
+} from "./codex-telemetry.js";
+import {
   detail,
   IdleWatchdog,
   type ModelChoice,
   PlannerError,
   providerOutcome,
 } from "./planner.js";
+import {
+  captureRequest,
+  captureResponse,
+  logUsage,
+  Tallies,
+  usageRecord,
+} from "./usage.js";
 
 export const DEFAULT_CODEX_WORKER_MODEL: ModelChoice<CodexEffort> = {
   model: "gpt-6.1-sol",
@@ -304,6 +316,12 @@ function codexActivity(
   if (tool) input.activity({ kind: "tool", phase, tool });
   if (phase === "started" && item.type === "command_execution")
     input.activity({ kind: "command", command: item.command });
+  if (
+    phase === "finished" &&
+    item.type === "command_execution" &&
+    (item.status === "failed" || (item.exit_code ?? 0) !== 0)
+  )
+    input.activity({ kind: "command-failed" });
   if (phase === "finished" && item.type === "file_change")
     for (const change of item.changes)
       input.activity({ kind: "edit", path: change.path });
@@ -321,13 +339,14 @@ export class CodexWorker implements Worker {
 
   async run(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
-    const record: Record<string, unknown> = {
-      event: "worker-call",
+    const record = usageRecord({
+      role: "worker",
       provider: "codex",
-      item: input.item.id,
       model: this.model.model,
       effort: this.model.effort,
-    };
+      item: input.item.id,
+    });
+    captureRequest(record, input.prompt);
     try {
       const result = await this.turn(input, record);
       record.outcome = result.kind;
@@ -340,7 +359,7 @@ export class CodexWorker implements Worker {
       throw error;
     } finally {
       record.ms = Date.now() - started;
-      input.log(record);
+      logUsage(input.log, record);
     }
   }
 
@@ -434,6 +453,8 @@ export class CodexWorker implements Worker {
       let finalResponse = "";
       let completed = false;
       let streamError: string | undefined;
+      const operations = new Tallies();
+      record.sdkOperations = operations.value;
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
@@ -449,32 +470,13 @@ export class CodexWorker implements Worker {
         if (event.type === "thread.started") record.thread = event.thread_id;
         if (item?.type === "agent_message") finalResponse = item.text;
         if (item) codexActivity(input, event.type, item);
-        if (event.type === "item.completed" && item) {
-          if (item.type === "command_execution")
-            input.log({
-              event: "worker-command",
-              item: input.item.id,
-              command: detail(redact(item.command, secrets)),
-              exitCode: item.exit_code,
-              status: item.status,
-            });
-          if (item.type === "file_change")
-            input.log({
-              event: "worker-edit",
-              item: input.item.id,
-              status: item.status,
-              paths: item.changes
-                .map((change) => relative(input.worktree, change.path))
-                .slice(0, 16),
-            });
+        if (item && SDK_OPERATIONS.has(item.type)) {
+          operations.add(item.type, item.id);
+          record.sdkOperations = operations.value;
         }
         if (event.type === "turn.completed") {
           completed = true;
-          record.usage = {
-            input: event.usage.input_tokens,
-            output: event.usage.output_tokens,
-            cached: event.usage.cached_input_tokens,
-          };
+          record.tokens = codexTokens(event.usage);
         }
         if (event.type === "turn.failed")
           return outcome(codexFailure(redact(event.error.message, secrets)));
@@ -486,6 +488,7 @@ export class CodexWorker implements Worker {
         return streamError
           ? outcome(codexFailure(redact(streamError, secrets)))
           : { kind: "retry", reason: "Codex ended without a completed turn" };
+      captureResponse(record, finalResponse);
       return { kind: "finished", finalResponse };
     } catch (error) {
       if (error instanceof PlannerError) return outcome(error);
@@ -515,6 +518,7 @@ export class CodexWorker implements Worker {
       kill();
       if (group !== undefined) processGroups.delete(group);
       saveModelsCache(join(home.root, "codex-home"));
+      addCodexTelemetry(record, join(home.root, "codex-home"));
       rmSync(home.root, { recursive: true, force: true });
     }
   }

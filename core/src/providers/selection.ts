@@ -201,6 +201,8 @@ export const OPERATIONAL: readonly string[] = [
   "provider.worker.timeoutSeconds",
   "provider.worker.idleSeconds",
   "provider.worker.settings.maxTurns",
+  // Content capture observes calls; it changes no run.
+  "capture",
 ];
 
 /** An Objective's frozen configuration: the values and their digest. */

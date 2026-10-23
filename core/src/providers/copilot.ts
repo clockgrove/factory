@@ -43,6 +43,14 @@ import {
   type PlannerModels,
   providerOutcome,
 } from "./planner.js";
+import {
+  captureRequest,
+  captureResponse,
+  logUsage,
+  Tallies,
+  tokens,
+  usageRecord,
+} from "./usage.js";
 
 export const DEFAULT_COPILOT_MODELS: PlannerModels = {
   planner: { model: "gpt-6.1-sol", effort: "high" },
@@ -108,6 +116,8 @@ interface Turn {
   toolIdleMs?: number;
   signal: AbortSignal;
   onEvent(event: SessionEvent): void;
+  /** The call's model-usage record (usage.ts): its tokens and tool calls as they arrive. */
+  record: Record<string, unknown>;
 }
 
 interface TurnResult {
@@ -254,6 +264,8 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     let text = "";
 
     const usage = { input: 0, output: 0, cached: 0 };
+    let reasoning: number | null = null;
+    const calls = new Tallies();
     let settle: () => void = () => undefined;
     let fail: (error: PlannerError) => void = () => undefined;
     // The turn ends at idle, or at once on a session error (as sendAndWait does).
@@ -339,6 +351,13 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
             usage.input += event.data.inputTokens ?? 0;
             usage.output += event.data.outputTokens ?? 0;
             usage.cached += event.data.cacheReadTokens ?? 0;
+            if (event.data.reasoningTokens !== undefined)
+              reasoning = (reasoning ?? 0) + event.data.reasoningTokens;
+            turn.record.tokens = tokens({ ...usage, reasoning });
+          }
+          if (event.type === "tool.execution_start") {
+            calls.add(event.data.toolName, event.data.toolCallId);
+            turn.record.nativeToolActivity = calls.value;
           }
           if (event.type === "session.error") fail(sessionFailure(event.data));
           if (event.type === "session.idle" && sent) settle();
@@ -429,6 +448,7 @@ export class CopilotPlanner implements Planner {
           writes: false,
           prompt: `${call.prompt}\n\nAnswer with only one JSON object that matches this JSON Schema, with no other text:\n${JSON.stringify(call.schema)}`,
           images,
+          record,
           idleMs: PLANNER_IDLE_MS,
           signal: call.signal,
           onEvent: (event) => {
@@ -441,7 +461,7 @@ export class CopilotPlanner implements Planner {
           },
         });
         record.session = result.session;
-        record.usage = result.usage;
+        captureResponse(record, result.text);
         const body = result.text
           .trim()
           .replace(/^```(?:json)?\s*/, "")
@@ -511,13 +531,14 @@ export class CopilotWorker implements Worker {
   async run(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
     const tools = copilotTools(this.options.tools);
-    const record: Record<string, unknown> = {
-      event: "worker-call",
+    const record = usageRecord({
+      role: "worker",
       provider: "copilot",
-      item: input.item.id,
       model: this.options.model.model,
       effort: this.options.model.effort,
-    };
+      item: input.item.id,
+    });
+    captureRequest(record, input.prompt);
     /** Running tool calls' names by id, for their completions. */
     const toolNames = new Map<string, string>();
     // Validate, as Claude's (work/self-validate.ts): only declared commands.
@@ -563,6 +584,7 @@ export class CopilotWorker implements Worker {
           },
         ],
         prompt: input.prompt,
+        record,
         idleMs: this.options.idleMs,
         ...(validator && {
           toolIdleMs: validationDeadlineMs(
@@ -571,18 +593,10 @@ export class CopilotWorker implements Worker {
           ),
         }),
         signal: input.signal,
-        onEvent: (event) => {
-          if (event.type === "tool.execution_start")
-            input.log({
-              event: "worker-tool",
-              item: input.item.id,
-              tool: event.data.toolName,
-            });
-          copilotActivity(input, event, toolNames);
-        },
+        onEvent: (event) => copilotActivity(input, event, toolNames),
       });
       record.session = result.session;
-      record.usage = result.usage;
+      captureResponse(record, result.text);
       record.outcome = "finished";
       const tree = await validator?.finalTree();
       if (validator) record.finalTreeValidated = Boolean(tree);
@@ -604,7 +618,7 @@ export class CopilotWorker implements Worker {
       ended.abort(new Error("the worker attempt ended"));
       await validator?.idle();
       record.ms = Date.now() - started;
-      input.log(record);
+      logUsage(input.log, record);
     }
   }
 }

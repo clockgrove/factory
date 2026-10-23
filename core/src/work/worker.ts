@@ -83,6 +83,8 @@ export type WorkerActivity =
   | { kind: "tool"; phase: "started" | "finished"; tool: string }
   | { kind: "edit"; path: string }
   | { kind: "command"; command: string }
+  /** A command ended with a non-zero exit, a signal or its time limit. */
+  | { kind: "command-failed" }
   | { kind: "turn" };
 
 /** At most one `worker-activity` event per Work Item per this long. */
@@ -97,6 +99,7 @@ interface ActivityWindow {
     toolsFinished: number;
     edits: number;
     commands: number;
+    commandsFailed: number;
     turns: number;
   };
   tools: string[];
@@ -110,6 +113,7 @@ const emptyWindow = (): ActivityWindow => ({
     toolsFinished: 0,
     edits: 0,
     commands: 0,
+    commandsFailed: 0,
     turns: 0,
   },
   tools: [],
@@ -158,6 +162,9 @@ export class ActivityLog {
       case "command":
         window.counts.commands += 1;
         window.command = this.clean(activity.command, COMMAND_CHARS);
+        break;
+      case "command-failed":
+        window.counts.commandsFailed += 1;
         break;
       case "turn":
         window.counts.turns += 1;

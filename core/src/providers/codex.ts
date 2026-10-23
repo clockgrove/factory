@@ -22,6 +22,11 @@ import type {
 import { within } from "../paths.js";
 import { errorMessage } from "../text.js";
 import {
+  addCodexTelemetry,
+  codexTokens,
+  SDK_OPERATIONS,
+} from "./codex-telemetry.js";
+import {
   callImages,
   detail,
   IdleWatchdog,
@@ -34,6 +39,7 @@ import {
   PlannerError,
   type PlannerModels,
 } from "./planner.js";
+import { captureResponse, Tallies } from "./usage.js";
 
 export type CodexEffort = ModelReasoningEffort;
 
@@ -503,6 +509,8 @@ export class CodexPlanner implements Planner {
       let response: string | undefined;
       let usage: PlannerAnswer["usage"];
       let completed = false;
+      const operations = new Tallies();
+      record.sdkOperations = operations.value;
       let streamError: string | undefined;
       for (;;) {
         const next = await watchdog.race(events.next());
@@ -547,11 +555,17 @@ export class CodexPlanner implements Planner {
             : undefined,
         );
         if (event.type === "thread.started") record.thread = event.thread_id;
+        if (item && SDK_OPERATIONS.has(item.type)) {
+          operations.add(item.type, item.id);
+          record.sdkOperations = operations.value;
+        }
         if (
           event.type === "item.completed" &&
           event.item.type === "agent_message"
-        )
+        ) {
           response = event.item.text;
+          captureResponse(record, response);
+        }
         if (event.type === "turn.completed") {
           completed = true;
           usage = {
@@ -559,7 +573,7 @@ export class CodexPlanner implements Planner {
             output: event.usage.output_tokens,
             cached: event.usage.cached_input_tokens,
           };
-          record.usage = usage;
+          record.tokens = codexTokens(event.usage);
         }
         if (event.type === "turn.failed")
           throw codexFailure(event.error.message);
@@ -612,6 +626,7 @@ export class CodexPlanner implements Planner {
         clearTimeout(timer);
       }
       saveModelsCache(home.env.CODEX_HOME!);
+      addCodexTelemetry(record, home.env.CODEX_HOME!);
       keepOrRemove(home.root, record.thread as string | undefined, call.log);
     }
   }

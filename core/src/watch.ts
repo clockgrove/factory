@@ -26,6 +26,7 @@ interface Totals {
   toolsFinished: number;
   edits: number;
   commands: number;
+  commandsFailed: number;
   turns: number;
 }
 
@@ -155,6 +156,7 @@ function applyEvent(
         toolsFinished: 0,
         edits: 0,
         commands: 0,
+        commandsFailed: 0,
         turns: 0,
       };
       for (const name of Object.keys(totals) as (keyof Totals)[])
@@ -221,6 +223,8 @@ function rowLine(row: Row, now = Date.now()): string {
         `${totals.edits} edits${row.paths ? ` (${row.paths.join(", ")})` : ""}`,
       );
     if (row.command) parts.push(`$ ${row.command}`);
+    if (totals.commandsFailed)
+      parts.push(`${totals.commandsFailed} failed commands`);
     if (row.activityAt) parts.push(`active ${age(now, row.activityAt)} ago`);
   }
   return parts.join(" · ");

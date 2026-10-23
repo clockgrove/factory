@@ -59,6 +59,14 @@ const granted = (state: ObjectiveState): Record<string, number> =>
 /** A Work Item's work step: its repairs are implementation repairs. */
 const IMPLEMENTATION = /^item:[^:]+:work$/;
 
+/**
+ * The repairs of a path that count: a repair whose failure was blamed on a
+ * predecessor is free (engine.ts Outcome `free`); the predecessor's own
+ * repair counts.
+ */
+const charged = (repair: ObjectiveState["repairs"][string]): number =>
+  repair.count - (repair.free?.length ?? 0);
+
 export interface Usage {
   used: number;
   allowed: number;
@@ -71,7 +79,7 @@ export function implementationRepairs(state: ObjectiveState): Usage {
   let used = 0;
   for (const [target, repair] of Object.entries(state.repairs ?? {}))
     if (IMPLEMENTATION.test(target))
-      used += repair.count - (conflicts[target] ?? 0);
+      used += charged(repair) - (conflicts[target] ?? 0);
   return {
     used,
     allowed:
@@ -87,7 +95,7 @@ export function perPath(state: ObjectiveState): Record<string, Usage> {
     Object.entries(state.repairs ?? {}).map(([target, repair]) => [
       target,
       {
-        used: repair.count,
+        used: charged(repair),
         allowed: base + (granted(state)[`perPath:${target}`] ?? 0),
       },
     ]),
@@ -103,8 +111,8 @@ export type Overrun = ("perPath" | "implementationRepairs")[];
  * Objective's allowance. Empty when it may run.
  */
 export function overrun(state: ObjectiveState, key: string): Overrun {
-  const count = state.repairs?.[key]?.count ?? 0;
-  if (!count) return [];
+  const repair = state.repairs?.[key];
+  if (!repair || !charged(repair)) return [];
   const over: Overrun = [];
   const path = perPath(state)[key];
   if (path && path.used > path.allowed) over.push("perPath");

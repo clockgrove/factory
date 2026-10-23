@@ -215,8 +215,15 @@ export interface ObjectiveState {
   asking: Record<string, PendingQuestion>;
   /** Facts steps keep across repairs (Outcome `keep`), by key. */
   kept: Record<string, unknown>;
-  /** Repairs per target step, with the latest findings (newest last). */
-  repairs: Record<string, { count: number; findings: string[] }>;
+  /**
+   * Repairs per target step, with the latest findings (newest last).
+   * `free`: the repair numbers that count against no allowance (a failure
+   * blamed on a predecessor, allowances.ts).
+   */
+  repairs: Record<
+    string,
+    { count: number; findings: string[]; free?: number[] }
+  >;
   /** Steps that finished, with their saved results. */
   done: Record<string, unknown>;
   /**

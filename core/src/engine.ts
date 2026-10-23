@@ -97,6 +97,12 @@ export type Outcome =
       clear: string[];
       /** A mechanical merge conflict: it counts against perPath only (allowances.ts). */
       conflict?: true;
+      /**
+       * Repair number `repair` of `target` stops counting against the repair
+       * allowances (allowances.ts): that item's failure was blamed on the
+       * predecessor this outcome repairs. Applying it twice is harmless.
+       */
+      free?: { target: string; repair: number };
       keep?: Record<string, unknown>;
     };
 
@@ -880,6 +886,10 @@ export class ObjectiveRunner {
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         state.repairs[outcome.target] = repair;
         if (outcome.conflict) countConflict(state, outcome.target);
+        const { free } = outcome;
+        const blamed = free ? state.repairs[free.target] : undefined;
+        if (free && blamed && !blamed.free?.includes(free.repair))
+          blamed.free = [...(blamed.free ?? []), free.repair];
         break;
       }
     }

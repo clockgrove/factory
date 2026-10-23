@@ -79,7 +79,12 @@ import {
 import { executable, type Plan, type WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import { moveStatusOffDone } from "../queue.js";
-import { correction, type RepairFinding } from "../repair.js";
+import {
+  type Correction,
+  type CorrectionResult,
+  correction,
+  type RepairFinding,
+} from "../repair.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
 import {
@@ -612,7 +617,12 @@ async function workStep(
   }
   if (!finished) {
     const repair = await repairContext(item, context, deps, base);
-    if (repair && "hold" in repair) return withKeep(repair.hold, keepBase);
+    // A question keeps this attempt's base; a predecessor's repair moves
+    // this item onto the predecessor's new head, so its facts win.
+    if (repair && "outcome" in repair)
+      return repair.outcome.kind === "repair"
+        ? { ...repair.outcome, keep: { ...keepBase, ...repair.outcome.keep } }
+        : withKeep(repair.outcome, keepBase);
     keepAll = { ...keepBase, ...(repair?.keep ?? {}) };
     // A kept selection whose private copies are gone can't be written
     // again: this attempt makes new candidates and the operator chooses.
@@ -930,7 +940,8 @@ async function rebaseWorktree(
 /**
  * What a repaired attempt is told: the latest finding and its correction.
  * The correction is diagnosed once per repair and kept, so a rerun of the
- * work step reuses it; an operator question holds.
+ * work step reuses it; an operator question holds, and a predecessor blame
+ * is the step's outcome instead (`blameOutcome`), with no worker run.
  */
 async function repairContext(
   item: WorkItem,
@@ -939,7 +950,7 @@ async function repairContext(
   base: string,
 ): Promise<
   | { context: RepairContext; keep: Record<string, unknown> }
-  | { hold: Outcome }
+  | { outcome: Outcome }
   | undefined
 > {
   const { state, signal } = context;
@@ -992,6 +1003,8 @@ async function repairContext(
     signal,
     log: context.log,
   });
+  if (result.kind === "predecessor")
+    return { outcome: blameOutcome(state, deps, item, result, history.count) };
   if (result.kind === "question") {
     const rereviewed = resultRereviews(state);
     const recheck = (await refusedResult(
@@ -1004,7 +1017,7 @@ async function repairContext(
       ? `\n\nIf the refused result is correct and Factory's own check was at fault (for example, the check could not see files the result has), answer \`revalidate\`: Factory runs validation, review and delivery again on the same result, unchanged, without running the worker. It doesn't count as a repair; it is a result rereview, and this Objective has used ${rereviewed.used} of ${rereviewed.allowed} (autonomy.allowances.resultRereviews).`
       : "";
     return {
-      hold: hold(
+      outcome: hold(
         `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, or \`retry\` to diagnose the failure again.${recheck}`,
         [
           "answer",
@@ -1056,6 +1069,117 @@ async function repairContext(
       item.id,
     ),
   };
+}
+
+/**
+ * The diagnosis blamed predecessor `blame.predecessor` for repair `repair`
+ * of `item`. An unmerged native-stack layer below is repaired with the
+ * correction (`repairOutcome`, so every layer above moves onto its new
+ * head), and that repair counts against its own allowances. The blamed
+ * item's repair is `free`: its change is kept to replay onto the
+ * predecessor's new head, as a layer above, and it runs once the
+ * predecessor is published again. A merged predecessor has no branch to
+ * repair (a repair never reopens merged work), so the item asks
+ * (`mergedBlame`).
+ */
+function blameOutcome(
+  state: ObjectiveState,
+  deps: BuildDeps,
+  item: WorkItem,
+  blame: Extract<CorrectionResult, { kind: "predecessor" }>,
+  repair: number,
+): Outcome {
+  const plan = currentPlan(state)!;
+  const stacked = stackOf(plan, deps);
+  const own = multiLayer(stacked, item.id);
+  const predecessor = plan.items.find(
+    (entry) => entry.id === blame.predecessor,
+  )!;
+  const below = own?.unit.items
+    .slice(0, own.layer)
+    .some((layer) => layer.id === predecessor.id);
+  if (!below || mergeOf(state, predecessor.id))
+    return mergedBlame(item, predecessor, blame.correction);
+  const work = stepKey(predecessor.id, "work");
+  const diagnosed = fact(state, "diagnosis", predecessor.id);
+  const refused = fact(state, "refused", item.id);
+  // The predecessor's correction is kept as diagnosed for its next repair,
+  // so its work step runs it with no second diagnosis.
+  const context: RepairContext = {
+    finding: blame.correction.failure,
+    correction: {
+      diagnosis: blame.correction.diagnosis,
+      correction: blame.correction.correction,
+    },
+  };
+  const outcome = repairOutcome(
+    predecessor,
+    "work",
+    blame.correction.failure,
+    state,
+    multiLayer(stacked, predecessor.id),
+    {
+      shown: `Work Item ${item.id}'s failure was traced to this item's result (${blame.correction.path}): ${blame.correction.diagnosis}`,
+      keep: {
+        ...facts(
+          {
+            diagnosis: {
+              repair: (state.repairs?.[work]?.count ?? 0) + 1,
+              context,
+              applied: [...(diagnosed?.applied ?? []), blame.finding],
+            },
+          },
+          predecessor.id,
+        ),
+        ...facts(
+          {
+            diagnosis: null,
+            ...(refused
+              ? {
+                  refused: { ...refused, replayOnly: true as const },
+                  finding: {
+                    kind: "conflict" as const,
+                    detail: `Its failure was traced to Work Item ${predecessor.id}, the stack layer below, which was repaired, so this change moves onto its new head.`,
+                  },
+                }
+              : {}),
+          },
+          item.id,
+        ),
+      },
+    },
+  );
+  return outcome.kind === "repair"
+    ? { ...outcome, free: { target: stepKey(item.id, "work"), repair } }
+    : outcome;
+}
+
+/**
+ * A blamed predecessor that already merged: no repair of this item can fix
+ * it, and a repair never reopens merged work, so the item asks with the
+ * evidence; `replan` plans the remaining work again from the default
+ * branch, which holds the predecessor's result. W4-07 adds the `amend`
+ * answer here (a follow-up Work Item after the predecessor) and refreshes
+ * the next step as the amendment lands.
+ */
+function mergedBlame(
+  item: WorkItem,
+  predecessor: WorkItem,
+  correction: Correction,
+): Outcome {
+  return hold(
+    `Work Item ${item.id}'s failure comes from Work Item ${predecessor.id}'s merged result, not its own work, so repairing ${item.id} can't fix it.\n\nEvidence (${correction.path}): ${correction.diagnosis}\n\nWhat ${predecessor.id} needs: ${correction.correction}\n\nAnswer \`replan\` to plan the remaining work again from the default branch, \`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, or cancel.`,
+    [
+      "replan",
+      "answer",
+      {
+        answer: "retry",
+        family: "retry",
+        consequence: "Diagnoses the failure again.",
+      },
+      "cancel",
+    ],
+  );
 }
 
 /** The one writer of the refused fact, from the work result a repair clears. */

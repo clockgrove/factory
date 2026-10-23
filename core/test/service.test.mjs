@@ -1573,6 +1573,24 @@ test("a deferred question asks right after the covering one; stack layers and ba
   );
   assert.equal(runner.state.answers["item:b:ci"].answer, "revalidate");
   assert.equal(runner.state.kept["allowances:rereviews"], 2);
+  // c's failure blamed on a (repair.ts `predecessor`): a's repair counts,
+  // and c's blamed repair is free, once however often the outcome lands.
+  const { perPath } = await import("../dist/allowances.js");
+  const charged = perPath(runner.state)["item:c:work"].used;
+  const blame = {
+    kind: "repair",
+    finding: "a's result breaks c",
+    target: "item:a:work",
+    clear: ["item:a:work"],
+    free: {
+      target: "item:c:work",
+      repair: runner.state.repairs["item:c:work"].count,
+    },
+  };
+  runner.apply("item:c:work", blame);
+  runner.apply("item:c:work", blame);
+  assert.equal(perPath(runner.state)["item:c:work"].used, charged - 1);
+  assert.equal(perPath(runner.state)["item:a:work"].used, 2);
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {

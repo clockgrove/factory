@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { allowances } from "../allowances.js";
+import { isObject } from "../checked.js";
 import {
   errored,
   hold,
@@ -6,6 +8,7 @@ import {
   type Step,
   type StepContext,
 } from "../engine.js";
+import { code, prose } from "../markdown.js";
 import type { ObjectiveState } from "../state.js";
 import { fact } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
@@ -16,6 +19,7 @@ import {
   acceptedPlan,
   currentPlan,
   amendmentKey as KEY,
+  proposalKey,
   proposalsOf,
 } from "./plan.js";
 import {
@@ -40,6 +44,7 @@ import {
   offeredProfiles,
   type PlanningDeps,
   planningFacts,
+  planningRevisions,
   planningTree,
   postPlan,
   workers,
@@ -77,10 +82,14 @@ import {
  *   dependencies, worker) deep-equal the rejected one, with a new diagnosis
  *   and correction.
  *
- * Proposals live in `modules.amendments`, in the order they were taken in,
- * each stamped with the acceptance of the plan it amends: a replan accepts
- * a new plan, and the earlier proposals no longer count. Each one's steps
- * save their results under `amend:<id>`.
+ * Proposals are kept one per key (`amend:<id>:proposal`, plan.ts
+ * `proposalKey`), in the order they were taken in, each stamped with the
+ * acceptance of the plan it amends: a replan accepts a new plan, and the
+ * earlier proposals no longer count. Each one's steps save their results
+ * under `amend:<id>`. Where they come from: an operator's
+ * `factory propose-amendment` (`proposeAmendment`, applied by the
+ * service), a worker's discovery or a merged predecessor's blame answered
+ * `amend` (work/steps.ts), and a rejection answered `replace`.
  */
 
 /** A worker's or operator's proposal of further work, as `.factory-discovery.json` holds it. */
@@ -94,9 +103,15 @@ export interface WorkDiscovery {
 }
 
 export interface AmendmentProposal {
-  /** Stable: the request id, or `worker-<item>-<attempt>` for a worker's discovery. */
+  /**
+   * Stable: the request id, `worker-<item>-<attempt>` for a worker's
+   * discovery, `blame-<item>-<repair>` for a merged predecessor's blame,
+   * or `<rejected>-r<n>` for a replacement.
+   */
   id: string;
   actor: string;
+  /** When it was taken in: proposals run in this order. */
+  at: string;
   discovery: WorkDiscovery;
   /** When the plan it amends was accepted (`plan:acceptedAt`). */
   plan: string;
@@ -104,11 +119,6 @@ export interface AmendmentProposal {
   worker?: { itemId: string; attempt: number };
   /** A replacement of a rejected amendment, with the operator's diagnosis. */
   replacement?: { amendmentId: string; diagnosis: string; correction: string };
-}
-
-/** `modules.amendments`: the proposals taken in, oldest first. */
-export interface AmendmentsModule {
-  proposals: AmendmentProposal[];
 }
 
 /** The saved outcome of one amendment (`amend:<id>`). */
@@ -269,12 +279,12 @@ export function proposalProblems(
     );
   if (ledger.used >= allowance)
     problems.push(
-      `This Objective has used all ${allowance} amendments (autonomy.allowances.planningRevisions); replan to plan again from the Objective`,
+      `This Objective has no planning revision left for an amendment (autonomy.allowances.planningRevisions, shared with the plan's own revision rounds; ${ledger.used} amendment${ledger.used === 1 ? "" : "s"} taken); replan to plan again from the Objective`,
     );
   if (!proposal.replacement) {
     if (ledger.rejected)
       problems.push(
-        `Amendment ${ledger.rejected.proposal.id} was rejected (${ledger.rejected.error}); replace it, or answer continue to run the plan without it`,
+        `Amendment ${ledger.rejected.proposal.id} was rejected (${ledger.rejected.error}); answer its question with \`replace <correction>\`, or \`continue\` to run the plan without it`,
       );
     return problems;
   }
@@ -314,6 +324,99 @@ export function proposalProblems(
       "This correction was already tried against this rejection; give a new one",
     );
   return problems;
+}
+
+/**
+ * How many proposals the plan accepted now may take: the frozen
+ * `planningRevisions` less the revision rounds its own planning spent.
+ * The operator's `more` grants to planning never become amendment budget.
+ */
+export function amendmentAllowance(state: ObjectiveState): number {
+  const { used } = planningRevisions(state);
+  return Math.max(
+    0,
+    allowances(state).planningRevisions - (used - proposalsOf(state).length),
+  );
+}
+
+/**
+ * Take in an operator's `factory propose-amendment` (service.ts, in the
+ * request's save): the file's six discovery fields, checked here where
+ * they enter (`proposalProblems`), kept as proposal `id` against the plan
+ * accepted now. The problems, or none when it was taken. A replacement is
+ * the rejection question's `replace` answer, never a file.
+ */
+export function proposeAmendment(
+  state: ObjectiveState,
+  value: unknown,
+  id: string,
+  by: string,
+  at: string,
+): string[] {
+  const fields = isObject(value) ? value : {};
+  if ("replacement" in fields || "worker" in fields)
+    return [
+      "A proposal file holds scope, reason, evidence, ownership, acceptance and dependencies only. Replace a rejected amendment by answering its question with `replace <correction>`",
+    ];
+  const proposal: AmendmentProposal = {
+    id,
+    actor: by,
+    at,
+    plan: String(state.kept[ACCEPTED_AT] ?? ""),
+    discovery: {
+      scope: fields.scope,
+      reason: fields.reason,
+      evidence: fields.evidence,
+      ownership: fields.ownership,
+      acceptance: fields.acceptance,
+      dependencies: fields.dependencies ?? [],
+    } as WorkDiscovery,
+  };
+  const problems = proposalProblems(proposal, state, amendmentAllowance(state));
+  if (!problems.length) state.kept[proposalKey(id)] = proposal;
+  return problems;
+}
+
+/** Where a proposal stands, following its replacements. */
+export type AmendmentStatus = "pending" | "accepted" | "rejected" | "continued";
+
+/**
+ * Proposal `id`, or the newest replacement in its chain, and where it
+ * stands; undefined when the plan accepted now has no such proposal. A
+ * Work Item that proposed (a worker's discovery, a merged predecessor's
+ * blame) reads its outcome here.
+ */
+export function amendmentStatus(
+  state: ObjectiveState,
+  id: string,
+): { id: string; status: AmendmentStatus } | undefined {
+  const chain = new Set([id]);
+  let last: AmendmentProposal | undefined;
+  for (const proposal of proposalsOf(state))
+    if (
+      chain.has(proposal.id) ||
+      (proposal.replacement && chain.has(proposal.replacement.amendmentId))
+    ) {
+      chain.add(proposal.id);
+      last = proposal;
+    }
+  if (!last) return undefined;
+  const result = state.done[KEY(last.id)] as AmendmentResult | undefined;
+  const status: AmendmentStatus = !result
+    ? "pending"
+    : result.plan
+      ? "accepted"
+      : state.done[`${KEY(last.id)}:continue`]
+        ? "continued"
+        : "rejected";
+  return { id: last.id, status };
+}
+
+/** A proposal's discovery as a question shows it (the sync escapes the rest). */
+export function discoveryText(discovery: WorkDiscovery): string {
+  const list = (entries: string[]) =>
+    entries.map((entry) => `\n- ${entry}`).join("");
+  return `Reason: ${discovery.reason}\n\nEvidence:${list(discovery.evidence)}\n\nOwnership: ${discovery.ownership.map(code).join(", ")}\n\nAcceptance:${list(discovery.acceptance)}${discovery.dependencies.length ? `\n\nAfter: ${discovery.dependencies.map(code).join(", ")}` : ""}`;
 }
 
 // ── The plan as amended ─────────────────────────────────────────────────
@@ -934,7 +1037,12 @@ function amendAcceptStep(
           ? { reviewArtifacts: inputs.reviewArtifacts }
           : {}),
       };
-      await postPlan(deps, state.issue, plan, signal);
+      // Crash points `amend:post:*` (and `amend:data:*` for a plan
+      // posted in parts); the marker makes a rerun edit, never repeat.
+      await postPlan(deps, state.issue, plan, signal, {
+        point: "amend",
+        note: `Amended by ${code(proposal.id)} (${prose(proposal.actor)}): ${prose(proposal.discovery.reason)}`,
+      });
       return done({
         plan,
         answer: round.answer,
@@ -944,25 +1052,65 @@ function amendAcceptStep(
 }
 
 /**
- * A rejected amendment waits for its replacement, which arrives as a new
- * proposal; `continue` runs the plan without it.
+ * A rejected amendment stops the build until it is settled: `replace
+ * <correction>` takes in a replacement that repeats its discovery, with
+ * the rejection as the diagnosis and the text as the correction (it
+ * charges a planning revision, and its own review judges it); `continue`
+ * runs the plan without it.
  */
 function rejectionStep(
   rejected: NonNullable<AmendmentLedger["rejected"]>,
 ): Step {
   const key = `${KEY(rejected.proposal.id)}:continue`;
+  const { proposal, error } = rejected;
   return {
     key,
     deadlineMs: MINUTE,
-    async run({ answer }): Promise<Outcome> {
+    async run({ state, answer }): Promise<Outcome> {
       if (answer?.answer === "continue") return done({});
+      const allowance = amendmentAllowance(state);
+      let refused = "";
+      if (answer?.answer === "replace") {
+        const replacement: AmendmentProposal = {
+          id: `${proposal.id.replace(/-r\d+$/, "")}-r${amendmentLedger(state).used + 1}`,
+          actor: answer.by,
+          at: new Date().toISOString(),
+          plan: proposal.plan,
+          discovery: proposal.discovery,
+          ...(proposal.worker ? { worker: proposal.worker } : {}),
+          replacement: {
+            amendmentId: proposal.id,
+            diagnosis: error,
+            correction: (answer.text ?? "").trim(),
+          },
+        };
+        const problems = proposalProblems(replacement, state, allowance);
+        if (!problems.length)
+          return {
+            kind: "retry",
+            reason: `Took in replacement amendment ${replacement.id}`,
+            progress: true,
+            keep: { [proposalKey(replacement.id)]: replacement },
+          };
+        refused = `\n\nThe replacement wasn't taken: ${problems.join("; ")}`;
+      }
+      const left = allowance - amendmentLedger(state).used;
       return hold(
-        `Amendment ${rejected.proposal.id} was rejected: ${rejected.error}\n\nPropose a replacement that repeats its discovery with a new diagnosis and correction, or \`continue\` to run the plan without it.`,
+        `Amendment ${code(proposal.id)} (${proposal.actor}) was rejected: ${error}\n\n${discoveryText(proposal.discovery)}${refused}\n\n\`replace <correction>\` plans it again with your correction (${left > 0 ? `${left} planning revision${left === 1 ? "" : "s"} left` : "no planning revision left, so it will be refused"}); \`continue\` runs the plan without it.`,
         [
+          {
+            answer: "replace",
+            family: "repair",
+            consequence:
+              "Plans the amendment again with your correction, reviewed again; uses a planning revision.",
+            needsText: true,
+            ...(left > 0 ? { recommended: true } : {}),
+          },
           {
             answer: "continue",
             family: "accept",
             consequence: "Runs the plan without this amendment.",
+            ...(left > 0 ? {} : { recommended: true }),
           },
           "cancel",
         ],

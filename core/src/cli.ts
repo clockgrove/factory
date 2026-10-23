@@ -316,6 +316,16 @@ const COMMANDS: Record<string, Command> = {
       );
     },
   },
+  "propose-amendment": {
+    args: "ISSUE",
+    flags: { file: "value" },
+    help: "Propose an amendment of the accepted plan: --file ABSOLUTE_PATH holds JSON with scope (in-scope), reason, and lists evidence, ownership, acceptance and dependencies (known Work Item ids). The planner revises the plan for it and an independent review judges it; it uses a planning revision. A rejected amendment is replaced by answering its question with replace",
+    check: (args) =>
+      issueCheck(args) ??
+      (args.flags.file && isAbsolute(args.flags.file)
+        ? undefined
+        : "propose-amendment needs --file ABSOLUTE_PATH"),
+  },
   retry: {
     args: "ISSUE",
     flags: { question: "value" },
@@ -506,6 +516,21 @@ async function main(argv: string[]): Promise<number> {
         ...(reviewArtifacts ? { reviewArtifacts } : {}),
       });
     }
+    case "propose-amendment": {
+      const file = args.flags.file!;
+      let proposal: unknown;
+      try {
+        proposal = JSON.parse(textFile(file, "--file"));
+      } catch (error) {
+        if (error instanceof Refusal) throw error;
+        throw usage(`--file ${file} isn't JSON: ${errorMessage(error)}`);
+      }
+      return await request(paths, {
+        kind: "propose-amendment",
+        issue: issueOf(args),
+        proposal,
+      });
+    }
     case "retry":
       return await request(paths, {
         kind: "retry",
@@ -530,7 +555,11 @@ async function main(argv: string[]): Promise<number> {
  */
 function answerText(args: Args): string | undefined {
   const file = args.flags["text-file"];
-  if (file === undefined) return args.flags.text;
+  return file === undefined ? args.flags.text : textFile(file, "--text-file");
+}
+
+/** The UTF-8 text of `file`, named by option `flag`, read as `answerText` says. */
+function textFile(file: string, flag: string): string {
   let fd: number;
   try {
     fd = openSync(
@@ -538,25 +567,23 @@ function answerText(args: Args): string | undefined {
       fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
     );
   } catch (error) {
-    throw usage(`--text-file ${file} can't be opened: ${errorMessage(error)}`);
+    throw usage(`${flag} ${file} can't be opened: ${errorMessage(error)}`);
   }
   try {
     if (!fstatSync(fd).isFile())
-      throw usage(`--text-file ${file} isn't a regular file`);
+      throw usage(`${flag} ${file} isn't a regular file`);
     const buffer = Buffer.alloc(MAX_ANSWER_TEXT + 1);
     let length = 0;
     for (let read = 1; read > 0 && length < buffer.length; length += read)
       read = readSync(fd, buffer, length, buffer.length - length, null);
     if (length > MAX_ANSWER_TEXT)
-      throw usage(
-        `--text-file ${file} is over ${MAX_ANSWER_TEXT} bytes, an answer's limit`,
-      );
+      throw usage(`${flag} ${file} is over ${MAX_ANSWER_TEXT} bytes`);
     try {
       return new TextDecoder("utf-8", { fatal: true }).decode(
         buffer.subarray(0, length),
       );
     } catch {
-      throw usage(`--text-file ${file} isn't UTF-8 text`);
+      throw usage(`${flag} ${file} isn't UTF-8 text`);
     }
   } finally {
     closeSync(fd);

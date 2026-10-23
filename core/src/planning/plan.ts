@@ -2,11 +2,7 @@ import { isObject } from "../checked.js";
 import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
-import type {
-  AmendmentProposal,
-  AmendmentResult,
-  AmendmentsModule,
-} from "./amendments.js";
+import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
 import { withExpansions } from "./expansion.js";
 import { coverageCriterion } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
@@ -33,12 +29,26 @@ export const ACCEPTED_AT = "plan:acceptedAt";
 /** An amendment's saved outcome (AmendmentResult). */
 export const amendmentKey = (id: string) => `amend:${id}`;
 
+/**
+ * Where a proposal is kept (`state.kept`), one key each: the service
+ * writes an operator's, and a step's outcome keeps a worker's, a blame's
+ * or a replacement, so neither overwrites the other.
+ */
+export const proposalKey = (id: string) => `amend:${id}:proposal`;
+const PROPOSAL = /^amend:[^:]+:proposal$/;
+
 /** The proposals against the plan accepted now, oldest first; a replan leaves earlier ones behind. */
 export function proposalsOf(state: ObjectiveState): AmendmentProposal[] {
   const accepted = state.kept[ACCEPTED_AT];
-  return (
-    (state.modules.amendments as AmendmentsModule | undefined)?.proposals ?? []
-  ).filter((proposal) => proposal.plan === accepted);
+  return Object.entries(state.kept)
+    .filter(
+      ([key, value]) =>
+        PROPOSAL.test(key) && (value as AmendmentProposal).plan === accepted,
+    )
+    .map(([, value]) => value as AmendmentProposal)
+    .sort((a, b) =>
+      a.at === b.at ? (a.id < b.id ? -1 : 1) : a.at < b.at ? -1 : 1,
+    );
 }
 
 /**

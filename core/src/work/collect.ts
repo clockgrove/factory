@@ -24,6 +24,10 @@ import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
 import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
+import {
+  type WorkDiscovery,
+  workDiscoveryProblem,
+} from "../planning/amendments.js";
 import { isRecord, ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS, type DesignRisk } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
@@ -55,16 +59,6 @@ export interface HandoffNote {
   criterionIndex?: number;
   /** A design note's checklist question; an index for review, never proof. */
   designRisk?: DesignRisk;
-}
-
-/** A worker's proposal of further work from `.factory-discovery.json`. */
-export interface WorkDiscovery {
-  scope: "in-scope" | "backlog";
-  reason: string;
-  evidence: string[];
-  ownership: string[];
-  acceptance: string[];
-  dependencies: string[];
 }
 
 export interface CollectInput {
@@ -440,25 +434,9 @@ async function readDiscovery(path: string): Promise<WorkDiscovery | undefined> {
       `Discovery manifest is not JSON: ${errorMessage(error)}`,
     );
   }
-  if (
-    !value ||
-    !["in-scope", "backlog"].includes(value.scope) ||
-    typeof value.reason !== "string" ||
-    !value.reason.trim()
-  )
-    throw new WorkFinding("Discovery requires explicit scope and reason");
-  for (const field of [
-    "evidence",
-    "ownership",
-    "acceptance",
-    "dependencies",
-  ] as const)
-    if (
-      !Array.isArray(value[field]) ||
-      !value[field].every((text) => typeof text === "string" && text.trim()) ||
-      (field !== "dependencies" && !value[field].length)
-    )
-      throw new WorkFinding(`Discovery lacks ${field}`);
+  // The one rule, shared with amendment intake.
+  const problem = workDiscoveryProblem(value);
+  if (problem) throw new WorkFinding(problem);
   return {
     scope: value.scope,
     reason: value.reason,

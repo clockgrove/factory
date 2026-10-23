@@ -29,6 +29,7 @@ import { backoffMs, Jobs } from "./jobs.js";
 import { takeServiceLock } from "./lock.js";
 import { newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
+import { proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
 import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
 import {
@@ -533,6 +534,29 @@ export async function serve(options: ServeOptions): Promise<number> {
         case "resume":
           refusal = control(state, request.kind, stored);
           break;
+        case "propose-amendment": {
+          // Taken in this save: the workflow runs it before any other
+          // step once the plan is accepted (workflow.ts).
+          const problems = TERMINAL.includes(state.status)
+            ? [
+                `#${request.issue} has finished; an amendment needs a running Objective`,
+              ]
+            : proposeAmendment(
+                state,
+                request.proposal,
+                stored.id,
+                stored.by,
+                stored.at,
+              );
+          if (problems.length)
+            refusal = refused(
+              TERMINAL.includes(state.status)
+                ? "objective_finished"
+                : "amendment_refused",
+              problems.join("\n"),
+            );
+          break;
+        }
       }
       // A cancel this request made records where it came from.
       if (state.ended && state.ended !== endedBefore && stored.source)

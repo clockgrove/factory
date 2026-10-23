@@ -40,6 +40,11 @@ export type Request =
   | { kind: "reset"; issue: number }
   /** Per-Objective control; it survives restarts. */
   | { kind: "pause" | "drain" | "resume"; issue: number }
+  /**
+   * `factory propose-amendment N --file F`: the file's JSON, checked by
+   * the service where it enters (planning/amendments.ts `proposeAmendment`).
+   */
+  | { kind: "propose-amendment"; issue: number; proposal: unknown }
   /** Queue-wide control (issue 0); it survives restarts. */
   | { kind: "queue"; issue: 0; mode: QueueMode }
   | RunRequest
@@ -109,7 +114,9 @@ export type RefusalCode =
   /** The command writes what only the running service writes (the knowledge store): start `factory serve`. */
   | "service_not_running"
   /** The knowledge store refused a `dream` write: the message says why (a changed or decided draft, an unreadable store). */
-  | "dream_refused";
+  | "dream_refused"
+  /** `propose-amendment` wasn't taken: the message names each problem and what would pass. */
+  | "amendment_refused";
 
 /** A request's result: applied (no code), or refused with a stable code. */
 export interface RequestResult {

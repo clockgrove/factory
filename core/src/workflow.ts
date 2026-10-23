@@ -9,6 +9,7 @@ import {
 } from "./engine.js";
 import { GitRefusal } from "./git.js";
 import { githubOutcome } from "./github.js";
+import { amendmentStep } from "./planning/amendments.js";
 import { currentPlan } from "./planning/plan.js";
 import { PREDECESSORS, predecessorsStep } from "./planning/predecessors.js";
 import {
@@ -47,6 +48,12 @@ const MINUTE = 60_000;
  * step that isn't ported yet holds with an honest question, so an Objective
  * on this build always has an answer that works. `deps` is absent when
  * Factory has no configuration.
+ *
+ * An amendment of the accepted plan (planning/amendments.ts), and a
+ * rejected one until it is replaced or continued past, comes before every
+ * other step after acceptance: steps already running finish, none starts,
+ * so the amendment's fence sees which items started, and the next steps
+ * are read from the amended plan.
  */
 export function objectiveWorkflow(deps?: BuildDeps): Workflow {
   const check = deps ? checkStep(deps) : unavailable("check");
@@ -70,7 +77,8 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
         return step ? [step] : [];
       }
       if (!deps) return [unavailable("build")];
-      return deliverySteps(state, deps);
+      const amend = amendmentStep(state, deps);
+      return amend ? [amend] : deliverySteps(state, deps);
     },
 
     upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),

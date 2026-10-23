@@ -477,6 +477,10 @@ const GITHUB_CRASH_POINTS = [
   "plan:data:after",
   "plan:post:before",
   "plan:post:after",
+  "amend:data:before",
+  "amend:data:after",
+  "amend:post:before",
+  "amend:post:after",
   "report:comment:before",
   "report:comment:after",
   "report:close:before",
@@ -3643,5 +3647,148 @@ test("a draining Objective starts no Work Item that hasn't started, even with a 
     `b started under the drain: ${touched.join(", ")}`,
   );
   assert.equal(cli(inst, "cancel", "57").code, 0);
+  await stopped(service);
+});
+
+test("an amendment comes before the build: intake is checked where it enters, a rejection asks replace or continue", async () => {
+  const inst = installation();
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    {
+      queue: { projectId: "PVT_none", pollSeconds: 5, maxActiveObjectives: 3 },
+    },
+  );
+  const accepted = "2026-01-01T00:00:00.000Z";
+  const discovery = {
+    scope: "in-scope",
+    reason: "b needs a shared helper",
+    evidence: ["src/b.ts imports src/helper.ts, which no item owns"],
+    ownership: ["src/helper.ts"],
+    acceptance: ["src/helper.ts exports parse"],
+    dependencies: [],
+  };
+  // Each owns its own path, so none waits for another's.
+  const plan = (issue) => ({
+    base: "0".repeat(40),
+    items: [{ id: "a", ownedPaths: [`src/${issue}.ts`], dependencies: [] }],
+    coverage: [],
+    finalCommands: [],
+    decisions: [],
+  });
+  const rejected = {
+    "amend:op-1:plan": { rejected: "The amendment removes Work Item a" },
+    "amend:op-1": { rejected: "The amendment removes Work Item a" },
+  };
+  const proposal = {
+    id: "op-1",
+    actor: "octo",
+    at: "2026-01-01T01:00:00.000Z",
+    plan: accepted,
+    discovery,
+  };
+  for (const issue of [81, 82])
+    seed(inst, issue, "building", {
+      done: { check: {}, plan: plan(issue), ...rejected },
+      kept: { "plan:acceptedAt": accepted, "amend:op-1:proposal": proposal },
+    });
+  seed(inst, 83, "building", {
+    done: { check: {}, plan: plan(83) },
+    kept: { "plan:acceptedAt": accepted },
+  });
+  const file = join(inst.root, "proposal.json");
+  writeFileSync(file, JSON.stringify(discovery));
+  const touched = (state, prefix) =>
+    [
+      ...Object.keys(state.retries),
+      ...Object.keys(state.attempts),
+      ...Object.keys(state.done),
+      ...state.holds.map((h) => h.step),
+    ].filter((key) => key.startsWith(prefix));
+  const service = serve(inst);
+
+  // The rejection holds the Objective before any Work Item starts.
+  await until(() => stateOf(inst, 81).holds.length, "#81's rejection asks");
+  const [question] = stateOf(inst, 81).holds;
+  assert.equal(question.step, "amend:op-1:continue");
+  assert.deepEqual(
+    question.options.map((option) => option.answer),
+    ["replace", "continue", "cancel"],
+  );
+  assert.match(question.question, /removes Work Item a/);
+  // A new proposal waits for the rejection to be settled.
+  const refusedNew = cli(inst, "propose-amendment", "81", "--file", file);
+  assert.equal(refusedNew.code, 1);
+  assert.equal(refusal(refusedNew), "amendment_refused");
+  assert.match(refusedNew.err, /op-1 was rejected/);
+  // `replace` takes in a replacement with the same discovery, and it is
+  // planned next.
+  assert.equal(
+    cli(
+      inst,
+      "answer",
+      "81",
+      "replace",
+      "--question",
+      question.id,
+      "--text",
+      "Keep a; add a helper item",
+    ).code,
+    0,
+  );
+  await until(
+    () => touched(stateOf(inst, 81), "amend:op-1-r2:plan").length,
+    "the replacement is planned",
+  );
+  const replacement = stateOf(inst, 81).kept["amend:op-1-r2:proposal"];
+  assert.deepEqual(replacement.discovery, discovery);
+  assert.deepEqual(replacement.replacement, {
+    amendmentId: "op-1",
+    diagnosis: "The amendment removes Work Item a",
+    correction: "Keep a; add a helper item",
+  });
+  assert.deepEqual(touched(stateOf(inst, 81), "item:"), []);
+
+  // `continue` runs the plan without it.
+  await until(() => stateOf(inst, 82).holds.length, "#82's rejection asks");
+  const [held] = stateOf(inst, 82).holds;
+  assert.equal(
+    cli(inst, "answer", "82", "continue", "--question", held.id).code,
+    0,
+  );
+  await until(
+    () => touched(stateOf(inst, 82), "item:a:work").length,
+    "a's work starts after continue",
+  );
+  assert.ok(stateOf(inst, 82).done["amend:op-1:continue"]);
+
+  // An operator's proposal is taken in and planned before a's work; a
+  // second waits for the first, and a malformed one names what passes.
+  await until(
+    () => touched(stateOf(inst, 83), "item:a:").length,
+    "#83's build runs",
+  );
+  assert.equal(cli(inst, "propose-amendment", "83", "--file", file).code, 0);
+  const taken = Object.entries(stateOf(inst, 83).kept).filter(([key]) =>
+    /^amend:.+:proposal$/.test(key),
+  );
+  assert.equal(taken.length, 1);
+  const [[, operator]] = taken;
+  assert.deepEqual(operator.discovery, discovery);
+  assert.equal(operator.plan, accepted);
+  await until(
+    () => touched(stateOf(inst, 83), `amend:${operator.id}:plan`).length,
+    "the operator's amendment is planned",
+  );
+  const second = cli(inst, "propose-amendment", "83", "--file", file);
+  assert.equal(refusal(second), "amendment_refused");
+  assert.match(second.err, /still being planned/);
+  writeFileSync(file, JSON.stringify({ ...discovery, ownership: [] }));
+  const malformed = cli(inst, "propose-amendment", "83", "--file", file);
+  assert.equal(refusal(malformed), "amendment_refused");
+  assert.match(malformed.err, /lacks ownership/);
+  for (const issue of [81, 82, 83])
+    assert.equal(cli(inst, "cancel", String(issue)).code, 0);
   await stopped(service);
 });

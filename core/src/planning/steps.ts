@@ -15,6 +15,7 @@ import {
 import { defaultHead } from "../git.js";
 import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
+import { prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
 import type { Planner } from "../providers/planner.js";
 import { resolvedProvider } from "../providers/selection.js";
@@ -39,6 +40,7 @@ import {
   currentPlan,
   generationInputs,
   position,
+  proposalsOf,
 } from "./plan.js";
 import {
   type PredecessorEvidence,
@@ -946,12 +948,13 @@ function fixRounds(state: ObjectiveState, g: number, n: number): number {
 
 /**
  * Planning revisions of the current generation: the rounds spent on fixes
- * before this one, and the rounds allowed with the operator's grants.
+ * before this one, plus the amendments of the plan it accepted, and the
+ * rounds allowed with the operator's grants.
  */
 export function planningRevisions(state: ObjectiveState): Usage {
   const { g, n } = position(state);
   return {
-    used: fixRounds(state, g, n) - 1,
+    used: fixRounds(state, g, n) - 1 + proposalsOf(state).length,
     allowed: allowances(state).planningRevisions + granted(state, g, n),
   };
 }
@@ -1053,31 +1056,37 @@ const LISTED_ITEMS = 200;
  * Post the plan on the issue, or edit the comments already there. The plan
  * data (what `factory reset` rebuilds from) goes in the plan comment when
  * it fits, else in numbered continuation comments the plan comment names;
- * it is never dropped.
+ * it is never dropped. An accepted amendment posts its plan the same way,
+ * with `note` saying which amendment it is and its own crash points
+ * (`point`: `<point>:post:*`, `<point>:data:*`).
  */
 export async function postPlan(
   deps: PlanningDeps,
   issue: number,
   plan: Plan,
   signal: AbortSignal,
+  { point = "plan", note }: { point?: string; note?: string } = {},
 ): Promise<void> {
   const marker = PLAN_MARK(issue);
   const children = plan.split
     ? plan.split.children
-        .map((child) => `- **${child.key}** ${child.title} (child Objective)`)
+        .map(
+          (child) =>
+            `- **${child.key}** ${prose(child.title)} (child Objective)`,
+        )
         .join("\n")
     : "";
   const listed = plan.items.slice(0, LISTED_ITEMS);
   const items = `${listed
     .map(
       (item) =>
-        `- **${item.id}** ${item.title}${item.dependencies.length ? ` (after ${item.dependencies.join(", ")})` : ""}`,
+        `- **${item.id}** ${prose(item.title)}${item.dependencies.length ? ` (after ${item.dependencies.join(", ")})` : ""}`,
     )
     .join(
       "\n",
     )}${plan.items.length > listed.length ? `\n- and ${plan.items.length - listed.length} more (see the plan data)` : ""}`;
   const summary =
-    `${marker}\n**Factory's plan** (${plan.split ? `split into ${plan.split.children.length} child Objectives` : `${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}`}, base \`${plan.base.slice(0, 12)}\`)\n\n${plan.split ? children : items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${d.text}` : ""} (${d.by})`).join("\n")}` : ""}`.slice(
+    `${marker}\n**Factory's plan** (${plan.split ? `split into ${plan.split.children.length} child Objectives` : `${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}`}, base \`${plan.base.slice(0, 12)}\`)${note ? `\n\n${note}` : ""}\n\n${plan.split ? children : items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${prose(d.text)}` : ""} (${prose(d.by)})`).join("\n")}` : ""}`.slice(
       0,
       COMMENT_LIMIT - 200,
     );
@@ -1098,10 +1107,10 @@ export async function postPlan(
       issue,
       PART_MARK(issue, index + 1),
       `${PART_MARK(issue, index + 1)}${data(part, `Plan data, part ${index + 1} of ${parts.length}`)}`,
-      "plan:data",
+      `${point}:data`,
       signal,
     );
-  await deps.github.upsertComment(issue, marker, body, "plan:post", signal);
+  await deps.github.upsertComment(issue, marker, body, `${point}:post`, signal);
 }
 
 // ---------------------------------------------------------------------------

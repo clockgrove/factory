@@ -1,7 +1,8 @@
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
+import type { WorkDiscovery } from "../planning/amendments.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
 import type { Retirement } from "../planning/types.js";
-import type { RepairFinding } from "../repair.js";
+import type { Correction, RepairFinding } from "../repair.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
@@ -74,6 +75,18 @@ export interface ItemFacts {
   discovery: DiscoveryResult;
   /** The criteria and commands the operator retired at this item's refusals (planning/plan.ts reads them). */
   retired: Retirement[];
+  /**
+   * Work attempt `attempt`'s in-scope `.factory-discovery.json`, kept
+   * while its question is open: collection deletes the file.
+   */
+  discovered: { attempt: number; discovery: WorkDiscovery };
+  /** The operator's `decline-discovery` of attempt `attempt`'s discovery. */
+  declined: { attempt: number; reason: string; by: string; at: string };
+  /**
+   * Repair `repair`'s failure blamed on merged predecessor `predecessor`:
+   * its `amend` answer proposes the follow-up work from this.
+   */
+  blamed: { repair: number; predecessor: string; correction: Correction };
 }
 
 /** What the Objective's own steps keep, by name. */

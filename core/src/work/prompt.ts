@@ -62,6 +62,8 @@ export interface WorkPromptInput {
    * path the worker gets when its own checkout lacks them.
    */
   peerNotes?: readonly PeerNote[];
+  /** Repository memory for this item (knowledge/index.ts roleMemory): advisory data. */
+  memory?: string;
   signal?: AbortSignal;
 }
 
@@ -426,6 +428,7 @@ function renderWorkPrompt(
     `\n\n${workItemContract(item)}\nNon-goals:\n${item.nonGoals.join("\n")}\nBrief:\n${attemptBrief(input, peerSources)}` +
     sourceInstructions +
     conventionsEvidence +
+    (input.memory ? `\n\n${input.memory}` : "") +
     validationInstructions +
     scriptInstructions +
     mediaInstructions +

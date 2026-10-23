@@ -24,6 +24,7 @@ import {
 } from "../engine.js";
 import { defaultHead } from "../git.js";
 import { GitHubError, issueGone } from "../github.js";
+import { roleMemory } from "../knowledge/index.js";
 import {
   type CandidateSet,
   captureAssets,
@@ -610,6 +611,7 @@ async function workStep(
       files,
     );
     const pin = packageManagerUpdate(shown.blocks);
+    const memory = await itemMemory("work", item, context, deps, base);
     const prepared = await prepareWorkPrompt({
       checkout: config.checkout,
       worktree,
@@ -633,6 +635,7 @@ async function workStep(
           }
         : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
+      ...(memory ? { memory } : {}),
       signal,
     });
     if ("problem" in prepared)
@@ -921,6 +924,12 @@ async function repairContext(
     sources,
     prior: applied,
     ...(answer ? { operatorAnswer: answer } : {}),
+    memory: () =>
+      itemMemory("diagnosis", item, context, deps, base, sources, [
+        finding.kind === "review"
+          ? finding.refused.map((r) => r.detail).join("\n")
+          : finding.detail,
+      ]),
     signal,
     log: context.log,
   });
@@ -1244,6 +1253,13 @@ async function reviewStep(
         predecessor: place.unit.items[place.layer - 1]?.id ?? null,
       }
     : { kind: "regular" };
+  const memory = await itemMemory(
+    "result-review",
+    item,
+    context,
+    deps,
+    work.base,
+  );
   const review = await reviewResult({
     planner: deps.planner,
     plan,
@@ -1260,6 +1276,7 @@ async function reviewStep(
       : {}),
     inputs: workerInputs(state, [item.id]),
     peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
+    ...(memory ? { memory } : {}),
     ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
     decisions,
     delivery: position,
@@ -2109,6 +2126,27 @@ function finalReviewStep(deps: BuildDeps): Step {
       const mergedIds = merges.flatMap(
         (entry) => entry.merged.items ?? [entry.id],
       );
+      const sources = await pinnedSources(state, deps, signal);
+      const acceptance = checkObjective(
+        acceptedInputs(state).shown.blocks,
+      ).objective.acceptance.map((criterion) => criterion.text);
+      const memory = await roleMemory({
+        role: "final-review",
+        state,
+        checkout: deps.config.checkout,
+        tree: final.commit,
+        paths: [
+          ...new Set(
+            plan.items
+              .filter((item) => mergedIds.includes(item.id))
+              .flatMap((item) => item.ownedPaths),
+          ),
+        ],
+        text: acceptance.join("\n"),
+        supplied: sources,
+        signal,
+        log: context.log,
+      });
       const review = await reviewObjective({
         planner: deps.planner,
         plan,
@@ -2140,10 +2178,9 @@ function finalReviewStep(deps: BuildDeps): Step {
         }),
         inputs: workerInputs(state, mergedIds),
         peerNotes: objectiveNotes(plan, acceptedNotes(state, plan)),
-        sources: await pinnedSources(state, deps, signal),
-        acceptance: checkObjective(
-          acceptedInputs(state).shown.blocks,
-        ).objective.acceptance.map((criterion) => criterion.text),
+        ...(memory ? { memory } : {}),
+        sources,
+        acceptance,
         dir: join(deps.workDir(state.issue), "final-review"),
         ...(decisions ? { decisions } : {}),
         signal,
@@ -2230,6 +2267,34 @@ function integrated(state: ObjectiveState, plan: Plan): string {
       if (!latest || (value as MergeResult).at > latest.at)
         latest = value as MergeResult;
   return latest?.integratedSha ?? plan.base;
+}
+
+/**
+ * Repository memory about one Work Item, for its worker, its diagnosis or
+ * its result review: the worker and the review ask the same query, so the
+ * review sees what the worker saw; the diagnosis searches by the failure
+ * first.
+ */
+function itemMemory(
+  role: "work" | "diagnosis" | "result-review",
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+  tree: string,
+  supplied: readonly { path: string; heading?: string }[] = item.citations,
+  lead: readonly string[] = [],
+): Promise<string> {
+  return roleMemory({
+    role,
+    state: context.state,
+    checkout: deps.config.checkout,
+    tree,
+    paths: item.ownedPaths,
+    text: [...lead, item.title, item.goal, ...item.acceptance].join("\n"),
+    supplied,
+    signal: context.signal,
+    log: context.log,
+  });
 }
 
 async function pinnedSources(

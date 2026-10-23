@@ -12,7 +12,8 @@
  * again once with the error; still invalid, the criteria it left undecided go
  * to the operator. Provider failures escape as `PlannerError`. The reviewer
  * also gets the Objective's knowledge: every item's accepted handoff notes
- * and the bytes they cite (result.ts knowledgeRows).
+ * and the bytes they cite (result.ts knowledgeRows), and the repository
+ * memory about its paths as one advisory row.
  */
 import type { CandidateRecord, InputRecord } from "../media.js";
 import { coverageCriterion } from "../planning/graph.js";
@@ -57,6 +58,8 @@ export function reviewObjective(input: {
   inputs?: readonly InputRecord[];
   /** Every item's accepted handoff notes (planning/schedule.ts objectiveNotes). */
   peerNotes?: readonly PeerNote[];
+  /** Repository memory for the Objective's paths (knowledge/index.ts roleMemory): advisory data. */
+  memory?: string;
   /** A private directory for the evidence root. */
   dir: string;
   /** Operator decisions; those on this tree replace the reviewer's verdict. */

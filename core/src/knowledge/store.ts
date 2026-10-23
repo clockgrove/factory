@@ -6,8 +6,8 @@
  *
  * It is not Objective state, but it has the same one writer: the service
  * adds memory as Objectives move, and applies the writes of `dream`
- * commands, which reach it as requests (requests.ts). The CLI only reads
- * it ({@link readStore}). Every change is one transaction in WAL mode with
+ * commands, which reach it as requests (requests.ts). The CLI and the
+ * roles that read memory only read it ({@link readStore}). Every change is one transaction in WAL mode with
  * full sync, so a crash keeps a change whole or not at all. Every record
  * is keyed by its content, so recording it again changes nothing.
  */
@@ -87,10 +87,15 @@ export function withStore<T>(root: string, use: (db: Database) => T): T {
 }
 
 /**
- * Run `use` on a read-only view of the store, for the CLI. A store that
- * doesn't exist yet reads as an empty one.
+ * Run `use` on a read-only view of the store, for the CLI and the roles
+ * that read memory. A store that doesn't exist yet reads as an empty one.
+ * A read waits up to `busyMs` for a lock.
  */
-export function readStore<T>(root: string, use: (db: Database) => T): T {
+export function readStore<T>(
+  root: string,
+  use: (db: Database) => T,
+  busyMs = 10_000,
+): T {
   const file = join(knowledgeDir(root), "knowledge.sqlite");
   const { DatabaseSync } = sqlite();
   const exists = existsSync(file);
@@ -98,7 +103,7 @@ export function readStore<T>(root: string, use: (db: Database) => T): T {
     ? new DatabaseSync(file, { readOnly: true })
     : new DatabaseSync(":memory:");
   try {
-    db.exec(exists ? "PRAGMA busy_timeout=10000" : SCHEMA);
+    db.exec(exists ? `PRAGMA busy_timeout=${busyMs}` : SCHEMA);
     return use(db);
   } finally {
     db.close();

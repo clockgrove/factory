@@ -1,26 +1,29 @@
 /**
  * The Knowledge capability: the curated playbook, repository memory and
  * Dream. Planning calls {@link planningKnowledge} once per planning call
- * (its single hook, beside the playbook read); the service calls
+ * (its single hook, beside the playbook read); the worker, the repair
+ * diagnosis and both reviews call {@link roleMemory}; the service calls
  * {@link knowledgeObserver} as Objectives move, and applies `dream`
  * writes (dream.ts applyDream).
  */
 import { TransientError } from "../github.js";
-import { type BaseFiles, planningSources } from "../planning/facts.js";
+import { BaseFiles, planningSources } from "../planning/facts.js";
+import { acceptedInputs } from "../planning/plan.js";
 import type { ShownObjective } from "../shown.js";
 import { type ObjectiveState, runOf } from "../state.js";
 import { errorMessage } from "../text.js";
 import { adaptiveWorkflow } from "../validate.js";
 import { pinnedPlaybook } from "./dream.js";
 import {
-  memorySection,
+  type MemoryRole,
   observeObjective,
   pathDigest,
+  queryMemory,
   retain,
   sourceRecords,
 } from "./memory.js";
 import { knowledgeSettings } from "./settings.js";
-import { type Database, openStore } from "./store.js";
+import { type Database, openStore, readStore } from "./store.js";
 
 /**
  * The advisory text planning appends to its prompts: the target's curated
@@ -62,15 +65,17 @@ export async function planningKnowledge(input: {
       );
       if (context.memory) {
         retain(db, sourceRecords(issue, run, input.files.base, sources));
-        parts.push(
-          await memorySection(db, {
-            objective: issue,
-            body: input.shown.body,
-            context,
-            supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
-            digest: (path) => pathDigest(input.files, path),
-          }),
-        );
+        const memory = await queryMemory(db, {
+          role: "planning",
+          objective: issue,
+          text: input.shown.body,
+          paths: context.selectors,
+          maxBytes: context.bounds.maxBytes,
+          context,
+          supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
+          digest: (path) => pathDigest(input.files, path),
+        });
+        parts.push(memory.text);
       }
     }
   } catch (error) {
@@ -82,6 +87,93 @@ export async function planningKnowledge(input: {
     db?.close();
   }
   return parts.filter(Boolean).join("\n\n");
+}
+
+/**
+ * The memory bytes each role gets at most (planning.context's maxBytes
+ * still caps them). Review's peer-notes row inlines 64 KB (result.ts
+ * KNOWLEDGE_INLINE_BYTES): final review, which sees every item, gets that
+ * much again; the worker and result review half of it, for one item; the
+ * diagnosis an eighth of its 128 KB candidate-file bound (repair.ts).
+ */
+const ROLE_BYTES: Record<Exclude<MemoryRole, "planning">, number> = {
+  work: 32_000,
+  "result-review": 32_000,
+  diagnosis: 16_000,
+  "final-review": 64_000,
+};
+
+/**
+ * A read waits this long for the writer's lock; longer, memory is empty.
+ * The wait blocks the service's loop, so it matches the writer's own
+ * (store.ts openStore).
+ */
+const ROLE_BUSY_MS = 1000;
+
+/**
+ * Repository memory for one role call, gated as planning's is: only for an
+ * Objective whose Adaptive workflow section is enabled, on an installation
+ * whose planning context turns `memory` on. Empty otherwise, and when no
+ * record is relevant: a role isn't told about memory it lacks. Memory is
+ * advisory, so a store that can't be read or is slow gives empty memory and
+ * a log line, never a hold or a retry.
+ */
+export async function roleMemory(input: {
+  role: Exclude<MemoryRole, "planning">;
+  state: ObjectiveState;
+  checkout: string;
+  /** The commit the role reads: a record's staleness is judged there. */
+  tree: string;
+  /** The paths the role works on. */
+  paths: readonly string[];
+  /** What the role is about: the search text. */
+  text: string;
+  /** Sources the role already has. */
+  supplied: readonly { path: string; heading?: string }[];
+  signal: AbortSignal;
+  log(event: Record<string, unknown>): void;
+}): Promise<string> {
+  const settings = knowledgeSettings();
+  const context = settings?.planningContext;
+  if (
+    !settings ||
+    !context?.memory ||
+    !adaptiveWorkflow(acceptedInputs(input.state).shown.blocks).enabled
+  )
+    return "";
+  const files = new BaseFiles(input.checkout, input.tree, input.signal);
+  try {
+    const section = await readStore(
+      settings.root,
+      (db) =>
+        queryMemory(db, {
+          role: input.role,
+          objective: input.state.issue,
+          text: input.text,
+          paths: input.paths,
+          maxBytes: ROLE_BYTES[input.role],
+          context,
+          supplied: input.supplied.map((s) => `${s.path}#${s.heading ?? ""}`),
+          digest: (path) => pathDigest(files, path),
+        }),
+      ROLE_BUSY_MS,
+    );
+    input.log({
+      event: "memory",
+      role: input.role,
+      shown: section.shown,
+      left: section.left,
+    });
+    return section.shown ? section.text : "";
+  } catch (error) {
+    if (input.signal.aborted) throw error;
+    input.log({
+      event: "memory-unavailable",
+      role: input.role,
+      error: errorMessage(error),
+    });
+    return "";
+  }
 }
 
 /**

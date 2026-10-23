@@ -32,11 +32,26 @@ export interface DiscoverySpecification {
   allowance: { maxEntries: number; maxBytes: number; maxAttempts: number };
 }
 
+/** Every kind a saved plan may hold; graph.ts knows each shape. */
+export type ItemKind = "work" | "qa" | "aggregate" | "discovery";
+
+/**
+ * The kinds this build executes (work/steps.ts), and so the only kinds the
+ * planner is offered: the wire, the planner prompt and the review rubric
+ * read this list. A kind joins it when its executor lands; a saved plan
+ * with any other kind holds at that item.
+ */
+export const EXECUTABLE_KINDS: readonly ItemKind[] = ["work", "aggregate"];
+
+/** Whether this build executes, and the planner is offered, `kind`. */
+export const executable = (kind: ItemKind = "work"): boolean =>
+  EXECUTABLE_KINDS.includes(kind);
+
 export interface WorkItem {
   /** A reviewed branch selector; absent or unknown facts never mean false. */
   condition?: { conditionId: string; when: boolean };
-  /** Read-only proof node; uses the ordinary scheduler without a worker or PR. */
-  kind?: "work" | "qa" | "aggregate" | "discovery";
+  /** Absent means work. See EXECUTABLE_KINDS for the kinds this build runs. */
+  kind?: ItemKind;
   /** Read-only observation; never coding or publication. */
   discovery?: DiscoverySpecification;
   /** Dependency observations, selected by exact role and typed fields. */

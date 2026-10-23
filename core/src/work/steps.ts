@@ -66,7 +66,7 @@ import {
   type PlanningDeps,
   REOPENED,
 } from "../planning/steps.js";
-import type { Plan, WorkItem } from "../planning/types.js";
+import { executable, type Plan, type WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import { moveStatusOffDone } from "../queue.js";
 import { correction, type RepairFinding } from "../repair.js";
@@ -187,12 +187,41 @@ interface PublishResult {
 }
 
 /**
+ * The steps after planning: the build, then final validation, final review
+ * and the report. Every one takes `replan` here, before it runs, so any of
+ * their holds may offer it and the answer always plans again.
+ */
+export function deliverySteps(state: ObjectiveState, deps: BuildDeps): Step[] {
+  const steps = !built(state)
+    ? buildSteps(state, deps)
+    : !state.done.final
+      ? [finalStep(deps)]
+      : !state.done["final-review"]
+        ? [finalReviewStep(deps)]
+        : !state.done.report
+          ? [reportStep(deps)]
+          : [];
+  return steps.map(replannable);
+}
+
+/** The step, except that a `replan` answer to its hold takes the replan route. */
+function replannable(step: Step): Step {
+  return {
+    ...step,
+    run: (context) =>
+      context.answer?.answer === "replan"
+        ? Promise.resolve(replanOutcome(context.state))
+        : step.run(context),
+  };
+}
+
+/**
  * The runnable item steps, most important first (planning/schedule.ts): each
  * unsettled item whose dependencies have merged, or a native-stack layer
  * whose layer below is published. An item's first step waits, without a
  * question, while an in-flight item holds a resource it declares.
  */
-export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
+function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   const plan = state.done.plan as Plan;
   if (plan.split) return [splitPending(plan.split.children.length)];
   const stacked =
@@ -256,9 +285,10 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
     );
   };
   const next = (item: WorkItem): Step | undefined => {
+    // The planner is offered only executable kinds; a saved plan from
+    // another build may still hold one this build can't run.
+    if (!executable(item.kind)) return notYet(item, `${item.kind} items`);
     if (item.kind === "aggregate") return aggregateStep(item);
-    if (item.kind === "qa" || item.kind === "discovery")
-      return notYet(item, `${item.kind} items`);
     const place = layerOf(item.id);
     const top = !place || place.layer === place.unit.items.length - 1;
     const phase = PHASES.find(
@@ -365,13 +395,11 @@ function unitsProblem(problem: string): Step {
   return {
     key: "build:units",
     deadlineMs: MINUTE,
-    run: async (context) =>
-      context.answer?.answer === "replan"
-        ? replanOutcome(context.state)
-        : hold(
-            `${problem}, so Factory can't deliver the plan as native stacks. Answer replan to plan again, or cancel.`,
-            ["replan", "cancel"],
-          ),
+    run: async () =>
+      hold(
+        `${problem}, so Factory can't deliver the plan as native stacks. Answer replan to plan again, or cancel.`,
+        ["replan", "cancel"],
+      ),
   };
 }
 
@@ -384,13 +412,11 @@ function splitPending(children: number): Step {
   return {
     key: "build:split",
     deadlineMs: MINUTE,
-    run: async (context) =>
-      context.answer?.answer === "replan"
-        ? replanOutcome(context.state)
-        : hold(
-            `The accepted plan splits this Objective into ${children} child Objectives, and Factory can't create child Objectives yet. Answer replan to plan it without a split, or cancel.`,
-            ["replan", "cancel"],
-          ),
+    run: async () =>
+      hold(
+        `The accepted plan splits this Objective into ${children} child Objectives, and Factory can't create child Objectives yet. Answer replan to plan it without a split, or cancel.`,
+        ["replan", "cancel"],
+      ),
   };
 }
 
@@ -432,10 +458,7 @@ function itemStep(item: WorkItem, phase: Phase, deps: BuildDeps): Step {
         : phase === "ci"
           ? 10 * MINUTE
           : 45 * MINUTE,
-    run: (context) =>
-      context.answer?.answer === "replan"
-        ? Promise.resolve(replanOutcome(context.state))
-        : guardedItem(deps, () => run(item, context, deps)),
+    run: (context) => guardedItem(deps, () => run(item, context, deps)),
   };
 }
 
@@ -1801,7 +1824,7 @@ interface FinalResult {
 const REPUSHED = "final:repushed";
 
 /** `final`: the final commands on the default branch head after every merge. */
-export function finalStep(deps: BuildDeps): Step {
+function finalStep(deps: BuildDeps): Step {
   return {
     key: "final",
     resource: "cpu",
@@ -1811,7 +1834,6 @@ export function finalStep(deps: BuildDeps): Step {
         const { state, signal } = context;
         const { config } = deps;
         const plan = state.done.plan as Plan;
-        if (context.answer?.answer === "replan") return replanOutcome(state);
         const head = await defaultHead(config.checkout, signal);
         for (const item of plan.items) {
           const merged = state.done[stepKey(item.id, "merge")] as
@@ -1885,14 +1907,13 @@ export function finalStep(deps: BuildDeps): Step {
 const REFUSED = "final-review:refused";
 
 /** `final-review`: every Objective criterion against the integrated result. */
-export function finalReviewStep(deps: BuildDeps): Step {
+function finalReviewStep(deps: BuildDeps): Step {
   return {
     key: "final-review",
     deadlineMs: 45 * MINUTE,
     run: (context) =>
       guardedItem(deps, async () => {
         const { state, signal } = context;
-        if (context.answer?.answer === "replan") return replanOutcome(state);
         // A `retry` to the refusal (never to an error or a wait question):
         // the operator fixed the default branch, so validate the new head
         // before reviewing again.
@@ -2082,7 +2103,7 @@ async function guardedItem(
 // report and cancel cleanup
 
 /** `report`: post the outcome on the issue, close it, and remove the work files. */
-export function reportStep(deps: BuildDeps): Step {
+function reportStep(deps: BuildDeps): Step {
   return {
     key: "report",
     deadlineMs: 10 * MINUTE,
@@ -2090,7 +2111,6 @@ export function reportStep(deps: BuildDeps): Step {
       guardedItem(deps, async () => {
         const { state, signal } = context;
         const { github } = deps;
-        if (context.answer?.answer === "replan") return replanOutcome(state);
         // The report is this run's: an earlier run of the same issue (queued
         // again after it finished) has its own, which never counts here.
         const run = runOf(state);

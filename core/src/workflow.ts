@@ -15,14 +15,11 @@ import {
 import type { ObjectiveState, ObjectiveStatus } from "./state.js";
 import {
   type BuildDeps,
-  buildSteps,
   built,
   cancelCleanupStep,
-  finalReviewStep,
-  finalStep,
+  deliverySteps,
   layersBelow,
   RERUN,
-  reportStep,
   rerunCleanupStep,
 } from "./work/steps.js";
 
@@ -51,11 +48,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
         return step ? [step] : [];
       }
       if (!deps) return [unavailable("build")];
-      if (!built(state)) return buildSteps(state, deps);
-      if (!state.done.final) return [finalStep(deps)];
-      if (!state.done["final-review"]) return [finalReviewStep(deps)];
-      if (!state.done.report) return [reportStep(deps)];
-      return [];
+      return deliverySteps(state, deps);
     },
 
     upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),

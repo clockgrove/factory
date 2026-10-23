@@ -12,18 +12,21 @@ import {
   GRAPH_REVIEW_REVISION_ROUND,
   PLANNER_CHECKLIST,
   QA_EVIDENCE_GUIDANCE,
+  QA_OFFERED,
   WORK_ITEM_ENTRY_SIGNAL,
   WORK_ITEM_PLANNING_RULES,
   WORK_ITEM_STANDARD,
   type WorkerCommandAccess,
   workerCapability,
 } from "./rubric.js";
-import type {
-  Draft,
-  Finding,
-  PlannerDecision,
-  PlanningFacts,
-  WorkItem,
+import {
+  type Draft,
+  EXECUTABLE_KINDS,
+  type Finding,
+  type ItemKind,
+  type PlannerDecision,
+  type PlanningFacts,
+  type WorkItem,
 } from "./types.js";
 import { COMPILER_READINESS_GUIDANCE } from "./wire.js";
 
@@ -121,8 +124,23 @@ function reviewRepositoryGuidance(
   } Work Item citations without an evidenceIndex name a repository file the planner cited at the base; the worker receives its exact base bytes.\n${repository.map}${repository.conventions}`;
 }
 
-const REVIEW_ARTIFACT_GUIDANCE =
-  "Configured review artifact selectors are installation configuration: when an item validation, read-only QA validation or final Acceptance command exactly equals a selector command and passes, Factory captures that selector's declared bodies and supplies them to that item's result review and to final Objective review. A work item captures a text selector only when it owns the selector's text.source. A locator match captures every regular file directly in the located directory whose name matches its pattern, so a new matching file needs no configuration change; reviews list the files actually captured.";
+/** What each item kind does, as the planner reads it. */
+const KIND_ROLES: Record<ItemKind, string> = {
+  work: "work implements",
+  qa: "qa checks the integrated result read-only",
+  aggregate: "aggregate depends on all children and omits acceptance",
+  discovery: "discovery observes the repository read-only",
+};
+
+/** The item kinds the planner may choose: exactly the kinds this build executes. */
+const ITEM_KINDS = `Item kinds: ${EXECUTABLE_KINDS.map((kind) => KIND_ROLES[kind]).join("; ")}. Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items.${QA_OFFERED ? " Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage." : ""} Read-only nodes omit ownership, assets, candidate counts and execution profiles.`;
+
+/** A plan for an Objective that changes nothing: read-only QA when offered. */
+const QUALIFY_ONLY = QA_OFFERED
+  ? "When the Objective only asks to qualify existing behavior, a graph of read-only QA items with no implementation is valid. Never invent a no-op worker or PR."
+  : "When the Objective only asks to qualify existing behavior, plan the work that adds its missing proof (tests or documentation); when the repository needs no change at all, raise decisionRequired. Never invent a no-op worker or PR.";
+
+const REVIEW_ARTIFACT_GUIDANCE = `Configured review artifact selectors are installation configuration: when an item validation, ${QA_OFFERED ? "read-only QA validation " : ""}or final Acceptance command exactly equals a selector command and passes, Factory captures that selector's declared bodies and supplies them to that item's result review and to final Objective review. A work item captures a text selector only when it owns the selector's text.source. A locator match captures every regular file directly in the located directory whose name matches its pattern, so a new matching file needs no configuration change; reviews list the files actually captured.`;
 
 /** The installation's exact selectors. */
 function configuredReviewArtifacts(
@@ -281,17 +299,16 @@ ${PLANNER_CHECKLIST}
 How to answer:
 ${compileRepositoryGuidance(repository, baseSha)}- Return only the requested choice structure and zero-based indices. Use a concise title, one-sentence goal, stage-local acceptance and non-goals. oneOutcomeReason is null unless an item has more than ${WORK_ITEM_ENTRY_SIGNAL} acceptance entries. Before review, Factory refuses an item above that without a reason, an acceptance entry that cites a line number, two items owning the same or overlapping paths when neither depends on the other, and, when the plan selects any validation command, a work item without one or a criterion proved by final review or CI whose owner runs none. The brief carries only settled decisions, cross-item contracts and evidence responsibilities the worker cannot get from the repository or the item's other fields; workers read the code themselves, so give no reading lists, line ranges or edit steps, and never recopy sources, acceptance, ownership or commands.
 - A pinned source has its complete literal body in the block labeled "source <sourceIndex>"; a source-line lineIndex is that block's numbered line.
-- Coverage: emit one top-level entry per supplied obligation, in order; array position selects obligationIndex. Choose a declared owner and a proof allowed by its actual item kind, including retained kinds. Validation indices refer to that same item. A semantic proof names no acceptance entry: the owner's review judges the obligation itself, so the owner's acceptance as a whole must deliver it. Do not duplicate coverage or obligation indices. Preserve every clause of the whole obligation. Item-local proof and acceptance are after its validation but before its delivery, LFS upload, publication, merge or hydration; they cannot depend on its own merge, later items or final validation. Native-stack predecessors are not yet merged. Use stage-local component acceptance and final-review on its implementation owner when authorized final validation/evidence proves the full obligation. Final-review names a phase, not supplied runtime evidence. Never fake sibling implementations or prematurely passing checks. Add downstream/QA proof only for a named source requirement or material risk whose necessary evidence is missing from final validation/review; put that responsibility in its brief. A final-controller guarantee must cover the entire obligation. Exactly one backticked command runs on the integrated result and any proof covers it; other required commands need their exact command proof.
+- Coverage: emit one top-level entry per supplied obligation, in order; array position selects obligationIndex. Choose a declared owner and a proof allowed by its actual item kind, including retained kinds. Validation indices refer to that same item. A semantic proof names no acceptance entry: the owner's review judges the obligation itself, so the owner's acceptance as a whole must deliver it. Do not duplicate coverage or obligation indices. Preserve every clause of the whole obligation. Item-local proof and acceptance are after its validation but before its delivery, LFS upload, publication, merge or hydration; they cannot depend on its own merge, later items or final validation. Native-stack predecessors are not yet merged. Use stage-local component acceptance and final-review on its implementation owner when authorized final validation/evidence proves the full obligation. Final-review names a phase, not supplied runtime evidence. Never fake sibling implementations or prematurely passing checks. Add downstream${QA_OFFERED ? "/QA" : ""} proof only for a named source requirement or material risk whose necessary evidence is missing from final validation/review; put that responsibility in its brief. A final-controller guarantee must cover the entire obligation. Exactly one backticked command runs on the integrated result and any proof covers it; other required commands need their exact command proof.
 - Source obligations (rule 3): give each sourceObligations entry its pinned sourceIndex (repository files you cite are not obligation sources), the smallest firstLineIndex..lastLineIndex range of that source's numbered lines stating it, and statement null when those lines state it on their own, otherwise a short self-contained statement that keeps every clause; ranges never repeat or overlap. A covered entry has an owner, a proof allowed for the owner's kind and an environment, usually a semantic proof by the owner whose acceptance delivers it; an out-of-scope entry has a reason and the OBJECTIVE objectiveLineIndices whose constraints or out-of-scope text exclude it. Obligations that carry source and lines are retained source obligations: cover them in coverage and do not list them again. In an amendment, list each previous sourceExclusions entry again with the same lines, or cover it.
 - Citations: each citation is {path, heading}; copy a pinned citation choice exactly or name a repository file. Choose the smallest complete, nonredundant sections, preserving required interfaces, literals and facts. Do not choose a full section and an already included subsection. Workers receive these sections verbatim and a full checkout; the brief supplies decisions, not reading lists or recopied sources. Distinguish supplied complete bytes from omitted repository/tooling bodies and fresh dependency implementations. Re-read only missing/current semantics, not known supplied bytes. Batch independent work only when no model decision intervenes; preserve command literals, quoting, prerequisites and exit gates. Keep required evidence/command temporary files, not scratch digest snapshots duplicating controller audits.
 - Package-manager metadata: only the structured Objective's exact Package manager update authorizes a version change; prose/model output does not. One implementation owner owns package.json and lockfile updates. Existing acceptance-script bodies and hooks stay fixed to the base/predecessor. An absent script needs an exact source-declared command and root package.json owner; never create lifecycle hooks or nested npm/pnpm invocations. Root installation is only exact source-declared \`pnpm install --frozen-lockfile --ignore-scripts\` or \`npm ci --ignore-scripts\`, before scripts. npm requires unchanged tracked package.json/package-lock.json and configuration, no workspaces, shrinkwrap override, mixed manager or manager update. Unsupported installation needs a source decision, not a wrapper or rewritten command.
 - Validation: preserve exact authorized commands. Every check must terminate with exit zero on success and clean up its owned resources. A bare service launch is not finite proof; startup/request/shutdown requires a finite source-authorized harness, not a brief promising cleanup. Missing finite-command authority needs a source decision, never dropped acceptance or rewritten literals. A source-declared command selects sourceIndex/lineIndex of one complete standalone command, not a JSON script body. Base-observed package scripts use their existing authorized npm/pnpm invocation and package.json source; other files need the base's standalone executable line. Newly authored commands are never base-observed. Item checks must pass in its actual pre-delivery checkout. Author sibling-dependent verification against settled interfaces but run it through authorized integrated commands, without premature item acceptance. Retain required real runtime, ordering and negative-control proof.
-- Environment: null (the default: local/available, null probe, no prerequisites or preparedBy) unless sources require preparation/readiness. ${COMPILER_READINESS_GUIDANCE} A probe is an owner's exact command that can pass before implementation. Setup indices are unique, increasing and before the probe, with explicit source authority; null probe requires none. Never infer setup from names or use newly implemented behavior as readiness. Preflight, worker and fresh result/final checkouts each require their own authorized sequence; read-only QA uses its validator checkout once, not an extra preflight checkout. Ignored installs/historical receipts do not transfer, and setup is not semantic acceptance.
-- ${QA_EVIDENCE_GUIDANCE}
-- Item kinds: work implements; qa checks the integrated result read-only; aggregate depends on all children and omits acceptance.  Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items. Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage. Read-only nodes omit ownership, assets, candidate counts and execution profiles.
+- Environment: null (the default: local/available, null probe, no prerequisites or preparedBy) unless sources require preparation/readiness. ${COMPILER_READINESS_GUIDANCE} A probe is an owner's exact command that can pass before implementation. Setup indices are unique, increasing and before the probe, with explicit source authority; null probe requires none. Never infer setup from names or use newly implemented behavior as readiness. Preflight, worker and fresh result/final checkouts each require their own authorized sequence;${QA_OFFERED ? " read-only QA uses its validator checkout once, not an extra preflight checkout." : ""} Ignored installs/historical receipts do not transfer, and setup is not semantic acceptance.
+${QA_EVIDENCE_GUIDANCE ? `- ${QA_EVIDENCE_GUIDANCE}\n` : ""}- ${ITEM_KINDS}
 - Ownership paths: use literal relative files or directory prefixes ending "/", with no wildcards, absolute paths, backslashes, empty or "." parts. Own affected existing tests and the files fixedScripts run; fixed script bodies cannot change. ${repository?.reads ? "Assign owned paths from the repository files and sources you read" : repository ? "Assign owned paths from the repository map and supplied source/script facts" : "Assign owned paths from supplied source/script facts"}; a worker reports any additional required path for review. newPackages lists every new package directory and its owner includes package.json. Own existing pnpm-workspace.yaml only for Objective-declared Workspace package additions: one owner preserves existing entries, owns new manifests and cites the named directories.
-- Required CI: add source-required premerge names to requiredPreIntegrationChecks using checkIndex from checkNames and the requiring sourceIndex; CI proofs use the same choices. Missing names remain a review/operator requirement, never silently dropped. No requirement means [].
-- When the Objective only asks to qualify existing behavior, a graph of read-only QA items with no implementation is valid. Never invent a no-op worker or PR.
+- Required CI: add source-required premerge names to requiredPreIntegrationChecks using checkIndex from checkNames and the requiring sourceIndex;${QA_OFFERED ? " CI proofs use the same choices." : ""} Missing names remain a review/operator requirement, never silently dropped. No requirement means [].
+- ${QUALIFY_ONLY}
 
 
 - Resources are exact identities; give a higher priority to work the source says must run first. Give explicit non-goals.

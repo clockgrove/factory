@@ -6,20 +6,22 @@ import {
   validValidationCommand,
 } from "./graph.js";
 import { WORK_ITEM_ENTRY_SIGNAL } from "./rubric.js";
-import type {
-  AcceptanceCoverage,
-  ChildObjectiveSpec,
-  Citation,
-  CoverageEnvironment,
-  CoverageProof,
-  Draft,
-  Finding,
-  PlanningFacts,
-  RequiredPreIntegrationCheck,
-  SourceAssetBinding,
-  SourceExclusion,
-  ValidationCommand,
-  WorkItem,
+import {
+  type AcceptanceCoverage,
+  type ChildObjectiveSpec,
+  type Citation,
+  type CoverageEnvironment,
+  type CoverageProof,
+  type Draft,
+  executable,
+  type Finding,
+  type ItemKind,
+  type PlanningFacts,
+  type RequiredPreIntegrationCheck,
+  type SourceAssetBinding,
+  type SourceExclusion,
+  type ValidationCommand,
+  type WorkItem,
 } from "./types.js";
 
 /**
@@ -445,7 +447,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     "integrated-ci": { checkIndex },
     "published-ci": { checkIndex, dependencyIndex: integer() },
   };
-  const modes: Record<string, string[]> = {
+  // Proof modes by item kind. The wire offers only the kinds this build
+  // executes; the others keep their modes for when their executor lands.
+  const allModes: Record<string, string[]> = {
     work: [
       "result-command",
       "result-semantic",
@@ -468,6 +472,10 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
       "final-controller",
     ],
   };
+  const modes = Object.fromEntries(
+    Object.entries(allModes).filter(([kind]) => executable(kind as ItemKind)),
+  );
+  const offeredForms = new Set(Object.values(modes).flat());
   // A plan may split the Objective into child Objectives, unless it is itself
   // a child: children never split again. An obligation a stub child carries
   // names that child's key as its itemId.
@@ -479,7 +487,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
         "Choose a kind allowed for the owner's item kind by proofModesByItemKind in the compiler choices.",
       anyOf: [
         ...Object.keys(proofForms)
-          .filter((form) => !form.endsWith("-ci") || checkNames.length)
+          .filter((form) => offeredForms.has(form))
           .map((form) =>
             strict({
               kind: { type: "string", enum: [form] },

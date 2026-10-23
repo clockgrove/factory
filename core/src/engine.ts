@@ -256,6 +256,12 @@ export interface StepContext {
   readonly answer?: Answer;
   readonly signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+  /**
+   * Facts to keep with whatever outcome this attempt ends in, an error
+   * included (`state.kept`, as an outcome's `keep`, which wins on a
+   * clash), such as a retained conversation's session (providers/session.ts).
+   */
+  keep(facts: Record<string, unknown>): void;
 }
 
 export interface Step {
@@ -786,6 +792,7 @@ export class ObjectiveRunner {
     const controller = new AbortController();
     this.running.set(step.key, { token, controller });
     const answer = this.state.answers[step.key];
+    let kept: Record<string, unknown> | undefined;
     const context: StepContext = {
       state: structuredClone(this.state),
       ...(answer ? { answer } : {}),
@@ -796,6 +803,9 @@ export class ObjectiveRunner {
           attemptId,
           ...event,
         }),
+      keep: (facts) => {
+        kept = { ...kept, ...facts };
+      },
     };
     this.log.write(this.state.issue, {
       step: step.key,
@@ -829,7 +839,12 @@ export class ObjectiveRunner {
       this.running.delete(step.key);
       this.run.finished += 1;
       try {
-        this.apply(step.key, outcome);
+        this.apply(
+          step.key,
+          kept && outcome.kind !== "replace"
+            ? { ...outcome, keep: { ...kept, ...outcome.keep } }
+            : outcome,
+        );
       } catch (error) {
         // The save failed and the state went back to disk, where the
         // attempt is still open: the next tick runs it again.

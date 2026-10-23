@@ -41,6 +41,8 @@ export interface CodexTelemetry {
   outputs: { name: string; output: string }[];
   /** The record was larger than the bound: earlier tool calls were not read. */
   partial?: true;
+  /** Codex compacted the thread's history in what was read. */
+  compacted?: true;
 }
 
 /** Response items that are a model-visible tool call. */
@@ -58,12 +60,14 @@ const CALLS = new Set([
 export function codexTelemetry(
   codexHome: string,
   thread: string | undefined,
+  /** A continued thread's record size before this turn: only what follows is this turn's. */
+  from = 0,
 ): CodexTelemetry | undefined {
   if (!thread) return undefined;
   const records = sessionRecords(join(codexHome, "sessions"));
   const file = records.find((path) => path.endsWith(`${thread}.jsonl`));
   if (!file) return undefined;
-  const tail = readTail(file);
+  const tail = readTail(file, MAX_BYTES, from);
   if (!tail) return undefined;
   const { lines, partial } = tail;
   const calls = new Tallies();
@@ -74,6 +78,7 @@ export function codexTelemetry(
   let info: Record<string, unknown> | undefined;
   let reportedModel: string | undefined;
   let imageOutputs = 0;
+  let compacted = false;
   for (const line of lines) {
     if (!line.trim()) continue;
     let entry: unknown;
@@ -89,6 +94,12 @@ export function codexTelemetry(
       timestamp?: unknown;
     };
     if (!payload || typeof payload !== "object") continue;
+    // Codex replaced the thread's history with a summary.
+    if (
+      type === "compacted" ||
+      (type === "event_msg" && payload.type === "context_compacted")
+    )
+      compacted = true;
     const at = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
     if (type === "turn_context" && typeof payload.model === "string")
       reportedModel = payload.model;
@@ -136,14 +147,16 @@ export function codexTelemetry(
     }
   }
   return {
-    ...(total && {
-      tokens: tokens({
-        input: total.input_tokens as number,
-        output: total.output_tokens as number,
-        cached: total.cached_input_tokens as number,
-        reasoning: total.reasoning_output_tokens as number,
+    // A continued thread's counts are cumulative over its earlier turns.
+    ...(total &&
+      from === 0 && {
+        tokens: tokens({
+          input: total.input_tokens as number,
+          output: total.output_tokens as number,
+          cached: total.cached_input_tokens as number,
+          reasoning: total.reasoning_output_tokens as number,
+        }),
       }),
-    }),
     nativeToolActivity: calls.value,
     nativeTools: tools.value,
     ...(reportedModel ? { reportedModel } : {}),
@@ -154,6 +167,7 @@ export function codexTelemetry(
     ),
     outputs,
     ...(partial ? { partial: true as const } : {}),
+    ...(compacted ? { compacted: true as const } : {}),
   };
 }
 
@@ -238,17 +252,19 @@ function sessionRecords(dir: string): string[] {
 function readTail(
   file: string,
   max = MAX_BYTES,
+  /** Read nothing before this offset (a continued thread's earlier turns). */
+  from = 0,
 ): { lines: string[]; partial: boolean; bytes: number } | undefined {
   try {
     const size = statSync(file).size;
-    const start = Math.max(0, size - max);
+    const start = Math.max(from, size - max);
     const fd = openSync(file, "r");
     try {
       const buffer = Buffer.alloc(size - start);
       const read = readSync(fd, buffer, 0, buffer.length, start);
       const lines = buffer.subarray(0, read).toString("utf8").split("\n");
-      if (start > 0) lines.shift();
-      return { lines, partial: start > 0, bytes: read };
+      if (start > from) lines.shift();
+      return { lines, partial: start > from, bytes: read };
     } catch {
       return undefined;
     } finally {
@@ -334,10 +350,13 @@ function lastTotalUsage(
 export function addCodexTelemetry(
   record: Record<string, unknown>,
   codexHome: string,
+  /** A continued thread's record size before this turn (codexTelemetry). */
+  from = 0,
 ): void {
   const native = codexTelemetry(
     codexHome,
     typeof record.thread === "string" ? record.thread : undefined,
+    from,
   );
   if (record.tokens) record.tokenSource = "sdk";
   if (!native) return;
@@ -356,10 +375,58 @@ export function addCodexTelemetry(
   for (const { name, output } of native.outputs)
     captureToolOutput(record, name, output);
   if (native.partial) record.nativePartial = true;
+  if (native.compacted) record.compacted = true;
   if (!record.tokens && native.tokens) {
     record.tokens = native.tokens;
     record.tokenSource = "native";
   }
+}
+
+/**
+ * A continued thread before its new turn: its record's byte size, and its
+ * cumulative counts so far. Codex reports a continued thread's counts
+ * cumulatively, so the turn's own are the new totals less these.
+ */
+export interface CodexBaseline {
+  size: number;
+  tokens?: Tokens;
+}
+
+export function codexBaseline(
+  codexHome: string,
+  thread: string,
+): CodexBaseline {
+  const file = codexSessionRecord(codexHome, thread);
+  let size = 0;
+  try {
+    size = file ? statSync(file).size : 0;
+  } catch {
+    return { size: 0 };
+  }
+  const tokens = codexTelemetry(codexHome, thread)?.tokens;
+  return { size, ...(tokens && { tokens }) };
+}
+
+/** A continued turn's own counts: cumulative `total` less `baseline`; unknown without one. */
+export function turnTokens(total: Tokens, baseline?: Tokens): Tokens {
+  const less = (a: number | null, b: number | null | undefined) =>
+    a === null || b === null || b === undefined ? null : Math.max(0, a - b);
+  return tokens({
+    input: less(total.input, baseline?.input),
+    output: less(total.output, baseline?.output),
+    cached: less(total.cached, baseline?.cached),
+    reasoning: less(total.reasoning, baseline?.reasoning),
+  });
+}
+
+/** `thread`'s session record in the Codex home `codexHome`, when it is there. */
+export function codexSessionRecord(
+  codexHome: string,
+  thread: string,
+): string | undefined {
+  return sessionRecords(join(codexHome, "sessions")).find((path) =>
+    path.endsWith(`${thread}.jsonl`),
+  );
 }
 
 /** The Codex SDK items that are operations (not messages, reasoning or errors). */

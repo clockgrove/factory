@@ -36,16 +36,22 @@ import { workerToolchainPath } from "../worktree.js";
 import {
   type CodexEffort,
   codexFailure,
+  codexHomeOf,
   codexRuntimeDirectory,
   privateCodexHome,
   saveModelsCache,
+  trimCodexHome,
 } from "./codex.js";
 import {
   addCodexTelemetry,
+  type CodexBaseline,
+  codexBaseline,
+  codexSessionRecord,
   codexTokens,
   codexTurnUsage,
   modelItem,
   SDK_OPERATIONS,
+  turnTokens,
 } from "./codex-telemetry.js";
 import {
   detail,
@@ -54,7 +60,9 @@ import {
   PlannerError,
   providerOutcome,
 } from "./planner.js";
+import { openTurn, type Turn, turnFields } from "./session.js";
 import {
+  captureRequest,
   captureResponse,
   describeRequest,
   firstToken,
@@ -161,6 +169,8 @@ function workerHome(
   worktree: string,
   network: boolean,
   keep: readonly string[],
+  /** A retained conversation's home (privateCodexHome `root`). */
+  root?: string,
 ): WorkerHome {
   const setsid = ["/usr/bin/setsid", "/bin/setsid"].find((path) =>
     existsSync(path),
@@ -176,6 +186,7 @@ function workerHome(
   };
   const runtime = codexRuntimeDirectory();
   return privateCodexHome({
+    ...(root && { root }),
     outside: { directory: workspace, name: "worktree" },
     source,
     keep,
@@ -392,8 +403,27 @@ export class CodexWorker implements Worker {
     const keep = this.options.allowedSecretNames ?? [];
     const secrets = this.options.secrets ?? [];
     let home: WorkerHome;
+    let turn: Turn;
     try {
-      home = workerHome(input.worktree, this.options.network === "host", keep);
+      // A repair continues the item's thread when it can; its home is kept.
+      const conversation = input.conversation;
+      turn = openTurn(
+        conversation,
+        input.prompt,
+        "codex",
+        this.model.model,
+        (session) =>
+          codexSessionRecord(
+            join(codexHomeOf(conversation!.dir), "codex-home"),
+            session.id,
+          ) !== undefined,
+      );
+      home = workerHome(
+        input.worktree,
+        this.options.network === "host",
+        keep,
+        conversation && codexHomeOf(conversation.dir),
+      );
     } catch (error) {
       return outcome(
         new PlannerError(
@@ -408,6 +438,13 @@ export class CodexWorker implements Worker {
     );
     let events: AsyncGenerator<ThreadEvent> | undefined;
     let group: number | undefined;
+    turnFields(record, turn);
+    let baseline: CodexBaseline | undefined;
+    if (turn.resumed) {
+      record.thread = turn.resumed.id;
+      captureRequest(record, turn.prompt);
+      baseline = codexBaseline(join(home.root, "codex-home"), turn.resumed.id);
+    }
     /** Track codex's group with the shared registry as soon as it exists. */
     const track = () => {
       if (group !== undefined) return;
@@ -445,17 +482,18 @@ export class CodexWorker implements Worker {
         },
       });
       const callStarted = Date.now();
-      record.sessionTurn = 1;
-      record.sessionMode = "fresh";
-      const thread = codex.startThread({
+      const options = {
         workingDirectory: resolve(input.worktree),
-        approvalPolicy: "never",
+        approvalPolicy: "never" as const,
         model: this.model.model,
         modelReasoningEffort: this.model.effort,
-      });
+      };
+      const thread = turn.resumed
+        ? codex.resumeThread(turn.resumed.id, options)
+        : codex.startThread(options);
       // The SDK kills codex on this signal; the abort listener kills its group.
       ({ events } = await watchdog.race(
-        thread.runStreamed(input.prompt + TMP_SUFFIX, {
+        thread.runStreamed(turn.prompt + TMP_SUFFIX, {
           signal: watchdog.signal,
         }),
       ));
@@ -486,7 +524,9 @@ export class CodexWorker implements Worker {
         }
         if (event.type === "turn.completed") {
           completed = true;
-          record.tokens = codexTokens(event.usage);
+          record.tokens = baseline
+            ? turnTokens(codexTokens(event.usage), baseline.tokens)
+            : codexTokens(event.usage);
           codexTurnUsage(record, event.usage);
         }
         if (event.type === "turn.failed")
@@ -500,7 +540,15 @@ export class CodexWorker implements Worker {
           ? outcome(codexFailure(redact(streamError, secrets)))
           : { kind: "retry", reason: "Codex ended without a completed turn" };
       captureResponse(record, finalResponse);
-      return { kind: "finished", finalResponse };
+      const threadId =
+        (record.thread as string | undefined) ?? turn.resumed?.id;
+      return {
+        kind: "finished",
+        finalResponse,
+        ...(input.conversation && threadId
+          ? { session: turn.end(threadId) }
+          : {}),
+      };
     } catch (error) {
       if (error instanceof PlannerError) return outcome(error);
       const idle = watchdog.expired;
@@ -529,8 +577,11 @@ export class CodexWorker implements Worker {
       kill();
       if (group !== undefined) processGroups.delete(group);
       saveModelsCache(join(home.root, "codex-home"));
-      addCodexTelemetry(record, join(home.root, "codex-home"));
-      rmSync(home.root, { recursive: true, force: true });
+      addCodexTelemetry(record, join(home.root, "codex-home"), baseline?.size);
+      // A retained conversation's Codex state stays for the item's next
+      // repair; its HOME, caches and scratch go now, as for any turn.
+      if (input.conversation) trimCodexHome(home.root);
+      else rmSync(home.root, { recursive: true, force: true });
     }
   }
 }

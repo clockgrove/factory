@@ -227,6 +227,19 @@ export function describeRequest(
   };
 }
 
+/**
+ * A resumed turn's request (providers/session.ts): the capture keeps the
+ * delta it sent, and `deltaBytes` its size, beside the whole request's
+ * digests and bytes from `describeRequest`.
+ */
+export function captureRequest(
+  record: Record<string, unknown>,
+  request: string,
+): void {
+  record.deltaBytes = Buffer.byteLength(request);
+  (record as { [CAPTURE]?: CaptureBody })[CAPTURE] = { request };
+}
+
 /** Set the call's time to first token, once: at its first model output. */
 export function firstToken(
   record: Record<string, unknown>,

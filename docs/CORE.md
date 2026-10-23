@@ -213,7 +213,7 @@ Every step is safe to run again. Before it does anything with an outside effect,
 
 So an effect whose result was lost is never "unknown". The next run of the step finds it on GitHub and carries on.
 
-A model call has no outside effect. If the process dies mid-call, the call runs again. A worker's worktree is kept and reused on the base the item kept, so a repeated work step continues from its files. A worktree from an attempt that never kept its base (it died before its outcome) is reset onto the base the rerun picks.
+A model call has no outside effect. If the process dies mid-call, the call runs again, fresh: a retained conversation whose turn was cut off is never continued (see [Retained conversations](#retained-conversations)). A worker's worktree is kept and reused on the base the item kept, so a repeated work step continues from its files. A worktree from an attempt that never kept its base (it died before its outcome) is reset onto the base the rerun picks.
 
 A step's kept facts (`state.kept`) outlive repairs. Every read and write goes through one typed helper (work/facts.ts `fact` and `facts`), which builds the keys (`item:<id>:<name>`, or an Objective step's own name) and types the values. A step forgets one by keeping `null`, and the engine then removes it, so a reader never sees `null`. A replan after acceptance forgets them all.
 
@@ -427,6 +427,8 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
   "model": "gpt-6.1-sol",
   "effort": "high",
   "item": "a",
+  "session": "fresh",
+  "turn": 1,
   "outcome": "finished",
   "ms": 81234,
   "tokens": {
@@ -465,7 +467,8 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
 - `providerUsage`: the provider's own usage breakdown, numbers only: Claude's `usage` and per-model `modelUsage` (subagents included), Codex's turn usage, its session record's last `token_count` and its child threads' (`descendants`), Copilot's per-model usage (with its `totalNanoAiu` billing units), managed spend.
 - `currency`: `USD` beside a known `costUsd`, else `null`.
 - `capture`: the id of the call's capture file, only when capture is on and the file was written.
-- An adapter adds its own fields: `session` or `thread`, `turns`, `stopReason`, `finalTreeValidated`, managed `key` and `spend`.
+- `session`: `fresh`, or `resumed` when the call continued a retained conversation (see [Retained conversations](#retained-conversations)); `turn` is the call's turn in its conversation, 1 for a fresh one. A resumed call's tokens and cost are its own turn's, never the conversation's running totals. A resumed call's capture holds the delta it sent.
+- An adapter adds its own fields: `sessionId` (Claude, Copilot, managed) or `thread` (Codex), `turns`, `stopReason`, `finalTreeValidated`, managed `key` and `spend`.
 
 **Codex native telemetry.** Each Codex call runs in a private `CODEX_HOME`. Before it is removed, providers/codex-telemetry.ts reads the thread's session record (`sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`, its last 8 MiB): the last `token_count` gives the thread's counts (reasoning included), and the `function_call`, `custom_tool_call`, `local_shell_call` and `web_search_call` items give `nativeToolActivity`. Unreadable or missing, it adds nothing.
 
@@ -477,6 +480,15 @@ Off by default. With `"capture": {"enabled": true}` in the configuration, the re
 - Each body is redacted (log.ts `redact`, with the configuration's secrets), then cut to half of `capture.maxBytesPerCall` (with tool outputs: two fifths each, and a quarter for the outputs together) (default 8 MiB, at least 1 KiB, at most 256 MiB); `truncated` says a body was cut. Redaction is best effort.
 - Files are `0600` in a `0700` directory and rotate with their run. A capture that can't be written is skipped; the call and its event are unaffected.
 - Capture is operational, never frozen with an Objective: turning it on or off applies from the next service start and changes no run.
+
+### Retained conversations
+
+A planner or reviewer round, or a worker repair, continues the provider's previous session by its id instead of starting fresh (providers/session.ts): a Codex thread (`resumeThread`), a Claude Agent SDK session (`resume`) or a Copilot session (`resumeSession`). Managed workers start fresh on every attempt.
+
+- **Which conversations.** The planner across a generation's plan revisions and context lookups, and the amendments of the plan it accepted; the plan reviewer across its review rounds and amendment reviews; each Work Item's result reviewer across re-reviews after repairs and after an invalid answer; final review across its re-reviews; each Work Item's worker across its repairs. Each is kept as a fact (work/facts.ts `session:planner`, `session:graph-review`, `session:final-review`, and an item's `workSession` and `reviewSession`), so it survives restarts, with its id, provider, model, turn count, scope and last-turn time. Its provider state lives in a private directory, `<work dir>/sessions/<name>`, removed with the work directory; a retained Codex home keeps only its Codex state between turns. Claude keeps its transcript in the login's own transcript store; a turn that replaces a session removes the old transcript.
+- **The delta.** A continuing call sends only the request's paragraphs the conversation hasn't seen (session.ts `promptDelta`, by paragraph digest), after a short preamble: a revision's findings and plan, a re-review's changed evidence rows (result review sends one evidence row a paragraph) or an amendment's new choices. The answer format is given again on every turn.
+- **When it starts fresh.** With `sessions.enabled` off; on another provider or model (a frozen configuration's `switch` or `adopt`); in another scope (a new plan generation after `replan`, a new accepted plan, or a `reset`, which keeps no conversation); after `fresh`, which forgets the item's conversations; at `sessions.maxTurns` turns (default 8) or after `sessions.maxIdleMinutes` idle (default 60), when the provider's cache is cold; when the session is gone (no Codex session record or Claude transcript); when its last turn failed or was interrupted (a mark stays until a turn ends well); and when the delta would be more than half the request. A hedged second call (planner.ts HedgedPlanner) always starts fresh and keeps nothing.
+- Settings are operational, never frozen: `"sessions": {"enabled": true, "maxTurns": 8, "maxIdleMinutes": 60}`.
 
 ### Worker activity
 

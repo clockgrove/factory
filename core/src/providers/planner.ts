@@ -15,6 +15,7 @@ import {
   type Outcome,
 } from "../engine.js";
 import type { Wait } from "../state.js";
+import type { Conversation, Session } from "./session.js";
 import {
   describeRequest,
   logUsage,
@@ -51,6 +52,12 @@ export interface PlannerCall {
   log(event: Record<string, unknown>): void;
   /** Called on every provider event: the call is alive. */
   activity?(): void;
+  /**
+   * The conversation this call may continue (session.ts): `prompt` is
+   * still the whole request; a continuing turn sends only its delta.
+   * Absent: a fresh call that keeps nothing.
+   */
+  conversation?: Conversation;
 }
 
 export interface PlannerAnswer {
@@ -63,6 +70,8 @@ export interface PlannerAnswer {
   ms: number;
   /** The call's `model-usage` id, for a `model-refused` event (usage.ts logRefused). */
   callId?: string;
+  /** The conversation to keep after this call; absent when none was given or the provider keeps none. */
+  session?: Session;
 }
 
 export interface Planner {
@@ -369,6 +378,9 @@ export class HedgedPlanner implements Planner {
         this.inner
           .answer({
             ...call,
+            // The hedge never shares the first call's conversation: it
+            // starts fresh and keeps none.
+            ...(n ? { conversation: undefined } : {}),
             signal: AbortSignal.any([call.signal, controllers[n]!.signal]),
             log: (event) => call.log({ ...event, ...(n ? { hedge: n } : {}) }),
             activity: () => {

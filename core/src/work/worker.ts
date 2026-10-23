@@ -8,6 +8,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { HoldScope } from "../engine.js";
 import { redact } from "../log.js";
 import type { WorkItem } from "../planning/types.js";
+import type { Conversation, Session } from "../providers/session.js";
 import type { PromptFacts } from "../providers/usage.js";
 import type { Answer, HoldOption, Wait } from "../state.js";
 
@@ -48,6 +49,11 @@ export interface WorkerInput {
   spend?: WorkerSpend;
   /** The answer to this step's last hold, such as `more`. */
   answer?: Answer;
+  /**
+   * The item's worker conversation (providers/session.ts): a repair may
+   * continue it with only its delta. `prompt` is still the whole request.
+   */
+  conversation?: Conversation;
 }
 
 export type WorkerResult = (
@@ -71,6 +77,8 @@ export type WorkerResult = (
 ) & {
   /** The Work Item's spend after this run, kept in state. */
   spend?: WorkerSpend;
+  /** The conversation to keep after a finished run; absent: none to continue. */
+  session?: Session;
 };
 
 export interface Worker {

@@ -2,6 +2,7 @@ import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { WorkDiscovery } from "../planning/amendments.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
 import type { Retirement } from "../planning/types.js";
+import type { Session } from "../providers/session.js";
 import type { Correction, RepairFinding } from "../repair.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";
@@ -87,6 +88,10 @@ export interface ItemFacts {
    * its `amend` answer proposes the follow-up work from this.
    */
   blamed: { repair: number; predecessor: string; correction: Correction };
+  /** The worker's retained conversation, which a repair continues (providers/session.ts); `fresh` forgets it. */
+  workSession: Session;
+  /** The result reviewer's retained conversation, which a re-review continues. */
+  reviewSession: Session;
 }
 
 /** What the Objective's own steps keep, by name. */
@@ -116,6 +121,12 @@ export interface ObjectiveFacts {
   "rerun:reopened": true;
   /** Predecessors the operator answered `ignore` to (planning/predecessors.ts). */
   "predecessors:ignored": IgnoredPredecessor[];
+  /** The planner's retained conversation across plan revisions and amendments (providers/session.ts). */
+  "session:planner": Session;
+  /** The plan reviewer's retained conversation across review rounds and amendment reviews. */
+  "session:graph-review": Session;
+  /** The final reviewer's retained conversation across re-reviews. */
+  "session:final-review": Session;
 }
 
 /** A finished worker run, kept until its result is collected, so a collection question doesn't run the worker again. */

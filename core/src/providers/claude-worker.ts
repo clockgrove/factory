@@ -60,11 +60,13 @@ import {
   apiErrorStatus,
   type ClaudeEffort,
   claudeEnvironment,
+  claudeTurn,
   DEFAULT_MAX_OUTPUT_TOKENS,
   failedResult,
   type SessionFacts,
   SYNTHETIC_MODEL,
   serviceLoginEnvironment,
+  sessionOptions,
   toolResultText,
   usageOf,
 } from "./claude.js";
@@ -75,9 +77,11 @@ import {
   PlannerError,
   providerOutcome,
 } from "./planner.js";
+import { type Turn, turnCost, turnFields } from "./session.js";
 import {
   addTokens,
   addUsage,
+  captureRequest,
   captureResponse,
   captureToolOutput,
   describeRequest,
@@ -1045,9 +1049,28 @@ export class ClaudeWorker implements Worker {
       prompt: input.prompt,
       ...(input.facts ? { facts: input.facts } : {}),
     });
+    // A repair continues the item's conversation when it can; never with
+    // the operator's own settings, which the transcript doesn't bind.
+    let turn: Turn | undefined;
+    if (!config.settingSources.length)
+      try {
+        turn = claudeTurn(input.conversation, input.prompt, config.model);
+      } catch (error) {
+        await attempt.close();
+        return providerOutcome(
+          new PlannerError(
+            "hold",
+            `Factory could not set up the Claude worker conversation; fix the host's work directory, then answer retry (${detail(String(error))})`,
+          ),
+        );
+      }
+    if (turn) {
+      turnFields(record, turn);
+      if (turn.resumed) captureRequest(record, turn.prompt);
+    }
     const started = Date.now();
     try {
-      const result = await this.converse(attempt, sdk, login, record);
+      const result = await this.converse(attempt, sdk, login, record, turn);
       record.outcome = result.kind;
       return result;
     } catch (error) {
@@ -1065,6 +1088,7 @@ export class ClaudeWorker implements Worker {
     attempt: Attempt,
     login: Record<string, string>,
     abortController: AbortController,
+    turn: Turn | undefined,
   ): Options {
     const { config } = this;
     const model = sdkModel(config.model);
@@ -1146,7 +1170,7 @@ export class ClaudeWorker implements Worker {
       // Prompts carry untrusted source text; never expand @paths or commands.
       verbatimPrompts: true,
       thinking: { type: "adaptive" },
-      persistSession: false,
+      ...sessionOptions(turn),
     };
   }
 
@@ -1161,8 +1185,10 @@ export class ClaudeWorker implements Worker {
     sdk: SdkModule,
     login: Record<string, string>,
     record: Record<string, unknown>,
+    turn: Turn | undefined,
   ): Promise<WorkerResult> {
     const { input } = attempt;
+    const prompt = turn?.prompt ?? input.prompt;
     // A running Validate or shell command sends no events; its silence is
     // bounded by the item's whole validation deadline, as for Copilot.
     const watchdog = new IdleWatchdog(
@@ -1181,8 +1207,9 @@ export class ClaudeWorker implements Worker {
     let facts: SessionFacts = { initialized: false, modelResponded: false };
     const abort = () => controller.abort(watchdog.signal.reason);
     watchdog.signal.addEventListener("abort", abort, { once: true });
-    // Every query is a fresh session (none resumes); its turns count from 1.
-    record.sessionMode = "fresh";
+    // A query continues the item's session when its turn resumes one; its
+    // turns count on from the session's.
+    record.sessionMode = turn?.resumed ? "resumed" : "fresh";
     record.imageOutputs = 0;
     const callStarted = Date.now();
     const send = (content: string) => {
@@ -1193,11 +1220,11 @@ export class ClaudeWorker implements Worker {
       turns = userTurns();
       controller = new AbortController();
       facts = { initialized: false, modelResponded: false };
-      record.sessionTurn = 0;
+      record.sessionTurn = (turn?.number ?? 1) - 1;
       send(prompt);
       session = sdk.query({
         prompt: turns.messages(),
-        options: this.queryOptions(attempt, login, controller),
+        options: this.queryOptions(attempt, login, controller, turn),
       });
       return session[Symbol.asyncIterator]();
     };
@@ -1221,7 +1248,7 @@ export class ClaudeWorker implements Worker {
     const tools = new NativeTools();
     let response: string | undefined;
     try {
-      let events = start(input.prompt);
+      let events = start(prompt);
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
@@ -1301,9 +1328,10 @@ export class ClaudeWorker implements Worker {
         }
         if (message.type !== "result") continue;
         result = message;
-        if (Number.isFinite(message.total_cost_usd))
-          queryUsd = message.total_cost_usd;
-        queryTokens = tokens({ ...usageOf(message) });
+        // A continued session reports its cost and per-model counts
+        // cumulatively: this turn's are what follows the kept total.
+        queryUsd = turnCost(message.total_cost_usd, turn) ?? queryUsd;
+        queryTokens = tokens({ ...usageOf(message, Boolean(turn?.resumed)) });
         record.tokens = addTokens(spentTokens, queryTokens);
         record.costUsd = spentUsd + queryUsd;
         record.turns = message.num_turns;
@@ -1344,7 +1372,7 @@ export class ClaudeWorker implements Worker {
           spentUsage = addUsage(spentUsage, queryUsage);
           queryUsage = undefined;
           queryTokens = tokens({ input: 0, output: 0, cached: 0 });
-          events = start(`${input.prompt}${CREDENTIAL_RESTART}`);
+          events = start(`${prompt}${CREDENTIAL_RESTART}`);
           continue;
         }
         if (
@@ -1413,9 +1441,13 @@ export class ClaudeWorker implements Worker {
     if (attempt.grants.validate) record.finalTreeValidated = Boolean(tree);
     const finalResponse = result.subtype === "success" ? result.result : "";
     captureResponse(record, finalResponse);
+    const sessionId = record.session as string | undefined;
     return {
       kind: "finished",
       finalResponse,
+      ...(turn && sessionId
+        ? { session: turn.end(sessionId, result.total_cost_usd) }
+        : {}),
       ...(tree && { validated: { tree, commands: [...input.commands] } }),
     };
   }

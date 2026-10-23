@@ -37,6 +37,7 @@ import {
   profileProblems,
   providersConfig,
 } from "./providers/config.js";
+import { DEFAULT_SESSIONS, type SessionPolicy } from "./providers/session.js";
 import {
   loadReviewArtifacts,
   type ReviewArtifactSelector,
@@ -198,6 +199,13 @@ export interface CoreConfig {
    * default. Operational: never frozen with an Objective.
    */
   capture: CaptureSettings;
+  /**
+   * Retained conversations (providers/session.ts): planner rounds, review
+   * rounds and worker repairs continue the provider's session by id, on
+   * by default, each for at most `maxTurns` turns and `maxIdleMinutes`
+   * between them. Operational: never frozen with an Objective.
+   */
+  sessions: SessionPolicy;
 }
 
 /** The operator's `sandbox` section, with defaults filled in. */
@@ -676,6 +684,11 @@ export function loadConfig(repository: string): CoreConfig {
           retainInRecovery: "removed: Factory keeps no recovery archive",
         },
       ),
+      sessions: object({
+        enabled: flag(DEFAULT_SESSIONS.enabled),
+        maxTurns: whole(1, DEFAULT_SESSIONS.maxTurns, 100),
+        maxIdleMinutes: whole(1, DEFAULT_SESSIONS.maxIdleMinutes, 24 * 60),
+      }),
     },
     problems,
     RETIRED[""],

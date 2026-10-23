@@ -35,6 +35,7 @@ import {
   qaObservationRow,
   REVIEW_GUIDANCE,
   type ResultReview,
+  type ReviewConversation,
   runReview,
   workItemDesign,
 } from "./result.js";
@@ -75,6 +76,8 @@ export function reviewObjective(input: {
   memory?: string;
   /** A private directory for the evidence root. */
   dir: string;
+  /** The final reviewer's retained conversation (result.ts ReviewConversation). */
+  conversation?: ReviewConversation;
   /**
    * Every operator criterion decision: final review's replace the
    * reviewer's verdict (result.ts `decides`), and the reviewer sees the

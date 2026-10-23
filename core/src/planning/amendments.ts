@@ -41,10 +41,12 @@ import {
   decisions,
   INVALID_ANSWER,
   invalidAnswer,
+  keepSession,
   localExecutables,
   type ObjectiveInputs,
   offeredProfiles,
   type PlanningDeps,
+  planningConversation,
   planningFacts,
   planningRevisions,
   planningTree,
@@ -799,6 +801,16 @@ function amendmentInputs(state: ObjectiveState): ObjectiveInputs {
   return acceptedInputs(state);
 }
 
+/** The accepted plan's generation (`plan:g:n`): an amendment continues its conversations. */
+function generationOf(state: ObjectiveState): number {
+  let generation = 1;
+  for (const key of Object.keys(state.done)) {
+    const found = /^plan:(\d+):\d+$/.exec(key);
+    if (found) generation = Math.max(generation, Number(found[1]));
+  }
+  return generation;
+}
+
 /** The planner revises the current plan for the discovery. */
 function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
   const key = `${KEY(proposal.id)}:plan`;
@@ -932,9 +944,18 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         facts: promptFacts,
         schema: lookups ? lookups.schema(schema) : schema,
         readDir: workDir,
+        // The planner of the accepted plan's generation, while it is warm.
+        conversation: planningConversation(
+          deps,
+          state,
+          "planner",
+          generationOf(state),
+          prompt,
+        ),
         signal,
         log: context.log,
       });
+      keepSession(context, "planner", answer);
       context.log({
         event: "amendment-answer",
         amendment: proposal.id,
@@ -1102,9 +1123,17 @@ function amendReviewStep(
         facts: promptFacts,
         schema: graphReviewSchema(),
         readDir: workDir,
+        conversation: planningConversation(
+          deps,
+          state,
+          "graph-review",
+          generationOf(state),
+          prompt,
+        ),
         signal,
         log: context.log,
       });
+      keepSession(context, "graph-review", answer);
       const decoded = decodeGraphReview(
         answer.value,
         evidence,

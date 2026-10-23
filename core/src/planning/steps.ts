@@ -19,11 +19,13 @@ import { prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
 import type { Planner, PlannerAnswer } from "../providers/planner.js";
 import { resolvedProvider } from "../providers/selection.js";
+import { type Conversation, conversationDir } from "../providers/session.js";
 import { logRefused } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import { type Answer, findState, type ObjectiveState } from "../state.js";
 import { adaptiveWorkflow, declarationProblems } from "../validate.js";
+import { fact, facts as keptFacts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
 import {
@@ -577,9 +579,12 @@ function planRoundStep(
         facts: promptFacts,
         schema: lookups ? lookups.schema(schema) : schema,
         readDir: workDir,
+        // A revision or lookup turn continues the generation's planner.
+        conversation: planningConversation(deps, state, "planner", g, prompt),
         signal,
         log: context.log,
       });
+      keepSession(context, "planner", answer);
       context.log({
         event: "planner-answer",
         model: answer.model,
@@ -727,9 +732,18 @@ function reviewStep(
         facts: promptFacts,
         schema: graphReviewSchema(),
         readDir: workDir,
+        // A revision round's review continues the generation's reviewer.
+        conversation: planningConversation(
+          deps,
+          state,
+          "graph-review",
+          g,
+          prompt,
+        ),
         signal,
         log: context.log,
       });
+      keepSession(context, "graph-review", answer);
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
@@ -1482,6 +1496,41 @@ export async function planningTree(
     workDir,
     repository: await repositoryView(deps.config.checkout, base, true, signal),
   };
+}
+
+/** The planning conversations, each kept as `session:<name>` (work/facts.ts). */
+export type PlanningConversation = "planner" | "graph-review";
+
+/**
+ * The planner's or plan reviewer's retained conversation for one call
+ * (providers/session.ts): it continues the kept session of the same plan
+ * generation `g`, so a replan starts fresh. None with `sessions.enabled` off.
+ */
+export function planningConversation(
+  deps: PlanningDeps,
+  state: ObjectiveState,
+  name: PlanningConversation,
+  g: number,
+  prompt: string,
+): Conversation | undefined {
+  if (!deps.config.sessions.enabled) return undefined;
+  const previous = fact(state, `session:${name}`);
+  return {
+    dir: conversationDir(deps.workDir(state.issue), name),
+    scope: `${name}:${g}`,
+    prompt,
+    policy: deps.config.sessions,
+    ...(previous ? { previous } : {}),
+  };
+}
+
+/** Keep the conversation `answer` left with the step's outcome; none forgets it. */
+export function keepSession(
+  context: StepContext,
+  name: PlanningConversation,
+  answer: Pick<PlannerAnswer, "session">,
+): void {
+  context.keep(keptFacts({ [`session:${name}`]: answer.session ?? null }));
 }
 
 /** The exported base tree for planning. Trees of other bases are removed. */

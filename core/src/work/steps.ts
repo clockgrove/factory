@@ -108,6 +108,7 @@ import {
   type WorkItem,
 } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
+import { conversationDir, type Session } from "../providers/session.js";
 import { moveStatusOffDone } from "../queue.js";
 import {
   type Correction,
@@ -128,6 +129,7 @@ import {
   type DependencyResult,
   decisionLines,
   type ResultReview,
+  type ReviewConversation,
   receiptPath,
   reviewQa,
   reviewResult,
@@ -878,12 +880,22 @@ async function workStep(
       context.log,
       deps.config.secrets,
     );
-    const { spend, ...result } = await deps
+    // A repair continues the item's worker conversation when it can.
+    const conversation = retained(
+      state,
+      deps,
+      `work-${item.id}`,
+      fact(state, "workSession", item.id),
+    );
+    const { spend, session, ...result } = await deps
       .worker(plan, shown.blocks, profile)
       .run({
         worktree,
         prompt: prepared.prompt,
         facts: prepared.facts,
+        ...(conversation
+          ? { conversation: { ...conversation, prompt: prepared.prompt } }
+          : {}),
         item: runnable,
         commands: runnable.validation.map((v) => v.command),
         base,
@@ -894,6 +906,8 @@ async function workStep(
         ...(context.answer ? { answer: context.answer } : {}),
       })
       .finally(() => activity.close());
+    if (conversation)
+      context.keep(facts({ workSession: session ?? null }, item.id));
     // A paid worker's spend outlives retries, restarts and repairs.
     if (spend) keepAll = { ...keepAll, ...facts({ spend }, item.id) };
     if (result.kind !== "finished") return withKeep(result, keepAll);
@@ -1073,6 +1087,26 @@ function acceptedNotes(
       );
   }
   return notes;
+}
+
+/**
+ * A retained conversation of this Objective (providers/session.ts) that
+ * continues `previous`, scoped to the accepted plan, so a replan or a
+ * reset starts it fresh; none with `sessions.enabled` off.
+ */
+function retained(
+  state: ObjectiveState,
+  deps: BuildDeps,
+  name: string,
+  previous: Session | undefined,
+): ReviewConversation | undefined {
+  if (!deps.config.sessions.enabled) return undefined;
+  return {
+    dir: conversationDir(deps.workDir(state.issue), name),
+    scope: String(state.kept[ACCEPTED_AT] ?? ""),
+    policy: deps.config.sessions,
+    ...(previous ? { previous } : {}),
+  };
 }
 
 /** Add facts to keep to any outcome that can carry them. */
@@ -2047,10 +2081,17 @@ async function reviewStep(
     deps,
     work.base,
   );
+  const conversation = retained(
+    state,
+    deps,
+    `review-${item.id}`,
+    fact(state, "reviewSession", item.id),
+  );
   const review = await reviewResult({
     planner: deps.planner,
     plan,
     item,
+    ...(conversation ? { conversation } : {}),
     checkout: deps.config.checkout,
     base: work.base,
     commit: candidate(state, item.id),
@@ -2078,6 +2119,8 @@ async function reviewStep(
     signal,
     log: context.log,
   });
+  if (conversation?.kept !== undefined)
+    context.keep(facts({ reviewSession: conversation.kept }, item.id));
   const held = (asked: ResultReview | null) => facts({ held: asked }, item.id);
   return withKeep(
     reviewOutcome(review, held, REFUSES_ITEM, (refusal) =>
@@ -3067,6 +3110,8 @@ function repairOutcome(
           selection: null,
           refused: null,
           diagnosis: null,
+          workSession: null,
+          reviewSession: null,
         },
         item.id,
       )
@@ -3790,8 +3835,15 @@ function finalReviewStep(deps: BuildDeps): Step {
             ]
           : [];
       });
+      const conversation = retained(
+        state,
+        deps,
+        "final-review",
+        fact(state, "session:final-review"),
+      );
       const review = await reviewObjective({
         planner: deps.planner,
+        ...(conversation ? { conversation } : {}),
         plan,
         checkout: deps.config.checkout,
         base: plan.base,
@@ -3842,6 +3894,8 @@ function finalReviewStep(deps: BuildDeps): Step {
         signal,
         log: context.log,
       });
+      if (conversation?.kept !== undefined)
+        context.keep(facts({ "session:final-review": conversation.kept }));
       const held = (asked: ResultReview | null) =>
         facts({ "final-review:held": asked });
       // Only an Objective criterion or a coverage obligation can be

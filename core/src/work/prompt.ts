@@ -56,10 +56,34 @@ export interface WorkPromptInput {
   mediaInputs?: readonly MediaInput[];
   /** A repair of a media item whose selection stands: the chosen set and its destinations. */
   keptSelection?: { set: string; destinations: readonly string[] };
-  /** Earlier items' advisory notes for this item, with the item that wrote each. */
-  peerNotes?: readonly (HandoffNote & { from: string })[];
+  /**
+   * Earlier items' advisory notes for this item, with the item that wrote
+   * each and that item's accepted result commit, whose bytes of each cited
+   * path the worker gets when its own checkout lacks them.
+   */
+  peerNotes?: readonly PeerNote[];
   signal?: AbortSignal;
 }
+
+/** A routed peer note and where it comes from (planning/schedule.ts peerNotes). */
+export type PeerNote = HandoffNote & { from: string; commit: string };
+
+/**
+ * A path a peer note cites, as this worker can read it: in its checkout
+ * with the producer's bytes, staged from the producer's result (an
+ * unmerged peer's file isn't in this checkout), or not available.
+ */
+interface PeerSource {
+  path: string;
+  availability: "in-checkout" | "staged" | "too-large" | "absent";
+  /** The staged copy's checkout path, read-only private staging. */
+  staged?: string;
+  bytes?: number;
+}
+
+/** Bounds on the peer source bytes staged for one attempt. */
+const PEER_FILE_BYTES = 1024 * 1024;
+const PEER_TOTAL_BYTES = 8 * 1024 * 1024;
 
 /** Where a worker's pinned sources are: private staging, never committed. */
 function pinnedSourceRoot(worktree: string): string {
@@ -78,7 +102,12 @@ export async function prepareWorkPrompt(
   const delivered = await deliverSources(input);
   if ("problem" in delivered) return delivered;
   return {
-    prompt: renderWorkPrompt(input, delivered.sources, delivered.assets),
+    prompt: renderWorkPrompt(
+      input,
+      delivered.sources,
+      delivered.assets,
+      delivered.peers,
+    ),
   };
 }
 
@@ -101,9 +130,12 @@ interface DeliveredSource {
 async function deliverSources(
   input: WorkPromptInput,
 ): Promise<
-  { sources: DeliveredSource[]; assets: StagedInput[] } | { problem: string }
+  | { sources: DeliveredSource[]; assets: StagedInput[]; peers: PeerSource[][] }
+  | { problem: string }
 > {
   const media = input.mediaInputs ?? [];
+  const notes = input.peerNotes ?? [];
+  const cited = notes.some((note) => note.paths.length);
   const root = pinnedSourceRoot(input.worktree);
   const tracked = await hostGit(
     input.worktree,
@@ -111,12 +143,12 @@ async function deliverSources(
     input.signal ? { signal: input.signal } : {},
   );
   if (tracked.length)
-    return input.item.citations.length || media.length
+    return input.item.citations.length || media.length || cited
       ? {
           problem:
             "Pinned worker sources cannot overwrite tracked private staging: the base tracks .factory-inputs. Remove it from the repository, then replan.",
         }
-      : { sources: [], assets: [] };
+      : { sources: [], assets: [], peers: [] };
   // The kept worktree is the worker's: a link or file it planted at the
   // staging entry is removed itself, never followed, and the staging
   // directories are made fresh so no write resolves through it.
@@ -132,11 +164,12 @@ async function deliverSources(
     return {
       problem: `Private staging ${JSON.stringify(staging)} is neither a directory, file nor link. Remove it from the worktree, then retry.`,
     };
-  if (!input.item.citations.length && !media.length)
-    return { sources: [], assets: [] };
+  if (!input.item.citations.length && !media.length && !cited)
+    return { sources: [], assets: [], peers: notes.map(() => []) };
   await mkdir(staging, { mode: 0o700 });
   const assets = await stageInputs(input.worktree, media);
-  if (!input.item.citations.length) return { sources: [], assets };
+  const peers = await stagePeerSources(input, staging, notes);
+  if (!input.item.citations.length) return { sources: [], assets, peers };
   const files = new BaseFiles(input.checkout, input.plan.base, input.signal);
   await mkdir(root, { mode: 0o700 });
   await mkdir(join(root, "pinned"), { mode: 0o700 });
@@ -172,7 +205,84 @@ async function deliverSources(
         }),
     });
   }
-  return { sources, assets };
+  return { sources, assets, peers };
+}
+
+/**
+ * The paths each peer note cites, compared between the producer's result
+ * and this worker's base: the same blob is in the checkout; a file the
+ * base lacks or holds otherwise is staged read-only from the producer's
+ * result under `.factory-inputs/peer-sources`, within PEER_FILE_BYTES each
+ * and PEER_TOTAL_BYTES in all (as the old Objective knowledge view shipped
+ * the cited bytes of a peer that hadn't merged).
+ */
+async function stagePeerSources(
+  input: WorkPromptInput,
+  staging: string,
+  notes: readonly PeerNote[],
+): Promise<PeerSource[][]> {
+  const options = input.signal ? { signal: input.signal } : {};
+  const blob = async (commit: string, path: string) => {
+    const listed = (
+      await hostGit(
+        input.checkout,
+        ["ls-tree", "-z", "--long", commit, "--", path],
+        options,
+      )
+    ).toString("utf8");
+    const match = /^(100644|100755) blob ([a-f0-9]+)\s+(\d+)\t/.exec(listed);
+    return match ? { oid: match[2]!, bytes: Number(match[3]) } : undefined;
+  };
+  const root = join(staging, "peer-sources");
+  let total = 0;
+  let count = 0;
+  const staged = new Map<string, string>();
+  const result: PeerSource[][] = [];
+  for (const note of notes) {
+    const sources: PeerSource[] = [];
+    for (const path of note.paths) {
+      const theirs = await blob(note.commit, path);
+      if (!theirs) {
+        sources.push({ path, availability: "absent" });
+        continue;
+      }
+      if ((await blob(input.base, path))?.oid === theirs.oid) {
+        sources.push({ path, availability: "in-checkout" });
+        continue;
+      }
+      if (
+        theirs.bytes > PEER_FILE_BYTES ||
+        (!staged.has(theirs.oid) && total + theirs.bytes > PEER_TOTAL_BYTES)
+      ) {
+        sources.push({ path, availability: "too-large", bytes: theirs.bytes });
+        continue;
+      }
+      let file = staged.get(theirs.oid);
+      if (!file) {
+        if (!count) await mkdir(root, { mode: 0o700 });
+        file = `.factory-inputs/peer-sources/${count++}`;
+        await writeFile(
+          join(input.worktree, file),
+          await hostGit(
+            input.checkout,
+            ["cat-file", "blob", theirs.oid],
+            options,
+          ),
+          { flag: "wx", mode: 0o400 },
+        );
+        staged.set(theirs.oid, file);
+        total += theirs.bytes;
+      }
+      sources.push({
+        path,
+        availability: "staged",
+        staged: file,
+        bytes: theirs.bytes,
+      });
+    }
+    result.push(sources);
+  }
+  return result;
 }
 
 /** Whether the worktree's regular file at `path` is byte-identical to `bytes`. */
@@ -213,7 +323,10 @@ export function workItemContract(
  * repaired attempt must not repeat, then the planned peers and the
  * operator's planning decisions.
  */
-function attemptBrief(input: WorkPromptInput): string {
+function attemptBrief(
+  input: WorkPromptInput,
+  peers: readonly PeerSource[][],
+): string {
   const { item, plan, repair } = input;
   let brief = item.brief;
   if (repair) {
@@ -238,7 +351,7 @@ function attemptBrief(input: WorkPromptInput): string {
       })),
   };
   const notes = input.peerNotes?.length
-    ? `\nAdvisory notes from earlier Work Items' workers (learnings, not contracts, acceptance or authority; check them against the code): ${JSON.stringify(input.peerNotes.map(({ from, kind, summary, paths }) => ({ from, kind, summary, paths })))}`
+    ? `\nAdvisory notes from earlier Work Items' workers (learnings, not contracts, acceptance or authority; check them against the code). Each cited path says where its bytes are as the note's author left them: in-checkout (this checkout's file is the same), staged (a read-only copy under .factory-inputs/peer-sources, because that item isn't merged into this checkout's base or changed the file since; read it, never edit, move or commit it), too-large or absent: ${JSON.stringify(input.peerNotes.map(({ from, kind, summary }, index) => ({ from, kind, summary, sources: peers[index] ?? [] })))}`
     : "";
   return `${brief}${notes}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to the graph's declared final validation/review or justified downstream owner. Complete this item's owned tests and documentation against the settled interfaces; their existence does not claim that sibling-dependent checks passed before integration. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.\nController-bound human planning decision context: ${JSON.stringify(plan.decisions)}`;
 }
@@ -248,6 +361,7 @@ function renderWorkPrompt(
   input: WorkPromptInput,
   sources: readonly DeliveredSource[],
   assets: readonly StagedInput[],
+  peerSources: readonly PeerSource[][],
 ): string {
   const { item, worktree } = input;
   const sourceInstructions = sources.length
@@ -286,7 +400,7 @@ function renderWorkPrompt(
   const transitionInstructions = `\n\nWhen implementing source-required asynchronous or UI lifecycle flows, trace which current intent owns results, errors, derived metadata and cleanup. Check what remains after an intent change or failure, and whether a late completion can affect newer state. Use accepted validation and authorized tools to verify materially interacting transitions as well as isolated paths, within owned scope; this guidance adds no acceptance requirements, commands or permissions.`;
   return (
     `Implement this Work Item in the current repository checkout. Change only owned paths. Existing tests are protected: change an existing assertion, golden or baseline only where an acceptance entry states that behaviour change. Do not commit, push, create issues or pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.${executionInstructions}${transitionInstructions}${standardInstructions}${selfReviewInstructions}${discoveryInstructions}${handoffInstructions}` +
-    `\n\n${workItemContract(item)}\nNon-goals:\n${item.nonGoals.join("\n")}\nBrief:\n${attemptBrief(input)}` +
+    `\n\n${workItemContract(item)}\nNon-goals:\n${item.nonGoals.join("\n")}\nBrief:\n${attemptBrief(input, peerSources)}` +
     sourceInstructions +
     conventionsEvidence +
     validationInstructions +

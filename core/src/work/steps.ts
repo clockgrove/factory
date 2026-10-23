@@ -840,12 +840,15 @@ function mediaOutcome(
   }
 }
 
-/** Handoff notes of every item whose result was accepted (validated and reviewed), by item. */
+/**
+ * Handoff notes of every item whose result was accepted (validated and
+ * reviewed), by item, each with that result's commit.
+ */
 function acceptedNotes(
   state: ObjectiveState,
   plan: Plan,
-): Map<string, HandoffNote[]> {
-  const notes = new Map<string, HandoffNote[]>();
+): Map<string, (HandoffNote & { commit: string })[]> {
+  const notes = new Map<string, (HandoffNote & { commit: string })[]>();
   for (const other of plan.items) {
     const work = state.done[stepKey(other.id, "work")] as
       | WorkResult
@@ -855,7 +858,13 @@ function acceptedNotes(
       state.done[stepKey(other.id, "validate")] &&
       state.done[stepKey(other.id, "review")]
     )
-      notes.set(other.id, work.notes);
+      notes.set(
+        other.id,
+        work.notes.map((note) => ({
+          ...note,
+          commit: candidate(state, other.id),
+        })),
+      );
   }
   return notes;
 }

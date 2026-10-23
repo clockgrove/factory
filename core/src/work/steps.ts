@@ -1,6 +1,6 @@
 import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { grant, resultRereviews } from "../allowances.js";
+import { resultRereviews } from "../allowances.js";
 import { crashPoint } from "../crash.js";
 import {
   ACCEPT,
@@ -17,7 +17,6 @@ import {
   type Repair,
 } from "../delivery.js";
 import {
-  failure,
   hold,
   type Outcome,
   objectiveWide,
@@ -549,40 +548,11 @@ async function workStep(
       keep: keepBase,
     });
   }
-  const rereviews = fact(state, "rereviews", item.id) ?? {
-    used: 0,
-    granted: 0,
-  };
-  const more = context.answer?.answer === "more" && rereviews.asked;
-  if (!finished && (context.answer?.answer === "revalidate" || more)) {
+  if (!finished && context.answer?.answer === "revalidate") {
     // The operator says the refused result is correct and Factory's check
     // was at fault: it is the step's result again, unchanged, with no
     // worker run, collection or repair. Only reads: a rerun does the same.
-    // Each is a result rereview; past the Objective's, `more` grants as
-    // much again and checks it.
-    const total = resultRereviews(state);
-    if (!more && total.used >= total.allowed)
-      return withKeep(
-        failure(
-          `Work Item ${item.id}'s refused result can't be checked again: this Objective has used its ${total.allowed} result rereview${total.allowed === 1 ? "" : "s"} (autonomy.allowances.resultRereviews). \`more\` allows ${grant(state, "resultRereviews")} more and checks it again.`,
-          [
-            {
-              answer: "more",
-              family: "retry",
-              consequence: `Allows ${grant(state, "resultRereviews")} more result rereviews, and checks this result again.`,
-            },
-            "cancel",
-          ],
-        ),
-        {
-          ...keepBase,
-          ...facts({ rereviews: { ...rereviews, asked: true } }, item.id),
-        },
-      );
-    const charged = {
-      used: rereviews.used,
-      granted: rereviews.granted + (more ? grant(state, "resultRereviews") : 0),
-    };
+    // The engine charged it to resultRereviews when the answer landed.
     const refused = await refusedResult(
       state,
       item,
@@ -596,22 +566,14 @@ async function workStep(
           `Work Item ${item.id}'s refused result can no longer be checked again as it is (it is gone, or no longer sits on ${base}). Answer \`retry\` to diagnose the failure again, or cancel.`,
           ["retry", "cancel"],
         ),
-        { ...keepBase, ...facts({ rereviews: charged }, item.id) },
+        keepBase,
       );
     return {
       kind: "done",
       result: refused,
       keep: {
         ...keepBase,
-        ...facts(
-          {
-            finished: null,
-            finding: null,
-            refused: null,
-            rereviews: { ...charged, used: charged.used + 1 },
-          },
-          item.id,
-        ),
+        ...facts({ finished: null, finding: null, refused: null }, item.id),
       },
     };
   }
@@ -1903,6 +1865,7 @@ function repairOutcome(
     kind: "repair",
     finding: text,
     target: stepKey(item.id, "work"),
+    ...(kept.kind === "conflict" ? { conflict: true as const } : {}),
     clear: [item, ...above].flatMap((entry) =>
       PHASES.map((p) => stepKey(entry.id, p)),
     ),

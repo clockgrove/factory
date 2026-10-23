@@ -1,4 +1,3 @@
-import type { Rereviews } from "../allowances.js";
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { RepairFinding } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
@@ -42,8 +41,6 @@ export interface ItemFacts {
   republish: boolean;
   /** The secret finding's digest the publish question names. */
   secret: string;
-  /** Its result rereviews (`revalidate`), against autonomy.allowances.resultRereviews. */
-  rereviews: Rereviews;
 }
 
 /** What the Objective's own steps keep, by name. */

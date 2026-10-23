@@ -45,6 +45,14 @@ export function grant(state: ObjectiveState, name: AllowanceName): number {
 /** The engine's repair grants (`state.kept`): `implementationRepairs`, and `perPath:<target>`. */
 const GRANTED = "allowances:granted";
 
+/**
+ * Mechanical merge-conflict repairs per target (`state.kept`): they count
+ * against `perPath`, which bounds a conflict loop, but never against
+ * `implementationRepairs`, which counts wrong results, as the old Factory
+ * charged only those.
+ */
+const CONFLICTS = "allowances:conflicts";
+
 const granted = (state: ObjectiveState): Record<string, number> =>
   (state.kept[GRANTED] as Record<string, number> | undefined) ?? {};
 
@@ -58,9 +66,12 @@ export interface Usage {
 
 /** Implementation repairs so far, and how many the Objective allows. */
 export function implementationRepairs(state: ObjectiveState): Usage {
+  const conflicts =
+    (state.kept[CONFLICTS] as Record<string, number> | undefined) ?? {};
   let used = 0;
   for (const [target, repair] of Object.entries(state.repairs ?? {}))
-    if (IMPLEMENTATION.test(target)) used += repair.count;
+    if (IMPLEMENTATION.test(target))
+      used += repair.count - (conflicts[target] ?? 0);
   return {
     used,
     allowed:
@@ -119,26 +130,29 @@ export function overrunQuestion(
 }
 
 /**
- * The engine's open overrun questions, by hold id (`state.kept`): their
- * `more` is the engine's, and any other `more` (a planning round, a
- * managed worker's spend, a rereview) is its step's.
+ * The engine's open allowance questions, by hold id (`state.kept`): what
+ * their `more` grants. Any other `more` (a planning round, a managed
+ * worker's spend) is its step's.
  */
 const ASKED = "allowances:asked";
 
-/** Note that open hold `id` asks about an overrun; closed ones are forgotten. */
-export function askedOverrun(state: ObjectiveState, id: string): void {
+export type Asked = "repairs" | "rereviews";
+
+/** Note that open hold `id` asks for more of `kind`; closed ones are forgotten. */
+export function asked(state: ObjectiveState, id: string, kind: Asked): void {
   const open = new Set(state.holds.map((hold) => hold.id));
-  state.kept[ASKED] = [
-    ...((state.kept[ASKED] as string[] | undefined) ?? []).filter(
-      (asked) => open.has(asked) && asked !== id,
+  const kept = (state.kept[ASKED] as Record<string, Asked> | undefined) ?? {};
+  state.kept[ASKED] = {
+    ...Object.fromEntries(
+      Object.entries(kept).filter(([held]) => open.has(held) && held !== id),
     ),
-    id,
-  ];
+    [id]: kind,
+  };
 }
 
-/** Whether hold `id` is an overrun question. */
-export function isOverrun(state: ObjectiveState, id: string): boolean {
-  return ((state.kept[ASKED] as string[] | undefined) ?? []).includes(id);
+/** What hold `id`'s `more` grants, if it is the engine's. */
+export function askedFor(state: ObjectiveState, id: string): Asked | undefined {
+  return (state.kept[ASKED] as Record<string, Asked> | undefined)?.[id];
 }
 
 /** Grant as much again of each allowance `key` overran: the engine's `more`. */
@@ -151,26 +165,46 @@ export function grantOverrun(state: ObjectiveState, key: string): void {
   state.kept[GRANTED] = grants;
 }
 
-/** A Work Item's result rereviews: used, granted, and a spent one asked about. */
-export interface Rereviews {
-  used: number;
-  granted: number;
-  /** Its `revalidate` found the allowance spent: `more` grants and revalidates. */
-  asked?: true;
+/**
+ * Result rereviews (`revalidate` answers) charged across the Objective
+ * (`state.kept`). The engine charges each when the answer lands, against
+ * the live state, so two at once can't both pass the allowance.
+ */
+const REREVIEWS = "allowances:rereviews";
+
+export function resultRereviews(state: ObjectiveState): Usage {
+  const used = (state.kept[REREVIEWS] as number | undefined) ?? 0;
+  return {
+    used,
+    allowed:
+      allowances(state).resultRereviews + (granted(state).resultRereviews ?? 0),
+  };
 }
 
-/**
- * Result rereviews across the Objective: each Work Item keeps its own
- * (work/facts.ts `rereviews`), so items rereviewed at once never write
- * the same fact.
- */
-export function resultRereviews(state: ObjectiveState): Usage {
-  let used = 0;
-  let extra = 0;
-  for (const [key, value] of Object.entries(state.kept ?? {}))
-    if (/^item:[^:]+:rereviews$/.test(key)) {
-      used += (value as Rereviews).used;
-      extra += (value as Rereviews).granted;
-    }
-  return { used, allowed: allowances(state).resultRereviews + extra };
+/** Charge one result rereview; false, and nothing charged, past the allowance. */
+export function chargeRereview(state: ObjectiveState): boolean {
+  const { used, allowed } = resultRereviews(state);
+  if (used >= allowed) return false;
+  state.kept[REREVIEWS] = used + 1;
+  return true;
+}
+
+/** The engine's `more` to a spent rereview: as much again. */
+export function grantRereviews(state: ObjectiveState): void {
+  const grants = { ...granted(state) };
+  grants.resultRereviews =
+    (grants.resultRereviews ?? 0) + grant(state, "resultRereviews");
+  state.kept[GRANTED] = grants;
+}
+
+/** The question a `revalidate` past the allowance asks instead. */
+export function rereviewQuestion(state: ObjectiveState, key: string): string {
+  const { allowed } = resultRereviews(state);
+  return `${key}'s refused result can't be checked again: this Objective has used its ${allowed} result rereview${allowed === 1 ? "" : "s"} (autonomy.allowances.resultRereviews). \`more\` allows ${grant(state, "resultRereviews")} more and checks it again.`;
+}
+
+export function countConflict(state: ObjectiveState, target: string): void {
+  const kept =
+    (state.kept[CONFLICTS] as Record<string, number> | undefined) ?? {};
+  state.kept[CONFLICTS] = { ...kept, [target]: (kept[target] ?? 0) + 1 };
 }

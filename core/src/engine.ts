@@ -1,9 +1,13 @@
 import {
-  askedOverrun,
+  asked,
+  askedFor,
+  chargeRereview,
+  countConflict,
   grantOverrun,
-  isOverrun,
+  grantRereviews,
   overrun,
   overrunQuestion,
+  rereviewQuestion,
 } from "./allowances.js";
 import { crashPoint } from "./crash.js";
 import type { RunLog } from "./log.js";
@@ -90,6 +94,8 @@ export type Outcome =
       finding: string;
       target: string;
       clear: string[];
+      /** A mechanical merge conflict: it counts against perPath only (allowances.ts). */
+      conflict?: true;
       keep?: Record<string, unknown>;
     };
 
@@ -363,6 +369,8 @@ const SWITCH = "switch";
 const ADOPT = "adopt";
 /** Grants as much again of each repair allowance the step overran (allowances.ts). */
 const MORE = "more";
+/** A refused result checked again, unchanged: charged to resultRereviews. */
+const REVALIDATE = "revalidate";
 /**
  * The configuration digest the open `adopt` question names (`state.kept`,
  * set by the question's step): `adopt` freezes only that one.
@@ -552,7 +560,10 @@ export class ObjectiveRunner {
       }
       // A repair past an allowance asks before it runs (allowances.ts):
       // `more` grants as much again. Past the Objective's, every step waits.
-      const over = overrun(this.state, step.key);
+      // An interrupted attempt passed this check when it started.
+      const over = this.state.attempts[step.key]
+        ? []
+        : overrun(this.state, step.key);
       if (over.length) {
         this.transact(() => {
           this.hold(step.key, {
@@ -569,8 +580,9 @@ export class ObjectiveRunner {
               ? { scope: "objective" as const }
               : {}),
           });
-          const asked = this.state.holds.at(-1);
-          if (asked?.step === step.key) askedOverrun(this.state, asked.id);
+          const question = this.state.holds.at(-1);
+          if (question?.step === step.key)
+            asked(this.state, question.id, "repairs");
         });
         continue;
       }
@@ -773,6 +785,7 @@ export class ObjectiveRunner {
         repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         state.repairs[outcome.target] = repair;
+        if (outcome.conflict) countConflict(state, outcome.target);
         break;
       }
     }
@@ -1150,8 +1163,9 @@ export class ObjectiveRunner {
       }
       frozen = { ...current, ...structuredClone(live) };
     }
-    // `more` to an overrun question is the engine's; any other is the step's.
-    const granting = answer === MORE && isOverrun(this.state, hold.id);
+    // `more` to an allowance question is the engine's; any other is the step's.
+    const granting =
+      answer === MORE ? askedFor(this.state, hold.id) : undefined;
     const retry = this.state.retries[hold.step];
     this.close(hold);
     if (answer === WAIT && retry) {
@@ -1169,16 +1183,42 @@ export class ObjectiveRunner {
           for (const [key, other] of Object.entries(this.state.retries))
             if (other.wait?.kind === "reset" && other.wait.provider)
               delete this.state.retries[key];
-      } else if (granting) grantOverrun(this.state, hold.step);
-      else
+      } else if (granting === "repairs") grantOverrun(this.state, hold.step);
+      else {
+        // A rereview's `more` grants and revalidates. Each `revalidate` is
+        // charged here, against the live state, so two at once can't both
+        // pass the allowance; past it, the step asks instead.
+        if (granting === "rereviews") grantRereviews(this.state);
+        const given = granting === "rereviews" ? REVALIDATE : answer;
+        if (given === REVALIDATE && !chargeRereview(this.state)) {
+          this.hold(
+            hold.step,
+            failure(rereviewQuestion(this.state, hold.step), [
+              {
+                answer: MORE,
+                family: "retry",
+                consequence:
+                  "Allows as much again of result rereviews, and checks this result again.",
+              },
+              "cancel",
+            ]),
+          );
+          const question = this.state.holds.at(-1);
+          if (question?.step === hold.step)
+            asked(this.state, question.id, "rereviews");
+          delete this.state.retries[hold.step];
+          this.settle();
+          return null;
+        }
         this.state.answers[hold.step] = {
           holdId: hold.id,
           question: hold.question,
-          answer,
+          answer: given,
           ...(note ? { text: note } : {}),
           by,
           at: this.now().toISOString(),
         };
+      }
       delete this.state.retries[hold.step];
     }
     this.settle();

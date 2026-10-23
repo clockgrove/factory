@@ -449,8 +449,10 @@ const RETIRED: Record<string, Retired> = {
 };
 
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Names a worker never receives (worktree.ts), so requiring one checks nothing. */
+const WITHHELD_NAME = /^(GH|GITHUB|GIT|SSH)_/i;
 
-/** `autonomy.requiredEnvironment`: distinct variable names. */
+/** `autonomy.requiredEnvironment`: distinct variable names a worker can get. */
 const environmentNames: Check<string[]> = (value, path, problems) => {
   const names = strings(value, path, problems);
   if (
@@ -459,6 +461,10 @@ const environmentNames: Check<string[]> = (value, path, problems) => {
   )
     problems.push(
       `${path} must be distinct variable names matching ${ENVIRONMENT_NAME.source}`,
+    );
+  for (const name of names.filter((each) => WITHHELD_NAME.test(each)))
+    problems.push(
+      `${path} names ${name}, which workers never receive (GH_, GITHUB_, GIT_ and SSH_ variables are withheld)`,
     );
   return names;
 };

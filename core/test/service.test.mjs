@@ -1520,6 +1520,56 @@ test("a deferred question asks right after the covering one; stack layers and ba
   runner.tick();
   await settle();
   assert.ok(started.slice(ran).includes("item:c:work"), "c repairs");
+  // An interrupted attempt passed the check when it started: it runs
+  // again at once, even past the allowance, and asks nothing.
+  runner.state.repairs["item:c:work"].count = 5;
+  delete runner.state.done["item:c:work"];
+  runner.state.attempts["item:c:work"] = {
+    startedAt: new Date().toISOString(),
+    run: "earlier",
+  };
+  const holds = runner.state.holds.length;
+  const before = started.length;
+  runner.tick();
+  await settle();
+  assert.equal(
+    started.slice(before).filter((k) => k === "item:c:work").length,
+    1,
+  );
+  assert.equal(runner.state.holds.length, holds);
+  // Each `revalidate` is charged when it lands, against the live state:
+  // past resultRereviews (1) the step asks instead, and that `more`
+  // grants as much again and revalidates.
+  const rereview = () => {
+    runner.apply(
+      "item:b:ci",
+      hold("Diagnosis needs you.", [
+        { answer: "revalidate", family: "accept", consequence: "Again." },
+        "cancel",
+      ]),
+    );
+    const open = runner.state.holds.find((h) => h.step === "item:b:ci");
+    return runner.transact(() =>
+      runner.answer("revalidate", undefined, "op", undefined, open.id),
+    );
+  };
+  assert.equal(rereview(), null);
+  assert.equal(runner.state.answers["item:b:ci"].answer, "revalidate");
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+  delete runner.state.answers["item:b:ci"];
+  assert.equal(rereview(), null);
+  assert.equal(runner.state.answers["item:b:ci"], undefined, "not recorded");
+  const spent = runner.state.holds.find((h) => h.step === "item:b:ci");
+  assert.match(spent.question, /used its 1 result rereview/);
+  assert.equal(spent.cause, "failure");
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("more", undefined, "op", undefined, spent.id),
+    ),
+    null,
+  );
+  assert.equal(runner.state.answers["item:b:ci"].answer, "revalidate");
+  assert.equal(runner.state.kept["allowances:rereviews"], 2);
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {
@@ -2276,8 +2326,8 @@ test("status shows times in the display zone and redacts named secrets", () => {
     done: { check: {}, plan: { items: [] }, "item:a:validate": { tree: "t1" } },
     kept: {
       "item:a:flaky": { tree: "t1", command: "npm test" },
-      "item:a:rereviews": { used: 1, granted: 1 },
-      "allowances:granted": { "perPath:item:a:work": 3 },
+      "allowances:rereviews": 1,
+      "allowances:granted": { "perPath:item:a:work": 3, resultRereviews: 1 },
     },
     repairs: { "item:a:work": { count: 4, findings: ["refused"] } },
     retries: {

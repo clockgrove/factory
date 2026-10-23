@@ -88,6 +88,8 @@ export type RefusalCode =
   | "unknown_provider"
   /** `run` names a closed issue Factory never ran: reopen it first. */
   | "issue_closed"
+  /** `run --deadline` passed before the Objective was admitted: run again with a new deadline. */
+  | "deadline_passed"
   /** The Objective's state can't be read: answer reset or cancel. */
   | "state_unreadable"
   /** The command needs this repository's configuration. */

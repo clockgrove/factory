@@ -491,6 +491,8 @@ const GITHUB_CRASH_POINTS = [
   "reset:answered",
   "run:queue:before",
   "run:queue:after",
+  "run:unqueue:before",
+  "run:unqueue:after",
 ];
 for (const point of GITHUB_CRASH_POINTS)
   test(`crash at ${point}, restart, finish once`, {
@@ -2661,6 +2663,25 @@ test("run: a request plus a follower; it exits 2 when it needs a person, 1 when 
   await until(
     () => readdirSync(inst.requests).every((n) => !n.endsWith(".json")),
     "the waiting request answered",
+  );
+  // A deadline that passed before the admission is refused, not frozen.
+  writeFileSync(
+    join(inst.requests, "late-run.json"),
+    JSON.stringify({
+      id: "late-run",
+      at: new Date().toISOString(),
+      by: "octo",
+      request: { kind: "run", issue: 81, deadline: new Date(0).toISOString() },
+    }),
+  );
+  await until(
+    () => existsSync(join(inst.requests, "late-run.result")),
+    "the late run's result",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(inst.requests, "late-run.result"), "utf8"))
+      .code,
+    "deadline_passed",
   );
   const refused = cli(inst, "run", "81");
   assert.equal(refused.code, 1);

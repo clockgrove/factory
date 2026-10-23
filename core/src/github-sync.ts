@@ -23,6 +23,7 @@ import {
   queued,
   queueIssue,
   readQueue,
+  unqueueIssue,
 } from "./queue.js";
 import { type RequestResult, refused, writeRequest } from "./requests.js";
 import type { ObjectiveState, ObjectiveStatus, QueueControl } from "./state.js";
@@ -198,8 +199,12 @@ export class GitHubSync {
   /** Known issues GitHub no longer has: left out of later reads. */
   private readonly gone = new Set<number>();
   private lastPoll = 0;
-  /** `factory run` cards being queued, or queued and not yet admitted: read by number until then. */
-  private readonly queuing = new Set<number>();
+  /**
+   * `factory run` cards queued and not yet admitted, with how to answer
+   * their request when the operator dequeues them first: read by number
+   * until then.
+   */
+  private readonly queuing = new Map<number, (result: RequestResult) => void>();
   private readonly jobs: Jobs;
   /** Finished Objectives whose final option and replies are written. */
   private readonly settled = new Set<number>();
@@ -269,7 +274,7 @@ export class GitHubSync {
             .filter((runner) => !TERMINAL.includes(runner.state.status))
             .map((runner) => runner.state.issue),
           ...sync.unreadable.keys(),
-          ...this.queuing,
+          ...this.queuing.keys(),
         ]),
       ].filter((issue) => !this.gone.has(issue));
       // The poll interval paces the queue read; it needs no backoff.
@@ -344,13 +349,16 @@ export class GitHubSync {
    * `factory run N`: set the issue's card to queued (queue.ts queueIssue),
    * once, in the background, and read the queue at once, so the normal
    * intake admits it. `closed` queues a closed issue (a finished Objective
-   * runs again). A missing or closed issue is `refuse`d; a failed write is
-   * retried with backoff on a later call.
+   * runs again). `answer` refuses a missing or closed issue, and one the
+   * operator dequeued after the request (`since`: queueIssue), now or by
+   * a later queue read before the admission; a failed write is retried
+   * with backoff on a later call.
    */
   queue(
     issue: number,
     closed: boolean,
-    refuse: (result: RequestResult) => void,
+    since: { at: string; shownAt?: string | undefined },
+    answer: (result: RequestResult) => void,
   ): void {
     if (this.problem() || this.queuing.has(issue)) return;
     this.background(issue, `run:${issue}`, async (signal) => {
@@ -360,21 +368,35 @@ export class GitHubSync {
         this.display,
         issue,
         closed,
+        since,
         signal,
       );
       if (outcome === "queued") {
-        this.queuing.add(issue);
+        this.queuing.set(issue, answer);
+        // A read that began before this write is stale for the card.
+        this.wroteAt.set(issue, this.now());
         this.lastPoll = 0;
         this.log.write(issue, { event: "run-queued" });
-      } else
-        refuse(
-          refused(
-            outcome,
-            outcome === "issue_closed"
-              ? `#${issue} is closed and Factory never ran it; reopen it, then factory run ${issue} again.`
-              : `${this.config.repository} has no issue #${issue}.`,
-          ),
-        );
+      } else answer(runRefusal(outcome, issue, this.config.repository));
+    });
+  }
+
+  /** A `factory run N` request got its result: its card is no longer watched for a dequeue. */
+  ranOut(issue: number): void {
+    this.queuing.delete(issue);
+  }
+
+  /**
+   * A cancel of a `factory run N` not admitted yet: stop queuing its card,
+   * and move a card that reads queued to cancelled (queue.ts unqueueIssue).
+   */
+  unqueue(issue: number): void {
+    this.queuing.delete(issue);
+    this.jobs.forget(`run:${issue}`);
+    if (this.problem()) return;
+    this.background(issue, `unrun:${issue}`, async (signal) => {
+      await unqueueIssue(this.github, this.config, this.display, issue, signal);
+      this.wroteAt.set(issue, this.now());
     });
   }
 
@@ -451,6 +473,15 @@ export class GitHubSync {
       this.changed.delete(issue);
       // Missing from a read that asked for it by number: no card.
       const item = items.get(issue);
+      // A `factory run` card moved out of queued before its admission: the
+      // operator's later dequeue drops the request.
+      const asked = this.queuing.get(issue);
+      if (asked && item?.option !== queuedOption) {
+        this.queuing.delete(issue);
+        asked(runRefusal("dequeued", issue, this.config.repository));
+        this.log.write(issue, { event: "run-dequeued", option: item?.option });
+        continue;
+      }
       try {
         let runner = sync.runners.get(issue);
         if (item?.option === queuedOption && !runner) runner = sync.find(issue);
@@ -1154,4 +1185,23 @@ export function moved(item: QueueItem, state: ObjectiveState): boolean {
     .map((mark) => Date.parse(mark ?? ""))
     .filter(Number.isFinite);
   return at > (marks.length ? Math.max(...marks) : Date.parse(state.updatedAt));
+}
+
+/** Why a `factory run` request isn't admitted. */
+function runRefusal(
+  outcome: "no_such_issue" | "issue_closed" | "dequeued",
+  issue: number,
+  repository: string,
+): RequestResult {
+  return outcome === "dequeued"
+    ? refused(
+        "superseded",
+        `#${issue}'s card was moved out of queued after this run was asked for, so it isn't admitted; queue it again, or factory run ${issue}.`,
+      )
+    : outcome === "issue_closed"
+      ? refused(
+          outcome,
+          `#${issue} is closed and Factory never ran it; reopen it, then factory run ${issue} again.`,
+        )
+      : refused(outcome, `${repository} has no issue #${issue}.`);
 }

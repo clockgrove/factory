@@ -12,6 +12,7 @@ import {
   type ObjectiveState,
   TERMINAL,
 } from "./state.js";
+import { facts } from "./work/facts.js";
 
 /**
  * `factory reset N` (CORE.md#State). The service saves a resetting record
@@ -275,7 +276,7 @@ export async function rebuildState(
         // Not merged in this plan: start fresh on the current start, so a
         // kept worktree on an older base is moved, not collected against
         // a base it wasn't built on.
-        state.kept[`item:${item.id}:rebase`] = true;
+        Object.assign(state.kept, facts({ rebase: true }, item.id));
         continue;
       }
       state.done[`item:${item.id}:publish`] = {

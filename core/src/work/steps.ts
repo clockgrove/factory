@@ -29,7 +29,6 @@ import {
   captureAssets,
   destinationFinding,
   type InputRecord,
-  type MediaInput,
   type MediaOutcome,
   materializeSelection,
   mediaDirectory,
@@ -93,9 +92,17 @@ import {
   worktreePath,
 } from "../worktree.js";
 import { collect, type HandoffNote } from "./collect.js";
+import {
+  fact,
+  facts,
+  itemsWith,
+  type KeptSelection,
+  type Refused,
+  written,
+} from "./facts.js";
 import { type MergeResult, mergeOf } from "./merged.js";
 import { prepareWorkPrompt, type RepairContext } from "./prompt.js";
-import type { Worker, WorkerSpend } from "./worker.js";
+import type { Worker } from "./worker.js";
 
 const MINUTE = 60_000;
 /** What a kept validation finding holds of a failed run's output. */
@@ -121,7 +128,7 @@ export interface BuildDeps extends PlanningDeps {
  *
  * A refused result is a `repair`: the item's steps from `work` on are
  * cleared and the worker continues in its kept worktree with the finding.
- * Facts that outlive repairs are kept in `state.kept`, under item keys.
+ * Facts that outlive repairs are kept in `state.kept` (work/facts.ts).
  *
  * With native-stack delivery, each chain of the plan (planning/units.ts) is
  * one unit: a layer above the bottom starts on the head published for the
@@ -141,15 +148,6 @@ const PHASES = [
 type Phase = (typeof PHASES)[number];
 
 const stepKey = (id: string, phase: Phase) => `item:${id}:${phase}`;
-const keptKey = (id: string, fact: string) => `item:${id}:${fact}`;
-
-function kept<T>(
-  state: ObjectiveState,
-  id: string,
-  fact: string,
-): T | undefined {
-  return (state.kept ?? {})[keptKey(id, fact)] as T | undefined;
-}
 
 interface WorkResult {
   base: string;
@@ -159,26 +157,6 @@ interface WorkResult {
   validated?: { tree: string; commands: string[] };
   /** The candidate media sets captured; empty when the item has no select step. */
   sets: CandidateSet[];
-}
-
-/**
- * An operator's selection kept across a repair that isn't about the media,
- * with the sets it was chosen from: the repaired attempt stages no media,
- * and the select step writes the same set on the new work commit.
- */
-interface KeptSelection {
-  selection: Selection;
-  sets: CandidateSet[];
-}
-
-/** A finished worker run, kept until its result is collected, so a collection question doesn't run the worker again. */
-interface Finished {
-  finalResponse: string;
-  /** Factory's clean replay of the kept change, with no worker: its notes are that change's. */
-  replayed?: true;
-  validated?: { tree: string; commands: string[] };
-  /** Captured once; absent until then. */
-  sets?: CandidateSet[];
 }
 
 interface ValidateResult {
@@ -336,13 +314,11 @@ export function startedItems(state: ObjectiveState): Set<string> {
       ...Object.keys(state.done),
       ...Object.keys(state.attempts),
       ...Object.keys(state.retries),
-      ...Object.entries(state.kept ?? {})
-        .filter(([key, value]) => key.endsWith(":base") && value != null)
-        .map(([key]) => key),
       ...state.holds.map((hold) => hold.step),
     ]
       .filter((key) => key.startsWith("item:"))
-      .map((key) => key.split(":")[1]!),
+      .map((key) => key.split(":")[1]!)
+      .concat(itemsWith(state, "base")),
   );
 }
 
@@ -502,12 +478,10 @@ async function workStep(
       (state.done[stepKey(below.id, phase)] as { head: string } | undefined)
         ?.head;
     return (
-      kept<string>(state, item.id, "onto") ??
-      delivered("ci") ??
-      delivered("publish")!
+      fact(state, "onto", item.id) ?? delivered("ci") ?? delivered("publish")!
     );
   };
-  const keptBase = kept<string>(state, item.id, "base");
+  const keptBase = fact(state, "base", item.id);
   let base = keptBase ?? (await start());
   const added = await addWorktree(config.checkout, worktree, base, signal);
   let replayed = false;
@@ -523,11 +497,11 @@ async function workStep(
       undefined,
       signal,
     );
-  } else if (kept(state, item.id, "rebase")) {
+  } else if (fact(state, "rebase", item.id)) {
     // A conflict or failed delivery: move onto the current start and replay
     // the kept change, so the worker can resolve it there.
     const head = await start();
-    const replay = kept<Replay>(state, item.id, "replay")?.commit;
+    const replay = fact(state, "refused", item.id)?.commit;
     if (head !== base) {
       replayed = await rebaseWorktree(
         config.checkout,
@@ -540,15 +514,9 @@ async function workStep(
       base = head;
     }
   }
-  const keepBase = {
-    [keptKey(item.id, "base")]: base,
-    [keptKey(item.id, "rebase")]: false,
-    [keptKey(item.id, "onto")]: null,
-  };
-  const finishedKey = keptKey(item.id, "finished");
-  const selectionKey = keptKey(item.id, "selection");
-  let finished = kept<Finished>(state, item.id, "finished");
-  let own = kept<KeptSelection>(state, item.id, "selection");
+  const keepBase = facts({ base, rebase: false, onto: null }, item.id);
+  let finished = fact(state, "finished", item.id);
+  let own = fact(state, "selection", item.id);
   // A conflict repair whose replay applied cleanly onto the change's own
   // base is mechanical: the replayed change is the result, collected,
   // validated and reviewed again with no worker run. A media item's
@@ -557,7 +525,7 @@ async function workStep(
     !finished &&
     replayed &&
     !needsSelection(item) &&
-    kept<RepairFinding>(state, item.id, "finding")?.kind === "conflict"
+    fact(state, "finding", item.id)?.kind === "conflict"
   )
     finished = {
       finalResponse: `Factory replayed the previous result onto ${base} with no conflict.`,
@@ -568,14 +536,9 @@ async function workStep(
   // back; any other answer collects it again.
   if (finished && context.answer?.answer === "repair") {
     const finding = `The operator sent this result back for repair${context.answer.text ? `: ${context.answer.text}` : "."}`;
-    return repairOutcome(
-      item,
-      "work",
-      finding,
-      { ...keepBase, ...failure(item, finding) },
-      context,
-      deps,
-    );
+    return repairOutcome(item, "work", finding, context, deps, {
+      keep: keepBase,
+    });
   }
   if (!finished && context.answer?.answer === "revalidate") {
     // The operator says the refused result is correct and Factory's check
@@ -601,10 +564,7 @@ async function workStep(
       result: refused,
       keep: {
         ...keepBase,
-        [finishedKey]: null,
-        [keptKey(item.id, "finding")]: null,
-        [keptKey(item.id, "refused")]: null,
-        [keptKey(item.id, "replay")]: null,
+        ...facts({ finished: null, finding: null, refused: null }, item.id),
       },
     };
   }
@@ -616,7 +576,7 @@ async function workStep(
     // again: this attempt makes new candidates and the operator chooses.
     if (own && (await missingMember(own.selection.set))) {
       own = undefined;
-      keepAll = { ...keepAll, [selectionKey]: null };
+      keepAll = { ...keepAll, ...facts({ selection: null }, item.id) };
     }
     const inputs = await resolveInputs({
       checkout: config.checkout,
@@ -635,7 +595,7 @@ async function workStep(
     if (inputs.kind !== "done")
       return mediaOutcome(item, inputs, context, deps, keepAll);
     // Review gets the same inputs (InputRecord): the last ones resolved.
-    keepAll = { ...keepAll, [keptKey(item.id, "inputs")]: inputs.value };
+    keepAll = { ...keepAll, ...facts({ inputs: inputs.value }, item.id) };
 
     const files = new BaseFiles(config.checkout, base, signal);
     const scripts = await fixedScripts(
@@ -674,7 +634,7 @@ async function workStep(
         keepAll,
       );
 
-    const spent = kept<WorkerSpend>(state, item.id, "spend");
+    const spent = fact(state, "spend", item.id);
     const { spend, ...result } = await deps.worker(plan, shown.blocks).run({
       worktree,
       prompt: prepared.prompt,
@@ -687,7 +647,7 @@ async function workStep(
       ...(context.answer ? { answer: context.answer } : {}),
     });
     // A paid worker's spend outlives retries, restarts and repairs.
-    if (spend) keepAll = { ...keepAll, [keptKey(item.id, "spend")]: spend };
+    if (spend) keepAll = { ...keepAll, ...facts({ spend }, item.id) };
     if (result.kind !== "finished") return withKeep(result, keepAll);
     finished = {
       finalResponse: result.finalResponse,
@@ -712,7 +672,7 @@ async function workStep(
         reason:
           "The repair staged new candidate sets, so the operator chooses again",
         progress: true,
-        keep: { ...keepAll, [finishedKey]: finished, [selectionKey]: null },
+        keep: { ...keepAll, ...facts({ finished, selection: null }, item.id) },
       };
     finished = { ...finished, sets: own.sets };
   }
@@ -727,7 +687,7 @@ async function workStep(
     if (captured.kind !== "done")
       return mediaOutcome(item, captured, context, deps, {
         ...keepAll,
-        [finishedKey]: finished,
+        ...facts({ finished }, item.id),
       });
     if (captured.value.length)
       return {
@@ -736,7 +696,10 @@ async function workStep(
         progress: true,
         keep: {
           ...keepAll,
-          [finishedKey]: { ...finished, sets: captured.value },
+          ...facts(
+            { finished: { ...finished, sets: captured.value } },
+            item.id,
+          ),
         },
       };
     finished = { ...finished, sets: [] };
@@ -744,7 +707,7 @@ async function workStep(
   const sets = finished.sets ?? [];
   // The kept copies replace the worker's staging.
   if (sets.length) await forceRemove(join(worktree, ".factory-media"));
-  const keepFinished = { ...keepAll, [finishedKey]: finished };
+  const keepFinished = { ...keepAll, ...facts({ finished }, item.id) };
 
   const collected = await collect({
     secretlintConfig: config.policy.secretlintConfig,
@@ -754,7 +717,7 @@ async function workStep(
     item,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
-    refusedTree: kept<Refused>(state, item.id, "refused")?.tree,
+    refusedTree: refusedOf(state, item.id)?.tree,
     signal,
   });
   switch (collected.kind) {
@@ -767,21 +730,16 @@ async function workStep(
         signal,
       });
       if (outside)
-        return repairOutcome(
-          item,
-          "work",
-          outside,
-          { ...keepAll, ...failure(item, outside) },
-          context,
-          deps,
-        );
+        return repairOutcome(item, "work", outside, context, deps, {
+          keep: keepAll,
+        });
       const done: WorkResult = {
         base,
         commit: collected.commit,
         tree: collected.tree,
         // A replay's collection has no handoff file: the notes are kept.
         notes: finished.replayed
-          ? (kept<Replay>(state, item.id, "replay")?.notes ?? [])
+          ? (fact(state, "refused", item.id)?.notes ?? [])
           : collected.notes,
         ...(finished.validated ? { validated: finished.validated } : {}),
         sets,
@@ -791,35 +749,17 @@ async function workStep(
         result: done,
         keep: {
           ...keepAll,
-          [finishedKey]: null,
-          [keptKey(item.id, "finding")]: null,
-          [keptKey(item.id, "refused")]: null,
-          [keptKey(item.id, "replay")]: null,
+          ...facts({ finished: null, finding: null, refused: null }, item.id),
         },
       };
     }
     case "repair":
-      return repairOutcome(
-        item,
-        "work",
-        collected.finding,
-        { ...keepAll, ...failure(item, collected.finding) },
-        context,
-        deps,
-      );
+      return repairOutcome(item, "work", collected.finding, context, deps, {
+        keep: keepAll,
+      });
     default:
       return withKeep(collected, keepFinished);
   }
-}
-
-/** The kept finding of a failure, for the next attempt's repair context. */
-function failure(item: WorkItem, detail: string): Record<string, unknown> {
-  return {
-    [keptKey(item.id, "finding")]: {
-      kind: "failure",
-      detail,
-    } satisfies RepairFinding,
-  };
 }
 
 /** A media answer other than done as the step's outcome: `repair` goes back to the work step. */
@@ -833,14 +773,9 @@ function mediaOutcome(
 ): Outcome {
   switch (outcome.kind) {
     case "repair":
-      return repairOutcome(
-        item,
-        from,
-        outcome.finding,
-        { ...keep, ...failure(item, outcome.finding) },
-        context,
-        deps,
-      );
+      return repairOutcome(item, from, outcome.finding, context, deps, {
+        keep,
+      });
     case "retry":
       return { kind: "retry", reason: outcome.reason, keep };
     default:
@@ -947,7 +882,7 @@ async function repairContext(
 > {
   const { state, signal } = context;
   const history = state.repairs?.[stepKey(item.id, "work")];
-  const finding = kept<RepairFinding>(state, item.id, "finding");
+  const finding = fact(state, "finding", item.id);
   // A conflict needs no diagnosis: the change was moved onto `base`.
   if (finding?.kind === "conflict")
     return {
@@ -957,14 +892,10 @@ async function repairContext(
       keep: {},
     };
   if (!history?.count || !finding) return undefined;
-  const saved = kept<{ repair: number; context: RepairContext }>(
-    state,
-    item.id,
-    "correction",
-  );
+  const saved = fact(state, "diagnosis", item.id);
   if (saved?.repair === history.count)
     return { context: saved.context, keep: {} };
-  const applied = kept<string[]>(state, item.id, "corrections") ?? [];
+  const applied = saved?.applied ?? [];
   const plan = state.done.plan as Plan;
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
@@ -979,10 +910,7 @@ async function repairContext(
     finding,
     checkout: deps.config.checkout,
     base,
-    commit:
-      kept<Refused>(state, item.id, "refused")?.commit ??
-      previous?.commit ??
-      base,
+    commit: refusedOf(state, item.id)?.commit ?? previous?.commit ?? base,
     sources,
     prior: applied,
     ...(answer ? { operatorAnswer: answer } : {}),
@@ -1016,54 +944,42 @@ async function repairContext(
   };
   return {
     context: repairContextValue,
-    keep: {
-      [keptKey(item.id, "correction")]: {
-        repair: history.count,
-        context: repairContextValue,
+    keep: facts(
+      {
+        diagnosis: {
+          repair: history.count,
+          context: repairContextValue,
+          applied: [...applied, result.finding],
+        },
       },
-      [keptKey(item.id, "corrections")]: [...applied, result.finding],
+      item.id,
+    ),
+  };
+}
+
+/** The one writer of the refused fact, from the work result a repair clears. */
+function refusedFact(
+  id: string,
+  work: WorkResult,
+  refused: boolean,
+): Record<string, unknown> {
+  return facts(
+    {
+      refused: {
+        commit: work.commit,
+        tree: work.tree,
+        notes: work.notes,
+        ...(refused ? {} : { replayOnly: true as const }),
+      },
     },
-  };
+    id,
+  );
 }
 
-/**
- * The result a repair refused: its commit (the diagnosis's evidence), its
- * tree (collection reads the same tree on the same base as no change) and
- * its notes (for `revalidate`).
- */
-interface Refused {
-  commit: string;
-  tree: string;
-  notes: HandoffNote[];
-}
-
-/**
- * The change a rebase replays: the commit of the item's last work result,
- * kept on every repair that clears it, whether or not the repair refuses
- * that result. Separate from the refused fact, whose tree collection reads
- * as "no change".
- */
-function replayFact(id: string, work: WorkResult): Record<string, Replay> {
-  return {
-    [keptKey(id, "replay")]: { commit: work.commit, notes: work.notes },
-  };
-}
-
-/** The change a rebase replays, with its notes for a replay without a worker. */
-interface Replay {
-  commit: string;
-  notes: HandoffNote[];
-}
-
-/** The one writer of the refused fact, from the refused work result. */
-function refusedFact(id: string, work: WorkResult): Record<string, Refused> {
-  return {
-    [keptKey(id, "refused")]: {
-      commit: work.commit,
-      tree: work.tree,
-      notes: work.notes,
-    },
-  };
+/** The kept result the latest repair refused, if it refused one. */
+function refusedOf(state: ObjectiveState, id: string): Refused | undefined {
+  const refused = fact(state, "refused", id);
+  return refused?.replayOnly ? undefined : refused;
 }
 
 /**
@@ -1079,9 +995,9 @@ async function refusedResult(
   base: string,
   signal: AbortSignal,
 ): Promise<WorkResult | undefined> {
-  const refused = kept<Refused>(state, item.id, "refused");
+  const refused = refusedOf(state, item.id);
   if (!refused) return undefined;
-  const own = kept<KeptSelection>(state, item.id, "selection");
+  const own = fact(state, "selection", item.id);
   if (needsSelection(item) && !own) return undefined;
   const shown = await hostGitExit(
     checkout,
@@ -1093,7 +1009,8 @@ async function refusedResult(
     shown.stdout.toString("utf8").trim() !== `${base} ${refused.tree}`
   )
     return undefined;
-  return { base, ...refused, sets: own?.sets ?? [] };
+  const { commit, tree, notes } = refused;
+  return { base, commit, tree, notes, sets: own?.sets ?? [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,20 +1060,20 @@ async function validateStep(
     case "failed": {
       // The worker's own Validate passed this exact tree with these
       // commands: run once more before calling it the result's fault.
-      const flakyKey = keptKey(item.id, "flaky");
       const sameAsWorker =
         work.validated?.tree === result.tree &&
         JSON.stringify(work.validated.commands) ===
           JSON.stringify(result.commands);
-      const rerun = kept<{ tree: string }>(state, item.id, "flaky");
+      const rerun = fact(state, "flaky", item.id);
       if (sameAsWorker && rerun?.tree !== result.tree && result.failed)
         return {
           kind: "retry",
           reason: `\`${result.failed.command}\` failed on a tree the worker's own validation passed; running it once more.`,
           progress: true,
-          keep: {
-            [flakyKey]: { tree: result.tree, command: result.failed.command },
-          },
+          keep: facts(
+            { flaky: { tree: result.tree, command: result.failed.command } },
+            item.id,
+          ),
         };
       // State is saved on every step: it keeps a bounded finding. Output
       // longer than that (up to the raised review-artifact stream bounds)
@@ -1176,12 +1093,10 @@ async function validateStep(
       return repairOutcome(
         item,
         "validate",
-        result.detail,
-        {
-          ...failure(item, keptOutput),
-        },
+        { kind: "failure", detail: keptOutput },
         context,
         deps,
+        { shown: result.detail },
       );
     }
     default:
@@ -1214,7 +1129,7 @@ async function selectStep(
     mediaDirectory(workDir, item.id),
   );
   const answer = context.answer;
-  const own = kept<KeptSelection>(state, item.id, "selection");
+  const own = fact(state, "selection", item.id);
   let read: ReturnType<typeof readSelection>;
   let decided: { by: string; at: string };
   if (!answer && own && work.sets.some((s) => s.id === own.selection.set.id)) {
@@ -1235,14 +1150,7 @@ async function selectStep(
     return { ...question, question: `${read.problem}\n\n${question.question}` };
   if (read.kind === "repair") {
     const finding = `The operator asked for new candidates${answer?.text ? `: ${answer.text}` : "."}`;
-    return repairOutcome(
-      item,
-      "select",
-      finding,
-      failure(item, finding),
-      context,
-      deps,
-    );
+    return repairOutcome(item, "select", finding, context, deps);
   }
   const made = await materializeSelection({
     checkout: deps.config.checkout,
@@ -1284,11 +1192,10 @@ async function reviewStep(
     state.issue,
     item.id,
   );
-  const pendingKey = keptKey(item.id, "questions");
   const decisions = criterionDecisions(
     context,
     validated.tree,
-    kept<string[]>(state, item.id, "questions"),
+    fact(state, "questions", item.id),
   );
   const chosen = selection(state)(item.id);
   const place = stackLayer(plan, deps, item.id);
@@ -1329,23 +1236,21 @@ async function reviewStep(
     signal,
     log: context.log,
   });
-  return reviewOutcome(review, pendingKey, () =>
-    repairOutcome(
-      item,
-      "review",
-      review.kind === "refused"
-        ? review.refused.map((r) => `${r.criterion}: ${r.detail}`).join("\n")
-        : "",
-      {
-        [keptKey(item.id, "finding")]: {
+  return reviewOutcome(
+    review,
+    (questions) => facts({ questions }, item.id),
+    () =>
+      repairOutcome(
+        item,
+        "review",
+        {
           kind: "review",
           tree: review.tree,
           refused: review.kind === "refused" ? review.refused : [],
-        } satisfies RepairFinding,
-      },
-      context,
-      deps,
-    ),
+        },
+        context,
+        deps,
+      ),
   );
 }
 
@@ -1353,7 +1258,7 @@ async function reviewStep(
 function workerInputs(state: ObjectiveState, ids: string[]): InputRecord[] {
   return ids.map((id) => ({
     item: id,
-    inputs: kept<MediaInput[]>(state, id, "inputs") ?? [],
+    inputs: fact(state, "inputs", id) ?? [],
   }));
 }
 
@@ -1433,10 +1338,10 @@ async function dependencyResults(
   return results;
 }
 
-/** Pass is done, refused repairs, needs-human asks (saving the criteria it asks about under `pendingKey`). */
+/** Pass is done, refused repairs, needs-human asks (keeping the criteria it asks about with `pending`). */
 function reviewOutcome(
   review: ResultReview,
-  pendingKey: string,
+  pending: (criteria: string[]) => Record<string, unknown>,
   refused: () => Outcome,
 ): Outcome {
   if (review.kind === "pass")
@@ -1451,7 +1356,7 @@ function reviewOutcome(
       `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n\`accept\` accepts ${review.questions.length === 1 ? "it" : "them all"}; \`refuse <reason>\` sends the result back for repair.`,
       ["accept", "refuse", "cancel"],
     ),
-    keep: { [pendingKey]: review.questions.map((q) => q.criterion) },
+    keep: pending(review.questions.map((q) => q.criterion)),
   };
 }
 
@@ -1500,8 +1405,8 @@ async function publishStep(
   if (changed) return changed;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const validated = state.done[stepKey(item.id, "validate")] as ValidateResult;
-  const pushed = kept<string[]>(state, item.id, "pushed") ?? [];
-  const republish = Boolean(kept(state, item.id, "republish"));
+  const pushed = fact(state, "pushed", item.id) ?? [];
+  const republish = Boolean(fact(state, "republish", item.id));
   // Kept first, so it outlives a failure on the way (the engine's) and
   // the questions that follow.
   if (context.answer?.answer === REPUBLISH && !republish)
@@ -1509,13 +1414,9 @@ async function publishStep(
       kind: "retry",
       reason: "Republishing on a new PR.",
       progress: true,
-      keep: { [keptKey(item.id, "republish")]: true },
+      keep: facts({ republish: true }, item.id),
     };
-  const rerun = kept<{ tree: string; command: string }>(
-    state,
-    item.id,
-    "flaky",
-  );
+  const rerun = fact(state, "flaky", item.id);
   const flaky = rerun?.tree === validated.tree ? rerun : undefined;
   const commit = candidate(state, item.id);
   const branch = baseBranch(state, deps, item);
@@ -1539,38 +1440,25 @@ async function publishStep(
     // the digest kept when the hold was raised, never the hold's text,
     // which quotes worker-chosen paths.
     ...(context.answer?.answer === "publish"
-      ? { allowSecret: kept<string>(state, item.id, "secret") }
+      ? { allowSecret: fact(state, "secret", item.id) }
       : {}),
   });
   if (result.kind === "secret")
     return context.answer?.answer === "repair"
-      ? repairOutcome(
-          item,
-          "publish",
-          result.finding,
-          failure(item, result.finding),
-          context,
-          deps,
-          true,
-        )
+      ? repairOutcome(item, "publish", result.finding, context, deps, {
+          refusesResult: true,
+        })
       : {
           ...hold(
             `${result.finding}\n\nPublication stopped; nothing was pushed (finding \`${result.digest}\`). Answer repair to have the worker remove the value; publish if the matched text isn't a secret, which lets exactly this finding on this commit through once; or cancel. Rotate the secret if the worker may have written it anywhere else.`,
             ["repair", "publish", "cancel"],
           ),
-          keep: { [keptKey(item.id, "secret")]: result.digest },
+          keep: facts({ secret: result.digest }, item.id),
         };
   // An empty change, or a pointer whose LFS object is missing: a fault in
   // the result itself, not a conflict, so no rebase.
   if (result.kind === "empty" || result.kind === "repair")
-    return repairOutcome(
-      item,
-      "publish",
-      result.finding,
-      failure(item, result.finding),
-      context,
-      deps,
-    );
+    return repairOutcome(item, "publish", result.finding, context, deps);
   if (result.kind !== "published") return result;
   const done: PublishResult = {
     pr: result.pr,
@@ -1580,10 +1468,10 @@ async function publishStep(
   return {
     kind: "done",
     result: done,
-    keep: {
-      [keptKey(item.id, "pushed")]: [...new Set([...pushed, commit])],
-      [keptKey(item.id, "republish")]: false,
-    },
+    keep: facts(
+      { pushed: [...new Set([...pushed, commit])], republish: false },
+      item.id,
+    ),
   };
 }
 
@@ -1601,7 +1489,7 @@ function pullInput(
     item: item.id,
     pr: published.pr,
     head: published.head,
-    pushedHeads: kept<string[]>(state, item.id, "pushed") ?? [],
+    pushedHeads: fact(state, "pushed", item.id) ?? [],
     requiredChecks: (plan.requiredPreIntegrationChecks ?? []).map(
       (c) => c.checkName,
     ),
@@ -1756,32 +1644,19 @@ function deliveryRepair(
   return repairOutcome(
     item,
     phase,
-    repair.finding,
-    {
-      ...(repair.conflict
-        ? conflictFinding(item, repair.finding)
-        : failure(item, repair.finding)),
-      ...(repair.conflict?.onto
-        ? { [keptKey(item.id, "onto")]: repair.conflict.onto }
-        : {}),
-      [keptKey(item.id, "rebase")]: true,
-    },
+    { kind: repair.conflict ? "conflict" : "failure", detail: repair.finding },
     context,
     deps,
+    {
+      keep: facts(
+        {
+          ...(repair.conflict?.onto ? { onto: repair.conflict.onto } : {}),
+          rebase: true,
+        },
+        item.id,
+      ),
+    },
   );
-}
-
-/** The kept finding of a conflict: a mechanical repair (see repairContext). */
-function conflictFinding(
-  item: WorkItem,
-  detail: string,
-): Record<string, unknown> {
-  return {
-    [keptKey(item.id, "finding")]: {
-      kind: "conflict",
-      detail,
-    } satisfies RepairFinding,
-  };
 }
 
 function republishOutcome(item: WorkItem, reason: string): Outcome {
@@ -1792,7 +1667,7 @@ function republishOutcome(item: WorkItem, reason: string): Outcome {
     clear: (["publish", "ci", "merge"] as const).map((p) =>
       stepKey(item.id, p),
     ),
-    keep: { [keptKey(item.id, "republish")]: true },
+    keep: facts({ republish: true }, item.id),
   };
 }
 
@@ -1806,27 +1681,49 @@ function republishOutcome(item: WorkItem, reason: string): Outcome {
  * operator's `repair`, or the selected set couldn't be written), or the
  * finding names a selected destination or cites the candidate receipt.
  *
- * Every cleared work result (the item's and each layer's above) keeps its
- * commit as the replay source, so a rebase never drops the change.
+ * Every cleared work result (the item's and each layer's above) is kept
+ * as the `refused` fact, so a rebase never drops the change.
+ *
+ * The repair keeps `finding` as the item's finding fact (a string is a
+ * failure with that detail) for the next attempt's repair context, and
+ * shows `shown`, else its detail or refused criteria.
  *
  * `refusesResult`: the repair refuses the item's own work result tree
  * (validate, review, CI, merge, a secret it writes), so the worker must
- * change it and the item's refused fact is recorded. A select or publish
- * media repair (new candidates, a selection that couldn't be written, LFS
- * objects) may rightly end on the same tracked tree, so it records no
- * refused fact, and a correct fix is never "no change". The layers above
- * are moved, not refused: they never get a refused fact.
+ * change it and the item's refused fact records it as refused. A select or
+ * publish media repair (new candidates, a selection that couldn't be
+ * written, LFS objects) may rightly end on the same tracked tree, so its
+ * fact is `replayOnly`, and a correct fix is never "no change". The layers
+ * above are moved, not refused: theirs is `replayOnly` too.
  */
 function repairOutcome(
   item: WorkItem,
   from: Phase,
-  finding: string,
-  keep: Record<string, unknown>,
+  finding: RepairFinding | string,
   context: StepContext,
   deps: BuildDeps,
-  refusesResult = from !== "select" && from !== "publish",
+  {
+    keep = {},
+    shown,
+    refusesResult = from !== "select" && from !== "publish",
+  }: {
+    /** Other facts the repair keeps. */
+    keep?: Record<string, unknown>;
+    /** The finding as the repair shows it; absent: the finding's detail. */
+    shown?: string;
+    refusesResult?: boolean;
+  } = {},
 ): Outcome {
   const { state } = context;
+  const kept: RepairFinding =
+    typeof finding === "string"
+      ? { kind: "failure", detail: finding }
+      : finding;
+  const text =
+    shown ??
+    (kept.kind === "review"
+      ? kept.refused.map((r) => `${r.criterion}: ${r.detail}`).join("\n")
+      : kept.detail);
   const place = stackLayer(state.done.plan as Plan, deps, item.id);
   const above = place ? place.unit.items.slice(place.layer + 1) : [];
   const standing = (entry: WorkItem): KeptSelection | undefined => {
@@ -1836,56 +1733,66 @@ function repairOutcome(
       | undefined;
     return chosen && work
       ? { selection: chosen, sets: work.sets }
-      : kept<KeptSelection>(state, entry.id, "selection");
+      : fact(state, "selection", entry.id);
   };
   // The work step forgets a selection whose copies are gone.
   const own =
-    keep[keptKey(item.id, "selection")] === null ? undefined : standing(item);
+    written(keep, "selection", item.id) === null ? undefined : standing(item);
   const media =
     from === "select" ||
-    (own !== undefined &&
-      aboutMedia(
-        item,
-        own.selection.set,
-        finding,
-        keep[keptKey(item.id, "finding")] as RepairFinding | undefined,
-      ));
+    (own !== undefined && aboutMedia(item, own.selection.set, text, kept));
   // The result being cleared, when there is one: a repair from `work`
   // itself keeps the facts of the result before it.
   const result = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
   const moved: Record<string, unknown> = {
-    [keptKey(item.id, "selection")]: media ? null : (own ?? null),
-    ...(result ? replayFact(item.id, result) : {}),
-    ...(result && refusesResult ? refusedFact(item.id, result) : {}),
+    ...facts({ selection: media ? null : (own ?? null) }, item.id),
+    ...(result ? refusedFact(item.id, result, refusesResult) : {}),
   };
   for (const layer of above) {
     const layerSelection = standing(layer);
-    if (layerSelection) moved[keptKey(layer.id, "selection")] = layerSelection;
     const work = state.done[stepKey(layer.id, "work")] as
       | WorkResult
       | undefined;
-    moved[keptKey(layer.id, "rebase")] = true;
-    moved[keptKey(layer.id, "finished")] = null;
-    moved[keptKey(layer.id, "onto")] = null;
-    if (work) {
+    Object.assign(
+      moved,
+      facts(
+        {
+          ...(layerSelection ? { selection: layerSelection } : {}),
+          rebase: true,
+          finished: null,
+          onto: null,
+        },
+        layer.id,
+      ),
+    );
+    if (work)
       Object.assign(
         moved,
-        replayFact(layer.id, work),
-        conflictFinding(
-          layer,
-          `Work Item ${item.id}, the stack layer below this one, is being repaired, so this change moves onto its new head.`,
+        refusedFact(layer.id, work, false),
+        facts(
+          {
+            finding: {
+              kind: "conflict",
+              detail: `Work Item ${item.id}, the stack layer below this one, is being repaired, so this change moves onto its new head.`,
+            },
+          },
+          layer.id,
         ),
       );
-    }
   }
   return {
     kind: "repair",
-    finding,
+    finding: text,
     target: stepKey(item.id, "work"),
     clear: [item, ...above].flatMap((entry) =>
       PHASES.map((p) => stepKey(entry.id, p)),
     ),
-    keep: { ...keep, ...moved, [keptKey(item.id, "finished")]: null },
+    keep: {
+      ...keep,
+      ...facts({ finding: kept }, item.id),
+      ...moved,
+      ...facts({ finished: null }, item.id),
+    },
   };
 }
 
@@ -1937,10 +1844,8 @@ export function replanOutcome(state: ObjectiveState): Outcome {
       ]),
     ],
     keep: {
-      ...Object.fromEntries(
-        Object.keys(state.kept ?? {}).map((key) => [key, null]),
-      ),
-      [RERUN]: true,
+      ...Object.fromEntries(Object.keys(state.kept).map((key) => [key, null])),
+      ...facts({ [RERUN]: true }),
     },
   };
 }
@@ -1992,9 +1897,6 @@ interface FinalResult {
   /** The selected media origin serves, for the report; absent when there is none. */
   media?: string;
 }
-
-/** Set once final validation pushed missing LFS objects to origin again. */
-const REPUSHED = "final:repushed";
 
 /** `final`: the final commands on the default branch head after every merge. */
 function finalStep(plan: Plan, deps: BuildDeps): Step {
@@ -2057,14 +1959,16 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
         commit: head,
         members,
         scratch: join(workDir, "final-media"),
-        repushed: Boolean((state.kept ?? {})[REPUSHED]),
+        repushed: Boolean(fact(state, "final:repushed")),
         signal,
       });
       if (verified.kind === "retry")
         return {
           kind: "retry",
           reason: verified.reason,
-          ...(verified.repushed ? { keep: { [REPUSHED]: true } } : {}),
+          ...(verified.repushed
+            ? { keep: facts({ "final:repushed": true }) }
+            : {}),
         };
       if (verified.kind === "repair") return hold(verified.finding);
       if (verified.kind !== "done") return verified;
@@ -2075,13 +1979,14 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(verified.value.summary ? { media: verified.value.summary } : {}),
       };
-      return { kind: "done", result: done, keep: { [REPUSHED]: null } };
+      return {
+        kind: "done",
+        result: done,
+        keep: facts({ "final:repushed": null }),
+      };
     },
   };
 }
-
-/** Final review's refusal is the open question: its `retry` means the default branch was fixed. */
-const REFUSED = "final-review:refused";
 
 /** `final-review`: every Objective criterion against the integrated result. */
 function finalReviewStep(deps: BuildDeps): Step {
@@ -2093,13 +1998,16 @@ function finalReviewStep(deps: BuildDeps): Step {
       // A `retry` to the refusal (never to an error or a wait question):
       // the operator fixed the default branch, so validate the new head
       // before reviewing again.
-      if (context.answer?.answer === "retry" && (state.kept ?? {})[REFUSED])
+      if (
+        context.answer?.answer === "retry" &&
+        fact(state, "final-review:refused")
+      )
         return {
           kind: "repair",
           finding: "Final review runs again after the operator's fix.",
           target: "final",
           clear: ["final", "final-review"],
-          keep: { [REFUSED]: null },
+          keep: facts({ "final-review:refused": null }),
         };
       const plan = state.done.plan as Plan;
       const final = state.done.final as FinalResult;
@@ -2118,7 +2026,7 @@ function finalReviewStep(deps: BuildDeps): Step {
       const decisions = criterionDecisions(
         context,
         final.tree,
-        (state.kept ?? {})["final:questions"] as string[] | undefined,
+        fact(state, "final-review:questions"),
       );
       // Every merged item in merge order; a native stack's layers share its merge.
       const mergedIds = merges.flatMap(
@@ -2164,12 +2072,14 @@ function finalReviewStep(deps: BuildDeps): Step {
         signal,
         log: context.log,
       });
-      return reviewOutcome(review, "final:questions", () => ({
+      const pending = (questions: string[]) =>
+        facts({ "final-review:questions": questions });
+      return reviewOutcome(review, pending, () => ({
         ...hold(
           `Final review refused the integrated result:\n\n${review.kind === "refused" ? review.refused.map((r) => `- ${r.criterion}: ${r.detail}`).join("\n") : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.`,
           ["retry", "replan", "cancel"],
         ),
-        keep: { [REFUSED]: true },
+        keep: facts({ "final-review:refused": true }),
       }));
     },
   };
@@ -2193,8 +2103,7 @@ async function objectiveEdited(
     readShown(issue.body_html, { sources: planned.writer === true }),
   );
   const accepted =
-    ((state.kept ?? {})[OBJECTIVE_ACCEPTED] as string | undefined) ??
-    shownDigest(planned.shown);
+    fact(state, OBJECTIVE_ACCEPTED) ?? shownDigest(planned.shown);
   if (context.answer?.answer === "continue")
     return digest === accepted
       ? undefined
@@ -2202,7 +2111,7 @@ async function objectiveEdited(
           kind: "retry",
           reason: "Continuing with the edited Objective.",
           progress: true,
-          keep: { [OBJECTIVE_ACCEPTED]: digest },
+          keep: facts({ [OBJECTIVE_ACCEPTED]: digest }),
         };
   if (issue.state !== "open")
     return objectiveWide(
@@ -2418,7 +2327,10 @@ export function rerunCleanupStep(deps: BuildDeps): Step {
       // The check that follows sees whether it stayed open.
       return {
         kind: "done",
-        keep: { [RERUN]: null, ...(closed ? { [REOPENED]: true } : {}) },
+        keep: facts({
+          [RERUN]: null,
+          ...(closed ? { [REOPENED]: true as const } : {}),
+        }),
       };
     },
   };

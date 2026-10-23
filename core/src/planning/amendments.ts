@@ -7,6 +7,7 @@ import {
   type StepContext,
 } from "../engine.js";
 import type { ObjectiveState } from "../state.js";
+import { fact } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
 import {
@@ -380,9 +381,8 @@ export function amendmentProgress(
     }),
   );
   const published = (id: string) => {
-    const pushed = state.kept[`item:${id}:pushed`];
     return (
-      (Array.isArray(pushed) && pushed.length > 0) ||
+      (fact(state, "pushed", id)?.length ?? 0) > 0 ||
       Boolean(state.done[`item:${id}:publish`]) ||
       Boolean(state.done[`item:${id}:merge`])
     );

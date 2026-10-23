@@ -21,7 +21,7 @@ export type Outcome =
   | {
       kind: "done";
       result?: unknown;
-      /** Facts that outlive repairs, such as the heads already pushed (`state.kept`). */
+      /** Facts that outlive repairs, such as the heads already pushed (`state.kept`, work/facts.ts); null deletes one. */
       keep?: Record<string, unknown>;
     }
   /**

@@ -155,8 +155,40 @@ export interface ResultReviewInput {
   artifacts?: readonly ReviewArtifact[];
   /** Operator decisions; those on this tree replace the reviewer's verdict. */
   decisions?: readonly CriterionDecision[];
+  /** How the result is delivered: a native-stack layer's place in its stack. */
+  delivery?: DeliveryPosition;
+  /** The completed result of each item this one depends on, transitively. */
+  dependencies?: readonly DependencyResult[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+}
+
+/** Where a result goes: its own PR, or one layer of a native stack. */
+export type DeliveryPosition =
+  | { kind: "regular" }
+  | {
+      kind: "native-stack";
+      /** 1 is the bottom layer, on the default branch. */
+      layer: number;
+      layers: number;
+      /** The layer below, whose published head this result builds on. */
+      predecessor: string | null;
+    };
+
+/** A dependency's completed result, as Factory recorded it. */
+export interface DependencyResult {
+  id: string;
+  title: string;
+  /** Merged, or (a native-stack layer below) published and not merged yet. */
+  status: "merged" | "published-unmerged" | "aggregate-complete";
+  resultCommitSha?: string;
+  resultTreeSha?: string;
+  validationCommands?: readonly string[];
+  pullRequest?: number;
+  deliveredHeadSha?: string;
+  mergeCommitSha?: string;
+  /** Whether the reviewed result's base contains the delivered result. */
+  inReviewedBase: boolean;
 }
 
 /** Largest complete per-file patch written for review; larger ones are marked incomplete. */
@@ -180,9 +212,49 @@ export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
         content: JSON.stringify(workItemDesign(input.item)),
         complete: true,
       },
+      ...deliveryRows(input),
     ],
     artifacts: [{ artifacts: input.artifacts ?? [] }],
   });
+}
+
+/** The item's delivery position and its dependencies' completed results. */
+function deliveryRows(input: ResultReviewInput): ResultEvidence[] {
+  const { delivery, dependencies } = input;
+  return [
+    ...(delivery
+      ? [
+          {
+            origin: "controller" as const,
+            path: "Delivery position",
+            content: JSON.stringify({
+              ...delivery,
+              scope:
+                delivery.kind === "native-stack"
+                  ? "This result is one layer of a native stack: its PR targets the layer below's branch, and the whole stack merges at once after every layer passes. Its base is the layer below's published head, so that layer's change is in base/ and candidate/ though not yet on the default branch."
+                  : "This result is delivered as its own PR to the default branch.",
+            }),
+            complete: true,
+          },
+        ]
+      : []),
+    ...(dependencies?.length
+      ? [
+          {
+            origin: "controller" as const,
+            path: "Completed dependency results",
+            content: JSON.stringify({
+              reviewedItemId: input.item.id,
+              reviewedBaseCommitSha: input.base,
+              scope:
+                "Factory's record of each dependency's accepted result: validated and reviewed, then merged, or for a native-stack layer below this one published and awaiting the stack's merge. It proves which bytes the dependency delivered, not that this result uses them correctly.",
+              work: dependencies,
+            }),
+            complete: true,
+          },
+        ]
+      : []),
+  ];
 }
 
 /**

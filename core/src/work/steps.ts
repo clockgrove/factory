@@ -74,6 +74,8 @@ import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
 import {
   type CriterionDecision,
+  type DeliveryPosition,
+  type DependencyResult,
   type ResultReview,
   receiptPath,
   reviewResult,
@@ -1254,6 +1256,15 @@ async function reviewStep(
     kept<string[]>(state, item.id, "questions"),
   );
   const chosen = selection(state)(item.id);
+  const place = stackLayer(plan, deps, item.id);
+  const position: DeliveryPosition = place
+    ? {
+        kind: "native-stack",
+        layer: place.layer + 1,
+        layers: place.unit.items.length,
+        predecessor: place.unit.items[place.layer - 1]?.id ?? null,
+      }
+    : { kind: "regular" };
   const review = await reviewResult({
     planner: deps.planner,
     plan,
@@ -1271,6 +1282,14 @@ async function reviewStep(
     inputs: workerInputs(state, [item.id]),
     ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
     decisions,
+    delivery: position,
+    dependencies: await dependencyResults(
+      state,
+      item,
+      deps.config.checkout,
+      work.base,
+      signal,
+    ),
     signal,
     log: context.log,
   });
@@ -1300,6 +1319,82 @@ function workerInputs(state: ObjectiveState, ids: string[]): InputRecord[] {
     item: id,
     inputs: kept<MediaInput[]>(state, id, "inputs") ?? [],
   }));
+}
+
+/**
+ * Each item `item` depends on, transitively, with its accepted result: its
+ * merge, or for a native-stack layer below, its published PR. Ready items
+ * have every dependency delivered; one that isn't is left out.
+ */
+async function dependencyResults(
+  state: ObjectiveState,
+  item: WorkItem,
+  checkout: string,
+  base: string,
+  signal: AbortSignal,
+): Promise<DependencyResult[]> {
+  const plan = state.done.plan as Plan;
+  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
+  const closure = new Set<string>();
+  const visit = (id: string) => {
+    if (closure.has(id)) return;
+    closure.add(id);
+    for (const parent of byId.get(id)?.dependencies ?? []) visit(parent);
+  };
+  for (const id of item.dependencies) visit(id);
+  const results: DependencyResult[] = [];
+  const contains = async (commit: string) =>
+    (
+      await hostGitExit(
+        checkout,
+        ["merge-base", "--is-ancestor", commit, base],
+        {
+          signal,
+        },
+      )
+    ).code === 0;
+  for (const entry of plan.items) {
+    if (!closure.has(entry.id)) continue;
+    const merged = mergeOf(state, entry.id);
+    const published = state.done[stepKey(entry.id, "publish")] as
+      | PublishResult
+      | undefined;
+    if (entry.kind === "aggregate") {
+      if (merged)
+        results.push({
+          id: entry.id,
+          title: entry.title,
+          status: "aggregate-complete",
+          inReviewedBase: true,
+        });
+      continue;
+    }
+    const work = state.done[stepKey(entry.id, "work")] as
+      | WorkResult
+      | undefined;
+    const validated = state.done[stepKey(entry.id, "validate")] as
+      | ValidateResult
+      | undefined;
+    if (!work || !validated || (!merged && !published)) continue;
+    const ci = state.done[stepKey(entry.id, "ci")] as
+      | { head: string }
+      | undefined;
+    const head = ci?.head ?? published?.head;
+    const delivered = merged?.mergeSha ?? head;
+    results.push({
+      id: entry.id,
+      title: entry.title,
+      status: merged ? "merged" : "published-unmerged",
+      resultCommitSha: candidate(state, entry.id),
+      resultTreeSha: validated.tree,
+      validationCommands: validated.commands,
+      ...(published ? { pullRequest: published.pr } : {}),
+      ...(head ? { deliveredHeadSha: head } : {}),
+      ...(merged ? { mergeCommitSha: merged.mergeSha } : {}),
+      inReviewedBase: delivered ? await contains(delivered) : false,
+    });
+  }
+  return results;
 }
 
 /** Pass is done, refused repairs, needs-human asks (saving the criteria it asks about under `pendingKey`). */

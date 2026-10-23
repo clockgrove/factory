@@ -3,51 +3,32 @@
  * tree and judges every Objective Acceptance criterion and every coverage
  * obligation once per distinct statement, wherever the plan proved it, plus
  * one fixed integration question per dependency edge between coding Work
- * Items. The evidence root, schema, decoding and verdicts are the result
- * review's (result.ts), over the changes this Objective's Work Items merged
- * (each merge's first-parent diff), read in the integrated tree: other work
- * merged on the default branch meanwhile is context, not under review. A refusal lists every refused criterion; a needs-human verdict
- * becomes a question for the operator. An invalid answer is asked again once
- * with the error; still invalid, the criteria it left undecided go to the
- * operator. Provider failures escape as `PlannerError`.
+ * Items. The review run (evidence root, schema, decoding and verdicts) is the
+ * result review's (result.ts runReview), over the changes this Objective's
+ * Work Items merged (each merge's first-parent diff), read in the integrated
+ * tree: other work merged on the default branch meanwhile is context, not
+ * under review. A refusal lists every refused criterion; a needs-human
+ * verdict becomes a question for the operator. An invalid answer is asked
+ * again once with the error; still invalid, the criteria it left undecided go
+ * to the operator. Provider failures escape as `PlannerError`.
  */
-import { rm } from "node:fs/promises";
 import type { CandidateRecord, InputRecord } from "../media.js";
 import { coverageCriterion } from "../planning/graph.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
+import type { ReviewArtifactGroup } from "./artifacts.js";
 import {
-  REVIEW_ARTIFACT_GUIDANCE,
-  type ReviewArtifactGroup,
-  reviewArtifactEvidence,
-} from "./artifacts.js";
-import {
-  CANDIDATE_GUIDANCE,
   type CriterionDecision,
-  candidateRows,
-  changeIndexRow,
-  decisionRows,
-  decodeResultReview,
-  evidenceRoot,
-  INPUT_GUIDANCE,
-  inputRows,
-  invalidReason,
-  judge,
-  materialize,
   type PassedValidation,
   REVIEW_GUIDANCE,
-  type ResultEvidence,
   type ResultReview,
-  resultReviewSchema,
-  reviewPrompt,
-  sourceRows,
-  validationRow,
+  runReview,
   workItemDesign,
 } from "./result.js";
 
 /** Review the integrated Objective. See the module comment for the outcomes. */
-export async function reviewObjective(input: {
+export function reviewObjective(input: {
   planner: Planner;
   plan: Plan;
   checkout: string;
@@ -78,84 +59,19 @@ export async function reviewObjective(input: {
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
 }): Promise<ResultReview> {
-  const tree = input.validation.tree;
-  const criteria = finalCriteria(input.plan, input.acceptance);
-  const decided = (criterion: string) =>
-    input.decisions?.find(
-      (entry) => entry.criterion === criterion && entry.tree === tree,
-    );
-  if (criteria.every(decided))
-    return judge(criteria, undefined, [], decided, tree, false);
-  const root = await evidenceRoot(input.dir, tree);
-  try {
-    const { changes, rows } = await materialize(input, root);
-    const captured = await reviewArtifactEvidence(
-      input.artifacts ?? [],
-      tree,
-      root,
-    );
-    const receipts = await candidateRows(root, input.candidates);
-    const given = await inputRows(root, input.inputs);
-    const evidence: ResultEvidence[] = [
-      ...sourceRows(input.sources),
-      ...input.plan.items.map(
-        (item): ResultEvidence => ({
-          origin: "controller",
-          path: `Accepted Work Item design: ${item.id}`,
-          content: JSON.stringify(workItemDesign(item)),
-          complete: true,
-        }),
-      ),
-      ...decisionRows(input.plan),
-      changeIndexRow(input.base, input.commit, tree, changes, input.merges),
-      validationRow(input.validation),
-      ...given,
-      ...receipts,
-      ...captured.rows,
-      ...rows,
-    ];
-    const ask = async (previousInvalid?: string) => {
-      const answer = await input.planner.answer({
-        role: "reviewer",
-        phase: "objective-review",
-        prompt: reviewPrompt(
-          [
-            FINAL_INSTRUCTIONS,
-            ...(captured.rows.length ? [REVIEW_ARTIFACT_GUIDANCE] : []),
-            ...(receipts.length ? [CANDIDATE_GUIDANCE] : []),
-            ...(given.length ? [INPUT_GUIDANCE] : []),
-          ].join("\n"),
-          criteria,
-          evidence,
-          input.base,
-          tree,
-          previousInvalid,
-        ),
-        schema: resultReviewSchema(evidence),
-        readDir: root,
-        ...(captured.images.length ? { images: captured.images } : {}),
-        signal: input.signal,
-        log: input.log,
-      });
-      return decodeResultReview(answer.value, criteria.length, evidence);
-    };
-    let decoded = await ask();
-    let review = judge(criteria, decoded, evidence, decided, tree, false);
-    const first = invalidReason(decoded, criteria, decided);
-    if (review.kind !== "refused" && first) {
-      input.log({ event: "objective-review-invalid", reason: first });
-      decoded = await ask(first);
-      review = judge(criteria, decoded, evidence, decided, tree, true);
-    }
-    input.log({
-      event: "objective-review",
-      outcome: review.kind,
-      criteria: criteria.length,
-    });
-    return review;
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  return runReview({
+    ...input,
+    phase: "objective-review",
+    criteria: finalCriteria(input.plan, input.acceptance),
+    instructions: FINAL_INSTRUCTIONS,
+    design: input.plan.items.map((item) => ({
+      origin: "controller",
+      path: `Accepted Work Item design: ${item.id}`,
+      content: JSON.stringify(workItemDesign(item)),
+      complete: true,
+    })),
+    artifacts: input.artifacts ?? [],
+  });
 }
 
 /**
@@ -244,4 +160,4 @@ const FINAL_INSTRUCTIONS = [
   REVIEW_GUIDANCE.labels,
   REVIEW_GUIDANCE.design,
   REVIEW_GUIDANCE.evidenceRoot,
-].join("\n");
+];

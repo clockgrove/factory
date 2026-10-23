@@ -39,6 +39,7 @@ import { hostGit } from "../worktree.js";
 import {
   REVIEW_ARTIFACT_GUIDANCE,
   type ReviewArtifact,
+  type ReviewArtifactGroup,
   reviewArtifactEvidence,
 } from "./artifacts.js";
 
@@ -165,54 +166,118 @@ const BASE_FILE_BYTES = 1_048_576;
 const BASE_TOTAL_BYTES = 67_108_864;
 
 /** Review one result. See the module comment for the outcomes. */
-export async function reviewResult(
-  input: ResultReviewInput,
+export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
+  const criteria = resultCriteria(input.plan, input.item);
+  return runReview({
+    ...input,
+    phase: "result-review",
+    criteria,
+    instructions: resultInstructions(input.item, criteria),
+    design: [
+      {
+        origin: "controller",
+        path: "Accepted Work Item design",
+        content: JSON.stringify(workItemDesign(input.item)),
+        complete: true,
+      },
+    ],
+    artifacts: [{ artifacts: input.artifacts ?? [] }],
+  });
+}
+
+/**
+ * One independent review, shared by the result and the final review: build
+ * the evidence root and indexed evidence, ask the reviewer, decode and judge
+ * the answer, ask again once with the error when it is invalid, and log the
+ * outcome. The evidence root is removed when the review ends.
+ */
+export async function runReview(
+  run: Pick<
+    ResultReviewInput,
+    | "planner"
+    | "plan"
+    | "checkout"
+    | "base"
+    | "commit"
+    | "validation"
+    | "sources"
+    | "dir"
+    | "notes"
+    | "candidates"
+    | "inputs"
+    | "decisions"
+    | "signal"
+    | "log"
+  > & {
+    phase: "result-review" | "objective-review";
+    criteria: readonly string[];
+    /** The fixed instructions; guidance for supplied evidence kinds follows. */
+    instructions: readonly string[];
+    /** The accepted Work Item design rows, after the pinned sources. */
+    design: readonly ResultEvidence[];
+    artifacts: readonly ReviewArtifactGroup[];
+    /** See materialize. */
+    merges?: readonly string[];
+  },
 ): Promise<ResultReview> {
-  const { item, validation } = input;
-  const tree = validation.tree;
-  const criteria = resultCriteria(input.plan, item);
+  const { criteria, phase } = run;
+  const tree = run.validation.tree;
   const decided = (criterion: string) =>
-    input.decisions?.find(
+    run.decisions?.find(
       (entry) => entry.criterion === criterion && entry.tree === tree,
     );
   if (criteria.every(decided))
     return judge(criteria, undefined, [], decided, tree, false);
-  const root = await evidenceRoot(input.dir, tree);
+  const root = await evidenceRoot(run.dir, tree);
   try {
-    const { changes, rows } = await materialize(input, root);
-    const captured = await reviewArtifactEvidence(
-      [{ artifacts: input.artifacts ?? [] }],
-      tree,
-      root,
-    );
-    const receipts = await candidateRows(root, input.candidates);
-    const given = await inputRows(root, input.inputs);
-    const evidence = [
-      ...sourceRows(input.sources),
-      ...controllerRows(input, changes),
+    const { changes, rows } = await materialize(run, root);
+    const captured = await reviewArtifactEvidence(run.artifacts, tree, root);
+    const receipts = await candidateRows(root, run.candidates);
+    const given = await inputRows(root, run.inputs);
+    const evidence: ResultEvidence[] = [
+      ...sourceRows(run.sources),
+      ...run.design,
+      ...decisionRows(run.plan),
+      changeIndexRow(run.base, run.commit, tree, changes, run.merges),
+      validationRow(run.validation),
+      ...(run.notes
+        ? [
+            {
+              origin: "worker" as const,
+              path: "Worker handoff and verification notes",
+              content: run.notes,
+              complete: true,
+            },
+          ]
+        : []),
       ...given,
       ...receipts,
       ...captured.rows,
       ...rows,
     ];
+    const instructions = [
+      ...run.instructions,
+      ...(captured.rows.length ? [REVIEW_ARTIFACT_GUIDANCE] : []),
+      ...(receipts.length ? [CANDIDATE_GUIDANCE] : []),
+      ...(given.length ? [INPUT_GUIDANCE] : []),
+    ].join("\n");
     const ask = async (previousInvalid?: string) => {
-      const answer = await input.planner.answer({
+      const answer = await run.planner.answer({
         role: "reviewer",
-        phase: "result-review",
-        prompt: renderResultReview(
-          input,
+        phase,
+        prompt: reviewPrompt(
+          instructions,
           criteria,
           evidence,
-          captured.rows.length > 0,
-          receipts.length > 0,
-          given.length > 0,
+          run.base,
+          tree,
           previousInvalid,
         ),
         schema: resultReviewSchema(evidence),
         readDir: root,
         ...(captured.images.length ? { images: captured.images } : {}),
-        signal: input.signal,
-        log: input.log,
+        signal: run.signal,
+        log: run.log,
       });
       return decodeResultReview(answer.value, criteria.length, evidence);
     };
@@ -220,15 +285,11 @@ export async function reviewResult(
     let review = judge(criteria, decoded, evidence, decided, tree, false);
     const first = invalidReason(decoded, criteria, decided);
     if (review.kind !== "refused" && first) {
-      input.log({ event: "result-review-invalid", reason: first });
+      run.log({ event: `${phase}-invalid`, reason: first });
       decoded = await ask(first);
       review = judge(criteria, decoded, evidence, decided, tree, true);
     }
-    input.log({
-      event: "result-review",
-      outcome: review.kind,
-      criteria: criteria.length,
-    });
+    run.log({ event: phase, outcome: review.kind, criteria: criteria.length });
     return review;
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -245,7 +306,7 @@ interface DecodedFinding {
   question: string;
 }
 
-export type Decoded =
+type Decoded =
   | { invalid: true; reason: string }
   | {
       invalid: false;
@@ -256,7 +317,7 @@ export type Decoded =
     };
 
 /** Why an answer is invalid for the criteria the operator hasn't decided. */
-export function invalidReason(
+function invalidReason(
   decoded: Decoded,
   criteria: readonly string[],
   decided: (criterion: string) => CriterionDecision | undefined,
@@ -279,7 +340,7 @@ export function invalidReason(
  * left without a valid verdict is asked of the operator, with the
  * reviewer's questions.
  */
-export function judge(
+function judge(
   criteria: readonly string[],
   decoded: Decoded | undefined,
   evidence: readonly ResultEvidence[],
@@ -377,7 +438,7 @@ const FINDING_FIELDS = [
 ];
 
 /** One finding per criterion; a pass may cite only complete evidence rows. */
-export function resultReviewSchema(
+function resultReviewSchema(
   evidence: readonly ResultEvidence[],
 ): Record<string, unknown> {
   // Index membership stays decoder-enforced, so the schema is stable across
@@ -450,7 +511,7 @@ export function resultReviewSchema(
  * only for a pass), nonempty detail, and a question for needs-human. A
  * problem with one criterion's finding leaves the others' verdicts valid.
  */
-export function decodeResultReview(
+function decodeResultReview(
   value: unknown,
   criteria: number,
   evidence: readonly ResultEvidence[],
@@ -558,7 +619,7 @@ function decodeFinding(
 // Evidence root
 
 /** One changed path, as `changes/INDEX.json` lists it. */
-export interface ChangeEntry {
+interface ChangeEntry {
   path: string;
   status: string;
   oldMode: string;
@@ -579,7 +640,7 @@ export interface ChangeEntry {
  * A fresh root for this tree. Roots a crash left behind are removed, so the
  * directory holds at most one.
  */
-export async function evidenceRoot(dir: string, tree: string): Promise<string> {
+async function evidenceRoot(dir: string, tree: string): Promise<string> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   for (const entry of await readdir(dir))
     if (entry.startsWith("review-"))
@@ -594,7 +655,7 @@ export async function evidenceRoot(dir: string, tree: string): Promise<string> {
  * index and the evidence rows that describe them: the exact-tree inventory
  * and each changed path's patch excerpt within the inline text budget.
  */
-export async function materialize(
+async function materialize(
   input: Pick<ResultReviewInput, "checkout" | "base" | "commit" | "signal"> & {
     /**
      * Merge commits, in merge order, whose first-parent diffs are the change
@@ -768,42 +829,13 @@ function excerptRows(
   });
 }
 
-/** The Work Item design, operator decisions, command passes and notes. */
-function controllerRows(
-  input: ResultReviewInput,
-  changes: readonly ChangeEntry[],
-): ResultEvidence[] {
-  const { item, plan, validation } = input;
-  return [
-    {
-      origin: "controller",
-      path: "Accepted Work Item design",
-      content: JSON.stringify(workItemDesign(item)),
-      complete: true,
-    },
-    ...decisionRows(plan),
-    changeIndexRow(input.base, input.commit, validation.tree, changes),
-    validationRow(validation),
-    ...(input.notes
-      ? [
-          {
-            origin: "worker" as const,
-            path: "Worker handoff and verification notes",
-            content: input.notes,
-            complete: true,
-          },
-        ]
-      : []),
-  ];
-}
-
 /** The evidence path of an item's controller candidate receipt. */
 export function receiptPath(itemId: string): string {
   return `Controller candidate receipt: ${itemId}`;
 }
 
 /** The controller candidate receipt of each item with a selection; see candidateReceipts. */
-export async function candidateRows(
+async function candidateRows(
   root: string,
   candidates: readonly CandidateRecord[] = [],
 ): Promise<ResultEvidence[]> {
@@ -816,7 +848,7 @@ export async function candidateRows(
 }
 
 /** The controller input receipt of each item whose worker got inputs; see inputReceipts. */
-export async function inputRows(
+async function inputRows(
   root: string,
   inputs: readonly InputRecord[] = [],
 ): Promise<ResultEvidence[]> {
@@ -829,7 +861,7 @@ export async function inputRows(
 }
 
 /** Each pinned source as a complete source row. */
-export function sourceRows(sources: readonly PinnedSource[]): ResultEvidence[] {
+function sourceRows(sources: readonly PinnedSource[]): ResultEvidence[] {
   return sources.map((source) => ({
     origin: "source",
     path: source.path,
@@ -856,7 +888,7 @@ export function workItemDesign(item: WorkItem): Record<string, unknown> {
 }
 
 /** The operator's planning decisions, when there are any. */
-export function decisionRows(plan: Plan): ResultEvidence[] {
+function decisionRows(plan: Plan): ResultEvidence[] {
   return plan.decisions.length
     ? [
         {
@@ -870,7 +902,7 @@ export function decisionRows(plan: Plan): ResultEvidence[] {
 }
 
 /** changes/INDEX.json with the commits and the reviewed tree. */
-export function changeIndexRow(
+function changeIndexRow(
   base: string,
   commit: string,
   tree: string,
@@ -892,7 +924,7 @@ export function changeIndexRow(
 }
 
 /** The commands that passed on the reviewed tree. */
-export function validationRow(validation: PassedValidation): ResultEvidence {
+function validationRow(validation: PassedValidation): ResultEvidence {
   return {
     origin: "controller",
     path: "Validation command passes",
@@ -1032,30 +1064,25 @@ export const REVIEW_GUIDANCE = {
  * How review judges an item that offered candidate media sets: both the
  * result and the final review give it when a candidate receipt is supplied.
  */
-export const CANDIDATE_GUIDANCE =
+const CANDIDATE_GUIDANCE =
   "Candidate media sets: alternatives exist so the operator can choose one. Factory delivers, validates, reviews, publishes and merges only the selected set; unselected sets stay in Factory's private staging and are never committed or validated, by design. Judge a criterion about the alternatives (how many were offered, that each was complete, how they differ) from the Controller candidate receipt: it lists every captured set with each member's role, destination, media type, size and sha256, the capture checks every set passed, which roles' bytes differ across sets, and the operator's selection; where a member has a reviewCopy, media-sets/ holds Factory's digest-checked copy of its bytes for read-only comparison. The operator viewed every set before choosing, so the selection is the human judgment of the alternatives' appearance; never ask the operator to confirm it again. Judge the delivered bytes (format, content, tests) from the selected set in candidate/ and the validation that passed on this tree. A criterion worded about each candidate or every alternative is judged for the delivered selection plus the receipt's facts about the alternatives: never ask for, and never refuse or hold for missing, validation, tests or review of an unselected set.";
 
-export const INPUT_GUIDANCE =
+const INPUT_GUIDANCE =
   "Worker inputs: the Controller input receipt lists every file Factory gave the worker read-only (Objective source assets, including private local files and GitHub attachments, and dependencies' selected media), each with the sha256 and size Factory recorded when it fetched it. Where an input has a reviewCopy, inputs/ holds Factory's digest-checked copy of those exact bytes: judge a criterion about using, quoting or matching an input against that copy and the receipt. Never ask the operator to supply or confirm an input's bytes when the receipt has them.";
 
 /**
- * The result-review prompt: product logic kept verbatim from the old
+ * The result-review instructions: product logic kept verbatim from the old
  * reviewer, trimmed to what the core supplies: no receipts, bindings or
  * historical references. Instructions
  * and evidence that don't depend on the candidate come first, so reviews of
  * one item's candidates share a provider-cache prefix.
  */
-function renderResultReview(
-  input: ResultReviewInput,
+function resultInstructions(
+  item: WorkItem,
   criteria: readonly string[],
-  evidence: readonly ResultEvidence[],
-  artifacts: boolean,
-  candidates: boolean,
-  inputs: boolean,
-  previousInvalid?: string,
-): string {
-  const itemCriteria = input.item.acceptance.length;
-  const instructions = [
+): string[] {
+  const itemCriteria = item.acceptance.length;
+  return [
     REVIEW_GUIDANCE.judge,
     "The worker's handoff and verification notes come from this unaccepted candidate: they are advisory investigation leads, not semantic claims, requirements, validation or acceptance. Check relevant claims against complete current evidence. A verification note is the implementer's claimed map from one criterionIndex's sub-clauses to candidate file:line locations: use it as a starting index, verify each cited location yourself, and judge the criterion from candidate evidence. A wrong, incomplete or absent map proves nothing either way, and a cited source unavailable in the candidate is a lead to investigate, not proof of absence.",
     REVIEW_GUIDANCE.asyncWork,
@@ -1072,18 +1099,7 @@ function renderResultReview(
     REVIEW_GUIDANCE.design,
     REVIEW_GUIDANCE.labels,
     REVIEW_GUIDANCE.evidenceRoot,
-    ...(artifacts ? [REVIEW_ARTIFACT_GUIDANCE] : []),
-    ...(candidates ? [CANDIDATE_GUIDANCE] : []),
-    ...(inputs ? [INPUT_GUIDANCE] : []),
-  ].join("\n");
-  return reviewPrompt(
-    instructions,
-    criteria,
-    evidence,
-    input.base,
-    input.validation.tree,
-    previousInvalid,
-  );
+  ];
 }
 
 /**
@@ -1091,7 +1107,7 @@ function renderResultReview(
  * rows, the base and the reviewed tree, and the previous answer's error when
  * the reviewer is asked again.
  */
-export function reviewPrompt(
+function reviewPrompt(
   instructions: string,
   criteria: readonly string[],
   evidence: readonly ResultEvidence[],

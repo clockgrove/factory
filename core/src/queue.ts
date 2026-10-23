@@ -61,6 +61,19 @@ query($project: ID!, $after: String, $query: String!, $field: String!, $order: S
   }
 }`;
 
+const ITEM_FIELDS = `
+fragment Item on ProjectV2Item {
+  id
+  isArchived
+  project { id }
+  option: fieldValueByName(name: $field) {
+    ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
+  }
+  order: fieldValueByName(name: $order) {
+    ... on ProjectV2ItemFieldNumberValue { number }
+  }
+}`;
+
 const ISSUE_FIELDS = `
 fragment Card on Issue {
   number
@@ -68,19 +81,25 @@ fragment Card on Issue {
   repository { nameWithOwner }
   body
   projectItems(first: 20) {
-    nodes {
-      id
-      isArchived
-      project { id }
-      option: fieldValueByName(name: $field) {
-        ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
-      }
-      order: fieldValueByName(name: $order) {
-        ... on ProjectV2ItemFieldNumberValue { number }
+    pageInfo { hasNextPage endCursor }
+    nodes { ...Item }
+  }
+}
+${ITEM_FIELDS}`;
+
+/** An issue's further Project cards, for one on more Projects than the first page. */
+const MORE_ITEMS = `
+query($owner: String!, $name: String!, $number: Int!, $after: String, $field: String!, $order: String!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      projectItems(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { ...Item }
       }
     }
   }
-}`;
+}
+${ITEM_FIELDS}`;
 
 /** Recently updated open issues, and these issues by number. */
 const issuesQuery = (numbers: number[]) => `
@@ -126,20 +145,23 @@ interface ItemsPage {
   } | null;
 }
 
+interface CardPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: ({
+    id: string;
+    isArchived: boolean;
+    project: { id: string };
+    option: Value;
+    order: Value;
+  } | null)[];
+}
+
 interface Card {
   number: number;
   state: string;
   repository: { nameWithOwner: string };
   body?: string;
-  projectItems: {
-    nodes: ({
-      id: string;
-      isArchived: boolean;
-      project: { id: string };
-      option: Value;
-      order: Value;
-    } | null)[];
-  };
+  projectItems: CardPage;
 }
 
 /** Pages of queued cards read at most; the rest wait for a later read. */
@@ -301,11 +323,11 @@ export async function readQueue(
     github.sameRepository(data.repository.nameWithOwner);
     for (const issue of (data.repository.recent as { nodes: Card[] } | null)
       ?.nodes ?? [])
-      read(issue);
+      await read(issue);
     for (const n of chunk) {
       const issue = data.repository[`i${n}`] as Card | null | undefined;
       // One transferred away reads as the issue it is now: gone from here.
-      if (issue && ours(issue, n)) read(issue);
+      if (issue && ours(issue, n)) await read(issue);
       else {
         gone.push(n);
         cards.set(n, null);
@@ -320,12 +342,36 @@ export async function readQueue(
         config.repository.toLowerCase()
     );
   }
-  function read(issue: Card): void {
+  /** An issue's queue card, paging its cards past the first page until found. */
+  async function read(issue: Card): Promise<void> {
     if (workItem(issue.body)) return;
-    const node = issue.projectItems.nodes.find(
-      (n) => n?.project.id === config.queue.projectId && !n.isArchived,
-    );
-    card(issue.number, issue.state === "OPEN", node ?? undefined);
+    const find = (items: CardPage) =>
+      items.nodes.find(
+        (n) => n?.project.id === config.queue.projectId && !n.isArchived,
+      ) ?? undefined;
+    let items = issue.projectItems;
+    let node = find(items);
+    while (!node && items.pageInfo.hasNextPage) {
+      const data = await github.graphql<{
+        repository: { issue: { projectItems: CardPage } | null } | null;
+      }>(
+        MORE_ITEMS,
+        {
+          owner: github.owner,
+          name: github.name,
+          number: issue.number,
+          after: items.pageInfo.endCursor,
+          ...fields,
+        },
+        signal,
+      );
+      const more = data.repository?.issue?.projectItems;
+      // A partial read throws: callers keep their last good view.
+      if (!more) throw new Error(`Issue #${issue.number}'s cards not found`);
+      items = more;
+      node = find(items);
+    }
+    card(issue.number, issue.state === "OPEN", node);
   }
   return {
     items: [...cards.values()].filter((item): item is QueueItem => !!item),

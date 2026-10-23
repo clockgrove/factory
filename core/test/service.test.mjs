@@ -2745,7 +2745,7 @@ test("unknown and misplaced options are refused with the fix", () => {
     ],
     [
       ["cancel", "5", "--json"],
-      /--json belongs to factory setup, status, log, queue/,
+      /--json belongs to factory setup, status, log, diagnostics, queue/,
     ],
     [
       ["status", "--bogus"],
@@ -2789,6 +2789,7 @@ test("unknown and misplaced options are refused with the fix", () => {
     "run",
     "status",
     "log",
+    "diagnostics",
     "watch",
     "answer",
     "retry",
@@ -2874,6 +2875,104 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   watching.kill("SIGINT");
   assert.equal(refusal(cli(inst, "log", "77")), "no_factory_state");
+  // diagnostics: a repaired step and a model call, as the engine and an
+  // adapter write them, then each mode; every mode is redacted.
+  const at = (ms) => new Date(Date.now() + ms).toISOString();
+  appendFileSync(
+    join(inst.logs, "54", run),
+    [
+      { at: at(1), step: "item:a:review", event: "start" },
+      {
+        at: at(2),
+        step: "item:a:review",
+        event: "model-usage",
+        role: "reviewer",
+        phase: "result-review",
+        provider: "codex",
+        model: "m1",
+        outcome: "done",
+        ms: 4000,
+        tokens: {
+          input: 100,
+          output: 20,
+          cached: 50,
+          reasoning: 5,
+          total: 120,
+        },
+        costUsd: null,
+        error: "sk-abcdefghijklmnop",
+      },
+      {
+        at: at(3000),
+        step: "item:a:review",
+        event: "outcome",
+        outcome: "repair",
+        target: "item:a:work",
+        finding: "the test fails",
+      },
+    ]
+      .map((event) => `${JSON.stringify(event)}\n`)
+      .join(""),
+  );
+  const timeline = cli(inst, "diagnostics", "54");
+  assert.equal(timeline.code, 0, timeline.err);
+  assert.match(timeline.out, /^Run \S+ · started /);
+  assert.match(timeline.out, /\+\d\d:\d\d {2}\S+ asks/);
+  assert.match(
+    timeline.out,
+    /model reviewer result-review codex m1 · done · 4 s · 120 tokens \(50 cached\) · \[REDACTED\]/,
+  );
+  assert.match(
+    timeline.out,
+    /item:a:review repair of item:a:work after 3 s: the test fails/,
+  );
+  assert.match(timeline.out, /activity a: 3 turns .* still running/);
+  assert.doesNotMatch(timeline.out, /ghp_|sk-a/);
+  const entries = cli(inst, "diagnostics", "54", "--logs", "a", "--json")
+    .out.trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(entries.length >= 4);
+  assert.ok(
+    entries.every(
+      (entry) => entry.item === "a" && entry.run === run.split(".")[0],
+    ),
+  );
+  const summary = JSON.parse(
+    cli(inst, "diagnostics", "54", "--summary", "--json", "--all-runs").out,
+  );
+  assert.equal(summary.roles.reviewer.calls, 1);
+  assert.equal(summary.phases["result-review"].tokens.total, 120);
+  assert.equal(summary.phases.review.steps, 1);
+  assert.equal(summary.repairs.a, 1);
+  assert.ok(summary.holds.length >= 1);
+  assert.ok(summary.criticalPath.length >= 1);
+  assert.match(
+    cli(inst, "diagnostics", "54", "--summary").out,
+    /By role:\n {2}reviewer: 1 calls · 120 tokens/,
+  );
+  assert.equal(
+    refusal(cli(inst, "diagnostics", "54", "--run", "nope")),
+    "no_factory_state",
+  );
+  assert.equal(cli(inst, "diagnostics", "54", "--summary", "--follow").code, 2);
+  const following = spawn(
+    process.execPath,
+    [CLI, "diagnostics", "54", "--follow", "--repo", REPO],
+    { env: inst.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  children.add(following);
+  let followed = "";
+  following.stdout.on("data", (chunk) => {
+    followed += chunk;
+  });
+  await until(() => /repair of item:a:work/.test(followed), "the timeline");
+  appendFileSync(
+    join(inst.logs, "54", run),
+    `${JSON.stringify({ at: at(4000), step: "item:a:work", event: "start" })}\n`,
+  );
+  await until(() => /item:a:work started/.test(followed), "a new line");
+  following.kill("SIGINT");
   await stopped(service);
 });
 

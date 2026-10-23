@@ -60,3 +60,9 @@ export class BoundedText {
 /** A thrown value's message. */
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+/** `text` as one line of at most `chars` characters, cut with an ellipsis. */
+export function oneLine(text: string, chars: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > chars ? `${line.slice(0, chars - 1)}…` : line;
+}

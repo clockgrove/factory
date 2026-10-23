@@ -917,7 +917,7 @@ export async function serve(options: ServeOptions): Promise<number> {
           ...(frozen
             ? { provider: frozen.provider, config: frozen.digest }
             : {}),
-          ...(asked ? { run: asked.id } : {}),
+          ...(asked ? { request: asked.id } : {}),
         });
         // A crash before this answers it when the request is read again:
         // the Objective is running by then.

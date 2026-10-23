@@ -32,7 +32,7 @@ import {
   TERMINAL,
   type Wait,
 } from "./state.js";
-import { errorMessage } from "./text.js";
+import { errorMessage, oneLine } from "./text.js";
 
 /** What a step reports. Every step ends in exactly one of these. */
 export type Outcome =
@@ -813,6 +813,9 @@ export class ObjectiveRunner {
       event: "outcome",
       outcome: outcome.kind,
       ...("reason" in outcome ? { reason: outcome.reason } : {}),
+      ...(outcome.kind === "repair"
+        ? { target: outcome.target, finding: oneLine(outcome.finding, 300) }
+        : {}),
     });
     crashPoint(`engine:${key}:applied`);
   }
@@ -1189,10 +1192,21 @@ export class ObjectiveRunner {
     const named = switching.map(
       (option) => `\`${answerForm(option)}\`: ${option.consequence}`,
     );
+    const id = `${key}@${now}`;
+    // Logged once saved, so the log never shows a question the state lost.
+    this.afterSave.push(() =>
+      this.log.write(state.issue, {
+        step: key,
+        event: "hold",
+        id,
+        cause,
+        question: oneLine(question, 300),
+      }),
+    );
     state.holds = [
       ...state.holds.filter((hold) => hold !== open),
       {
-        id: `${key}@${now}`,
+        id,
         step: key,
         ...(item !== undefined ? { item } : {}),
         question: [

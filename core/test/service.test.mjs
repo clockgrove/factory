@@ -588,6 +588,24 @@ test("the one step running at three deaths, with progress between, holds", async
   await stopped(service);
 });
 
+test("an Objective dequeued during its check is withdrawn once the check ends, and never plans", async () => {
+  const inst = installation();
+  // Saved by a dequeue while the check ran: the check is done now.
+  seed(inst, 71, "planning", { done: { check: true }, withdrawing: true });
+  const service = serve(inst);
+  const logs = () =>
+    existsSync(join(inst.logs, "71"))
+      ? readdirSync(join(inst.logs, "71"))
+          .map((name) => readFileSync(join(inst.logs, "71", name), "utf8"))
+          .join("")
+      : "";
+  await until(() => logs().includes('"withdrawn"'), "the withdrawal");
+  assert.ok(!existsSync(join(inst.objectives, "71.json")));
+  assert.ok(!existsSync(join(inst.objectives, "finished", "71.json")));
+  assert.ok(!logs().includes('"step":"plan"'), "nothing past the check");
+  await stopped(service);
+});
+
 test("two spellings of one state directory share one lock", async () => {
   const inst = installation();
   const first = serve(inst);

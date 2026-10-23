@@ -79,8 +79,12 @@ export interface SyncView {
   find(issue: number): ObjectiveRunner | undefined;
   /** Start (or start again) an Objective seen queued; the service decides whether it may. */
   admit(issue: number, github: GitHubModule): void;
-  /** Withdraw an Objective dequeued before it started; false when it has started. */
-  withdraw(issue: number): boolean;
+  /**
+   * Withdraw an Objective dequeued before it started: now, or (`pending`)
+   * once its running check or a re-run's cleanup ends; false when it has
+   * started.
+   */
+  withdraw(issue: number): "withdrawn" | "pending" | false;
   /** Checked and waiting for a slot: still shown as queued. */
   waitingForSlot(issue: number): boolean;
   requestsDir: string;
@@ -362,13 +366,16 @@ export class GitHubSync {
     const module = runner.state.modules.github as GitHubModule;
     if (TERMINAL.includes(runner.state.status)) {
       if (option === queued) return "requeued";
-    } else if (
-      module.seen === queued &&
-      option !== queued &&
-      sync.withdraw(issue)
-    ) {
-      this.log.write(issue, { event: "dequeued", option });
-      return "withdrawn";
+    } else if (module.seen === queued && option !== queued) {
+      const withdrawn = sync.withdraw(issue);
+      if (withdrawn === "pending")
+        runner.transact(() => {
+          (runner.state.modules.github as GitHubModule).seen = option;
+        });
+      if (withdrawn) {
+        this.log.write(issue, { event: "dequeued", option, withdrawn });
+        return "withdrawn";
+      }
     }
     const desired = this.desired(runner, sync);
     runner.transact(() => {

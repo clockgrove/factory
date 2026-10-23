@@ -344,6 +344,27 @@ export async function serve(options: ServeOptions): Promise<number> {
     return message;
   };
 
+  /**
+   * Dequeued before planning: the run goes as if never admitted, so
+   * queuing it again checks it afresh. The observer ends it first; false
+   * when it can't yet (it stays `withdrawing`, and goes on a later tick).
+   */
+  const withdrawNow = (runner: ObjectiveRunner): boolean => {
+    const issue = runner.state.issue;
+    if (!runner.state.withdrawing)
+      runner.transact(() => {
+        runner.state.withdrawing = true;
+      });
+    if (!release(runner.state)) return false;
+    removeState(paths.objectives, issue);
+    crashPoint("serve:withdrawn");
+    runner.stop();
+    runners.delete(issue);
+    options.sync?.forget(issue);
+    log.write(issue, { event: "withdrawn" });
+    return true;
+  };
+
   const tick = (): void => {
     for (const issue of [...unloaded]) load(issue);
     applyRequests();
@@ -359,6 +380,24 @@ export async function serve(options: ServeOptions): Promise<number> {
     waitingForSlot.clear();
     for (const runner of ordered) {
       const { state } = runner;
+      // Dequeued while its check or a re-run's cleanup ran: once that is
+      // done and nothing runs, it goes; nothing past them starts.
+      if (
+        state.withdrawing &&
+        !TERMINAL.includes(state.status) &&
+        !state.kept?.[RERUN]
+      ) {
+        if (!runner.busy)
+          try {
+            withdrawNow(runner);
+          } catch (error) {
+            log.write(state.issue, {
+              event: "withdraw-failed",
+              error: String(error),
+            });
+          }
+        continue;
+      }
       let run = false;
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
       // The check (and a new run's cleanup) runs when the Objective is first
@@ -476,21 +515,20 @@ export async function serve(options: ServeOptions): Promise<number> {
         const runner = runners.get(issue);
         if (
           !runner ||
-          runner.busy ||
           TERMINAL.includes(runner.state.status) ||
           !unstarted(runner.state)
         )
           return false;
-        // Dequeued before planning: the run goes as if never admitted, so
-        // queuing it again checks it afresh. The observer ends it first.
-        if (!release(runner.state)) return false;
-        removeState(paths.objectives, issue);
-        crashPoint("serve:withdrawn");
-        runner.stop();
-        runners.delete(issue);
-        options.sync?.forget(issue);
-        log.write(issue, { event: "withdrawn" });
-        return true;
+        // Its check or a re-run's cleanup still runs: it goes once that
+        // ends, and nothing past them starts meanwhile (see tick).
+        if (runner.busy || runner.state.kept?.[RERUN]) {
+          if (!runner.state.withdrawing)
+            runner.transact(() => {
+              runner.state.withdrawing = true;
+            });
+          return "pending";
+        }
+        return withdrawNow(runner) ? "withdrawn" : "pending";
       },
       result: (id: string) => readResult(paths.requests, id),
     });
@@ -604,15 +642,12 @@ function gated(runner: ObjectiveRunner, workflow: Workflow): boolean {
 /** Not started: nothing past the check (and a re-run's cleanup) has run or begun. */
 function unstarted(state: ObjectiveState): boolean {
   const early = (key: string) => key === "check" || key === "rerun:cleanup";
-  return (
-    !state.kept?.[RERUN] &&
-    [
-      ...Object.keys(state.done),
-      ...Object.keys(state.retries),
-      ...Object.keys(state.asking),
-      ...Object.keys(state.attempts),
-    ].every(early)
-  );
+  return [
+    ...Object.keys(state.done),
+    ...Object.keys(state.retries),
+    ...Object.keys(state.asking),
+    ...Object.keys(state.attempts),
+  ].every(early);
 }
 
 function started(runner: ObjectiveRunner): boolean {

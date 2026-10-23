@@ -45,6 +45,7 @@ import {
   packageScriptInvocation,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
+import { retiredCommands, runnableItem } from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
@@ -213,7 +214,7 @@ export type Validation =
 export async function validateTree(input: ValidateInput): Promise<Validation> {
   const { checkout, commit, plan, item } = input;
   const { preparation, commands } = item
-    ? validationSequence(item)
+    ? validationSequence(runnableItem(plan, item))
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   const { signal } = input;
@@ -719,7 +720,7 @@ async function dependencyInputsChanged(
 
 /**
  * The commands final validation runs: the declared prerequisites, then the
- * final commands. Only a bootstrap that runs first installs, so the
+ * final commands less those the operator retired (planning/plan.ts). Only a bootstrap that runs first installs, so the
  * sequence starts with one exactly once: a bootstrap the final commands list
  * moves to the front, and otherwise the plan's source-declared bootstrap
  * leads. The plan's declared prerequisites run first unless the final
@@ -733,13 +734,17 @@ function finalSequence(plan: Plan): {
   const key = (command: string) => command.trim();
   const isBootstrap = (command: string) =>
     packageBootstrap(command) !== undefined;
-  const listed = plan.finalCommands.filter(isBootstrap);
+  const retired = retiredCommands(plan);
+  const finalCommands = plan.finalCommands.filter(
+    (command) => !retired.has(command),
+  );
+  const listed = finalCommands.filter(isBootstrap);
   let commands = [
     ...listed.filter(
       (command, index) =>
         listed.findIndex((other) => key(other) === key(command)) === index,
     ),
-    ...plan.finalCommands.filter((command) => !isBootstrap(command)),
+    ...finalCommands.filter((command) => !isBootstrap(command)),
   ];
   // The bootstrap's position never decides whether the final commands
   // already start with the declared prerequisites.

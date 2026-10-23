@@ -3002,6 +3002,24 @@ function item(id, fields = {}) {
   };
 }
 
+/** An operator's `retire` record, against the plan accepted at `plan`. */
+function retirement(
+  criterion,
+  reason,
+  itemId,
+  plan = "2026-01-01T00:00:00.000Z",
+) {
+  return {
+    criterion,
+    ...(itemId ? { itemId } : {}),
+    reason,
+    by: "kirk",
+    at: "2026-01-01T00:00:00.000Z",
+    holdId: `${criterion}@1`,
+    plan,
+  };
+}
+
 test("status: one model, the Work Item table, the full --json and the list view", () => {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1", { MY_TOKEN: "s3cret-value-123" });
@@ -3012,7 +3030,20 @@ test("status: one model, the Work Item table, the full --json and the list view"
   seed(inst, 55, "holding", {
     done: {
       check: {},
-      plan: { items: [item("a"), item("b", { kind: "aggregate" })] },
+      plan: {
+        items: [item("a"), item("b", { kind: "aggregate" })],
+        coverage: [
+          {
+            source: {
+              path: "OBJECTIVE",
+              text: "Audit is clean",
+              command: "npm run audit",
+            },
+            itemId: "a",
+            proof: { kind: "final-review" },
+          },
+        ],
+      },
       "item:a:validate": { tree: "t1" },
       "item:a:publish": { pr: 12, head: "h1", merged: false },
     },
@@ -3036,6 +3067,19 @@ test("status: one model, the Work Item table, the full --json and the list view"
       },
       "allowances:rereviews": 1,
       "allowances:granted": { "perPath:item:a:work": 3, resultRereviews: 1 },
+      // Retirements count only against the plan accepted now.
+      "plan:acceptedAt": "2026-01-01T00:00:00.000Z",
+      "item:a:retired": [
+        retirement("Docs build", "docs moved out", "a"),
+        retirement("Stale", "from an earlier plan", "a", "2025-12-01"),
+      ],
+      "final:retired": [
+        {
+          ...retirement(undefined, "covered by CI"),
+          command: "npm run audit",
+        },
+      ],
+      "final-review:retired": [retirement("Old API kept", "API dropped")],
     },
     repairs: { "item:a:work": { count: 4, findings: ["refused"] } },
     modules: {
@@ -3085,6 +3129,11 @@ test("status: one model, the Work Item table, the full --json and the list view"
   );
   assert.match(
     text,
+    /Retired: Docs build \(Work Item a\): retired by kirk at 2026-01-01 09:00:00 GMT\+9: docs moved out\n {2}Retired: command `npm run audit` \(final validation\): retired by kirk at .*: covered by CI\. Judged by review instead: Audit is clean\n {2}Retired: Old API kept \(final review\): retired by kirk at .*: API dropped\n/,
+  );
+  assert.doesNotMatch(text, /Stale/);
+  assert.match(
+    text,
     /Allowances: planning revisions 0\/4, implementation repairs 4\/5, result rereviews 1\/2; repairs per path: item:a:work 4\/6/,
   );
   assert.match(
@@ -3125,6 +3174,10 @@ test("status: one model, the Work Item table, the full --json and the list view"
     "JSON stays ISO",
   );
   assert.deepEqual(row.flakyRerun, [{ item: "a", command: "npm test" }]);
+  assert.deepEqual(
+    row.plan.retired.map((entry) => entry.criterion ?? entry.command),
+    ["Docs build", "npm run audit", "Old API kept"],
+  );
   assert.deepEqual(row.allowances, {
     planningRevisions: { used: 0, allowed: 4 },
     implementationRepairs: { used: 4, allowed: 5 },

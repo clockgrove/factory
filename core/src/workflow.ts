@@ -28,12 +28,14 @@ import {
   freshable,
   freshOutcome,
   layersBelow,
+  overrunOffers,
   RERUN,
   RERUN_CLEANUP,
   replanOutcome,
   rerunCleanupStep,
   revalidatable,
   reviewArtifactSelection,
+  unspent,
 } from "./work/steps.js";
 
 const MINUTE = 60_000;
@@ -101,6 +103,14 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
           revalidatable,
           reviewArtifacts: (values: readonly string[]) =>
             reviewArtifactSelection(values, deps.config.reviewArtifacts),
+          // A retirement answers a repair-allowance question too.
+          overrunOffers: (state: ObjectiveState, key: string) =>
+            overrunOffers(
+              state,
+              key,
+              deps.config.finalValidation.requiredCommands,
+            ),
+          unspent,
         }
       : {}),
   };

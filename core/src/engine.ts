@@ -322,6 +322,20 @@ export interface Workflow {
     values: readonly string[],
   ): ReviewArtifactSelector[] | string;
   /**
+   * The answers step `key`'s repair-allowance question offers beside
+   * `more`, with a note for its question: `retire` answers to the refusal
+   * driving the repairs.
+   */
+  overrunOffers?(
+    state: ObjectiveState,
+    key: string,
+  ): { note: string; options: HoldOption[] } | undefined;
+  /**
+   * Whether step `key` takes `answer` without a repair (a retirement it
+   * hasn't recorded): it then runs once past a spent repair allowance.
+   */
+  unspent?(state: ObjectiveState, key: string, answer: Answer): boolean;
+  /**
    * The configuration as an Objective freezes it now, per configured
    * provider, for the `switch NAME` and `adopt` answers.
    */
@@ -684,27 +698,35 @@ export class ObjectiveRunner {
       }
       // A repair past an allowance asks before it runs (allowances.ts):
       // `more` grants as much again. Past the Objective's, every step waits.
-      // An interrupted attempt passed this check when it started, and a
-      // `revalidate` is no repair: it was charged to resultRereviews.
+      // An interrupted attempt passed this check when it started, a
+      // `revalidate` is no repair (it was charged to resultRereviews), and
+      // neither is a retirement the step hasn't recorded yet.
       const over =
-        this.state.attempts[step.key] || answer?.answer === REVALIDATE
+        this.state.attempts[step.key] ||
+        answer?.answer === REVALIDATE ||
+        (answer && this.workflow.unspent?.(this.state, step.key, answer))
           ? []
           : overrun(this.state, step.key);
       if (over.length) {
+        const offers = this.workflow.overrunOffers?.(this.state, step.key);
         this.transact(() => {
           this.hold(step.key, {
-            ...failure(overrunQuestion(this.state, step.key, over), [
-              {
-                answer: MORE,
-                family: "retry",
-                consequence:
-                  "Allows as much again of each spent allowance, and the repair runs.",
-              },
-              ...(this.workflow.revalidatable?.(this.state, step.key)
-                ? [common(REVALIDATE)]
-                : []),
-              "cancel",
-            ]),
+            ...failure(
+              `${overrunQuestion(this.state, step.key, over)}${offers?.note ?? ""}`,
+              [
+                {
+                  answer: MORE,
+                  family: "retry",
+                  consequence:
+                    "Allows as much again of each spent allowance, and the repair runs.",
+                },
+                ...(this.workflow.revalidatable?.(this.state, step.key)
+                  ? [common(REVALIDATE)]
+                  : []),
+                ...(offers?.options ?? []),
+                "cancel",
+              ],
+            ),
             ...(over.includes("implementationRepairs")
               ? { scope: "objective" as const }
               : {}),

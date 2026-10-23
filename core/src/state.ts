@@ -63,6 +63,7 @@ export type AnswerFamily =
   | "select"
   | "answer"
   | "repair"
+  | "retire"
   | "reset";
 
 /** One answer a hold offers (CORE.md#Holds and answers). */

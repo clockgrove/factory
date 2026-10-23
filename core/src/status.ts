@@ -11,7 +11,7 @@ import { displayTime, duration, eventLine, redactDeep } from "./display.js";
 import { type CapacityUse, DEADLINE, hold as question } from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
-import { currentPlan, decisionsOf } from "./planning/plan.js";
+import { currentPlan, decisionsOf, retiredLines } from "./planning/plan.js";
 import { planningRevisions } from "./planning/steps.js";
 import type { ItemKind, Plan } from "./planning/types.js";
 import { RESET, type ResetRecord } from "./reset.js";
@@ -637,6 +637,8 @@ function objectiveText(row: ObjectiveView): string[] {
         ? "  Waiting on a free slot (queue.maxActiveObjectives)"
         : `  Waiting on Objective #${row.waitsOn.paths} (overlapping owned paths)`,
     );
+  for (const line of row.plan ? retiredLines(row.plan, displayTime) : [])
+    lines.push(`  Retired: ${line}`);
   for (const flaky of row.flakyRerun)
     lines.push(
       `  Possibly flaky: ${flaky.item}: \`${flaky.command}\` failed once; its rerun passed`,

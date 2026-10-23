@@ -267,6 +267,42 @@ export interface Plan extends Draft {
   reviewArtifacts?: ReviewArtifactSelector[];
   /** Operator answers; workers and final review get them. */
   decisions: PlannerDecision[];
+  /**
+   * The criteria and obligations the operator retired, with their reasons:
+   * only currentPlan (plan.ts) sets it, from the kept retirements of the
+   * plan accepted now. Never part of a saved plan.
+   */
+  retired?: Retirement[];
+}
+
+/**
+ * An operator's `retire <n> <reason>` to a review refusal (criterion n no
+ * longer applies, so it no longer counts as unmet), or `retire-command <n>
+ * <reason>` to a validation failure (command n no longer runs). Recorded
+ * like an amendment, against the plan accepted then (`plan`, its
+ * acceptance time), and read back through currentPlan. Exactly one of
+ * `criterion` and `command` is set.
+ */
+export interface Retirement {
+  /** The criterion or obligation, as the review judged it. */
+  criterion?: string;
+  /** The validation command, exactly as the plan runs it. */
+  command?: string;
+  /**
+   * The Work Item whose review or validation refused it. A criterion is
+   * retired for that item and for the Objective at final review; a command
+   * only from that item's validation. Absent: final review's criterion,
+   * retired for the Objective and every item, or final validation's
+   * command, retired from final validation only.
+   */
+  itemId?: string;
+  reason: string;
+  by: string;
+  at: string;
+  /** The question answered: one retirement per answer. */
+  holdId: string;
+  /** The accepted plan it retires from (plan.ts ACCEPTED_AT). */
+  plan: string;
 }
 
 /** A problem with a draft, with a message that names what would pass. */

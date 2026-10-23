@@ -18,7 +18,11 @@
 import type { CandidateRecord, InputRecord } from "../media.js";
 import type { Expanded } from "../planning/expansion.js";
 import { coverageCriterion } from "../planning/graph.js";
-import type { ConditionVerdict } from "../planning/plan.js";
+import {
+  type ConditionVerdict,
+  retiredCriteria,
+  retiredLines,
+} from "../planning/plan.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
@@ -106,6 +110,7 @@ export function reviewObjective(input: {
         complete: true,
       })),
       ...(input.qa ?? []).map(qaObservationRow),
+      ...retiredRows(input.plan),
       ...(input.skipped ?? []).map((entry) => ({
         origin: "controller" as const,
         path: `Skipped Work Item: ${entry.itemId}`,
@@ -130,6 +135,38 @@ export function reviewObjective(input: {
 }
 
 /**
+ * The operator's retirements as controller rows: retired criteria no longer
+ * count, while retired commands only no longer run.
+ */
+function retiredRows(plan: Plan) {
+  const row = (path: string, scope: string, kind: "criterion" | "command") => {
+    const retired = retiredLines(plan, undefined, kind);
+    return retired.length
+      ? [
+          {
+            origin: "controller" as const,
+            path,
+            content: JSON.stringify({ scope, retired }),
+            complete: true,
+          },
+        ]
+      : [];
+  };
+  return [
+    ...row(
+      "Retired criteria",
+      "The operator retired these criteria and obligations: they no longer apply, so they are not under review and never count as unmet. Judge the remaining criteria without them.",
+      "criterion",
+    ),
+    ...row(
+      "Retired commands",
+      "The operator retired these validation commands: they no longer run, so they are no evidence either way. Criteria they proved are still judged, on other evidence.",
+      "command",
+    ),
+  ];
+}
+
+/**
  * Final review judges, on the integrated tree, the Objective criteria and
  * every coverage obligation once per distinct statement, wherever the plan
  * proved it: item reviews judge obligations one Work Item at a time. Then one
@@ -137,7 +174,8 @@ export function reviewObjective(input: {
  * per source whose obligations coding items without a direct edge deliver
  * together, asks whether the consumer accepts the producer's real outputs and
  * reuses its helpers and types. Each question names the criteria it bears on
- * by index, so its refusal stays tied to them.
+ * by index, so its refusal stays tied to them. The criteria the operator
+ * retired (planning/plan.ts) are left out.
  */
 function finalCriteria(
   plan: Plan,
@@ -145,9 +183,10 @@ function finalCriteria(
   skipped: ReadonlySet<string>,
   expansions: readonly Expanded[],
 ): string[] {
+  const retired = retiredCriteria(plan);
   const judged = [
     ...new Set([...objective, ...plan.coverage.map(coverageCriterion)]),
-  ];
+  ].filter((criterion) => !retired.has(criterion));
   // A skipped item delivered nothing, so it integrates with nothing.
   const coding = plan.items.filter(
     (item) => (item.kind ?? "work") === "work" && !skipped.has(item.id),
@@ -168,7 +207,8 @@ function finalCriteria(
               items.includes(entry.itemId) &&
               (!paths || paths.includes(entry.source.path)),
           )
-          .map((entry) => judged.indexOf(coverageCriterion(entry))),
+          .map((entry) => judged.indexOf(coverageCriterion(entry)))
+          .filter((index) => index >= 0),
       ),
     ].sort((a, b) => a - b);
     return indices.length ? ` It bears on criteria ${indices.join(", ")}.` : "";

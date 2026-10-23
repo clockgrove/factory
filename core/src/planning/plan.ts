@@ -8,8 +8,9 @@ import type {
   AmendmentsModule,
 } from "./amendments.js";
 import { withExpansions } from "./expansion.js";
+import { coverageCriterion } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
-import type { Plan, WorkItem } from "./types.js";
+import type { Plan, Retirement, WorkItem } from "./types.js";
 
 /*
  * The one reader of the accepted plan. The plan step saves it at
@@ -20,6 +21,8 @@ import type { Plan, WorkItem } from "./types.js";
  * withExpansions): their children run like any Work Item. Only amendments,
  * which keep every envelope whose producer started, read the saved plan
  * without that layer (`acceptedPlan`).
+ * The operator's retirements (`retire <n>`) are kept apart, by the step
+ * whose refusal they answer, and `currentPlan` returns them in `retired`.
  * A conditional Work Item's declared condition is read here too
  * (`conditionVerdict`), from its producer's kept discovery result.
  */
@@ -55,10 +58,23 @@ export function decisionsOf(state: ObjectiveState): CriterionDecision[] {
     .sort((a, b) => a.at.localeCompare(b.at));
 }
 
-/** The plan the Objective runs now, with its settled expansions' children. */
+/**
+ * The plan the Objective runs now, with its settled expansions' children
+ * and the criteria and commands the operator retired from it.
+ */
 export function currentPlan(state: ObjectiveState): Plan | undefined {
-  const plan = acceptedPlan(state);
-  return plan && withExpansions(state, plan);
+  const saved = acceptedPlan(state);
+  if (!saved) return undefined;
+  const plan = withExpansions(state, saved);
+  const accepted = state.kept[ACCEPTED_AT];
+  const retired = [
+    ...itemsWith(state, "retired").flatMap(
+      (id) => fact(state, "retired", id) ?? [],
+    ),
+    ...(fact(state, "final:retired") ?? []),
+    ...(fact(state, "final-review:retired") ?? []),
+  ].filter((entry) => entry.plan === accepted);
+  return retired.length ? { ...plan, retired } : plan;
 }
 
 /** The latest accepted amendment's plan, else the accepted plan, as saved. */
@@ -97,6 +113,103 @@ export function profilesLacking(
     ),
   );
   return [...used].filter((id) => !Object.hasOwn(profiles, id)).sort();
+}
+
+/**
+ * The criteria a review no longer judges: with `itemId`, that item's
+ * review (its own retirements and final review's); without, final review
+ * (every retirement).
+ */
+export function retiredCriteria(plan: Plan, itemId?: string): Set<string> {
+  return new Set(
+    (plan.retired ?? [])
+      .filter(
+        (entry) =>
+          itemId === undefined ||
+          entry.itemId === undefined ||
+          entry.itemId === itemId,
+      )
+      .flatMap((entry) => (entry.criterion ? [entry.criterion] : [])),
+  );
+}
+
+/**
+ * The validation commands the operator retired: with `itemId`, from that
+ * item's validation; without, from final validation.
+ */
+export function retiredCommands(plan: Plan, itemId?: string): Set<string> {
+  return new Set(
+    (plan.retired ?? [])
+      .filter((entry) => entry.itemId === itemId)
+      .flatMap((entry) => (entry.command ? [entry.command] : [])),
+  );
+}
+
+/**
+ * Work Item `item` as it runs now: without the commands and acceptance
+ * criteria the operator retired for it. The worker, its notes, the
+ * collector and its review all read this one, so criterion indices agree.
+ */
+export function runnableItem(plan: Plan, item: WorkItem): WorkItem {
+  const commands = retiredCommands(plan, item.id);
+  const criteria = retiredCriteria(plan, item.id);
+  return commands.size || criteria.size
+    ? {
+        ...item,
+        acceptance: item.acceptance.filter(
+          (criterion) => !criteria.has(criterion),
+        ),
+        validation: item.validation.filter(
+          (check) => !commands.has(check.command),
+        ),
+      }
+    : item;
+}
+
+/**
+ * The obligations retired command `entry` proved: a Work Item's by its
+ * coverage's validation index, final validation's by the Objective
+ * criterion's command. Review judges them on other evidence now.
+ */
+export function provedBy(plan: Plan, entry: Retirement): string[] {
+  const item = plan.items.find((each) => each.id === entry.itemId);
+  return [
+    ...new Set(
+      plan.coverage
+        .filter((coverage) =>
+          item
+            ? coverage.itemId === item.id &&
+              "validationIndex" in coverage.proof &&
+              item.validation[coverage.proof.validationIndex]?.command ===
+                entry.command
+            : entry.itemId === undefined &&
+              coverage.source.command === entry.command,
+        )
+        .map(coverageCriterion),
+    ),
+  ];
+}
+
+/**
+ * The retirements as lines for the report and status: criterion or
+ * command, where, reason, who and when; for a command, the obligations it
+ * proved, which review judges now. `kind` selects one kind.
+ */
+export function retiredLines(
+  plan: Plan,
+  time: (at: string) => string = (at) => at,
+  kind?: "criterion" | "command",
+): string[] {
+  return (plan.retired ?? [])
+    .filter(
+      (entry) =>
+        kind === undefined ||
+        (kind === "command") === (entry.command !== undefined),
+    )
+    .map((entry) => {
+      const proved = entry.command !== undefined ? provedBy(plan, entry) : [];
+      return `${entry.command !== undefined ? `command \`${entry.command}\`` : entry.criterion}${entry.itemId ? ` (Work Item ${entry.itemId})` : entry.command !== undefined ? " (final validation)" : " (final review)"}: retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}${proved.length ? `. Judged by review instead: ${proved.join("; ")}` : ""}`;
+    });
 }
 
 /** The current planning generation and round, from the saved decisions. */

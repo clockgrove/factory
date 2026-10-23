@@ -1,6 +1,6 @@
 import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { resultRereviews } from "../allowances.js";
+import { overrun, resultRereviews } from "../allowances.js";
 import {
   ACCEPT,
   type DeliveryContext,
@@ -57,9 +57,10 @@ import {
   BaseFiles,
   finalCommands,
   fixedScripts,
+  packageBootstrap,
   planningSources,
 } from "../planning/facts.js";
-import { baselineQa } from "../planning/graph.js";
+import { baselineQa, coverageCriterion } from "../planning/graph.js";
 import {
   ACCEPTED_AT,
   acceptedInputs,
@@ -67,6 +68,10 @@ import {
   conditionVerdict,
   currentPlan,
   decisionsOf,
+  retiredCommands,
+  retiredCriteria,
+  retiredLines,
+  runnableItem,
 } from "../planning/plan.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
@@ -83,7 +88,12 @@ import {
   type PlanningDeps,
   REOPENED,
 } from "../planning/steps.js";
-import { executable, type Plan, type WorkItem } from "../planning/types.js";
+import {
+  executable,
+  type Plan,
+  type Retirement,
+  type WorkItem,
+} from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import { moveStatusOffDone } from "../queue.js";
 import {
@@ -578,7 +588,7 @@ async function workStep(
 ): Promise<Outcome> {
   const { state, signal } = context;
   const { config } = deps;
-  const plan = currentPlan(state)!;
+  let plan = currentPlan(state)!;
   const { shown } = acceptedInputs(state);
   const body = shown.body;
   const workDir = deps.workDir(state.issue);
@@ -696,15 +706,99 @@ async function workStep(
       },
     };
   }
+  // `retire <n>` or `retire-command <n>` to a question about a refusal:
+  // recorded, then the refused result is checked again when nothing it was
+  // refused on still counts, else what still counts is diagnosed, within
+  // the repair allowances.
+  let finding = fact(state, "finding", item.id);
+  if (!finished && retiring(context.answer) && finding) {
+    const recorded = retireKeep(
+      context,
+      itemRetirable(
+        plan,
+        item,
+        finding,
+        config.finalValidation.requiredCommands,
+      ),
+      { itemId: item.id },
+    );
+    if (typeof recorded === "string")
+      return withKeep(
+        hold(
+          `${recorded} Answer \`retry\` to diagnose the failure again, or cancel.`,
+        ),
+        keepAll,
+      );
+    keepAll = { ...keepAll, ...recorded };
+    // The plan as it reads with the retirement, for the rest of the step.
+    plan = planWith(state, keepAll);
+    const retired = retiredCriteria(plan, item.id);
+    const remaining =
+      finding.kind === "review"
+        ? finding.refused.filter((entry) => !retired.has(entry.criterion))
+        : [];
+    const settled =
+      finding.kind === "review"
+        ? !remaining.length
+        : finding.kind === "failure" &&
+          finding.failed !== undefined &&
+          retiredCommands(plan, item.id).has(finding.failed.command);
+    if (settled) {
+      const refused = await refusedResult(
+        state,
+        item,
+        config.checkout,
+        base,
+        signal,
+      );
+      // The hold is marked unrecheckable (`recheckMark`).
+      if (!refused)
+        return withKeep(
+          hold(
+            `What Work Item ${item.id}'s result was refused on is retired, but the refused result can no longer be checked again (it is gone, or no longer sits on ${base}). Answer \`fresh\` to start it again on the current base, or cancel.`,
+            ["fresh", "cancel"],
+          ),
+          keepAll,
+        );
+      return {
+        kind: "done",
+        result: refused,
+        keep: {
+          ...keepAll,
+          ...facts({ finished: null, finding: null, refused: null }, item.id),
+        },
+      };
+    }
+    if (finding.kind === "review") {
+      finding = { ...finding, refused: remaining };
+      keepAll = { ...keepAll, ...facts({ finding }, item.id) };
+    }
+    // Answered past a spent allowance: what still counts asks it again.
+    if (overrun(state, stepKey(item.id, "work")).length)
+      return {
+        kind: "retry",
+        reason: `The retirement is recorded; repairing what still counts needs more of the repair allowance.`,
+        progress: true,
+        keep: keepAll,
+      };
+  }
   if (!finished) {
-    const repair = await repairContext(item, context, deps, base);
-    // A question keeps this attempt's base; a predecessor's repair moves
-    // this item onto the predecessor's new head, so its facts win.
+    const repair = await repairContext(
+      item,
+      context,
+      deps,
+      base,
+      finding,
+      plan,
+    );
+    // A question keeps this attempt's base and any retirement just
+    // recorded; a predecessor's repair moves this item onto the
+    // predecessor's new head, so its facts win.
     if (repair && "outcome" in repair)
       return repair.outcome.kind === "repair"
-        ? { ...repair.outcome, keep: { ...keepBase, ...repair.outcome.keep } }
-        : withKeep(repair.outcome, keepBase);
-    keepAll = { ...keepBase, ...(repair?.keep ?? {}) };
+        ? { ...repair.outcome, keep: { ...keepAll, ...repair.outcome.keep } }
+        : withKeep(repair.outcome, keepAll);
+    keepAll = { ...keepAll, ...(repair?.keep ?? {}) };
     // A kept selection whose private copies are gone can't be written
     // again: this attempt makes new candidates and the operator chooses.
     if (own && (await missingMember(own.selection.set))) {
@@ -742,13 +836,15 @@ async function workStep(
       profile === undefined
         ? undefined
         : config.execution.profiles?.[profile]?.instructions;
+    // The worker runs the commands validation will: none the operator retired.
+    const runnable = runnableItem(plan, item);
     const prepared = await prepareWorkPrompt({
       checkout: config.checkout,
       worktree,
       objective: state.issue,
       objectiveBody: body,
       plan,
-      item,
+      item: runnable,
       base,
       conventions: (await repositoryView(config.checkout, base, false, signal))
         .conventions,
@@ -788,8 +884,8 @@ async function workStep(
       .run({
         worktree,
         prompt: prepared.prompt,
-        item,
-        commands: item.validation.map((v) => v.command),
+        item: runnable,
+        commands: runnable.validation.map((v) => v.command),
         base,
         signal,
         log: context.log,
@@ -866,7 +962,7 @@ async function workStep(
     worktree,
     base,
     plan,
-    item,
+    item: runnableItem(plan, item),
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,
@@ -1035,6 +1131,10 @@ async function repairContext(
   context: StepContext,
   deps: BuildDeps,
   base: string,
+  /** The kept finding, less the criteria a `retire` answer just retired. */
+  finding: RepairFinding | undefined,
+  /** The current plan, with a retirement this run just recorded. */
+  plan: Plan,
 ): Promise<
   | { context: RepairContext; keep: Record<string, unknown> }
   | { outcome: Outcome }
@@ -1042,7 +1142,6 @@ async function repairContext(
 > {
   const { state, signal } = context;
   const history = state.repairs?.[stepKey(item.id, "work")];
-  const finding = fact(state, "finding", item.id);
   // A conflict needs no diagnosis: the change was moved onto `base`.
   if (finding?.kind === "conflict")
     return {
@@ -1064,7 +1163,6 @@ async function repairContext(
   if (saved?.repair === history.count && !answered)
     return { context: saved.context, keep: {} };
   const applied = saved?.applied ?? [];
-  const plan = currentPlan(state)!;
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
     | undefined;
@@ -1120,9 +1218,17 @@ async function repairContext(
       ? `\n\nIf the refused result is correct and Factory's own check was at fault (for example, the check could not see files the result has), answer \`revalidate\`: Factory runs validation, review and delivery again on the same result, unchanged, without running the worker. It doesn't count as a repair; it is a result rereview, and this Objective has used ${rereviewed.used} of ${rereviewed.allowed} (autonomy.allowances.resultRereviews).`
       : "";
     // The engine offers `revalidate` itself (`revalidatable`).
+    const offer = retireOffer(
+      itemRetirable(
+        plan,
+        item,
+        finding,
+        deps.config.finalValidation.requiredCommands,
+      ),
+    );
     return {
       outcome: hold(
-        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, or \`retry\` to diagnose the failure again.${recheck}`,
+        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, or \`retry\` to diagnose the failure again.${recheck}${offer.note}`,
         [
           "answer",
           {
@@ -1130,6 +1236,7 @@ async function repairContext(
             family: "retry",
             consequence: "Diagnoses the failure again.",
           },
+          ...offer.options,
           "cancel",
         ],
       ),
@@ -1520,7 +1627,11 @@ async function validateStep(
       return repairOutcome(
         item,
         "validate",
-        { kind: "failure", detail: keptOutput },
+        {
+          kind: "failure",
+          detail: keptOutput,
+          ...(result.failed ? { failed: result.failed } : {}),
+        },
         context.state,
         place,
         { shown: result.detail },
@@ -1924,6 +2035,270 @@ function criterionDecisions(
         ? facts({ "final-review:decisions": decisions })
         : facts({ decisions }, itemId),
   };
+}
+
+// ---------------------------------------------------------------------------
+// retire
+
+/** The answer that retires a refused criterion: `retire <n> <reason>`. */
+const RETIRE = "retire";
+
+/** The answer that retires a failed validation command: `retire-command <n> <reason>`. */
+const RETIRE_COMMAND = "retire-command";
+
+/** A refused criterion, by its index in the review that refused it; the operator names it from 1. */
+type Cited = { criterionIndex: number; criterion: string };
+
+/**
+ * What a refusal lets the operator retire: the criteria a review refused,
+ * or the command a validation failed on (by its index in the sequence that
+ * ran), unless `refusal` says why that command can't be retired.
+ */
+interface Retirable {
+  criteria: readonly Cited[];
+  command?: { index: number; command: string };
+  refusal?: string;
+}
+
+/** The `retire` and `retire-command` options a refusal offers, and the note its question carries. */
+function retireOffer(retirable: Retirable): {
+  note: string;
+  options: HoldOption[];
+} {
+  const { criteria, command, refusal } = retirable;
+  const short = (text: string) =>
+    text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  const notes = [
+    ...(criteria.length
+      ? [
+          `If a refused criterion no longer applies, answer \`retire <n> <reason>\` with its number: it stops counting as unmet, and final review, the report and status list it with your reason. The refused criteria:\n${criteria.map((entry) => `${entry.criterionIndex + 1}. ${entry.criterion}`).join("\n")}`,
+        ]
+      : []),
+    ...(command && refusal
+      ? [`\`${command.command}\` can't be retired: ${refusal}.`]
+      : command
+        ? [
+            `If \`${command.command}\` can't pass here and its check is covered elsewhere, answer \`retire-command ${command.index + 1} <reason>\`: it no longer runs in this validation, and the report and status list it with your reason.`,
+          ]
+        : []),
+  ];
+  return {
+    note: notes.length ? `\n\n${notes.join("\n\n")}` : "",
+    options: [
+      ...criteria.map(({ criterionIndex, criterion }) => ({
+        answer: RETIRE,
+        family: "retire" as const,
+        arg: String(criterionIndex + 1),
+        consequence: `Retires criterion ${criterionIndex + 1} (${short(criterion)}) with your reason: it no longer counts as unmet.`,
+        needsText: true as const,
+      })),
+      ...(command && !refusal
+        ? [
+            {
+              answer: RETIRE_COMMAND,
+              family: "retire" as const,
+              arg: String(command.index + 1),
+              consequence: `Retires \`${short(command.command)}\` from this validation with your reason, and validates again without it.`,
+              needsText: true as const,
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
+/**
+ * Why `command` can't be retired from `item`'s validation (or, without
+ * `item`, final validation), or undefined when it can. The installation's
+ * required final commands, readiness probes and preparation are never
+ * retired, nor a validation's last command.
+ */
+function commandRefusal(
+  plan: Plan,
+  item: WorkItem | undefined,
+  command: string,
+  required: readonly string[],
+): string | undefined {
+  if (required.includes(command))
+    return "the installation requires it (finalValidation.requiredCommands)";
+  if (packageBootstrap(command) !== undefined)
+    return "it is the package bootstrap the other commands need";
+  // Only a real check counts as one left: never a readiness probe, its
+  // preparation or a package bootstrap.
+  const preparation = new Set(
+    plan.coverage
+      .filter((entry) => item === undefined || entry.itemId === item.id)
+      .flatMap((entry) => [
+        entry.environment.probe,
+        ...(entry.environment.prerequisites ?? []),
+      ]),
+  );
+  const checks = (commands: readonly string[]) =>
+    commands.filter(
+      (each) =>
+        each !== command &&
+        !preparation.has(each) &&
+        packageBootstrap(each) === undefined,
+    ).length;
+  if (!item) {
+    if (!plan.finalCommands.includes(command))
+      return "it is final validation's preparation, not one of its commands";
+    const retired = retiredCommands(plan);
+    return checks(plan.finalCommands.filter((each) => !retired.has(each)))
+      ? undefined
+      : "no other check would be left in final validation";
+  }
+  if (preparation.has(command))
+    return "it is a readiness probe or preparation command";
+  return checks(
+    runnableItem(plan, item).validation.map((check) => check.command),
+  )
+    ? undefined
+    : "no other check would be left in the Work Item's validation";
+}
+
+/** What final validation's failure on `failed` lets the operator retire. */
+function finalRetirable(
+  plan: Plan,
+  failed: { index: number; command: string } | undefined,
+  required: readonly string[],
+): Retirable {
+  if (!failed) return { criteria: [] };
+  const refusal = commandRefusal(plan, undefined, failed.command, required);
+  return { criteria: [], command: failed, ...(refusal ? { refusal } : {}) };
+}
+
+/** What item `item`'s kept finding lets the operator retire. */
+function itemRetirable(
+  plan: Plan,
+  item: WorkItem,
+  finding: RepairFinding | undefined,
+  required: readonly string[],
+): Retirable {
+  if (finding?.kind === "review") return { criteria: finding.refused };
+  if (finding?.kind !== "failure" || !finding.failed) return { criteria: [] };
+  const refusal = commandRefusal(plan, item, finding.failed.command, required);
+  return {
+    criteria: [],
+    command: finding.failed,
+    ...(refusal ? { refusal } : {}),
+  };
+}
+
+/**
+ * The keep that records the operator's `retire <n>` or `retire-command <n>`
+ * answer to a refusal of `retirable`, beside the kept retirements `name`
+ * (item `itemId`'s, else the final step's or final review's): one
+ * retirement per question, against the plan accepted now. Empty when the
+ * answer is no retirement or is already recorded (a rerun of the step); a
+ * string when the command can't be retired now.
+ */
+function retireKeep(
+  context: StepContext,
+  retirable: Retirable,
+  where:
+    | { itemId: string }
+    | { name: "final:retired" | "final-review:retired" },
+): Record<string, unknown> | string {
+  const { answer, state } = context;
+  const accepted = state.kept[ACCEPTED_AT] as string;
+  const kept = (
+    ("itemId" in where
+      ? fact(state, "retired", where.itemId)
+      : fact(state, where.name)) ?? []
+  ).filter((entry) => entry.plan === accepted);
+  if (!answer || kept.some((entry) => entry.holdId === answer.holdId))
+    return {};
+  let retired: Pick<Retirement, "criterion" | "command"> | undefined;
+  if (answer.answer === RETIRE) {
+    const chosen = retirable.criteria.find(
+      (entry) => String(entry.criterionIndex + 1) === answer.arg,
+    );
+    if (chosen) retired = { criterion: chosen.criterion };
+  } else if (
+    answer.answer === RETIRE_COMMAND &&
+    retirable.command !== undefined &&
+    String(retirable.command.index + 1) === answer.arg
+  ) {
+    if (retirable.refusal)
+      return `\`${retirable.command!.command}\` can't be retired: ${retirable.refusal}.`;
+    retired = { command: retirable.command!.command };
+  }
+  if (!retired) return {};
+  const entries: Retirement[] = [
+    ...kept,
+    {
+      ...retired,
+      ...("itemId" in where ? { itemId: where.itemId } : {}),
+      reason: answer.text ?? "",
+      by: answer.by,
+      at: answer.at,
+      holdId: answer.holdId,
+      plan: accepted,
+    },
+  ];
+  return "itemId" in where
+    ? facts({ retired: entries }, where.itemId)
+    : where.name === "final:retired"
+      ? facts({ "final:retired": entries })
+      : facts({ "final-review:retired": entries });
+}
+
+/** Whether `answer` retires something: `retire` or `retire-command`. */
+const retiring = (answer: Answer | undefined) =>
+  answer?.answer === RETIRE || answer?.answer === RETIRE_COMMAND;
+
+/**
+ * The `retire` answers a Work Item's repair-allowance question offers
+ * (engine.ts, `Workflow.overrunOffers`), from the refusal driving its
+ * repairs.
+ */
+export function overrunOffers(
+  state: ObjectiveState,
+  key: string,
+  required: readonly string[],
+): { note: string; options: HoldOption[] } | undefined {
+  const id = itemOf(key);
+  const plan = currentPlan(state);
+  const item = plan?.items.find((entry) => entry.id === id);
+  if (!plan || !item || key !== stepKey(item.id, "work")) return undefined;
+  return retireOffer(
+    itemRetirable(plan, item, fact(state, "finding", item.id), required),
+  );
+}
+
+/**
+ * Whether Work Item step `key` takes `answer` without a repair: a
+ * retirement it hasn't recorded yet. The engine then runs it past a spent
+ * repair allowance once; the step records it and repairs only within the
+ * allowance.
+ */
+export function unspent(
+  state: ObjectiveState,
+  key: string,
+  answer: Answer,
+): boolean {
+  const id = itemOf(key);
+  return (
+    id !== undefined &&
+    key === stepKey(id, "work") &&
+    retiring(answer) &&
+    !(fact(state, "retired", id) ?? []).some(
+      (entry) => entry.holdId === answer.holdId,
+    )
+  );
+}
+
+/** An outcome with `keep` saved first, so the outcome's own facts win. */
+function keepFirst(keep: Record<string, unknown>, outcome: Outcome): Outcome {
+  return outcome.kind === "replace"
+    ? outcome
+    : { ...outcome, keep: { ...keep, ...(outcome.keep ?? {}) } };
+}
+
+/** The plan as it reads once `keep` is saved. */
+function planWith(state: ObjectiveState, keep: Record<string, unknown>): Plan {
+  return currentPlan({ ...state, kept: { ...state.kept, ...keep } })!;
 }
 
 // ---------------------------------------------------------------------------
@@ -2925,75 +3300,116 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
     deadlineMs:
       validationDeadlineMs(plan, commandTimeoutMs(deps)) + 15 * MINUTE,
     run: async (context): Promise<Outcome> => {
-      const { state, signal } = context;
+      const { state } = context;
       const { config } = deps;
-      const plan = currentPlan(state)!;
-      const head = await defaultHead(
-        config.checkout,
-        config.repository,
-        signal,
-      );
-      const problem = await integrationProblem(state, plan, head, deps, signal);
-      if (problem) return problem;
-      const workDir = deps.workDir(state.issue);
-      const members = validationMembers(plan, undefined, selection(state));
-      const result = await validateTree({
-        checkout: config.checkout,
-        repository: config.repository,
-        directory: join(workDir, "final"),
-        commit: head,
-        plan,
-        blocks: acceptedInputs(state).shown.blocks,
-        reviewArtifacts: {
-          configured: config.reviewArtifacts,
-          planned: plan.reviewArtifacts,
-          dir: join(workDir, "artifacts", "final"),
-        },
-        media: members,
-        sandbox: config.sandbox,
-        commandTimeoutMs: commandTimeoutMs(deps),
-        signal,
-        log: context.log,
-      });
-      if (result.kind === "failed")
+      // `retire-command <n>` to final validation's failure: recorded, and
+      // final validation runs again without it.
+      const failed = fact(state, "final:failed");
+      const recorded =
+        context.answer?.answer === RETIRE_COMMAND && failed
+          ? retireKeep(
+              context,
+              finalRetirable(
+                currentPlan(state)!,
+                failed,
+                config.finalValidation.requiredCommands,
+              ),
+              { name: "final:retired" },
+            )
+          : {};
+      if (typeof recorded === "string")
         return hold(
-          `Final validation failed on the default branch (${head.slice(0, 12)}):\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.`,
+          `${recorded} Fix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.`,
           ["retry", "replan", "cancel"],
         );
-      if (result.kind !== "passed") return result;
-      // Origin must serve every selected member's bytes.
-      const verified = await verifyOriginMedia({
-        checkout: config.checkout,
-        repository: config.repository,
-        commit: head,
-        members,
-        scratch: join(workDir, "final-media"),
-        repushed: Boolean(fact(state, "final:repushed")),
-        signal,
-      });
-      if (verified.kind === "retry")
-        return {
-          kind: "retry",
-          reason: verified.reason,
-          ...(verified.repushed
-            ? { keep: facts({ "final:repushed": true }) }
-            : {}),
-        };
-      if (verified.kind === "repair") return hold(verified.finding);
-      if (verified.kind !== "done") return verified;
-      const done: FinalResult = {
-        commit: head,
-        tree: result.tree,
-        commands: result.commands,
-        ...(result.artifacts ? { artifacts: result.artifacts } : {}),
-        ...(verified.value.summary ? { media: verified.value.summary } : {}),
-      };
-      return {
-        kind: "done",
-        result: done,
-        keep: facts({ "final:repushed": null }),
-      };
+      const retired = { ...recorded, ...facts({ "final:failed": null }) };
+      return keepFirst(
+        retired,
+        await finalValidation(context, deps, planWith(state, retired)),
+      );
     },
+  };
+}
+
+/** Final validation of the default branch head, then origin's media check. */
+async function finalValidation(
+  context: StepContext,
+  deps: BuildDeps,
+  plan: Plan,
+): Promise<Outcome> {
+  const { state, signal } = context;
+  const { config } = deps;
+  const head = await defaultHead(config.checkout, config.repository, signal);
+  const problem = await integrationProblem(state, plan, head, deps, signal);
+  if (problem) return problem;
+  const workDir = deps.workDir(state.issue);
+  const members = validationMembers(plan, undefined, selection(state));
+  const result = await validateTree({
+    checkout: config.checkout,
+    repository: config.repository,
+    directory: join(workDir, "final"),
+    commit: head,
+    plan,
+    blocks: acceptedInputs(state).shown.blocks,
+    reviewArtifacts: {
+      configured: config.reviewArtifacts,
+      planned: plan.reviewArtifacts,
+      dir: join(workDir, "artifacts", "final"),
+    },
+    media: members,
+    sandbox: config.sandbox,
+    commandTimeoutMs: commandTimeoutMs(deps),
+    signal,
+    log: context.log,
+  });
+  if (result.kind === "failed") {
+    const offer = retireOffer(
+      finalRetirable(
+        plan,
+        result.failed,
+        config.finalValidation.requiredCommands,
+      ),
+    );
+    return {
+      ...hold(
+        `Final validation failed on the default branch (${head.slice(0, 12)}):\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.${offer.note}`,
+        ["retry", ...offer.options, "replan", "cancel"],
+      ),
+      ...(result.failed
+        ? { keep: facts({ "final:failed": result.failed }) }
+        : {}),
+    };
+  }
+  if (result.kind !== "passed") return result;
+  // Origin must serve every selected member's bytes.
+  const verified = await verifyOriginMedia({
+    checkout: config.checkout,
+    repository: config.repository,
+    commit: head,
+    members,
+    scratch: join(workDir, "final-media"),
+    repushed: Boolean(fact(state, "final:repushed")),
+    signal,
+  });
+  if (verified.kind === "retry")
+    return {
+      kind: "retry",
+      reason: verified.reason,
+      ...(verified.repushed ? { keep: facts({ "final:repushed": true }) } : {}),
+    };
+  if (verified.kind === "repair") return hold(verified.finding);
+  if (verified.kind !== "done") return verified;
+  const done: FinalResult = {
+    commit: head,
+    tree: result.tree,
+    commands: result.commands,
+    ...(result.artifacts ? { artifacts: result.artifacts } : {}),
+    ...(verified.value.summary ? { media: verified.value.summary } : {}),
+  };
+  return {
+    kind: "done",
+    result: done,
+    keep: facts({ "final:repushed": null }),
   };
 }
 
@@ -3022,7 +3438,22 @@ function finalReviewStep(deps: BuildDeps): Step {
             "final-review:held": null,
           }),
         };
-      const plan = currentPlan(state)!;
+      // `retire <n>` to the refusal: recorded, and the same integrated
+      // result is reviewed again without it.
+      const refusedBefore = fact(state, "final-review:refused");
+      const recorded =
+        context.answer?.answer === RETIRE && refusedBefore
+          ? retireKeep(
+              context,
+              { criteria: refusedBefore },
+              { name: "final-review:retired" },
+            )
+          : undefined;
+      const retired =
+        typeof recorded === "object"
+          ? { ...recorded, ...facts({ "final-review:refused": null }) }
+          : {};
+      const plan = planWith(state, retired);
       const final = state.done.final as FinalResult;
       const merges = objectiveMerges(state, plan);
       const decided = criterionDecisions(
@@ -3125,33 +3556,50 @@ function finalReviewStep(deps: BuildDeps): Step {
       });
       const held = (asked: ResultReview | null) =>
         facts({ "final-review:held": asked });
-      return withKeep(
-        reviewOutcome(
-          review,
-          held,
-          "and final review refuses the integrated result",
-          (refusal) => {
-            const lines = refusal.refused.map(
-              (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
-            );
-            const open = refusal.questions.map(
-              (q) =>
-                `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
-            );
-            const offers = criterionOffers(refusal, "and the refusal stands");
-            return {
-              ...hold(
-                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}`,
-                ["retry", "replan", ...offers, "cancel"],
-              ),
-              keep: {
-                ...facts({ "final-review:refused": true }),
-                ...held(refusal),
-              },
-            };
-          },
+      // Only an Objective criterion or a coverage obligation can be
+      // retired, never an integration question.
+      const obligations = new Set([
+        ...acceptance,
+        ...plan.coverage.map(coverageCriterion),
+      ]);
+      // The retirement first: a new refusal's criteria replace the old.
+      return keepFirst(
+        retired,
+        withKeep(
+          reviewOutcome(
+            review,
+            held,
+            "and final review refuses the integrated result",
+            (refusal) => {
+              const lines = refusal.refused.map(
+                (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
+              );
+              const open = refusal.questions.map(
+                (q) =>
+                  `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
+              );
+              const offers = criterionOffers(refusal, "and the refusal stands");
+              const cited = refusal.refused
+                .filter((entry) => obligations.has(entry.criterion))
+                .map(({ criterionIndex, criterion }) => ({
+                  criterionIndex,
+                  criterion,
+                }));
+              const retire = retireOffer({ criteria: cited });
+              return {
+                ...hold(
+                  `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${retire.note}`,
+                  ["retry", "replan", ...offers, ...retire.options, "cancel"],
+                ),
+                keep: {
+                  ...facts({ "final-review:refused": cited }),
+                  ...held(refusal),
+                },
+              };
+            },
+          ),
+          decided.keep,
         ),
-        decided.keep,
       );
     },
   };
@@ -3376,7 +3824,13 @@ function reportStep(deps: BuildDeps): Step {
         0,
       );
       const decided = decisionLines(decisionsOf(state));
-      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${final.media ? `\n\n${final.media}` : ""}`;
+      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
+        plan.retired?.length
+          ? `\n\nRetired criteria and commands:\n${retiredLines(plan)
+              .map((line) => `- ${line}`)
+              .join("\n")}`
+          : ""
+      }${final.media ? `\n\n${final.media}` : ""}`;
       await github.ensureComment(
         state.issue,
         marker,

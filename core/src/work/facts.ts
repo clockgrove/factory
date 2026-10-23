@@ -1,4 +1,5 @@
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
+import type { Retirement } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";
@@ -70,6 +71,8 @@ export interface ItemFacts {
   };
   /** A discovery item's complete result (work/discovery.ts): its dependents, conditions and expansions read it. */
   discovery: DiscoveryResult;
+  /** The criteria and commands the operator retired at this item's refusals (planning/plan.ts reads them). */
+  retired: Retirement[];
 }
 
 /** What the Objective's own steps keep, by name. */
@@ -82,8 +85,17 @@ export interface ObjectiveFacts {
   "final-review:held": ResultReview;
   /** The operator's `accept <n>` and `refuse <n>` at final review (planning/plan.ts `decisionsOf`). */
   "final-review:decisions": CriterionDecision[];
-  /** Final review refused the integrated result: its `retry` validates again. */
-  "final-review:refused": true;
+  /**
+   * Final review refused the integrated result: its `retry` validates
+   * again, and `retire <n>` names one of these refused criteria by index.
+   */
+  "final-review:refused": { criterionIndex: number; criterion: string }[];
+  /** The criteria the operator retired at final review's refusals (planning/plan.ts reads them). */
+  "final-review:retired": Retirement[];
+  /** The command final validation failed on, for `retire-command <n>`. */
+  "final:failed": { index: number; command: string };
+  /** The commands the operator retired from final validation (planning/plan.ts reads them). */
+  "final:retired": Retirement[];
   /** The Objective runs again (work/steps.ts `RERUN`). */
   rerun: true;
   /** The re-run's cleanup reopened the issue (planning/steps.ts `REOPENED`). */

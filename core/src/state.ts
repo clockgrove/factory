@@ -11,11 +11,13 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { crashPoint } from "./crash.js";
+import type { HoldScope } from "./engine.js";
 import type { ProviderConfig } from "./providers/config.js";
 
 /**
- * 2: open questions are a list (`holds`). Another version is unreadable,
- * with no migration; `factory reset` (#1775) must rebuild `holds`.
+ * 2: open questions are a list (`holds`), saved ones a map (`asking`).
+ * Another version is unreadable, with no migration; `factory reset`
+ * (#1775) must rebuild `holds`.
  */
 const STATE_VERSION = 2;
 
@@ -95,12 +97,17 @@ export interface Retry {
   wait?: Wait;
   /** The operator answered `wait`: no question until then. */
   grantedUntil?: string;
-  /**
-   * A question the engine raised about this step (a repair over budget, a
-   * crash-loop suspect) while another question that stops it was open:
-   * asked as soon as no open question stops the step, before it runs.
-   */
-  asking?: { question: string; answers: string[]; recommended: string };
+}
+
+/**
+ * A question the engine raised about a step (a repair over budget, a
+ * crash-loop suspect) while another question that stops it was open.
+ */
+export interface PendingQuestion {
+  question: string;
+  answers: string[];
+  recommended: string;
+  scope?: HoldScope;
 }
 
 /** The provider an Objective was admitted with, kept for its whole run. */
@@ -131,6 +138,12 @@ export interface ObjectiveState {
   /** The latest answer per step, read by the step when it runs again. */
   answers: Record<string, Answer>;
   retries: Record<string, Retry>;
+  /**
+   * Questions saved per step, asked as soon as no open question stops the
+   * step, before it runs. Kept apart from `retries`, so no change to a
+   * retry drops one; cleared when asked, or when a repair clears the step.
+   */
+  asking: Record<string, PendingQuestion>;
   /** Facts steps keep across repairs (Outcome `keep`), by key. */
   kept: Record<string, unknown>;
   /** Repairs per target step, with the latest findings (newest last). */
@@ -168,6 +181,7 @@ export function newObjective(
     holds: [],
     answers: {},
     retries: {},
+    asking: {},
     repairs: {},
     kept: {},
     done: {},

@@ -606,6 +606,7 @@ function unstarted(state: ObjectiveState): boolean {
     [
       ...Object.keys(state.done),
       ...Object.keys(state.retries),
+      ...Object.keys(state.asking),
       ...Object.keys(state.attempts),
     ].every(early)
   );

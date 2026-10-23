@@ -134,6 +134,7 @@ function seed(inst, issue, status = "checking", fields = {}) {
       holds: [],
       answers: {},
       retries: {},
+      asking: {},
       kept: {},
       done: {},
       attempts: {},
@@ -1052,6 +1053,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
       status: () => "building",
       // b is the native-stack layer above a.
       upstream: (_, item) => (item === "b" ? ["a"] : []),
+      providers: { claude: {} },
     },
     mkdtempSync(join(tmpdir(), "factory-defer-")),
     { write() {} },
@@ -1087,7 +1089,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
   // An Objective question is open: a bare retry is refused.
   runner.apply(
     "final",
-    objectiveWide(hold("Issue closed?", ["continue", "cancel"])),
+    objectiveWide(hold("Issue closed?", ["switch", "cancel"])),
   );
   assert.match(
     runner.transact(() => runner.retryNow("op")),
@@ -1112,14 +1114,25 @@ test("a deferred question asks right after the covering one; stack layers and ba
   });
   assert.equal(runner.state.holds.length, 2);
   assert.ok(due("item:d:ci"), "d runs right after the answer");
-  assert.ok(runner.state.retries["item:c:work"].asking);
+  assert.ok(runner.state.asking["item:c:work"]);
+  // c's earlier limit retry is still on record: `switch` drops it, not the question.
+  runner.state.retries["item:c:work"] = {
+    count: 0,
+    attempts: 1,
+    since: new Date().toISOString(),
+    nextAt: new Date().toISOString(),
+    lastError: "usage limit",
+    wait: { kind: "reset", provider: "codex" },
+  };
   const final = runner.state.holds.find((h) => h.step === "final");
   assert.equal(
     runner.transact(() =>
-      runner.answer("continue", undefined, "op", undefined, final.id),
+      runner.answer("switch", "claude", "op", undefined, final.id),
     ),
     null,
   );
+  assert.ok(!runner.state.retries["item:c:work"]);
+  assert.ok(runner.state.asking["item:c:work"], "switch keeps c's question");
   const ran = started.length;
   outcomes["item:d:ci"] = undefined;
   runner.tick();

@@ -453,13 +453,20 @@ export class GitHubSync {
    * short form `/factory <answer>` only while it is the one open question;
    * once another opens, it is edited to name its question. The comment's
    * GitHub time is saved on the hold (`shownAt`): an answer that names no
-   * question is compared with it (engine.ts `answer`).
+   * question is compared with it (engine.ts `answer`). A short form shown
+   * before another question (`lastShownAt`) would be refused, so that
+   * comment is edited to name its question too.
    */
   private ask(runner: ObjectiveRunner): void {
     const issue = runner.state.issue;
     const holds = runner.state.holds;
-    const bound = holds.length > 1;
+    const others = holds.length > 1;
+    const lastShownAt = Date.parse(runner.state.lastShownAt ?? "");
     for (const hold of holds) {
+      const bound =
+        others ||
+        (hold.shortForm === true &&
+          lastShownAt > Date.parse(hold.shownAt ?? ""));
       if (hold.shownAt !== undefined && (!hold.shortForm || !bound)) continue;
       this.background(issue, `ask:${issue}:${hold.id}`, async () => {
         const marker = MARK(issue, "hold", hold.id);
@@ -473,9 +480,11 @@ export class GitHubSync {
         const about = hold.item
           ? ` It stops Work Item \`${hold.item}\` and the items that depend on it; other work goes on.`
           : "";
-        const form = bound
+        const form = others
           ? " Other questions are open too, so the answer names this one."
-          : ` While this is the only open question, the short form works; \`/factory <answer>${named}\` always does.`;
+          : bound
+            ? " Another question was shown after this one, so the answer names this one."
+            : ` While this is the only open question, the short form works; \`/factory <answer>${named}\` always does.`;
         const comment = await this.github.upsertComment(
           issue,
           marker,

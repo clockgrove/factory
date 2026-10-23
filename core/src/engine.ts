@@ -341,16 +341,17 @@ export class ObjectiveRunner {
     for (const step of steps) {
       if (this.running.has(step.key)) continue;
       // A question saved while another stopped the step: ask it now.
-      const asking = this.state.retries[step.key]?.asking;
+      const asking = this.state.asking[step.key];
       if (asking && !this.state.attempts[step.key]) {
         if (!this.heldBy(step.key))
           this.transact(() => {
-            delete this.state.retries[step.key]?.asking;
+            delete this.state.asking[step.key];
             this.hold(
               step.key,
               asking.question,
               asking.answers,
               asking.recommended,
+              asking.scope,
             );
           });
         continue;
@@ -542,6 +543,7 @@ export class ObjectiveRunner {
           delete state.done[cleared];
           delete state.answers[cleared];
           delete state.attempts[cleared];
+          delete state.asking[cleared];
           if (cleared !== outcome.target) delete state.retries[cleared];
         }
         this.abortRunning(outcome.clear);
@@ -731,7 +733,7 @@ export class ObjectiveRunner {
    * once, so it runs again right after the answer and asks then (an
    * Objective-wide cause the answer fixed asks nothing). A question that
    * running the step again wouldn't ask (`saved`: a repair over budget, a
-   * crash-loop suspect) is saved on its retry instead, and asked before
+   * crash-loop suspect) is saved in `asking` instead, and asked before
    * the step runs (`tick`).
    */
   private hold(
@@ -750,19 +752,17 @@ export class ObjectiveRunner {
         hold.item === undefined || (item !== undefined && hold.item === item),
     );
     if (open && open.step !== key) {
-      const retry = state.retries[key];
       if (saved)
-        state.retries[key] = {
-          ...(retry ?? {
-            count: 0,
-            attempts: 0,
-            since: now,
-            lastError: question,
-          }),
-          nextAt: now,
-          asking: { question, answers, recommended },
+        state.asking[key] = {
+          question,
+          answers,
+          recommended,
+          ...(scope ? { scope } : {}),
         };
-      else if (retry) retry.nextAt = now;
+      else {
+        const retry = state.retries[key];
+        if (retry) retry.nextAt = now;
+      }
       return;
     }
     const all = answers.includes("cancel") ? answers : [...answers, "cancel"];
@@ -963,6 +963,7 @@ export class ObjectiveRunner {
     this.state.holds = [];
     this.state.attempts = {};
     this.state.retries = {};
+    this.state.asking = {};
     this.state.answers.cancel = {
       holdId: "",
       answer: "cancel",

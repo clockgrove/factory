@@ -164,6 +164,8 @@ export const OPERATIONAL: readonly string[] = [
   "sandbox.packageStore",
   // Selectors choose review evidence and grant no authority; each capture records what it ran.
   "reviewArtifacts",
+  // The live status comment: display only.
+  "progress",
   // A validation command's time limit.
   "validation.commandTimeoutSeconds",
   // A worker run's time, idle and turn limits.

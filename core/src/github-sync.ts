@@ -4,10 +4,24 @@ import type { EngineLimits, ObjectiveRunner } from "./engine.js";
 import { type GitHub, issueGone, TransientError } from "./github.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import type { RunLog } from "./log.js";
+import {
+  decisionsOf,
+  RunTally,
+  STATUS_EVERY_MS,
+  STATUS_REFRESH_MS,
+  statusComment,
+} from "./progress.js";
 import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
-import type { ObjectiveState, ObjectiveStatus } from "./state.js";
-import { answerForm, CLOCK_SKEW_MS, TERMINAL } from "./state.js";
+import type { ObjectiveState, ObjectiveStatus, QueueControl } from "./state.js";
+import {
+  answerForm,
+  CLOCK_SKEW_MS,
+  runOf,
+  sinceRun,
+  TERMINAL,
+} from "./state.js";
+import { type ObjectiveView, statusOf } from "./status.js";
 import { errorMessage } from "./text.js";
 
 /** What the sync keeps in an Objective's state (`modules.github`). */
@@ -52,6 +66,8 @@ export interface GitHubModule {
   reminded?: string;
   /** `/factory` comments whose author's access couldn't be read yet, oldest first. */
   unchecked?: UncheckedComment[];
+  /** The live status comment's last write: its stable body's hash, the status it showed, and its GitHub time. */
+  status?: { hash: string; shown: ObjectiveStatus; at: string };
 }
 
 /** A `/factory` comment waiting for its author's access to be read. */
@@ -88,6 +104,11 @@ export interface SyncView {
   withdraw(issue: number): "withdrawn" | "pending" | false;
   /** Checked and waiting for a slot: still shown as queued. */
   waitingForSlot(issue: number): boolean;
+  /** What the Objective waits on before it can start, as `factory status` shows it. */
+  waitsOn(issue: number): ObjectiveView["waitsOn"];
+  queue: QueueControl;
+  /** The run log directory: the live status comment reads model calls and worker activity there. */
+  logs: string;
   requestsDir: string;
   /** The result of an applied request, by id, while its result file exists. */
   result(id: string): string | undefined;
@@ -164,6 +185,10 @@ export class GitHubSync {
   /** The repository's identity was read once since the service started. */
   private identified = false;
   private readonly display: QueueDisplay;
+  /** The run log, read forward for the live status comments (made on the first tick). */
+  private tally?: RunTally;
+  /** When each Objective's live status comment was last due to be written (this host's clock). */
+  private readonly statusTried = new Map<number, number>();
 
   constructor(
     private readonly github: GitHub,
@@ -269,6 +294,7 @@ export class GitHubSync {
       if (!module) continue;
       this.show(runner, module, sync);
       this.ask(runner);
+      this.status(runner, sync);
       this.reply(runner, module, sync);
       if (finished) continue;
       this.note(runner, module);
@@ -302,7 +328,8 @@ export class GitHubSync {
       [module.shown, module.ceded].includes(
         this.config.queue.options[OPTION[state.status]],
       ) &&
-      !unreplied(state, module).length
+      !unreplied(state, module).length &&
+      (!this.config.progress.enabled || module.status?.shown === state.status)
     );
   }
 
@@ -317,6 +344,8 @@ export class GitHubSync {
     this.settled.delete(issue);
     this.changed.delete(issue);
     this.wroteAt.delete(issue);
+    this.statusTried.delete(issue);
+    this.tally?.forget(issue);
     this.jobs.forget(issue, (key) => key.startsWith("reply:"));
   }
 
@@ -585,6 +614,78 @@ export class GitHubSync {
         );
       });
     }
+  }
+
+  /**
+   * The live status comment (progress.ts): one per run, posted once and
+   * then edited in place, found by its marker. A background job renders it
+   * (a render that throws backs off like a failed write) at most once
+   * per STATUS_EVERY_MS and written only when its stable body changed (its
+   * hash), or, while a step runs, every STATUS_REFRESH_MS so its ages stay
+   * true. A finished Objective settles only once it shows the final status.
+   * The comment list is read from the last write on (GitHub's `since` is
+   * the edit time), or from the run's admission before the first.
+   */
+  private status(runner: ObjectiveRunner, sync: SyncView): void {
+    const { state } = runner;
+    const issue = state.issue;
+    if (!this.config.progress.enabled || state.withdrawing) return;
+    const now = this.now();
+    if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
+      return;
+    if (this.jobs.pending(`status:${issue}`)) return;
+    this.statusTried.set(issue, now);
+    this.background(issue, `status:${issue}`, async (signal) => {
+      this.tally ??= new RunTally(sync.logs);
+      const marker = MARK(issue, "status", runOf(state));
+      const view = statusOf(
+        { kind: "ok", state },
+        {
+          issue,
+          live: true,
+          queue: sync.queue,
+          waitsOn: sync.waitsOn(issue),
+          lastEvent: null,
+        },
+      );
+      const { plan: _plan, ...shown } = view;
+      const { body, hash } = statusComment(
+        marker,
+        {
+          view: shown,
+          ...this.tally.read(issue, state.startedAt ?? ""),
+          decisions: decisionsOf(state),
+          ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+        },
+        this.config.secrets,
+        // W3-08: progress.includeQuestions sets this.
+        { questions: true },
+        now,
+      );
+      const last = (state.modules.github as GitHubModule).status;
+      const status = state.status;
+      if (
+        last?.hash === hash &&
+        last.shown === status &&
+        !(view.running.length && now - Date.parse(last.at) >= STATUS_REFRESH_MS)
+      )
+        return;
+      const comment = await this.github.upsertComment(
+        issue,
+        marker,
+        body,
+        "sync:status",
+        signal,
+        last ? skewed(last.at) : sinceRun(state),
+      );
+      runner.transact(() => {
+        (runner.state.modules.github as GitHubModule).status = {
+          hash,
+          shown: status,
+          at: comment.updated_at ?? comment.created_at,
+        };
+      });
+    });
   }
 
   /**

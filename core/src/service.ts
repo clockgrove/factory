@@ -734,6 +734,16 @@ export async function serve(options: ServeOptions): Promise<number> {
       unreadable,
       requestsDir: paths.requests,
       waitingForSlot: (issue) => waitingForSlot.has(issue),
+      waitsOn: (issue) => {
+        const other = waitingOnPaths.get(issue);
+        return waitingForSlot.has(issue)
+          ? { slot: true }
+          : other !== undefined
+            ? { paths: other }
+            : null;
+      },
+      queue,
+      logs: paths.logs,
       find,
       admit: (issue: number, github: GitHubModule) => {
         // A paused or draining queue admits nothing new; the card stays

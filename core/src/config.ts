@@ -157,6 +157,12 @@ export interface CoreConfig {
      */
     localAssetRoots: string[];
   };
+  /**
+   * The live status comment on each Objective issue (progress.ts), on by
+   * default. Display only: operational, so changing it never holds a
+   * started Objective.
+   */
+  progress: { enabled: boolean };
 }
 
 /** The operator's `sandbox` section, with defaults filled in. */
@@ -609,6 +615,7 @@ export function loadConfig(repository: string): CoreConfig {
         loadReviewArtifacts(value, found),
       sandbox: sandboxSection,
       media: object({ localAssetRoots }),
+      progress: object({ enabled: flag(true) }),
     },
     problems,
     RETIRED[""],

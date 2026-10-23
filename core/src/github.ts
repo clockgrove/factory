@@ -645,8 +645,17 @@ export class GitHub {
     marker: string,
     signal?: AbortSignal,
   ): Promise<IssueSummary | undefined> {
+    return (await this.markedIssues(found, marker, signal))[0];
+  }
+
+  /** Every issue in `found` that Factory's login opened with `marker` first. */
+  async markedIssues(
+    found: readonly IssueSummary[],
+    marker: string,
+    signal?: AbortSignal,
+  ): Promise<IssueSummary[]> {
     const self = await this.login(signal);
-    return found.find(
+    return found.filter(
       (issue) =>
         (issue.body ?? "").startsWith(marker) &&
         issue.user !== null &&

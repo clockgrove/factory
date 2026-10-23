@@ -48,6 +48,15 @@ import { errorMessage } from "./text.js";
  * Objective keeps the issues recorded (service.ts), so one created but
  * never linked is still found.
  *
+ * A create repeated because GitHub's list hadn't shown the first yet
+ * makes a duplicate: the time the first began is kept (`duplicates`),
+ * and once SWEEP_AFTER_MS has passed, or the Objective has ended, one
+ * list of Factory's labelled issues since then finds every issue with an
+ * item's marker. Each one that isn't the item's recorded issue, and that
+ * still reads as Factory wrote it, is closed as not planned with a comment
+ * naming the issue Factory keeps; an edited copy only gets that comment,
+ * as a possible duplicate, and stays open.
+ *
  * A refusal on one item's issue (deleted, locked, transferred) stops
  * only that issue's writes: the others are still written and closed.
  * Only a refusal of the Objective-wide calls (the lists, a create) gives
@@ -86,6 +95,11 @@ export interface Tracking {
   items: Record<string, ItemIssue>;
   /** Items whose issue may have been created without being recorded here, with when (host time) each create began: looked up first. */
   creating?: Record<string, string>;
+  /**
+   * A create may have been repeated: when (host time) the earliest
+   * repeated one's first create began. Swept for duplicates once.
+   */
+  duplicates?: string;
   /** The repository doesn't offer the native type, or refused it: not tried again this run. */
   untyped?: true;
   /** The Objective has its role for this run, and the priority labels its items inherit. */
@@ -206,13 +220,36 @@ export function carried(tracking: Tracking): Tracking {
       ),
     ),
     ...(tracking.creating ? { creating: tracking.creating } : {}),
+    ...(tracking.duplicates ? { duplicates: tracking.duplicates } : {}),
   };
 }
 
+/** How long after a repeated create the duplicates are swept: GitHub's lists lag by seconds. */
+const SWEEP_AFTER_MS = 10 * 60_000;
+
+/** The least wait before a sweep, even once the Objective has ended: the lag the list just showed. */
+const SWEEP_LAG_MS = 2 * 60_000;
+
+/**
+ * Whether the duplicate sweep is due: SWEEP_AFTER_MS on, or once the
+ * Objective has ended, but never within SWEEP_LAG_MS, when the list may
+ * still not show the first create.
+ */
+function sweepDue(state: ObjectiveState, now: number): boolean {
+  const from = trackingOf(state)?.duplicates;
+  if (from === undefined) return false;
+  const waited = now - Date.parse(from);
+  return (
+    waited >= SWEEP_AFTER_MS ||
+    (TERMINAL.includes(state.status) && waited >= SWEEP_LAG_MS)
+  );
+}
+
 /** Whether a tracking pass has a write to make. */
-export function trackingDue(state: ObjectiveState): boolean {
+export function trackingDue(state: ObjectiveState, now = Date.now()): boolean {
   const tracking = trackingOf(state);
   if (Object.keys(tracking?.creating ?? {}).length) return true;
+  if (sweepDue(state, now)) return true;
   const all = wanted(state);
   if (all.size && !tracking?.objective) return true;
   const priority = tracking?.objective?.priority.join("\n");
@@ -323,13 +360,19 @@ export async function track(context: TrackContext): Promise<void> {
         signal,
       )),
     ];
-    for (const [id] of creating) {
+    for (const [id, at] of creating) {
       const issue = record().items[id]
         ? undefined
         : await github.markedIssue(found, issueMark(id), signal);
       context.save((tracking) => {
         if (issue) tracking.items[id] = adopted(issue);
         if (tracking.items[id] || !want.get(id)?.planned) created(tracking, id);
+        // Not found yet, and created again below: the first may exist.
+        else if (
+          !tracking.duplicates ||
+          Date.parse(at) < Date.parse(tracking.duplicates)
+        )
+          tracking.duplicates = at;
       });
     }
   }
@@ -405,6 +448,95 @@ export async function track(context: TrackContext): Promise<void> {
         close: closing,
       });
     }
+  }
+
+  if (sweepDue(context.state(), Date.now())) await sweep();
+
+  /**
+   * Close every issue with an item's marker that isn't the item's
+   * recorded issue: duplicates a repeated create made.
+   */
+  async function sweep(): Promise<void> {
+    const from = record().duplicates!;
+    const listed = await github.issuesByLabel(
+      WORK_ITEM_LABEL,
+      new Date(Date.parse(from) - CLOCK_SKEW_MS).toISOString(),
+      signal,
+    );
+    for (const [id, kept] of Object.entries(record().items))
+      for (const duplicate of await github.markedIssues(
+        listed,
+        issueMark(id),
+        signal,
+      )) {
+        if (duplicate.number === kept.issue || duplicate.state !== "open")
+          continue;
+        // Only an exact copy is closed: one a person edited may be in use.
+        const exact = [
+          kept.body,
+          ...(want.get(id)?.title
+            ? [hash(want.get(id)!.title, want.get(id)!.body)]
+            : []),
+        ].includes(
+          hash(duplicate.title, (duplicate.body ?? "").replace(/\r\n/g, "\n")),
+        );
+        const about = `#${kept.issue}, which Factory keeps for Work Item ${code(id)} of #${objective}`;
+        try {
+          if (exact) {
+            const marker = mark(
+              objective,
+              "duplicate",
+              String(duplicate.number),
+            );
+            await github.ensureComment(
+              duplicate.number,
+              marker,
+              `${marker}\nDuplicate of ${about}.`,
+              "sync:item-duplicate:comment",
+              signal,
+            );
+            await github.closeIssue(
+              duplicate.number,
+              "not_planned",
+              "sync:item-duplicate:close",
+              signal,
+            );
+          } else {
+            const marker = mark(
+              objective,
+              "possible-duplicate",
+              String(duplicate.number),
+            );
+            await github.ensureComment(
+              duplicate.number,
+              marker,
+              `${marker}\nPossible duplicate of ${about}. It was edited after Factory opened it, so Factory leaves it open: close it once nobody needs it.`,
+              "sync:item-duplicate:comment",
+              signal,
+            );
+          }
+          context.log({
+            event: exact
+              ? "item-issue-duplicate-closed"
+              : "item-issue-duplicate-left-open",
+            item: id,
+            issue: duplicate.number,
+            kept: kept.issue,
+          });
+        } catch (error) {
+          if (!refusal(error)) throw error;
+          context.log({
+            event: "item-issue-refused",
+            item: id,
+            issue: duplicate.number,
+            status: error.status,
+            duplicate: true,
+          });
+        }
+      }
+    context.save((tracking) => {
+      delete tracking.duplicates;
+    });
   }
 
   /** The issue's body, type, labels, card, links, live comment and reopen, as due. */

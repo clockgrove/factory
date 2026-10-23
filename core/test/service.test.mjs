@@ -55,10 +55,11 @@ after(() => {
 });
 
 /** Start `factory serve`. Resolves with its exit when it ends. */
-function serve(inst, crashAt) {
+function serve(inst, crashAt, nodeArgs = []) {
   const env = { ...inst.env };
   if (crashAt) env.FACTORY_CRASH_AT = crashAt;
-  const child = spawn(process.execPath, [CLI, "serve", "--repo", REPO], {
+  const args = [...nodeArgs, CLI, "serve", "--repo", REPO];
+  const child = spawn(process.execPath, args, {
     env,
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -641,6 +642,23 @@ test("a finished Objective leaves the startup set, and can't be cancelled", asyn
     readFileSync(join(inst.root, "service.json"), "utf8"),
   );
   assert.deepEqual(record.unreadable, {});
+  await stopped(service);
+});
+
+test("a knowledge store that can't open never holds back retirement", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  seed(inst, 14, "done");
+  // node:sqlite missing, as on Node before 22.13: every observation fails.
+  const service = serve(inst, undefined, ["--no-experimental-sqlite"]);
+  await until(
+    () => existsSync(join(inst.objectives, "finished", "14.json")),
+    "the move to finished/",
+  );
+  const logs = readdirSync(join(inst.logs, "14"))
+    .map((name) => readFileSync(join(inst.logs, "14", name), "utf8"))
+    .join("");
+  assert.match(logs, /"observe-failed"/, "the observation is retried");
   await stopped(service);
 });
 

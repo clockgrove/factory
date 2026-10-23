@@ -41,6 +41,7 @@ import {
   newObjective,
   type ObjectiveState,
   removeState,
+  runOf,
   saveState,
   TERMINAL,
 } from "./state.js";
@@ -68,8 +69,13 @@ export interface ServeOptions {
  * reads an active state file. It gets a copy and runs beside the loop,
  * aborted by `signal` past its deadline; a failure is retried with backoff
  * until it succeeds. `release` ends a run that a new admission of the same
- * issue replaces, before the new run starts; if it throws, the admission
- * waits.
+ * issue replaces, or a withdrawal removes, before the new run starts.
+ *
+ * Knowledge is best effort for the lifecycle: a failed observation or
+ * release never holds back admission, withdrawal or retirement. The run's
+ * settled observation (which also releases it) is kept and retried in the
+ * background, with backoff, until it lands: an episode may be recorded
+ * late, but the queue never waits on it.
  */
 export interface StateObserver {
   observe(
@@ -78,6 +84,13 @@ export interface StateObserver {
     signal: AbortSignal,
   ): Promise<void>;
   release(state: ObjectiveState): void;
+}
+
+interface Observation {
+  mark?: string;
+  busy: boolean;
+  failures: number;
+  nextAt: number;
 }
 
 const OBSERVE_BACKOFF_MS = 1000;
@@ -126,10 +139,56 @@ export async function serve(options: ServeOptions): Promise<number> {
   const runners = new Map<number, ObjectiveRunner>();
   const unreadable = new Map<number, UnreadableObjective>();
   /** Per Objective: the mark last observed, an observation in flight, the failure backoff. */
-  const observed = new Map<
-    number,
-    { mark?: string; busy: boolean; failures: number; nextAt: number }
-  >();
+  const observed = new Map<number, Observation>();
+  /**
+   * Settled observations of runs no longer in memory (retired, replaced or
+   * withdrawn before the observer took them), by `<issue>@<run>`: retried
+   * with backoff until they land.
+   */
+  const late = new Map<string, Observation & { state: ObjectiveState }>();
+  const observeLate = (state: ObjectiveState): void => {
+    if (!options.observer) return;
+    late.set(`${state.issue}@${runOf(state)}`, {
+      state: structuredClone(state),
+      busy: false,
+      failures: 0,
+      nextAt: 0,
+    });
+  };
+  /** Run an observer job unless one is in flight or backing off; log a failure and back off. */
+  const attempt = (
+    entry: Observation,
+    issue: number,
+    job: () => Promise<void>,
+    done: () => void,
+  ): void => {
+    if (entry.busy || Date.now() < entry.nextAt) return;
+    entry.busy = true;
+    job()
+      .then(
+        () => {
+          entry.failures = 0;
+          done();
+        },
+        (error: unknown) => {
+          entry.failures += 1;
+          entry.nextAt =
+            Date.now() +
+            Math.min(
+              OBSERVE_BACKOFF_MS * 2 ** (entry.failures - 1),
+              OBSERVE_MAX_BACKOFF_MS,
+            );
+          log.write(issue, {
+            event: "observe-failed",
+            error: String(error),
+            retryAt: new Date(entry.nextAt).toISOString(),
+          });
+        },
+      )
+      .finally(() => {
+        entry.busy = false;
+      });
+  };
   /** Checked Objectives waiting for a slot, as of the last tick. */
   const waitingForSlot = new Set<number>();
   const open = (state: ObjectiveState): ObjectiveRunner => {
@@ -184,8 +243,12 @@ export async function serve(options: ServeOptions): Promise<number> {
     )
       retire(issue);
   };
-  /** A settled Objective leaves memory, and its file moves to finished/. */
+  /**
+   * A settled Objective leaves memory, and its file moves to finished/. Its
+   * settled observation, if it hasn't landed, goes on in the background.
+   */
   const retire = (issue: number): void => {
+    const runner = runners.get(issue);
     try {
       finishState(paths.objectives, issue);
     } catch (error) {
@@ -193,16 +256,20 @@ export async function serve(options: ServeOptions): Promise<number> {
       log.write(issue, { event: "finish-failed", error: String(error) });
       return;
     }
+    if (runner && observed.get(issue)?.mark !== observeMark(runner))
+      observeLate(runner.state);
     runners.delete(issue);
     options.sync?.forget(issue);
     observed.delete(issue);
   };
   /**
    * The observer ends a run that is replaced (a re-queue) or withdrawn,
-   * before its state goes. False when it can't: the caller waits.
+   * before its state goes. One that fails is retried in the background,
+   * never waited on.
    */
-  const release = (state: ObjectiveState): boolean => {
-    if (!options.observer) return true;
+  const release = (state: ObjectiveState): void => {
+    if (!options.observer) return;
+    observed.delete(state.issue);
     try {
       options.observer.release(structuredClone(state));
     } catch (error) {
@@ -210,10 +277,8 @@ export async function serve(options: ServeOptions): Promise<number> {
         event: "release-deferred",
         error: String(error),
       });
-      return false;
+      observeLate(state);
     }
-    observed.delete(state.issue);
-    return true;
   };
 
   // Only the lock holder writes state, so leftover temporary files are from a crash.
@@ -346,23 +411,17 @@ export async function serve(options: ServeOptions): Promise<number> {
 
   /**
    * Dequeued before planning: the run goes as if never admitted, so
-   * queuing it again checks it afresh. The observer ends it first; false
-   * when it can't yet (it stays `withdrawing`, and goes on a later tick).
+   * queuing it again checks it afresh. The observer ends it first.
    */
-  const withdrawNow = (runner: ObjectiveRunner): boolean => {
+  const withdrawNow = (runner: ObjectiveRunner): void => {
     const issue = runner.state.issue;
-    if (!runner.state.withdrawing)
-      runner.transact(() => {
-        runner.state.withdrawing = true;
-      });
-    if (!release(runner.state)) return false;
+    release(runner.state);
     removeState(paths.objectives, issue);
     crashPoint("serve:withdrawn");
     runner.stop();
     runners.delete(issue);
     options.sync?.forget(issue);
     log.write(issue, { event: "withdrawn" });
-    return true;
   };
 
   const tick = (): void => {
@@ -432,7 +491,8 @@ export async function serve(options: ServeOptions): Promise<number> {
         });
       }
     }
-    for (const runner of options.observer ? runners.values() : []) {
+    const observer = options.observer;
+    for (const runner of observer ? runners.values() : []) {
       const { state } = runner;
       const mark = observeMark(runner);
       const entry = observed.get(state.issue) ?? {
@@ -441,40 +501,36 @@ export async function serve(options: ServeOptions): Promise<number> {
         nextAt: 0,
       };
       observed.set(state.issue, entry);
-      if (entry.busy || entry.mark === mark || Date.now() < entry.nextAt)
-        continue;
-      entry.busy = true;
+      if (entry.mark === mark) continue;
       // The mark is kept only once the observation succeeded.
-      options
-        .observer!.observe(
-          structuredClone(state),
-          settled(runner),
-          AbortSignal.timeout(OBSERVE_DEADLINE_MS),
-        )
-        .then(
-          () => {
-            entry.mark = mark;
-            entry.failures = 0;
-          },
-          (error: unknown) => {
-            entry.failures += 1;
-            entry.nextAt =
-              Date.now() +
-              Math.min(
-                OBSERVE_BACKOFF_MS * 2 ** (entry.failures - 1),
-                OBSERVE_MAX_BACKOFF_MS,
-              );
-            log.write(state.issue, {
-              event: "observe-failed",
-              error: String(error),
-              retryAt: new Date(entry.nextAt).toISOString(),
-            });
-          },
-        )
-        .finally(() => {
-          entry.busy = false;
-        });
+      const copy = structuredClone(state);
+      const end = settled(runner);
+      attempt(
+        entry,
+        state.issue,
+        () =>
+          observer!.observe(
+            copy,
+            end,
+            AbortSignal.timeout(OBSERVE_DEADLINE_MS),
+          ),
+        () => {
+          entry.mark = mark;
+        },
+      );
     }
+    for (const [key, entry] of observer ? late : [])
+      attempt(
+        entry,
+        entry.state.issue,
+        () =>
+          observer!.observe(
+            entry.state,
+            true,
+            AbortSignal.timeout(OBSERVE_DEADLINE_MS),
+          ),
+        () => late.delete(key),
+      );
     options.sync?.tick({
       runners,
       unreadable,
@@ -491,9 +547,9 @@ export async function serve(options: ServeOptions): Promise<number> {
         )
           return;
         // A run again after the operator queued a finished one. The observer
-        // ends the old run first (its episode, its playbook pin); if it
-        // can't, the item stays queued and the next queue read admits it.
-        if (previous && !release(previous.state)) return;
+        // ends the old run first (its episode, its playbook pin), now or in
+        // the background.
+        if (previous) release(previous.state);
         // The old run stops for good (its steps, its saves, its sync jobs)
         // before the new one exists, so only one run ever writes the file.
         previous?.stop();
@@ -528,19 +584,21 @@ export async function serve(options: ServeOptions): Promise<number> {
             });
           return "pending";
         }
-        return withdrawNow(runner) ? "withdrawn" : "pending";
+        withdrawNow(runner);
+        return "withdrawn";
       },
       result: (id: string) => readResult(paths.requests, id),
     });
     // A finished Objective leaves memory, and its file objectives/, once
-    // its cleanup, its final sync and its settled observation are done; a
-    // request or a re-queue reads it again from finished/.
+    // its cleanup and its final sync are done, and no observation of it is
+    // in flight (one that failed goes on in the background); a request or
+    // a re-queue reads it again from finished/.
     for (const runner of [...runners.values()]) {
       const issue = runner.state.issue;
       if (
         settled(runner) &&
         (options.sync?.idle(issue) ?? true) &&
-        (!options.observer || observed.get(issue)?.mark === observeMark(runner))
+        !observed.get(issue)?.busy
       )
         retire(issue);
     }

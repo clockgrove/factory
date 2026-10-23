@@ -608,14 +608,22 @@ async function workStep(
       base,
       signal,
     );
-    if (!refused)
+    if (!refused) {
+      // Marked, so the engine no longer offers `revalidate` for it.
+      const kept = fact(state, "refused", item.id);
       return withKeep(
         hold(
           `Work Item ${item.id}'s refused result can no longer be checked again as it is (it is gone, or no longer sits on ${base}). Answer \`retry\` to diagnose the failure again, or cancel.`,
           ["retry", "cancel"],
         ),
-        keepBase,
+        {
+          ...keepBase,
+          ...(kept
+            ? facts({ refused: { ...kept, unrecheckable: true } }, item.id)
+            : {}),
+        },
       );
+    }
     return {
       kind: "done",
       result: refused,
@@ -1292,6 +1300,7 @@ export function revalidatable(state: ObjectiveState, key: string): boolean {
     (item.kind ?? "work") === "work" &&
     key === stepKey(item.id, "work") &&
     !!refusedOf(state, item.id) &&
+    !refusedOf(state, item.id)?.unrecheckable &&
     (!needsSelection(item) || !!fact(state, "selection", item.id))
   );
 }

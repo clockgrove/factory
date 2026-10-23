@@ -113,6 +113,8 @@ export interface Refused {
   tree: string;
   notes: HandoffNote[];
   replayOnly?: true;
+  /** The work step found it can't be checked again as it is (gone, or off its base): `revalidate` isn't offered until a new repair. */
+  unrecheckable?: true;
 }
 
 type Writes<F> = { [N in keyof F]?: F[N] | null };

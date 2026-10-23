@@ -1113,7 +1113,18 @@ test("an execution profile frozen at admission is kept through a config change; 
     {},
     { providers, defaultProvider: "codex", execution: { profiles } },
   );
-  seed(inst, 46);
+  // Its plan runs an item on the profile.
+  const plan = {
+    items: [
+      {
+        id: "a",
+        title: "Item a",
+        ownedPaths: ["src/"],
+        executionProfile: { id: "careful", reason: "delicate" },
+      },
+    ],
+  };
+  seed(inst, 46, "checking", { done: { plan } });
   const admitted = stateOf(inst, 46).frozen;
   const careful = () =>
     stateOf(inst, 46).frozen.config.execution.profiles.careful;

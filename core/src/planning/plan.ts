@@ -1,3 +1,4 @@
+import { isObject } from "../checked.js";
 import type { ObjectiveState } from "../state.js";
 import { fact } from "../work/facts.js";
 import type {
@@ -41,6 +42,28 @@ export function currentPlan(state: ObjectiveState): Plan | undefined {
     if (result?.plan) return result.plan;
   }
   return state.done.plan as Plan | undefined;
+}
+
+/**
+ * The execution profiles the current plan's items run on that a frozen
+ * `config` doesn't name: none before a plan exists, or when the plan uses
+ * none. Its items would fail on that configuration (selection.ts).
+ */
+export function profilesLacking(
+  state: ObjectiveState,
+  config: Record<string, unknown>,
+): string[] {
+  const execution = config.execution;
+  const profiles =
+    isObject(execution) && isObject(execution.profiles)
+      ? execution.profiles
+      : {};
+  const used = new Set(
+    (currentPlan(state)?.items ?? []).flatMap((item) =>
+      item.executionProfile ? [item.executionProfile.id] : [],
+    ),
+  );
+  return [...used].filter((id) => !Object.hasOwn(profiles, id)).sort();
 }
 
 /** The current planning generation and round, from the saved decisions. */

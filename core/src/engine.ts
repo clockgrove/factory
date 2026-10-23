@@ -12,6 +12,7 @@ import {
 import { crashPoint } from "./crash.js";
 import { duration } from "./display.js";
 import type { RunLog } from "./log.js";
+import { profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
 import {
@@ -935,10 +936,20 @@ export class ObjectiveRunner {
       if (Number.isFinite(at)) nextAt = Math.max(at, now + backoff);
       if (!granted && !(at - now <= this.limits.maxWaitMs)) {
         // The limit is this provider's: switching to it again can't help.
+        // A limit on a provider the Objective doesn't run on (an execution
+        // profile's) stays whatever it switches to: only waiting helps.
+        const own = this.state.frozen?.config.provider as
+          | { planner?: unknown; worker?: { kind?: unknown } }
+          | undefined;
+        const elsewhere =
+          wait.provider !== undefined &&
+          own !== undefined &&
+          wait.provider !== own.planner &&
+          wait.provider !== own.worker?.kind;
         question = {
           ...hold(
             `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${new Date(at).toISOString()}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets, or cancel.`,
-            ["wait", ...this.switchOptions(false), "cancel"],
+            ["wait", ...(elsewhere ? [] : this.switchOptions(false)), "cancel"],
           ),
           // A limit is the account's, not the step's: one question for all.
           scope: "objective",
@@ -1257,6 +1268,13 @@ export class ObjectiveRunner {
         return refused(
           "invalid_answer",
           `Provider ${provider} isn't configured now, so there is nothing to switch to. Answers: ${hold.options.map((one) => answerForm(one)).join(", ")}.`,
+        );
+      // Its items would fail on a configuration without their profiles.
+      const lacking = profilesLacking(this.state, live.config);
+      if (lacking.length)
+        return refused(
+          "invalid_answer",
+          `Provider ${provider}'s configuration doesn't name execution profile${lacking.length === 1 ? "" : "s"} ${lacking.join(", ")}, which this Objective's plan runs on, so switching to it would fail. Answers: ${hold.options.map((one) => answerForm(one)).join(", ")}.`,
         );
       frozen = { ...structuredClone(live), provider, selectedBy: "switch" };
     } else if (answer === ADOPT) {

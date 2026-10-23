@@ -10,6 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isObject } from "../checked.js";
 import type { CoreConfig } from "../config.js";
 import { ADOPTS, hold, type Step, type Workflow } from "../engine.js";
+import { profilesLacking } from "../planning/plan.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { type ObjectiveState, TERMINAL } from "../state.js";
@@ -354,12 +355,30 @@ function changed(
           "This Objective has no frozen configuration: it was admitted without one. Cancel it and queue it again.",
           ["cancel"],
         );
+      // A profile the plan runs on is gone: only restoring it helps, since
+      // `adopt` or `switch` would freeze a configuration without it (and
+      // every provider's configuration names the same profiles).
+      const live = freezable[frozen.provider];
+      const now = live ?? Object.values(freezable)[0];
+      const missing = profilesLacking(state, now?.config ?? {});
+      if (missing.length)
+        return hold(
+          `This Objective's plan runs on execution profile${missing.length === 1 ? "" : "s"} ${missing.map((id) => `"${id}"`).join(", ")}, which the configuration no longer names. Restore ${missing.length === 1 ? "it" : "them"} as ${missing.length === 1 ? "it was" : "they were"}, restart the service and answer retry; or cancel.`,
+          [
+            {
+              answer: "retry",
+              family: "retry",
+              consequence:
+                "Runs on the frozen profiles again, once they are restored and the service restarted.",
+            },
+            "cancel",
+          ],
+        );
       // `switch` stands for one option per configured provider, this one's
       // included (a re-freeze); the engine names them in the question.
       const switching = Object.keys(freezable).some(
         (name) => name !== frozen.provider,
       );
-      const live = freezable[frozen.provider];
       if (!live)
         return hold(
           `This Objective froze provider "${frozen.provider}", which the configuration no longer names. Restore the provider as it was, restart the service and answer retry; or cancel.`,
@@ -370,24 +389,6 @@ function changed(
               family: "retry",
               consequence:
                 "Runs on the frozen provider again, once it is restored and the service restarted.",
-            },
-            "cancel",
-          ],
-        );
-      // A profile the plan may run on is gone: only restoring it helps,
-      // since `adopt` or `switch` would freeze a configuration without it.
-      const missing = Object.keys(profilesOf(frozen.config)).filter(
-        (id) => !Object.hasOwn(profilesOf(live.config), id),
-      );
-      if (missing.length)
-        return hold(
-          `This Objective froze execution profile${missing.length === 1 ? "" : "s"} ${missing.map((id) => `"${id}"`).join(", ")}, which the configuration no longer names. Restore ${missing.length === 1 ? "it" : "them"} as ${missing.length === 1 ? "it was" : "they were"}, restart the service and answer retry; or cancel.`,
-          [
-            {
-              answer: "retry",
-              family: "retry",
-              consequence:
-                "Runs on the frozen profiles again, once they are restored and the service restarted.",
             },
             "cancel",
           ],
@@ -404,12 +405,4 @@ function changed(
       };
     },
   };
-}
-
-/** The execution profiles a frozen configuration holds, by id. */
-function profilesOf(config: Record<string, unknown>): Record<string, unknown> {
-  const execution = config.execution;
-  return isObject(execution) && isObject(execution.profiles)
-    ? execution.profiles
-    : {};
 }

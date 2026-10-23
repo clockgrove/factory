@@ -170,11 +170,15 @@ export interface CoreConfig {
     localAssetRoots: string[];
   };
   /**
-   * The live status comment on each Objective issue (progress.ts), on by
-   * default. Display only: operational, so changing it never holds a
-   * started Objective.
+   * Factory's progress comments on each Objective issue, on by default:
+   * the live status comment (progress.ts), a failure's evidence in its
+   * question comment, the 24 h reminders, the status note and the
+   * cancel comment (github-sync.ts). Question comments always post: they
+   * are how a question is answered on GitHub. `includeQuestions` (default
+   * true) lists the open questions in the live status comment. Display
+   * only: operational, so changing it never holds a started Objective.
    */
-  progress: { enabled: boolean };
+  progress: { enabled: boolean; includeQuestions: boolean };
   /**
    * One display-only issue per Work Item (tracking.ts), on by default:
    * a sub-issue of the Objective with blocked-by links that mirror the
@@ -639,7 +643,10 @@ export function loadConfig(repository: string): CoreConfig {
         loadReviewArtifacts(value, found),
       sandbox: sandboxSection,
       media: object({ localAssetRoots }),
-      progress: object({ enabled: flag(true) }),
+      progress: object({
+        enabled: flag(true),
+        includeQuestions: flag(true),
+      }),
       tracking: object({ enabled: flag(true), issueType: text("Task") }),
       capture: object(
         {

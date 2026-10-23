@@ -172,6 +172,7 @@ export interface IssueComment {
   created_at: string;
   updated_at?: string;
   user: { login: string } | null;
+  html_url?: string;
 }
 
 /** An issue as the issue lists show it. */

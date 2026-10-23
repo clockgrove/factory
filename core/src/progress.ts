@@ -43,10 +43,7 @@ export interface ProgressInput {
   startedAt?: string;
 }
 
-/**
- * What the comment includes. W3-08 adds `progress.includeQuestions`; it
- * sets `questions` here, and only here.
- */
+/** What the comment includes: `questions` is `progress.includeQuestions`. */
 export interface ProgressOptions {
   questions: boolean;
 }

@@ -428,8 +428,8 @@ test("unreadable state holds with cancel, and cancel works", async () => {
 // Every crash point the hold → cancel path passes. A crash at each one, then
 // a clean restart, must end cancelled and cleaned up, with the request
 // applied once and no stray files.
-// Crash points around GitHub effects: the hold, reply, note, reminder and
-// live status comments, the Work Item issues (create, edit, links, live
+// Crash points around GitHub effects: the hold, reply, note, reminder,
+// cancel and live status comments, the Work Item issues (create, edit, links, live
 // comment, reopen, close), the Status write, the plan, report and cancel comments, the
 // issue close, the PR close, the branch delete, a re-queue's move of the
 // built-in Status off Done and its reopen, and delivery's effects (LFS
@@ -447,6 +447,8 @@ const GITHUB_CRASH_POINTS = [
   "sync:note:after",
   "sync:remind:before",
   "sync:remind:after",
+  "sync:cancel:before",
+  "sync:cancel:after",
   "sync:status:before",
   "sync:status:after",
   "sync:item-issue:create:before",

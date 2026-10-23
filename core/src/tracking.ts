@@ -138,7 +138,10 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
         ...(row.repairs ? [`**Repairs:** ${row.repairs}`] : []),
         ...(row.hold
           ? [
-              `**Question:** ${code(row.hold)} is open on #${objective}; answer it there.`,
+              state.holds.find((open) => open.id === row.hold)?.cause ===
+              "failure"
+                ? `**Failed:** ${code(row.hold)} on #${objective} names the failure, its evidence and the answers; answer it there.`
+                : `**Question:** ${code(row.hold)} is open on #${objective}; answer it there.`,
             ]
           : []),
         ...(close ? [`**Closed:** ${why}`] : []),

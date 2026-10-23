@@ -1,21 +1,41 @@
-import type { ObjectiveBlock } from "../shown.js";
 /**
  * Provider selection. Each configured provider gets its own planner,
  * worker and workflow; an Objective runs on the provider it froze when it
- * was admitted (state.provider), whatever the configuration or
- * `serve --provider` says later. Cancel needs no provider.
+ * was admitted (state.frozen), whatever `serve --provider` says later.
+ * Cancel needs no provider.
  */
 
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { isObject } from "../checked.js";
 import type { CoreConfig } from "../config.js";
-import { hold, type Step, switchTargets, type Workflow } from "../engine.js";
+import {
+  ADOPTS,
+  hold,
+  type Step,
+  switchTargets,
+  type Workflow,
+} from "../engine.js";
 import type { Plan } from "../planning/types.js";
+import type { ObjectiveBlock } from "../shown.js";
 import { type ObjectiveState, TERMINAL } from "../state.js";
 import type { Worker } from "../work/worker.js";
-import { ClaudePlanner, DEFAULT_CLAUDE_MODELS } from "./claude.js";
-import { ClaudeWorker } from "./claude-worker.js";
-import { CodexPlanner, DEFAULT_CODEX_MODELS } from "./codex.js";
-import { CodexWorker } from "./codex-worker.js";
+import {
+  ClaudePlanner,
+  type ClaudePlannerOptions,
+  DEFAULT_CLAUDE_MODELS,
+} from "./claude.js";
+import {
+  ClaudeWorker,
+  type ClaudeWorkerConfig,
+  DEFAULT_CLAUDE_WORKER,
+} from "./claude-worker.js";
+import {
+  type CodexEffort,
+  CodexPlanner,
+  DEFAULT_CODEX_MODELS,
+} from "./codex.js";
+import { CodexWorker, DEFAULT_CODEX_WORKER_MODEL } from "./codex-worker.js";
 import type { ProviderConfig } from "./config.js";
 import {
   CopilotPlanner,
@@ -23,22 +43,55 @@ import {
   DEFAULT_COPILOT_MODELS,
 } from "./copilot.js";
 import { ClaudeManagedWorker, OpenAIManagedWorker } from "./managed.js";
-import { HedgedPlanner, type Planner } from "./planner.js";
+import {
+  HedgedPlanner,
+  type ModelChoice,
+  type Planner,
+  type PlannerModels,
+} from "./planner.js";
+
+/**
+ * The provider's settings with every adapter default filled in: what its
+ * planner and worker run with, and what an Objective freezes, so an
+ * upgrade that changes a default holds a running Objective too.
+ */
+export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
+  const worker = provider.worker;
+  return {
+    ...provider,
+    models:
+      provider.planner === "claude"
+        ? { ...DEFAULT_CLAUDE_MODELS, ...provider.models }
+        : provider.planner === "copilot"
+          ? { ...DEFAULT_COPILOT_MODELS, ...provider.models }
+          : { ...DEFAULT_CODEX_MODELS, ...provider.models },
+    worker:
+      worker.kind === "claude"
+        ? {
+            ...worker,
+            settings: { ...DEFAULT_CLAUDE_WORKER, ...worker.settings },
+          }
+        : worker.kind === "codex"
+          ? { ...DEFAULT_CODEX_WORKER_MODEL, ...worker }
+          : worker,
+  } as ProviderConfig;
+}
 
 /** The provider's planner, hedged against stalled calls. */
 export function providerPlanner(provider: ProviderConfig): Planner {
-  switch (provider.planner) {
+  const resolved = resolvedProvider(provider);
+  switch (resolved.planner) {
     case "claude":
       return new HedgedPlanner(
-        new ClaudePlanner({ ...DEFAULT_CLAUDE_MODELS, ...provider.models }),
+        new ClaudePlanner(resolved.models as ClaudePlannerOptions),
       );
     case "copilot":
       return new HedgedPlanner(
-        new CopilotPlanner({ ...DEFAULT_COPILOT_MODELS, ...provider.models }),
+        new CopilotPlanner(resolved.models as PlannerModels),
       );
     default:
       return new HedgedPlanner(
-        new CodexPlanner({ ...DEFAULT_CODEX_MODELS, ...provider.models }),
+        new CodexPlanner(resolved.models as PlannerModels<CodexEffort>),
       );
   }
 }
@@ -48,7 +101,7 @@ export function providerWorker(
   provider: ProviderConfig,
   config: CoreConfig,
 ): (plan: Plan, blocks: readonly ObjectiveBlock[]) => Worker {
-  const worker = provider.worker;
+  const worker = resolvedProvider(provider).worker;
   const allowedSecretNames = config.policy.allowedSecretNames;
   return (plan, blocks) => {
     switch (worker.kind) {
@@ -58,7 +111,7 @@ export function providerWorker(
           plan,
           blocks,
           repository: config.repository,
-          config: worker.settings,
+          config: worker.settings as ClaudeWorkerConfig,
           allowedSecretNames,
           commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
         });
@@ -75,7 +128,7 @@ export function providerWorker(
       default: {
         const { kind: _, network, ...model } = worker;
         return new CodexWorker({
-          model,
+          model: model as ModelChoice<CodexEffort>,
           sandbox: config.sandbox,
           network,
           allowedSecretNames,
@@ -86,28 +139,107 @@ export function providerWorker(
   };
 }
 
-/** A provider's workflow, with the settings it was built from. */
-export interface ProviderRoute {
-  workflow: Workflow;
-  settings: ProviderConfig;
+/**
+ * The keys an Objective doesn't freeze, as paths into its frozen
+ * configuration (`provider` is its own provider's settings). They operate
+ * the host or present the run, never decide the work, so they may change
+ * under a running Objective. Every other key is frozen, including keys
+ * added later.
+ */
+export const OPERATIONAL: readonly string[] = [
+  // Derived secret values: never written to state.
+  "secrets",
+  // Polling, the slots for Objectives at once, and the Project fields progress is shown in.
+  "queue",
+  // Steps at once, and the host's caps on workers and validations.
+  "execution.concurrency",
+  "execution.workers",
+  "execution.validations",
+  // The sandbox's resource caps and the package cache's place on the host.
+  "sandbox.limits",
+  "sandbox.packageStore",
+  // Selectors choose review evidence and grant no authority; each capture records what it ran.
+  "reviewArtifacts",
+  // A validation command's time limit.
+  "validation.commandTimeoutSeconds",
+  // A worker run's time, idle and turn limits.
+  "provider.worker.timeoutSeconds",
+  "provider.worker.idleSeconds",
+  "provider.worker.settings.maxTurns",
+];
+
+/** An Objective's frozen configuration: the values and their digest. */
+export interface FrozenConfig {
+  /** SHA-256 of `config` with its keys sorted. */
+  digest: string;
+  config: Record<string, unknown>;
 }
 
 /**
- * Settings as state stores them, so a frozen copy compares equal. Copilot's
- * `idleSeconds` is a bound, not a choice the Objective froze: changing it
- * strands nothing.
+ * The configuration as an Objective on `provider` freezes it: everything
+ * but OPERATIONAL, with that provider's resolved settings as `provider` in place
+ * of `providers` and `defaultProvider` (they only choose a new
+ * Objective's provider). Undefined when `provider` isn't configured.
  */
-export const frozenSettings = (settings: ProviderConfig): ProviderConfig =>
-  JSON.parse(
-    JSON.stringify(settings, (key, value) =>
-      key === "idleSeconds" ? undefined : value,
-    ),
-  ) as ProviderConfig;
+export function freezeConfig(
+  config: CoreConfig,
+  provider: string,
+): FrozenConfig | undefined {
+  const settings = config.providers[provider];
+  if (!settings) return undefined;
+  const { providers: _all, defaultProvider: _default, ...rest } = config;
+  const frozen = JSON.parse(
+    JSON.stringify({ ...rest, provider: resolvedProvider(settings) }),
+  ) as Record<string, unknown>;
+  for (const path of OPERATIONAL) {
+    const keys = path.split(".");
+    const last = keys.pop()!;
+    let at: unknown = frozen;
+    for (const key of keys) at = isObject(at) ? at[key] : undefined;
+    if (isObject(at)) delete at[last];
+  }
+  return {
+    digest: createHash("sha256").update(canonical(frozen)).digest("hex"),
+    config: frozen,
+  };
+}
+
+const canonical = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(",")}]`
+    : isObject(value)
+      ? `{${Object.keys(value)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+          .join(",")}}`
+      : JSON.stringify(value);
+
+/** The keys whose values differ between two frozen configurations, as dotted paths. */
+export function frozenChanges(
+  was: Record<string, unknown>,
+  now: Record<string, unknown>,
+  prefix = "",
+): string[] {
+  return [...new Set([...Object.keys(was), ...Object.keys(now)])]
+    .sort()
+    .flatMap((key) => {
+      const [a, b] = [was[key], now[key]];
+      if (isObject(a) && isObject(b))
+        return frozenChanges(a, b, `${prefix}${key}.`);
+      return isDeepStrictEqual(a, b) ? [] : [`${prefix}${key}`];
+    });
+}
+
+/** A provider's workflow, with the configuration an Objective on it freezes. */
+export interface ProviderRoute {
+  workflow: Workflow;
+  frozen: FrozenConfig;
+}
 
 /**
- * Route each Objective to the provider it froze at admission. It runs only
- * while that provider is configured with the same planner, models and
- * worker; otherwise it holds until they are restored. A finished Objective
+ * Route each Objective to the provider it froze. It runs only while the
+ * configuration is as it froze it (CORE.md#Frozen configuration);
+ * otherwise it holds once, naming the changed keys. A finished Objective
  * has no steps, and `cancel` always works.
  */
 export function providerWorkflow(
@@ -115,18 +247,13 @@ export function providerWorkflow(
   fallback: Workflow,
 ): Workflow {
   const frozen = (state: ObjectiveState) => {
-    const route = state.provider && routes.get(state.provider.name);
-    return route &&
-      isDeepStrictEqual(
-        frozenSettings(route.settings),
-        state.provider!.settings,
-      )
+    const route = state.frozen && routes.get(state.frozen.provider);
+    return route && route.frozen.digest === state.frozen!.digest
       ? route.workflow
       : undefined;
   };
-  // `switch NAME` freezes these settings, so the new route matches them.
-  const providers = Object.fromEntries(
-    [...routes].map(([name, route]) => [name, frozenSettings(route.settings)]),
+  const freezable = Object.fromEntries(
+    [...routes].map(([name, route]) => [name, route.frozen]),
   );
   return {
     steps(state) {
@@ -134,50 +261,62 @@ export function providerWorkflow(
       if (state.status === "cancelled") return fallback.steps(state);
       if (TERMINAL.includes(state.status)) return [];
       const workflow = frozen(state);
-      return workflow ? workflow.steps(state) : [unavailable(state, providers)];
+      return workflow ? workflow.steps(state) : [changed(state, freezable)];
     },
     status: (state) => (frozen(state) ?? fallback).status(state),
     upstream: (state, item) =>
       (frozen(state) ?? fallback).upstream?.(state, item) ?? [],
-    providers,
+    freezable,
   };
 }
 
-function unavailable(
+/** The question an Objective asks when the configuration isn't the one it froze. */
+function changed(
   state: ObjectiveState,
-  providers: Readonly<Record<string, ProviderConfig>>,
+  freezable: Readonly<Record<string, FrozenConfig>>,
 ): Step {
   return {
-    key: "provider",
+    key: "config",
     deadlineMs: 60_000,
     async run() {
-      const provider = state.provider;
-      if (!provider)
+      const frozen = state.frozen;
+      if (!frozen)
         return hold(
-          "This Objective has no frozen provider: it was admitted by a Factory build that didn't record one. Cancel it and queue it again.",
+          "This Objective has no frozen configuration: it was admitted without one. Cancel it and queue it again.",
           ["cancel"],
         );
-      const configured = provider.name in providers;
-      const what = configured
-        ? `whose settings changed since then. It needs them as they were: ${JSON.stringify(provider.settings)}. Restore them`
-        : "which the configuration no longer names. Restore it with the settings it had";
-      // `switch` moves the Objective now, without restoring anything: onto
-      // another configured provider, or onto this one's new settings. The
-      // engine accepts exactly these (switchTargets).
-      const others = switchTargets(provider, providers);
-      const named = others
-        .map((n) =>
-          n === provider.name ? `\`${n}\` (its new settings)` : `\`${n}\``,
+      // `switch` re-freezes on another configured provider, or on this
+      // one's current configuration: exactly the targets the engine
+      // accepts (switchTargets), so plain `switch` works when it says so.
+      const targets = switchTargets(frozen, freezable);
+      const named = targets
+        .map((name) =>
+          name === frozen.provider
+            ? `\`${name}\` (its current configuration)`
+            : `\`${name}\``,
         )
         .join(", ");
-      return others.length
-        ? hold(
-            `This Objective started on provider "${provider.name}", ${what} and restart the service, then answer retry. Or ${others.length === 1 ? `answer \`switch\` to run it on provider ${named}` : `answer \`switch NAME\` to run it on one of these providers: ${named}`}; or cancel.`,
-            ["switch", "retry", "cancel"],
-          )
-        : hold(
-            `This Objective started on provider "${provider.name}", ${what} and restart the service, then answer retry; or cancel.`,
-          );
+      const switching = !targets.some((name) => name !== frozen.provider)
+        ? ""
+        : targets.length === 1
+          ? `\`switch\` runs it on provider ${named}`
+          : `\`switch NAME\` runs it on one of these providers: ${named}`;
+      const live = freezable[frozen.provider];
+      if (!live)
+        return hold(
+          `This Objective froze provider "${frozen.provider}", which the configuration no longer names. ${switching ? `${switching}; or restore` : "Restore"} the provider as it was, restart the service and answer retry; or cancel.`,
+          [...(switching ? ["switch"] : []), "retry", "cancel"],
+        );
+      const keys = frozenChanges(frozen.config, live.config);
+      // `adopt` freezes exactly the configuration this question names
+      // (engine.ts ADOPTS); a later change asks again.
+      return {
+        ...hold(
+          `The configuration changed since this Objective froze it (${frozen.digest.slice(0, 12)}): ${keys.join(", ")}. \`adopt\` runs it on the configuration as it is now (${live.digest.slice(0, 12)})${switching ? `; ${switching}` : ""}; or cancel. To keep the frozen values, restore them, restart the service and answer adopt.`,
+          ["adopt", ...(switching ? ["switch"] : []), "cancel"],
+        ),
+        keep: { [ADOPTS]: live.digest },
+      };
     },
   };
 }

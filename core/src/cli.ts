@@ -43,7 +43,7 @@ import {
 import { PLANNERS, WORKERS } from "./providers/config.js";
 import type { Planner } from "./providers/planner.js";
 import {
-  frozenSettings,
+  freezeConfig,
   type ProviderRoute,
   providerPlanner,
   providerWorker,
@@ -60,7 +60,7 @@ import {
 import { RESET, type ResetRecord, rebuildStep, resettable } from "./reset.js";
 import { serve } from "./service.js";
 import {
-  type FrozenProvider,
+  type Frozen,
   findState,
   type Hold,
   listAllObjectives,
@@ -121,7 +121,7 @@ const COMMANDS: Record<
   answer: {
     args: "ISSUE ANSWER [NAME]",
     flags: { question: true, text: true },
-    help: "Answer open question --question ID (status shows the ids); `switch NAME` runs it on another provider",
+    help: "Answer open question --question ID (status shows the ids); `switch NAME` runs it on another provider, `adopt` on the changed configuration",
   },
   retry: {
     args: "ISSUE",
@@ -288,16 +288,16 @@ async function serveCommand(
   let sync: GitHubSync | undefined;
   let loaded: CoreConfig | undefined;
   let workflow = objectiveWorkflow();
-  let provider: FrozenProvider | undefined;
+  let frozen: Frozen | undefined;
   if (existsSync(configPath(repository))) {
     const config = loadConfig(repository);
     loaded = config;
     configureKnowledge(knowledge(config, paths));
     const name = providerName(config, args);
-    provider = {
-      name,
+    frozen = {
+      ...freezeConfig(config, name)!,
+      provider: name,
       selectedBy: args.flags.provider ? "--provider" : "defaultProvider",
-      settings: frozenSettings(config.providers[name]!),
     };
     const github = new GitHub(
       config.repository,
@@ -312,7 +312,7 @@ async function serveCommand(
     const routes = new Map<string, ProviderRoute>();
     for (const [each, settings] of Object.entries(config.providers))
       routes.set(each, {
-        settings,
+        frozen: freezeConfig(config, each)!,
         workflow: objectiveWorkflow({
           config,
           github,
@@ -337,7 +337,7 @@ async function serveCommand(
     workflow,
     ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
     ...(sync ? { sync, reset: true } : {}),
-    ...(provider ? { provider } : {}),
+    ...(frozen ? { frozen } : {}),
     ...(loaded ? { observer: knowledgeObserver } : {}),
     ...(process.env.FACTORY_TICK_MS
       ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
@@ -474,8 +474,8 @@ interface StatusRow {
   mode: "running" | "paused" | "draining";
   /** Open questions, oldest first. */
   holds: Hold[];
-  /** The provider frozen at admission (or by a `switch` answer), and what chose it. */
-  provider?: FrozenProvider;
+  /** The configuration frozen at admission (or by a `switch` or `adopt` answer): its provider, what chose it, and its digest. */
+  frozen?: Pick<Frozen, "provider" | "selectedBy" | "digest">;
   waiting: {
     step: string;
     nextAt: string;
@@ -563,7 +563,15 @@ async function status(
       status: state.status,
       mode: state.control?.mode ?? "running",
       holds: state.holds,
-      ...(state.provider ? { provider: state.provider } : {}),
+      ...(state.frozen
+        ? {
+            frozen: {
+              provider: state.frozen.provider,
+              selectedBy: state.frozen.selectedBy,
+              digest: state.frozen.digest,
+            },
+          }
+        : {}),
       waiting: Object.entries(state.retries).map(([step, retry]) => ({
         step,
         nextAt: retry.nextAt,
@@ -624,9 +632,9 @@ async function status(
     lines.push(
       `#${row.issue}: ${row.status}${row.mode !== "running" ? ` (${row.mode})` : ""}`,
     );
-    if (row.provider)
+    if (row.frozen)
       lines.push(
-        `  Provider: ${row.provider.name} (selectedBy: ${row.provider.selectedBy})`,
+        `  Provider: ${row.frozen.provider} (selectedBy: ${row.frozen.selectedBy}); configuration ${row.frozen.digest.slice(0, 12)}`,
       );
     for (const hold of row.holds)
       lines.push(
@@ -801,9 +809,9 @@ function serviceRecord(paths: Paths): ServiceView {
  * `setup --provider NAME`: add a named provider to the configuration, or
  * change its planner or worker kind, and verify the result loads. The
  * first provider, or `--default`, becomes defaultProvider. Managed
- * workers need settings written by hand. An Objective that started on a
- * provider holds while that provider's settings differ from the ones it
- * froze; restart the service to use the change.
+ * workers need settings written by hand. An Objective holds while the
+ * configuration differs from the one it froze; restart the service to use
+ * the change, and answer adopt.
  */
 function setup(repository: string, args: Args): number {
   const name = args.flags.provider;

@@ -48,7 +48,7 @@ Run `factory status ISSUE --json`. Each entry in `objectives` has:
 - `waiting`: steps that will retry on their own, each with `step`, `nextAt`, `lastError` and `since`. With `gate` set, the step waits on a person outside Factory, such as an environment approval or a required review; name that gate to the operator.
 - `waitsOn`: `{slot: true}` (no free slot) or `{paths: N}` (Objective #N owns overlapping paths), else `null`.
 - `running`: steps started and not finished. `lastEvent`: the latest run log event.
-- `provider`: the provider frozen when the Objective was admitted, `{name, selectedBy, settings}`. `selectedBy` is `defaultProvider`, `--provider` (from `serve --provider`) or `switch` (an operator's `switch` answer). Report `name` and `selectedBy`.
+- `frozen`: the configuration frozen when the Objective was admitted, `{provider, selectedBy, digest}`. `selectedBy` is `defaultProvider`, `--provider` (from `serve --provider`) or `switch` (an operator's `switch` answer). Report `provider`, `selectedBy` and the digest's first 12 characters.
 - `flakyRerun`: `{item, command}` for each validation that failed once and passed its one rerun. Report them.
 - `reset`: `{requestedAt, hadState}` while a reset rebuilds the state. It is done when the rebuild lands and `reset` disappears, not when the command returns.
 - `nextAction`: `{command, reason}`. When you suggest a next step, use `command` as given; `null` means nothing to run, and `reason` says why.
@@ -80,6 +80,7 @@ Common answers, so you can explain them:
 | `retry`                    | Run the stopped step again.                                                                                                      |
 | `wait`                     | Keep waiting on a slow cause or a usage limit.                                                                                   |
 | `switch NAME`              | Run this Objective on provider NAME, or re-freeze the same provider's changed settings. Plain `switch` when there is one target. |
+| `adopt`                    | Re-freeze the changed configuration the service runs now, and continue.                                                          |
 | `answer` + text            | A correction or decision the planner or worker uses next.                                                                        |
 | `allow` + an exact command | Authorize that validation command for this Objective.                                                                            |
 | `approve`, `more`          | Accept the reviewed plan; grant more plan revisions.                                                                             |
@@ -115,7 +116,7 @@ Any other code, or a non-zero exit with no JSON line: show the operator the mess
 
 - **Service stopped:** ask the operator to start it the way it was set up (the `setup` skill installs it). A restart is the normal recovery path; the service continues from its last saved step without repeating GitHub effects.
 - **Waiting on a cleared cause** (a provider limit lifted, the network back): `factory retry ISSUE` runs now the waiting steps that no open hold stops. It is refused while an Objective-wide hold is open: answer that hold instead.
-- **Provider changed or unavailable:** the hold offers `switch NAME`, `retry` and `cancel`. `switch` with the same provider's name re-freezes its changed settings; another name moves the Objective to that provider.
+- **Configuration changed:** the hold names the changed keys and offers `adopt` (re-freeze the current configuration), `switch NAME` (another provider) and `cancel`. When the frozen provider is no longer configured it offers `switch NAME`, `retry` (after restoring it and restarting) and `cancel`.
 - **`unreadable` state:** the hold (id `unreadable`) offers `reset` and `cancel`. `factory reset ISSUE` rebuilds state from the plan comment, PRs and report on GitHub; run it only when the operator chooses it. The command returns at once; the reset is done when the rebuild lands and `status` no longer shows `reset`.
 - **Repeated failure:** read `factory log ISSUE` and diagnose before answering `retry` again. Never loop on the same answer.
 

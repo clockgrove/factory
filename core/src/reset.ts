@@ -7,7 +7,7 @@ import type { Plan } from "./planning/types.js";
 import { readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
 import {
-  type FrozenProvider,
+  type Frozen,
   newObjective,
   type ObjectiveState,
   TERMINAL,
@@ -35,7 +35,7 @@ export interface ResetRecord {
 
 /**
  * The record that stands while the state is rebuilt: the old run's
- * identity (`startedAt`), provider, Project card and comment cursor, and
+ * identity (`startedAt`), frozen configuration, Project card and comment cursor, and
  * the operator's pause or drain, so nothing the operator did or wrote is
  * lost meanwhile.
  */
@@ -45,10 +45,10 @@ export function resetRecord(
   old: ObjectiveState | undefined,
   hadState: boolean,
   github: GitHubModule | undefined,
-  provider: FrozenProvider | undefined,
+  frozen: Frozen | undefined,
 ): ObjectiveState {
   const now = new Date();
-  const state = newObjective(issue, now, old?.provider ?? provider);
+  const state = newObjective(issue, now, old?.frozen ?? frozen);
   state.status = "resetting";
   if (old?.startedAt) state.startedAt = old.startedAt;
   if (old?.control) state.control = old.control;
@@ -78,7 +78,7 @@ export function resettable(inner: Workflow, rebuild: Step): Workflow {
     ...(inner.upstream
       ? { upstream: (state, item) => inner.upstream!(state, item) }
       : {}),
-    ...(inner.providers ? { providers: inner.providers } : {}),
+    ...(inner.freezable ? { freezable: inner.freezable } : {}),
   };
 }
 
@@ -125,7 +125,7 @@ export function rebuildStep(github: GitHub, config: CoreConfig): Step {
  * The record that replaces the resetting one: `base` (rebuilt from GitHub,
  * or the old state restored), with what the operator and the sync own
  * taken from the live record when the rebuild lands: a pause or drain, the
- * provider (a `switch`), the card and comment cursor, and every request
+ * frozen configuration (a `switch` or `adopt`), the card and comment cursor, and every request
  * applied meanwhile, plus this reset's own answer.
  */
 function carried(
@@ -137,7 +137,7 @@ function carried(
   const state = structuredClone(base);
   if (live.control) state.control = live.control;
   else delete state.control;
-  if (live.provider) state.provider = live.provider;
+  if (live.frozen) state.frozen = live.frozen;
   const kept = live.modules.github as GitHubModule | undefined;
   const card = base.modules.github as GitHubModule | undefined;
   if (kept)
@@ -170,7 +170,7 @@ function carried(
  * must be newer than when this run was queued (the card's queue time), and
  * with no queue time a plan comment refuses with `plan_unreadable`. An
  * Objective Factory has no state or plan comment for needs a card that is
- * queued. The operator's own choices (pause or drain, a provider switch,
+ * queued. The operator's own choices (pause or drain, a switch or adopt,
  * the card and the comment cursor) are taken from the live record when the
  * rebuild lands (`carried`).
  *
@@ -237,7 +237,7 @@ export async function rebuildState(
       ? undefined
       : planned;
 
-  const state = newObjective(issue, new Date(requestedAt), record.provider);
+  const state = newObjective(issue, new Date(requestedAt), record.frozen);
   if (record.startedAt) state.startedAt = record.startedAt;
   if (card)
     state.modules.github = {

@@ -1,10 +1,10 @@
-import { isDeepStrictEqual } from "node:util";
 import { crashPoint } from "./crash.js";
 import type { RunLog } from "./log.js";
-import type { ProviderConfig } from "./providers/config.js";
+import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
 import {
   type Answer,
+  type Frozen,
   type Hold,
   type ObjectiveState,
   type ObjectiveStatus,
@@ -97,19 +97,18 @@ export type HoldScope = "item" | "objective";
 
 /**
  * Providers `switch` can move to: every other configured one, and the
- * current one when its configured settings changed since they were frozen
- * (a model fixed in the configuration, then the service restarted). The
- * one rule for what a hold offers and what the engine accepts.
+ * current one when the configuration changed since it was frozen (a model
+ * fixed in the configuration, then the service restarted). The one rule
+ * for what a hold offers and what the engine accepts.
  */
 export function switchTargets(
-  current: ObjectiveState["provider"],
-  providers: Readonly<Record<string, ProviderConfig>> | undefined,
+  current: Frozen | undefined,
+  freezable: Workflow["freezable"],
 ): string[] {
-  return Object.entries(providers ?? {})
+  return Object.entries(freezable ?? {})
     .filter(
-      ([name, settings]) =>
-        name !== current?.name ||
-        !isDeepStrictEqual(settings, current.settings),
+      ([name, frozen]) =>
+        name !== current?.provider || frozen.digest !== current.digest,
     )
     .map(([name]) => name);
 }
@@ -157,10 +156,10 @@ export interface Workflow {
   /** The status of a state that isn't holding or terminal. */
   status(state: ObjectiveState): ObjectiveStatus;
   /**
-   * The named providers configured, with their settings as an Objective
-   * freezes them, for the `switch NAME` answer to a usage limit.
+   * The configuration as an Objective freezes it now, per configured
+   * provider, for the `switch NAME` and `adopt` answers.
    */
-  readonly providers?: Readonly<Record<string, ProviderConfig>>;
+  readonly freezable?: Readonly<Record<string, FrozenConfig>>;
   /**
    * The Work Items whose questions also stop `item` although it can run
    * before they settle: the native-stack layers below it. (A dependency's
@@ -258,6 +257,12 @@ const ERROR_ANSWERS = ["retry", "cancel"];
 /** Answers the engine applies itself, for its own wait questions. */
 const WAIT = "wait";
 const SWITCH = "switch";
+const ADOPT = "adopt";
+/**
+ * The configuration digest the open `adopt` question names (`state.kept`,
+ * set by the question's step): `adopt` freezes only that one.
+ */
+export const ADOPTS = "config:adopts";
 
 interface Running {
   token: number;
@@ -902,23 +907,41 @@ export class ObjectiveRunner {
         "invalid_answer",
         `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`,
       );
-    let provider: string | undefined;
+    let frozen: Frozen | undefined;
     if (answer === SWITCH) {
       const others = this.otherProviders();
-      provider =
+      const provider =
         text?.trim().split(/\s+/)[0] ||
         (others.length === 1 ? others[0] : undefined);
-      if (
-        !provider ||
-        !this.workflow.providers?.[provider] ||
-        !others.includes(provider)
-      )
+      const live = provider && this.workflow.freezable?.[provider];
+      if (!provider || !live || !others.includes(provider))
         return refused(
           "invalid_answer",
           others.length
             ? `Name the provider to switch to: \`${SWITCH} NAME\`, one of ${others.join(", ")}.`
-            : "No other provider is configured, and this one's settings are unchanged, so there is nothing to switch to.",
+            : "No other provider is configured, and this one's configuration is unchanged, so there is nothing to switch to.",
         );
+      frozen = { ...structuredClone(live), provider, selectedBy: "switch" };
+    } else if (answer === ADOPT) {
+      const current = this.state.frozen;
+      const live = current && this.workflow.freezable?.[current.provider];
+      if (!current || !live)
+        return refused(
+          "invalid_answer",
+          `This Objective's provider "${current?.provider}" isn't configured, so there is nothing to adopt. Answers: ${hold.answers.join(", ")}.`,
+        );
+      if (live.digest !== this.state.kept[ADOPTS]) {
+        // The configuration changed again after the question named it:
+        // its step asks again, naming the changes as they are now.
+        this.close(hold);
+        delete this.state.kept[ADOPTS];
+        this.settle();
+        return refused(
+          "stale_question",
+          `#${issue}'s configuration changed again after question ${hold.id} named it, so adopt wasn't applied; the question is asked again with the current changes.`,
+        );
+      }
+      frozen = { ...current, ...structuredClone(live) };
     }
     const retry = this.state.retries[hold.step];
     this.close(hold);
@@ -927,17 +950,16 @@ export class ObjectiveRunner {
       for (const other of Object.values(this.state.retries))
         if (other === retry || sameLimit(retry, other)) this.grant(other);
     } else {
-      if (provider) {
-        // The Objective's frozen provider changes for the rest of its run,
-        // and every step waiting on a provider's limit runs now, on it.
-        this.state.provider = {
-          name: provider,
-          selectedBy: "switch",
-          settings: structuredClone(this.workflow.providers![provider]!),
-        };
-        for (const [key, other] of Object.entries(this.state.retries))
-          if (other.wait?.kind === "reset" && other.wait.provider)
-            delete this.state.retries[key];
+      if (frozen) {
+        // The Objective runs on this configuration for the rest of its
+        // run; after a switch, every step waiting on a provider's limit
+        // runs now, on the new provider.
+        this.state.frozen = frozen;
+        delete this.state.kept[ADOPTS];
+        if (answer === SWITCH)
+          for (const [key, other] of Object.entries(this.state.retries))
+            if (other.wait?.kind === "reset" && other.wait.provider)
+              delete this.state.retries[key];
       } else
         this.state.answers[hold.step] = {
           holdId: hold.id,
@@ -998,7 +1020,7 @@ export class ObjectiveRunner {
   }
 
   private otherProviders(): string[] {
-    return switchTargets(this.state.provider, this.workflow.providers);
+    return switchTargets(this.state.frozen, this.workflow.freezable);
   }
 
   /**

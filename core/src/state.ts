@@ -13,15 +13,15 @@ import {
 import { join } from "node:path";
 import { crashPoint } from "./crash.js";
 import type { HoldScope } from "./engine.js";
-import type { ProviderConfig } from "./providers/config.js";
+import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
 
 /**
- * 2: open questions are a list (`holds`), saved ones a map (`asking`).
+ * 3: one frozen configuration (`frozen`) in place of the frozen provider.
  * Another version is unreadable, with no migration; `factory reset`
  * rebuilds it from GitHub (reset.ts), with no open question.
  */
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 
 export type ObjectiveStatus =
   | "checking"
@@ -114,13 +114,16 @@ export interface PendingQuestion {
   scope?: HoldScope;
 }
 
-/** The provider an Objective was admitted with, kept for its whole run. */
-export interface FrozenProvider {
-  name: string;
-  /** Why: the configured default, `serve --provider`, or the operator's `switch` answer to a usage limit. */
+/**
+ * The configuration an Objective runs with, frozen at admission
+ * (CORE.md#Frozen configuration): its provider, with that provider's
+ * resolved settings, and every other key but the operational ones
+ * (providers/selection.ts OPERATIONAL). A `switch` or `adopt` answer freezes it again.
+ */
+export interface Frozen extends FrozenConfig {
+  provider: string;
+  /** Why this provider: the configured default, `serve --provider`, or the operator's `switch` answer. */
   selectedBy: "defaultProvider" | "--provider" | "switch";
-  /** The provider's planner, models and worker as they were at admission. */
-  settings: ProviderConfig;
 }
 
 export interface ObjectiveState {
@@ -128,8 +131,8 @@ export interface ObjectiveState {
   issue: number;
   /** `holding` while any question is open. */
   status: ObjectiveStatus;
-  /** Frozen at admission; absent only for a record that never ran. */
-  provider?: FrozenProvider;
+  /** Frozen at admission; absent only without configuration. */
+  frozen?: Frozen;
   /** Open questions, oldest first: at most one for the Objective and one per Work Item. */
   holds: Hold[];
   /**
@@ -187,13 +190,13 @@ export interface ObjectiveState {
 export function newObjective(
   issue: number,
   now: Date,
-  provider?: FrozenProvider,
+  frozen?: Frozen,
 ): ObjectiveState {
   return {
     version: STATE_VERSION,
     issue,
     status: "checking",
-    ...(provider ? { provider } : {}),
+    ...(frozen ? { frozen } : {}),
     holds: [],
     answers: {},
     retries: {},

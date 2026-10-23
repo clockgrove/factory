@@ -83,7 +83,7 @@ function seedDone(inst, issue) {
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 2,
+      version: 3,
       issue,
       status: "done",
       holds: [],

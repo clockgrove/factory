@@ -21,8 +21,10 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
+import { loadConfig } from "../dist/config.js";
 import { checkObjective } from "../dist/objective.js";
 import { finalCommands, sectionText } from "../dist/planning/facts.js";
+import { freezeConfig } from "../dist/providers/selection.js";
 import { readShown, shownDigest } from "../dist/shown.js";
 import { declarationProblems } from "../dist/validate.js";
 
@@ -121,24 +123,34 @@ function status(inst) {
   return JSON.parse(cli(inst, "status", "--json").out);
 }
 
+/** The configuration an Objective admitted on `provider` freezes; none without a configuration. */
+function frozen(inst, provider = "codex") {
+  if (!inst.env.FACTORY_CONFIG) return undefined;
+  const saved = process.env.FACTORY_CONFIG;
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  try {
+    const config = loadConfig(REPO);
+    return {
+      ...freezeConfig(config, provider),
+      provider,
+      selectedBy: "defaultProvider",
+    };
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_CONFIG;
+    else process.env.FACTORY_CONFIG = saved;
+  }
+}
+
 function seed(inst, issue, status = "checking", fields = {}) {
   mkdirSync(inst.objectives, { recursive: true });
   const now = new Date().toISOString();
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 2,
+      version: 3,
       issue,
       status,
-      // The provider a configuration without `providers` freezes.
-      provider: {
-        name: "codex",
-        selectedBy: "defaultProvider",
-        settings: {
-          planner: "codex",
-          worker: { kind: "codex", network: "off" },
-        },
-      },
+      frozen: frozen(inst),
       holds: [],
       answers: {},
       retries: {},
@@ -965,10 +977,65 @@ test("switch moves an Objective held on a usage limit to the named provider", as
     Object.values(state.retries).every((retry) => !retry.wait),
     "every step on the limit runs now",
   );
-  assert.equal(state.provider.name, "claude");
-  assert.equal(state.provider.selectedBy, "switch");
-  assert.equal(state.provider.settings.planner, "claude");
+  assert.equal(state.frozen.provider, "claude");
+  assert.equal(state.frozen.selectedBy, "switch");
+  assert.equal(state.frozen.config.provider.planner, "claude");
   assert.equal(cli(inst, "cancel", "41").code, 0);
+  await stopped(service);
+});
+
+test("a changed configuration holds once, naming the frozen keys; adopt re-freezes only what it named", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  seed(inst, 44);
+  const before = stateOf(inst, 44).frozen.digest;
+  // One frozen key and two operational ones change under the Objective.
+  const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+  config.planning = { revisions: 1 };
+  config.queue.pollSeconds = 7;
+  config.execution = { workers: 1 };
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  const first = serve(inst);
+  await until(() => stateOf(inst, 44).holds.length > 0, "the question");
+  const [stale] = stateOf(inst, 44).holds;
+  assert.equal(stale.step, "config");
+  assert.deepEqual(stale.answers, ["adopt", "cancel"]);
+  assert.match(
+    stale.question,
+    /changed since this Objective froze it .*: planning\.revisions\./,
+  );
+  assert.doesNotMatch(stale.question, /pollSeconds|workers/);
+  await stopped(first);
+  // A second edit while the question is open: adopt never freezes a
+  // configuration the question didn't name, and the question is asked again.
+  config.execution.repairs = 2;
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  const service = serve(inst);
+  await until(() => status(inst).service === "running", "service");
+  const late = cli(inst, "answer", "44", "adopt", "--question", stale.id);
+  assert.equal(late.code, 1);
+  assert.equal(refusal(late), "stale_question");
+  await until(
+    () => stateOf(inst, 44).holds.some((open) => open.id !== stale.id),
+    "the question asked again",
+  );
+  const [asked] = stateOf(inst, 44).holds;
+  assert.match(asked.question, /execution\.repairs, planning\.revisions\./);
+  assert.equal(stateOf(inst, 44).frozen.digest, before);
+  assert.equal(
+    cli(inst, "answer", "44", "adopt", "--question", asked.id).code,
+    0,
+  );
+  const state = stateOf(inst, 44);
+  assert.notEqual(state.frozen.digest, before);
+  assert.equal(state.frozen.config.planning.revisions, 1);
+  assert.equal(state.frozen.config.execution.repairs, 2);
+  await until(
+    () => stateOf(inst, 44).done.check || stateOf(inst, 44).retries.check,
+    "the check runs on the adopted configuration",
+  );
+  assert.ok(stateOf(inst, 44).holds.every((open) => open.step !== "config"));
+  assert.equal(cli(inst, "cancel", "44").code, 0);
   await stopped(service);
 });
 
@@ -1281,7 +1348,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
       status: () => "building",
       // b is the native-stack layer above a.
       upstream: (_, item) => (item === "b" ? ["a"] : []),
-      providers: { claude: {} },
+      freezable: { claude: { digest: "c", config: {} } },
     },
     mkdtempSync(join(tmpdir(), "factory-defer-")),
     { write() {} },
@@ -2142,7 +2209,10 @@ test("status shows times in the display zone and redacts named secrets", () => {
   const text = cli(inst, "status").out;
   assert.match(text, /retries at 2026-01-01 09:30:00 GMT\+9/);
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
-  assert.match(text, /Provider: codex \(selectedBy: defaultProvider\)/);
+  assert.match(
+    text,
+    /Provider: codex \(selectedBy: defaultProvider\); configuration [0-9a-f]{12}/,
+  );
   assert.doesNotMatch(text, /s3cret/);
   assert.match(text, /\[REDACTED\]/);
   const json = cli(inst, "status", "--json").out;
@@ -2154,8 +2224,9 @@ test("status shows times in the display zone and redacts named secrets", () => {
     "JSON stays ISO",
   );
   assert.deepEqual(row.flakyRerun, [{ item: "a", command: "npm test" }]);
-  assert.equal(row.provider.name, "codex");
-  assert.equal(row.provider.selectedBy, "defaultProvider");
+  assert.equal(row.frozen.provider, "codex");
+  assert.equal(row.frozen.selectedBy, "defaultProvider");
+  assert.match(row.frozen.digest, /^[0-9a-f]{64}$/);
   inst.env.FACTORY_DISPLAY_TIMEZONE = "UTC";
   assert.match(cli(inst, "status").out, /retries at 2026-01-01 00:30:00 UTC/);
 });

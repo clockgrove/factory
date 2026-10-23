@@ -44,6 +44,7 @@ export interface ClaudePlannerOptions extends PlannerModels<ClaudeEffort> {
 export const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
 export const DEFAULT_CLAUDE_MODELS: ClaudePlannerOptions = {
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   planner: { model: "claude-opus-5-5", effort: "medium" },
   reviewer: { model: "claude-opus-5-5", effort: "medium" },
   reviewEffort: { "graph-review": "high", "result-review": "high" },

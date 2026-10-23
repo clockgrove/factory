@@ -14,11 +14,12 @@ import { join } from "node:path";
 import { crashPoint } from "./crash.js";
 import type { HoldScope } from "./engine.js";
 import type { ProviderConfig } from "./providers/config.js";
+import type { QueueMode, RefusalCode } from "./requests.js";
 
 /**
  * 2: open questions are a list (`holds`), saved ones a map (`asking`).
  * Another version is unreadable, with no migration; `factory reset`
- * (#1775) must rebuild `holds`.
+ * rebuilds it from GitHub (reset.ts), with no open question.
  */
 const STATE_VERSION = 2;
 
@@ -28,6 +29,8 @@ export type ObjectiveStatus =
   | "building"
   | "finishing"
   | "holding"
+  /** `factory reset`: rebuilding the state from GitHub (reset.ts). */
+  | "resetting"
   | "done"
   | "failed"
   | "cancelled";
@@ -165,7 +168,13 @@ export interface ObjectiveState {
    */
   withdrawing?: boolean;
   /** The latest applied requests and their results, so a request is never applied twice. */
-  appliedRequests: { id: string; message: string }[];
+  appliedRequests: { id: string; message: string; code?: RefusalCode }[];
+  /**
+   * The operator's pause or drain (`factory pause|drain N`), until
+   * `factory resume N`. Paused: no step starts. Draining: no Work Item
+   * starts that hasn't started; started ones carry on.
+   */
+  control?: { mode: "paused" | "draining"; by: string; at: string };
   /** Per-capability data. Modules own their key. */
   modules: Record<string, unknown>;
   updatedAt: string;
@@ -252,6 +261,43 @@ function writeWhole(
   renameSync(temporary, path);
   syncDirectory(dir);
   if (point) crashPoint(`${point}:saved`);
+}
+
+/** The queue-wide mode (`factory queue pause|drain|resume`), saved in the installation root. */
+export interface QueueControl {
+  mode: QueueMode;
+  by?: string;
+  at?: string;
+}
+
+const QUEUE_FILE = "queue.json";
+
+/** The saved queue mode; running when none was saved or the file can't be read. */
+export function loadQueueControl(root: string): QueueControl {
+  try {
+    const saved = JSON.parse(
+      readFileSync(join(root, QUEUE_FILE), "utf8"),
+    ) as QueueControl;
+    if (["running", "paused", "draining"].includes(saved.mode)) return saved;
+  } catch {
+    // Never saved.
+  }
+  return { mode: "running" };
+}
+
+/** Save the queue mode whole: temporary file, fsync, rename. */
+export function saveQueueControl(root: string, control: QueueControl): void {
+  const path = join(root, QUEUE_FILE);
+  const temporary = `${path}.${process.pid}.tmp`;
+  const fd = openSync(temporary, "w", 0o600);
+  try {
+    writeSync(fd, `${JSON.stringify(control)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
+  syncDirectory(root);
 }
 
 /** Remove the Objective's state: it was dequeued before it started. */

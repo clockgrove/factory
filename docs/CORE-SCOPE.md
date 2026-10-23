@@ -11,17 +11,17 @@ Each entry is marked **ported**, **in progress**, **slice N**, or **replaced**. 
 3. One Work Item end to end: worktree, worker, validation, review, PR, CI, merge, final validation, final review and report. Also: origin-binding checks, flaky-check rerun, and detecting Objective edits after the plan is accepted (done 2026-10-22). Several Work Items at once and cancel cleanup came in from slice 4. Several Objectives at once (`maxActiveObjectives`, owned-path waits, host-wide limits) came in from slice 6. Moved on: predecessor blame and `requiredEnvironment` go to slice 5; refusing Factory's own repositories and checking origin before a fetch went to slice 7 (both ported 2026-10-23); worker settings in config go to slice 7; running execution profiles goes to slice 6.
 4. Delivery modes: native stacks and LFS assets. Also: scheduling by the plan's hints, and sharing worker notes with peers (done 2026-10-22). Came in from slice 6: Media AssetSets (capture, selection, binding), LFS upload and hydration, Objective source asset import, review artifacts and image review evidence.
 5. Operator surface:
-   - queue pause, resume and drain, plus per-Objective pause;
-   - `queue list`, `watch` and `status --issue`;
+   - queue pause, resume and drain, plus per-Objective pause (done, part A);
+   - `queue list` (done, part A), `watch` and `status --issue`;
    - `factory run N` (queues one Objective and follows it, with the old exit codes);
    - a deadline per Objective;
    - Objective dependencies through blocked-by;
    - Work Item issues, sub-issues and Live comments;
-   - stable refusal codes in JSON output;
+   - stable refusal codes in JSON output (done, part A);
    - binding CLI answers to the question they answer;
    - redaction and display time zone;
    - predecessor blame and `requiredEnvironment`;
-   - `factory reset`, and the `factory log` read command;
+   - `factory reset`, and the `factory log` read command (done, part A);
    - comparing Source files changed on the default branch after planning;
    - configurable step deadlines.
 
@@ -91,12 +91,12 @@ Status words:
 
 - Background queue on a GitHub Project, read every queue.pollSeconds (30 s). Old: USER-GUIDE#Queue and background. **ported** (queue.ts, github-sync.ts). queue.ts reads the Project's item list, plus, from the issue side, the issues Factory knows (queued, running or unreadable) and the 20 most recently updated open issues, because the item list is a search index that lagged for minutes on a new Project (f#1767). Cost follows the Project and the active work, not the repository's open issues. A Project too large to read whole is a failed read, never a partial view.
 - `queue add` as explicit consent, with approval bound to the exact issue body; labels and cards never admit work. Old: USER-GUIDE#Queue. **replaced**: the operator sets the Project Status option to "queued". Consent is now "whoever can edit the Project" and is not tied to the body. See Contradictions. (Approved by Kirk 2026-10-22.)
-- `queue list` shows unqueued candidates and inert cards. Old: cli.ts queueCommand. **planned** (see Slices): core status lists only Objectives that have state.
+- `queue list` shows unqueued candidates and inert cards. Old: cli.ts queueCommand. **ported** (cli.ts queueCommand reads every open card with queue.ts readCards and classes each against its state: queued, a candidate (not queued, no unfinished run), or inert (queued before it finished, unreadable state, or held by a paused or draining queue), with the reason; `--json`).
 - `queue remove` withdraws an Objective and archives its card. Old: queueCommand. **replaced**: move Status out of "queued" before the Objective starts. After it starts, use cancel.
 - `queue sync`. Old: queueCommand. **replaced**: the 30 s poll.
 - Ordered queue. Old: order NUMBER field. **ported** (queue.ts queued: order field, then issue number).
-- `queue pause|resume|drain`, a queue-wide hold. Old: control card. **planned** (see Slices): CORE.md removes the control card and names no replacement.
-- Per-Objective `pause|drain|resume`, surviving restarts. Old: USER-GUIDE#Run. **planned** (see Slices).
+- `queue pause|resume|drain`, a queue-wide hold. Old: control card. **ported** (a `queue` request; state.ts saves the mode in `queue.json`, so it survives restarts; service.ts: pause admits nothing and starts no step, drain admits nothing new while admitted Objectives carry on, resume undoes both; cancel, answers, cleanup and a reset's rebuild always work). There is no control card.
+- Per-Objective `pause|drain|resume`, surviving restarts. Old: USER-GUIDE#Run. **ported** (`factory pause|drain|resume N`, saved in the state's `control`; service.ts `allowed`: paused starts no step and takes no slot, draining starts no Work Item that hasn't started as buildSteps counts it (work/steps.ts startedItems), while started ones, the check and the final steps carry on; an interrupted attempt still resumes).
 - `cancel` from every non-terminal state, under changed config, with no provider call. Old: LIFECYCLE#Invariants. **ported** (engine.ts, service.ts: a cancel request is applied even under a hold).
 - Cancel closes open Factory PRs and removes worktrees. Old: LIFECYCLE#Cancel exits. **ported** (work/steps.ts cancelCleanupStep: lists every branch under `factory/<issue>/` (github.ts branches), so PRs of an earlier plan close too, comments once by marker, closes each open PR, closes the issue as not planned, then removes every worktree and selection ref of the Objective). Running workers and sandboxed commands are killed with their process groups (sandbox.ts processGroups).
 - `cancel --provider NAME` for a stranded Objective. Old: LIFECYCLE#Cancel exits. **replaced**: cancel doesn't need a provider.
@@ -107,12 +107,12 @@ Status words:
 - A Project queue requires a current admission before a foreground run. Old: USER-GUIDE#Queue. **replaced**: there are no foreground runs.
 - Two hosts never consume the same admission. Old: USER-GUIDE#Queue. **dropped** (approved by Kirk 2026-10-22): there is only a per-host flock, and nothing stops two installations on one Project. CORE.md assumes one installation.
 - One control plane: the service applies CLI commands. Old: LIFECYCLE#Matrix. **ported** (requests.ts, service.ts).
-- Stable lifecycle refusal codes as JSON on stderr. Old: LIFECYCLE#Refusal codes. **planned** (see Slices): core prints prose. answer/cancel/retry return 0 or 1 plus a message.
+- Stable lifecycle refusal codes as JSON on stderr. Old: LIFECYCLE#Refusal codes. **ported** (requests.ts RefusalCode: the service returns a code with each refused request, engine.ts answers included, and the CLI prints `{"kind":"lifecycle-refusal","code":"..."}` on stderr, then the message; exit 1, or 2 for `usage`). The codes are new, for the new commands; the old owner, archive and handoff codes have no counterpart.
 - Upgrade by handoff (drain, safe-point handoff). Old: USER-GUIDE#Upgrade by handoff. **replaced**: stop, install, start. Crash-only restart continues from the last step.
 - Settle deadline: end steps are bounded. Old: LIFECYCLE#Settle deadline. **replaced** by per-step deadlines (engine.ts Step.deadlineMs).
-- Unknown or misplaced flags are refused with a fix hint. Old: src/cli-flags.ts assertKnownFlags. **planned** (see Slices): core cli.ts parse ignores unknown flags.
+- Unknown or misplaced flags are refused with a fix hint. Old: src/cli-flags.ts assertKnownFlags. **ported** (cli.ts parse, from the one command table: an unknown command or option, an option of another command, `--objective`, a missing value or an extra argument is refused with how to write it; options may come before the command; `--help`, `-h` and a bare `factory` show help).
 - Queuing a finished Objective again runs it again: the old run is stopped (its steps aborted, its saves and GitHub jobs detached) before the new one is made, and the new run closes the old run's open PRs and removes its worktrees before it checks the issue. A closed issue is reopened after its built-in Project Status moves off Done, and the check holds if it was closed again. (new) **ported** (service.ts admit, engine.ts stop, work/steps.ts rerunCleanupStep, queue.ts moveStatusOffDone).
-- `factory help` lists every command and option. Old: cli.ts help. **ported** for the 4 core commands (cli.ts USAGE). The rest is **slice 6**, as commands are ported.
+- `factory help` lists every command and option. Old: cli.ts help. **ported** for every core command, setup and dream included (cli.ts USAGE is made from the same table that checks options). Commands still to come are **slice 6**, as they are ported.
 - `--config PATH` on every command, with XDG config and state roots. Old: cli.ts. **replaced**: FACTORY_CONFIG and `--repo`. Config lives in ~/.config/factory (config.ts), not XDG_CONFIG_HOME/clockgrove-factory. Paths are in paths.ts.
 
 ## Planning
@@ -192,7 +192,7 @@ Status words:
 - Supported dependency bootstrap (npm ci / pnpm frozen with --ignore-scripts) run first; pinned package scripts. Old: USER-GUIDE#Run. **ported** (facts.ts packageBootstrap; validate.ts runs the bootstrap first and pins package scripts to the base).
 - finalValidation.requiredCommands. Old: USER-GUIDE#Run. **ported** (the check refuses one with no authority at base, facts.ts objectiveCommandProblems; the plan records it in finalCommands; work/steps.ts finalStep runs them).
 - finalValidation.ciOnlyCommands, never run locally and refused in Objectives. Old: VALIDATION-ENVIRONMENT.md. **ported** (the check refuses them in Acceptance; facts.ts leaves them out of authorized commands and `allow`; checks.ts ci-only refuses them in a plan).
-- Flaky check: one fresh rerun when worker Validate passed, then flakyRerun shown in status and the PR. Old: delivery/description.ts:95. **in progress**: the rerun is ported, tied to the exact tree (work/steps.ts validateStep), and the PR body names it (delivery.ts). Missing: status doesn't show it. That is **slice 5**.
+- Flaky check: one fresh rerun when worker Validate passed, then flakyRerun shown in status and the PR. Old: delivery/description.ts:95. **ported**: the rerun is tied to the exact tree (work/steps.ts validateStep), the PR body names it (delivery.ts), and status shows it (cli.ts `flakyRerun`).
 - Final validation of the integrated tree, re-run when other Objectives merged first. Old: USER-GUIDE#Run. **ported** (work/steps.ts finalStep validates the default branch head after the last merge, so other Objectives' merges are in it, and holds if one of this Objective's merges is no longer on the head).
 - Independent result review per Work Item against criteria, contract, design checklist and engineering standard, with base/ and changes/ roots. Old: PLANNING#Engineering standard. **ported** (review/result.ts).
 - Result review knows the item's delivery position and its dependencies' results: a native-stack layer's number, the stack's size and the layer below (published, not merged), and a "Completed dependency results" record for every transitive dependency (result commit and tree, validation commands, PR, delivered head, merge commit, and whether the reviewed base contains it). Old: src/result-evidence.ts:111-120, :2431-2570. **ported** (work/steps.ts reviewStep and dependencyResults; review/result.ts controllerRows).
@@ -234,7 +234,7 @@ Status words:
 - Factory reads no human comment as input. Old: USER-GUIDE#GitHub progress. **replaced and reversed**: `/factory <answer>` comments from users with write access (github-sync.ts). See Contradictions.
 - Close the Work Item issue on merge and the Objective on sealed acceptance; cancel closes as not_planned; duplicates are closed. Old: github.ts:918-1015, completion.ts. **in progress**: the report closes the Objective as completed after final review passes (work/steps.ts reportStep), and cancel closes it as not planned (cancelCleanupStep). Work Item issue closing is **planned** (see Slices).
 - Create the role labels and the native issue types (Feature, Task); priority inheritance. Old: github.ts:1242. **planned** (see Slices).
-- Display times in the host zone, with FACTORY_DISPLAY_TIMEZONE. Old: USER-GUIDE#GitHub progress. **planned** (see Slices): core prints ISO times.
+- Display times in the host zone, with FACTORY_DISPLAY_TIMEZONE. Old: USER-GUIDE#GitHub progress. **in progress**: status and log text show `YYYY-MM-DD HH:MM:SS ZONE` (display.ts displayTime); JSON keeps ISO times. Times in GitHub comments are still ISO: **slice 5** (part B, with the live status comment).
 - A reminder comment after a hold is open 24 h (new). **slice 5**.
 
 ## Holds and decisions
@@ -247,7 +247,7 @@ Status words:
 - The director skill asks holds with AskUserQuestion, recommended answer first. Old: skills/director. **slice 5** (CORE.md#Holds; the skill is not rewritten yet).
 - Autonomy allowances (planningRevisions 1, implementationRepairs 6, resultRereviews 1), perPath caps, repairClasses; snapshotted, and running out stops for a decision. Old: src/repair-policy.ts. **in progress**: planningRevisions is ported as planning.revisions (config.ts, steps.ts), and the repair budget as config.ts execution.repairs (6 per Work Item by default, then a hold where `retry` allows one more). resultRereviews, perPath, repairClasses and snapshotting are **planned** (see Slices).
 - autonomy.requiredEnvironment secrets checked before planning. Old: USER-GUIDE#Autonomy limits. **slice 5** (moved from slice 3; nothing in core reads it).
-- policy.allowedSecretNames passed by name and redacted from output. Old: config.ts:342. **in progress**: the setting and the plumbing are ported (config.ts policy.allowedSecretNames; worktree.ts workerEnvironment; codex-worker.ts and claude-worker.ts pass the named variables). Every text Factory writes to GitHub (comments, PR bodies and titles, holds, reports) is redacted at one choke point (github.ts `redacting`), with Dream input and the Codex worker's reports, of one secret set config.ts derives once: the named values plus each managed provider's credential (apiKeyEnv, credentialEnv), which worker shells don't see. Missing: local status and diagnostics output don't redact; **slice 5**.
+- policy.allowedSecretNames passed by name and redacted from output. Old: config.ts:342. **in progress**: the setting and the plumbing are ported (config.ts policy.allowedSecretNames; worktree.ts workerEnvironment; codex-worker.ts and claude-worker.ts pass the named variables). Every text Factory writes to GitHub (comments, PR bodies and titles, holds, reports) is redacted at one choke point (github.ts `redacting`), with Dream input and the Codex worker's reports, of one secret set config.ts derives once: the named values plus each managed provider's credential (apiKeyEnv, credentialEnv), which worker shells don't see. Local status and log output are redacted too, every string before it is formatted (display.ts redactDeep). Diagnostics are **slice 6**.
 - Predecessor blame: a failure in a merged predecessor's file stops with a decision and spends no repair. Old: USER-GUIDE#Decisions. **slice 5** (moved from slice 3). validate.ts uses the predecessor only to pin package scripts; a failure is always the item's repair.
 - `fail` holds with retry, replan and cancel (new). **slice 5**.
 
@@ -264,11 +264,11 @@ Status words:
 - A repair stops the running steps it clears, so a late outcome of cleared work is never saved. (new) **ported** (engine.ts abortRunning).
 - `repair --proposal FILE` for an operator-diagnosed correction. Old: USER-GUIDE#Decisions. **slice 5** (a hold answer with text) or **planned** (see Slices): CORE.md has no file input.
 - Usage-limit and transient errors retry with backoff. Old: USER-GUIDE#Decisions. **ported** (engine.ts retry classes every wait by its cause, CORE.md#Waits; github.ts githubOutcome classes GitHub errors the same way for every step).
-- Git checkpoints to a private archive (gitPersistence), with `persistence status|sync|inspect|maintain`. Old: USER-GUIDE#Git checkpoints. **replaced**: state is rebuilt from GitHub (`factory reset`, **slice 5**, not in cli.ts). Learning and receipt archiving: dropped (approved by Kirk 2026-10-22).
-- Restore on another machine (`persistence restore`, `reconcile`). Old: USER-GUIDE#Restore. **replaced** by `factory reset --objective N`, which is not built yet.
+- Git checkpoints to a private archive (gitPersistence), with `persistence status|sync|inspect|maintain`. Old: USER-GUIDE#Git checkpoints. **replaced**: state is rebuilt from GitHub (`factory reset N`, reset.ts). Learning and receipt archiving: dropped (approved by Kirk 2026-10-22).
+- Restore on another machine (`persistence restore`, `reconcile`). Old: USER-GUIDE#Restore. **replaced** by `factory reset N` (reset.ts, an engine step: status `resetting`, one `rebuild` step that replaces the record): the plan from Factory's own data block in the plan comment and its continuations, merged Work Items from PRs by head branch, done from the report, cancelled from a closed issue. Each find is bound to the current run and plan (Factory's own login; the run in PR bodies, delivery.ts, and the report marker; PRs opened after the plan comment's last write, newest first; a report newer than it). Unmerged items start fresh (kept `rebase`). Pause or drain, a provider switch, the card and the comment cursor carry over. Refusals: `no_factory_state`, `queue_not_running`, `plan_unreadable` (the old state stands again). Crash points `reset:recorded` (CI) and `reset:answered` (drill).
 - An archive bound being exceeded stops with exit 2. Old: USER-GUIDE#Git checkpoints. **replaced**: there is no archive. Log retention is 20 runs and 2 GB (log.ts rotateLogs).
 - Retention of finished Objectives, with worktrees and logs reclaimed. Old: USER-GUIDE#Retention. **ported** (log.ts for logs; work/steps.ts reportStep and cancelCleanupStep remove the worktrees). A finished Objective leaves the service's memory once its cleanup is done, its final Status and replies are written (retried with backoff, across restarts) and its settled observation is recorded; its file then moves to objectives/finished/, which startup never reads. Status, a request or a re-queue reads it from there (state.ts finishState and findState, service.ts).
-- An incompatible state version is refused with guidance. Old: USER-GUIDE#Queue. **in progress**: an unreadable or incompatible state holds with cancel (state.ts STATE_VERSION, service.ts). The hold is posted on the issue, Status shows "Needs you", and `/factory cancel` comments are read for it (github-sync.ts); nothing overwrites the file but that cancel. The CORE.md `reset` answer is **slice 5**.
+- An incompatible state version is refused with guidance. Old: USER-GUIDE#Queue. **ported**: an unreadable or incompatible state holds with `reset` and `cancel` (state.ts STATE_VERSION, service.ts). The hold is posted on the issue, Status shows "Needs you", and `/factory reset` and `/factory cancel` comments are read for it (github-sync.ts); nothing overwrites the file but those answers.
 
 ## Learning and knowledge
 
@@ -279,11 +279,11 @@ Status words:
 ## Telemetry and diagnostics
 
 - `status` without an Objective shows service, queue, active Objectives and holds. Old: cli.ts serviceStatus. **ported** (cli.ts status: service running or stopped, holds, waits).
-- `status --objective N [--json]`: headline phase, the exact Next command, a Work Item table, the provider line, plan, graph, allowances and repairs. Old: USER-GUIDE#Status. **ported** partly (cli.ts status ISSUE). The rest is **slice 5**.
+- `status --objective N [--json]`: headline phase, the exact Next command, a Work Item table, the provider line, plan, graph, allowances and repairs. Old: USER-GUIDE#Status. **in progress**: cli.ts status ISSUE shows the open questions (`holds[]`, each with its id) and the exact next command (`nextAction`), waits ("Waiting on …", a slot, another Objective's paths), running steps, flaky reruns, the frozen provider and what selected it (`provider.selectedBy`), the crash loop, pause and drain, a reset and the last log event. The Work Item table, plan, graph, allowances and repairs are **slice 5** (part B).
 - `status --issue N|URL` resolves a Work Item issue. Old: cli.ts statusForIssue. **planned** (see Slices).
 - Status names a command only while Factory would accept it; prerequisiteGuidance. Old: USER-GUIDE#Status. **ported** for holds. prerequisiteGuidance is **planned** (see Slices).
 - `watch` live view (liveness, turns, context, compactions, no-progress, last 8 tool calls). Old: cli.ts watchObjective. **planned** (see Slices): CORE.md names `log`, not watch.
-- `factory log` reads an Objective's run log, and `status` reads the end of it (CORE.md#Process model). (new) **slice 5**: cli.ts has no `log` command, and status reads only the state file.
+- `factory log` reads an Objective's run log, and `status` reads the end of it (CORE.md#Process model). (new) **ported** (cli.ts `log ISSUE [--tail N] [--follow] [--json]`; log.ts readLog reads only the end of each run file, and follow carries on from the byte offset the tail read to; status shows the last event).
 - `diagnostics` timeline, `--follow`, `--logs ITEM`, `--summary`. Old: src/diagnostics-cli.ts. **slice 6** (Observers). The run log is **ported** (log.ts).
 - Content capture (prompts and responses, 0600, byte cap, retainInRecovery). Old: USER-GUIDE#Diagnostic capture. **slice 6**. CORE.md puts bodies in the run log directory.
 - Token and cache accounting per role and phase; native Codex telemetry. Old: same. **slice 6**.

@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { crashPoint } from "./crash.js";
 import type { RunLog } from "./log.js";
 import type { ProviderConfig } from "./providers/config.js";
+import { type RequestResult, refused } from "./requests.js";
 import {
   type Answer,
   type Hold,
@@ -51,6 +52,12 @@ export type Outcome =
     }
   /** The step can't succeed as planned. */
   | { kind: "fail"; reason: string }
+  /**
+   * The whole state is replaced (`factory reset`'s rebuild step, reset.ts):
+   * the rebuilt Objective, or, with `withdraw`, the record is withdrawn as
+   * if never admitted (service.ts). Only that step returns it.
+   */
+  | { kind: "replace"; state: ObjectiveState; withdraw?: boolean }
   /**
    * The work is wrong (validation, review or CI refused it): clear `clear`
    * from the finished steps and run `target` again with the finding, within
@@ -346,7 +353,7 @@ export class ObjectiveRunner {
    * that is no longer next is dropped. Any other step waits while a
    * question that stops it is open (`heldBy`).
    */
-  tick(): void {
+  tick(allow: (key: string) => boolean = () => true): void {
     const steps = this.workflow.steps(this.state);
     const stale = Object.keys(this.state.attempts).filter(
       (key) => !this.running.has(key) && !steps.some((s) => s.key === key),
@@ -375,6 +382,9 @@ export class ObjectiveRunner {
         continue;
       }
       if (this.running.size >= this.limits.concurrency) return;
+      // An operator's pause or drain (service.ts `allowed`) starts nothing
+      // new; an interrupted attempt still resumes.
+      if (!this.state.attempts[step.key] && !allow(step.key)) continue;
       if (this.state.attempts[step.key]) {
         if (now < this.run.resumeAt) continue;
       } else if (this.heldBy(step.key)) continue;
@@ -494,6 +504,15 @@ export class ObjectiveRunner {
   }
 
   private applyChange(key: string, outcome: Outcome): void {
+    if (outcome.kind === "replace") {
+      // The rebuilt record stands whole; the steps of the one it replaces
+      // are gone with it.
+      this.abortRunning(Object.keys(this.state.attempts));
+      this.state = structuredClone(outcome.state);
+      this.state.finishedRun = this.run.id;
+      if (outcome.withdraw) this.state.withdrawing = true;
+      return;
+    }
     const state = this.state;
     const now = this.now();
     delete state.attempts[key];
@@ -839,27 +858,41 @@ export class ObjectiveRunner {
     by: string,
     writtenAt?: string,
     question?: string,
-  ): string | null {
+  ): RequestResult | null {
     if (answer === "cancel") return this.cancel(by);
+    const finished = this.finishedRefusal();
+    if (finished) return finished;
     const issue = this.state.issue;
     const holds = this.state.holds;
     if (!holds.length)
       return question === undefined
-        ? `#${issue} has no open question.`
-        : `#${issue}'s question ${question} was already answered, and no question is open now.`;
+        ? refused("no_open_question", `#${issue} has no open question.`)
+        : refused(
+            "stale_question",
+            `#${issue}'s question ${question} was already answered, and no question is open now.`,
+          );
     if (question === undefined) {
       const why = unboundRefusal(holds, this.state.lastShownAt, writtenAt);
       if (why)
-        return `That answer names no question, and ${why}, so it wasn't applied. ${openQuestions(issue, holds)}`;
+        return refused(
+          "question_required",
+          `That answer names no question, and ${why}, so it wasn't applied. ${openQuestions(issue, holds)}`,
+        );
     }
     const hold =
       question === undefined
         ? holds[0]!
         : holds.find((open) => open.id === question);
     if (!hold)
-      return `#${issue}'s question ${question} isn't open, so that answer wasn't applied. ${openQuestions(issue, holds)}`;
+      return refused(
+        "stale_question",
+        `#${issue}'s question ${question} isn't open, so that answer wasn't applied. ${openQuestions(issue, holds)}`,
+      );
     if (!hold.answers.includes(answer))
-      return `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`;
+      return refused(
+        "invalid_answer",
+        `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`,
+      );
     let provider: string | undefined;
     if (answer === SWITCH) {
       const others = this.otherProviders();
@@ -871,9 +904,12 @@ export class ObjectiveRunner {
         !this.workflow.providers?.[provider] ||
         !others.includes(provider)
       )
-        return others.length
-          ? `Name the provider to switch to: \`${SWITCH} NAME\`, one of ${others.join(", ")}.`
-          : "No other provider is configured, and this one's settings are unchanged, so there is nothing to switch to.";
+        return refused(
+          "invalid_answer",
+          others.length
+            ? `Name the provider to switch to: \`${SWITCH} NAME\`, one of ${others.join(", ")}.`
+            : "No other provider is configured, and this one's settings are unchanged, so there is nothing to switch to.",
+        );
     }
     const retry = this.state.retries[hold.step];
     this.close(hold);
@@ -980,11 +1016,10 @@ export class ObjectiveRunner {
    * Cancel at once: stop running steps and mark the Objective cancelled.
    * Cleanup steps follow. A finished Objective stays as it is.
    */
-  cancel(by: string): string | null {
-    const status = this.state.status;
-    if (status === "done" || status === "failed")
-      return `#${this.state.issue} has already finished (${status}).`;
-    if (status === "cancelled") return null;
+  cancel(by: string): RequestResult | null {
+    if (this.state.status === "cancelled") return null;
+    const finished = this.finishedRefusal();
+    if (finished) return finished;
     this.state.status = "cancelled";
     this.state.holds = [];
     this.state.attempts = {};
@@ -1009,24 +1044,46 @@ export class ObjectiveRunner {
    * run the waiting steps no open question stops now. A bare retry never
    * answers a question: while one stops every step, it is refused.
    */
-  retryNow(by: string, question?: string): string | null {
+  retryNow(by: string, question?: string): RequestResult | null {
+    const finished = this.finishedRefusal();
+    if (finished) return finished;
     const issue = this.state.issue;
     const holds = this.state.holds;
     if (question !== undefined) {
       const hold = holds.find((open) => open.id === question);
       if (hold && !hold.answers.includes("retry"))
-        return `#${issue}'s question ${hold.id} has no retry answer. Answers: ${hold.answers.join(", ")}.`;
+        return refused(
+          "invalid_answer",
+          `#${issue}'s question ${hold.id} has no retry answer. Answers: ${hold.answers.join(", ")}.`,
+        );
       return this.answer("retry", undefined, by, undefined, question);
     }
     if (holds.some((hold) => hold.item === undefined))
-      return `#${issue} has an open question that stops every step, so retry must name it. ${openQuestions(issue, holds)}`;
+      return refused(
+        "question_required",
+        `#${issue} has an open question that stops every step, so retry must name it. ${openQuestions(issue, holds)}`,
+      );
     const waiting = Object.entries(this.state.retries).filter(
       ([key]) => !this.heldBy(key),
     );
     if (holds.length && !waiting.length)
-      return `#${issue}'s waiting steps all wait on an open question, so retry must name it. ${openQuestions(issue, holds)}`;
+      return refused(
+        "question_required",
+        `#${issue}'s waiting steps all wait on an open question, so retry must name it. ${openQuestions(issue, holds)}`,
+      );
     for (const [, retry] of waiting) retry.nextAt = this.now().toISOString();
     return null;
+  }
+
+  /** The refusal for a finished Objective: only re-queuing runs it again. */
+  private finishedRefusal(): RequestResult | null {
+    const status = this.state.status;
+    return status === "done" || status === "failed"
+      ? refused(
+          "objective_finished",
+          `#${this.state.issue} has already finished (${status}).`,
+        )
+      : null;
   }
 
   private save(): void {

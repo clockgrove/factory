@@ -165,7 +165,9 @@ export interface PullRequest {
   number: number;
   state: "open" | "closed";
   merged?: boolean;
+  created_at?: string;
   merged_at?: string | null;
+  merge_commit_sha?: string | null;
   closed_at?: string | null;
   draft?: boolean;
   head: { ref: string; sha: string };
@@ -454,6 +456,30 @@ export class GitHub {
       throw new TransientError("GitHub GET /user: no login");
     this.self = user.login;
     return this.self;
+  }
+
+  /**
+   * Make sure the marked comment exists: found first (by Factory's own
+   * login), and posted only when it isn't there, so a post whose answer was
+   * lost is never repeated. It is never edited (see `upsertComment` for a
+   * comment kept current). `point` names the crash points before and after
+   * the post. Returns the comment as GitHub shows it, with its times.
+   */
+  async ensureComment(
+    issue: number,
+    marker: string,
+    body: string,
+    point: string,
+    signal?: AbortSignal,
+    /** Read comments from here on (a little before the comment was first due). */
+    since?: string,
+  ): Promise<IssueComment> {
+    const existing = await this.markedComment(issue, marker, since, signal);
+    if (existing) return existing;
+    crashPoint(`${point}:before`);
+    const posted = await this.postComment(issue, body, signal);
+    crashPoint(`${point}:after`);
+    return posted;
   }
 
   /**

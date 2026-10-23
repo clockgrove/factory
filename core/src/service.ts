@@ -13,6 +13,7 @@ import { crashPoint } from "./crash.js";
 import {
   DEFAULT_LIMITS,
   type EngineLimits,
+  itemOf,
   ObjectiveRunner,
   type ServiceRun,
   type Workflow,
@@ -29,25 +30,32 @@ import { pathsOverlap } from "./planning/graph.js";
 import { ACCEPTED_AT } from "./planning/steps.js";
 import type { Plan } from "./planning/types.js";
 import {
+  isCancel,
   pendingRequests,
+  type RequestResult,
+  refused,
   removeRequest,
   type StoredRequest,
 } from "./requests.js";
+import { RESET, type ResetRecord, resetRecord } from "./reset.js";
 import {
   type FrozenProvider,
   findState,
   finishState,
   listObjectives,
   listObservations,
+  loadQueueControl,
   newObjective,
   type ObjectiveState,
+  type QueueControl,
   removeState,
   runOf,
   saveObservation,
+  saveQueueControl,
   saveState,
   TERMINAL,
 } from "./state.js";
-import { built, RERUN } from "./work/steps.js";
+import { built, RERUN, startedItems } from "./work/steps.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 export interface ServeOptions {
@@ -63,6 +71,8 @@ export interface ServeOptions {
   provider?: FrozenProvider;
   /** Reads Objectives as they move; never changes them (knowledge records memory here). */
   observer?: StateObserver;
+  /** The workflow can rebuild a state from GitHub (`factory reset`, reset.ts): it has configuration. */
+  reset?: boolean;
 }
 
 /**
@@ -211,6 +221,10 @@ export async function serve(options: ServeOptions): Promise<number> {
   };
   /** Checked Objectives waiting for a slot, as of the last tick. */
   const waitingForSlot = new Set<number>();
+  /** Objectives waiting on an earlier Objective's paths, as of the last tick. */
+  const waitingOnPaths = new Map<number, number>();
+  /** `factory queue pause|drain|resume`, saved so it survives restarts. */
+  let queue = loadQueueControl(paths.root);
   const open = (state: ObjectiveState): ObjectiveRunner => {
     const runner = new ObjectiveRunner(
       state,
@@ -329,8 +343,14 @@ export async function serve(options: ServeOptions): Promise<number> {
       crashes: record.starts.length - 1,
       resumeAt: record.resumeAt,
     });
-  const heartbeat = (stopped = false): void =>
+  const heartbeat = (stopped = false): void => {
+    record.queue = queue;
+    record.waits = Object.fromEntries([
+      ...[...waitingForSlot].map((issue) => [issue, { slot: true as const }]),
+      ...[...waitingOnPaths].map(([issue, other]) => [issue, { paths: other }]),
+    ]);
     writeServiceRecord(paths.root, record, run, unreadable, stopped);
+  };
   // Saved before any hold below, so a crash in between never counts the
   // same death twice.
   heartbeat();
@@ -364,9 +384,9 @@ export async function serve(options: ServeOptions): Promise<number> {
         removeRequest(file);
         continue;
       }
-      let message: string;
+      let result: RequestResult | undefined;
       try {
-        message = applyRequest(stored);
+        result = applyRequest(stored);
       } catch (error) {
         // Not saved: the request file stays and is tried again next tick.
         log.write(stored.request.issue, {
@@ -376,22 +396,40 @@ export async function serve(options: ServeOptions): Promise<number> {
         });
         continue;
       }
-      writeResult(paths.requests, stored.id, message);
+      // A reset that is rebuilding: answered when the rebuild lands.
+      if (!result) continue;
+      writeResult(paths.requests, stored.id, result);
       crashPoint("requests:applied");
       removeRequest(file);
     }
   };
 
-  const applyRequest = (stored: StoredRequest): string => {
+  /** The result; undefined while a reset rebuilds (or its state can't be read now). */
+  const applyRequest = (stored: StoredRequest): RequestResult | undefined => {
     const { request } = stored;
+    if (request.kind === "queue") {
+      queue = { mode: request.mode, by: stored.by, at: stored.at };
+      saveQueueControl(paths.root, queue);
+      log.write(0, { event: "queue", mode: request.mode, by: stored.by });
+      return { message: "ok" };
+    }
+    // `reset` answers an unreadable state's question; elsewhere `reset` is
+    // an ordinary answer (such as replacing a Work Item branch).
+    if (
+      request.kind === "reset" ||
+      (request.kind === "answer" &&
+        request.answer === "reset" &&
+        unreadable.has(request.issue))
+    )
+      return startReset(stored);
     const runner = find(request.issue);
     const broken = unreadable.get(request.issue);
     if (!runner && broken) {
-      if (
-        request.kind !== "cancel" &&
-        !(request.kind === "answer" && request.answer === "cancel")
-      )
-        return `#${request.issue} has unreadable state (${broken.error}). Answers: cancel.`;
+      if (!isCancel(request))
+        return refused(
+          "state_unreadable",
+          `#${request.issue} has unreadable state (${broken.error}). Answers: reset, cancel.`,
+        );
       // Start over from a fresh cancelled record that replaces the unreadable
       // file; cleanup closes the Objective's PRs and issue, and the sync
       // replies and shows it cancelled.
@@ -403,24 +441,29 @@ export async function serve(options: ServeOptions): Promise<number> {
       saveState(paths.objectives, state);
       unreadable.delete(request.issue);
       open(state);
-      return "ok";
+      return { message: "ok" };
     }
-    if (!runner) return `Factory has no Objective #${request.issue}.`;
+    if (!runner)
+      return refused(
+        "no_factory_state",
+        `Factory has no Objective #${request.issue}.`,
+      );
     const seen = runner.state.appliedRequests.find((r) => r.id === stored.id);
-    if (seen) return seen.message;
+    if (seen) return seen;
     // The change and the record that it was applied are saved together.
-    const message = runner.transact(() => {
+    const result = runner.transact(() => {
       const state = runner.state;
-      let result: string | null = null;
+      const resetting = state.kept?.[RESET] as ResetRecord | undefined;
+      let refusal: RequestResult | null = null;
       switch (request.kind) {
         case "cancel":
-          result = runner.cancel(stored.by);
+          refusal = runner.cancel(stored.by);
           break;
         case "retry":
-          result = runner.retryNow(stored.by, request.question);
+          refusal = runner.retryNow(stored.by, request.question);
           break;
         case "answer":
-          result = runner.answer(
+          refusal = runner.answer(
             request.answer,
             request.text,
             stored.by,
@@ -428,21 +471,90 @@ export async function serve(options: ServeOptions): Promise<number> {
             request.question,
           );
           break;
+        case "pause":
+        case "drain":
+        case "resume":
+          refusal = control(state, request.kind, stored);
+          break;
       }
-      const text = result ?? "ok";
+      const applied = refusal ?? { message: "ok" };
+      // A cancel replaces a reset that hasn't landed: its request is
+      // answered here, with this save.
+      const superseded =
+        resetting && !refusal && isCancel(request)
+          ? [
+              {
+                id: resetting.request,
+                ...refused("superseded", "A cancel replaced this reset."),
+              },
+            ]
+          : [];
       state.appliedRequests = [
         ...state.appliedRequests,
-        { id: stored.id, message: text },
+        ...superseded,
+        { id: stored.id, ...applied },
       ].slice(-KEEP_REQUEST_IDS);
-      return text;
+      return applied;
     });
     log.write(request.issue, {
       event: "request",
       request,
       by: stored.by,
-      message,
+      ...result,
     });
-    return message;
+    return result;
+  };
+
+  /**
+   * `factory reset N`: save a resetting record in place of the old state
+   * (which it keeps, to carry the operator's choices over or to restore),
+   * and let its `rebuild` step read GitHub (reset.ts). The request is
+   * answered when the rebuild lands; a crash at any point reruns the
+   * rebuild, which only reads.
+   */
+  const startReset = (stored: StoredRequest): RequestResult | undefined => {
+    const issue = stored.request.issue;
+    if (!options.reset)
+      return refused(
+        "no_configuration",
+        "Factory has no configuration for this repository, so it can't read GitHub to reset.",
+      );
+    let known: ObjectiveRunner | undefined;
+    try {
+      known = find(issue);
+    } catch {
+      return undefined; // the state can't be read now: tried again next tick
+    }
+    const seen = known?.state.appliedRequests.find((r) => r.id === stored.id);
+    if (seen) return seen;
+    const running = known?.state.kept?.[RESET] as ResetRecord | undefined;
+    if (running?.request === stored.id) return undefined;
+    if (running && !TERMINAL.includes(known!.state.status))
+      return { message: "A reset of this Objective is already rebuilding it." };
+    const hadState = Boolean(known) || unreadable.has(issue);
+    // Creating an Objective is an admission: not while the queue isn't running.
+    if (!hadState && queue.mode !== "running")
+      return refused(
+        "queue_not_running",
+        `The queue is ${queue.mode}, so #${issue}, which Factory has no state for, isn't admitted; run factory queue resume, then reset again.`,
+      );
+    const state = resetRecord(
+      issue,
+      stored,
+      known ? structuredClone(known.state) : undefined,
+      hadState,
+      unreadable.get(issue)?.github,
+      options.provider,
+    );
+    known?.stop();
+    runners.delete(issue);
+    unreadable.delete(issue);
+    options.sync?.forget(issue);
+    saveState(paths.objectives, state);
+    crashPoint("reset:recorded");
+    open(state);
+    log.write(issue, { event: "reset-started", by: stored.by, hadState });
+    return undefined;
   };
 
   /**
@@ -451,6 +563,16 @@ export async function serve(options: ServeOptions): Promise<number> {
    */
   const withdrawNow = (runner: ObjectiveRunner): void => {
     const issue = runner.state.issue;
+    // A reset that found nothing to rebuild: its request is answered
+    // before the record goes.
+    const reset = runner.state.kept?.[RESET] as ResetRecord | undefined;
+    const answered =
+      reset && runner.state.appliedRequests.find((r) => r.id === reset.request);
+    if (reset && answered) {
+      writeResult(paths.requests, reset.request, answered);
+      removeRequest(join(paths.requests, `${reset.request}.json`));
+      crashPoint("reset:answered");
+    }
     release(runner.state);
     removeState(paths.objectives, issue);
     crashPoint("serve:withdrawn");
@@ -488,6 +610,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     );
     let slots = maxActive;
     waitingForSlot.clear();
+    waitingOnPaths.clear();
     for (const runner of ordered) {
       const { state } = runner;
       // Dequeued while its check or a re-run's cleanup ran: it goes once
@@ -509,7 +632,15 @@ export async function serve(options: ServeOptions): Promise<number> {
         if (runner.busy) continue;
       }
       let run = false;
+      const allow = allowed(runner, queue);
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
+      // Paused (the queue or the Objective), or drained with nothing left
+      // to start: no slot; a step the service's death interrupted resumes.
+      else if (
+        !runner.busy &&
+        !workflow.steps(state).some((step) => allow(step.key))
+      )
+        run = Object.keys(state.attempts).length > 0;
       // The check (and a new run's cleanup) runs when the Objective is first
       // seen, slot or not (rule 7), within the host's `github` cap;
       // planning and building need a slot.
@@ -527,14 +658,17 @@ export async function serve(options: ServeOptions): Promise<number> {
       else if (gated(runner, workflow)) run = true;
       // Waiting on another Objective's paths takes no slot either, so a hold
       // that owns common paths can't stall the queue (rule 1).
-      else if (waitsOnPaths(runner, ordered)) run = false;
-      else if (slots > 0) {
-        slots -= 1;
-        run = true;
-      } else waitingForSlot.add(state.issue);
+      else {
+        const owner = pathOwner(runner, ordered);
+        if (owner !== undefined) waitingOnPaths.set(state.issue, owner);
+        else if (slots > 0) {
+          slots -= 1;
+          run = true;
+        } else waitingForSlot.add(state.issue);
+      }
       if (!run) continue;
       try {
-        runner.tick();
+        runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
       } catch (error) {
         // A failed save: that Objective's state stays as on disk and is tried again next tick.
         log.write(state.issue, {
@@ -593,6 +727,9 @@ export async function serve(options: ServeOptions): Promise<number> {
       waitingForSlot: (issue) => waitingForSlot.has(issue),
       find,
       admit: (issue: number, github: GitHubModule) => {
+        // A paused or draining queue admits nothing new; the card stays
+        // queued and is admitted on a read after resume.
+        if (queue.mode !== "running") return;
         const previous = find(issue);
         if (unreadable.has(issue)) return; // never over an unreadable file
         // Never over an unfinished run, nor one whose cleanup still runs.
@@ -707,14 +844,14 @@ export async function serve(options: ServeOptions): Promise<number> {
  * its plan lands it waits on every plan accepted before it, so two
  * Objectives never build overlapping paths at once.
  */
-function waitsOnPaths(
+function pathOwner(
   runner: ObjectiveRunner,
   all: readonly ObjectiveRunner[],
-): boolean {
+): number | undefined {
   const mine = ownedPaths(runner.state);
-  if (!mine.length || built(runner.state)) return false;
+  if (!mine.length || built(runner.state)) return undefined;
   const at = acceptedAt(runner.state);
-  return all.some((other) => {
+  return all.find((other) => {
     if (other === runner) return false;
     if (TERMINAL.includes(other.state.status) || built(other.state))
       return false;
@@ -724,7 +861,50 @@ function waitsOnPaths(
     if (when > at || (when === at && other.state.issue > runner.state.issue))
       return false;
     return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
-  });
+  })?.state.issue;
+}
+
+/**
+ * Which steps may start under the operator's controls. A paused queue or
+ * Objective starts none; a draining Objective starts no Work Item that
+ * hasn't started (as buildSteps counts it), and a draining queue only
+ * stops admissions. A reset's rebuild is the operator's own request: it
+ * always runs.
+ */
+function allowed(
+  runner: ObjectiveRunner,
+  queue: QueueControl,
+): (key: string) => boolean {
+  const mode = runner.state.control?.mode;
+  if (queue.mode === "paused" || mode === "paused")
+    return (key) => key === "rebuild";
+  if (mode !== "draining") return () => true;
+  const started = startedItems(runner.state);
+  return (key) => {
+    const item = itemOf(key);
+    return item === undefined || started.has(item);
+  };
+}
+
+/** Apply `factory pause|drain|resume N`. */
+function control(
+  state: ObjectiveState,
+  kind: "pause" | "drain" | "resume",
+  stored: StoredRequest,
+): RequestResult | null {
+  if (TERMINAL.includes(state.status))
+    return refused(
+      "objective_finished",
+      `#${state.issue} has already finished (${state.status}).`,
+    );
+  if (kind === "resume") delete state.control;
+  else
+    state.control = {
+      mode: kind === "pause" ? "paused" : "draining",
+      by: stored.by,
+      at: stored.at,
+    };
+  return null;
 }
 
 function ownedPaths(state: ObjectiveState): string[] {
@@ -791,19 +971,24 @@ function queueOrder(runner: ObjectiveRunner): number {
   );
 }
 
+/** An applied request's message, for the reply on GitHub. */
 function readResult(dir: string, id: string): string | undefined {
   try {
-    return readFileSync(join(dir, `${id}.result`), "utf8").trim();
+    return (
+      JSON.parse(
+        readFileSync(join(dir, `${id}.result`), "utf8"),
+      ) as RequestResult
+    ).message;
   } catch {
     return undefined;
   }
 }
 
 /** Write the result whole, and only once: a request re-read after a crash keeps its first result. */
-function writeResult(dir: string, id: string, message: string): void {
+function writeResult(dir: string, id: string, result: RequestResult): void {
   const temporary = join(dir, `.${id}.result.tmp`);
   try {
-    writeFileSync(temporary, `${message}\n`);
+    writeFileSync(temporary, `${JSON.stringify(result)}\n`);
     linkSync(temporary, join(dir, `${id}.result`));
   } catch {
     // Already written.
@@ -858,6 +1043,10 @@ interface ServiceRecord {
   unreadable: Record<string, string>;
   /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
   problem?: string;
+  /** The queue's mode. */
+  queue?: QueueControl;
+  /** Objectives waiting, as of the last tick: for a slot, or on another Objective's paths. */
+  waits?: Record<string, { slot: true } | { paths: number }>;
 }
 
 interface Crash {

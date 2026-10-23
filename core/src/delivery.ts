@@ -177,6 +177,8 @@ export interface PublishInput {
    * (`itemBranch(issue, predecessor)`) for a layer above it.
    */
   baseBranch?: string;
+  /** The Objective's run (state.ts runOf), marked in the PR body for `factory reset`. */
+  run?: string;
 }
 
 /**
@@ -658,6 +660,7 @@ async function pullRequestBody(
   parts.push(
     `Candidate commit: ${code(input.commit)}\n\nCandidate tree: ${code(input.tree)}`,
     pullMarker(input.issue, input.item.id),
+    ...(input.run ? [`<!-- factory-run:${input.run} -->`] : []),
   );
   return parts.join("\n\n");
 }

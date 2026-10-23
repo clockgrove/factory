@@ -101,6 +101,7 @@ const OPTION: Record<ObjectiveStatus, QueueOption> = {
   building: "building",
   finishing: "building",
   holding: "holding",
+  resetting: "planning",
   done: "done",
   failed: "failed",
   cancelled: "cancelled",
@@ -621,14 +622,14 @@ export class GitHubSync {
       const what = retry.wait?.kind === "gate" ? retry.wait.gate : step;
       this.background(issue, `remind:${issue}`, async () => {
         const marker = MARK(issue, "remind", id);
-        if (!(await this.posted(issue, marker, retry.since))) {
-          crashPoint("sync:remind:before");
-          await this.github.postComment(
-            issue,
-            `${marker}\n**Factory is still waiting on ${what}**, since ${retry.since}. It carries on by itself once that is done.`,
-          );
-          crashPoint("sync:remind:after");
-        }
+        await this.github.ensureComment(
+          issue,
+          marker,
+          `${marker}\n**Factory is still waiting on ${what}**, since ${retry.since}. It carries on by itself once that is done.`,
+          "sync:remind",
+          undefined,
+          skewed(retry.since),
+        );
         runner.transact(() => {
           (runner.state.modules.github as GitHubModule).reminded = id;
         });
@@ -667,15 +668,12 @@ export class GitHubSync {
         // This incident's question: an earlier incident's question, and
         // the answers to it, never count for this one.
         const marker = MARK(issue, "hold", `unreadable:${entry.incident}`);
-        let question = await this.github.markedComment(issue, marker);
-        if (!question) {
-          crashPoint("sync:ask:before");
-          question = await this.github.postComment(
-            issue,
-            `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with \`/factory cancel\` (recommended) to start over from a cancelled record; then queue it again to run it again.`,
-          );
-          crashPoint("sync:ask:after");
-        }
+        const question = await this.github.ensureComment(
+          issue,
+          marker,
+          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with \`/factory reset\` (recommended) to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).`,
+          "sync:ask",
+        );
         module.commentsSince = question.created_at;
         module.askedUnreadable = true;
       });
@@ -827,34 +825,20 @@ export class GitHubSync {
       this.background(issue, `reply:${issue}:${request.id}`, async () => {
         const marker = MARK(issue, "reply", request.id);
         const message = sync.result(request.id) ?? request.message;
-        if (!(await this.posted(issue, marker, module.commentsSince))) {
-          crashPoint("sync:reply:before");
-          await this.github.postComment(
-            issue,
-            `${marker}\n${message === "ok" ? "Factory: done." : `Factory: ${message}`}`,
-          );
-          crashPoint("sync:reply:after");
-        }
+        await this.github.ensureComment(
+          issue,
+          marker,
+          `${marker}\n${message === "ok" ? "Factory: done." : `Factory: ${message}`}`,
+          "sync:reply",
+          undefined,
+          skewed(module.commentsSince),
+        );
         runner.transact(() => {
           const github = runner.state.modules.github as GitHubModule;
           github.replied = [...(github.replied ?? []), request.id].slice(-50);
         });
       });
     }
-  }
-
-  /** Whether the marked comment exists; read from a little before `since`, for clock skew between this host and GitHub. */
-  private async posted(
-    issue: number,
-    marker: string,
-    since: string,
-  ): Promise<boolean> {
-    // An unreadable state's cursor is empty until its question is shown.
-    const at = Date.parse(since);
-    const from = Number.isFinite(at)
-      ? new Date(at - CLOCK_SKEW_MS).toISOString()
-      : undefined;
-    return (await this.github.findComment(issue, marker, from)) !== undefined;
   }
 
   /** GitHub no longer has the issue here: nothing more is written to it. */
@@ -925,6 +909,18 @@ export class GitHubSync {
   }
 }
 
+/**
+ * Where a read for a comment due at `since` starts: a little before, for
+ * clock skew between this host and GitHub. An unreadable state's cursor is
+ * empty until its question is shown: then every comment is read.
+ */
+function skewed(since: string): string | undefined {
+  const at = Date.parse(since);
+  return Number.isFinite(at)
+    ? new Date(at - CLOCK_SKEW_MS).toISOString()
+    : undefined;
+}
+
 /** Requests from comments that have no reply yet. */
 function unreplied(
   state: ObjectiveState,
@@ -941,7 +937,7 @@ function unreplied(
  * this run (by GitHub's clock): an operator's queue or dequeue. A run with
  * no GitHub time saved falls back to its last save.
  */
-function moved(item: QueueItem, state: ObjectiveState): boolean {
+export function moved(item: QueueItem, state: ObjectiveState): boolean {
   const at = Date.parse(item.optionAt ?? "");
   if (!Number.isFinite(at)) return false;
   const module = state.modules.github as GitHubModule | undefined;

@@ -241,19 +241,7 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   // Started: any step done or running, a kept base (the first work attempt
   // keeps it, and repairs keep it), a waiting retry or an open question.
   // Settled items drop out below.
-  const started = new Set(
-    [
-      ...Object.keys(state.done),
-      ...Object.keys(state.attempts),
-      ...Object.keys(state.retries),
-      ...Object.entries(state.kept ?? {})
-        .filter(([key, value]) => key.endsWith(":base") && value != null)
-        .map(([key]) => key),
-      ...state.holds.map((hold) => hold.step),
-    ]
-      .filter((key) => key.startsWith("item:"))
-      .map((key) => key.split(":")[1]),
-  );
+  const started = startedItems(state);
   const view: ScheduleView = {
     settled,
     inFlight: (id) => started.has(id) && !settled(id),
@@ -346,6 +334,28 @@ export function layersBelow(
   return place
     ? place.unit.items.slice(0, place.layer).map((layer) => layer.id)
     : [];
+}
+
+/**
+ * The Work Items that have started: any step done, running or waiting, a
+ * kept base (the first work attempt keeps it, and repairs keep it), or an
+ * open question. Placeholder facts a repair keeps for items above it
+ * (`rebase`, `finished`, `onto`) don't count.
+ */
+export function startedItems(state: ObjectiveState): Set<string> {
+  return new Set(
+    [
+      ...Object.keys(state.done),
+      ...Object.keys(state.attempts),
+      ...Object.keys(state.retries),
+      ...Object.entries(state.kept ?? {})
+        .filter(([key, value]) => key.endsWith(":base") && value != null)
+        .map(([key]) => key),
+      ...state.holds.map((hold) => hold.step),
+    ]
+      .filter((key) => key.startsWith("item:"))
+      .map((key) => key.split(":")[1]!),
+  );
 }
 
 /** Whether every item has merged (or, for aggregates, completed). */
@@ -875,7 +885,7 @@ function acceptedNotes(
 
 /** Add facts to keep to any outcome that can carry them. */
 function withKeep(outcome: Outcome, keep: Record<string, unknown>): Outcome {
-  if (outcome.kind === "fail") return outcome;
+  if (outcome.kind === "fail" || outcome.kind === "replace") return outcome;
   return { ...outcome, keep: { ...(outcome.keep ?? {}), ...keep } };
 }
 
@@ -1528,6 +1538,7 @@ async function publishStep(
       ...(republish ? { republish: true } : {}),
       ...(context.answer?.answer === RESET_BRANCH ? { reset: true } : {}),
       ...(branch ? { baseBranch: branch } : {}),
+      run: runOf(state),
       secrets: deps.config.secrets,
       // The operator's `publish` counts only for the finding it answered:
       // the digest kept when the hold was raised, never the hold's text,
@@ -2301,11 +2312,14 @@ function reportStep(deps: BuildDeps): Step {
           0,
         );
         const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${final.media ? `\n\n${final.media}` : ""}`;
-        if (!reported) {
-          crashPoint("report:comment:before");
-          await github.postComment(state.issue, body, signal);
-          crashPoint("report:comment:after");
-        }
+        await github.ensureComment(
+          state.issue,
+          marker,
+          body,
+          "report:comment",
+          signal,
+          sinceRun(state),
+        );
         await github.closeIssue(
           state.issue,
           "completed",

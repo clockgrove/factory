@@ -148,6 +148,75 @@ function queuedFilter(config: CoreConfig): string {
 }
 
 /**
+ * Every open card of this repository on the Project, whatever its option,
+ * for `factory queue list`. Bounded like the queue read.
+ */
+export async function readCards(
+  github: GitHub,
+  config: CoreConfig,
+  signal?: AbortSignal,
+): Promise<{ items: QueueItem[]; truncated: number }> {
+  const items: QueueItem[] = [];
+  const truncated = await readItems(
+    github,
+    config,
+    "is:open",
+    (item) => items.push(item),
+    signal,
+  );
+  return { items, truncated };
+}
+
+/** Read the Project's items matching `query`, page by page; returns how many were left unread. */
+async function readItems(
+  github: GitHub,
+  config: CoreConfig,
+  query: string,
+  each: (item: QueueItem) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  let after: string | null = null;
+  for (let page = 0; ; page++) {
+    const data: ItemsPage = await github.graphql<ItemsPage>(
+      ITEMS,
+      {
+        project: config.queue.projectId,
+        after,
+        query,
+        field: config.queue.field,
+        order: config.queue.orderField,
+      },
+      signal,
+    );
+    const items = data.node?.items;
+    if (!items) throw new Error(`Project ${config.queue.projectId} not found`);
+    for (const node of items.nodes) {
+      const content = node?.content;
+      if (
+        !node ||
+        node.isArchived ||
+        typeof content?.number !== "number" ||
+        content.repository?.nameWithOwner?.toLowerCase() !==
+          config.repository.toLowerCase()
+      )
+        continue;
+      each({
+        issue: content.number,
+        itemId: node.id,
+        option: node.option?.name ?? null,
+        optionAt: node.option?.updatedAt ?? null,
+        order: node.order?.number ?? null,
+        open: content.state === "OPEN",
+      });
+    }
+    if (!items.pageInfo.hasNextPage) return 0;
+    if (page + 1 === MAX_PAGES)
+      return Math.max(0, items.totalCount - MAX_PAGES * 100);
+    after = items.pageInfo.endCursor;
+  }
+}
+
+/**
  * Queued issues of this repository on the configured Project, open or
  * closed, and `known` issues (read from the issue side) whatever their
  * option. A known
@@ -181,40 +250,13 @@ export async function readQueue(
           }
         : null,
     );
-  let after: string | null = null;
-  let truncated = 0;
-  for (let page = 0; ; page++) {
-    const data: ItemsPage = await github.graphql<ItemsPage>(
-      ITEMS,
-      {
-        project: config.queue.projectId,
-        after,
-        query: queuedFilter(config),
-        ...fields,
-      },
-      signal,
-    );
-    const items = data.node?.items;
-    if (!items) throw new Error(`Project ${config.queue.projectId} not found`);
-    for (const node of items.nodes) {
-      const content = node?.content;
-      if (
-        !node ||
-        node.isArchived ||
-        typeof content?.number !== "number" ||
-        content.repository?.nameWithOwner?.toLowerCase() !==
-          config.repository.toLowerCase()
-      )
-        continue;
-      card(content.number, content.state === "OPEN", node);
-    }
-    if (!items.pageInfo.hasNextPage) break;
-    if (page + 1 === MAX_PAGES) {
-      truncated = Math.max(0, items.totalCount - MAX_PAGES * 100);
-      break;
-    }
-    after = items.pageInfo.endCursor;
-  }
+  const truncated = await readItems(
+    github,
+    config,
+    queuedFilter(config),
+    (item) => cards.set(item.issue, item),
+    signal,
+  );
   // The issue side is read directly, so it wins over the lagging index.
   const numbers = [...new Set(known)];
   const gone: number[] = [];

@@ -107,7 +107,14 @@ async function comment(inst, issue, answer, writtenAt, question) {
   );
   const result = join(inst.requests, `${id}.result`);
   await until(() => existsSync(result), "the comment's result");
-  return readFileSync(result, "utf8").trim();
+  return JSON.parse(readFileSync(result, "utf8")).message;
+}
+
+/** The stable refusal code a command printed on stderr. */
+function refusal(result) {
+  const parsed = JSON.parse(result.err.split("\n")[0]);
+  assert.equal(parsed.kind, "lifecycle-refusal");
+  return parsed.code;
 }
 
 function status(inst) {
@@ -262,10 +269,13 @@ test("a step that can't run holds with answers that work", async () => {
   assert.deepEqual(row.holds[0].answers, ["retry", "cancel"]);
 
   const firstHold = row.holds[0].id;
-  assert.equal(cli(inst, "answer", "7", "retry").code, 2, "the CLI names it");
+  const unnamed = cli(inst, "answer", "7", "retry");
+  assert.equal(unnamed.code, 2, "the CLI names it");
+  assert.equal(refusal(unnamed), "usage");
   const wrong = cli(inst, "answer", "7", "approve", "--question", firstHold);
   assert.equal(wrong.code, 1);
-  assert.match(wrong.out, /Answers: retry, cancel/);
+  assert.equal(refusal(wrong), "invalid_answer");
+  assert.match(wrong.err, /Answers: retry, cancel/);
   assert.equal(status(inst).objectives[0].status, "holding");
   // Not shown on GitHub (no configuration here): a comment must name it.
   assert.match(
@@ -363,11 +373,20 @@ test("unreadable state holds with cancel, and cancel works", async () => {
   await until(() => status(inst).service === "running", "service");
   const [row] = status(inst).objectives;
   assert.equal(row.status, "unreadable");
-  assert.deepEqual(row.holds[0].answers, ["cancel"]);
-  assert.equal(
-    cli(inst, "answer", "9", "retry", "--question", "unreadable").code,
-    1,
+  assert.deepEqual(row.holds[0].answers, ["reset", "cancel"]);
+  assert.equal(row.nextAction.command, "factory reset 9");
+  const answered = cli(
+    inst,
+    "answer",
+    "9",
+    "retry",
+    "--question",
+    "unreadable",
   );
+  assert.equal(answered.code, 1);
+  assert.equal(refusal(answered), "state_unreadable");
+  // No configuration: reset can't read GitHub, and says so.
+  assert.equal(refusal(cli(inst, "reset", "9")), "no_configuration");
   assert.equal(cli(inst, "cancel", "9").code, 0);
   await until(
     () => status(inst).objectives[0].status === "cancelled",
@@ -438,6 +457,7 @@ const GITHUB_CRASH_POINTS = [
   "stack:merge:after",
   "final:lfs-repush:before",
   "final:lfs-repush:after",
+  "reset:answered",
 ];
 for (const point of GITHUB_CRASH_POINTS)
   test(`crash at ${point}, restart, finish once`, {
@@ -752,7 +772,15 @@ test("a finished Objective leaves the startup set, and can't be cancelled", asyn
   await until(() => status(inst).service === "running", "service");
   const result = cli(inst, "cancel", "13");
   assert.equal(result.code, 1);
-  assert.match(result.out, /already finished \(done\)/);
+  assert.equal(refusal(result), "objective_finished");
+  assert.match(result.err, /already finished \(done\)/);
+  assert.equal(refusal(cli(inst, "pause", "13")), "objective_finished");
+  // Bound to a question, it is still finished, not a stale question.
+  assert.equal(
+    refusal(cli(inst, "answer", "13", "retry", "--question", "old")),
+    "objective_finished",
+  );
+  assert.equal(refusal(cli(inst, "cancel", "99")), "no_factory_state");
   assert.equal(stateOf(inst, 13).status, "done");
   const record = JSON.parse(
     readFileSync(join(inst.root, "service.json"), "utf8"),
@@ -928,7 +956,8 @@ test("switch moves an Objective held on a usage limit to the named provider", as
   await until(() => status(inst).service === "running", "service");
   const unknown = cli(inst, "answer", "41", "switch", "nope", "--question", id);
   assert.equal(unknown.code, 1);
-  assert.match(unknown.out, /one of claude/);
+  assert.equal(refusal(unknown), "invalid_answer");
+  assert.match(unknown.err, /one of claude/);
   assert.equal(cli(inst, "answer", "41", "switch", "--question", id).code, 0);
   const state = stateOf(inst, 41);
   assert.deepEqual(state.holds, []);
@@ -1051,7 +1080,8 @@ test("an item's question holds only that item and its dependents", async () => {
   assert.equal(stateOf(inst, 61).holds[0].id, a.id, "a is still open");
   const stale = cli(inst, "answer", "61", "retry", "--question", d.id);
   assert.equal(stale.code, 1);
-  assert.match(stale.out, /isn't open/);
+  assert.equal(refusal(stale), "stale_question");
+  assert.match(stale.err, /isn't open/);
 
   // With two questions open, a comment must name one: an unbound answer
   // is refused and changes nothing.
@@ -1290,7 +1320,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
     objectiveWide(hold("Issue closed?", ["switch", "cancel"])),
   );
   assert.match(
-    runner.transact(() => runner.retryNow("op")),
+    runner.transact(() => runner.retryNow("op")).message,
     /stops every step/,
   );
   // d meets a limit 5 h away, and c a repair over budget: neither is
@@ -1900,5 +1930,351 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
     stateOf(inst, 71).holds[0].question,
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
+  await stopped(service);
+});
+test("an answer or retry bound to a question that changed is refused", async () => {
+  const inst = installation();
+  seed(inst, 51);
+  const service = serve(inst);
+  await until(() => stateOf(inst, 51).holds.length, "hold");
+  const first = stateOf(inst, 51).holds[0].id;
+  const unbound = cli(inst, "retry", "51");
+  assert.equal(unbound.code, 1);
+  assert.equal(refusal(unbound), "question_required");
+  assert.ok(unbound.err.includes(first), "the refusal names the question");
+  assert.equal(refusal(cli(inst, "answer", "51", "retry")), "usage");
+  assert.equal(cli(inst, "retry", "51", "--question", first).code, 0);
+  await until(
+    () =>
+      stateOf(inst, 51).holds.length && stateOf(inst, 51).holds[0].id !== first,
+    "the next question",
+  );
+  // A delayed answer to the first question never answers the second.
+  for (const late of [
+    cli(inst, "answer", "51", "retry", "--question", first),
+    cli(inst, "retry", "51", "--question", first),
+  ]) {
+    assert.equal(late.code, 1);
+    assert.equal(refusal(late), "stale_question");
+  }
+  assert.notEqual(stateOf(inst, 51).holds[0].id, first);
+  assert.equal(status(inst).objectives[0].status, "holding");
+  await stopped(service);
+});
+
+test("pause, drain and resume, per Objective and for the queue, survive restarts", async () => {
+  const inst = installation();
+  seed(inst, 52);
+  seed(inst, 53);
+  // Sent while the service is stopped: it applies before any step starts.
+  cli(inst, "pause", "52");
+  cli(inst, "queue", "pause");
+  let service = serve(inst);
+  await until(
+    () =>
+      stateOf(inst, 52).control?.mode === "paused" &&
+      status(inst).queue.mode === "paused",
+    "paused",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(
+    stateOf(inst, 52).holds.length,
+    0,
+    "a paused Objective starts nothing",
+  );
+  assert.equal(
+    stateOf(inst, 53).holds.length,
+    0,
+    "a paused queue starts nothing",
+  );
+  const [row52, row53] = status(inst).objectives;
+  assert.equal(row52.mode, "paused");
+  assert.equal(row52.nextAction.command, "factory resume 52");
+  assert.equal(row53.nextAction.command, "factory queue resume");
+  assert.match(cli(inst, "status").out, /#52: checking \(paused\)/);
+  service.child.kill("SIGKILL");
+  await service.exit;
+
+  service = serve(inst);
+  await until(() => status(inst).service === "running", "restart");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(
+    stateOf(inst, 52).holds.length,
+    0,
+    "the pause survives a restart",
+  );
+  assert.equal(
+    stateOf(inst, 53).holds.length,
+    0,
+    "the queue pause survives too",
+  );
+  assert.equal(cli(inst, "queue", "drain").code, 0);
+  // A draining queue admits nothing new, but admitted Objectives run on.
+  await until(() => stateOf(inst, 53).holds.length, "#53 runs under a drain");
+  assert.equal(stateOf(inst, 52).holds.length, 0, "#52 is still paused");
+  assert.equal(cli(inst, "drain", "52").code, 0);
+  assert.equal(stateOf(inst, 52).control.mode, "draining");
+  // Draining stops only new Work Items: the check still runs.
+  await until(
+    () => stateOf(inst, 52).holds.length,
+    "#52 runs its check under a drain",
+  );
+  assert.equal(cli(inst, "resume", "52").code, 0);
+  assert.equal(stateOf(inst, 52).control, undefined);
+  assert.equal(cli(inst, "queue", "resume").code, 0);
+  assert.equal(status(inst).queue.mode, "running");
+  await stopped(service);
+});
+
+test("unknown and misplaced options are refused with the fix", () => {
+  const inst = installation();
+  const cases = [
+    [
+      ["status", "--objective", "5"],
+      /factory status takes the issue as an argument/,
+    ],
+    [
+      ["cancel", "5", "--json"],
+      /--json belongs to factory setup, status, log, queue/,
+    ],
+    [
+      ["status", "--bogus"],
+      /Unknown option --bogus for factory status; see factory help/,
+    ],
+    [["frobnicate"], /Unknown command: frobnicate; see factory help/],
+    [["answer", "5", "retry", "--question"], /--question needs a value/],
+    [["cancel", "5", "6"], /factory cancel takes ISSUE; unexpected 6/],
+    [["log", "5", "--tail", "x"], /--tail takes a whole number/],
+  ];
+  for (const [args, message] of cases) {
+    const result = cli(inst, ...args);
+    assert.equal(result.code, 2, args.join(" "));
+    assert.equal(refusal(result), "usage");
+    assert.match(result.err, message);
+  }
+  const help = cli(inst, "help");
+  assert.equal(help.code, 0);
+  for (const args of [[], ["--help"], ["status", "--help"], ["-h"]]) {
+    const shown = spawnSync(process.execPath, [CLI, ...args], {
+      env: inst.env,
+      encoding: "utf8",
+    });
+    assert.equal(shown.status, 0, args.join(" "));
+    assert.equal(shown.stdout, help.out);
+  }
+  // Options may come before the command, values included.
+  const leading = spawnSync(
+    process.execPath,
+    [CLI, "--repo", REPO, "status", "--json"],
+    { env: inst.env, encoding: "utf8" },
+  );
+  assert.equal(leading.status, 0, leading.stderr);
+  assert.equal(JSON.parse(leading.stdout).service, "stopped");
+  for (const command of [
+    "serve",
+    "status",
+    "log",
+    "answer",
+    "retry",
+    "cancel",
+    "reset",
+    "pause",
+    "drain",
+    "resume",
+    "queue list|pause|resume|drain",
+  ])
+    assert.match(
+      help.out,
+      new RegExp(`\\n  ${command.replace(/\|/g, "\\|")}\\b`),
+    );
+});
+
+test("the run log: tail, follow, and status reads its end", async () => {
+  const inst = installation();
+  seed(inst, 54);
+  const service = serve(inst);
+  await until(() => stateOf(inst, 54).holds.length, "hold");
+  const lines = cli(inst, "log", "54", "--tail", "2", "--json")
+    .out.trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].at <= lines[1].at);
+  assert.ok(status(inst).objectives[0].lastEvent.event);
+  const follow = spawn(
+    process.execPath,
+    [CLI, "log", "54", "--tail", "0", "--follow", "--json", "--repo", REPO],
+    { env: inst.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  children.add(follow);
+  let out = "";
+  follow.stdout.on("data", (chunk) => {
+    out += chunk;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal(cli(inst, "cancel", "54").code, 0);
+  await until(() => /"event":"cancelled"/.test(out), "the cancel, followed");
+  follow.kill("SIGINT");
+  assert.equal(refusal(cli(inst, "log", "77")), "no_factory_state");
+  await stopped(service);
+});
+
+test("status shows times in the display zone and redacts named secrets", () => {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1", { MY_TOKEN: "s3cret-value-123" });
+  const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+  config.policy = { allowedSecretNames: ["MY_TOKEN"] };
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  seed(inst, 55, "building", {
+    done: { check: {}, plan: { items: [] }, "item:a:validate": { tree: "t1" } },
+    kept: { "item:a:flaky": { tree: "t1", command: "npm test" } },
+    retries: {
+      build: {
+        count: 0,
+        attempts: 1,
+        since: "2026-01-01T00:00:00.000Z",
+        nextAt: "2026-01-01T00:30:00.000Z",
+        lastError: "push failed: token s3cret-value-123 refused",
+      },
+    },
+  });
+  inst.env.FACTORY_DISPLAY_TIMEZONE = "Asia/Tokyo";
+  const text = cli(inst, "status").out;
+  assert.match(text, /retries at 2026-01-01 09:30:00 GMT\+9/);
+  assert.match(text, /Possibly flaky: a: `npm test` failed once/);
+  assert.match(text, /Provider: codex \(selectedBy: defaultProvider\)/);
+  assert.doesNotMatch(text, /s3cret/);
+  assert.match(text, /\[REDACTED\]/);
+  const json = cli(inst, "status", "--json").out;
+  assert.doesNotMatch(json, /s3cret/);
+  const [row] = JSON.parse(json).objectives;
+  assert.equal(
+    row.waiting[0].nextAt,
+    "2026-01-01T00:30:00.000Z",
+    "JSON stays ISO",
+  );
+  assert.deepEqual(row.flakyRerun, [{ item: "a", command: "npm test" }]);
+  assert.equal(row.provider.name, "codex");
+  assert.equal(row.provider.selectedBy, "defaultProvider");
+  inst.env.FACTORY_DISPLAY_TIMEZONE = "UTC";
+  assert.match(cli(inst, "status").out, /retries at 2026-01-01 00:30:00 UTC/);
+});
+
+// A reset saves a resetting record at once (the old state kept inside it),
+// and its one step, `rebuild`, reads GitHub. A crash at any point reruns the
+// rebuild, which only reads; with GitHub down it waits like any step;
+// cancel (either form) replaces it, and its request is answered
+// `superseded`. Creating an Objective is an admission: refused while the
+// queue isn't running.
+for (const point of ["reset:recorded", "engine:rebuild:started"])
+  test(`crash at ${point}, restart, the rebuild waits while GitHub is down, cancel replaces it`, async () => {
+    const inst = installation();
+    configured(inst, `http://127.0.0.1:${await closedPort()}`);
+    const control = { mode: "paused", by: "op", at: new Date().toISOString() };
+    seed(inst, 56, "building", {
+      control,
+      done: { check: {}, plan: { items: [] } },
+    });
+    const before = stateOf(inst, 56);
+    // Sent while stopped: the reset applies before any step of #56 starts.
+    assert.match(cli(inst, "reset", "56").out, /isn't running/);
+    const crashing = serve(inst, point);
+    const death = await crashing.exit;
+    assert.equal(death.signal, "SIGKILL", death.stderr);
+    const recorded = stateOf(inst, 56);
+    assert.equal(recorded.status, "resetting");
+    assert.deepEqual(recorded.control, control, "the pause carries over");
+    assert.deepEqual(recorded.kept.reset.old.done, before.done);
+
+    const service = serve(inst);
+    await until(
+      () => stateOf(inst, 56).retries.rebuild?.attempts >= 1,
+      "the rebuild waits on GitHub after the restart",
+    );
+    const [row] = status(inst).objectives;
+    assert.equal(row.status, "resetting");
+    assert.ok(row.reset, "status shows the reset");
+    assert.match(row.waiting[0].lastError, /GitHub/);
+    const pending = readdirSync(inst.requests).filter((n) =>
+      n.endsWith(".json"),
+    );
+    assert.equal(pending.length, 1, "the reset is answered when it lands");
+    // Creating an Objective is an admission: not while the queue drains.
+    assert.equal(cli(inst, "queue", "drain").code, 0);
+    assert.equal(refusal(cli(inst, "reset", "77")), "queue_not_running");
+    // The question's own `cancel` answer replaces the reset.
+    assert.equal(
+      cli(inst, "answer", "56", "cancel", "--question", "any").code,
+      0,
+    );
+    await until(() => stateOf(inst, 56).status === "cancelled", "cancelled");
+    await until(
+      () => readdirSync(inst.requests).every((n) => !n.endsWith(".json")),
+      "no request left",
+    );
+    const reset = pending[0].replace(/\.json$/, "");
+    assert.equal(
+      stateOf(inst, 56).appliedRequests.find((r) => r.id === reset)?.code,
+      "superseded",
+    );
+    assert.equal(status(inst).objectives[0].reset, undefined);
+    await stopped(service);
+  });
+
+test("a draining Objective starts no Work Item that hasn't started, even with a stack repair's placeholders", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const item = (id) => ({
+    id,
+    title: id,
+    goal: id,
+    acceptance: [],
+    nonGoals: [],
+    citations: [],
+    dependencies: [],
+    ownedPaths: [`${id}/`],
+    validation: [],
+    brief: id,
+  });
+  seed(inst, 57, "building", {
+    control: { mode: "draining", by: "test", at: new Date().toISOString() },
+    done: {
+      check: {},
+      plan: {
+        base: "0".repeat(40),
+        items: [item("a"), item("b")],
+        finalCommands: [],
+        decisions: [],
+      },
+    },
+    kept: {
+      // a started; b only has the placeholders a stack repair writes.
+      "item:a:base": "0".repeat(40),
+      "item:b:rebase": true,
+      "item:b:finished": null,
+      "item:b:onto": null,
+    },
+  });
+  const service = serve(inst);
+  await until(
+    () =>
+      Object.keys(stateOf(inst, 57).retries).some((key) =>
+        key.startsWith("item:a:"),
+      ) || stateOf(inst, 57).holds.some((h) => h.step.startsWith("item:a:")),
+    "the started item runs under the drain",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const state = stateOf(inst, 57);
+  const touched = [
+    ...Object.keys(state.retries),
+    ...Object.keys(state.attempts),
+    ...Object.keys(state.done),
+    ...state.holds.map((h) => h.step),
+  ];
+  assert.ok(
+    !touched.some((key) => key.startsWith("item:b:")),
+    `b started under the drain: ${touched.join(", ")}`,
+  );
+  assert.equal(cli(inst, "cancel", "57").code, 0);
   await stopped(service);
 });

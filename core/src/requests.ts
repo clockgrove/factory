@@ -30,7 +30,68 @@ export type Request =
       question?: string;
     }
   | { kind: "cancel"; issue: number }
-  | { kind: "retry"; issue: number; question?: string };
+  | { kind: "retry"; issue: number; question?: string }
+  /** Rebuild the Objective's state from GitHub (`factory reset`). */
+  | { kind: "reset"; issue: number }
+  /** Per-Objective control; it survives restarts. */
+  | { kind: "pause" | "drain" | "resume"; issue: number }
+  /** Queue-wide control (issue 0); it survives restarts. */
+  | { kind: "queue"; issue: 0; mode: QueueMode };
+
+/** The queue's mode: `paused` admits and starts nothing; `draining` admits nothing new. */
+export type QueueMode = "running" | "paused" | "draining";
+
+/**
+ * Stable refusal codes. Tools decide on the code, never the message. The
+ * CLI prints `{"kind":"lifecycle-refusal","code":"..."}` on stderr before
+ * the message.
+ */
+export type RefusalCode =
+  /** Command line misuse: an unknown command, option or value. */
+  | "usage"
+  /** Factory has no state for this Objective (and, for a reset, GitHub has no plan comment or card). */
+  | "no_factory_state"
+  /** The Objective has finished (done or failed); only re-queuing runs it again. */
+  | "objective_finished"
+  /** The Objective has no open question. */
+  | "no_open_question"
+  /** The answer names a question that is no longer open: it changed, or it was answered. */
+  | "stale_question"
+  /** An open question stops the steps, so the command must name it with `--question`. */
+  | "question_required"
+  /** The answer isn't one the question offers, or `switch` names no usable provider. */
+  | "invalid_answer"
+  /** The Objective's state can't be read: answer reset or cancel. */
+  | "state_unreadable"
+  /** The command needs this repository's configuration. */
+  | "no_configuration"
+  /** GitHub has no such issue in this repository. */
+  | "no_such_issue"
+  /** A reset found a plan comment whose data isn't Factory's own, or doesn't parse. */
+  | "plan_unreadable"
+  /** A later cancel replaced this request before it applied. */
+  | "superseded"
+  /** The queue is paused or draining, so nothing new is admitted (a reset of an Objective Factory has no state for). */
+  | "queue_not_running";
+
+/** A request's result: applied (no code), or refused with a stable code. */
+export interface RequestResult {
+  message: string;
+  code?: RefusalCode;
+}
+
+export const refused = (code: RefusalCode, message: string): RequestResult => ({
+  code,
+  message,
+});
+
+/** `cancel`, or the answer `cancel`: it works at any time. */
+export function isCancel(request: Request): boolean {
+  return (
+    request.kind === "cancel" ||
+    (request.kind === "answer" && request.answer === "cancel")
+  );
+}
 
 export interface StoredRequest {
   id: string;

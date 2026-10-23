@@ -977,16 +977,36 @@ export class GitHub {
     branch: string,
     signal?: AbortSignal,
   ): Promise<string[]> {
+    return (await this.checksPolicy(branch, signal)).names;
+  }
+
+  /**
+   * `requiredChecks`, and whether a rule or the classic protection requires
+   * a branch to be up to date before it merges (strict); undefined when
+   * no rule does and the login can't read the classic protection's.
+   */
+  async checksPolicy(
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<{ names: string[]; strict: boolean | undefined }> {
     const name = encodeURIComponent(branch);
     const rules =
       (await this.optional(
         this.pages<{
           type?: string;
-          parameters?: { required_status_checks?: { context?: unknown }[] };
+          parameters?: {
+            required_status_checks?: { context?: unknown }[];
+            strict_required_status_checks_policy?: unknown;
+          };
         }>(this.repo(`rules/branches/${name}`), signal),
       )) ?? [];
-    type Required = { contexts?: unknown; checks?: unknown } | null | undefined;
+    type Required =
+      | { contexts?: unknown; checks?: unknown; strict?: unknown }
+      | null
+      | undefined;
     let classic: Required;
+    // The branch read's protection never shows `strict`.
+    let strictKnown = true;
     try {
       classic = await this.rest<Required>(
         "GET",
@@ -999,6 +1019,7 @@ export class GitHub {
         throw error;
       // 404: unprotected, or no required checks. 403: the login may not read
       // protection settings; the branch read shows the same checks.
+      strictKnown = error.status === 404;
       if (error.status === 403)
         classic = (
           await this.rest<{
@@ -1006,7 +1027,7 @@ export class GitHub {
           }>("GET", this.repo(`branches/${name}`), undefined, signal)
         ).protection?.required_status_checks;
     }
-    return [
+    const names = [
       ...new Set(
         [
           ...rules.flatMap((rule) =>
@@ -1023,6 +1044,18 @@ export class GitHub {
         ].filter((name): name is string => typeof name === "string" && !!name),
       ),
     ];
+    const strict =
+      classic?.strict === true ||
+      rules.some(
+        (rule) =>
+          rule.type === "required_status_checks" &&
+          rule.parameters?.strict_required_status_checks_policy === true,
+      )
+        ? true
+        : strictKnown
+          ? false
+          : undefined;
+    return { names, strict };
   }
 
   /**

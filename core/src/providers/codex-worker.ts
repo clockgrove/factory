@@ -6,13 +6,16 @@
  * bubblewrap; Factory's validation still decides. Factory collects and
  * commits the result.
  */
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
@@ -215,6 +218,56 @@ ${proxyPolicy(source, network)}`;
       return { root, launcher, pidFile, env };
     },
   });
+}
+
+/**
+ * What the probe runs: a write outside its worktree, then its result in the
+ * worktree. A file, since a network-off sandbox may not write to the pipe.
+ */
+const PROBE = `const fs=require("node:fs");let refused="";try{fs.writeFileSync(process.argv[1]+"/outside","x")}catch(e){refused=e.code}fs.writeFileSync("result",JSON.stringify({refused}))`;
+
+/**
+ * Codex's sandbox under a worker's own permission profile, tried with no
+ * model call (\`codex sandbox\`): a command must write its worktree and be
+ * refused a directory outside it. The problem, or undefined. Readiness
+ * runs it.
+ */
+export function codexSandboxProblem(
+  network: boolean,
+  keep: readonly string[],
+): string | undefined {
+  let worktree: string | undefined;
+  let outside: string | undefined;
+  let home: WorkerHome | undefined;
+  try {
+    worktree = mkdtempSync(join(tmpdir(), "factory-probe-"));
+    outside = mkdtempSync(join(tmpdir(), "factory-probe-outside-"));
+    home = workerHome(worktree, network, keep);
+    const run = spawnSync(
+      home.launcher,
+      ["sandbox", "--", "node", "-e", PROBE, outside],
+      { cwd: worktree, env: home.env, encoding: "utf8", timeout: 30_000 },
+    );
+    let refused: unknown;
+    try {
+      ({ refused } = JSON.parse(
+        readFileSync(join(worktree, "result"), "utf8"),
+      ));
+    } catch {
+      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(`${run.stderr}`.trim())}`;
+    }
+    if (
+      !["EACCES", "EPERM", "EROFS", "ENOENT"].includes(String(refused)) ||
+      existsSync(join(outside, "outside"))
+    )
+      return "Codex's sandbox let a command write outside its worktree";
+    return undefined;
+  } catch (error) {
+    return `Factory could not set up a Codex worker home: ${detail(errorMessage(error))}`;
+  } finally {
+    for (const directory of [worktree, outside, home?.root])
+      if (directory) rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /** The process group a launcher recorded, once codex has started. */

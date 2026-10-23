@@ -861,8 +861,15 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
       report.status === "refused"
         ? `${report.config} was not changed`
         : `${report.config} ${report.created ? "created" : report.changed.length ? `changed: ${report.changed.join(", ")}` : "unchanged"}; default provider ${report.defaultProvider}`;
+    const mark = { ok: "ok     ", warn: "warning", blocked: "BLOCKED" };
+    const checklist = (report.readiness?.checks ?? [])
+      .map(
+        (check) =>
+          `  ${mark[check.status]} ${check.name}: ${check.detail}${check.fix && check.status !== "ok" ? `\n          ${check.fix}` : ""}\n`,
+      )
+      .join("");
     process.stdout.write(
-      `Setup ${report.status}: ${what}.\n${report.problems.map((problem) => `- ${problem}\n`).join("")}${report.status === "refused" || report.created || !report.changed.length ? "" : "Restart the service to use the change.\n"}`,
+      `Setup ${report.status}: ${what}.\n${report.problems.map((problem) => `- ${problem}\n`).join("")}${checklist ? `Readiness (no model calls):\n${checklist}` : ""}${report.status === "refused" || report.created || !report.changed.length ? "" : "Restart the service to use the change.\n"}`,
     );
   }
   return report.status === "configured" ? 0 : 1;

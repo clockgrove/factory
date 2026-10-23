@@ -404,7 +404,22 @@ No mocks, fake services, fake providers or scripted responses.
 - **Repeat:** the same command changes nothing and reports `changed: []`. `--config-only` is accepted, and it is the only mode until `--background`.
 - **Bindings:** `--checkout`, `--project-id`, `--field` and `--order-field` never change an existing value, defaults included. A different value is refused, because it would move running Objectives to another target. Edit the file by hand when nothing runs.
 - **Refusal:** a value the configuration refuses leaves the file as it was. The report names every problem.
-- **Report:** `--json` prints `{status, config, created, changed, defaultProvider, problems}`. `status` is `configured` (exit 0), `blocked` (the file is saved but the target isn't ready; exit 1) or `refused` (nothing saved; exit 1).
+- **Report:** `--json` prints `{status, config, created, changed, defaultProvider, problems, readiness}`. `status` is `configured` (exit 0), `blocked` (the file is saved but the target isn't ready, or a readiness check is blocked; exit 1) or `refused` (nothing saved; exit 1).
+
+**Readiness** (readiness.ts) is one checklist, made with no model call and no change to the target or its settings (the Codex probe writes only its own temporary directories). Each check is `ok`, `warn` (it runs, but see the detail) or `blocked` (the service would hold on it), and every check that isn't `ok` names its fix.
+
+- **Host:**
+  - bubblewrap starts a sandbox, and with `package-install`, pasta is there;
+  - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
+  - git, git lfs, node and each final command's program are on the PATH;
+  - a final command that needs the network is flagged.
+- **Providers:** each planner's and worker's SDK is installed and its login is present. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree and be refused outside it.
+- **Repository:**
+  - the GitHub CLI login can read the repository and push to it;
+  - PRs into the default branch may merge with a merge commit;
+  - required status checks exist.
+- **Branch protection:** setup recommends "require branches to be up to date", and Factory never changes repository settings.
+- **Validation environment:** `readiness.validationEnvironment` says how validation differs from hosted CI: the network, the sandbox, the bootstrap install, `sandbox.environment`'s names, the final and CI-only commands, and the package scripts that need a network validation lacks.
 
 Installation options, each setting one key:
 

@@ -458,6 +458,9 @@ const onPath = (name: string) =>
     .filter((entry) => isAbsolute(entry))
     .map((entry) => join(entry, name));
 
+/** The executable `name` resolves to on the PATH, or undefined. */
+export const executable = (name: string) => onPath(name).find(isFile);
+
 function bubblewrapExecutable(): string | undefined {
   return ["/usr/bin/bwrap", "/usr/local/bin/bwrap", ...onPath("bwrap")].find(
     isFile,

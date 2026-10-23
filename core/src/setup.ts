@@ -22,6 +22,7 @@ import { originRefusal } from "./git.js";
 import { GitHub } from "./github.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
 import { projectProblems } from "./queue.js";
+import { type Readiness, readiness } from "./readiness.js";
 import { errorMessage } from "./text.js";
 
 /** How an option's value becomes the key's: loadConfig checks the result. */
@@ -129,9 +130,10 @@ export class SetupUsage extends Error {}
 
 export interface SetupReport {
   /**
-   * `configured`: saved, it loads, and the target is ready. `blocked`:
-   * saved and it loads, but the target isn't ready (`problems` names
-   * what). `refused`: nothing saved (`problems` names why).
+   * `configured`: saved, it loads, and the target and host are ready.
+   * `blocked`: saved and it loads, but the target isn't ready (`problems`
+   * names what) or a readiness check is blocked (it names its fix).
+   * `refused`: nothing saved (`problems` names why).
    */
   status: "configured" | "blocked" | "refused";
   config: string;
@@ -140,6 +142,8 @@ export interface SetupReport {
   changed: string[];
   defaultProvider?: string;
   problems: string[];
+  /** The readiness checklist, once the configuration loads (readiness.ts). */
+  readiness?: Readiness;
 }
 
 /** Equal as JSON, whatever the order of object keys. */
@@ -307,19 +311,21 @@ export async function setup(
     const refusal = await originRefusal(config.checkout, repository);
     if (refusal) problems.push(refusal.message);
   }
+  const github = new GitHub(repository, process.env.FACTORY_GITHUB_API);
   try {
-    const github = new GitHub(repository, process.env.FACTORY_GITHUB_API);
     problems.push(...(await projectProblems(github, config)));
   } catch (error) {
     problems.push(`Can't read the queue's Project: ${errorMessage(error)}`);
   }
+  const ready = await readiness(config, github);
   return {
-    status: problems.length ? "blocked" : "configured",
+    status: problems.length || !ready.ready ? "blocked" : "configured",
     config: path,
     created,
     changed,
     defaultProvider: config.defaultProvider,
     problems,
+    readiness: ready,
   };
 }
 

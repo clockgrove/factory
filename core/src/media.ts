@@ -31,15 +31,22 @@
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  constants,
+  copyFileSync,
   createReadStream,
   createWriteStream,
+  linkSync,
   lstatSync,
+  renameSync,
+  rmSync,
+  statfsSync,
 } from "node:fs";
 import { chmod, copyFile, mkdir, open, rm, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
+import { crashPoint } from "./crash.js";
 import { hold, objectiveWide } from "./engine.js";
 import {
   blobSizes,
@@ -1276,7 +1283,24 @@ export interface LfsFile {
   path: string;
   sha256: string;
   bytes: number;
+  /**
+   * A hard link to the local store's object, with its inode: the sandbox
+   * mounts it read-only (runSandboxed's readOnlyFiles), so no command can
+   * change it or the store, and rewrittenMedia needn't read it. Before
+   * each command the path must still hold that inode: a command that moved
+   * its directory would leave the store's object writable to the next.
+   */
+  linked?: { ino: number };
 }
+
+/**
+ * Restored files linked to the local store at most: each is one read-only
+ * mount in the command sandbox. The largest files are linked first; the
+ * rest are cloned or copied.
+ */
+const MAX_LINKED_FILES = 1000;
+/** Free space a copy of an LFS file for validation must leave on its disk. */
+const RESERVED_BYTES = 1024 * MIB;
 
 /**
  * Restore the bytes of EVERY Git LFS file in a validation checkout: each
@@ -1284,15 +1308,22 @@ export interface LfsFile {
  * as `git lfs pull` would, so the commands see the repository as a person
  * who clones it does, whatever the format. Objects come from the local LFS
  * store; those it lacks are fetched from origin at `commit` first. Each
- * copy is checked against its pointer's sha256 and size. A selected member
- * marked `required` must be its exact pointer in the tree, else it holds.
- * At most MAX_CAPTURE_BYTES are restored in all. Returns the restored
- * files: they now differ from their pointer blobs, so the caller leaves
- * them out of its clean-checkout and mutation checks and gives them to
- * rewrittenMedia after the commands.
+ * file is checked against its pointer's size, and a copy against its
+ * sha256 too. A selected member marked `required` must be its exact pointer
+ * in the tree, else it holds. Returns the restored files: they now differ
+ * from their pointer blobs, so the caller leaves them out of its
+ * clean-checkout and mutation checks, mounts the linked ones read-only for
+ * its commands, and gives them to rewrittenMedia after the commands.
  *
- * Each file is written literally: Factory copies the store's object over
- * the pointer file itself, without following a link. `git lfs checkout`
+ * Cost follows the disk, not the repository's LFS size: with `link` (the
+ * commands run in the sandbox, which mounts linked files read-only), the
+ * largest MAX_LINKED_FILES files are hard links to the store's objects
+ * where the store shares their filesystem; the rest are reflinked clones
+ * where the filesystem supports them, else copies. A copy that would leave
+ * less than RESERVED_BYTES free holds, naming the space it needs.
+ *
+ * Each file is written literally: Factory replaces the pointer file itself,
+ * reached without following a link. `git lfs checkout`
  * can't do that: its arguments are gitignore-style patterns, so a glob
  * character or a bare file name restores other files too, and it matches
  * nothing for a `:(literal)` pathspec (checked with git-lfs 3.7.1).
@@ -1309,6 +1340,8 @@ export async function hydrateTree(input: {
   repository: string;
   commit: string;
   members: readonly SelectedMember[];
+  /** Link files to the store: only when every command runs in the sandbox. */
+  link: boolean;
   signal: AbortSignal;
 }): Promise<Exclude<MediaOutcome<LfsFile[]>, { kind: "repair" }>> {
   const { directory, signal } = input;
@@ -1327,11 +1360,6 @@ export async function hydrateTree(input: {
       );
   }
   const files = await lfsFiles(directory, signal);
-  const total = files.reduce((sum, file) => sum + file.bytes, 0);
-  if (total > MAX_CAPTURE_BYTES)
-    return hold(
-      `The tree being validated holds ${files.length} Git LFS files, ${total} bytes in all; Factory restores at most ${MAX_CAPTURE_BYTES} bytes of LFS files for a validation run, so their commands can't see the real files. Make the repository's LFS files smaller in all on the default branch and answer retry, or cancel.`,
-    );
   const missing = await fetchMissing(
     { ...input, checkout: directory },
     files.map((file) => ({ ...file, oid: file.sha256 })),
@@ -1346,21 +1374,36 @@ export async function hydrateTree(input: {
           ", ",
         )}${missing.length > 20 ? ` and ${missing.length - 20} more` : ""} at ${input.commit.slice(0, 12)}, and Factory's checkout doesn't hold them, so validation can't restore those files. Push the objects to origin's LFS storage (\`git lfs push --object-id origin <oid>\` from a clone that has them) and answer retry, or cancel.`,
     );
-  for (const file of files) {
-    const held = await restoreObject(directory, file, signal);
-    if (held?.sha256 !== file.sha256 || held.bytes !== file.bytes)
+  const restored: LfsFile[] = [];
+  let links = 0;
+  for (const file of [...files].sort((a, b) => b.bytes - a.bytes)) {
+    const link =
+      input.link && file.mode === "100644" && links < MAX_LINKED_FILES;
+    const held = await restoreObject(directory, file, link, signal);
+    if (typeof held === "object" && "free" in held)
+      return hold(
+        `Restoring the Git LFS file ${file.path} (${file.bytes} bytes) for validation would leave less than ${RESERVED_BYTES} bytes free on the disk of ${directory} (${held.free} bytes free). Free disk space, then answer retry; or cancel. Factory links LFS files instead of copying them when Factory's state directory and the target checkout share a filesystem.`,
+      );
+    if (typeof held !== "number" && held !== "cloned" && held !== "copied")
       return hold(
         `Factory could not restore ${file.path} (sha256 ${file.sha256}, ${file.bytes} bytes) from the local Git LFS store: the store's object or the checkout's file is not a regular file with those bytes. Remove the object from the target checkout's .git/lfs/objects and answer retry, or cancel.`,
       );
+    if (typeof held === "number") links += 1;
+    restored.push({
+      path: file.path,
+      sha256: file.sha256,
+      bytes: file.bytes,
+      ...(typeof held === "number" ? { linked: { ino: held } } : {}),
+    });
   }
-  return { kind: "done", value: files };
+  return { kind: "done", value: restored };
 }
 
 /** The checkout's Git LFS files at HEAD: pointers at `filter=lfs` paths. */
 async function lfsFiles(
   directory: string,
   signal: AbortSignal,
-): Promise<LfsFile[]> {
+): Promise<(LfsFile & { mode: string })[]> {
   const entries = (
     await hostGit(directory, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"], {
       signal,
@@ -1370,11 +1413,14 @@ async function lfsFiles(
     .split("\0");
   // "<mode> <type> <oid>\t<path>"; only regular files can be pointers Git LFS smudges.
   const blobs: { oid: string; path: string }[] = [];
+  const modes = new Map<string, string>();
   for (const entry of entries) {
     const tab = entry.indexOf("\t");
     const [mode, type, oid] = entry.slice(0, tab).split(" ");
-    if (tab > 0 && type === "blob" && mode?.startsWith("100") && oid)
+    if (tab > 0 && type === "blob" && mode?.startsWith("100") && oid) {
       blobs.push({ oid, path: entry.slice(tab + 1) });
+      modes.set(entry.slice(tab + 1), mode);
+    }
   }
   const pointers = await pointerBlobs(directory, blobs, signal);
   if (!pointers.length) return [];
@@ -1386,13 +1432,19 @@ async function lfsFiles(
   );
   return pointers
     .filter((pointer) => filtered.has(pointer.path))
-    .map(({ path, oid, size }) => ({ path, sha256: oid, bytes: size }));
+    .map(({ path, oid, size }) => ({
+      path,
+      sha256: oid,
+      bytes: size,
+      mode: modes.get(path)!,
+    }));
 }
 
 /**
  * The restored files whose bytes are no longer their pointers' (or that
  * are no longer regular files reached without links): what a validation
- * command rewrote. Call after the commands, with hydrateTree's result.
+ * command rewrote. Call after the commands, with hydrateTree's result;
+ * linked files were read-only to the commands and aren't read again.
  */
 export async function rewrittenMedia(
   directory: string,
@@ -1400,6 +1452,8 @@ export async function rewrittenMedia(
 ): Promise<string[]> {
   const changed: string[] = [];
   for (const file of restored) {
+    // Mounted read-only: no command could change it.
+    if (file.linked) continue;
     let parent: ReturnType<typeof openParent>;
     try {
       parent = openParent(directory, file.path, false);
@@ -1423,17 +1477,25 @@ export async function rewrittenMedia(
 }
 
 /**
- * Copy the local store's object for `file` over its pointer file in
- * `directory`, reached without links. Undefined when the store lacks it or
- * either file isn't a regular file reached without links.
+ * Replace `file`'s pointer file in `directory`, reached without links, with
+ * the local store's object: a hard link (`link`), else a reflinked clone,
+ * else a copy checked against the pointer's sha256, which must leave
+ * RESERVED_BYTES free. A link or clone replaces the pointer by a rename and
+ * keeps its mode; a copy writes over it. A link returns its inode.
+ * Undefined when the store lacks the object or either file isn't a regular
+ * file of the pointer's size.
  */
 async function restoreObject(
   directory: string,
   file: LfsFile,
+  link: boolean,
   signal: AbortSignal,
-): Promise<{ sha256: string; bytes: number } | undefined> {
+): Promise<number | "cloned" | "copied" | { free: number } | undefined> {
   const stored = await lfsObject(directory, file.sha256, signal);
   if (!stored) return undefined;
+  const source = join(stored.root, stored.relative);
+  if (lstatSync(source, { throwIfNoEntry: false })?.size !== file.bytes)
+    return undefined;
   let parent: ReturnType<typeof openParent>;
   try {
     parent = openParent(directory, file.path, false);
@@ -1442,15 +1504,42 @@ async function restoreObject(
   }
   try {
     const target = `${parent.anchor}/${parent.name}`;
-    if (!lstatSync(target, { throwIfNoEntry: false })?.isFile())
-      return undefined;
-    return await copyContained(
+    const pointer = lstatSync(target, { throwIfNoEntry: false });
+    if (!pointer?.isFile()) return undefined;
+    // Linked or cloned beside the pointer, then renamed over it.
+    const staged = `${parent.anchor}/.${parent.name}.factory-lfs`;
+    rmSync(staged, { force: true });
+    if (link)
+      try {
+        linkSync(source, staged);
+        renameSync(staged, target);
+        return lstatSync(target).ino;
+      } catch {
+        // Another filesystem, or the link limit: clone or copy instead.
+        rmSync(staged, { force: true });
+      }
+    try {
+      copyFileSync(source, staged, constants.COPYFILE_FICLONE_FORCE);
+      await chmod(staged, pointer.mode & 0o777);
+      renameSync(staged, target);
+      return "cloned";
+    } catch {
+      // No reflinks on this filesystem: copy.
+      rmSync(staged, { force: true });
+    }
+    const { bavail, bsize } = statfsSync(directory);
+    const free = Number(bavail) * Number(bsize);
+    if (free - file.bytes < RESERVED_BYTES) return { free };
+    const held = await copyContained(
       stored.root,
       stored.relative,
       target,
       file.bytes,
       true,
     );
+    return held.sha256 === file.sha256 && held.bytes === file.bytes
+      ? "copied"
+      : undefined;
   } catch (error) {
     if (error instanceof ContainedError) return undefined;
     throw error;

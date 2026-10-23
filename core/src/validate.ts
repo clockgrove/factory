@@ -49,12 +49,13 @@ import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
   captureReviewArtifacts,
+  outputLimit,
   plannedReviewArtifactsProblem,
   type ReviewArtifact,
   type ReviewArtifactSelector,
   selectorsFor,
 } from "./review/artifacts.js";
-import { runSandboxed } from "./sandbox.js";
+import { runSandboxed, sandboxAvailable } from "./sandbox.js";
 import type { ObjectiveBlock } from "./shown.js";
 import { errorMessage, headAndTail } from "./text.js";
 import { privateStagingPath } from "./work/collect.js";
@@ -293,11 +294,14 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       repository: input.repository,
       commit,
       members: input.media ?? [],
+      // Linked files are safe only behind the sandbox's read-only mounts.
+      link: sandboxAvailable().available,
       signal,
     });
     if (restored.kind !== "done") return restored;
     const lfsFiles: readonly LfsFile[] = restored.value;
     const hydrated = new Set(lfsFiles.map((file) => file.path));
+    const linked = lfsFiles.filter((file) => file.linked);
     const baseline = await status(worktree, signal);
     const dirty = mutationDetail(Buffer.alloc(0), baseline, hydrated);
     if (dirty) {
@@ -332,8 +336,32 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           : undefined;
       const online =
         install && input.sandbox.network === "package-install" && !refused;
+      // A command that moved a linked file's directory would leave the
+      // operator's LFS object writable to the next one: stop first.
+      const moved = linked.filter(
+        (file) =>
+          lstatSync(join(worktree, file.path), { throwIfNoEntry: false })
+            ?.ino !== file.linked?.ino,
+      );
+      if (moved.length) {
+        const detail = `Validation command modified the result tree: Git LFS files moved or replaced: ${moved
+          .slice(0, 20)
+          .map((file) => file.path)
+          .join(
+            ", ",
+          )}${moved.length > 20 ? ` and ${moved.length - 20} more` : ""}`;
+        return {
+          kind: "failed",
+          tree,
+          commands: sequence,
+          results,
+          detail,
+          output: detail,
+        };
+      }
       const started = Date.now();
       input.log({ event: "validation-command", index, command, preparing });
+      const limit = capture ? outputLimit(selectors, command) : undefined;
       const run = await runSandboxed(command, {
         cwd: worktree,
         home: install ? await made("factory-install-home-") : home,
@@ -347,6 +375,8 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         config: input.sandbox,
         packageInstall: install,
         network: online,
+        readOnlyFiles: linked.map((file) => file.path),
+        ...(limit ? { outputLimit: limit } : {}),
         signal: input.signal,
         timeoutMs: input.commandTimeoutMs ?? 30 * MINUTE,
       });

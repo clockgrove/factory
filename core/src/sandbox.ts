@@ -1018,6 +1018,12 @@ export interface SandboxOptions {
   network?: boolean;
   /** Further host directories to mount read-only. */
   readOnly?: string[];
+  /**
+   * Regular files in the checkout, relative to `cwd`, mounted read-only
+   * over it: no command can write, replace or remove them (hydrated Git
+   * LFS files that are hard links to the operator's LFS store).
+   */
+  readOnlyFiles?: readonly string[];
   signal: AbortSignal;
   timeoutMs: number;
   /** Each decoded chunk as it arrives. */
@@ -1242,6 +1248,22 @@ function launch(
   // The checkout's `.git` stays read-only, so no command repoints it.
   const git = join(checkout, ".git");
   if (existsSync(git)) mounts.set(git, "ro");
+  for (const file of options.readOnlyFiles ?? []) {
+    const path = join(checkout, file);
+    // Reached without links: an earlier command could have swapped a
+    // parent directory for a link to a host file.
+    if (
+      !within(path, checkout) ||
+      path === checkout ||
+      !lstatSync(path, { throwIfNoEntry: false })?.isFile() ||
+      realpathSync(path) !== path
+    )
+      throw new Refusal(
+        `read-only file ${file} is not a regular file in the checkout`,
+        "Validate again: Factory restores the checkout's Git LFS files afresh",
+      );
+    mounts.set(path, "ro");
+  }
   // A network grant runs in the sandbox's own namespace through pasta, or
   // offline: never in the host's network namespace.
   const online =

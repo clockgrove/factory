@@ -1,6 +1,6 @@
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
-import type { Retirement } from "../planning/types.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
+import type { Retirement } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";

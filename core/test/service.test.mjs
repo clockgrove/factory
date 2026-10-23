@@ -2070,7 +2070,10 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   // #95 is done: its record is the evidence.
   seed(inst, 95, "done", {
     done: {
-      check: { shown: readShown(SHOWN_95, { sources: false }) },
+      check: {
+        shown: readShown(SHOWN_95, { sources: false }),
+        title: "Parser",
+      },
       plan: { items: [{ id: "a", title: "Parse", ownedPaths: ["src/"] }] },
       "item:a:publish": { pr: 7 },
       "item:a:merge": { mergeSha: "a".repeat(40) },
@@ -2135,7 +2138,7 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   assert.equal(ignore("--text", "Done by hand").code, 0);
   await until(() => stateOf(inst, 91).done.predecessors, "#91 goes on");
   const [ignored] = stateOf(inst, 91).done.predecessors.ignored;
-  assert.deepEqual([ignored.issue, ignored.reason], [90, "Done by hand"]);
+  assert.deepEqual([ignored.ref, ignored.reason], ["#90", "Done by hand"]);
   await stopped(service);
 });
 

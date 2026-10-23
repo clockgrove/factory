@@ -47,7 +47,8 @@ export interface PredecessorEvidence {
 
 /** A predecessor the operator answered `ignore` to: the Objective proceeds without it. */
 export interface IgnoredPredecessor {
-  issue: number;
+  /** `#N` in this repository, `owner/repo#N` in another (`reference`). */
+  ref: string;
   reason: string;
   by: string;
   at: string;
@@ -69,10 +70,35 @@ export function predecessorEvidence(
   );
 }
 
-type Blocker =
-  | { issue: number; kind: "done"; evidence: PredecessorEvidence }
-  | { issue: number; kind: "waiting"; why: string }
-  | { issue: number; kind: "ended"; why: string };
+type Blocker = { ref: string } & (
+  | { kind: "done"; evidence: PredecessorEvidence }
+  | { kind: "waiting"; why: string }
+  | { kind: "ended"; why: string }
+);
+
+/**
+ * How a blocker is named and matched: `#N` in this repository, else
+ * `owner/repo#N`, so an `ignore` of one never skips another repository's
+ * issue with the same number.
+ */
+function reference(github: GitHub, blocker: IssueSummary): string {
+  if (github.ownIssue(blocker)) return `#${blocker.number}`;
+  const repository = /\/repos\/([^/]+\/[^/]+)$/.exec(
+    blocker.repository_url ?? "",
+  )?.[1];
+  return `${repository ?? "another repository"}#${blocker.number}`;
+}
+
+/** The `ignore` option for a blocker: its arg is the number here, else `owner/repo#N`. */
+function ignoreOffer(ref: string): Offer {
+  return {
+    answer: "ignore",
+    arg: ref.startsWith("#") ? ref.slice(1) : ref,
+    family: "accept",
+    consequence: `Goes on without ${ref}; your reason is recorded.`,
+    needsText: true,
+  };
+}
 
 /** The `predecessors` step (workflow.ts): wait, hold or record the evidence. */
 export function predecessorsStep(deps: PlanningDeps): Step {
@@ -83,15 +109,13 @@ export function predecessorsStep(deps: PlanningDeps): Step {
     run: async ({ state, answer, signal }): Promise<Outcome> => {
       const { github } = deps;
       let ignored = fact(state, "predecessors:ignored") ?? [];
-      const ignoring = answer?.answer === "ignore" ? Number(answer.arg) : NaN;
-      if (
-        Number.isSafeInteger(ignoring) &&
-        !ignored.some((entry) => entry.issue === ignoring)
-      )
+      const arg = answer?.answer === "ignore" ? answer.arg : undefined;
+      const ignoring = arg?.includes("#") ? arg : arg && `#${arg}`;
+      if (ignoring && !ignored.some((entry) => entry.ref === ignoring))
         ignored = [
           ...ignored,
           {
-            issue: ignoring,
+            ref: ignoring,
             reason: (answer!.text ?? "").trim(),
             by: answer!.by,
             at: answer!.at,
@@ -100,9 +124,9 @@ export function predecessorsStep(deps: PlanningDeps): Step {
       const keep = ignored.length
         ? facts({ "predecessors:ignored": ignored })
         : {};
-      const skip = new Set(ignored.map((entry) => entry.issue));
+      const skip = new Set(ignored.map((entry) => entry.ref));
       const linked = (await github.blockedBy(state.issue, signal)).filter(
-        (blocker) => !skip.has(blocker.number),
+        (blocker) => !skip.has(reference(github, blocker)),
       );
       const blockers: Blocker[] = [];
       for (const blocker of linked.sort((a, b) => a.number - b.number))
@@ -112,7 +136,7 @@ export function predecessorsStep(deps: PlanningDeps): Step {
         return {
           ...objectiveWide(
             hold(
-              `Objective #${state.issue} is blocked by ${ended.length === 1 ? "an issue that ended" : "issues that ended"} without delivering:\n\n${ended.map((b) => `- #${b.issue}: ${b.why}`).join("\n")}\n\n\`replan\` reads the issue and its blocked-by links again once you have edited them; \`ignore <n> <reason>\` goes on without that predecessor; or cancel.`,
+              `Objective #${state.issue} is blocked by ${ended.length === 1 ? "an issue that ended" : "issues that ended"} without delivering:\n\n${ended.map((b) => `- ${b.ref}: ${b.why}`).join("\n")}\n\n\`replan\` reads the issue and its blocked-by links again once you have edited them; \`ignore <n> <reason>\` (\`owner/repo#n\` for another repository's issue) goes on without that predecessor; or cancel.`,
               [
                 {
                   answer: "replan",
@@ -120,15 +144,7 @@ export function predecessorsStep(deps: PlanningDeps): Step {
                   consequence:
                     "Reads the issue's blocked-by links again (edit them first) and plans once its predecessors are done.",
                 },
-                ...ended.map(
-                  (b): Offer => ({
-                    answer: "ignore",
-                    arg: String(b.issue),
-                    family: "accept",
-                    consequence: `Goes on without #${b.issue}; your reason is recorded.`,
-                    needsText: true,
-                  }),
-                ),
+                ...ended.map((b) => ignoreOffer(b.ref)),
                 "cancel",
               ],
             ),
@@ -143,24 +159,14 @@ export function predecessorsStep(deps: PlanningDeps): Step {
             ...objectiveWide(
               hold(
                 `Objective #${state.issue} is in a dependency cycle: ${cycle.map((n) => `#${n}`).join(" is blocked by ")}. No Objective in it can start. Remove one of these blocked-by links and answer \`retry\`, \`ignore ${cycle[1]} <reason>\` to go on without #${cycle[1]}, or cancel.`,
-                [
-                  "retry",
-                  {
-                    answer: "ignore",
-                    arg: String(cycle[1]),
-                    family: "accept",
-                    consequence: `Goes on without #${cycle[1]}; your reason is recorded.`,
-                    needsText: true,
-                  },
-                  "cancel",
-                ],
+                ["retry", ignoreOffer(`#${cycle[1]}`), "cancel"],
               ),
             ),
             keep,
           };
         // A wait on another Objective has no deadline, like a human gate:
         // no question, no slot, and status shows what it waits on.
-        const on = waiting.map((b) => `#${b.issue} (${b.why})`).join(", ");
+        const on = waiting.map((b) => `${b.ref} (${b.why})`).join(", ");
         return {
           kind: "retry",
           reason: `Waiting on predecessor${waiting.length === 1 ? "" : "s"} ${on}`,
@@ -189,42 +195,43 @@ async function classify(
   signal: AbortSignal,
 ): Promise<Blocker> {
   const issue = blocker.number;
+  const ref = reference(deps.github, blocker);
   if (!deps.github.ownIssue(blocker))
     return blocker.state === "open"
-      ? { issue, kind: "waiting", why: "open, in another repository" }
+      ? { ref, kind: "waiting", why: "open, in another repository" }
       : {
-          issue,
+          ref,
           kind: "ended",
           why: "it is in another repository, so Factory has no accepted result for it",
         };
-  if (blocker.state === "open") return { issue, kind: "waiting", why: "open" };
+  if (blocker.state === "open") return { ref, kind: "waiting", why: "open" };
   if (blocker.state_reason && blocker.state_reason !== "completed")
     return {
-      issue,
+      ref,
       kind: "ended",
       why: `closed as ${prose(blocker.state_reason.replace(/_/g, " "))}`,
     };
   const loaded = findState(deps.objectives, issue);
   if (loaded?.kind === "unreadable")
-    return { issue, kind: "waiting", why: "its Factory state can't be read" };
+    return { ref, kind: "waiting", why: "its Factory state can't be read" };
   const previous = loaded?.state;
   if (!previous)
     return {
-      issue,
+      ref,
       kind: "ended",
       why: "closed, but Factory never ran it here, so it has no accepted result",
     };
   if (previous.status === "cancelled")
-    return { issue, kind: "ended", why: "its Objective was cancelled" };
+    return { ref, kind: "ended", why: "its Objective was cancelled" };
   if (previous.status !== "done")
-    return { issue, kind: "waiting", why: "its Objective isn't done" };
+    return { ref, kind: "waiting", why: "its Objective isn't done" };
   const plan = currentPlan(previous);
   const final = previous.done.final as
     | { commit: string; tree: string; commands: string[] }
     | undefined;
   if (!plan || !final)
     return {
-      issue,
+      ref,
       kind: "ended",
       why: "its Objective is done, but its record has no accepted result",
     };
@@ -234,21 +241,22 @@ async function classify(
   const digest =
     fact(previous, "objective:accepted") ?? shownDigest(accepted.shown);
   if (
+    rendered.title !== accepted.title ||
     shownDigest(
       readShown(rendered.body_html, { sources: accepted.writer === true }),
     ) !== digest
   )
     return {
-      issue,
+      ref,
       kind: "ended",
       why: "its issue was edited after Factory accepted its result",
     };
   return {
-    issue,
+    ref,
     kind: "done",
     evidence: {
       issue,
-      title: rendered.title,
+      title: accepted.title,
       commit: final.commit,
       tree: final.tree,
       commands: final.commands,

@@ -2165,13 +2165,24 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
         if (kept) log({ event: "branch-kept", branch, reason: kept });
       }
       // The Objective's issue closes as not planned, so the queue and the
-      // issue agree; the operator can reopen and queue it again.
-      await deps.github.closeIssue(
-        state.issue,
-        "not_planned",
-        "cancel:close",
-        signal,
-      );
+      // issue agree; the operator can reopen and queue it again. An issue
+      // GitHub no longer has (deleted, or transferred away) has nothing to
+      // close: cleanup goes on, so it settles.
+      try {
+        await deps.github.closeIssue(
+          state.issue,
+          "not_planned",
+          "cancel:close",
+          signal,
+        );
+      } catch (error) {
+        if (
+          !(error instanceof GitHubError) ||
+          (error.status !== 404 && error.status !== 410)
+        )
+          throw error;
+        log({ event: "issue-gone", status: error.status });
+      }
       await removeWorkFiles(state.issue, deps, signal);
       return { kind: "done" };
     },

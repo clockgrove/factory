@@ -220,7 +220,8 @@ export class GitHubSync {
       const finished =
         TERMINAL.includes(runner.state.status) && !runner.hasWork;
       if (finished && this.settled.has(issue)) continue;
-      if (finished && this.synced(runner.state)) {
+      // An issue GitHub no longer has has no card or comments to write.
+      if (finished && (this.synced(runner.state) || this.gone.has(issue))) {
         this.settled.add(issue);
         continue;
       }

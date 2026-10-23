@@ -289,7 +289,7 @@ function logged(inst, issue, event) {
   );
 }
 
-test("the service retries a failed observation, and one run keeps one episode across restarts and --record", async () => {
+test("the service retries a failed observation, across a restart, and one run keeps one episode across restarts and --record", async () => {
   const inst = installation();
   seedDone(inst, 7);
   assert.equal(dream(inst, undefined, "--show").code, 0); // creates the store
@@ -298,14 +298,28 @@ test("the service retries a failed observation, and one run keeps one episode ac
   blocker.exec("BEGIN IMMEDIATE");
   const first = await serve(inst);
   await until(() => logged(inst, 7, "observe-failed"), "a failed observation");
+  // The run retires without it; its observation is kept beside it, and the
+  // next start retries it.
+  const pending = () =>
+    readdirSync(join(inst.objectives, "finished")).filter((name) =>
+      name.endsWith(".observe.json"),
+    );
+  await until(
+    () =>
+      existsSync(join(inst.objectives, "finished")) && pending().length === 1,
+    "the kept observation",
+  );
+  await first.stop();
   blocker.exec("COMMIT");
   blocker.close();
+  const restarted = await serve(inst);
   await until(
     () =>
       count(inst, "SELECT count(*) FROM memory WHERE kind = 'episode'") === 1,
     "the retried observation",
   );
-  await first.stop();
+  await until(() => pending().length === 0, "the landed observation's file");
+  await restarted.stop();
 
   // A save after the run settled (a display or reply update) moves updatedAt
   // and writes the active file again; the settled run's moved to finished/.

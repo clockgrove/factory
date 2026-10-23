@@ -38,10 +38,12 @@ import {
   findState,
   finishState,
   listObjectives,
+  listObservations,
   newObjective,
   type ObjectiveState,
   removeState,
   runOf,
+  saveObservation,
   saveState,
   TERMINAL,
 } from "./state.js";
@@ -74,8 +76,9 @@ export interface ServeOptions {
  * Knowledge is best effort for the lifecycle: a failed observation or
  * release never holds back admission, withdrawal or retirement. The run's
  * settled observation (which also releases it) is kept and retried in the
- * background, with backoff, until it lands: an episode may be recorded
- * late, but the queue never waits on it.
+ * background, with backoff, until it lands, across restarts (saved beside
+ * the finished states): an episode may be recorded late, but the queue
+ * never waits on it.
  */
 export interface StateObserver {
   observe(
@@ -143,17 +146,34 @@ export async function serve(options: ServeOptions): Promise<number> {
   /**
    * Settled observations of runs no longer in memory (retired, replaced or
    * withdrawn before the observer took them), by `<issue>@<run>`: retried
-   * with backoff until they land.
+   * with backoff until they land. Each is saved in finished/ (`path`)
+   * until then, and startup reads those files back.
    */
-  const late = new Map<string, Observation & { state: ObjectiveState }>();
-  const observeLate = (state: ObjectiveState): void => {
-    if (!options.observer) return;
+  const late = new Map<
+    string,
+    Observation & { state: ObjectiveState; path?: string }
+  >();
+  const keepLate = (state: ObjectiveState, path?: string): void => {
     late.set(`${state.issue}@${runOf(state)}`, {
       state: structuredClone(state),
+      ...(path ? { path } : {}),
       busy: false,
       failures: 0,
       nextAt: 0,
     });
+  };
+  /** Keep a settled observation on disk too; one that can't be saved is kept in memory and logged. */
+  const observeLate = (state: ObjectiveState): void => {
+    if (!options.observer) return;
+    try {
+      keepLate(state, saveObservation(paths.objectives, state));
+    } catch (error) {
+      log.write(state.issue, {
+        event: "observe-unsaved",
+        error: String(error),
+      });
+      keepLate(state);
+    }
   };
   /** Run an observer job unless one is in flight or backing off; log a failure and back off. */
   const attempt = (
@@ -249,15 +269,21 @@ export async function serve(options: ServeOptions): Promise<number> {
    */
   const retire = (issue: number): void => {
     const runner = runners.get(issue);
+    const unobserved =
+      options.observer &&
+      runner &&
+      observed.get(issue)?.mark !== observeMark(runner);
+    let path: string | undefined;
     try {
+      // Saved before the move, so a restart retries it from finished/.
+      if (unobserved) path = saveObservation(paths.objectives, runner.state);
       finishState(paths.objectives, issue);
     } catch (error) {
       // It stays, and moves on a later tick.
       log.write(issue, { event: "finish-failed", error: String(error) });
       return;
     }
-    if (runner && observed.get(issue)?.mark !== observeMark(runner))
-      observeLate(runner.state);
+    if (unobserved) keepLate(runner.state, path);
     runners.delete(issue);
     options.sync?.forget(issue);
     observed.delete(issue);
@@ -286,6 +312,15 @@ export async function serve(options: ServeOptions): Promise<number> {
     if (name.endsWith(".tmp"))
       rmSync(join(paths.objectives, name), { force: true });
   for (const issue of listObjectives(paths.objectives)) load(issue);
+  // Settled observations that hadn't landed: retried, never history read.
+  for (const { path, state, error } of options.observer
+    ? listObservations(paths.objectives)
+    : [])
+    if (state) keepLate(state, path);
+    else {
+      log.write(0, { event: "observation-unreadable", path, error });
+      rmSync(path, { force: true });
+    }
   const record = startRecord(previous, startedAt, runId, runners, limits);
   run.resumeAt = Date.parse(record.resumeAt ?? "") || 0;
   if (record.resumeAt)
@@ -531,7 +566,10 @@ export async function serve(options: ServeOptions): Promise<number> {
             true,
             AbortSignal.timeout(OBSERVE_DEADLINE_MS),
           ),
-        () => late.delete(key),
+        () => {
+          late.delete(key);
+          if (entry.path) rmSync(entry.path, { force: true });
+        },
       );
     options.sync?.tick({
       runners,

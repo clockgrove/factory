@@ -231,7 +231,15 @@ function statePath(dir: string, issue: number): string {
  */
 export function saveState(dir: string, state: ObjectiveState): void {
   mkdirSync(dir, { recursive: true });
-  const path = statePath(dir, state.issue);
+  writeWhole(dir, statePath(dir, state.issue), state, "state");
+}
+
+function writeWhole(
+  dir: string,
+  path: string,
+  state: ObjectiveState,
+  point?: string,
+): void {
   const temporary = `${path}.${process.pid}.tmp`;
   const fd = openSync(temporary, "w", 0o600);
   try {
@@ -240,10 +248,10 @@ export function saveState(dir: string, state: ObjectiveState): void {
   } finally {
     closeSync(fd);
   }
-  crashPoint("state:before-rename");
+  if (point) crashPoint(`${point}:before-rename`);
   renameSync(temporary, path);
   syncDirectory(dir);
-  crashPoint("state:saved");
+  if (point) crashPoint(`${point}:saved`);
 }
 
 /** Remove the Objective's state: it was dequeued before it started. */
@@ -276,6 +284,58 @@ export function finishState(dir: string, issue: number): void {
   }
   syncDirectory(finished);
   syncDirectory(dir);
+}
+
+const OBSERVATION = ".observe.json";
+
+/**
+ * A run's settled observation that hasn't landed (service.ts `late`): the
+ * state it observes, saved beside the finished states until it lands, so
+ * a restart retries it. Returns the file, to remove once it lands.
+ */
+export function saveObservation(dir: string, state: ObjectiveState): string {
+  const finished = join(dir, FINISHED);
+  mkdirSync(finished, { recursive: true });
+  const run = runOf(state).replace(/[^\w.-]/g, "-");
+  const path = join(finished, `${state.issue}@${run}${OBSERVATION}`);
+  writeWhole(finished, path, state);
+  return path;
+}
+
+/**
+ * The settled observations still to land. Only these files are read, never
+ * the finished states; one that doesn't parse comes with its `error`, and
+ * leftover temporary files are removed.
+ */
+export function listObservations(
+  dir: string,
+): { path: string; state?: ObjectiveState; error?: string }[] {
+  const finished = join(dir, FINISHED);
+  let names: string[];
+  try {
+    names = readdirSync(finished);
+  } catch {
+    return [];
+  }
+  const found: { path: string; state?: ObjectiveState; error?: string }[] = [];
+  for (const name of names) {
+    const path = join(finished, name);
+    if (name.includes(`${OBSERVATION}.`) && name.endsWith(".tmp"))
+      rmSync(path, { force: true });
+    if (!name.endsWith(OBSERVATION)) continue;
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      continue; // read again at the next start
+    }
+    try {
+      found.push({ path, state: JSON.parse(text) });
+    } catch (error) {
+      found.push({ path, error: String(error) });
+    }
+  }
+  return found;
 }
 
 /** The Objective's active state, else its finished one; null when it has neither. */

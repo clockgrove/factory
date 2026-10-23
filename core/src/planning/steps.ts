@@ -980,20 +980,17 @@ function sameFindings(a: Finding[], b: Finding[]): boolean {
 // plan (accept)
 
 /**
- * The accepted generation's inputs and the planner's full answer for the
- * accepted draft: the base an amendment revises.
+ * The planner's full answer for the accepted draft, the base an amendment
+ * revises; undefined when the plan has none (rebuilt by `factory reset`).
  */
-export function acceptedRound(state: ObjectiveState): {
-  inputs: ObjectiveInputs;
-  answer: unknown;
-} {
+export function acceptedRoundAnswer(state: ObjectiveState): unknown {
   const { g, n } = position(state);
   for (let m = n; m >= 1; m--) {
     const round = state.done[`plan:${g}:${m}`] as PlanRound | undefined;
-    if (round?.draft)
-      return { inputs: generationInputs(state, g), answer: round.answer };
+    if (round?.draft) return round.answer;
   }
-  throw new Error("The accepted plan has no planning round");
+  // A plan `factory reset` rebuilt from its comment has no planning round.
+  return undefined;
 }
 
 function acceptStep(g: number, n: number, deps: PlanningDeps): Step {

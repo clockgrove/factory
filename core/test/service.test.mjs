@@ -3688,18 +3688,26 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     plan: accepted,
     discovery,
   };
+  // The planner's answer an amendment revises; #82's plan has none, as
+  // after factory reset.
+  const round = { "plan:1:1": { draft: {}, answer: {} } };
   for (const issue of [81, 82])
     seed(inst, issue, "building", {
-      done: { check: {}, plan: plan(issue), ...rejected },
+      done: {
+        check: {},
+        plan: plan(issue),
+        ...rejected,
+        ...(issue === 81 ? round : {}),
+      },
       kept: { "plan:acceptedAt": accepted, "amend:op-1:proposal": proposal },
     });
   seed(inst, 83, "building", {
-    done: { check: {}, plan: plan(83) },
+    done: { check: {}, plan: plan(83), ...round },
     kept: { "plan:acceptedAt": accepted },
   });
   // A worker's discovery, proposed at once, waits on its amendment.
   seed(inst, 84, "building", {
-    done: { check: {}, plan: plan(84) },
+    done: { check: {}, plan: plan(84), ...round },
     kept: {
       "plan:acceptedAt": accepted,
       "item:a:base": "0".repeat(40),
@@ -3708,6 +3716,12 @@ test("an amendment comes before the build: intake is checked where it enters, a 
         id: "worker-a-1",
         actor: "Work Item a's worker",
         worker: { itemId: "a", attempt: 1 },
+      },
+      // Taken in while worker-a-1 was in flight (a race intake can't see).
+      "amend:op-2:proposal": {
+        ...proposal,
+        id: "op-2",
+        at: "2026-01-01T02:00:00.000Z",
       },
     },
   });
@@ -3776,6 +3790,10 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     "a's work starts after continue",
   );
   assert.ok(stateOf(inst, 82).done["amend:op-1:continue"]);
+  // A plan with no planner answer to revise refuses amendments.
+  const rebuilt = cli(inst, "propose-amendment", "82", "--file", file);
+  assert.equal(refusal(rebuilt), "amendment_refused");
+  assert.match(rebuilt.err, /factory reset/);
 
   // An operator's proposal is taken in and planned before a's work; a
   // second waits for the first, and a malformed one names what passes.
@@ -3835,12 +3853,24 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     0,
   );
   const declined = stateOf(inst, 84);
+  assert.match(declined.done["amend:op-2"].rejected, /in flight/);
   assert.match(
     declined.done["amend:worker-a-1"].rejected,
     /Declined by .*: obsolete/,
   );
   assert.ok(declined.done["amend:worker-a-1:continue"]);
   assert.equal(declined.kept["item:a:declined"].reason, "obsolete");
+  // op-2's rejection stays until its own answer settles it.
+  await until(
+    () => stateOf(inst, 84).holds.some((h) => h.step === "amend:op-2:continue"),
+    "op-2's rejection asks",
+  );
+  assert.deepEqual(touched(stateOf(inst, 84), "item:a:work"), []);
+  const [overlap] = stateOf(inst, 84).holds;
+  assert.equal(
+    cli(inst, "answer", "84", "continue", "--question", overlap.id).code,
+    0,
+  );
   await until(
     () => touched(stateOf(inst, 84), "item:a:work").length,
     "a's work goes on after the decline",

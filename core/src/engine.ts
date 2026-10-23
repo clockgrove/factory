@@ -168,6 +168,11 @@ const COMMON = {
     family: "adopt",
     consequence: "Freezes the configuration as it is now and continues.",
   },
+  refuse: {
+    family: "refuse",
+    consequence:
+      "Rejects the amendment, so it can be replaced or the plan runs without it.",
+  },
   answer: {
     family: "answer",
     consequence:
@@ -267,7 +272,8 @@ export interface Step {
   /**
    * The answer that gets past a model call too large for the model
    * (`Workflow.outcomeOf`): `replan` by default; `refuse` for a step whose
-   * input the operator can reject instead.
+   * input the operator can reject instead, which its errors-in-a-row
+   * question offers too.
    */
   readonly redo?: "replan" | "refuse";
   run(context: StepContext): Promise<Outcome>;
@@ -1000,7 +1006,15 @@ export class ObjectiveRunner {
       question = hold(after.question, after.offers);
     else if (isError) {
       if (count >= this.limits.maxErrors)
-        question = failure(`Step ${key} keeps failing (${outcome.reason}).`);
+        // A step whose input the operator can reject (`Step.redo`
+        // `refuse`, an amendment's) offers that way past too.
+        question = failure(
+          `Step ${key} keeps failing (${outcome.reason}).`,
+          this.workflow.steps(state).find((step) => step.key === key)?.redo ===
+            "refuse"
+            ? ["refuse", "retry", "cancel"]
+            : undefined,
+        );
     } else if (wait?.kind === "reset") {
       const at = wait.at ? Date.parse(wait.at) : Number.NaN;
       // A reset already past (clock skew) still backs off: never a hot loop.

@@ -58,6 +58,7 @@ import {
   discoveryText,
   itemAttempt,
   proposalProblems,
+  revisable,
   type WorkDiscovery,
 } from "../planning/amendments.js";
 import {
@@ -1419,6 +1420,7 @@ function mergedBlame(
 ): Outcome {
   const amendable =
     note === undefined &&
+    revisable(state) &&
     amendmentAllowance(state) > amendmentLedger(state).used;
   return hold(
     `Work Item ${item.id}'s failure comes from Work Item ${predecessor}'s merged result, not its own work, so repairing ${item.id} can't fix it.\n\nEvidence (${correction.path}): ${correction.diagnosis}\n\nWhat ${predecessor} needs: ${correction.correction}${note ? `\n\n${note}` : ""}\n\nAnswer ${amendable ? `\`amend\` to have the planner add a Work Item after ${predecessor} that makes this correction (reviewed independently; it uses a planning revision, and ${item.id} runs again on the amended plan with no repair charged), ` : ""}\`replan\` to plan the remaining work again from the default branch, \`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, or cancel.`,

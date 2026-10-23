@@ -9,7 +9,7 @@ import {
 } from "./engine.js";
 import { GitRefusal } from "./git.js";
 import { githubOutcome } from "./github.js";
-import { amendmentStep } from "./planning/amendments.js";
+import { amendmentSteps } from "./planning/amendments.js";
 import { currentPlan } from "./planning/plan.js";
 import { PREDECESSORS, predecessorsStep } from "./planning/predecessors.js";
 import {
@@ -77,8 +77,8 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
         return step ? [step] : [];
       }
       if (!deps) return [unavailable("build")];
-      const amend = amendmentStep(state, deps);
-      return amend ? [amend] : deliverySteps(state, deps);
+      const amend = amendmentSteps(state, deps);
+      return amend.length ? amend : deliverySteps(state, deps);
     },
 
     upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),
@@ -163,18 +163,7 @@ export function errorOutcome(
           redo === "replan"
             ? `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`
             : `${message}\n\n\`refuse\` rejects this amendment, so it can be replaced or the plan can continue without it.`,
-          [
-            redo === "replan"
-              ? "replan"
-              : {
-                  answer: "refuse",
-                  family: "refuse",
-                  consequence:
-                    "Rejects the amendment, so it can be replaced or the plan runs without it.",
-                },
-            "retry",
-            "cancel",
-          ],
+          [redo, "retry", "cancel"],
         ),
         cause: "failure",
       }),

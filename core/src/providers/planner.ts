@@ -169,6 +169,7 @@ export class IdleWatchdog {
   private readonly tools = new Set<string>();
   private timer?: NodeJS.Timeout;
   private lastEvent = "start";
+  private stopped = false;
   readonly signal: AbortSignal;
 
   constructor(
@@ -186,7 +187,8 @@ export class IdleWatchdog {
     tool?: { id: string; active: boolean },
     quietMs = 0,
   ): void {
-    if (this.signal.aborted) return;
+    // Events can still arrive while a stopped call cleans up.
+    if (this.signal.aborted || this.stopped) return;
     this.lastEvent = event;
     if (tool?.active) this.tools.add(tool.id);
     else if (tool) this.tools.delete(tool.id);
@@ -215,6 +217,7 @@ export class IdleWatchdog {
   }
 
   stop(): void {
+    this.stopped = true;
     clearTimeout(this.timer);
     this.timer = undefined;
   }

@@ -186,7 +186,7 @@ function sdkModel(model: string): string {
  * component, as written or after a link, may be `.git`: a worker that
  * repoints a `.git` file can make host Git run its own filter.
  */
-function pathInsideRoot(path: string, root: string): boolean {
+export function pathInsideRoot(path: string, root: string): boolean {
   try {
     if (!path || path.includes("\0")) return false;
     const lexicalRoot = resolve(root);

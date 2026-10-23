@@ -386,33 +386,41 @@ const CLAUDE_LOGIN_CREDENTIALS = [
 /**
  * The Claude login values systemd loaded for a supervised service. They
  * stay out of `process.env`, so git, Codex and other children never inherit
- * them; only the Claude SDK child receives them. An unreadable or invalid
- * credential holds with its name.
+ * them; only the Claude SDK child receives them.
  */
 export function serviceLoginEnvironment(): Record<string, string> {
-  const directory = process.env.CREDENTIALS_DIRECTORY;
   const env: Record<string, string> = {};
-  if (!directory || !isAbsolute(directory)) return env;
   for (const name of CLAUDE_LOGIN_CREDENTIALS) {
-    const path = join(directory, name);
-    if (!existsSync(path)) continue;
-    let value: string;
-    try {
-      value = readFileSync(path, "utf8").trim();
-    } catch {
-      throw new PlannerError(
-        "hold",
-        `Controller credential ${name} is unavailable; restore its configured private file and restart the service, then answer retry`,
-      );
-    }
-    if (!value || /[\r\n\0]/.test(value))
-      throw new PlannerError(
-        "hold",
-        `Controller credential ${name} is empty or invalid; update its private file and restart the service, then answer retry`,
-      );
-    env[name] = value;
+    const value = serviceCredential(name);
+    if (value !== undefined) env[name] = value;
   }
   return env;
+}
+
+/**
+ * One credential systemd loaded for the service (LoadCredential), by name.
+ * An unreadable or invalid credential holds with its name.
+ */
+export function serviceCredential(name: string): string | undefined {
+  const directory = process.env.CREDENTIALS_DIRECTORY;
+  if (!directory || !isAbsolute(directory)) return undefined;
+  const path = join(directory, name);
+  if (!existsSync(path)) return undefined;
+  let value: string;
+  try {
+    value = readFileSync(path, "utf8").trim();
+  } catch {
+    throw new PlannerError(
+      "hold",
+      `Controller credential ${name} is unavailable; restore its configured private file and restart the service, then answer retry`,
+    );
+  }
+  if (!value || /[\r\n\0]/.test(value))
+    throw new PlannerError(
+      "hold",
+      `Controller credential ${name} is empty or invalid; update its private file and restart the service, then answer retry`,
+    );
+  return value;
 }
 
 /**

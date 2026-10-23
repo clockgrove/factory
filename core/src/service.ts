@@ -27,6 +27,7 @@ import {
   type StoredRequest,
 } from "./requests.js";
 import {
+  type FrozenProvider,
   listObjectives,
   loadState,
   newObjective,
@@ -46,6 +47,8 @@ export interface ServeOptions {
   tickMs?: number;
   /** GitHub queue, display and comments. Absent without configuration. */
   sync?: GitHubSync;
+  /** The provider each newly admitted Objective freezes. */
+  provider?: FrozenProvider;
 }
 
 const KEEP_REQUEST_IDS = 50;
@@ -223,7 +226,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         ).length < maxActive,
       admit: (issue: number, github: GitHubModule) => {
         // A new run, or a run again after the operator queued a finished one.
-        const state = newObjective(issue, new Date());
+        const state = newObjective(issue, new Date(), options.provider);
         state.modules.github = github;
         saveState(paths.objectives, state);
         unreadable.delete(issue);
@@ -231,7 +234,10 @@ export async function serve(options: ServeOptions): Promise<number> {
           issue,
           new ObjectiveRunner(state, workflow, paths.objectives, log, limits),
         );
-        log.write(issue, { event: "admitted" });
+        log.write(issue, {
+          event: "admitted",
+          ...(options.provider ? { provider: options.provider } : {}),
+        });
       },
       result: (id: string) => readResult(paths.requests, id),
     });

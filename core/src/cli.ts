@@ -1,25 +1,30 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
-import { DEFAULT_LIMITS, hostLimits } from "./engine.js";
+import { DEFAULT_LIMITS, hostLimits, type Workflow } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
 import { RunLog } from "./log.js";
 import { installationPaths, type Paths } from "./paths.js";
+import { PLANNERS, WORKERS } from "./providers/config.js";
+import type { Planner } from "./providers/planner.js";
 import {
-  ClaudePlanner,
-  type ClaudePlannerOptions,
-  DEFAULT_CLAUDE_MODELS,
-} from "./providers/claude.js";
-import { ClaudeWorker } from "./providers/claude-worker.js";
-import { CodexPlanner, DEFAULT_CODEX_MODELS } from "./providers/codex.js";
-import { CodexWorker } from "./providers/codex-worker.js";
-import { HedgedPlanner } from "./providers/planner.js";
+  providerPlanner,
+  providerWorker,
+  providerWorkflow,
+} from "./providers/selection.js";
 import { type Request, writeRequest } from "./requests.js";
 import { serve } from "./service.js";
 import {
+  type FrozenProvider,
   type Hold,
   listObjectives,
   loadState,
@@ -29,7 +34,11 @@ import { objectiveWorkflow } from "./workflow.js";
 
 const USAGE = `Usage: factory <command> --repo OWNER/NAME
 
-  serve                          Run the service (the only writer of state)
+  serve [--provider NAME]        Run the service (the only writer of state);
+                                 new Objectives use NAME, else defaultProvider
+  setup --provider NAME [--planner codex|claude|copilot]
+        [--worker codex|claude|copilot|openai-agents|claude-managed-agents]
+        [--default]              Add or change a named provider in the configuration
   status [ISSUE] [--json]        Show Objectives and open questions
   answer ISSUE ANSWER [--text T] Answer an Objective's open question
   cancel ISSUE                   Cancel an Objective
@@ -40,6 +49,7 @@ interface StatusRow {
   issue: number;
   status: ObjectiveStatus | "unreadable";
   hold: Hold | null;
+  provider?: FrozenProvider;
   waiting: { step: string; nextAt: string; lastError: string }[];
   error?: string;
 }
@@ -62,47 +72,40 @@ async function main(argv: string[]): Promise<number> {
       let sync: GitHubSync | undefined;
       let loaded: CoreConfig | undefined;
       let workflow = objectiveWorkflow();
+      let provider: FrozenProvider | undefined;
       if (existsSync(configPath(repository))) {
         const config = loadConfig(repository);
         loaded = config;
+        const name = args.flags.provider ?? config.defaultProvider;
+        if (!config.providers[name]) {
+          process.stderr.write(
+            `factory: no provider ${JSON.stringify(name)}; the configuration names ${Object.keys(config.providers).join(", ")}\n`,
+          );
+          return 2;
+        }
+        provider = {
+          name,
+          selectedBy: args.flags.provider ? "--provider" : "defaultProvider",
+        };
         const github = new GitHub(config.repository).redacting(
           config.policy.allowedSecretNames.flatMap(
             (name) => process.env[name] ?? [],
           ),
         );
         sync = new GitHubSync(github, config, new RunLog(paths.logs, "sync"));
-        const planner = new HedgedPlanner(
-          config.planning.provider === "claude"
-            ? new ClaudePlanner({
-                ...DEFAULT_CLAUDE_MODELS,
-                ...(config.planning.models ?? {}),
-              } as ClaudePlannerOptions)
-            : new CodexPlanner({
-                ...DEFAULT_CODEX_MODELS,
-                ...(config.planning.models ?? {}),
-              } as typeof DEFAULT_CODEX_MODELS),
-        );
-        workflow = objectiveWorkflow({
-          config,
-          github,
-          planner,
-          workDir: (issue) => join(paths.root, "work", String(issue)),
-          worker: (plan, body) =>
-            config.execution.workerProvider === "claude"
-              ? new ClaudeWorker({
-                  sandbox: config.sandbox,
-                  plan,
-                  body,
-                  repository: config.repository,
-                  config: config.execution.claudeWorker,
-                  allowedSecretNames: config.policy.allowedSecretNames,
-                })
-              : new CodexWorker({
-                  sandbox: config.sandbox,
-                  network: config.execution.codexNetwork,
-                  allowedSecretNames: config.policy.allowedSecretNames,
-                }),
-        });
+        const workflows = new Map<string, Workflow>();
+        for (const [each, settings] of Object.entries(config.providers))
+          workflows.set(
+            each,
+            objectiveWorkflow({
+              config,
+              github,
+              planner: planner(config, each),
+              workDir: (issue) => join(paths.root, "work", String(issue)),
+              worker: providerWorker(settings, config),
+            }),
+          );
+        workflow = providerWorkflow(workflows, workflows.get(name)!);
       }
       if (loaded)
         hostLimits.configure({
@@ -114,6 +117,7 @@ async function main(argv: string[]): Promise<number> {
         workflow,
         ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
         ...(sync ? { sync } : {}),
+        ...(provider ? { provider } : {}),
         ...(process.env.FACTORY_TICK_MS
           ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
           : {}),
@@ -133,6 +137,8 @@ async function main(argv: string[]): Promise<number> {
     }
     case "status":
       return await status(paths, args);
+    case "setup":
+      return setup(repository, args);
     case "answer":
     case "cancel":
     case "retry":
@@ -141,6 +147,20 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(USAGE);
       return 2;
   }
+}
+
+/**
+ * The planner (plan, review, diagnosis) for a configured provider: the
+ * one named, by default `defaultProvider`. An Objective uses its frozen
+ * provider's planner.
+ */
+function planner(
+  config: CoreConfig,
+  name: string = config.defaultProvider,
+): Planner {
+  const provider = config.providers[name];
+  if (!provider) throw new Error(`No provider ${JSON.stringify(name)}`);
+  return providerPlanner(provider);
 }
 
 async function status(paths: Paths, args: Args): Promise<number> {
@@ -172,6 +192,7 @@ async function status(paths: Paths, args: Args): Promise<number> {
       issue,
       status: state.status,
       hold: state.hold,
+      ...(state.provider ? { provider: state.provider } : {}),
       waiting: Object.entries(state.retries).map(([step, retry]) => ({
         step,
         nextAt: retry.nextAt,
@@ -190,6 +211,10 @@ async function status(paths: Paths, args: Args): Promise<number> {
   if (rows.length === 0) lines.push("No Objectives.");
   for (const row of rows) {
     lines.push(`#${row.issue}: ${row.status}`);
+    if (row.provider)
+      lines.push(
+        `  Provider: ${row.provider.name} (selectedBy: ${row.provider.selectedBy})`,
+      );
     if (row.hold)
       lines.push(
         `  Question: ${row.hold.question}`,
@@ -202,6 +227,91 @@ async function status(paths: Paths, args: Args): Promise<number> {
       );
   }
   process.stdout.write(`${lines.join("\n")}\n`);
+  return 0;
+}
+
+/**
+ * `setup --provider NAME`: add a named provider to the configuration, or
+ * change its planner or worker kind, and verify the result loads. The
+ * first provider, or `--default`, becomes defaultProvider. Started
+ * Objectives keep the provider they froze; restart the service to use it.
+ */
+function setup(repository: string, args: Args): number {
+  const name = args.flags.provider;
+  const path = configPath(repository);
+  if (!name) {
+    process.stderr.write("factory: setup needs --provider NAME\n");
+    return 2;
+  }
+  let raw: Record<string, unknown>;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+    raw = JSON.parse(text) as Record<string, unknown>;
+  } catch (error) {
+    process.stderr.write(`factory: can't read ${path}: ${String(error)}\n`);
+    return 2;
+  }
+  const planner = args.flags.planner;
+  const worker = args.flags.worker;
+  if (planner && !(PLANNERS as readonly string[]).includes(planner)) {
+    process.stderr.write(
+      `factory: --planner is one of ${PLANNERS.join(", ")}\n`,
+    );
+    return 2;
+  }
+  if (worker && !(WORKERS as readonly string[]).includes(worker)) {
+    process.stderr.write(`factory: --worker is one of ${WORKERS.join(", ")}\n`);
+    return 2;
+  }
+  // Without providers the configuration has one: codex, the default.
+  const providers = (raw.providers ?? {
+    codex: { planner: "codex", worker: { kind: "codex" } },
+  }) as Record<string, Record<string, unknown>>;
+  raw.defaultProvider ??= raw.providers ? undefined : "codex";
+  const existing = providers[name];
+  const kind = planner ?? (existing?.planner as string | undefined) ?? "codex";
+  const current = existing?.worker as Record<string, unknown> | undefined;
+  // Model choices belong to one planner kind.
+  const { models, ...kept } = existing ?? {};
+  providers[name] = {
+    ...kept,
+    ...(models && kind === existing?.planner ? { models } : {}),
+    planner: kind,
+    worker:
+      worker && worker !== current?.kind
+        ? { kind: worker }
+        : (current ?? { kind: worker ?? kind }),
+  };
+  raw.providers = providers;
+  if (!raw.defaultProvider || args.flags.default !== undefined)
+    raw.defaultProvider = name;
+  const save = (body: string) => {
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, body, { mode: 0o600 });
+    renameSync(temporary, path);
+  };
+  save(`${JSON.stringify(raw, null, 2)}\n`);
+  try {
+    loadConfig(repository);
+  } catch (error) {
+    save(text);
+    process.stderr.write(
+      `factory: the provider was not saved: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 1;
+  }
+  const summary = {
+    provider: name,
+    planner: kind,
+    worker: (providers[name]!.worker as { kind: string }).kind,
+    defaultProvider: raw.defaultProvider,
+  };
+  process.stdout.write(
+    args.flags.json !== undefined
+      ? `${JSON.stringify(summary)}\n`
+      : `Provider ${name}: ${summary.planner} plans, ${summary.worker} works; default is ${summary.defaultProvider}. Restart the service to use it.\n`,
+  );
   return 0;
 }
 
@@ -285,7 +395,7 @@ function parse(argv: string[]): Args {
     }
     const name = arg.slice(2);
     const next = argv[i + 1];
-    if (name === "json") flags.json = "";
+    if (name === "json" || name === "default") flags[name] = "";
     else if (next !== undefined) {
       flags[name] = next;
       i++;

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { type ProviderConfig, providersConfig } from "./providers/config.js";
 import {
   loadReviewArtifacts,
   type ReviewArtifactSelector,
@@ -24,11 +25,11 @@ export interface CoreConfig {
     /** Objectives that may run at once; building waits on overlapping owned paths. */
     maxActiveObjectives: number;
   };
+  /** Named planner and worker pairs (providers/config.ts). */
+  providers: Record<string, ProviderConfig>;
+  /** The provider new work uses unless `serve --provider` names another. */
+  defaultProvider: string;
   planning: {
-    /** The provider that plans and reviews. */
-    provider: "codex" | "claude";
-    /** Optional model choices; each adapter has defaults. */
-    models?: Record<string, unknown>;
     /** Revision rounds before Factory asks; `more` grants two more. */
     revisions: number;
     /** A curated playbook file in the target, read at the base. */
@@ -43,12 +44,6 @@ export interface CoreConfig {
     validations: number;
     /** Repairs of one Work Item before Factory asks. */
     repairs: number;
-    /** The worker provider; defaults to the planning provider. */
-    workerProvider: "codex" | "claude";
-    /** The Codex worker shell's network. */
-    codexNetwork: "off" | "host";
-    /** Claude worker settings (model, effort, maxTurns, tools, allowedTools, permissionMode). */
-    claudeWorker: Record<string, unknown>;
   };
   policy: {
     /** Operator variables a worker's shell may see, by name. */
@@ -365,9 +360,7 @@ export function loadConfig(repository: string): CoreConfig {
     },
   } as CoreConfig;
   const planning = (raw.planning ?? {}) as Record<string, unknown>;
-  const provider = planning.provider ?? "codex";
-  if (provider !== "codex" && provider !== "claude")
-    problems.push('planning.provider must be "codex" or "claude"');
+  Object.assign(config, providersConfig(raw, problems));
   const final = (raw.finalValidation ?? {}) as Record<string, unknown>;
   const list = (value: unknown, name: string): string[] => {
     if (value === undefined) return [];
@@ -377,10 +370,6 @@ export function loadConfig(repository: string): CoreConfig {
     return [];
   };
   config.planning = {
-    provider: provider === "claude" ? "claude" : "codex",
-    ...(planning.models && typeof planning.models === "object"
-      ? { models: planning.models as Record<string, unknown> }
-      : {}),
     revisions:
       typeof planning.revisions === "number" && planning.revisions >= 0
         ? planning.revisions
@@ -417,16 +406,6 @@ export function loadConfig(repository: string): CoreConfig {
       Math.max(2, Math.floor(cpus / 4)),
     ),
     repairs: count(execution.repairs, "execution.repairs", 6),
-    workerProvider:
-      execution.workerProvider === "claude" ||
-      execution.workerProvider === "codex"
-        ? execution.workerProvider
-        : config.planning.provider,
-    codexNetwork: execution.codexNetwork === "host" ? "host" : "off",
-    claudeWorker:
-      execution.claudeWorker && typeof execution.claudeWorker === "object"
-        ? (execution.claudeWorker as Record<string, unknown>)
-        : {},
   };
   const policy = (raw.policy ?? {}) as Record<string, unknown>;
   config.policy = {

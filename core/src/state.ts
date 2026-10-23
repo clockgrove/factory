@@ -59,10 +59,19 @@ export interface Retry {
   lastError: string;
 }
 
+/** The provider an Objective was admitted with, kept for its whole run. */
+export interface FrozenProvider {
+  name: string;
+  /** Why: the configured default, or `serve --provider`. */
+  selectedBy: "defaultProvider" | "--provider";
+}
+
 export interface ObjectiveState {
   version: number;
   issue: number;
   status: ObjectiveStatus;
+  /** Frozen at admission; absent only for a record that never ran. */
+  provider?: FrozenProvider;
   /** The status to return to when a hold is answered. */
   resumeStatus?: ObjectiveStatus;
   hold: Hold | null;
@@ -84,11 +93,16 @@ export interface ObjectiveState {
   updatedAt: string;
 }
 
-export function newObjective(issue: number, now: Date): ObjectiveState {
+export function newObjective(
+  issue: number,
+  now: Date,
+  provider?: FrozenProvider,
+): ObjectiveState {
   return {
     version: STATE_VERSION,
     issue,
     status: "checking",
+    ...(provider ? { provider } : {}),
     hold: null,
     answers: {},
     retries: {},

@@ -149,6 +149,11 @@ function carried(
       ...kept,
       ...(card ? { itemId: card.itemId, order: card.order ?? null } : {}),
     };
+  // Attempt numbers never go back, so no attempt id is used twice.
+  const runs = { ...base.stepRuns };
+  for (const [key, run] of Object.entries(live.stepRuns ?? {}))
+    runs[key] = { ...runs[key], n: Math.max(run.n, runs[key]?.n ?? 0) };
+  if (Object.keys(runs).length) state.stepRuns = runs;
   state.appliedRequests = [
     ...live.appliedRequests.filter((applied) => applied.id !== request),
     { id: request, ...result },

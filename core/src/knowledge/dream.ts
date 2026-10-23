@@ -826,15 +826,26 @@ async function dream(
       });
       throw error;
     }
+    // Set when draftOf refused the answer itself, not when the store failed.
+    let decoded = true;
     try {
-      draft = readStore(settings.root, (db) => draftOf(db, answer, selection));
+      draft = readStore(settings.root, (db) => {
+        try {
+          return draftOf(db, answer, selection);
+        } catch (error) {
+          // A store error carries a code; a refused answer doesn't.
+          if ((error as { code?: unknown }).code === undefined) decoded = false;
+          throw error;
+        }
+      });
     } catch (error) {
       refusal = errorMessage(error);
-      logRefused(
-        (event) => options.log({ ...event, dream: id }),
-        callId,
-        refusal,
-      );
+      if (!decoded)
+        logRefused(
+          (event) => options.log({ ...event, dream: id }),
+          callId,
+          refusal,
+        );
     }
   }
   if (!draft) {

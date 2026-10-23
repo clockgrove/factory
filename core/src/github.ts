@@ -298,6 +298,20 @@ export interface NotedRequest {
 
 const MAX_NOTED = 50;
 
+/**
+ * Statuses the running read's caller takes as an answer (a 404 for "no
+ * such user", for "unprotected"): `send` neither traces nor counts them
+ * as failed. Set with `expecting`.
+ */
+const expectedStatuses = new AsyncLocalStorage<readonly number[]>();
+
+function expecting<T>(
+  statuses: readonly number[],
+  read: () => Promise<T>,
+): Promise<T> {
+  return expectedStatuses.run(statuses, read);
+}
+
 /** The job whose requests `send` counts; outside a job nothing is counted. */
 export const transport = new AsyncLocalStorage<Transport>();
 
@@ -964,9 +978,9 @@ export class GitHub {
   }
 
   /** A read the login may not be allowed: 403 or 404 is undefined. */
-  private async optional<T>(read: Promise<T>): Promise<T | undefined> {
+  private async optional<T>(read: () => Promise<T>): Promise<T | undefined> {
     try {
-      return await read;
+      return await expecting([403, 404], read);
     } catch (error) {
       if (
         error instanceof GitHubError &&
@@ -1011,11 +1025,13 @@ export class GitHub {
     if (known && Date.now() - known.at < WRITER_TTL_MS) return known.ok;
     let permission: string;
     try {
-      ({ permission } = await this.rest<{ permission: string }>(
-        "GET",
-        this.repo(`collaborators/${encodeURIComponent(login)}/permission`),
-        undefined,
-        signal,
+      ({ permission } = await expecting([404], () =>
+        this.rest<{ permission: string }>(
+          "GET",
+          this.repo(`collaborators/${encodeURIComponent(login)}/permission`),
+          undefined,
+          signal,
+        ),
       ));
     } catch (error) {
       // No such user: a definite no. Anything else may pass.
@@ -1270,7 +1286,7 @@ export class GitHub {
     sha: string,
     signal?: AbortSignal,
   ): Promise<WorkflowRun[] | undefined> {
-    return this.optional(
+    return this.optional(() =>
       this.pages<WorkflowRun>(
         this.repo(`actions/runs?head_sha=${sha}`),
         signal,
@@ -1302,7 +1318,7 @@ export class GitHub {
   ): Promise<{ names: string[]; strict: boolean | undefined }> {
     const name = encodeURIComponent(branch);
     const rules =
-      (await this.optional(
+      (await this.optional(() =>
         this.pages<{
           type?: string;
           parameters?: {
@@ -1319,11 +1335,13 @@ export class GitHub {
     // The branch read's protection never shows `strict`.
     let strictKnown = true;
     try {
-      classic = await this.rest<Required>(
-        "GET",
-        this.repo(`branches/${name}/protection/required_status_checks`),
-        undefined,
-        signal,
+      classic = await expecting([403, 404], () =>
+        this.rest<Required>(
+          "GET",
+          this.repo(`branches/${name}/protection/required_status_checks`),
+          undefined,
+          signal,
+        ),
       );
     } catch (error) {
       if (!(error instanceof GitHubError && [403, 404].includes(error.status)))
@@ -1383,7 +1401,7 @@ export class GitHub {
     if (repository.allow_merge_commit !== true) return false;
     const name = encodeURIComponent(branch);
     const rules =
-      (await this.optional(
+      (await this.optional(() =>
         this.pages<{
           type?: unknown;
           parameters?: { allowed_merge_methods?: unknown } | null;
@@ -1399,7 +1417,7 @@ export class GitHub {
       )
     )
       return false;
-    const classic = await this.optional(
+    const classic = await this.optional(() =>
       this.rest<{ required_linear_history?: { enabled?: unknown } }>(
         "GET",
         this.repo(`branches/${name}/protection`),
@@ -1419,7 +1437,7 @@ export class GitHub {
     sha: string,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const activity = await this.optional(
+    const activity = await this.optional(() =>
       this.rest<{ after?: unknown; timestamp?: unknown }[]>(
         "GET",
         this.repo(
@@ -1649,11 +1667,14 @@ export class GitHub {
       (response.status === 403 &&
         (response.headers.get("x-ratelimit-remaining") === "0" ||
           /rate limit/i.test(text)));
-    if (counted) {
+    const expected =
+      !limited && expectedStatuses.getStore()?.includes(response.status);
+    if (counted && !expected) {
       if (limited) counted.rateLimited += 1;
       else counted.failed += 1;
     }
-    note(counted, method, path, refreshed ? 2 : 1, response, limited);
+    if (!expected)
+      note(counted, method, path, refreshed ? 2 : 1, response, limited);
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
     if (response.status === 401) throw new GitHubError(detail, 401, answer);
     if (limited)

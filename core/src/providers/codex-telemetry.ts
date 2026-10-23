@@ -234,20 +234,21 @@ function sessionRecords(dir: string): string[] {
   return found;
 }
 
-/** The record's last MAX_BYTES as complete lines; undefined when unreadable. */
+/** The record's last `max` bytes as complete lines; undefined when unreadable. */
 function readTail(
   file: string,
-): { lines: string[]; partial: boolean } | undefined {
+  max = MAX_BYTES,
+): { lines: string[]; partial: boolean; bytes: number } | undefined {
   try {
     const size = statSync(file).size;
-    const start = Math.max(0, size - MAX_BYTES);
+    const start = Math.max(0, size - max);
     const fd = openSync(file, "r");
     try {
       const buffer = Buffer.alloc(size - start);
       const read = readSync(fd, buffer, 0, buffer.length, start);
       const lines = buffer.subarray(0, read).toString("utf8").split("\n");
       if (start > 0) lines.shift();
-      return { lines, partial: start > 0 };
+      return { lines, partial: start > 0, bytes: read };
     } catch {
       return undefined;
     } finally {
@@ -270,37 +271,59 @@ function descendantUsage(
     reasoning: 0,
     total: 0,
   };
+  // The last token_count is near a record's end: 64 KiB first, wider
+  // only when it isn't there, within one budget across all children.
+  let budget = CHILD_BYTES;
   for (const file of files) {
-    const lines = readTail(file)?.lines ?? [];
-    for (let at = lines.length - 1; at >= 0; at--) {
-      let usage: Record<string, unknown> | undefined;
-      try {
-        const entry = JSON.parse(lines[at]!) as {
-          type?: unknown;
-          payload?: { type?: unknown; info?: { total_token_usage?: unknown } };
-        };
-        if (entry.type === "event_msg" && entry.payload?.type === "token_count")
-          usage = entry.payload.info?.total_token_usage as
-            | Record<string, unknown>
-            | undefined;
-      } catch {
-        continue;
+    for (const width of [64 * 1024, 1024 * 1024]) {
+      if (budget <= 0) break;
+      const tail = readTail(file, Math.min(width, budget));
+      if (!tail) break;
+      budget -= tail.bytes;
+      const usage = lastTotalUsage(tail.lines);
+      if (usage) {
+        const n = (key: string) =>
+          typeof usage[key] === "number" && Number.isFinite(usage[key])
+            ? (usage[key] as number)
+            : 0;
+        sum.threads += 1;
+        sum.input += n("input_tokens");
+        sum.cached += n("cached_input_tokens");
+        sum.output += n("output_tokens");
+        sum.reasoning += n("reasoning_output_tokens");
+        sum.total += n("total_tokens");
+        break;
       }
-      if (!usage || typeof usage !== "object") continue;
-      const n = (key: string) =>
-        typeof usage[key] === "number" && Number.isFinite(usage[key])
-          ? (usage[key] as number)
-          : 0;
-      sum.threads += 1;
-      sum.input += n("input_tokens");
-      sum.cached += n("cached_input_tokens");
-      sum.output += n("output_tokens");
-      sum.reasoning += n("reasoning_output_tokens");
-      sum.total += n("total_tokens");
-      break;
+      if (!tail.partial) break;
     }
   }
   return sum.threads ? sum : undefined;
+}
+
+/** The read bytes across all child records of one call. */
+const CHILD_BYTES = 4 * 1024 * 1024;
+
+/** The last `token_count`'s `total_token_usage` in `lines`. */
+function lastTotalUsage(
+  lines: readonly string[],
+): Record<string, unknown> | undefined {
+  for (let at = lines.length - 1; at >= 0; at--) {
+    let usage: Record<string, unknown> | undefined;
+    try {
+      const entry = JSON.parse(lines[at]!) as {
+        type?: unknown;
+        payload?: { type?: unknown; info?: { total_token_usage?: unknown } };
+      };
+      if (entry.type === "event_msg" && entry.payload?.type === "token_count")
+        usage = entry.payload.info?.total_token_usage as
+          | Record<string, unknown>
+          | undefined;
+    } catch {
+      continue;
+    }
+    if (usage && typeof usage === "object") return usage;
+  }
+  return undefined;
 }
 
 /**

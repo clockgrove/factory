@@ -77,6 +77,7 @@ import {
 } from "./planner.js";
 import {
   addTokens,
+  addUsage,
   captureResponse,
   captureToolOutput,
   describeRequest,
@@ -1210,6 +1211,9 @@ export class ClaudeWorker implements Worker {
     // Tokens likewise: the queries a credential retry ended, and the running one.
     let spentTokens = tokens({ input: 0, output: 0, cached: 0 });
     let queryTokens = spentTokens;
+    // The provider's own usage, summed over queries like the tokens.
+    let spentUsage: Record<string, unknown> | undefined;
+    let queryUsage: Record<string, unknown> | undefined;
     let result: SDKResultMessage | undefined;
     /** Running tool calls' names by id, for their results. */
     const toolNames = new Map<string, string>();
@@ -1304,11 +1308,11 @@ export class ClaudeWorker implements Worker {
         record.costUsd = spentUsd + queryUsd;
         record.turns = message.num_turns;
         record.resultSubtype = message.subtype;
-        record.providerUsage =
-          providerUsage({
-            usage: message.usage,
-            modelUsage: message.modelUsage,
-          }) ?? null;
+        queryUsage = providerUsage({
+          usage: message.usage,
+          modelUsage: message.modelUsage,
+        });
+        record.providerUsage = addUsage(spentUsage, queryUsage) ?? null;
         if (message.stop_reason) record.stopReason = message.stop_reason;
         const error = resultError(message);
         if (
@@ -1337,6 +1341,8 @@ export class ClaudeWorker implements Worker {
           spentUsd += queryUsd;
           queryUsd = 0;
           spentTokens = addTokens(spentTokens, queryTokens);
+          spentUsage = addUsage(spentUsage, queryUsage);
+          queryUsage = undefined;
           queryTokens = tokens({ input: 0, output: 0, cached: 0 });
           events = start(`${input.prompt}${CREDENTIAL_RESTART}`);
           continue;

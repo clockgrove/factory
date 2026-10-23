@@ -187,6 +187,26 @@ const FIELDS = [
   "step",
   "item",
   "capture",
+  "callId",
+  "attemptId",
+  "reportedModel",
+  "stage",
+  "sessionMode",
+  "currency",
+  "promptDigest",
+  "schemaDigest",
+  "sourceDigest",
+] as const;
+
+/** Numeric and structured model-usage fields copied as `factory.*` attributes when present. */
+const MEASURES = [
+  "requestBytes",
+  "timeToFirstTokenMs",
+  "sessionTurn",
+  "imageOutputs",
+  "promptComponents",
+  "nativeTools",
+  "providerUsage",
 ] as const;
 
 /**
@@ -251,6 +271,13 @@ function spansOf(options: ExportOptions): {
         ...(str(event.error) !== undefined
           ? [attribute("factory.error", event.error, secrets)]
           : []),
+        ...MEASURES.flatMap((field) => {
+          const value = event[field];
+          return num(value) !== undefined ||
+            (value !== null && typeof value === "object")
+            ? [attribute(`factory.${field}`, value, secrets)]
+            : [];
+        }),
       ];
       if (options.content === "retained") {
         const id = str(event.capture);

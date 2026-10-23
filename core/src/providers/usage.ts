@@ -6,7 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { CAPTURE, type CaptureBody } from "../log.js";
+import { CAPTURE, type CaptureBody, capturingTools } from "../log.js";
 
 export type ModelRole =
   | "planner"
@@ -298,21 +298,27 @@ export class NativeTools {
 /** The most tool output one call keeps for its capture file, before the file's own cut. */
 const TOOL_OUTPUT_CAPTURE_BYTES = 1024 * 1024;
 
-/** Keep one native tool output for the capture file (capture on only; RunLog redacts and bounds it). */
+/**
+ * Keep one native tool output for the capture file, only while capture is
+ * on (RunLog redacts and bounds it again). The kept slice is a copy, cut
+ * by UTF-8 bytes, so it pins no larger string.
+ */
 export function captureToolOutput(
   record: Record<string, unknown>,
   name: string,
   output: string,
 ): void {
   const body = (record as { [CAPTURE]?: CaptureBody })[CAPTURE];
-  if (!body) return;
-  body.tools ??= [];
-  const used = body.tools.reduce((sum, t) => sum + t.output.length, 0);
+  if (!body || !capturingTools()) return;
+  const used = body.toolBytes ?? 0;
   if (used >= TOOL_OUTPUT_CAPTURE_BYTES) return;
-  body.tools.push({
-    name,
-    output: output.slice(0, TOOL_OUTPUT_CAPTURE_BYTES - used),
-  });
+  // Decoded from bytes: a fresh string; a cut character decodes to U+FFFD, dropped.
+  const kept = Buffer.from(output, "utf8")
+    .subarray(0, TOOL_OUTPUT_CAPTURE_BYTES - used)
+    .toString("utf8")
+    .replace(/\uFFFD$/, "");
+  body.tools = [...(body.tools ?? []), { name, output: kept }];
+  body.toolBytes = used + Buffer.byteLength(kept);
 }
 
 /**
@@ -335,6 +341,28 @@ export function providerUsage(
     }
   }
   return Object.keys(kept).length ? kept : undefined;
+}
+
+/** Two `providerUsage` views added key by key (numbers summed, objects merged); either may be absent. */
+export function addUsage(
+  a: Record<string, unknown> | undefined,
+  b: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!a || !b) return a ?? b;
+  const sum: Record<string, unknown> = { ...a };
+  for (const [key, value] of Object.entries(b)) {
+    const had = sum[key];
+    sum[key] =
+      typeof value === "number" && typeof had === "number"
+        ? had + value
+        : value && typeof value === "object" && had && typeof had === "object"
+          ? addUsage(
+              had as Record<string, unknown>,
+              value as Record<string, unknown>,
+            )
+          : (had ?? value);
+  }
+  return sum;
 }
 
 /**

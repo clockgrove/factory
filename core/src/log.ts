@@ -53,9 +53,15 @@ export const CAPTURE = Symbol("capture");
 export interface CaptureBody {
   request: string;
   response?: string;
-  /** Native tool outputs, in order (usage.ts captureToolOutput). */
+  /** Native tool outputs, in order (usage.ts captureToolOutput), and their UTF-8 bytes. */
   tools?: { name: string; output: string }[];
+  toolBytes?: number;
 }
+
+let toolCapture = false;
+
+/** Whether a run log of this process captures: only then are tool outputs kept for it. */
+export const capturingTools = (): boolean => toolCapture;
 
 /**
  * How a run ended, in its `run-end` event: `stopped` (a clean stop, or a
@@ -101,7 +107,9 @@ export class RunLog {
     readonly runId: string,
     private readonly capture: CaptureSettings = CAPTURE_OFF,
     private readonly secrets: readonly string[] = [],
-  ) {}
+  ) {
+    if (capture.enabled) toolCapture = true;
+  }
 
   write(issue: number, event: Record<string, unknown>): void {
     const file = this.file(issue);
@@ -166,7 +174,7 @@ export class RunLog {
       const id = randomUUID();
       // Request and response share the bound; tool outputs, when any, take a quarter.
       const share = Math.floor(
-        this.capture.maxBytesPerCall / (body.tools?.length ? 2.5 : 2),
+        (this.capture.maxBytesPerCall * (body.tools?.length ? 3 : 4)) / 8,
       );
       const request = bounded(redact(body.request, this.secrets), share);
       const response =
@@ -227,7 +235,8 @@ export class RunLog {
 /**
  * At a start that found the last run dead: append `run-end` (`crashed`)
  * to that run's files of `issues` (and the service's, 0) that exist,
- * numbered after their last line, which a torn last line doesn't swallow.
+ * numbered after their last line, which a torn last line doesn't swallow;
+ * a file that already has one is left alone.
  * Only the given issues are looked at: the Objectives this start loaded.
  */
 export function endCrashedRun(
@@ -242,9 +251,10 @@ export function endCrashedRun(
       if (!existsSync(path)) continue;
       const size = sizeOf(path);
       const tail = readFrom(path, Math.max(0, size - 64 * 1024), size);
-      const last = parseLines(completeLines(tail).toString("utf8"), true).at(
-        -1,
-      );
+      const lines = parseLines(completeLines(tail).toString("utf8"), true);
+      // Ended already (a start that died after writing this): once only.
+      if (lines.some((line) => line.event === "run-end")) continue;
+      const last = lines.at(-1);
       const seq = typeof last?.seq === "number" ? last.seq + 1 : undefined;
       appendFileSync(
         path,

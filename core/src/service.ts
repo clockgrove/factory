@@ -339,14 +339,6 @@ export async function serve(options: ServeOptions): Promise<number> {
       rmSync(path, { force: true });
     }
   const record = startRecord(previous, startedAt, runId, runners, limits);
-  // The last run died: its files end with that, as far as this start knows them.
-  if (previous?.runId && !previous.stopped && previous.runId !== runId)
-    endCrashedRun(
-      paths.logs,
-      previous.runId,
-      [...runners.keys(), ...unreadable.keys()],
-      runId,
-    );
   if (options.unconfigured) {
     record.problem = `No configuration at ${options.unconfigured}, so the service applies requests only and never reads the queue; run factory setup, then restart the service`;
     log.write(0, { event: "unconfigured", config: options.unconfigured });
@@ -371,6 +363,15 @@ export async function serve(options: ServeOptions): Promise<number> {
   // Saved before any hold below, so a crash in between never counts the
   // same death twice.
   heartbeat();
+  // The last run died: its files end with that, as far as this start knows them
+  // (after the heartbeat that records the death).
+  if (previous?.runId && !previous.stopped && previous.runId !== runId)
+    endCrashedRun(
+      paths.logs,
+      previous.runId,
+      [...runners.keys(), ...unreadable.keys()],
+      runId,
+    );
   // The evidence is spent before any question is visible: the steps to
   // ask about are saved in the record first (`suspected`), so a death
   // before their questions are saved asks them at the next start, and a
@@ -1037,6 +1038,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     }
     await new Promise((resolve) => setTimeout(resolve, options.tickMs ?? 1000));
   }
+  options.sync?.flushTransport();
   // An Objective still unfinished is handed off to the next run.
   log.end((issue) =>
     runners.get(issue)?.settled === false ? "handed-off" : "stopped",

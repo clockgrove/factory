@@ -1512,6 +1512,11 @@ export class GitHubSync {
       this.writeTransport(key);
   }
 
+  /** Write every unwritten `github-call` tally: at the service's stop, before its run ends. */
+  flushTransport(): void {
+    for (const key of [...this.transportTally.keys()]) this.writeTransport(key);
+  }
+
   private writeTransport(key: string): void {
     const tally = this.transportTally.get(key);
     this.transportTally.delete(key);

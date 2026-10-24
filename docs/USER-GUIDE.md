@@ -265,6 +265,7 @@ Common answers:
 - `wait` and `switch NAME` (provider limits).
 - `adopt` (a configuration change).
 - `recheck` (an edited issue).
+- A candidate set id, optionally `bind ITEM...`, then your reason: the media set to deliver, asked when a media Work Item staged two or more sets (a single set is selected without asking and given to every Work Item that depends on it).
 - `cancel`.
 
 The options a hold offers are the only ones that apply.

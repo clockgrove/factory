@@ -2,7 +2,7 @@
 
 These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout.
 
-[The requirements](docs/PRD.md) say what Factory must do and when it is done; [the design](docs/DESIGN.md) says how. Factory is being rebuilt against them. Until cutover, the old tree under `src/` is frozen: no fixes or features there; it is deleted at cutover. [The architecture](docs/ARCHITECTURE.md) and [the lifecycle](docs/LIFECYCLE.md) describe the old tree and are replaced at cutover.
+[The requirements](docs/PRD.md) say what Factory must do and when it is done; [the design](docs/DESIGN.md) says how. Factory is being rebuilt against them.
 
 ## Stability rules
 

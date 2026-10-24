@@ -8,7 +8,7 @@ How changes reach `main` when several agents work at once. The goal is no merge 
 
 ```sh
 gh pr merge --auto --squash N   # enqueue once CI is green; GitHub merges it
-gh stack merge --yes --squash   # a stack: queued as one all-or-nothing entry
+gh stack merge --yes             # a stack: queues every layer, bottom first
 ```
 
 The queue runs the checks on each pull request on top of `main` and on everything queued ahead of it, then squashes it in. So two green pull requests can't break `main` together, and nobody rebases just to catch up.
@@ -61,11 +61,12 @@ gh stack init first-branch       # from main
 gh stack add next-branch         # one per layer; commit on each
 gh stack submit --auto --open    # push every layer and open its pull request
 gh stack rebase                  # after main moves: rebase every layer in order
-gh stack merge --yes --squash    # queue the whole stack, all or nothing
+gh stack merge --yes             # queue every layer; run again if layers drop out
 ```
 
 - **One layer, one reviewable change.** A reader should be able to approve a layer without reading the ones above it.
 - **Never rebase a stacked branch onto `main` yourself.** That copies every lower layer into it: GitHub shows the pull request as conflicting and runs no CI on it. Use `gh stack rebase`. After repointing layers, check with `git range-diff` that their patches didn't change.
+- **Check that the whole stack landed.** The queue merges the layers one at a time, and a layer can drop out when the branch below it is deleted on merge. If `gh stack view` still shows open layers, run `gh stack merge --yes` again.
 - **Independent changes are separate pull requests,** not layers of one stack.
 
 ## Before you push
@@ -96,7 +97,7 @@ Splitting a hot file or moving code between modules is a refactor stack.
 1. **Freeze** new pull requests to the touched area until the stack lands. Then each lane rebases its open branches once.
 2. **Generate each layer with a script, never by hand.** When `main` moves under the stack, re-run the script on the new `main` instead of resolving conflicts by hand.
 3. **Prove each layer is a pure move,** and put the proof in its pull request.
-4. **Land the stack** with `gh stack merge --yes --squash` after one read of the proofs.
+4. **Land the stack** with `gh stack merge --yes` after one read of the proofs, and check that every layer merged.
 
 ### Prove a split
 

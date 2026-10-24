@@ -366,9 +366,8 @@ export function republishOutcome(item: WorkItem, reason: string): Outcome {
 
 /**
  * The facts of a native-stack layer the layer below moves (a repair of
- * it): it replays its change onto the new head, keeping its selection,
- * and keeps nothing of a rereview of its old result. Every move of a
- * layer goes through here.
+ * it): it replays its change onto the new head, keeping its selection.
+ * Every move of a layer goes through here.
  */
 export function movedLayer(
   state: ObjectiveState,
@@ -384,7 +383,6 @@ export function movedLayer(
         rebase: true,
         finished: null,
         onto: null,
-        rereview: null,
       },
       layer.id,
     ),
@@ -522,7 +520,7 @@ export function repairOutcome(
       ...keep,
       ...facts({ finding: fresh ? null : kept }, item.id),
       ...moved,
-      ...facts({ finished: null, rereview: null }, item.id),
+      ...facts({ finished: null }, item.id),
     },
   };
 }

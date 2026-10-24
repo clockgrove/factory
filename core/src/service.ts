@@ -619,7 +619,6 @@ export async function serve(options: ServeOptions): Promise<number> {
             request.writtenAt,
             request.question,
             request.arg,
-            request.reviewArtifacts,
           );
           break;
         case "pause":

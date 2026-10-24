@@ -10,7 +10,6 @@ import { type ResultReview, reviewQa } from "../review/result.js";
 import { validateTree } from "../validate.js";
 import { worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
-import { rereviewCapture, rereviewOf, rereviewRecord } from "./refused.js";
 import {
   integrationProblem,
   objectiveMerges,
@@ -104,7 +103,6 @@ export async function qaValidateStep(
     reviewArtifacts: {
       configured: config.reviewArtifacts,
       planned: plan.reviewArtifacts,
-      ...rereviewCapture(state, item.id, config.reviewArtifacts),
       dir: join(workDir, "artifacts", item.id),
     },
     media: validationMembers(plan, item, selection(state)),
@@ -120,7 +118,6 @@ export async function qaValidateStep(
         tree: result.tree,
         commands: result.commands,
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
-        ...rereviewRecord(state, item.id),
         checks,
       };
       return { kind: "done", result: done };
@@ -169,10 +166,7 @@ export async function qaReviewStep(
       target: steps[0]!,
       clear: steps,
       ...(again === REVALIDATE ? { rereview: true as const } : {}),
-      keep: facts(
-        { qaRefused: null, rereview: rereviewOf(context.answer) },
-        item.id,
-      ),
+      keep: facts({ qaRefused: null }, item.id),
     };
   const plan = currentPlan(state)!;
   const checked = state.done[steps[0]!] as QaResult;

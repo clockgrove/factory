@@ -45,7 +45,7 @@ import {
   packageScriptInvocation,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
-import { retiredCommands, runnableItem } from "./planning/plan.js";
+import { retiredCommands } from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
@@ -137,12 +137,6 @@ export interface ValidateInput {
      * installation no longer configures holds before anything runs.
      */
     planned?: readonly ReviewArtifactSelector[];
-    /**
-     * A rereview's `--review-artifacts`: the configured selectors this run
-     * captures instead of all (none when empty). The planned check still
-     * reads `configured`.
-     */
-    selected?: readonly ReviewArtifactSelector[];
     /** Private capture directory, such as `<state>/artifacts/<issue>/<item>` or `.../final`; emptied first. */
     dir: string;
   };
@@ -214,7 +208,7 @@ export type Validation =
 export async function validateTree(input: ValidateInput): Promise<Validation> {
   const { checkout, commit, plan, item } = input;
   const { preparation, commands } = item
-    ? validationSequence(runnableItem(plan, item))
+    ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   const { signal } = input;
@@ -239,9 +233,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         ["retry", "replan", "cancel"],
       ),
     );
-  const selectors = capture
-    ? selectorsFor(capture.selected ?? capture.configured, item)
-    : [];
+  const selectors = capture ? selectorsFor(capture.configured, item) : [];
   const refusal = await pinRefusal(
     new Revisions(checkout, commit, signal),
     plan.base,

@@ -8,7 +8,6 @@ import { headAndTail } from "../text.js";
 import { validateTree } from "../validate.js";
 import { addWorktree, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
-import { rereviewCapture, rereviewRecord } from "./refused.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaValidateStep } from "./step-qa.js";
 import {
@@ -53,7 +52,6 @@ export async function validateStep(
     reviewArtifacts: {
       configured: config.reviewArtifacts,
       planned: plan.reviewArtifacts,
-      ...rereviewCapture(state, item.id, config.reviewArtifacts),
       dir: join(workDir, "artifacts", item.id),
     },
     media: validationMembers(plan, item, selection(state)),
@@ -68,7 +66,6 @@ export async function validateStep(
         tree: result.tree,
         commands: result.commands,
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
-        ...rereviewRecord(state, item.id),
       };
       return { kind: "done", result: done };
     }
@@ -108,11 +105,7 @@ export async function validateStep(
       return repairOutcome(
         item,
         "validate",
-        {
-          kind: "failure",
-          detail: keptOutput,
-          ...(result.failed ? { failed: result.failed } : {}),
-        },
+        { kind: "failure", detail: keptOutput },
         context.state,
         place,
         { shown: result.detail },

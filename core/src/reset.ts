@@ -301,35 +301,17 @@ export async function rebuildState(
     }
     // So do the operator's retirements: they now retire from the rebuilt
     // plan.
-    for (const entry of (old && currentPlan(old)?.retired) ?? []) {
-      const moved = { ...entry, plan: planAt };
+    const retired = (old && currentPlan(old)?.retired) ?? [];
+    if (retired.length)
       Object.assign(
         state.kept,
-        entry.itemId
-          ? facts(
-              {
-                retired: [
-                  ...(fact(state, "retired", entry.itemId) ?? []),
-                  moved,
-                ],
-              },
-              entry.itemId,
-            )
-          : entry.command !== undefined
-            ? facts({
-                "final:retired": [
-                  ...(fact(state, "final:retired") ?? []),
-                  moved,
-                ],
-              })
-            : facts({
-                "final-review:retired": [
-                  ...(fact(state, "final-review:retired") ?? []),
-                  moved,
-                ],
-              }),
+        facts({
+          "final:retired": [
+            ...(fact(state, "final:retired") ?? []),
+            ...retired.map((entry) => ({ ...entry, plan: planAt })),
+          ],
+        }),
       );
-    }
     // The PR that merged Work Item `id` in this plan and run, if any.
     const mergedPull = async (id: string) => {
       const merged = (

@@ -289,20 +289,14 @@ export function item(id, fields = {}) {
   };
 }
 
-/** An operator's `retire` record, against the plan accepted at `plan`. */
-export function retirement(
-  criterion,
-  reason,
-  itemId,
-  plan = "2026-01-01T00:00:00.000Z",
-) {
+/** An operator's `retire-command` record, against the plan accepted at `plan`. */
+export function retirement(command, reason, plan = "2026-01-01T00:00:00.000Z") {
   return {
-    criterion,
-    ...(itemId ? { itemId } : {}),
+    command,
     reason,
     by: "kirk",
     at: "2026-01-01T00:00:00.000Z",
-    holdId: `${criterion}@1`,
+    holdId: `${command}@1`,
     plan,
   };
 }

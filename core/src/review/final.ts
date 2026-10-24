@@ -17,7 +17,7 @@
  */
 import type { CandidateRecord, InputRecord } from "../media.js";
 import { coverageCriterion } from "../planning/graph.js";
-import { retiredCriteria, retiredLines } from "../planning/plan.js";
+import { retiredLines } from "../planning/plan.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
@@ -101,35 +101,25 @@ export function reviewObjective(input: {
 }
 
 /**
- * The operator's retirements as controller rows: retired criteria no longer
- * count, while retired commands only no longer run.
+ * The final validation commands the operator retired, as a controller row:
+ * they only no longer run.
  */
 function retiredRows(plan: Plan) {
-  const row = (path: string, scope: string, kind: "criterion" | "command") => {
-    const retired = retiredLines(plan, undefined, kind);
-    return retired.length
-      ? [
-          {
-            origin: "controller" as const,
-            path,
-            content: JSON.stringify({ scope, retired }),
-            complete: true,
-          },
-        ]
-      : [];
-  };
-  return [
-    ...row(
-      "Retired criteria",
-      "The operator retired these criteria and obligations: they no longer apply, so they are not under review and never count as unmet. Judge the remaining criteria without them.",
-      "criterion",
-    ),
-    ...row(
-      "Retired commands",
-      "The operator retired these validation commands: they no longer run, so they are no evidence either way. Criteria they proved are still judged, on other evidence.",
-      "command",
-    ),
-  ];
+  const retired = retiredLines(plan);
+  return retired.length
+    ? [
+        {
+          origin: "controller" as const,
+          path: "Retired commands",
+          content: JSON.stringify({
+            scope:
+              "The operator retired these validation commands: they no longer run, so they are no evidence either way. Criteria they proved are still judged, on other evidence.",
+            retired,
+          }),
+          complete: true,
+        },
+      ]
+    : [];
 }
 
 /**
@@ -140,14 +130,12 @@ function retiredRows(plan: Plan) {
  * per source whose obligations coding items without a direct edge deliver
  * together, asks whether the consumer accepts the producer's real outputs and
  * reuses its helpers and types. Each question names the criteria it bears on
- * by index, so its refusal stays tied to them. The criteria the operator
- * retired (planning/plan.ts) are left out.
+ * by index, so its refusal stays tied to them.
  */
 function finalCriteria(plan: Plan, objective: readonly string[]): string[] {
-  const retired = retiredCriteria(plan);
   const judged = [
     ...new Set([...objective, ...plan.coverage.map(coverageCriterion)]),
-  ].filter((criterion) => !retired.has(criterion));
+  ];
   const coding = plan.items.filter((item) => (item.kind ?? "work") === "work");
   const ids = new Set(coding.map((item) => item.id));
   const linked = (a: WorkItem, b: WorkItem) =>

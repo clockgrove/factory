@@ -17,9 +17,8 @@ export const spec: Command = {
     question: "value",
     text: "value",
     "text-file": "value",
-    "review-artifacts": "list",
   },
-  help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance); with `revalidate`, --review-artifacts N (repeatable) captures only the configured reviewArtifacts selectors numbered N (from 1), or none, for this rereview",
+  help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance)",
   check: (args, command) => {
     const answer = args.positional[2];
     const file = args.flags["text-file"];
@@ -38,11 +37,7 @@ export const spec: Command = {
               ? "give --text or --text-file, not both"
               : file !== undefined && !isAbsolute(file)
                 ? "--text-file needs an absolute path"
-                : args.lists["review-artifacts"] &&
-                    answer !== "revalidate" &&
-                    answer !== "more"
-                  ? "--review-artifacts goes with revalidate: factory answer ISSUE revalidate --question ID --review-artifacts N"
-                  : undefined)
+                : undefined)
     );
   },
   run: async ({ paths, args }) => {
@@ -50,7 +45,6 @@ export const spec: Command = {
     const arg = args.positional[3];
     const { question } = args.flags;
     const text = answerText(args);
-    const reviewArtifacts = args.lists["review-artifacts"];
     return await request(paths, {
       kind: "answer",
       issue: issueOf(args),
@@ -58,7 +52,6 @@ export const spec: Command = {
       ...(arg ? { arg } : {}),
       ...(text ? { text } : {}),
       ...(question !== undefined ? { question } : {}),
-      ...(reviewArtifacts ? { reviewArtifacts } : {}),
     });
   },
 };

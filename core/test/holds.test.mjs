@@ -621,7 +621,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
     "../dist/engine.js"
   );
   const { newObjective } = await import("../dist/state.js");
-  const { reviewArtifactSelection } = await import("../dist/work/steps.js");
   const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
   const started = [];
   const outcomes = {};
@@ -652,11 +651,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
       freezable: { claude: { digest: "c", config } },
       // c keeps a refused result it can check again.
       revalidatable: (_, key) => key === "item:c:work",
-      reviewArtifacts: (values) =>
-        reviewArtifactSelection(values, [
-          { command: "npm run shots" },
-          { command: "npm test" },
-        ]),
     },
     mkdtempSync(join(tmpdir(), "factory-defer-")),
     { write() {} },
@@ -836,41 +830,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
   runner.apply("item:c:work", blame);
   assert.equal(perPath(runner.state)["item:c:work"].used, charged - 1);
   assert.equal(perPath(runner.state)["item:a:work"].used, 2);
-  // `--review-artifacts` goes with a rereview only, names configured
-  // selectors by number (or none alone), and is recorded on the answer.
-  delete runner.state.answers["item:b:ci"];
-  runner.apply(
-    "item:b:ci",
-    hold("Diagnosis needs you.", [
-      { answer: "revalidate", family: "accept", consequence: "Again." },
-      "cancel",
-    ]),
-  );
-  const choose = (answer, values) => {
-    const open = runner.state.holds.find((h) => h.step === "item:b:ci");
-    return runner.transact(() =>
-      runner.answer(
-        answer,
-        undefined,
-        "op",
-        undefined,
-        open.id,
-        undefined,
-        values,
-      ),
-    );
-  };
-  for (const values of [["3"], ["none", "1"], ["x"]])
-    assert.match(
-      choose("revalidate", values)?.message ?? "",
-      /names no configured selector|can't be given with selectors/,
-    );
-  assert.equal(choose("revalidate", ["2"]), null, "past the allowance");
-  // That `more` reuses the selectors, resolved when the answer landed.
-  assert.equal(choose("more", undefined), null);
-  assert.deepEqual(runner.state.answers["item:b:ci"].reviewArtifacts, [
-    { command: "npm test" },
-  ]);
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {

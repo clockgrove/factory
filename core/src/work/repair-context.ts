@@ -16,9 +16,9 @@ import { fact, facts, type ItemFacts } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
 import { refusedOf, refusedResult } from "./refused.js";
-import { itemRetirable, retireOffer } from "./retire.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
+import { refusalOffers } from "./step-review.js";
 import { withKeep } from "./step-work.js";
 import {
   type BuildDeps,
@@ -39,11 +39,10 @@ export async function repairContext(
   context: StepContext,
   deps: BuildDeps,
   base: string,
-  /** The kept finding, less the criteria a `retire` answer just retired. */
+  /** The kept finding, less the criteria an `accept` answer just accepted. */
   finding: RepairFinding | undefined,
-  /** The current plan, with a retirement this run just recorded. */
   plan: Plan,
-  /** A retirement narrowed `finding`: diagnose it again, never reuse the saved diagnosis. */
+  /** A decision narrowed `finding`: diagnose it again, never reuse the saved diagnosis. */
   narrowed = false,
 ): Promise<
   | { context: RepairContext; keep: Record<string, unknown> }
@@ -71,7 +70,7 @@ export async function repairContext(
       ? context.answer
       : undefined;
   if (saved?.repair === history.count && !answered && !narrowed)
-    // Reached past a spent allowance (a retirement that leaves the
+    // Reached past a spent allowance (a decision that leaves the
     // finding as it was): the engine asks for `more` first.
     return overrun(state, stepKey(item.id, "work")).length
       ? {
@@ -137,14 +136,7 @@ export async function repairContext(
       ? `\n\nIf the refused result is correct and Factory's own check was at fault (for example, the check could not see files the result has), answer \`revalidate\`: Factory runs validation, review and delivery again on the same result, unchanged, without running the worker. It doesn't count as a repair; it is a result rereview, and this Objective has used ${rereviewed.used} of ${rereviewed.allowed} (autonomy.allowances.resultRereviews).`
       : "";
     // The engine offers `revalidate` itself (`revalidatable`).
-    const offer = retireOffer(
-      itemRetirable(
-        plan,
-        item,
-        finding,
-        deps.config.finalValidation.requiredCommands,
-      ),
-    );
+    const offer = refusalOffers(finding);
     return {
       outcome: hold(
         `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, or \`retry\` to diagnose the failure again.${recheck}${offer.note}`,

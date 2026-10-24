@@ -1,17 +1,20 @@
 import { ACCEPT } from "../delivery.js";
-import { hold, type Outcome, type StepContext } from "../engine.js";
+import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { InputRecord } from "../media.js";
 import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
+import type { RepairFinding } from "../repair.js";
 import {
   type CriterionDecision,
   type DeliveryPosition,
   type DependencyResult,
+  decides,
+  type RefusedCriterion,
   type ResultReview,
   reviewResult,
 } from "../review/result.js";
-import type { HoldOption, ObjectiveState } from "../state.js";
+import type { Answer, HoldOption, ObjectiveState } from "../state.js";
 import { hostGitExit, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { mergeOf } from "./merged.js";
@@ -75,9 +78,7 @@ export async function reviewStep(
     deps,
     `review-${item.id}`,
     item,
-    secondLook(context, item.id)
-      ? undefined
-      : fact(state, "reviewSession", item.id),
+    secondLook(context) ? undefined : fact(state, "reviewSession", item.id),
   );
   const review = await reviewResult({
     planner: deps.planner,
@@ -364,4 +365,97 @@ export function criterionDecisions(
         ? facts({ "final-review:decisions": decisions })
         : facts({ decisions }, itemId),
   };
+}
+
+/** A Work Item's kept review finding as the refused review it records. */
+function refusedReview(
+  finding: Extract<RepairFinding, { kind: "review" }>,
+): Extract<ResultReview, { kind: "refused" }> {
+  return {
+    kind: "refused",
+    tree: finding.tree,
+    refused: finding.refused,
+    verdicts: [],
+    questions: [],
+  };
+}
+
+/**
+ * The `accept <n>` answers to the review refusal `finding` driving a Work
+ * Item's repairs (criterionOffers), for its work step's repair diagnosis
+ * and repair-allowance questions, and the note those questions carry.
+ */
+export function refusalOffers(finding: RepairFinding | undefined): {
+  note: string;
+  options: HoldOption[];
+} {
+  if (finding?.kind !== "review") return { note: "", options: [] };
+  const options = criterionOffers(refusedReview(finding), REFUSES_ITEM);
+  const listed = finding.refused
+    .filter((entry) => entry.source === "model")
+    .map((entry) => `${entry.criterionIndex + 1}. ${entry.criterion}`);
+  return {
+    note: options.length
+      ? `\n\nIf the reviewer was wrong about a refused criterion, answer \`accept <n> <reason>\` with its number: it counts as met by this exact result (a later one is judged again), and the refused result is checked again once no refusal stands, else what still counts is diagnosed. Final review, the report and status list it with your reason. The refused criteria:\n${listed.join("\n")}`
+      : "",
+    options,
+  };
+}
+
+/**
+ * The operator's `accept <n>` to a question about Work Item `itemId`'s
+ * review refusal `finding`, recorded once (criterionDecisions), and the
+ * refused criteria the decisions on the refused tree leave standing.
+ */
+export function refusalDecisions(
+  context: StepContext,
+  finding: Extract<RepairFinding, { kind: "review" }>,
+  itemId: string,
+): { standing: RefusedCriterion[]; keep: Record<string, unknown> } {
+  const decided = criterionDecisions(context, refusedReview(finding), itemId);
+  const accepted = (criterion: string) =>
+    [...decided.decisions]
+      .reverse()
+      .find((entry) => decides(entry, criterion, finding.tree))?.outcome ===
+    ACCEPT;
+  return {
+    standing: finding.refused.filter((entry) => !accepted(entry.criterion)),
+    keep: decided.keep,
+  };
+}
+
+/**
+ * The `accept <n>` answers a Work Item's repair-allowance question offers
+ * (engine.ts, `Workflow.overrunOffers`), from the review refusal driving
+ * its repairs.
+ */
+export function overrunOffers(
+  state: ObjectiveState,
+  key: string,
+): { note: string; options: HoldOption[] } | undefined {
+  const id = itemOf(key);
+  if (id === undefined || key !== stepKey(id, "work")) return undefined;
+  return refusalOffers(fact(state, "finding", id));
+}
+
+/**
+ * Whether Work Item step `key` takes `answer` without a repair: an
+ * `accept <n>` it hasn't recorded yet. The engine then runs it past a
+ * spent repair allowance once; the step records it and repairs only
+ * within the allowance.
+ */
+export function unspent(
+  state: ObjectiveState,
+  key: string,
+  answer: Answer,
+): boolean {
+  const id = itemOf(key);
+  return (
+    id !== undefined &&
+    key === stepKey(id, "work") &&
+    answer.answer === ACCEPT &&
+    !(fact(state, "decisions", id) ?? []).some(
+      (entry) => entry.holdId === answer.holdId,
+    )
+  );
 }

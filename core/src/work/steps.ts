@@ -6,10 +6,7 @@ import { rank, resourceGate, type ScheduleView } from "../planning/schedule.js";
 import type { PlanningDeps } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
-import type {
-  ReviewArtifact,
-  ReviewArtifactSelector,
-} from "../review/artifacts.js";
+import type { ReviewArtifact } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import { validationDeadlineMs } from "../validate.js";
@@ -105,8 +102,6 @@ export interface ValidateResult {
   tree: string;
   commands: string[];
   artifacts?: ReviewArtifact[];
-  /** A rereview's `--review-artifacts`: the selectors captured instead of all. */
-  reviewArtifacts?: ReviewArtifactSelector[];
 }
 
 export interface PublishResult {

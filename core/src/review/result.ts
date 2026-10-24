@@ -29,11 +29,6 @@ import {
 } from "../media.js";
 import { validPath } from "../objective.js";
 import { coverageCriterion, isRecord } from "../planning/graph.js";
-import {
-  retiredCommands,
-  retiredCriteria,
-  runnableItem,
-} from "../planning/plan.js";
 import { TREE_READ_GUIDANCE } from "../planning/prompts.js";
 import {
   exportTree,
@@ -58,15 +53,9 @@ import {
  * The criteria a result review judges: the item's own acceptance, then each
  * Objective criterion or source exit item the plan says this item's review
  * proves. A single-item plan's review also judges what final review proves.
- * An obligation a command proved whose command the operator retired is
- * judged here instead. The criteria the operator retired for it
- * (planning/plan.ts) are left out; its own acceptance as `runnableItem`
- * gives it, so the indices match the worker's notes.
+ * The indices match the worker's notes.
  */
-export function resultCriteria(plan: Plan, accepted: WorkItem): string[] {
-  const item = runnableItem(plan, accepted);
-  const retired = retiredCriteria(plan, item.id);
-  const commands = retiredCommands(plan, item.id);
+export function resultCriteria(plan: Plan, item: WorkItem): string[] {
   const whole = plan.items.length === 1 && plan.items[0]!.id === item.id;
   const owned = plan.coverage
     .filter(
@@ -74,17 +63,11 @@ export function resultCriteria(plan: Plan, accepted: WorkItem): string[] {
         entry.itemId === item.id &&
         (entry.proof.kind === "result-semantic" ||
           entry.proof.kind === "integrated-semantic" ||
-          (whole && entry.proof.kind === "final-review") ||
-          ("validationIndex" in entry.proof &&
-            commands.has(
-              item.validation[entry.proof.validationIndex]?.command ?? "",
-            ))),
+          (whole && entry.proof.kind === "final-review")),
     )
     .map(coverageCriterion)
     .filter((criterion) => !item.acceptance.includes(criterion));
-  return [...item.acceptance, ...new Set(owned)].filter(
-    (criterion) => !retired.has(criterion),
-  );
+  return [...item.acceptance, ...new Set(owned)];
 }
 
 /** The commands Factory's validation ran, in order, each passing on `tree`. */
@@ -295,8 +278,7 @@ const BASE_TOTAL_BYTES = 67_108_864;
 
 /** Review one result. See the module comment for the outcomes. */
 export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
-  // As the worker saw it: without what the operator retired.
-  const item = runnableItem(input.plan, input.item);
+  const { item } = input;
   const criteria = resultCriteria(input.plan, item);
   return runReview({
     ...input,
@@ -340,9 +322,7 @@ export function reviewQa(
       {
         origin: "controller",
         path: "Accepted Work Item design",
-        content: JSON.stringify(
-          workItemDesign(runnableItem(input.plan, input.item)),
-        ),
+        content: JSON.stringify(workItemDesign(input.item)),
         complete: true,
       },
       qaObservationRow({

@@ -273,6 +273,7 @@ Common answers:
 - `answer` with text: your decision, sent back to the planner or worker.
 - `more`: grant more repairs or rounds.
 - `replan`, and `revalidate` (check a refused result again, unchanged).
+- `accept N` and `refuse N` with a reason: decide one review criterion on this exact result.
 - `wait` and `switch NAME` (provider limits).
 - `adopt` (a configuration change).
 - `recheck` (an edited issue).

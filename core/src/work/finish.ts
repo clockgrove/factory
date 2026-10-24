@@ -14,7 +14,6 @@ import { roleMemory } from "../knowledge/index.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
-import { coverageCriterion } from "../planning/graph.js";
 import {
   acceptedInputs,
   currentPlan,
@@ -43,7 +42,6 @@ import {
   finalRetirable,
   keepFirst,
   planWith,
-  RETIRE,
   RETIRE_COMMAND,
   retireKeep,
   retireOffer,
@@ -109,7 +107,6 @@ export function finalStep(plan: Plan, deps: BuildDeps): Step {
                 failed,
                 config.finalValidation.requiredCommands,
               ),
-              { name: "final:retired" },
             )
           : {};
       if (typeof recorded === "string")
@@ -233,22 +230,7 @@ export function finalReviewStep(deps: BuildDeps): Step {
             "final-review:held": null,
           }),
         };
-      // `retire <n>` to the refusal: recorded, and the same integrated
-      // result is reviewed again without it.
-      const refusedBefore = fact(state, "final-review:refused");
-      const recorded =
-        context.answer?.answer === RETIRE && refusedBefore
-          ? retireKeep(
-              context,
-              { criteria: refusedBefore },
-              { name: "final-review:retired" },
-            )
-          : undefined;
-      const retired =
-        typeof recorded === "object"
-          ? { ...recorded, ...facts({ "final-review:refused": null }) }
-          : {};
-      const plan = planWith(state, retired);
+      const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
       const merges = objectiveMerges(state, plan);
       const decided = criterionDecisions(
@@ -354,50 +336,33 @@ export function finalReviewStep(deps: BuildDeps): Step {
         context.keep(facts({ "session:final-review": conversation.kept }));
       const held = (asked: ResultReview | null) =>
         facts({ "final-review:held": asked });
-      // Only an Objective criterion or a coverage obligation can be
-      // retired, never an integration question.
-      const obligations = new Set([
-        ...acceptance,
-        ...plan.coverage.map(coverageCriterion),
-      ]);
-      // The retirement first: a new refusal's criteria replace the old.
-      return keepFirst(
-        retired,
-        withKeep(
-          reviewOutcome(
-            review,
-            held,
-            "and final review refuses the integrated result",
-            (refusal) => {
-              const lines = refusal.refused.map(
-                (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
-              );
-              const open = refusal.questions.map(
-                (q) =>
-                  `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
-              );
-              const offers = criterionOffers(refusal, "and the refusal stands");
-              const cited = refusal.refused
-                .filter((entry) => obligations.has(entry.criterion))
-                .map(({ criterionIndex, criterion }) => ({
-                  criterionIndex,
-                  criterion,
-                }));
-              const retire = retireOffer({ criteria: cited });
-              return {
-                ...hold(
-                  `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${retire.note}`,
-                  ["retry", "replan", ...offers, ...retire.options, "cancel"],
-                ),
-                keep: {
-                  ...facts({ "final-review:refused": cited }),
-                  ...held(refusal),
-                },
-              };
-            },
-          ),
-          decided.keep,
+      return withKeep(
+        reviewOutcome(
+          review,
+          held,
+          "and final review refuses the integrated result",
+          (refusal) => {
+            const lines = refusal.refused.map(
+              (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
+            );
+            const open = refusal.questions.map(
+              (q) =>
+                `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
+            );
+            const offers = criterionOffers(refusal, "and the refusal stands");
+            return {
+              ...hold(
+                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}`,
+                ["retry", "replan", ...offers, "cancel"],
+              ),
+              keep: {
+                ...facts({ "final-review:refused": true }),
+                ...held(refusal),
+              },
+            };
+          },
         ),
+        decided.keep,
       );
     },
   };
@@ -450,7 +415,7 @@ export function reportStep(deps: BuildDeps): Step {
       const decided = decisionLines(decisionsOf(state));
       const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
         plan.retired?.length
-          ? `\n\nRetired criteria and commands:\n${retiredLines(plan)
+          ? `\n\nRetired final validation commands:\n${retiredLines(plan)
               .map((line) => `- ${line}`)
               .join("\n")}`
           : ""

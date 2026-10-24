@@ -41,7 +41,6 @@ import {
   replanOutcome,
   rerunCleanupStep,
   revalidatable,
-  reviewArtifactSelection,
   unspent,
 } from "./work/steps.js";
 
@@ -143,15 +142,8 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
             freshOutcome(state, deps, key, answer),
           // A refused result checked again, unchanged (a result rereview).
           revalidatable,
-          reviewArtifacts: (values: readonly string[]) =>
-            reviewArtifactSelection(values, deps.config.reviewArtifacts),
-          // A retirement answers a repair-allowance question too.
-          overrunOffers: (state: ObjectiveState, key: string) =>
-            overrunOffers(
-              state,
-              key,
-              deps.config.finalValidation.requiredCommands,
-            ),
+          // `accept <n>` answers a repair-allowance question too.
+          overrunOffers,
           unspent,
           diagnoseFirst,
         }

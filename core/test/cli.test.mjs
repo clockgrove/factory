@@ -200,10 +200,6 @@ test("unknown and misplaced options are refused with the fix", () => {
     ],
     [["frobnicate"], /Unknown command: frobnicate; see factory help/],
     [["answer", "5", "retry", "--question"], /--question needs a value/],
-    [
-      ["answer", "5", "retry", "--question", "q", "--review-artifacts", "1"],
-      /--review-artifacts goes with revalidate/,
-    ],
     [["cancel", "5", "6"], /factory cancel takes ISSUE; unexpected 6/],
     [["log", "5", "--tail", "x"], /--tail takes a whole number/],
   ];
@@ -999,26 +995,14 @@ test("status: one model, the Work Item table, the full --json and the list view"
     ],
     kept: {
       "item:a:flaky": { tree: "t1", command: "npm test" },
-      "item:a:rereview": {
-        reviewArtifacts: [{ command: "npm test" }],
-        by: "op",
-        at: "x",
-      },
       "allowances:rereviews": 1,
       "allowances:granted": { "perPath:item:a:work": 3, resultRereviews: 1 },
       // Retirements count only against the plan accepted now.
       "plan:acceptedAt": "2026-01-01T00:00:00.000Z",
-      "item:a:retired": [
-        retirement("Docs build", "docs moved out", "a"),
-        retirement("Stale", "from an earlier plan", "a", "2025-12-01"),
-      ],
       "final:retired": [
-        {
-          ...retirement(undefined, "covered by CI"),
-          command: "npm run audit",
-        },
+        retirement("npm run audit", "covered by CI"),
+        retirement("npm run stale", "from an earlier plan", "2025-12-01"),
       ],
-      "final-review:retired": [retirement("Old API kept", "API dropped")],
     },
     repairs: { "item:a:work": { count: 4, findings: ["refused"] } },
     modules: {
@@ -1064,13 +1048,9 @@ test("status: one model, the Work Item table, the full --json and the list view"
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
   assert.match(
     text,
-    /Rereview: a captures only the review artifacts of `npm test` \(--review-artifacts, by op\)/,
+    /Retired: command `npm run audit` \(final validation\): retired by kirk at 2026-01-01 09:00:00 GMT\+9: covered by CI\. Judged by review instead: Audit is clean\n/,
   );
-  assert.match(
-    text,
-    /Retired: Docs build \(Work Item a\): retired by kirk at 2026-01-01 09:00:00 GMT\+9: docs moved out\n {2}Retired: command `npm run audit` \(final validation\): retired by kirk at .*: covered by CI\. Judged by review instead: Audit is clean\n {2}Retired: Old API kept \(final review\): retired by kirk at .*: API dropped\n/,
-  );
-  assert.doesNotMatch(text, /Stale/);
+  assert.doesNotMatch(text, /npm run stale/);
   assert.match(
     text,
     /Allowances: planning revisions 0\/4, implementation repairs 4\/5, result rereviews 1\/2; repairs per path: item:a:work 4\/6/,
@@ -1114,8 +1094,8 @@ test("status: one model, the Work Item table, the full --json and the list view"
   );
   assert.deepEqual(row.flakyRerun, [{ item: "a", command: "npm test" }]);
   assert.deepEqual(
-    row.plan.retired.map((entry) => entry.criterion ?? entry.command),
-    ["Docs build", "npm run audit", "Old API kept"],
+    row.plan.retired.map((entry) => entry.command),
+    ["npm run audit"],
   );
   assert.deepEqual(row.allowances, {
     planningRevisions: { used: 0, allowed: 4 },

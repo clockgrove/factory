@@ -33,12 +33,7 @@ export type RepairFinding =
    * names, URLs and excerpts GitHub supplied), a conflict, or a collection
    * refusal.
    */
-  | {
-      kind: "failure";
-      detail: string;
-      /** The validation command that failed, by its index in the sequence that ran: `retire-command` names it. */
-      failed?: { index: number; command: string };
-    }
+  | { kind: "failure"; detail: string }
   /**
    * The change was moved onto a new base: its PR conflicted with its base,
    * or the stack layer below it moved. A mechanical repair: the worker

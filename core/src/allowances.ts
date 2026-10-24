@@ -6,7 +6,6 @@
  * grants as much again. A replan starts every allowance afresh: it clears
  * the repairs and the kept facts these counts are made of.
  */
-import type { ReviewArtifactSelector } from "./review/artifacts.js";
 import type { ObjectiveState } from "./state.js";
 
 export interface Allowances {
@@ -147,46 +146,17 @@ const ASKED = "allowances:asked";
 
 export type Asked = "repairs" | "rereviews";
 
-/**
- * The `--review-artifacts` a `revalidate` past the allowance gave, by the
- * id of the rereviews question it asked instead: its `more` reuses them.
- */
-const CAPTURES = "allowances:captures";
-
-/**
- * Note that open hold `id` asks for more of `kind`, with the rereview's
- * `captures` when it gave them; closed ones are forgotten.
- */
-export function asked(
-  state: ObjectiveState,
-  id: string,
-  kind: Asked,
-  captures?: readonly ReviewArtifactSelector[],
-): void {
+/** Note that open hold `id` asks for more of `kind`; closed ones are forgotten. */
+export function asked(state: ObjectiveState, id: string, kind: Asked): void {
   const open = new Set(state.holds.map((hold) => hold.id));
-  const live = <T>(name: string): Record<string, T> =>
-    Object.fromEntries(
+  state.kept[ASKED] = {
+    ...Object.fromEntries(
       Object.entries(
-        (state.kept[name] as Record<string, T> | undefined) ?? {},
+        (state.kept[ASKED] as Record<string, Asked> | undefined) ?? {},
       ).filter(([held]) => open.has(held) && held !== id),
-    );
-  state.kept[ASKED] = { ...live<Asked>(ASKED), [id]: kind };
-  const kept = {
-    ...live<ReviewArtifactSelector[]>(CAPTURES),
-    ...(captures ? { [id]: [...captures] } : {}),
+    ),
+    [id]: kind,
   };
-  if (Object.keys(kept).length) state.kept[CAPTURES] = kept;
-  else delete state.kept[CAPTURES];
-}
-
-/** The `--review-artifacts` rereviews question `id` keeps for its `more`. */
-export function askedCaptures(
-  state: ObjectiveState,
-  id: string,
-): ReviewArtifactSelector[] | undefined {
-  return (
-    state.kept[CAPTURES] as Record<string, ReviewArtifactSelector[]> | undefined
-  )?.[id];
 }
 
 /** What hold `id`'s `more` grants, if it is the engine's. */

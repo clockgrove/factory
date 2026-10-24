@@ -18,7 +18,19 @@ import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
 import { validateTree } from "../dist/validate.js";
 import { ActivityLog } from "../dist/work/worker.js";
-import { CLI, cli, configured, installation, item, REPO } from "./helpers.mjs";
+import {
+  CLI,
+  cli,
+  closedPort,
+  configured,
+  installation,
+  item,
+  REPO,
+  seed,
+  serve,
+  stopped,
+  until,
+} from "./helpers.mjs";
 
 /** The CLI with room for a large output. */
 function large(inst, ...args) {
@@ -246,4 +258,48 @@ test("a failed validation command's whole output is kept in its attempt file and
       `whole output: \\S+/62/${run}\\.attempts/item_a_validate_1\\.validation-1`,
     ),
   );
+});
+
+/** Every event of the issue's run log so far. */
+function events(inst, issue) {
+  return cli(inst, "log", String(issue), "--tail", "100000", "--json")
+    .out.trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+test("a step's GitHub requests are traced with their failure category, time and counts, like a sync job's", async () => {
+  for (const [api, category] of [
+    [`http://127.0.0.1:${await closedPort()}`, "connection"],
+    ["http://factory-drill.invalid", "dns"],
+  ]) {
+    const inst = installation();
+    configured(inst, api);
+    seed(inst, 63);
+    const service = serve(inst);
+    const traced = () =>
+      events(inst, 63).find(
+        (e) => e.event === "github-request" && e.step === "check",
+      );
+    await until(traced, `the check's ${category} failure, traced`, 30_000);
+    const request = traced();
+    assert.equal(request.category, category);
+    assert.equal(request.status, null);
+    assert.equal(request.job, "check");
+    assert.match(request.attemptId, /^check#\d+$/);
+    assert.equal(typeof request.ms, "number");
+    assert.match(request.route, /^\/(?:repos|graphql|user)/);
+    const call = events(inst, 63).find(
+      (e) => e.event === "github-call" && e.step === "check",
+    );
+    assert.ok(call.calls >= 1 && call.failed >= 1, JSON.stringify(call));
+    assert.equal(typeof call.requestMs, "number");
+    // analysis sums them with the sync jobs'.
+    const analysis = JSON.parse(
+      cli(inst, "diagnostics", "63", "--analyze", "--json").out,
+    );
+    assert.ok(analysis.github.traced[`network ${category}`] >= 1);
+    await stopped(service);
+  }
 });

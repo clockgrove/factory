@@ -417,7 +417,7 @@ export interface AnalysisReport {
     /** Attempts that continue another (`parentAttemptId`). */
     continued: number;
   };
-  /** GitHub requests of the sync jobs (`github-call`), summed: counts, never bodies. */
+  /** GitHub requests of the run (`github-call`: sync jobs, step attempts, the service's own), summed: counts, never bodies. */
   github: {
     jobs: number;
     runs: number;
@@ -426,8 +426,11 @@ export interface AnalysisReport {
     rateLimited: number;
     failed: number;
     bytes: number;
+    /** Sync job runs' time. */
     ms: number;
-    /** Requests traced one by one (`github-request`: failed, re-sent or rate-limited), by status. */
+    /** The requests' own time. */
+    requestMs: number;
+    /** Requests traced one by one (`github-request`), by status (or `network`) and failure category. */
     traced: Record<string, number>;
   };
   limitations: string[];
@@ -701,6 +704,7 @@ class Analysis {
     failed: 0,
     bytes: 0,
     ms: 0,
+    requestMs: 0,
     traced: {},
   };
   private from?: string;
@@ -883,7 +887,7 @@ class Analysis {
           this.github.traced,
           event.unnoted
             ? "untraced"
-            : `${String(event.status ?? "network")}${event.rateLimited ? " rate-limited" : ""}`,
+            : `${String(event.status ?? "network")}${event.category ? ` ${String(event.category)}` : ""}`,
           num(event.unnoted) ?? 1,
         );
         break;
@@ -898,6 +902,7 @@ class Analysis {
           "failed",
           "bytes",
           "ms",
+          "requestMs",
         ] as const)
           g[field] += num(event[field]) ?? 0;
         break;
@@ -1293,10 +1298,10 @@ function analysisText(report: AnalysisReport): string {
     ),
   ]);
   const g = report.github;
-  section("GitHub requests (sync jobs):", [
-    `  ${count(g.calls)} requests in ${g.runs} job runs (${g.jobs} jobs) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.ms)}`,
+  section("GitHub requests (sync jobs, steps and the service):", [
+    `  ${count(g.calls)} requests in ${g.runs} runs (${g.jobs} jobs and steps) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.requestMs)} in requests`,
     ...(Object.keys(g.traced).length
-      ? [`  traced requests by status: ${tally(g.traced)}`]
+      ? [`  traced requests by status and failure: ${tally(g.traced)}`]
       : []),
   ]);
   lines.push("", ...report.limitations.map((line) => `Note: ${line}`));

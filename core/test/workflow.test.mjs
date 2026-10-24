@@ -19,10 +19,12 @@ import {
   configured,
   githubOrigin,
   installation,
+  item,
   offered,
   refusal,
   seed,
   serve,
+  silentServer,
   stateOf,
   status,
   stopped,
@@ -530,5 +532,97 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
     stateOf(inst, 71).holds[0].question,
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
+  await stopped(service);
+});
+
+test("overlapping owned paths take turns while busy, after an amendment, until the earlier Objective finishes", async () => {
+  const inst = installation();
+  // GitHub never answers, so a step that reads it stays running.
+  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  const at = new Date().toISOString();
+  // #73 owns src/: its one item merged, and its final validation asks.
+  seed(inst, 73, "holding", {
+    done: {
+      check: {},
+      plan: {
+        items: [item("a", { ownedPaths: ["src/"] })],
+        coverage: [],
+        finalCommands: [],
+      },
+      "item:a:merge": { mergeSha: "a".repeat(40) },
+    },
+    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
+    holds: [
+      {
+        id: `final@${at}`,
+        step: "final",
+        question: "Final validation failed.",
+        options: offered("retry", "cancel"),
+        askedAt: at,
+      },
+    ],
+  });
+  // #74's plan, accepted later, owned only lib/; an accepted amendment
+  // added r, which owns src/r.ts. Paused, its interrupted ci on p resumes,
+  // so it is busy.
+  const accepted = "2026-01-02T00:00:00.000Z";
+  const plan = { items: [item("p", { ownedPaths: ["lib/p.ts"] })] };
+  seed(inst, 74, "building", {
+    control: { mode: "paused", by: "kirk", at },
+    done: {
+      check: {},
+      plan,
+      "item:p:work": {},
+      "item:p:validate": {},
+      "item:p:review": {},
+      "item:p:publish": { pr: 7, head: "b".repeat(40), merged: false },
+      "amend:x": {
+        plan: {
+          items: [...plan.items, item("r", { ownedPaths: ["src/r.ts"] })],
+        },
+      },
+    },
+    kept: {
+      "plan:acceptedAt": accepted,
+      "amend:x:proposal": {
+        id: "x",
+        actor: "kirk",
+        at: accepted,
+        plan: accepted,
+        discovery: {
+          scope: "in-scope",
+          reason: "r is needed",
+          evidence: [],
+          ownership: ["src/r.ts"],
+          acceptance: [],
+          dependencies: [],
+        },
+      },
+    },
+    attempts: { "item:p:ci": { startedAt: at, run: "dead" } },
+  });
+  const tried = () => {
+    const state = stateOf(inst, 74);
+    return [
+      ...Object.keys({ ...state.attempts, ...state.retries }),
+      ...state.holds.map((hold) => hold.step),
+    ];
+  };
+  const service = serve(inst);
+  await until(
+    () => stateOf(inst, 74).attempts["item:p:ci"]?.run !== "dead",
+    "p's ci resumes",
+  );
+  assert.equal(cli(inst, "resume", "74").code, 0);
+  await until(() => !stateOf(inst, 74).control, "#74 resumed");
+  // Busy, with #73 in final validation: r waits its turn.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.deepEqual(tried(), ["item:p:ci"]);
+  const row = status(inst).objectives.find((each) => each.issue === 74);
+  assert.deepEqual(row.waitsOn, { paths: 73 });
+  // Once #73 has finished, r builds.
+  assert.equal(cli(inst, "cancel", "73").code, 0);
+  await until(() => tried().includes("item:r:work"), "r's work starts");
+  assert.equal(cli(inst, "cancel", "74").code, 0);
   await stopped(service);
 });

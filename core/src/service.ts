@@ -913,10 +913,23 @@ export async function serve(options: ServeOptions): Promise<number> {
         if (runner.busy) continue;
       }
       let run = false;
-      const allow = allowed(runner, queue);
+      let allow = allowed(runner, queue);
+      // Waiting its turn on another Objective's paths, however busy it is,
+      // it starts no step but an amendment's (planning never waits): those
+      // running finish, and one the service's death interrupted resumes.
+      const owner = TERMINAL.includes(state.status)
+        ? undefined
+        : pathOwner(runner, ordered);
+      if (owner !== undefined) {
+        waitingOnPaths.set(state.issue, owner);
+        const operator = allow;
+        allow = (key) => operator(key) && key.startsWith("amend:");
+      }
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
-      // Paused (the queue or the Objective), or drained with nothing left
-      // to start: no slot; a step the service's death interrupted resumes.
+      // Paused (the queue or the Objective), drained with nothing left to
+      // start, or waiting on paths with only building left: no slot, so a
+      // hold that owns common paths can't stall the queue (rule 1); a step
+      // the service's death interrupted resumes.
       else if (
         !runner.busy &&
         !workflow.steps(state).some((step) => allow(step.key))
@@ -938,16 +951,10 @@ export async function serve(options: ServeOptions): Promise<number> {
       // A wait on a human gate (an approval, a required review) has no
       // deadline, so it takes no slot: it polls, and its paths stay owned.
       else if (gated(runner, workflow)) run = true;
-      // Waiting on another Objective's paths takes no slot either, so a hold
-      // that owns common paths can't stall the queue (rule 1).
-      else {
-        const owner = pathOwner(runner, ordered);
-        if (owner !== undefined) waitingOnPaths.set(state.issue, owner);
-        else if (slots > 0) {
-          slots -= 1;
-          run = true;
-        } else waitingForSlot.add(state.issue);
-      }
+      else if (slots > 0) {
+        slots -= 1;
+        run = true;
+      } else waitingForSlot.add(state.issue);
       if (!run) continue;
       try {
         runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
@@ -1190,7 +1197,11 @@ export async function serve(options: ServeOptions): Promise<number> {
  * overlapping path; planning never waits. Earlier means its plan was
  * accepted earlier: an Objective still planning owns nothing yet, and once
  * its plan lands it waits on every plan accepted before it, so two
- * Objectives never build overlapping paths at once.
+ * Objectives never build overlapping paths at once. Its paths are its
+ * current plan's, so an accepted amendment's count from the next tick; the
+ * amendment keeps the plan's acceptance time, so the order never reverses.
+ * It owns them until it is done or cancelled, through final validation,
+ * final review and the report, which judge those files.
  */
 function pathOwner(
   runner: ObjectiveRunner,
@@ -1200,9 +1211,7 @@ function pathOwner(
   if (!mine.length || built(runner.state)) return undefined;
   const at = acceptedAt(runner.state);
   return all.find((other) => {
-    if (other === runner) return false;
-    if (TERMINAL.includes(other.state.status) || built(other.state))
-      return false;
+    if (other === runner || TERMINAL.includes(other.state.status)) return false;
     const theirs = ownedPaths(other.state);
     if (!theirs.length) return false;
     const when = acceptedAt(other.state);

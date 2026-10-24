@@ -42,7 +42,7 @@ import {
   type RequestResult,
   writeRequest,
 } from "./requests.js";
-import { rebuildStep, resettable } from "./reset.js";
+import { resettable } from "./reset.js";
 import { serve } from "./service.js";
 import { type Frozen, type ObjectiveState, TERMINAL } from "./state.js";
 import { readStatus, type StatusView, statusText } from "./status.js";
@@ -179,7 +179,8 @@ export async function serveInstallation(
       });
     workflow = resettable(
       providerWorkflow(routes, routes.get(name)!.workflow),
-      rebuildStep(github, config),
+      github,
+      config,
     );
     freeze = (each) => {
       const route = routes.get(each);

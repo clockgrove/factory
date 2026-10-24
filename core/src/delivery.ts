@@ -42,7 +42,7 @@ import {
   Unreadable,
 } from "./github.js";
 import { redact } from "./log.js";
-import { inert, prose } from "./markdown.js";
+import { inert, prose, readRunMarks, runMarks } from "./markdown.js";
 import { lfsObjectsHoldingSecrets, lfsPushIfPointers } from "./media.js";
 import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
@@ -184,8 +184,12 @@ export interface PublishInput {
    * (`itemBranch(issue, predecessor)`) for a layer above it.
    */
   baseBranch?: string;
-  /** The Objective's run (state.ts runOf), marked in the PR body for `factory reset`. */
-  run?: string;
+  /**
+   * The Objective's run (state.ts runOf) and accepted plan
+   * (planning/plan.ts ACCEPTED_AT), marked in the PR body for `factory
+   * reset` (markdown.ts `runMarks`).
+   */
+  run?: { run: string; plan: string };
   /** The Work Item's issue (tracking.ts), once it exists: the PR body closes it on merge. */
   itemIssue?: number;
 }
@@ -367,13 +371,28 @@ export async function publish(
       return hold(
         `PR #${pull.number} for ${branch} targets ${pull.base.ref}, not ${baseBranch}. Change its base back and answer retry, or cancel.`,
       );
-    if (await updates(context, pull.head.sha, current, bases))
+    if (await updates(context, pull.head.sha, current, bases)) {
+      // A PR reused after a replan names this run and plan from now on,
+      // so `factory reset` finds it (markdown.ts `runMarks`).
+      if (input.run) {
+        const marks = runMarks(input.run.run, input.run.plan);
+        const body = pull.body ?? "";
+        const named = readRunMarks(body);
+        if (named?.run !== input.run.run || named.plan !== input.run.plan)
+          await github.updatePull(
+            pull,
+            `${body.replace(/(?:<!-- factory-run:\S+ -->)(?:<!-- factory-plan:\S+ -->)?\s*$/, "").trimEnd()}\n\n${marks}`,
+            "deliver:pr-marks",
+            signal,
+          );
+      }
       return {
         kind: "published",
         pr: pull.number,
         head: pull.head.sha,
         merged: false,
       };
+    }
     if (await updates(context, pull.head.sha, earlier, bases))
       return lagging(
         `PR #${pull.number} does not show the pushed head ${input.commit} yet`,
@@ -684,7 +703,7 @@ async function pullRequestBody(
   parts.push(
     `Candidate commit: ${code(input.commit)}\n\nCandidate tree: ${code(input.tree)}`,
     pullMarker(input.issue, input.item.id),
-    ...(input.run ? [`<!-- factory-run:${input.run} -->`] : []),
+    ...(input.run ? [runMarks(input.run.run, input.run.plan)] : []),
   );
   return parts.join("\n\n");
 }

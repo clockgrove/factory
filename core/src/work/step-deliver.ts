@@ -138,7 +138,7 @@ export async function publishStep(
     ...(itemIssueOf(state, item.id)
       ? { itemIssue: itemIssueOf(state, item.id) }
       : {}),
-    secrets: deps.config.credentials,
+    secrets: deps.config.secrets,
     // The operator's `publish` counts only for the finding it answered:
     // the digest kept when the hold was raised, never the hold's text,
     // which quotes worker-chosen paths.

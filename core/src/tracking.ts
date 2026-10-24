@@ -187,8 +187,10 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
     items.set(item.id, {
       planned: !ended,
       ...(status ? { status } : {}),
-      // A title is plain text, never Markdown: only cut to one line.
-      title: cut(item.title, 200),
+      // A title is plain text, never Markdown: cut to one line, and it
+      // references and mentions nothing (markdown.ts inert). Every create
+      // and edit of the issue uses this title.
+      title: inert(cut(item.title, 200)),
       body: issueBody(objective, item, plan!),
       dependencies: [...item.dependencies].sort(),
       comment: liveComment(objective, item.id, [

@@ -138,12 +138,19 @@ function hostChecks(
     });
   // Sandboxed commands read the checkout's Git configuration.
   const credentials = checkoutCredentialEntries(config.checkout);
-  if (credentials.length)
+  if (!credentials)
+    checks.push({
+      name: "checkout git config",
+      status: "warn",
+      detail: `Git can't read ${config.checkout}'s configuration, so whether it holds a credential sandboxed commands could read is unknown`,
+      fix: `Check \`git -C ${config.checkout} config --local --list\` runs, then repeat`,
+    });
+  else if (credentials.length)
     checks.push({
       name: "checkout git config",
       status: "blocked",
       detail: `${config.checkout}'s Git configuration holds ${credentials.join(", ")}, which sandboxed commands can read`,
-      fix: `Remove ${credentials.length === 1 ? "it" : "them"} with \`git -C ${config.checkout} config --local --unset-all NAME\`, and keep Git credentials in the user's global configuration (for example \`gh auth setup-git\`)`,
+      fix: `Remove ${credentials.length === 1 ? "it" : "them"} (\`git -C ${config.checkout} config --unset-all NAME\`, with \`--worktree\` for a worktree entry), use remote URLs without credentials, and keep Git credentials in the user's global configuration (for example \`gh auth setup-git\`)`,
     });
   const store = config.sandbox.packageStore;
   if (store && existsSync(store) && !statSync(store).isDirectory())

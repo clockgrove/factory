@@ -24,7 +24,7 @@ import type { SandboxConfig } from "../config.js";
 import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
 import { inert } from "../markdown.js";
-import { namesPath, validPath } from "../objective.js";
+import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
 import {
   type WorkDiscovery,
@@ -52,27 +52,33 @@ function collectionMessage(item: Pick<WorkItem, "title">): string {
 
 /** CI configuration Factory knows of, by path from the root. */
 const CI_PATHS = [
+  ".appveyor.yml",
+  ".drone.yml",
+  ".gitlab-ci.yaml",
   ".gitlab-ci.yml",
   ".travis.yml",
-  ".drone.yml",
-  ".appveyor.yml",
+  ".woodpecker.yaml",
+  ".woodpecker.yml",
   "appveyor.yml",
+  "azure-pipelines.yaml",
   "azure-pipelines.yml",
   "bitbucket-pipelines.yml",
   "Jenkinsfile",
 ];
 const CI_DIRECTORIES = [
-  ".github/",
-  ".circleci/",
   ".buildkite/",
+  ".circleci/",
+  ".forgejo/workflows/",
+  ".gitea/workflows/",
+  ".github/",
   ".woodpecker/",
 ];
 
 /**
  * Whether `path` steers CI or review: anything under `.github/` (workflows,
  * CODEOWNERS, settings), a CODEOWNERS file anywhere, or another CI
- * system's configuration. A worker changes one only when the Objective
- * names that path.
+ * system's configuration. A worker changes one only when the Objective's
+ * May change section lists that path.
  */
 function protectedPath(path: string): boolean {
   return (
@@ -103,8 +109,8 @@ export interface CollectInput {
   base: string;
   plan: Plan;
   item: WorkItem;
-  /** The accepted Objective's shown text: a protected path changes only when it names it (namesPath). */
-  objective: string;
+  /** The accepted Objective's "May change" paths (objective.ts mayChange): the only protected paths a worker may change. */
+  mayChange: readonly string[];
   sandbox: SandboxConfig;
   /** The worker's last message, carried by an empty-result finding. */
   finalResponse: string;
@@ -205,12 +211,14 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   // A collection interrupted after its own commit, or a repair continuing
   // from Factory's earlier commit, is undone to the staged candidate and
   // checked again from the top.
+  // Its subject is the inert one, or the raw title an earlier Factory wrote.
   const head = await text("rev-parse", "HEAD");
   if (
     head !== base &&
     (await parent(worktree, signal)) === base &&
-    (await text("log", "-1", "--format=%ae%n%s")) ===
-      `${FACTORY_EMAIL}\n${collectionMessage(item)}`
+    [collectionMessage(item), `Factory: ${item.title}`]
+      .map((subject) => `${FACTORY_EMAIL}\n${subject}`)
+      .includes(await text("log", "-1", "--format=%ae%n%s"))
   )
     await git("reset", "--quiet", "--soft", base);
   if ((await text("rev-parse", "HEAD")) !== base)
@@ -632,11 +640,11 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,
     );
   const guarded = paths.filter(
-    (path) => protectedPath(path) && !namesPath(input.objective, path),
+    (path) => protectedPath(path) && !input.mayChange.includes(path),
   );
   if (guarded.length)
     throw new WorkFinding(
-      `Worker changed protected paths the Objective doesn't name: ${guarded.join(", ")}. CI configuration, .github/ and CODEOWNERS change only when the Objective names the exact path; undo these changes`,
+      `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. CI configuration, .github/ and CODEOWNERS change only when that section lists the exact path; undo these changes`,
     );
   const findings: SecretFinding[] = [];
   for (const path of paths) {

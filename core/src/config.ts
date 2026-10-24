@@ -131,14 +131,8 @@ export interface CoreConfig {
     secretlintConfig?: string;
   };
   /**
-   * The secret values themselves, derived once here: the allowedSecretNames
-   * values and each managed provider's credential. No pushed blob and no
-   * profile text may hold one.
-   */
-  credentials: string[];
-  /**
-   * Every value Factory's output (GitHub, logs, captures) is redacted of:
-   * the credentials and each sandbox.environment value.
+   * Every secret value Factory's output is redacted of, derived once here:
+   * the allowedSecretNames values and each managed provider's credential.
    */
   secrets: string[];
   validation: {
@@ -241,7 +235,8 @@ export interface SandboxConfig {
    * Fixed environment variables for every sandboxed command, such as the
    * variable that locates a pre-provisioned tool directory. Names Factory
    * controls or that could leak or redirect are refused. A value that is an
-   * absolute path should lie within `readOnlyPaths`.
+   * absolute path should lie within `readOnlyPaths`. Never a secret: values
+   * are not redacted (a secret goes in policy.allowedSecretNames).
    */
   environment: Record<string, string>;
   limits: SandboxLimits;
@@ -722,29 +717,17 @@ export function loadConfig(repository: string): CoreConfig {
       );
     else
       execution.reservations[name as keyof Reservations] = execution.memoryMiB;
-  const credentials = secretValues(
-    checked.policy.allowedSecretNames,
-    providers,
-  );
   const config: CoreConfig = {
     ...checked,
     execution,
     providers,
     defaultProvider,
-    credentials,
-    secrets: [
-      ...new Set([
-        ...credentials,
-        ...Object.values(checked.sandbox.environment).filter(
-          (value) => value.length >= MIN_SECRET_LENGTH,
-        ),
-      ]),
-    ],
+    secrets: secretValues(checked.policy.allowedSecretNames, providers),
   };
   profileProblems(
     config.execution.profiles,
     providers,
-    config.credentials,
+    config.secrets,
     problems,
   );
   if (config.repository !== repository)

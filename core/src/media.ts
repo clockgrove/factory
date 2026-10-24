@@ -495,14 +495,25 @@ async function attachmentSource(
       `GitHub attachment ${path} is larger than Factory's bound of ${MAX_ATTACHMENT_BYTES} bytes for an attachment${bytes ? ` (${bytes} bytes)` : ""}. Answer replan to cite a smaller file (or put it in the repository through Git LFS), or cancel.`,
       ["replan", "cancel"],
     );
-  // The token goes only to the configured repository's own attachments
-  // (and to user-attachments, which GitHub checks against the viewer).
-  const owner = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/assets\//.exec(
-    path,
-  )?.[1];
-  if (owner && owner.toLowerCase() !== request.repository.toLowerCase())
+  // The token goes only to a user attachment or one of the configured
+  // repository's own (the plan check recognized the URL's form).
+  let owned = false;
+  try {
+    const url = new URL(path);
+    const [first, second, third] = url.pathname.split("/").slice(1);
+    owned =
+      url.protocol === "https:" &&
+      url.hostname === "github.com" &&
+      (first === "user-attachments" ||
+        (third === "assets" &&
+          `${first}/${second}`.toLowerCase() ===
+            request.repository.toLowerCase()));
+  } catch {
+    owned = false;
+  }
+  if (!owned)
     return hold(
-      `GitHub attachment ${path} belongs to ${owner}, not ${request.repository}, and Factory sends its GitHub token only to ${request.repository}'s attachments. Answer replan to cite a copy attached to an issue of ${request.repository} (or put the file in the repository), or cancel.`,
+      `GitHub attachment ${path} is not a user attachment or one of ${request.repository}'s, and Factory sends its GitHub token only to those. Answer replan to cite a copy attached to an issue of ${request.repository} (or put the file in the repository), or cancel.`,
       ["replan", "cancel"],
     );
   const token = await request.githubToken();

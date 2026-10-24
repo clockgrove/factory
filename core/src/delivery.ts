@@ -174,7 +174,7 @@ export interface PublishInput {
   republish?: boolean;
   /** The operator answered RESET_BRANCH: replace the branch whoever made it. */
   reset?: boolean;
-  /** The values no pushed blob may hold (config.credentials). */
+  /** The values no pushed blob may hold (config.secrets). */
   secrets: readonly string[];
   /** The digest of a secret finding the operator let through (`publish`). */
   allowSecret?: string;
@@ -312,7 +312,7 @@ export async function publish(
           "cancel",
         ],
       );
-    // Nothing Factory pushes carries a secret value it knows (config.credentials).
+    // Nothing Factory pushes carries a secret value it knows (config.secrets).
     const leaked = [
       ...(await pathsHoldingSecrets(
         context.checkout,

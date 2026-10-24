@@ -239,10 +239,16 @@ function workerHome(
       // (systemd-resolved under /run, WSL under /mnt/wsl).
       if (network && existsSync("/etc/resolv.conf"))
         grants.push(`${path(realpathSync("/etc/resolv.conf"))} = "read"`);
-      // As planning's configuration (codex.ts), every tool but the shell,
-      // unified exec and view_image is off.
+      // As planning's configuration (codex.ts): web search, apps, plugins,
+      // hooks, memories, browser and computer use, image generation, skill
+      // search and instructions, tool suggestions and sleep are off. The
+      // shell, unified exec and view_image stay, and so does the code-mode
+      // host the shell runs through; multi-agent keeps Codex's default.
       return `default_permissions = "factory"
 web_search = "disabled"
+
+[skills]
+include_instructions = false
 
 [features]
 apps = false
@@ -252,6 +258,9 @@ memories = false
 browser_use = false
 computer_use = false
 image_generation = false
+skill_search = false
+tool_suggest = false
+sleep_tool = false
 
 [permissions.factory.filesystem]
 ${grants.join("\n")}
@@ -305,32 +314,63 @@ ${shellPolicy(source, network, sandbox.environment, [
  */
 const PROBE = `const fs=require("node:fs"),net=require("node:net"),[,out,p,sealedFile,port]=process.argv;let refused="",unread="",sealed=false,connected=false;try{fs.writeFileSync(out+"/outside","x")}catch(e){refused=e.code}if(p)try{fs.statSync(p).isDirectory()?fs.readdirSync(p):fs.closeSync(fs.openSync(p,"r"))}catch(e){unread=e.code||"error"}try{fs.readFileSync(sealedFile);sealed=true}catch{}const done=()=>fs.writeFileSync("result",JSON.stringify({refused,unread,sealed,connected}));if(!Number(port))done();else try{const s=net.connect(Number(port),"127.0.0.1");s.setTimeout(5000);s.on("connect",()=>{connected=true;s.destroy();done()});s.on("error",done);s.on("timeout",()=>{s.destroy();done()})}catch{done()}`;
 
-/** A command's exit and stderr, killed after `timeout` ms. */
+/**
+ * A probe's exit and stderr. After `timeout` ms its whole process group
+ * (the launcher's `pidFile`) is killed, and it resolves then whatever the
+ * process does.
+ */
 function probeRun(
   command: string,
   args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeout: number;
+    pidFile: string;
+  },
 ): Promise<{
   status: number | null;
   signal: string | null;
   stderr: string;
   error?: Error;
 }> {
-  return new Promise((done) => {
+  return new Promise((resolve) => {
+    let stderr = "";
+    let settled = false;
+    const done = (result: {
+      status: number | null;
+      signal: string | null;
+      error?: Error;
+    }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...result, stderr });
+    };
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "ignore", "pipe"],
-      timeout: options.timeout,
     });
-    let stderr = "";
+    const timer = setTimeout(() => {
+      const group = launchedGroup(options.pidFile);
+      try {
+        if (group) process.kill(-group, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+      child.kill("SIGKILL");
+      done({
+        status: null,
+        signal: "SIGKILL",
+        error: new Error(`timed out after ${options.timeout} ms`),
+      });
+    }, options.timeout);
     child.stderr.on("data", (chunk: Buffer) => {
       if (stderr.length < 4096) stderr += chunk.toString("utf8");
     });
-    child.on("error", (error) =>
-      done({ status: null, signal: null, stderr, error }),
-    );
-    child.on("close", (status, signal) => done({ status, signal, stderr }));
+    child.on("error", (error) => done({ status: null, signal: null, error }));
+    child.on("close", (status, signal) => done({ status, signal }));
   });
 }
 
@@ -380,7 +420,7 @@ export async function codexSandboxProblem(
         sealedFile,
         String(port),
       ],
-      { cwd: worktree, env: home.env, timeout: 30_000 },
+      { cwd: worktree, env: home.env, timeout: 30_000, pidFile: home.pidFile },
     );
     let found: {
       refused?: unknown;

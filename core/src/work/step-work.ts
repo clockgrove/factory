@@ -14,7 +14,7 @@ import {
   sentBackDirectory,
   sentBackInputs,
 } from "../media.js";
-import { objectiveText } from "../objective.js";
+import { mayChange, objectiveText } from "../objective.js";
 import { forceRemove } from "../paths.js";
 import { BaseFiles, finalCommands, fixedScripts } from "../planning/facts.js";
 import {
@@ -495,7 +495,7 @@ export async function workStep(
     base,
     plan,
     item: runnableItem(plan, item),
-    objective: objectiveText(shown.blocks),
+    mayChange: mayChange(shown.blocks).paths,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,

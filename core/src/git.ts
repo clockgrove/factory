@@ -71,31 +71,49 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** A URL with a password, or an http(s) URL with any user part (a token). */
+const URL_CREDENTIAL =
+  /^(?:https?:\/\/[^/@\s]+@|[a-z][a-z\d+.-]*:\/\/[^/@:\s]*:[^/@\s]*@)/i;
+
 /**
- * The checkout's own Git configuration entries that carry a credential:
- * `http.*extraheader` (an Authorization header, as CI checkouts write) and
- * `credential.*`. Sandboxed commands read that file (sandbox.ts
- * gitMetadata), so readiness refuses a checkout that has any. Names only,
- * never values; empty when Git can't read it.
+ * The checkout's own Git configuration entries (local and worktree) that
+ * carry a credential: `http.*extraheader` (an Authorization header, as CI
+ * checkouts write), a `credential.*helper` that runs inline shell (`!…`),
+ * `credential.*username` or `password`, a `remote.*.url` or `pushurl` with
+ * one in it, and a `url.*` rewrite whose base has one. Sandboxed commands
+ * read that configuration (sandbox.ts gitMetadata), so readiness refuses a
+ * checkout that has any. Names only, never values; undefined when Git
+ * can't read it.
  */
-export function checkoutCredentialEntries(checkout: string): string[] {
-  const found = spawnSync(
-    "git",
-    [
-      "-C",
-      checkout,
-      "config",
-      "--local",
-      "--includes",
-      "--name-only",
-      "--get-regexp",
-      "^http\\..*extraheader$|^credential\\.",
-    ],
-    { env: gitEnvironment(), encoding: "utf8", timeout: 30_000 },
-  );
-  return found.status === 0
-    ? [...new Set(found.stdout.split("\n").filter(Boolean))]
-    : [];
+export function checkoutCredentialEntries(
+  checkout: string,
+): string[] | undefined {
+  const found = new Set<string>();
+  for (const scope of ["--local", "--worktree"]) {
+    const read = spawnSync(
+      "git",
+      ["-C", checkout, "config", scope, "--includes", "--null", "--list"],
+      { env: gitEnvironment(), encoding: "utf8", timeout: 30_000 },
+    );
+    if (read.status !== 0) return undefined;
+    for (const entry of read.stdout.split("\0")) {
+      const split = entry.indexOf("\n");
+      const name = split < 0 ? entry : entry.slice(0, split);
+      const value = split < 0 ? "" : entry.slice(split + 1);
+      const key = name.toLowerCase();
+      if (
+        /^http\..*extraheader$/.test(key) ||
+        (/^credential\.(?:.*\.)?helper$/.test(key) &&
+          value.trimStart().startsWith("!")) ||
+        /^credential\.(?:.*\.)?(?:username|password)$/.test(key) ||
+        (/^remote\..*\.(?:url|pushurl)$/.test(key) &&
+          URL_CREDENTIAL.test(value)) ||
+        (key.startsWith("url.") && URL_CREDENTIAL.test(name.slice(4)))
+      )
+        found.add(name);
+    }
+  }
+  return [...found];
 }
 
 export interface GitExit {

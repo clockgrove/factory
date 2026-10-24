@@ -157,6 +157,7 @@ export function checkObjective(blocks: readonly ObjectiveBlock[]): {
     }
     sources.push(heading ? { path, heading } : { path });
   }
+  problems.push(...mayChange(blocks).problems);
   return {
     objective: {
       goal,
@@ -197,6 +198,33 @@ export function declaration(
     entries.push(block);
   }
   return { entries };
+}
+
+/**
+ * The protected paths (CI configuration, `.github/`, CODEOWNERS) the
+ * Objective lets a worker change: its one "May change" section, each entry
+ * a list item that is exactly one code element naming a repository path,
+ * as an Acceptance command is written. Any other entry is a problem. A
+ * path named anywhere else in the Objective allows nothing.
+ */
+export function mayChange(blocks: readonly ObjectiveBlock[]): {
+  paths: string[];
+  problems: string[];
+} {
+  const { entries, problem } = declaration(blocks, "may change", "May change");
+  if (problem) return { paths: [], problems: [problem] };
+  const paths: string[] = [];
+  const problems: string[] = [];
+  for (const entry of entries ?? []) {
+    if (entry.kind === "empty") continue;
+    const path = entry.kind === "item" ? entry.code?.trim() : undefined;
+    if (path && validPath(path)) paths.push(path);
+    else
+      problems.push(
+        `May change entry ${JSON.stringify(entry.text)} isn't one path; write each as a bullet that is exactly one backticked repository path, such as "- \`.github/workflows/ci.yml\`".`,
+      );
+  }
+  return { paths, problems };
 }
 
 /** A declaration's only entry, when it has exactly one. */

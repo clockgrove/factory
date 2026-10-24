@@ -44,7 +44,7 @@ import {
   packageScriptInvocation,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
-import { finalChecks } from "./planning/plan.js";
+import { dependencyOrder, fallbackRuns, finalChecks } from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
@@ -77,13 +77,19 @@ const VALIDATION_MARGIN_MS = 15 * MINUTE;
 
 /**
  * The deadline of a step that validates a Work Item, or a plan's final
- * validation: every command it runs at its full limit, plus a margin. It
- * grows with the commands, so a long command list never outlasts it.
+ * validation: every command it runs at its full limit, plus a margin (one
+ * per Work Item run, when final validation runs those). It grows with the
+ * commands, so a long command list never outlasts it.
  */
 export function validationDeadlineMs(
   of: WorkItem | Plan,
   commandTimeoutMs: number,
 ): number {
+  if (!("validation" in of) && fallbackRuns(of).length)
+    return fallbackRuns(of).reduce(
+      (sum, item) => sum + validationDeadlineMs(item, commandTimeoutMs),
+      0,
+    );
   const { preparation, commands } =
     "validation" in of ? validationSequence(of) : finalSequence(of);
   return (
@@ -114,6 +120,8 @@ export interface ValidateInput {
   blocks: readonly ObjectiveBlock[];
   /** The commit a later item started from, when not the base: its new scripts stay fixed too. */
   predecessor?: string;
+  /** Final validation of one Work Item's commands: the declared Package manager update must have landed. */
+  requirePackageManagerUpdate?: true;
   sandbox: SandboxConfig;
   /** Each command's limit (`validation.commandTimeoutSeconds`); past it the command failed. */
   commandTimeoutMs: number;
@@ -244,6 +252,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           workspacePackageAdditions: workspaceAdditions(input.blocks).additions,
           packageManagerUpdate: packageManagerUpdate(input.blocks),
           predecessor: input.predecessor,
+          requirePackageManagerUpdate: input.requirePackageManagerUpdate,
         }
       : {
           sourceDeclared: [
@@ -726,7 +735,8 @@ function finalSequence(plan: Plan): {
   const key = (command: string) => command.trim();
   const isBootstrap = (command: string) =>
     packageBootstrap(command) !== undefined;
-  const finalCommands = finalChecks(plan);
+  // A plan without final commands runs its Work Items' own (fallbackRuns).
+  const finalCommands = plan.finalCommands.length ? finalChecks(plan) : [];
   const listed = finalCommands.filter(isBootstrap);
   let commands = [
     ...listed.filter(
@@ -768,19 +778,7 @@ function finalSequence(plan: Plan): {
  * acceptance is inferred from its success.
  */
 function preparationCommands(plan: Plan): string[] {
-  const ordered: WorkItem[] = [];
-  const seen = new Set<string>();
-  const visit = (item: WorkItem) => {
-    if (seen.has(item.id)) return;
-    seen.add(item.id);
-    for (const id of item.dependencies) {
-      const dependency = plan.items.find((candidate) => candidate.id === id);
-      if (dependency) visit(dependency);
-    }
-    ordered.push(item);
-  };
-  for (const item of plan.items) visit(item);
-  return ordered.flatMap((item) => {
+  return dependencyOrder(plan).flatMap((item) => {
     const selected = new Set(
       plan.coverage
         .filter((entry) => entry.itemId === item.id)
@@ -941,6 +939,71 @@ function packageScriptCommands(commands: readonly string[]): string[] {
       !packageBootstrap(check) &&
       !packageManagerVersionProbe(check),
   );
+}
+
+/**
+ * The package-script commands among `commands` whose script, or one of its
+ * lifecycle hooks, a merge of this Objective changed: on `head` it differs
+ * from the script the item validated (the accepted base's where the base
+ * has it, else `predecessor`'s), so the pin check would refuse it there.
+ * Each names the items whose merge changed it. A change no merge made is
+ * left to the pin check.
+ */
+export async function laterScriptChanges(input: {
+  checkout: string;
+  base: string;
+  predecessor?: string;
+  head: string;
+  commands: readonly string[];
+  merges: readonly { items: string[]; mergeSha: string }[];
+  signal: AbortSignal;
+}): Promise<{ command: string; changedBy: string[] }[]> {
+  const git = new Revisions(input.checkout, input.head, input.signal);
+  const scriptsAt = async (
+    revision: string,
+  ): Promise<Record<string, unknown>> => {
+    try {
+      const scripts = JSON.parse(
+        (await git.text(revision, "package.json")) ?? "{}",
+      ).scripts;
+      return scripts && typeof scripts === "object" ? scripts : {};
+    } catch {
+      input.signal.throwIfAborted();
+      // Unreadable: the pin check refuses it.
+      return {};
+    }
+  };
+  const changes: { command: string; changedBy: string[] }[] = [];
+  for (const command of packageScriptCommands(input.commands)) {
+    const name = packageScriptInvocation(command)?.name;
+    if (!name) continue;
+    const hooks = [`pre${name}`, `post${name}`];
+    const base = await scriptsAt(input.base);
+    const reference =
+      typeof base[name] === "string" || !input.predecessor
+        ? base
+        : await scriptsAt(input.predecessor);
+    const head = await scriptsAt(input.head);
+    if (
+      !(
+        (typeof reference[name] === "string" &&
+          head[name] !== reference[name]) ||
+        hooks.some((hook) => head[hook] !== reference[hook])
+      )
+    )
+      continue;
+    const changedBy: string[] = [];
+    for (const merge of input.merges) {
+      const [before, after] = await Promise.all([
+        scriptsAt(`${merge.mergeSha}^1`),
+        scriptsAt(merge.mergeSha),
+      ]);
+      if ([name, ...hooks].some((key) => before[key] !== after[key]))
+        changedBy.push(...merge.items);
+    }
+    if (changedBy.length) changes.push({ command, changedBy });
+  }
+  return changes;
 }
 
 /** Why `commands` may not run on `commit`, or undefined when every pin holds. */

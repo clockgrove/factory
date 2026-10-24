@@ -74,6 +74,8 @@ export function commandRefusal(
       ...(entry.environment.prerequisites ?? []),
     ]),
   );
+  if (preparation.has(command))
+    return "it is a readiness probe or its preparation";
   return checks.some(
     (each) =>
       each !== command &&

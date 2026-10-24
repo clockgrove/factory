@@ -17,6 +17,7 @@ import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
 import { RunTally, statusComment } from "../dist/progress.js";
+import { CodexStderr, logBoundary } from "../dist/providers/codex-boundary.js";
 import { validateTree } from "../dist/validate.js";
 import { ActivityLog } from "../dist/work/worker.js";
 import {
@@ -367,5 +368,79 @@ test("a running planner or reviewer call shows in watch and the live status comm
   assert.doesNotMatch(
     shown(tally.read(64, "2026-01-01T00:00:00.000Z")),
     /Model calls running/,
+  );
+});
+
+test("a Codex call's boundary telemetry: requests, responses, retries and a lost response.completed, from the pinned runtime's trace records", () => {
+  const golden = readFileSync(
+    new URL("./codex-0.160.0-stderr.golden", import.meta.url),
+    "utf8",
+  );
+  const file = join(mkdtempSync(join(tmpdir(), "factory-codex-")), "stderr");
+  // A call reads what came after it began: an earlier turn's lines are not its own.
+  const read = (text, completed) => {
+    writeFileSync(file, golden);
+    const stderr = new CodexStderr(file);
+    writeFileSync(file, `${golden}${text}`);
+    return stderr.read(completed);
+  };
+  assert.equal(read("", true).boundary.coverage, "unavailable");
+  const whole = read(`WARNING: an ordinary line\n${golden}`, true);
+  assert.deepEqual(whole.boundary, {
+    coverage: "observed",
+    requests: 2,
+    failedRequests: 0,
+    connects: 1,
+    responsesCompleted: 2,
+    // The start-up warm-up's empty response is not a zero-output turn.
+    zeroOutputResponses: 0,
+    streamFailures: 0,
+    retries: { http: 0, stream: 0 },
+    retryDelayMs: 0,
+    firstOutputMs: 5692,
+    completionLost: false,
+  });
+  assert.equal(whole.ordinary, "WARNING: an ordinary line\n");
+  // The stall: the final answer's request, a stream retry, and no response.completed.
+  const lines = golden.trim().split("\n");
+  const stalled = read(
+    `${[
+      ...lines.slice(0, -1),
+      '2026-10-24T05:50:38.885453Z  INFO codex_otel.trace_safe: event.name="codex.retry" retry.layer=stream retry.operation=sampling retry.delay_ms=200 retry.attempt=1 event.timestamp=2026-10-24T05:50:38.885Z',
+    ].join("\n")}\n`,
+    false,
+  );
+  assert.equal(stalled.boundary.completionLost, true);
+  assert.deepEqual(stalled.boundary.retries, { http: 0, stream: 1 });
+  assert.deepEqual(stalled.retries, [
+    {
+      layer: "stream",
+      operation: "sampling",
+      delayMs: 200,
+      attempt: 1,
+      nativeAt: "2026-10-24T05:50:38.885Z",
+    },
+  ]);
+  // Logged with its call, and summed by analysis.
+  const inst = installation();
+  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-4");
+  const record = {
+    event: "model-usage",
+    callId: "c2",
+    role: "reviewer",
+    provider: "codex",
+    phase: "result-review",
+    outcome: "error",
+  };
+  const write = (event) => log.write(65, { step: "item:a:review", ...event });
+  writeFileSync(file, "");
+  const stderr = new CodexStderr(file);
+  writeFileSync(file, `${lines.slice(0, -1).join("\n")}\n`);
+  logBoundary(record, write, stderr, false);
+  write(record);
+  const analysis = cli(inst, "diagnostics", "65", "--analyze");
+  assert.match(
+    analysis.out,
+    /Codex boundary: observed in 1\/1 calls · 2 requests \(0 failed\) · 1 responses completed \(0 with no output\) · retries 0 HTTP, 0 stream \(0 s delay\) · 0 stream failures · 1 lost completions/,
   );
 });

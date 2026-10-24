@@ -277,6 +277,20 @@ export interface CallGroup {
   sessions: Record<string, number>;
   maxSessionTurn: number;
   imageOutputs: { reportedCalls: number; total: number };
+  /** Codex calls' boundary telemetry (`codexBoundary`), summed over the calls that report it. */
+  codexBoundary: {
+    reportedCalls: number;
+    observedCalls: number;
+    requests: number;
+    failedRequests: number;
+    responsesCompleted: number;
+    zeroOutputResponses: number;
+    streamFailures: number;
+    httpRetries: number;
+    streamRetries: number;
+    retryDelayMs: number;
+    completionLost: number;
+  };
   /** Calls with the provider's own usage breakdown (`providerUsage`). */
   providerUsageCalls: number;
   /** Calls by the currency of their cost; `unknown` without a cost. */
@@ -486,6 +500,19 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
     sessions: {},
     maxSessionTurn: 0,
     imageOutputs: { reportedCalls: 0, total: 0 },
+    codexBoundary: {
+      reportedCalls: 0,
+      observedCalls: 0,
+      requests: 0,
+      failedRequests: 0,
+      responsesCompleted: 0,
+      zeroOutputResponses: 0,
+      streamFailures: 0,
+      httpRetries: 0,
+      streamRetries: 0,
+      retryDelayMs: 0,
+      completionLost: 0,
+    },
     providerUsageCalls: 0,
     currencies: {},
     efficiency: {
@@ -607,6 +634,22 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
   if (event.providerUsage && typeof event.providerUsage === "object")
     group.providerUsageCalls += 1;
   bump(group.currencies, str(event.currency) ?? "unknown");
+  const boundary = event.codexBoundary as Record<string, unknown> | undefined;
+  if (boundary && typeof boundary === "object") {
+    const b = group.codexBoundary;
+    const retries = (boundary.retries ?? {}) as Record<string, unknown>;
+    b.reportedCalls += 1;
+    if (boundary.coverage === "observed") b.observedCalls += 1;
+    b.requests += num(boundary.requests) ?? 0;
+    b.failedRequests += num(boundary.failedRequests) ?? 0;
+    b.responsesCompleted += num(boundary.responsesCompleted) ?? 0;
+    b.zeroOutputResponses += num(boundary.zeroOutputResponses) ?? 0;
+    b.streamFailures += num(boundary.streamFailures) ?? 0;
+    b.httpRetries += num(retries.http) ?? 0;
+    b.streamRetries += num(retries.stream) ?? 0;
+    b.retryDelayMs += num(boundary.retryDelayMs) ?? 0;
+    if (boundary.completionLost === true) b.completionLost += 1;
+  }
 }
 
 function settle(group: CallGroup, rates: Rates): CallGroup {
@@ -1205,6 +1248,11 @@ function groupText(group: CallGroup, indent: string): string[] {
       : []),
     `${indent}sessions: ${tally(group.sessions)}${group.maxSessionTurn > 1 ? ` · up to turn ${group.maxSessionTurn}` : ""}${group.firstToken.meanMs === null ? "" : ` · first token after ${duration(group.firstToken.meanMs)} on average (${group.firstToken.reportedCalls} calls)`}${group.imageOutputs.total ? ` · ${group.imageOutputs.total} images out` : ""} · provider usage in ${group.providerUsageCalls}/${group.usage.calls} calls · cost currency: ${tally(group.currencies)}`,
     `${indent}SDK operations: ${toolText(group.sdkOperations)}`,
+    ...(group.codexBoundary.reportedCalls
+      ? [
+          `${indent}Codex boundary: observed in ${group.codexBoundary.observedCalls}/${group.codexBoundary.reportedCalls} calls · ${count(group.codexBoundary.requests)} requests (${group.codexBoundary.failedRequests} failed) · ${count(group.codexBoundary.responsesCompleted)} responses completed (${group.codexBoundary.zeroOutputResponses} with no output) · retries ${group.codexBoundary.httpRetries} HTTP, ${group.codexBoundary.streamRetries} stream (${duration(group.codexBoundary.retryDelayMs)} delay) · ${group.codexBoundary.streamFailures} stream failures · ${group.codexBoundary.completionLost} lost completions`,
+        ]
+      : []),
     `${indent}efficiency: ${
       [
         e.msPerCall === null ? undefined : `${duration(e.msPerCall)} per call`,

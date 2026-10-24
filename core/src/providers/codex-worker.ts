@@ -45,10 +45,12 @@ import {
   codexHomeOf,
   codexLauncher,
   codexRuntimeDirectory,
+  codexStderr,
   privateCodexHome,
   saveModelsCache,
   trimCodexHome,
 } from "./codex.js";
+import { CodexStderr, logBoundary, withStderr } from "./codex-boundary.js";
 import {
   addCodexTelemetry,
   type CodexBaseline,
@@ -128,6 +130,8 @@ interface WorkerHome {
   launcher: string;
   /** Where the launcher records that group. */
   pidFile: string;
+  /** Codex's standard error (codex.ts codexStderr). */
+  stderr: string;
   env: Record<string, string>;
 }
 
@@ -275,8 +279,9 @@ ${shellPolicy(source, network, sandbox.environment, [
       // Package caches stay in the private HOME, never in the worktree.
       Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
       // Commands it starts end with it, an abort's included.
-      const { launcher, pidFile } = codexLauncher(root, env);
-      return { root, launcher, pidFile, env };
+      const stderr = codexStderr(root, env);
+      const { launcher, pidFile } = codexLauncher(root, env, stderr);
+      return { root, launcher, pidFile, env, stderr };
     },
   });
 }
@@ -383,6 +388,8 @@ export async function codexSandboxProblem(
     }
     // workerHome checked it exists; read where it is granted.
     const readable = sandbox.readOnlyPaths[0] && real(sandbox.readOnlyPaths[0]);
+    // Codex's standard error goes to its file (codex.ts codexStderr).
+    const probeStderr = new CodexStderr(home.stderr);
     const run = await probeRun(
       home.launcher,
       [
@@ -407,7 +414,7 @@ export async function codexSandboxProblem(
     try {
       found = JSON.parse(readFileSync(join(worktree, "result"), "utf8"));
     } catch {
-      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(run.stderr.trim())}`;
+      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(`${run.stderr}${probeStderr.read(true).ordinary}`.trim())}`;
     }
     if (
       !["EACCES", "EPERM", "EROFS", "ENOENT"].includes(String(found.refused)) ||
@@ -612,6 +619,9 @@ export class CodexWorker implements Worker {
     };
     const reading = setInterval(readLive, ACTIVITY_INTERVAL_MS);
     reading.unref();
+    // Codex's standard error since this turn began: its boundary telemetry.
+    const stderr = new CodexStderr(home.stderr);
+    let turnCompleted = false;
     // The SDK hides the child: the group its launcher records is killed on
     // an abort, and a service exit kills it even before its first event.
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);
@@ -676,6 +686,7 @@ export class CodexWorker implements Worker {
         }
         if (event.type === "turn.completed") {
           completed = true;
+          turnCompleted = true;
           record.tokens = baseline
             ? turnTokens(codexTokens(event.usage), baseline.tokens)
             : codexTokens(event.usage);
@@ -719,7 +730,14 @@ export class CodexWorker implements Worker {
       // Cancelled or past the step deadline: the engine decides.
       if (input.signal.aborted) throw input.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.
-      return failed(codexFailure(redact(errorMessage(error), secrets)));
+      return failed(
+        codexFailure(
+          redact(
+            errorMessage(withStderr(error, stderr.read(false).ordinary)),
+            secrets,
+          ),
+        ),
+      );
     } finally {
       clearInterval(reading);
       readLive();
@@ -739,6 +757,7 @@ export class CodexWorker implements Worker {
       group.end();
       saveModelsCache(join(home.root, "codex-home"));
       addCodexTelemetry(record, join(home.root, "codex-home"), baseline?.size);
+      logBoundary(record, input.log, stderr, turnCompleted);
       // A retained conversation's Codex state stays for the item's next
       // repair; its HOME, caches and scratch go now, as for any turn.
       // A later turn may have taken the directory: then it isn't this one's.

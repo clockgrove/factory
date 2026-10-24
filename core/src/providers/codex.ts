@@ -25,6 +25,12 @@ import { within } from "../paths.js";
 import { LaunchedGroup, namespacedLauncher } from "../sandbox.js";
 import { errorMessage } from "../text.js";
 import {
+  BOUNDARY_RUST_LOG,
+  CodexStderr,
+  logBoundary,
+  withStderr,
+} from "./codex-boundary.js";
+import {
   addCodexTelemetry,
   type CodexBaseline,
   codexBaseline,
@@ -188,6 +194,22 @@ export function codexLauncher(
   const pidFile = join(root, "codex.pid");
   namespacedLauncher(launcher, join(target, "bin", "codex"), pidFile, stderr);
   return { launcher, pidFile };
+}
+
+/**
+ * Where a Codex home's launcher appends codex's standard error, with
+ * RUST_LOG set to add its trace-safe records (codex-boundary.ts): what the
+ * call's boundary telemetry and its error message read. Under
+ * FACTORY_PROVIDER_TRACE, RUST_LOG comes from FACTORY_CODEX_RUST_LOG.
+ */
+export function codexStderr(root: string, env: Record<string, string>): string {
+  const traced = process.env.FACTORY_PROVIDER_TRACE
+    ? process.env.FACTORY_CODEX_RUST_LOG
+    : undefined;
+  env.RUST_LOG = traced
+    ? `${traced},codex_otel.trace_safe=trace`
+    : BOUNDARY_RUST_LOG;
+  return join(root, "codex-stderr.log");
 }
 
 /** The launcher's own failure (setsid or unshare), as the SDK reports codex's exit. */
@@ -385,6 +407,8 @@ function codexHome(
   env: Record<string, string>;
   launcher: string;
   pidFile: string;
+  /** Codex's standard error (codexStderr). */
+  stderr: string;
 } {
   return privateCodexHome({
     ...(root && { root }),
@@ -396,17 +420,9 @@ function codexHome(
     finish: ({ root, env }) => {
       const workdir = join(root, "work");
       mkdirSync(workdir, { mode: 0o700 });
-      // FACTORY_PROVIDER_TRACE keeps codex's stderr, with RUST_LOG from
-      // FACTORY_CODEX_RUST_LOG.
-      const trace = Boolean(process.env.FACTORY_PROVIDER_TRACE);
-      if (trace && process.env.FACTORY_CODEX_RUST_LOG)
-        env.RUST_LOG = process.env.FACTORY_CODEX_RUST_LOG;
-      const launched = codexLauncher(
-        root,
-        env,
-        trace ? join(root, "codex-stderr.log") : undefined,
-      );
-      return { root, workdir, env, ...launched };
+      const stderr = codexStderr(root, env);
+      const launched = codexLauncher(root, env, stderr);
+      return { root, workdir, env, stderr, ...launched };
     },
   });
 }
@@ -625,6 +641,9 @@ export class CodexPlanner implements Planner {
     let events: AsyncGenerator<ThreadEvent> | undefined;
     let baseline: CodexBaseline | undefined;
     let reading: NodeJS.Timeout | undefined;
+    // Codex's standard error since this call began: its boundary telemetry.
+    const stderr = new CodexStderr(home.stderr);
+    let turnCompleted = false;
     // An abort ends codex and every command it started (namespacedLauncher).
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
@@ -748,6 +767,7 @@ export class CodexPlanner implements Planner {
         }
         if (event.type === "turn.completed") {
           completed = true;
+          turnCompleted = true;
           const counts = baseline
             ? turnTokens(codexTokens(event.usage), baseline.tokens)
             : codexTokens(event.usage);
@@ -807,7 +827,12 @@ export class CodexPlanner implements Planner {
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.
-      throw overflowed(codexFailure(errorMessage(error)), turn);
+      throw overflowed(
+        codexFailure(
+          errorMessage(withStderr(error, stderr.read(false).ordinary)),
+        ),
+        turn,
+      );
     } finally {
       clearInterval(reading);
       watchdog.stop();
@@ -825,6 +850,7 @@ export class CodexPlanner implements Planner {
       group.end();
       saveModelsCache(home.env.CODEX_HOME!);
       addCodexTelemetry(record, home.env.CODEX_HOME!, baseline?.size);
+      logBoundary(record, call.log, stderr, turnCompleted);
       // A retained conversation's home stays for its next turn, unless a
       // later turn has taken it (a hedge's loser, an aborted attempt).
       if (call.conversation) {

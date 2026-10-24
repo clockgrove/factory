@@ -15,10 +15,12 @@ import {
   type CapacityUse,
   DEFAULT_LIMITS,
   type EngineLimits,
+  FRESH,
   hostLimits,
   itemOf,
   MAX_CLEANUP_FAILURES,
   ObjectiveRunner,
+  REPLAN,
   type ServiceRun,
   type Workflow,
 } from "./engine.js";
@@ -33,7 +35,7 @@ import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
+import { currentPlan } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -45,7 +47,7 @@ import {
   removeRequest,
   type StoredRequest,
 } from "./requests.js";
-import { RESET, type ResetRecord, resetRecord } from "./reset.js";
+import { ownedPlan, RESET, type ResetRecord, resetRecord } from "./reset.js";
 import {
   deadlineAt,
   type Frozen,
@@ -913,10 +915,36 @@ export async function serve(options: ServeOptions): Promise<number> {
         if (runner.busy) continue;
       }
       let run = false;
-      const allow = allowed(runner, queue);
+      let allow = allowed(runner, queue);
+      // Waiting its turn on another Objective's paths, however busy it is,
+      // it starts no step but an amendment's (planning never waits) and one
+      // answered `replan` or `fresh`, so the answer applies at once (rule
+      // 3): steps running finish, and one the service's death interrupted
+      // resumes. Once the wait ends, the steps it stopped don't count it.
+      const owner = TERMINAL.includes(state.status)
+        ? undefined
+        : pathOwner(runner, ordered);
+      if (owner !== undefined) {
+        waitingOnPaths.set(state.issue, owner);
+        const stops = (key: string) => pathWaitStops(runner.state, key);
+        runner.waitOn(stops);
+        const operator = allow;
+        allow = (key) => operator(key) && !stops(key);
+      } else {
+        try {
+          runner.waited();
+        } catch (error) {
+          log.write(state.issue, {
+            event: "tick-failed",
+            error: String(error),
+          });
+        }
+      }
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
-      // Paused (the queue or the Objective), or drained with nothing left
-      // to start: no slot; a step the service's death interrupted resumes.
+      // Paused (the queue or the Objective), drained with nothing left to
+      // start, or waiting on paths with only building left: no slot, so a
+      // hold that owns common paths can't stall the queue (rule 1); a step
+      // the service's death interrupted resumes.
       else if (
         !runner.busy &&
         !workflow.steps(state).some((step) => allow(step.key))
@@ -938,16 +966,10 @@ export async function serve(options: ServeOptions): Promise<number> {
       // A wait on a human gate (an approval, a required review) has no
       // deadline, so it takes no slot: it polls, and its paths stay owned.
       else if (gated(runner, workflow)) run = true;
-      // Waiting on another Objective's paths takes no slot either, so a hold
-      // that owns common paths can't stall the queue (rule 1).
-      else {
-        const owner = pathOwner(runner, ordered);
-        if (owner !== undefined) waitingOnPaths.set(state.issue, owner);
-        else if (slots > 0) {
-          slots -= 1;
-          run = true;
-        } else waitingForSlot.add(state.issue);
-      }
+      else if (slots > 0) {
+        slots -= 1;
+        run = true;
+      } else waitingForSlot.add(state.issue);
       if (!run) continue;
       try {
         runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
@@ -1190,25 +1212,36 @@ export async function serve(options: ServeOptions): Promise<number> {
  * overlapping path; planning never waits. Earlier means its plan was
  * accepted earlier: an Objective still planning owns nothing yet, and once
  * its plan lands it waits on every plan accepted before it, so two
- * Objectives never build overlapping paths at once.
+ * Objectives never build overlapping paths at once. Its paths are its
+ * current plan's, so an accepted amendment's count from the next tick; the
+ * amendment keeps the plan's acceptance time, so the order never reverses.
+ * It owns them until it is done or cancelled, through final validation,
+ * final review and the report, which judge those files, and through a
+ * reset (reset.ts `ownedPlan`). An amendment that adds paths a later
+ * Objective's started items touch makes that one wait with those items
+ * unmerged on their branches (docs/reference/queue.md).
  */
 function pathOwner(
   runner: ObjectiveRunner,
   all: readonly ObjectiveRunner[],
 ): number | undefined {
-  const mine = ownedPaths(runner.state);
-  if (!mine.length || built(runner.state)) return undefined;
-  const at = acceptedAt(runner.state);
+  // Only building waits: an Objective with no accepted plan of its own
+  // (planning, resetting, or reviewing a rebuilt plan) never does.
+  const mine = currentPlan(runner.state) && ownedPlan(runner.state);
+  if (!mine || built(runner.state)) return undefined;
+  const paths = mine.plan.items.flatMap((item) => item.ownedPaths);
   return all.find((other) => {
-    if (other === runner) return false;
-    if (TERMINAL.includes(other.state.status) || built(other.state))
+    const theirs = other !== runner && ownedPlan(other.state);
+    if (!theirs) return false;
+    if (
+      theirs.accepted > mine.accepted ||
+      (theirs.accepted === mine.accepted &&
+        other.state.issue > runner.state.issue)
+    )
       return false;
-    const theirs = ownedPaths(other.state);
-    if (!theirs.length) return false;
-    const when = acceptedAt(other.state);
-    if (when > at || (when === at && other.state.issue > runner.state.issue))
-      return false;
-    return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
+    return theirs.plan.items.some((item) =>
+      item.ownedPaths.some((b) => paths.some((a) => pathsOverlap(a, b))),
+    );
   })?.state.issue;
 }
 
@@ -1255,13 +1288,13 @@ function control(
   return null;
 }
 
-function ownedPaths(state: ObjectiveState): string[] {
-  return (currentPlan(state)?.items ?? []).flatMap((item) => item.ownedPaths);
-}
-
-/** When the Objective's plan was accepted (planning/steps.ts keeps it). */
-function acceptedAt(state: ObjectiveState): string {
-  return (state.kept?.[ACCEPTED_AT] as string | undefined) ?? "";
+/**
+ * Whether waiting on paths stops step `key`: every step but an
+ * amendment's, and one whose answer is `replan` or `fresh`.
+ */
+function pathWaitStops(state: ObjectiveState, key: string): boolean {
+  const answer = state.answers[key]?.answer;
+  return !key.startsWith("amend:") && answer !== REPLAN && answer !== FRESH;
 }
 
 /**

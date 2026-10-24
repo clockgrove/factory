@@ -11,7 +11,7 @@
  */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 
-/** Codex's own errors, as before, and its trace-safe records. */
+/** Codex's error-level logs and its trace-safe records. */
 export const BOUNDARY_RUST_LOG = "error,codex_otel.trace_safe=trace";
 
 /** The most of a call's standard error that is read: its end. */
@@ -191,7 +191,7 @@ export class CodexStderr {
   }
 }
 
-/** A failed codex run's error with its standard error, as the SDK reported it before it went to the file. */
+/** A failed codex run's error with its other standard error lines appended. */
 export function withStderr(error: unknown, ordinary: string): unknown {
   if (!(error instanceof Error) || !ordinary) return error;
   if (!/^Codex Exec exited with [^:]*: $/.test(error.message)) return error;

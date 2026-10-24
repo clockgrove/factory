@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /** The ATX headings and fenced-code boundaries used by source selectors. */
 export function markdownLines(content: string): {
   text: string;
@@ -122,4 +124,31 @@ export function readRunMarks(
   const found =
     /<!-- factory-run:(\S+) --><!-- factory-plan:(\S+) -->\s*$/.exec(text);
   return found ? { run: found[1]!, plan: found[2]! } : undefined;
+}
+
+/** SHA-256 of `text` in hex: a record Factory writes carries its own, so a casual edit of it shows. */
+export function digest(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * The plan comment's line after its marker: its run and accepted plan
+ * (`runMarks`), and the digest of its plan data's JSON (`json`, joined
+ * from its continuations when it has them).
+ */
+export function planMarks(run: string, plan: string, json: string): string {
+  return `${runMarks(run, plan)}<!-- factory-data:${digest(json)} -->`;
+}
+
+/** What `planMarks` wrote on `line`, if it is exactly that line. */
+export function readPlanMarks(
+  line: string,
+): { run: string; plan: string; digest: string } | undefined {
+  const found =
+    /^<!-- factory-run:(\S+) --><!-- factory-plan:(\S+) --><!-- factory-data:([0-9a-f]{64}) -->$/.exec(
+      line,
+    );
+  return found
+    ? { run: found[1]!, plan: found[2]!, digest: found[3]! }
+    : undefined;
 }

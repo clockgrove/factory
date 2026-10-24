@@ -23,6 +23,7 @@ const config = {
       cancelled: "Cancelled",
     },
   },
+  finalValidation: { requiredCommands: [] },
 };
 const self = "factory-app";
 // No state file: the reset runs on a machine that never saw #394.
@@ -138,7 +139,7 @@ test("a delivered Objective comes back done from GitHub alone, with its plan and
   );
 });
 
-test("a mid-build Objective keeps its plan for review, its merged item, open PR, decisions and retirements, whatever the card's time", () => {
+test("a mid-build Objective keeps its plan for review, its merged item, open PR and the decisions the plan can take, whatever the card's time", () => {
   const mine = (holdId, at, plan = accepted) => ({
     reason: "Checked by hand: <ok> --> fine",
     by: "octo",
@@ -157,6 +158,7 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR,
       "2026-10-24T02:45:10.000Z",
     ),
   };
+  // Final validation's only command can't be retired: dropped, and named.
   const retired = {
     command: "npm test",
     ...mine("final@2026-10-24T02:45:20.000Z", "2026-10-24T02:45:30.000Z"),
@@ -167,9 +169,15 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR,
     holdId: "item:badge-helper:review@2026-10-24T02:20:00.000Z",
     plan: "2026-10-24T02:10:00.000Z",
   };
-  const shown = status([earlier, decision], [retired]);
+  // A criterion the plan doesn't have decides nothing either.
+  const foreign = {
+    ...decision,
+    criterion: "Anything goes.",
+    holdId: "item:badge-helper:review@2026-10-24T02:44:00.000Z",
+  };
+  const shown = status([earlier, decision, foreign], [retired]);
   assert.deepEqual(statusRecord(shown.body), {
-    decisions: [earlier, decision],
+    decisions: [earlier, decision, foreign],
     retired: [retired],
   });
   const open = {
@@ -211,7 +219,9 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR,
   assert.deepEqual(Object.keys(kept.merged), ["badge-image"]);
   assert.equal(kept.merged["badge-image"].pr, 401);
   assert.deepEqual(kept.decisions, [decision]);
-  assert.deepEqual(kept.retired, [retired]);
+  assert.deepEqual(kept.retired, []);
+  assert.match(found.message, /retirement of `npm test`/);
+  assert.match(found.message, /Anything goes/);
   // Its planning decisions stand for the checks and the review.
   assert.equal(
     state.done["decide:0:1"].decision.text,
@@ -256,4 +266,47 @@ test("a later run GitHub names plans afresh; nothing of Factory's on GitHub and 
     ).code,
     "no_factory_state",
   );
+});
+
+test("an edited record is taken as missing: an edited plan plans afresh, an edited status record's decisions are asked again", () => {
+  const decision = {
+    criterion:
+      'src/badgeQvjrv.js exports badgePathQvjrv(), which returns exactly "assets/badgeQvjrv.png".',
+    outcome: "accept",
+    reason: "fine",
+    by: "octo",
+    at: "2026-10-24T02:45:10.000Z",
+    tree: "3a4c54cad91d9e5015c601ad1ca21e293c7f7da3",
+    itemId: "badge-helper",
+    holdId: "item:badge-helper:review@2026-10-24T02:45:00.000Z",
+    plan: accepted,
+  };
+  const shown = status([decision], []);
+  // A writer turns the accept into a refusal in the record's JSON.
+  const forged = {
+    ...shown,
+    body: shown.body.replace('"outcome":"accept"', '"outcome":"refuse"'),
+  };
+  assert.equal(statusRecord(forged.body), "edited");
+  const read = (comments) =>
+    rebuildFrom(
+      record(),
+      { open: true, card: card("Building"), self, comments, pulls },
+      config,
+    );
+  const edited = read([forged, plan]);
+  assert.deepEqual(edited.state.kept["reset:plan"].decisions, []);
+  assert.match(edited.message, /record doesn't match its digest/);
+  // A writer edits an item's title in the plan data.
+  const retitled = {
+    ...plan,
+    body: plan.body.replace(
+      '"title":"Add selectable badge image"',
+      '"title":"Anything"',
+    ),
+  };
+  const replanned = read([shown, retitled]);
+  assert.equal(replanned.state.kept["reset:plan"], undefined);
+  assert.equal(replanned.state.status, "checking", "it plans afresh");
+  assert.match(replanned.message, /plan data doesn't match the digest/);
 });

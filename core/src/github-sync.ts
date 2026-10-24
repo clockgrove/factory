@@ -35,7 +35,7 @@ import {
   unqueueIssue,
 } from "./queue.js";
 import { type RequestResult, refused, writeRequest } from "./requests.js";
-import { statusRecordOf } from "./reset.js";
+import { resetting, statusRecordOf } from "./reset.js";
 import type {
   Hold,
   ObjectiveState,
@@ -983,7 +983,8 @@ export class GitHubSync {
       return;
     }
     const given = (state.modules.github as GitHubModule).statusGivenUp;
-    if (!this.config.progress.enabled || given) return;
+    // A resetting record shows nothing: its rebuild reads the run's comment.
+    if (!this.config.progress.enabled || given || resetting(state)) return;
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;

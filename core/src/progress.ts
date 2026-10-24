@@ -3,7 +3,7 @@ import { statSync } from "node:fs";
 import { isObject } from "./checked.js";
 import { displayTime, redactDeep } from "./display.js";
 import { type LogEvent, logFiles, readNew } from "./log.js";
-import { code, prose } from "./markdown.js";
+import { code, digest, prose } from "./markdown.js";
 import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
 import type { Retirement } from "./planning/types.js";
 import type { CriterionDecision } from "./review/result.js";
@@ -52,13 +52,15 @@ export interface ProgressInput {
 
 /**
  * The operator's criterion decisions (`accept <n>`, `refuse <n>`) and
- * final validation command retirements (`retire-command <n>`) under the plan accepted
- * now (planning/plan.ts `decisionsOf`, `currentPlan`): the status comment
- * carries them as data, so `factory reset` rebuilds them (reset.ts).
+ * final validation command retirements (`retire-command <n>`) under the
+ * plan accepted now (planning/plan.ts `decisionsOf`, `currentPlan`): the
+ * status comment carries them as data, so `factory reset` rebuilds them
+ * (reset.ts). `dropped`: entries left out to keep it bounded.
  */
 export interface StatusRecord {
   decisions: CriterionDecision[];
   retired: Retirement[];
+  dropped?: number;
 }
 
 /** What the comment includes: `questions` is `progress.includeQuestions`. */
@@ -172,58 +174,82 @@ export function statusComment(
 
 const RECORD_OPEN = "\n\n<!-- factory-record:";
 const RECORD_CLOSE = " -->";
-/** The record's most JSON: past it, the oldest entries are left out. */
+/** The record's most JSON: past it, entries are left out. */
 const RECORD_LIMIT = 16_000;
+/** The most of each reason the record keeps. */
+const REASON_LIMIT = 1_000;
 
 /**
  * The record as the comment's last line: JSON in a hidden comment, with
- * `<` and `>` escaped so no text in it can close the comment early. The
- * newest entries are kept when it is too long.
+ * `<` and `>` escaped so no text in it can close the comment early, then
+ * the JSON's digest (markdown.ts `digest`). Each reason is cut to
+ * REASON_LIMIT. Past RECORD_LIMIT, entries are left out oldest first:
+ * accepts before refusals, and both before retirements, so what a reset
+ * loses is asked again rather than taken as passed; `dropped` counts them.
  */
 function recordLine(record: StatusRecord): string {
-  const decisions = [...record.decisions];
-  const retired = [...record.retired];
+  const cut = <T extends { reason: string; at: string }>(entries: T[]) =>
+    entries
+      .map((entry) =>
+        entry.reason.length > REASON_LIMIT
+          ? { ...entry, reason: `${entry.reason.slice(0, REASON_LIMIT - 1)}…` }
+          : entry,
+      )
+      .sort((a, b) => a.at.localeCompare(b.at));
+  const decisions = cut(record.decisions);
+  const retired = cut(record.retired);
+  let dropped = record.dropped ?? 0;
   for (;;) {
-    const json = JSON.stringify({ decisions, retired })
+    const json = JSON.stringify({
+      decisions,
+      retired,
+      ...(dropped ? { dropped } : {}),
+    })
       .replace(/</g, "\\u003c")
       .replace(/>/g, "\\u003e");
     if (json.length <= RECORD_LIMIT || (!decisions.length && !retired.length))
-      return `${RECORD_OPEN}${json}${RECORD_CLOSE}`;
-    const oldest =
-      !retired.length ||
-      (decisions.length && decisions[0]!.at <= retired[0]!.at)
-        ? decisions
-        : retired;
-    oldest.shift();
+      return `${RECORD_OPEN}${json} ${digest(json)}${RECORD_CLOSE}`;
+    const accept = decisions.findIndex((entry) => entry.outcome === "accept");
+    if (accept >= 0) decisions.splice(accept, 1);
+    else if (decisions.length) decisions.shift();
+    else retired.shift();
+    dropped += 1;
   }
 }
 
 /**
  * The record a status comment's body ends with, checked: undefined when
- * it has none or it isn't the shape Factory writes. Anyone who can edit
- * the comment can change it, so it is data, never authority.
+ * it has none, `edited` when its JSON doesn't match its digest or isn't
+ * the shape Factory writes. Anyone who can edit the comment can change it:
+ * the digest catches a casual edit, and `factory reset` keeps only entries
+ * that fit the rebuilt plan and that a fresh answer could make (reset.ts).
  */
-export function statusRecord(body: string): StatusRecord | undefined {
+export function statusRecord(
+  body: string,
+): StatusRecord | "edited" | undefined {
   const at = body.lastIndexOf(RECORD_OPEN);
   if (at < 0 || !body.endsWith(RECORD_CLOSE)) return undefined;
+  const line = body.slice(at + RECORD_OPEN.length, -RECORD_CLOSE.length);
+  const space = line.lastIndexOf(" ");
+  const json = line.slice(0, space);
+  if (space < 0 || digest(json) !== line.slice(space + 1)) return "edited";
   let value: unknown;
   try {
-    value = JSON.parse(
-      body.slice(at + RECORD_OPEN.length, -RECORD_CLOSE.length),
-    );
+    value = JSON.parse(json);
   } catch {
-    return undefined;
+    return "edited";
   }
-  if (!isObject(value)) return undefined;
+  if (!isObject(value)) return "edited";
   const strings = (entry: unknown, required: string[], optional: string[]) =>
     isObject(entry) &&
     required.every((key) => typeof entry[key] === "string") &&
     optional.every(
       (key) => entry[key] === undefined || typeof entry[key] === "string",
     );
-  const { decisions, retired } = value;
+  const { decisions, retired, dropped } = value;
   return Array.isArray(decisions) &&
     Array.isArray(retired) &&
+    (dropped === undefined || Number.isInteger(dropped)) &&
     decisions.every(
       (entry) =>
         strings(
@@ -236,8 +262,12 @@ export function statusRecord(body: string): StatusRecord | undefined {
     retired.every((entry) =>
       strings(entry, ["command", "reason", "by", "at", "holdId", "plan"], []),
     )
-    ? { decisions, retired }
-    : undefined;
+    ? {
+        decisions,
+        retired,
+        ...(dropped ? { dropped: dropped as number } : {}),
+      }
+    : "edited";
 }
 
 function render(

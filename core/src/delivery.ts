@@ -42,7 +42,7 @@ import {
   Unreadable,
 } from "./github.js";
 import { redact } from "./log.js";
-import { inert, prose, runMarks } from "./markdown.js";
+import { inert, prose, readRunMarks, runMarks } from "./markdown.js";
 import { lfsObjectsHoldingSecrets, lfsPushIfPointers } from "./media.js";
 import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
@@ -371,13 +371,28 @@ export async function publish(
       return hold(
         `PR #${pull.number} for ${branch} targets ${pull.base.ref}, not ${baseBranch}. Change its base back and answer retry, or cancel.`,
       );
-    if (await updates(context, pull.head.sha, current, bases))
+    if (await updates(context, pull.head.sha, current, bases)) {
+      // A PR reused after a replan names this run and plan from now on,
+      // so `factory reset` finds it (markdown.ts `runMarks`).
+      if (input.run) {
+        const marks = runMarks(input.run.run, input.run.plan);
+        const body = pull.body ?? "";
+        const named = readRunMarks(body);
+        if (named?.run !== input.run.run || named.plan !== input.run.plan)
+          await github.updatePull(
+            pull,
+            `${body.replace(/(?:<!-- factory-run:\S+ -->)(?:<!-- factory-plan:\S+ -->)?\s*$/, "").trimEnd()}\n\n${marks}`,
+            "deliver:pr-marks",
+            signal,
+          );
+      }
       return {
         kind: "published",
         pr: pull.number,
         head: pull.head.sha,
         merged: false,
       };
+    }
     if (await updates(context, pull.head.sha, earlier, bases))
       return lagging(
         `PR #${pull.number} does not show the pushed head ${input.commit} yet`,

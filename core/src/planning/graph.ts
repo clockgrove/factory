@@ -157,12 +157,7 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
       found(`Work Item ${label} ${field} must be a list of strings`, id);
       usable = false;
     }
-  for (const field of [
-    "resources",
-    "children",
-    "expectedOutputRoles",
-    "requiredLfsRoles",
-  ])
+  for (const field of ["resources", "children", "expectedOutputRoles"])
     if (value[field] !== undefined && !strings(value[field])) {
       found(
         `Work Item ${label} ${field} must be a list of strings or left out`,

@@ -134,9 +134,11 @@ export interface UncheckedComment {
   nextAt: string;
 }
 
-/** An Objective whose state file can't be read: it holds, with `cancel`. */
+/** An Objective whose state file can't be read: it holds, with `reset` and `cancel`. */
 export interface UnreadableObjective {
   error: string;
+  /** Set aside by the service (service.ts `setAside`): its file reads, so `retry` reads it again too. */
+  setAside?: true;
   /** Which incident: the unreadable file's digest. Its question and answers are this incident's only. */
   incident: string;
   /** Its card and comment cursor, once the sync has seen it on the Project. */
@@ -148,6 +150,12 @@ export interface SyncView {
   unreadable: ReadonlyMap<number, UnreadableObjective>;
   /** The Objective's run, read from disk when it isn't in memory; throws when the read fails. */
   find(issue: number): ObjectiveRunner | undefined;
+  /**
+   * Run one Objective's part of the sync's tick: a throw is that
+   * Objective's alone (service.ts `guarded`), and one whose work already
+   * threw this tick is left alone.
+   */
+  guard(issue: number, work: () => void): void;
   /** Start (or start again) an Objective seen queued; the service decides whether it may. */
   admit(issue: number, github: GitHubModule): void;
   /**
@@ -449,50 +457,52 @@ export class GitHubSync {
       this.fresh = false;
       this.intake(sync);
     }
-    for (const runner of sync.runners.values()) {
-      const module = runner.state.modules.github as GitHubModule | undefined;
-      const issue = runner.state.issue;
-      const finished = runner.settled;
-      if (finished && this.settled.has(issue)) continue;
-      // An issue GitHub no longer has here (deleted, or moved away) has no
-      // card or comments to write: its replies are dropped, and once it
-      // finishes its sync is settled.
-      if (this.gone.has(issue)) {
-        if (finished) {
-          for (const request of module ? unreplied(runner.state, module) : [])
-            this.log.write(issue, { event: "reply-dropped", id: request.id });
-          this.settled.add(issue);
+    for (const runner of sync.runners.values())
+      sync.guard(runner.state.issue, () => {
+        const module = runner.state.modules.github as GitHubModule | undefined;
+        const issue = runner.state.issue;
+        const finished = runner.settled;
+        if (finished && this.settled.has(issue)) return;
+        // An issue GitHub no longer has here (deleted, or moved away) has no
+        // card or comments to write: its replies are dropped, and once it
+        // finishes its sync is settled.
+        if (this.gone.has(issue)) {
+          if (finished) {
+            for (const request of module ? unreplied(runner.state, module) : [])
+              this.log.write(issue, { event: "reply-dropped", id: request.id });
+            this.settled.add(issue);
+          }
+          return;
         }
-        continue;
-      }
-      if (finished && this.synced(runner.state)) {
-        this.settled.add(issue);
-        continue;
-      }
-      if (!module) continue;
-      this.show(runner, module, sync);
-      this.ask(runner);
-      this.status(runner, sync);
-      this.track(runner);
-      this.reply(runner, module, sync);
-      this.cancelled(runner, module);
-      if (finished) continue;
-      this.note(runner, module);
-      this.remind(runner, module);
-      if (due && !TERMINAL.includes(runner.state.status))
-        this.readComments(
-          issue,
-          module,
-          () => runner.state.holds.length > 0,
-          sync,
-          (change) =>
-            runner.transact(() =>
-              change(runner.state.modules.github as GitHubModule),
-            ),
-        );
-    }
+        if (finished && this.synced(runner.state)) {
+          this.settled.add(issue);
+          return;
+        }
+        if (!module) return;
+        this.show(runner, module, sync);
+        this.ask(runner);
+        this.status(runner, sync);
+        this.track(runner);
+        this.reply(runner, module, sync);
+        this.cancelled(runner, module);
+        if (finished) return;
+        this.note(runner, module);
+        this.remind(runner, module);
+        if (due && !TERMINAL.includes(runner.state.status))
+          this.readComments(
+            issue,
+            module,
+            () => runner.state.holds.length > 0,
+            sync,
+            (change) =>
+              runner.transact(() =>
+                change(runner.state.modules.github as GitHubModule),
+              ),
+          );
+      });
     for (const [issue, entry] of sync.unreadable)
-      if (!this.gone.has(issue)) this.unreadable(issue, entry, due, sync);
+      if (!this.gone.has(issue))
+        sync.guard(issue, () => this.unreadable(issue, entry, due, sync));
   }
 
   /**
@@ -1442,7 +1452,7 @@ export class GitHubSync {
         const question = await this.github.ensureComment(
           issue,
           marker,
-          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with \`/factory reset\` (recommended) to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).`,
+          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with ${entry.setAside ? "`/factory retry` to read it again and run on, " : ""}\`/factory reset\` (recommended) to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).`,
           "sync:ask",
           signal,
         );

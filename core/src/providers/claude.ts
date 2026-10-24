@@ -25,6 +25,7 @@ import {
   detail,
   freshOnOverflow,
   IdleWatchdog,
+  type LiveCall,
   loggedCall,
   type ModelChoice,
   modelChoice,
@@ -991,8 +992,8 @@ export class ClaudePlanner implements Planner {
 
   private async attempt(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.options, call);
-    return loggedCall("claude", call, choice, (record) =>
-      this.run(call, choice, record),
+    return loggedCall("claude", call, choice, (record, live) =>
+      this.run(call, choice, record, live),
     );
   }
 
@@ -1000,6 +1001,7 @@ export class ClaudePlanner implements Planner {
     call: PlannerCall,
     choice: ModelChoice<ClaudeEffort>,
     record: Record<string, unknown>,
+    live: LiveCall,
   ): Promise<Omit<PlannerAnswer, "ms">> {
     call.signal.throwIfAborted();
     let query: typeof import("@anthropic-ai/claude-agent-sdk").query;
@@ -1126,8 +1128,19 @@ export class ClaudePlanner implements Planner {
         ) {
           firstToken(record, callStarted);
           record.reportedModel = message.message.model;
+          // The main thread's context at this request; the SDK gives no window.
+          const usage = message.message.usage;
+          if (message.parent_tool_use_id === null && usage)
+            live.context(
+              usage.input_tokens +
+                (usage.cache_read_input_tokens ?? 0) +
+                (usage.cache_creation_input_tokens ?? 0),
+            );
           // One response may arrive split over several messages with its id.
-          if (message.message.id !== response) tools.response();
+          if (message.message.id !== response) {
+            tools.response();
+            live.turn();
+          }
           response = message.message.id;
         }
         if (message.type === "assistant" || message.type === "user") {

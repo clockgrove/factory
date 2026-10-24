@@ -208,7 +208,10 @@ export async function loggedCall<Effort extends string>(
   provider: string,
   call: PlannerCall,
   choice: ModelChoice<Effort>,
-  run: (record: Record<string, unknown>) => Promise<Omit<PlannerAnswer, "ms">>,
+  run: (
+    record: Record<string, unknown>,
+    live: LiveCall,
+  ) => Promise<Omit<PlannerAnswer, "ms">>,
 ): Promise<PlannerAnswer> {
   const started = Date.now();
   const record = usageRecord({
@@ -218,6 +221,7 @@ export async function loggedCall<Effort extends string>(
     effort: choice.effort,
     phase: call.phase,
   });
+  const live = new LiveCall(call.log, record, started);
   record.tools = Boolean(call.readDir);
   describeRequest(record, {
     prompt: call.prompt,
@@ -226,7 +230,7 @@ export async function loggedCall<Effort extends string>(
     ...(call.facts ? { facts: call.facts } : {}),
   });
   try {
-    const answer = await run(record);
+    const answer = await run(record, live);
     record.outcome = "done";
     return {
       ...answer,
@@ -238,8 +242,102 @@ export async function loggedCall<Effort extends string>(
     record.error = detail(String(error));
     throw error;
   } finally {
+    live.end();
     record.ms = Date.now() - started;
     logUsage(call.log, record);
+  }
+}
+
+/** At most one `model-progress` event per running call per this long. */
+const LIVE_INTERVAL_MS = 10_000;
+
+/**
+ * A planner-seam call while it runs (docs/reference/run-log.md#Live calls):
+ * `model-call` when it starts, then what its provider reports live (the
+ * tokens in its context at its last model request, with the window when
+ * given, and its model turns so far) as `model-progress`, the first report
+ * after a quiet interval at once and the rest coalesced. Its `model-usage`
+ * ends it. Watch and the live status comment show it.
+ */
+export class LiveCall {
+  private tokens: number | undefined;
+  private window: number | undefined;
+  private turns = 0;
+  private pending = false;
+  private lastAt = 0;
+  private timer: NodeJS.Timeout | undefined;
+  private ended = false;
+  private readonly callId: unknown;
+
+  constructor(
+    private readonly log: (event: Record<string, unknown>) => void,
+    record: Record<string, unknown>,
+    private readonly started: number,
+    private readonly intervalMs = LIVE_INTERVAL_MS,
+  ) {
+    this.callId = record.callId;
+    log({
+      event: "model-call",
+      callId: record.callId,
+      role: record.role,
+      phase: record.phase,
+      provider: record.provider,
+      model: record.model,
+      effort: record.effort,
+    });
+  }
+
+  /** The tokens in the call's context at its last model request, and the model's window when known. */
+  context(tokens: number, window?: number): void {
+    if (!(Number.isSafeInteger(tokens) && tokens >= 0)) return;
+    this.tokens = tokens;
+    if (
+      typeof window === "number" &&
+      Number.isSafeInteger(window) &&
+      window > 0
+    )
+      this.window = window;
+    this.changed();
+  }
+
+  /** One more model turn (a response). */
+  turn(): void {
+    this.turns += 1;
+    this.changed();
+  }
+
+  /** The call ended: nothing more is written; its `model-usage` follows. */
+  end(): void {
+    clearTimeout(this.timer);
+    this.ended = true;
+  }
+
+  private changed(): void {
+    if (this.ended) return;
+    this.pending = true;
+    if (this.timer) return;
+    const wait = this.lastAt + this.intervalMs - Date.now();
+    if (wait <= 0) this.flush();
+    else {
+      this.timer = setTimeout(() => this.flush(), wait);
+      this.timer.unref();
+    }
+  }
+
+  private flush(): void {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    if (!this.pending || this.ended) return;
+    this.pending = false;
+    this.lastAt = Date.now();
+    this.log({
+      event: "model-progress",
+      callId: this.callId,
+      ms: this.lastAt - this.started,
+      turns: this.turns,
+      ...(this.tokens !== undefined ? { tokens: this.tokens } : {}),
+      ...(this.window !== undefined ? { window: this.window } : {}),
+    });
   }
 }
 

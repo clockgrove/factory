@@ -28,6 +28,7 @@ import {
   addCodexTelemetry,
   type CodexBaseline,
   codexBaseline,
+  codexLiveRecord,
   codexSessionRecord,
   codexTelemetry,
   codexTokens,
@@ -41,6 +42,7 @@ import {
   detail,
   freshOnOverflow,
   IdleWatchdog,
+  type LiveCall,
   loggedCall,
   type ModelChoice,
   modelChoice,
@@ -539,6 +541,9 @@ export function codexResetAt(
     : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hours, m);
 }
 
+/** How often a running planner call's session record is read for its live view. */
+const LIVE_READ_MS = 5_000;
+
 /** Planning and review through the Codex SDK and the operator's `codex login`. */
 export class CodexPlanner implements Planner {
   constructor(
@@ -548,8 +553,8 @@ export class CodexPlanner implements Planner {
   async answer(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
     return freshOnOverflow(call, (once) =>
-      loggedCall("codex", once, choice, (record) =>
-        this.run(once, choice, record),
+      loggedCall("codex", once, choice, (record, live) =>
+        this.run(once, choice, record, live),
       ),
     );
   }
@@ -558,6 +563,7 @@ export class CodexPlanner implements Planner {
     call: PlannerCall,
     choice: ModelChoice<CodexEffort>,
     record: Record<string, unknown>,
+    live: LiveCall,
   ): Promise<Omit<PlannerAnswer, "ms">> {
     // A shell under a root controller would read root-only host files.
     if (call.readDir && process.geteuid?.() === 0)
@@ -618,6 +624,7 @@ export class CodexPlanner implements Planner {
     }
     let events: AsyncGenerator<ThreadEvent> | undefined;
     let baseline: CodexBaseline | undefined;
+    let reading: NodeJS.Timeout | undefined;
     // An abort ends codex and every command it started (namespacedLauncher).
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
@@ -666,6 +673,18 @@ export class CodexPlanner implements Planner {
         outputSchema: call.schema,
         signal: watchdog.signal,
       }));
+      // The stream has no counts until the turn ends: the session record
+      // gives the context and the responses as they happen.
+      const readLive = codexLiveRecord(home.env.CODEX_HOME!, baseline?.size);
+      reading = setInterval(() => {
+        const thread =
+          (record.thread as string | undefined) ?? turn.resumed?.id;
+        if (!thread) return;
+        const { context, responses } = readLive(thread);
+        for (let n = 0; n < responses; n++) live.turn();
+        if (context) live.context(context.tokens, context.window);
+      }, LIVE_READ_MS);
+      reading.unref();
       let response: string | undefined;
       let usage: PlannerAnswer["usage"];
       let completed = false;
@@ -790,6 +809,7 @@ export class CodexPlanner implements Planner {
       // A failed codex process: its stderr is in the message.
       throw overflowed(codexFailure(errorMessage(error)), turn);
     } finally {
+      clearInterval(reading);
       watchdog.stop();
       // Closing the stream ends the SDK's read; group.end kills codex.
       if (events) {

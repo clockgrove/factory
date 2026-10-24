@@ -55,6 +55,21 @@ interface Row {
   progressAt?: string;
   /** The item's first failed validation since it last passed. */
   failingSince?: string;
+  /** Planner-seam calls running for it, by call id (`model-call`, `model-progress`). */
+  calls?: Record<string, LiveCallRow>;
+}
+
+/** A running planner or reviewer call, as watch shows it. */
+interface LiveCallRow {
+  role: string;
+  phase?: string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  startedAt: string;
+  tokens?: number;
+  window?: number;
+  turns: number;
 }
 
 export interface WatchOutput {
@@ -155,6 +170,8 @@ function applyEvent(
     case "outcome":
       if (!step) return undefined;
       row.phase = phaseOf(step);
+      // A call its step outlived (cancelled, past its deadline) ran no more.
+      delete row.calls;
       row.state = String(event.outcome ?? "ended");
       row.at = event.at;
       if (typeof event.reason === "string") row.reason = event.reason;
@@ -206,6 +223,43 @@ function applyEvent(
       if (!row.state) row.state = "running";
       break;
     }
+    // A planner or reviewer call: shown while it runs, until its model-usage.
+    case "model-call": {
+      if (typeof event.callId !== "string") return undefined;
+      row.calls = {
+        ...row.calls,
+        [event.callId]: {
+          role: String(event.role ?? "model"),
+          ...(typeof event.phase === "string" ? { phase: event.phase } : {}),
+          ...(typeof event.provider === "string"
+            ? { provider: event.provider }
+            : {}),
+          ...(typeof event.model === "string" ? { model: event.model } : {}),
+          ...(typeof event.effort === "string" ? { effort: event.effort } : {}),
+          startedAt: event.at,
+          turns: 0,
+        },
+      };
+      if (!row.phase && step) row.phase = phaseOf(step);
+      row.state ||= "running";
+      break;
+    }
+    case "model-progress": {
+      const call =
+        typeof event.callId === "string"
+          ? row.calls?.[event.callId]
+          : undefined;
+      if (!call) return undefined;
+      if (typeof event.tokens === "number") call.tokens = event.tokens;
+      if (typeof event.window === "number") call.window = event.window;
+      if (typeof event.turns === "number") call.turns = event.turns;
+      break;
+    }
+    case "model-usage":
+      if (typeof event.callId !== "string" || !row.calls?.[event.callId])
+        return undefined;
+      delete row.calls[event.callId];
+      break;
     case "cancelled":
       row.phase ||= "objective";
       row.state = "cancelled";
@@ -284,7 +338,21 @@ function rowLine(row: Row, now = Date.now()): string {
     parts.push(`validation failing for ${age(now, row.failingSince)}`);
   if (totals && row.activityAt)
     parts.push(`active ${age(now, row.activityAt)} ago`);
+  for (const call of Object.values(row.calls ?? {}))
+    parts.push(liveCallText(call, now));
   return parts.join(" · ");
+}
+
+/** `reviewer result-review codex gpt-6.1-sol high for 2m, 3 turns, context 84K/272K`. */
+function liveCallText(call: LiveCallRow, now: number): string {
+  const name = [call.role, call.phase, call.provider, call.model, call.effort]
+    .filter(Boolean)
+    .join(" ");
+  const context =
+    call.tokens === undefined
+      ? "context unknown"
+      : `context ${kilo(call.tokens)}${call.window ? `/${kilo(call.window)}` : ""}`;
+  return `${name} for ${age(now, call.startedAt)}, ${call.turns} turn${call.turns === 1 ? "" : "s"}, ${context}`;
 }
 
 /** A token count: `840`, `84K`, `1.2M`. */

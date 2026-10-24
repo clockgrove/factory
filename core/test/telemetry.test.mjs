@@ -1,7 +1,7 @@
 // Telemetry and debugging: what the run log and its attempt files keep,
 // and how diagnostics, watch and status show it.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -16,10 +16,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
+import { RunTally, statusComment } from "../dist/progress.js";
 import { validateTree } from "../dist/validate.js";
 import { ActivityLog } from "../dist/work/worker.js";
 import {
   CLI,
+  children,
   cli,
   closedPort,
   configured,
@@ -276,4 +278,94 @@ test("a step's GitHub requests are traced with their failure category, time and 
     assert.ok(analysis.github.traced[`network ${category}`] >= 1);
     await stopped(service);
   }
+});
+
+test("a running planner or reviewer call shows in watch and the live status comment with its model, role, age, context and turns", async () => {
+  const inst = installation();
+  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-3");
+  const step = { step: "item:a:review", attemptId: "item:a:review#1" };
+  log.write(64, { ...step, event: "start" });
+  log.write(64, {
+    ...step,
+    event: "model-call",
+    callId: "c1",
+    role: "reviewer",
+    phase: "result-review",
+    provider: "codex",
+    model: "gpt-6.1-sol",
+    effort: "high",
+  });
+  log.write(64, {
+    ...step,
+    event: "model-progress",
+    callId: "c1",
+    ms: 20_000,
+    turns: 3,
+    tokens: 84_000,
+    window: 272_000,
+  });
+  const watching = spawn(
+    process.execPath,
+    [CLI, "watch", "64", "--repo", REPO],
+    {
+      env: inst.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  children.add(watching);
+  let view = "";
+  watching.stdout.on("data", (chunk) => {
+    view += chunk;
+  });
+  await until(
+    () =>
+      /#64 a review running for \S+ · reviewer result-review codex gpt-6\.1-sol high for \S+, 3 turns, context 84K\/272K/.test(
+        view,
+      ),
+    "the running call in watch",
+  );
+  watching.kill("SIGINT");
+  const tally = new RunTally(inst.logs);
+  const shown = (running) =>
+    statusComment(
+      "<!-- marker -->",
+      {
+        view: {
+          issue: 64,
+          status: "building",
+          phase: "building",
+          mode: "running",
+          holds: [],
+          items: [],
+          waiting: [],
+          waitsOn: null,
+          running: [],
+          flakyRerun: [],
+          rereviews: [],
+          decisions: [],
+          nextAction: { reason: "Factory is reviewing." },
+        },
+        ...running,
+        decisions: [],
+      },
+      [],
+      { questions: true },
+      Date.now(),
+    ).body;
+  const body = shown(tally.read(64, "2026-01-01T00:00:00.000Z"));
+  assert.match(body, /\*\*Model calls running\*\*/);
+  assert.match(
+    body,
+    /- reviewer result-review \(Work Item `a`\): codex gpt-6\.1-sol high, started .*; 3 turns; 84000 input tokens in context/,
+  );
+  log.write(64, {
+    ...step,
+    event: "model-usage",
+    callId: "c1",
+    role: "reviewer",
+  });
+  assert.doesNotMatch(
+    shown(tally.read(64, "2026-01-01T00:00:00.000Z")),
+    /Model calls running/,
+  );
 });

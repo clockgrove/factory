@@ -1853,9 +1853,9 @@ async function mergeUnitOnce(
           ),
           layer.input,
         );
-      // The layer below moved (GitHub updated it with the default branch,
-      // or it was repaired): GitHub merges it into this layer the same way,
-      // with no worker. Only a refused update, a real conflict, is a repair.
+      // The layer below moved (GitHub updated it with the default branch):
+      // GitHub merges it into this layer the same way, with no worker. Only
+      // a refused update, a real conflict, is a repair.
       if (relation !== "identical" && relation !== "ahead")
         return pin(
           await updateBranch(

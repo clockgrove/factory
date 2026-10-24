@@ -14,7 +14,12 @@ import {
   unknownCheckMessage,
   unknownCheckNames,
 } from "./facts.js";
-import { coverageCriterion, pathsOverlap, validateGraph } from "./graph.js";
+import {
+  coverageCriterion,
+  ownsPath,
+  pathsOverlap,
+  validateGraph,
+} from "./graph.js";
 import type {
   Citation,
   CoverageObligation,
@@ -503,7 +508,50 @@ function recognizedObjectiveAttachment(value: string): boolean {
   }
 }
 
-/** Output roles, candidate counts, LFS roles and source assets. */
+/** A file name no rule singles out: a directory whose probe is routed has every file in it routed. */
+const LFS_PROBE = "factory-lfs-probe";
+
+/**
+ * Selected media is stored in Git LFS, so an item with output roles needs
+ * destinations routed through it. It passes when it, or an item it depends
+ * on, owns `.gitattributes` (and so can add the rule its result is built
+ * on), or when the base already routes what it owns: a directory whose
+ * every file is routed, or one exact file per role.
+ */
+async function lfsFindings(
+  items: readonly WorkItem[],
+  files: BaseFiles,
+  found: Found,
+): Promise<void> {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const media = items.filter(
+    (item) =>
+      item.expectedOutputRoles?.length &&
+      ![item.id, ...dependencyClosure(byId, item.id)].some((id) =>
+        ownsPath(".gitattributes", byId.get(id)?.ownedPaths ?? []),
+      ),
+  );
+  const probe = (owned: string) =>
+    owned.endsWith("/") ? `${owned}${LFS_PROBE}` : owned;
+  const routed = await files.lfsRouted([
+    ...new Set(media.flatMap((item) => item.ownedPaths.map(probe))),
+  ]);
+  for (const item of media) {
+    const roles = item.expectedOutputRoles!;
+    const owned = item.ownedPaths.filter((path) => routed.has(probe(path)));
+    if (
+      owned.some((path) => path.endsWith("/")) ||
+      owned.length >= roles.length
+    )
+      continue;
+    found(
+      `Work Item ${item.id} expects media roles ${roles.join(", ")}, and selected media is stored in Git LFS, but the base's .gitattributes routes ${owned.length ? `only ${owned.join(", ")}` : "none of its owned paths"} through LFS (lfsRules lists its filter=lfs rules) and neither it nor an item it depends on owns .gitattributes. Add .gitattributes to its owned paths, depend on the item that adds the filter=lfs rule, or own destinations the base already routes: one exact file per role, or a directory a rule covers whole (such as dir/**)`,
+      item.id,
+    );
+  }
+}
+
+/** Output roles, candidate counts, LFS routing and source assets. */
 async function mediaFindings(
   items: readonly WorkItem[],
   facts: PlanningFacts,
@@ -512,6 +560,7 @@ async function mediaFindings(
 ): Promise<void> {
   const shown = objectiveText(facts.blocks);
   const tracked = new Set(await files.paths());
+  await lfsFindings(items, files, found);
   for (const item of items) {
     const roles = item.expectedOutputRoles ?? [];
     if (new Set(roles).size !== roles.length)
@@ -522,14 +571,6 @@ async function mediaFindings(
     if (roles.length && (item.minimumAssetSets ?? 0) < 1)
       found(
         `Work Item ${item.id} expects output roles, so minimumAssetSets must be at least 1`,
-        item.id,
-      );
-    const unknown = (item.requiredLfsRoles ?? []).filter(
-      (role) => !roles.includes(role),
-    );
-    if (unknown.length)
-      found(
-        `Work Item ${item.id} requires LFS for ${unknown.join(", ")}, which is not one of its expected output roles (${roles.join(", ") || "none"})`,
         item.id,
       );
     for (const asset of item.sourceAssets ?? []) {

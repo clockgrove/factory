@@ -1,4 +1,5 @@
 import {
+  CANCEL_CLEANUP,
   errored,
   hold,
   type Outcome,
@@ -234,7 +235,7 @@ function unavailable(key: string): Step {
 }
 
 const cleanup: Step = {
-  key: "cancel:cleanup",
+  key: CANCEL_CLEANUP,
   deadlineMs: 10 * MINUTE,
   neverAsks: true,
   async run(): Promise<Outcome> {

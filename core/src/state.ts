@@ -11,6 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import { isObject } from "./checked.js";
 import { crashPoint } from "./crash.js";
 import type { HoldScope } from "./engine.js";
 import type { FrozenConfig } from "./providers/selection.js";
@@ -464,7 +465,7 @@ export function saveObservation(dir: string, state: ObjectiveState): string {
 
 /**
  * The settled observations still to land. Only these files are read, never
- * the finished states; one that doesn't parse comes with its `error`, and
+ * the finished states; one that isn't a state comes with its `error`, and
  * leftover temporary files are removed.
  */
 export function listObservations(
@@ -489,11 +490,22 @@ export function listObservations(
     } catch {
       continue; // read again at the next start
     }
+    let problem: string | undefined;
+    let value: unknown;
     try {
-      found.push({ path, state: JSON.parse(text) });
+      value = JSON.parse(text);
+      problem = stateProblem(
+        value,
+        Number(/^(\d+)@/.exec(name)?.[1] ?? Number.NaN),
+      );
     } catch (error) {
-      found.push({ path, error: String(error) });
+      problem = String(error);
     }
+    found.push(
+      problem
+        ? { path, error: problem }
+        : { path, state: value as ObjectiveState },
+    );
   }
   return found;
 }
@@ -533,9 +545,10 @@ export type Loaded =
     };
 
 /**
- * The Objective's state; null when it has none. Only a file that doesn't
- * parse, or has another version, is unreadable; a read that fails (EMFILE,
- * EIO) throws, and the caller tries again later.
+ * The Objective's state; null when it has none. A file that doesn't
+ * parse, has another version or another shape (`stateProblem`) is
+ * unreadable; a read that fails (EMFILE, EIO) throws, and the caller tries
+ * again later.
  */
 export function loadState(dir: string, issue: number): Loaded | null {
   let text: string;
@@ -545,24 +558,102 @@ export function loadState(dir: string, issue: number): Loaded | null {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+  let problem: string | undefined;
+  let value: unknown;
   try {
-    const state = JSON.parse(text) as ObjectiveState;
-    if (state.version !== STATE_VERSION)
-      return {
-        kind: "unreadable",
-        issue,
-        error: `state version ${state.version}, expected ${STATE_VERSION}`,
-        incident: digest(text),
-      };
-    return { kind: "ok", state };
+    value = JSON.parse(text);
+    problem = stateProblem(value, issue);
   } catch (error) {
-    return {
-      kind: "unreadable",
-      issue,
-      error: String(error),
-      incident: digest(text),
-    };
+    problem = String(error);
   }
+  return problem
+    ? { kind: "unreadable", issue, error: problem, incident: digest(text) }
+    : { kind: "ok", state: value as ObjectiveState };
+}
+
+const STATUSES: readonly ObjectiveStatus[] = [
+  "checking",
+  "planning",
+  "building",
+  "finishing",
+  "holding",
+  "resetting",
+  "done",
+  "cancelled",
+];
+
+/**
+ * Why `value` isn't a state file of Objective `issue` this version can
+ * run; undefined when it is one. Checked once, where a file is read: the
+ * engine, the sync and status trust every state they get. It checks what
+ * every reader relies on (the top-level fields and each open question);
+ * a module's own data is its module's to check.
+ */
+function stateProblem(value: unknown, issue: number): string | undefined {
+  if (!isObject(value)) return "the state isn't an object";
+  if (value.version !== STATE_VERSION)
+    return `state version ${value.version}, expected ${STATE_VERSION}`;
+  if (value.issue !== issue)
+    return `the state names issue ${JSON.stringify(value.issue)}, not #${issue}`;
+  if (!STATUSES.includes(value.status as ObjectiveStatus))
+    return `status ${JSON.stringify(value.status)} isn't one Factory knows`;
+  for (const key of [
+    "answers",
+    "retries",
+    "asking",
+    "kept",
+    "done",
+    "attempts",
+    "modules",
+  ])
+    if (!isObject(value[key])) return `${key} isn't an object`;
+  for (const key of ["retries", "asking", "attempts"])
+    for (const [step, entry] of Object.entries(
+      value[key] as Record<string, unknown>,
+    ))
+      if (!isObject(entry)) return `${key}.${step} isn't an object`;
+  for (const key of ["repairs", "frozen", "control", "ended", "stepRuns"])
+    if (value[key] !== undefined && !isObject(value[key]))
+      return `${key} isn't an object`;
+  for (const key of [
+    "updatedAt",
+    "startedAt",
+    "deadline",
+    "lastShownAt",
+    "finishedRun",
+  ])
+    if (
+      (key === "updatedAt" || value[key] !== undefined) &&
+      typeof value[key] !== "string"
+    )
+      return `${key} isn't text`;
+  if (
+    !Array.isArray(value.appliedRequests) ||
+    !value.appliedRequests.every(
+      (applied) => isObject(applied) && typeof applied.id === "string",
+    )
+  )
+    return "appliedRequests isn't a list of applied requests";
+  if (!Array.isArray(value.holds)) return "holds isn't a list";
+  for (const hold of value.holds as unknown[]) {
+    if (
+      !isObject(hold) ||
+      !["id", "step", "question", "askedAt"].every(
+        (key) => typeof hold[key] === "string",
+      ) ||
+      (hold.item !== undefined && typeof hold.item !== "string") ||
+      !Array.isArray(hold.options) ||
+      !hold.options.every(
+        (option) =>
+          isObject(option) &&
+          typeof option.answer === "string" &&
+          typeof option.family === "string" &&
+          typeof option.consequence === "string",
+      )
+    )
+      return `holds has a question that isn't one: ${JSON.stringify(hold).slice(0, 200)}`;
+  }
+  return undefined;
 }
 
 const digest = (text: string): string =>

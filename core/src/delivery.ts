@@ -543,6 +543,9 @@ async function pushBranch(
     );
   }
   crashPoint("deliver:push:after");
+  // GitHub's reads of the new branch and commit may lag behind the push.
+  context.github.made(commit);
+  context.github.made(branch);
   if ((await remoteHead(context, branch)) !== commit)
     return retry(
       `Remote branch ${branch} does not show the pushed ${commit} yet`,

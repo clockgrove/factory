@@ -88,10 +88,8 @@ for (const point of CRASH_POINTS) {
 
     const state = stateOf(inst, 11);
     assert.equal(state.status, "cancelled");
-    assert.equal(
-      new Set(state.appliedRequests).size,
-      state.appliedRequests.length,
-    );
+    const ids = state.appliedRequests.map((applied) => applied.id);
+    assert.equal(new Set(ids).size, ids.length, "a request applied twice");
     const leftovers = readdirSync(inst.objectives).filter(
       (n) => n !== "11.json" && n !== "finished",
     );

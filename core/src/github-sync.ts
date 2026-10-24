@@ -1,7 +1,13 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
 import { displayTime } from "./display.js";
-import { DEADLINE, type EngineLimits, type ObjectiveRunner } from "./engine.js";
+import {
+  CANCEL_CLEANUP,
+  DEADLINE,
+  type EngineLimits,
+  type Left,
+  type ObjectiveRunner,
+} from "./engine.js";
 import {
   type GitHub,
   GitHubError,
@@ -1256,22 +1262,27 @@ export class GitHubSync {
   }
 
   /**
-   * A cancelled run's one closing comment: who cancelled it (the login
-   * of a `/factory cancel` comment's author; a CLI cancel is "the
-   * operator", never the host's user name), or its deadline. Keyed by the run, so a restart never posts it twice;
-   * a finished Objective settles once it is posted, or GitHub refused it
-   * (`givenUp`). None for a withdrawn run or while progress comments are
-   * off.
+   * A cancelled run's one closing comment, once its cleanup has settled:
+   * who cancelled it (the login of a `/factory cancel` comment's author; a
+   * CLI cancel is "the operator", never the host's user name), or its
+   * deadline, and what the cleanup left when it settled without finishing
+   * (engine.ts `Left`). Keyed by the run, so a restart never posts it
+   * twice; a finished Objective settles once it is posted, or GitHub
+   * refused it (`givenUp`). None for a withdrawn run or while progress
+   * comments are off.
    */
   private cancelled(runner: ObjectiveRunner, module: GitHubModule): void {
     const { state } = runner;
+    const cleanup = state.done[CANCEL_CLEANUP] as Left | true | undefined;
     if (
       !this.config.progress.enabled ||
       state.status !== "cancelled" ||
       state.withdrawing ||
-      module.cancelShown
+      module.cancelShown ||
+      cleanup === undefined
     )
       return;
+    const left = cleanup === true ? undefined : cleanup;
     const issue = state.issue;
     this.background(
       issue,
@@ -1288,7 +1299,7 @@ export class GitHubSync {
         await this.github.ensureComment(
           issue,
           marker,
-          `${marker}\n**Factory cancelled this Objective**${ended ? ` at ${code(ended.at)}` : ""}: ${why}. Its open pull requests close and the issue closes as not planned; what merged stays merged. Queue it again to run it from a new plan.`,
+          `${marker}\n**Factory cancelled this Objective**${ended ? ` at ${code(ended.at)}` : ""}: ${why}. ${left ? `Its cleanup stopped after ${left.failures} tries, and left what it couldn't do: ${excerpt(left.left, this.config.secrets, 1500)} Close or delete those by hand.` : "Its open pull requests are closed and the issue is closed as not planned."} What merged stays merged. Queue it again to run it from a new plan.`,
           "sync:cancel",
           signal,
           sinceRun(state),

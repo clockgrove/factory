@@ -1,7 +1,13 @@
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { deleteFactoryBranch } from "../delivery.js";
-import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import {
+  CANCEL_CLEANUP,
+  hold,
+  type Outcome,
+  type Step,
+  type StepContext,
+} from "../engine.js";
 import { defaultHead } from "../git.js";
 import { GitHubError, issueGone } from "../github.js";
 import { roleMemory } from "../knowledge/index.js";
@@ -24,6 +30,7 @@ import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
 import { decisionLines, type ResultReview } from "../review/result.js";
 import { runOf, sinceRun } from "../state.js";
+import { errorMessage } from "../text.js";
 import { validateTree, validationDeadlineMs } from "../validate.js";
 import { hostGit, removeWorktree, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
@@ -479,51 +486,83 @@ export function reportStep(deps: BuildDeps): Step {
   };
 }
 
-/** After cancel: close Factory's open PRs, delete its branches and remove the work files. It retries; it never asks. */
+/**
+ * After cancel: close Factory's open PRs, delete its branches, close the
+ * issue and remove the work files. Each part is tried on every attempt,
+ * so one that keeps failing never stops the others, and the outcome names
+ * what is left; it retries, it never asks, and after MAX_CLEANUP_FAILURES
+ * it settles with that as its note (engine.ts `Left`).
+ */
 export function cancelCleanupStep(deps: BuildDeps): Step {
   return {
-    key: "cancel:cleanup",
+    key: CANCEL_CLEANUP,
     deadlineMs: 10 * MINUTE,
     neverAsks: true,
-    run: async ({ state, signal, log }) => {
-      await closeFactoryPulls(
-        deps,
-        state.issue,
-        "cancelled",
-        `Factory cancelled Objective #${state.issue}; closing this PR.`,
-        signal,
+    run: async ({ state, signal, log }): Promise<Outcome> => {
+      const issue = state.issue;
+      const left: string[] = [];
+      /** Run one part; a failure is noted as left, unless the attempt was aborted. */
+      const part = async (what: string, effect: () => Promise<unknown>) => {
+        try {
+          await effect();
+          return true;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          left.push(`${what} (${errorMessage(error).slice(0, 300)})`);
+          return false;
+        }
+      };
+      const closed = await part(`Factory's open PRs for #${issue}`, () =>
+        closeFactoryPulls(
+          deps,
+          issue,
+          "cancelled",
+          `Factory cancelled Objective #${issue}; closing this PR.`,
+          signal,
+        ),
       );
       // Cancel ends the Objective, so its branches go once their PRs are
       // closed (a stack's upper PRs first); a re-run reuses them instead.
-      for (const branch of await deps.github.branches(
-        `factory/${state.issue}/`,
-        signal,
-      )) {
-        const kept = await deleteFactoryBranch(
-          { github: deps.github, checkout: deps.config.checkout, signal },
-          branch,
-          "cancel:branch-delete",
-        );
-        if (kept) log({ event: "branch-kept", branch, reason: kept });
-      }
+      // While a PR may still be open, its branch stays, so the PR closes
+      // with its comment.
+      if (closed) {
+        let branches: string[] = [];
+        await part(`the branches factory/${issue}/*`, async () => {
+          branches = await deps.github.branches(`factory/${issue}/`, signal);
+        });
+        for (const branch of branches)
+          await part(`branch ${branch}`, async () => {
+            const kept = await deleteFactoryBranch(
+              { github: deps.github, checkout: deps.config.checkout, signal },
+              branch,
+              "cancel:branch-delete",
+            );
+            if (kept) log({ event: "branch-kept", branch, reason: kept });
+          });
+      } else left.push(`the branches factory/${issue}/* (their PRs are open)`);
       // The Objective's issue closes as not planned, so the queue and the
       // issue agree; the operator can reopen and queue it again. An issue
       // GitHub no longer has here (deleted, or transferred away: GitHub
-      // redirects, and Factory never follows) has nothing to close: cleanup
-      // goes on, so it settles.
-      try {
-        await deps.github.closeIssue(
-          state.issue,
-          "not_planned",
-          "cancel:close",
-          signal,
-        );
-      } catch (error) {
-        if (!issueGone(error)) throw error;
-        log({ event: "issue-gone", status: error.status });
-      }
-      await removeWorkFiles(state.issue, deps, signal);
-      return { kind: "done" };
+      // redirects, and Factory never follows) has nothing to close.
+      await part(`closing issue #${issue}`, async () => {
+        try {
+          await deps.github.closeIssue(
+            issue,
+            "not_planned",
+            "cancel:close",
+            signal,
+          );
+        } catch (error) {
+          if (!issueGone(error)) throw error;
+          log({ event: "issue-gone", status: error.status });
+        }
+      });
+      await part(`the work files of #${issue}`, () =>
+        removeWorkFiles(issue, deps, signal),
+      );
+      return left.length
+        ? { kind: "retry", reason: `Left: ${left.join("; ")}` }
+        : { kind: "done" };
     },
   };
 }

@@ -94,6 +94,9 @@ A refused command exits 1 and prints `{"kind":"lifecycle-refusal","code":"..."}`
 | `plan_unreadable`                   | A reset can't read the plan comment. Show the operator the message; cancel only on request.                                                               |
 | `queue_not_running`                 | A reset would create the Objective while the queue is paused or draining. Tell the operator; run `factory queue resume` only if they want it.             |
 | `reset_in_progress`                 | A reset is already rebuilding the state. Tell the operator and wait for `reset` to disappear from `status`; don't retry.                                  |
+| `cleanup_running`                   | A cancelled Objective is still cleaning up (at most 5 tries). Run it again later, or `factory reset ISSUE` if the operator wants it now.                  |
+| `invalid_request`                   | The request file was malformed and moved to `requests/rejected/`. Run the command again.                                                                  |
+| `request_failed`                    | Applying the request failed; nothing changed. Show the operator the message, then run the command again once.                                             |
 | `usage` (exit 2)                    | Fix the command.                                                                                                                                          |
 
 Any other code, or a non-zero exit with no JSON line: show the operator the message (and the code, if any), and stop. Never retry a refused command unchanged.

@@ -99,12 +99,15 @@ export function issueGone(error: unknown): error is GitHubError {
 }
 
 const TIMEOUT_MS = 60_000;
+/** How long GitHub may lag behind what Factory made (`GitHub.made`). */
+const FRESH_MS = 2 * 60_000;
 
 /**
  * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
  * must fix holds, at once: a rejected login (401), a refusal (403, or a
- * 404 of anything but an issue; rate limits are TransientErrors) naming
- * the permission the call needs (`needing`), and a missing issue (404).
+ * 404 of anything but an issue; rate limits, and a 403 or 404 of what
+ * Factory just made, are TransientErrors: `GitHub.made`) naming the
+ * permission the call needs (`needing`), and a missing issue (404).
  * A rate limit waits for its reset. Everything else (5xx, timeouts, 409,
  * 410, 422, GraphQL errors) may change, so it retries as an unknown
  * transient wait; a 5xx's retry-after only sets its backoff. Undefined
@@ -370,6 +373,8 @@ export class GitHub {
   private readonly writers = new Map<string, { ok: boolean; at: number }>();
   /** Set once the repository is found under another name; never cleared (a restart reads the configuration again). */
   private renamed: RepositoryMoved | undefined;
+  /** What Factory made lately, and when (`made`): a 403 or 404 under one is GitHub's lag. */
+  private readonly fresh = new Map<string, number>();
 
   constructor(
     readonly repository: string,
@@ -465,7 +470,67 @@ export class GitHub {
   ): Promise<T> {
     const response = await this.send(method, path, body, signal);
     if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    const result = await this.body(response, method, path, signal, "json");
+    // A resource Factory just created (an issue, a PR, a comment): GitHub
+    // may not serve it, or what is under it, for a moment.
+    const url = (result as { url?: unknown } | null)?.url;
+    if (
+      response.status === 201 &&
+      typeof url === "string" &&
+      url.startsWith(`${this.api}/`)
+    )
+      this.made(url.slice(this.api.length));
+    return result as T;
+  }
+
+  /**
+   * The response's body. Its headers came, but the body can still fail
+   * (a socket reset, the deadline, truncated JSON): that is a
+   * TransientError like any network failure, so it retries.
+   */
+  private async body(
+    response: Response,
+    method: string,
+    path: string,
+    signal: AbortSignal | undefined,
+    as: "json" | "text",
+  ): Promise<unknown> {
+    try {
+      return as === "json" ? await response.json() : await response.text();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransientError(
+        `GitHub ${method} ${path}: the answer's body didn't arrive whole: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Factory just made `what`: an API path (a created issue, PR or comment;
+   * what is under it counts too), or a pushed branch or commit (any path
+   * that names it). For FRESH_MS after, a 403 or 404 there is GitHub's lag,
+   * a TransientError, never a missing permission or resource.
+   */
+  made(what: string): void {
+    const now = Date.now();
+    for (const [mark, at] of this.fresh)
+      if (now - at >= FRESH_MS) this.fresh.delete(mark);
+    this.fresh.set(what, now);
+  }
+
+  /** Whether `path` is under, or names, something Factory made within FRESH_MS. */
+  private isFresh(path: string): boolean {
+    const now = Date.now();
+    const asked = path.toLowerCase();
+    for (const [mark, at] of this.fresh) {
+      if (now - at >= FRESH_MS) continue;
+      const made = mark.toLowerCase();
+      const under =
+        asked.startsWith(made) &&
+        ["", "/", "?"].includes(asked[made.length] ?? "");
+      if (made.startsWith("/") ? under : asked.includes(made)) return true;
+    }
+    return false;
   }
 
   /** An issue's comments, oldest first; from `since` on when given. */
@@ -527,9 +592,13 @@ export class GitHub {
       signal,
       { accept: "application/vnd.github.full+json" },
     );
-    const found = (await response.json()) as Awaited<
-      ReturnType<GitHub["issue"]>
-    > & { body_html?: unknown };
+    const found = (await this.body(
+      response,
+      "GET",
+      `/repos/${this.repository}/issues/${issue}`,
+      signal,
+      "json",
+    )) as Awaited<ReturnType<GitHub["issue"]>> & { body_html?: unknown };
     if (typeof found.body_html === "string")
       return { ...found, body_html: found.body_html };
     if (!found.body) return { ...found, body_html: "" };
@@ -548,7 +617,13 @@ export class GitHub {
       signal,
       { accept: "text/html" },
     );
-    return await response.text();
+    return (await this.body(
+      response,
+      "POST",
+      "/markdown",
+      signal,
+      "text",
+    )) as string;
   }
 
   async postComment(
@@ -970,10 +1045,17 @@ export class GitHub {
       { query, variables },
       signal,
     );
-    const result = (await response.json()) as {
+    const result = (await this.body(
+      response,
+      "POST",
+      "/graphql",
+      signal,
+      "json",
+    )) as {
       data?: T;
       errors?: GraphQLError[];
-    };
+    } | null;
+    if (!result) throw new TransientError("GitHub GraphQL: no answer");
     const errors = result.errors ?? [];
     const refused = errors.filter((e) => !accept(e));
     if (refused.length) {
@@ -1640,6 +1722,9 @@ export class GitHub {
         if (size > 1024 * 1024) return undefined;
         chunks.push(value);
       }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransientError(`job ${job} log: ${errorMessage(error)}`);
     } finally {
       await reader.cancel().catch(() => undefined);
     }
@@ -1762,6 +1847,15 @@ export class GitHub {
       throw new TransientError(
         detail,
         retryAfter > 0 ? retryAfter * 1000 : undefined,
+      );
+    // Something Factory just made may not show yet (GitHub's lag): a
+    // refusal or a 404 there retries; past FRESH_MS it stands.
+    if (
+      (response.status === 403 || response.status === 404) &&
+      this.isFresh(path)
+    )
+      throw new TransientError(
+        `${detail} (Factory made this within the last ${FRESH_MS / 60_000} min, so GitHub may not show it yet)`,
       );
     const failed = new GitHubError(
       detail,

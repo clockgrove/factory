@@ -8,7 +8,13 @@ import {
 } from "./allowances.js";
 import type { CapacityRecommendation } from "./capacity.js";
 import { displayTime, duration, eventLine, redactDeep } from "./display.js";
-import { type CapacityUse, DEADLINE, hold as question } from "./engine.js";
+import {
+  CANCEL_CLEANUP,
+  type CapacityUse,
+  DEADLINE,
+  type Left,
+  hold as question,
+} from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
 import {
@@ -120,6 +126,8 @@ export interface ObjectiveView {
   endedAt?: string;
   /** Who cancelled it: `deadline` when its deadline did. */
   endedBy?: string;
+  /** What cleanup after cancel left when it settled without finishing (engine.ts `Left`). */
+  cleanupLeft?: string;
   /** What happens next, and the command that moves it, if one does. */
   nextAction: { command: string | null; reason: string };
   /** The latest run log event. */
@@ -330,6 +338,10 @@ export function statusOf(
       : {}),
     ...(state.ended ? { endedAt: state.ended.at } : {}),
     ...(state.ended?.by ? { endedBy: state.ended.by } : {}),
+    ...(typeof (state.done[CANCEL_CLEANUP] as Left | undefined)?.left ===
+    "string"
+      ? { cleanupLeft: (state.done[CANCEL_CLEANUP] as Left).left }
+      : {}),
     nextAction: { command: null, reason: "" },
     lastEvent,
   };
@@ -602,6 +614,7 @@ function objectiveText(row: ObjectiveView): string[] {
       ? `  Next: ${row.nextAction.command}\n    ${row.nextAction.reason}`
       : `  Next: ${row.nextAction.reason}`,
   ];
+  if (row.cleanupLeft) lines.push(`  Cleanup left: ${row.cleanupLeft}`);
   if (row.deadline)
     lines.push(
       `  Deadline: ${displayTime(row.deadline.at)} (${row.deadline.leftSeconds ? `${duration(row.deadline.leftSeconds * 1000)} left` : "passed: Factory cancels it"})`,

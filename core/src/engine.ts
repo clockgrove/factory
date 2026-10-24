@@ -247,6 +247,21 @@ export function objectiveWide<T extends Outcome>(outcome: T): T {
 }
 
 /** The Work Item a step belongs to: item steps are keyed `item:<id>:<phase>`. */
+/** The step that cleans up after cancel (work/finish.ts `cancelCleanupStep`). */
+export const CANCEL_CLEANUP = "cancel:cleanup";
+
+/** Failures in a row after which cleanup after the end settles, leaving what it couldn't do. */
+export const MAX_CLEANUP_FAILURES = 5;
+
+/**
+ * A `neverAsks` step's result once it settled without finishing: the last
+ * failure, which names what was left (PRs, branches, files).
+ */
+export interface Left {
+  left: string;
+  failures: number;
+}
+
 export function itemOf(key: string): string | undefined {
   return /^item:([^:]+):/.exec(key)?.[1];
 }
@@ -274,7 +289,8 @@ export interface Step {
   readonly resource?: HostResource;
   /**
    * Cleanup after the end (cancel's): it never asks. Any outcome but
-   * `done` retries in the background with the usual backoff.
+   * `done` retries in the background with the usual backoff, up to
+   * MAX_CLEANUP_FAILURES; then it is done with what it left (`Left`).
    */
   readonly neverAsks?: true;
   /**
@@ -953,24 +969,39 @@ export class ObjectiveRunner {
     }
     if (neverAsks && outcome.kind !== "done") {
       // Cleanup after the end never asks and never blocks: it retries in
-      // the background with the usual backoff.
+      // the background with the usual backoff, and settles after
+      // MAX_CLEANUP_FAILURES, recording what it left (`Left`), so the
+      // Objective settles and can be queued again.
       const previous = state.retries[key];
       const attempts = (previous?.attempts ?? 0) + 1;
       const backoff = Math.min(
         this.limits.baseBackoffMs * 2 ** (attempts - 1),
         this.limits.maxBackoffMs,
       );
+      const lastError =
+        "reason" in outcome
+          ? outcome.reason
+          : "question" in outcome
+            ? outcome.question
+            : outcome.finding;
+      if (attempts >= MAX_CLEANUP_FAILURES) {
+        const left: Left = { left: lastError, failures: attempts };
+        state.done[key] = left;
+        delete state.retries[key];
+        this.log.write(state.issue, {
+          step: key,
+          event: "cleanup-left",
+          failures: attempts,
+          left: lastError,
+        });
+        return;
+      }
       state.retries[key] = {
         count: (previous?.count ?? 0) + 1,
         attempts,
         since: previous?.since ?? now.toISOString(),
         nextAt: new Date(now.getTime() + backoff).toISOString(),
-        lastError:
-          "reason" in outcome
-            ? outcome.reason
-            : "question" in outcome
-              ? outcome.question
-              : outcome.finding,
+        lastError,
       };
       return;
     }
@@ -1070,7 +1101,14 @@ export class ObjectiveRunner {
       outcome.afterMs !== undefined ? now + outcome.afterMs : now + backoff;
     let question: Extract<Outcome, { kind: "hold" }> | undefined;
     const after = outcome.holdAfter;
-    if (after && now - Date.parse(after.since ?? since) >= after.ms)
+    // An answer to the step since then (`retry`) starts the clock again,
+    // so the step gets the whole time again before it asks.
+    const answered = Date.parse(state.answers[key]?.at ?? "");
+    const from = Math.max(
+      Date.parse(after?.since ?? since),
+      Number.isFinite(answered) ? answered : -Infinity,
+    );
+    if (after && now - from >= after.ms)
       question = hold(after.question, after.offers);
     else if (isError) {
       if (count >= this.limits.maxErrors)
@@ -1108,13 +1146,25 @@ export class ObjectiveRunner {
           scope: "objective",
         };
       }
-    } else if (
-      wait?.kind !== "gate" &&
-      !granted &&
-      now - Date.parse(since) >= this.limits.maxWaitMs
-    )
-      // A human gate (an approval, a required review) is never timed out:
-      // the display shows it and a reminder follows a day later.
+    } else if (wait?.kind === "gate") {
+      // A human gate (an approval, a required review) isn't Factory's to
+      // time out: the display shows it, a reminder follows after
+      // `remindAfterMs`, and as long again after that it asks, so the
+      // wait shows as needing a person.
+      const waited = now - Date.parse(since);
+      if (!granted && waited >= 2 * this.limits.remindAfterMs)
+        question = hold(
+          `Step ${key} has been waiting on ${wait.gate} since ${since}, for more than ${hours(waited)}. Factory carries on by itself once that is done.\n\n\`${WAIT}\` keeps waiting for another ${hours(this.limits.remindAfterMs)}, then asks again; or cancel.`,
+          [
+            {
+              answer: WAIT,
+              family: "wait",
+              consequence: `Keeps waiting for another ${hours(this.limits.remindAfterMs)}, then asks again.`,
+            },
+            "cancel",
+          ],
+        );
+    } else if (!granted && now - Date.parse(since) >= this.limits.maxWaitMs)
       question = hold(
         `Step ${key} has been retrying since ${since}, for more than ${hours(this.limits.maxWaitMs)}. It began with: ${(previous?.cause ?? outcome.reason).slice(0, 500)}\n\nLast error: ${outcome.reason.slice(0, 500)}\n\n\`${WAIT}\` keeps retrying for another ${hours(this.limits.maxWaitMs)}; \`retry\` tries again now; or cancel.`,
         [
@@ -1572,9 +1622,9 @@ export class ObjectiveRunner {
    * earlier (that one's close pauses the rest). Only steps the question
    * stopped pause: an item's question leaves other items' clocks running.
    * Budgets and the status note count only time a step could run.
-   * A human gate's `since` stays: it is never timed out, and its reminder
-   * (github-sync note) is keyed to the original start, so moving it would
-   * post the reminder again.
+   * A human gate's `since` stays: its reminder (github-sync note) is keyed
+   * to the original start, so moving it would post the reminder again,
+   * and its question is timed from it (a granted `wait` puts it off).
    */
   private close(hold: Hold): void {
     const now = this.now().getTime();
@@ -1621,12 +1671,14 @@ export class ObjectiveRunner {
 
   /**
    * `wait`: keep waiting without asking, until a known reset (and the
-   * usual budget after it), for a day on a limit with no reset time, or for
-   * another `maxWaitMs` on a transient cause.
+   * usual budget after it), for `remindAfterMs` (a day) on a limit with no
+   * reset time or on a human gate, or for another `maxWaitMs` on a
+   * transient cause.
    */
   private grant(retry: Retry): void {
     const now = this.now().getTime();
     const reset = retry.wait?.kind === "reset";
+    const daily = reset || retry.wait?.kind === "gate";
     const at =
       reset && retry.wait?.kind === "reset" && retry.wait.at
         ? Math.max(Date.parse(retry.wait.at), now)
@@ -1634,7 +1686,7 @@ export class ObjectiveRunner {
     retry.grantedUntil = new Date(
       Number.isFinite(at)
         ? at + this.limits.maxWaitMs
-        : now + (reset ? this.limits.remindAfterMs : this.limits.maxWaitMs),
+        : now + (daily ? this.limits.remindAfterMs : this.limits.maxWaitMs),
     ).toISOString();
     retry.nextAt = new Date(Number.isFinite(at) ? at : now).toISOString();
   }

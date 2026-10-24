@@ -128,9 +128,25 @@ export function profilesLacking(
   return [...used].filter((id) => !Object.hasOwn(profiles, id)).sort();
 }
 
-/** The final validation commands the operator retired. */
-export function retiredCommands(plan: Plan): Set<string> {
-  return new Set((plan.retired ?? []).map((entry) => entry.command));
+/**
+ * The checks final validation runs on the merged default branch, less
+ * those the operator retired: the plan's final commands or, when neither
+ * the Objective nor the installation declares one, each Work Item's own
+ * validation commands, so QA runs on the default branch whenever the plan
+ * has a command. A declared prerequisite stays preparation.
+ */
+export function finalChecks(plan: Plan): string[] {
+  const retired = new Set((plan.retired ?? []).map((entry) => entry.command));
+  const prerequisites = new Set(
+    plan.coverage.flatMap((entry) => entry.environment.prerequisites ?? []),
+  );
+  const checks = plan.finalCommands.length
+    ? plan.finalCommands
+    : plan.items
+        .filter((item) => (item.kind ?? "work") === "work")
+        .flatMap((item) => item.validation.map((check) => check.command))
+        .filter((command) => !prerequisites.has(command));
+  return [...new Set(checks)].filter((command) => !retired.has(command));
 }
 
 /**

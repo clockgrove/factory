@@ -44,7 +44,7 @@ import {
   packageScriptInvocation,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
-import { retiredCommands } from "./planning/plan.js";
+import { finalChecks } from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
@@ -712,12 +712,12 @@ async function dependencyInputsChanged(
 
 /**
  * The commands final validation runs: the declared prerequisites, then the
- * final commands less those the operator retired (planning/plan.ts). Only a bootstrap that runs first installs, so the
- * sequence starts with one exactly once: a bootstrap the final commands list
- * moves to the front, and otherwise the plan's source-declared bootstrap
- * leads. The plan's declared prerequisites run first unless the final
- * commands already start with them; when they do run first, the bootstrap
- * leads them.
+ * final checks (planning/plan.ts `finalChecks`). Only a bootstrap that runs
+ * first installs, so the sequence starts with one exactly once: a bootstrap
+ * the final checks list moves to the front, and otherwise the plan's
+ * source-declared bootstrap leads. The plan's declared prerequisites run
+ * first unless the final checks already start with them; when they do run
+ * first, the bootstrap leads them.
  */
 function finalSequence(plan: Plan): {
   preparation: string[];
@@ -726,10 +726,7 @@ function finalSequence(plan: Plan): {
   const key = (command: string) => command.trim();
   const isBootstrap = (command: string) =>
     packageBootstrap(command) !== undefined;
-  const retired = retiredCommands(plan);
-  const finalCommands = plan.finalCommands.filter(
-    (command) => !retired.has(command),
-  );
+  const finalCommands = finalChecks(plan);
   const listed = finalCommands.filter(isBootstrap);
   let commands = [
     ...listed.filter(

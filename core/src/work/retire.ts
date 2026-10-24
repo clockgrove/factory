@@ -1,6 +1,6 @@
 import type { Outcome, StepContext } from "../engine.js";
 import { packageBootstrap } from "../planning/facts.js";
-import { ACCEPTED_AT, currentPlan, retiredCommands } from "../planning/plan.js";
+import { ACCEPTED_AT, currentPlan, finalChecks } from "../planning/plan.js";
 import type { Plan, Retirement } from "../planning/types.js";
 import type { HoldOption, ObjectiveState } from "../state.js";
 import { fact, facts } from "./facts.js";
@@ -63,7 +63,8 @@ export function commandRefusal(
     return "the installation requires it (finalValidation.requiredCommands)";
   if (packageBootstrap(command) !== undefined)
     return "it is the package bootstrap the other commands need";
-  if (!plan.finalCommands.includes(command))
+  const checks = finalChecks(plan);
+  if (!checks.includes(command))
     return "it is final validation's preparation, not one of its commands";
   // Only a real check counts as one left: never a readiness probe, its
   // preparation or a package bootstrap.
@@ -73,11 +74,9 @@ export function commandRefusal(
       ...(entry.environment.prerequisites ?? []),
     ]),
   );
-  const retired = retiredCommands(plan);
-  return plan.finalCommands.some(
+  return checks.some(
     (each) =>
       each !== command &&
-      !retired.has(each) &&
       !preparation.has(each) &&
       packageBootstrap(each) === undefined,
   )

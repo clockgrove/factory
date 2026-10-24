@@ -22,8 +22,15 @@ predecessors → check → per planning round g:n: plan:g:n → review:g:n → d
   → while an amendment is pending: amend:<id>:plan → amend:<id>:review → amend:<id> (accept, post the plan comment)
   → per Work Item, in dependency order:
       item:<id>:work → select (media items) → validate → review → publish (push, PR) → ci → merge
+      read-only QA: item:<id>:validate → review → merge (settles, delivers nothing)
   → final (final validation) → final-review → report → done
 ```
+
+**QA on the default branch.** Every Objective is checked on the merged default branch, after its last merge:
+
+- **Final validation** (`final`) runs on the default branch head, in a fresh sandboxed checkout. It runs the final commands: the Objective's Acceptance commands and the installation's `finalValidation.requiredCommands`. When there are none, it runs each Work Item's own validation commands instead (planning/plan.ts `finalChecks`). The plan check requires a validation command on every Work Item once the repository has one.
+- **Read-only QA** (a `qa` item) adds checks the plan names: its named CI checks, then its commands, on the default-branch commit once every dependency has merged, then a review. An Objective made only of QA checks the commit it was planned on.
+- **Final review** (`final-review`) judges every Objective criterion against the commit final validation checked. For a plan with no command at all (the repository has none), it is the only QA.
 
 Other steps: `cancel:cleanup` after cancel, `rerun:cleanup` before a re-run, `config` when the frozen configuration no longer matches, and `rebuild` for `factory reset`.
 

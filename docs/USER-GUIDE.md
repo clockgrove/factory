@@ -111,7 +111,7 @@ At queue time each final command must be runnable:
 - A command listed in the installation's `finalValidation.ciOnlyCommands` is refused: final validation runs offline, so leave it to CI.
 - Each executable the command starts must be on the service's PATH, and an npm or pnpm it uses must match the `packageManager` pin. Factory never installs tools.
 
-Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well.
+Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well. With no final command, final validation runs each Work Item's own validation commands on the merged default branch instead, so QA runs there either way.
 
 A backticked command in a sentence ("the probe is `node scripts/probe.mjs`") is declared, because you wrote it: the plan may use it as a Work Item check. It is not a final command. If the Objective has no final command at all but backticks a command the base already declares (a `package.json` script, or an own-line command in a Sources file), the check refuses it: make it an Acceptance bullet, or remove the backticks.
 
@@ -204,7 +204,9 @@ factory propose --file /abs/draft.json --approve SHA256 --enqueue --repo OWNER/N
   - wait for CI;
   - merge.
 
-  Then the final validation and final review on the default branch, and a report comment that closes the issue.
+  A read-only QA item has no worker or PR: it validates the default branch once its dependencies have merged, and is reviewed.
+
+  Then QA on the default branch: final validation (the final commands, or each Work Item's own commands when there are none) and final review, and a report comment that closes the issue.
 
 - **No approval step.** A clean, reviewed plan starts at once. Factory asks only when the review finds a decision for you.
 - **Dequeue:** move the card off Queued before planning starts, and the Objective is withdrawn as if never admitted. To run a finished Objective again, set its card to Queued after its final status shows.

@@ -1,1 +1,0 @@
-drill private brief: the gamma value is 2.2 and the label is NORTH

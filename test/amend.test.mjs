@@ -10,6 +10,7 @@ import {
   configured,
   installation,
   item,
+  plan,
   refusal,
   seed,
   serve,
@@ -21,28 +22,12 @@ import {
 test("a draining Objective starts no Work Item that hasn't started, even with a stack repair's placeholders", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  const item = (id) => ({
-    id,
-    title: id,
-    goal: id,
-    acceptance: [],
-    nonGoals: [],
-    citations: [],
-    dependencies: [],
-    ownedPaths: [`${id}/`],
-    validation: [],
-    brief: id,
-  });
+  const owned = (id) => item(id, { ownedPaths: [`${id}/`] });
   seed(inst, 57, "building", {
     control: { mode: "draining", by: "test", at: new Date().toISOString() },
     done: {
       check: {},
-      plan: {
-        base: "0".repeat(40),
-        items: [item("a"), item("b")],
-        finalCommands: [],
-        decisions: [],
-      },
+      plan: plan([owned("a"), owned("b")], { base: "0".repeat(40) }),
     },
     kept: {
       // a started; b only has the placeholders a stack repair writes.
@@ -96,13 +81,10 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     dependencies: [],
   };
   // Each owns its own path, so none waits for another's.
-  const plan = (issue) => ({
-    base: "0".repeat(40),
-    items: [{ id: "a", ownedPaths: [`src/${issue}.ts`], dependencies: [] }],
-    coverage: [],
-    finalCommands: [],
-    decisions: [],
-  });
+  const own = (issue) =>
+    plan([item("a", { ownedPaths: [`src/${issue}.ts`] })], {
+      base: "0".repeat(40),
+    });
   const rejected = {
     "amend:op-1:plan": { rejected: "The amendment removes Work Item a" },
     "amend:op-1": { rejected: "The amendment removes Work Item a" },
@@ -121,19 +103,19 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     seed(inst, issue, "building", {
       done: {
         check: {},
-        plan: plan(issue),
+        plan: own(issue),
         ...rejected,
         ...(issue === 81 ? round : {}),
       },
       kept: { "plan:acceptedAt": accepted, "amend:op-1:proposal": proposal },
     });
   seed(inst, 83, "building", {
-    done: { check: {}, plan: plan(83), ...round },
+    done: { check: {}, plan: own(83), ...round },
     kept: { "plan:acceptedAt": accepted },
   });
   // A worker's discovery, proposed at once, waits on its amendment.
   seed(inst, 84, "building", {
-    done: { check: {}, plan: plan(84), ...round },
+    done: { check: {}, plan: own(84), ...round },
     kept: {
       "plan:acceptedAt": accepted,
       "item:a:base": "0".repeat(40),

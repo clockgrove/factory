@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { githubOrigin } from "./helpers.mjs";
+import { githubOrigin, item, plan } from "./helpers.mjs";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = "drill/target";
@@ -106,7 +106,8 @@ function count(inst, sql) {
  */
 function seedDone(inst, issue, dir = inst.objectives) {
   mkdirSync(dir, { recursive: true });
-  const item = (id, paths) => ({ id, title: `Item ${id}`, ownedPaths: paths });
+  const owner = (id, paths) =>
+    item(id, { title: `Item ${id}`, ownedPaths: paths });
   writeFileSync(
     join(dir, `${issue}.json`),
     JSON.stringify({
@@ -150,10 +151,7 @@ function seedDone(inst, issue, dir = inst.objectives) {
       },
       done: {
         check: { title: "Parser hardening" },
-        plan: {
-          items: [item("a", ["src/parser/"]), item("b", ["docs/"])],
-          decisions: [],
-        },
+        plan: plan([owner("a", ["src/parser/"]), owner("b", ["docs/"])]),
         "item:a:work": {
           notes: [
             {

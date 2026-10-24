@@ -17,13 +17,7 @@ import {
 } from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
-import {
-  currentPlan,
-  decisionsOf,
-  retiredLines,
-  SPLIT_END,
-  splitRecord,
-} from "./planning/plan.js";
+import { currentPlan, decisionsOf, retiredLines } from "./planning/plan.js";
 import { planningRevisions } from "./planning/steps.js";
 import type { ItemKind, Plan } from "./planning/types.js";
 import { RESET, type ResetRecord } from "./reset.js";
@@ -44,7 +38,6 @@ import {
 } from "./state.js";
 import type { Tracking } from "./tracking.js";
 import { mergeOf } from "./work/merged.js";
-import { childRows } from "./work/split.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /** The list view hides Objectives that finished longer ago than this. */
@@ -79,8 +72,6 @@ export interface ObjectiveView {
   frozen?: Pick<Frozen, "provider" | "selectedBy" | "digest">;
   /** The current plan's Work Items. */
   items: ItemRow[];
-  /** A split's child Objectives: each one's issue and status as the parent last read it (work/split.ts). */
-  children?: { key: string; issue: number; status: string }[];
   /** The current plan, in full. */
   plan?: Plan;
   waiting: {
@@ -303,7 +294,6 @@ export function statusOf(
         }
       : {}),
     items: plan ? itemRows(state, plan) : [],
-    ...(splitRecord(state) ? { children: childRows(state) } : {}),
     ...(plan ? { plan } : {}),
     waiting: Object.entries(state.retries).map(([step, retry]) => ({
       step,
@@ -471,7 +461,7 @@ function nextAction(
         .join(", ")}.`,
     };
   if (TERMINAL.includes(row.status as ObjectiveStatus)) {
-    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : row.endedBy === SPLIT_END ? ": its child Objectives deliver it" : ""}`;
+    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : ""}`;
     return row.running.length || row.waiting.length
       ? { command: null, reason: `${how}; Factory is cleaning up.` }
       : { command: null, reason: `${how}.` };
@@ -626,13 +616,6 @@ function objectiveText(row: ObjectiveView): string[] {
       `  Deadline: ${displayTime(row.deadline.at)} (${row.deadline.leftSeconds ? `${duration(row.deadline.leftSeconds * 1000)} left` : "passed: Factory cancels it"})`,
     );
   if (row.items.length) lines.push("  Work Items:", ...itemTable(row.items));
-  if (row.children?.length)
-    lines.push(
-      "  Child Objectives:",
-      ...row.children.map(
-        (child) => `    #${child.issue} ${child.key}: ${child.status}`,
-      ),
-    );
   if (row.frozen)
     lines.push(
       `  Provider: ${row.frozen.provider} (selectedBy: ${row.frozen.selectedBy}); configuration ${row.frozen.digest.slice(0, 12)}`,

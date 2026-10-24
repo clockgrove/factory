@@ -12,8 +12,7 @@ import { findState, type ObjectiveState } from "../state.js";
 import { fact, facts } from "../work/facts.js";
 import { mergeOf } from "../work/merged.js";
 import { hostGitExit, isAncestor } from "../worktree.js";
-import { childOf } from "./facts.js";
-import { acceptedInputs, currentPlan, splitRecord } from "./plan.js";
+import { acceptedInputs, currentPlan } from "./plan.js";
 import type { PlanningDeps } from "./steps.js";
 
 /*
@@ -131,7 +130,7 @@ export function predecessorsStep(deps: PlanningDeps): Step {
       );
       const blockers: Blocker[] = [];
       for (const blocker of linked.sort((a, b) => a.number - b.number))
-        blockers.push(...(await classify(deps, blocker, skip, signal)));
+        blockers.push(await classify(deps, blocker, signal));
       const ended = blockers.filter((b) => b.kind === "ended");
       if (ended.length)
         return {
@@ -191,48 +190,13 @@ export function predecessorsStep(deps: PlanningDeps): Step {
 
 /**
  * Where one blocker stands: done (with its evidence), still to come, or
- * ended without delivering. A done split parent stands for its children
- * (work/split.ts): each child is classified in its place, except the ones
- * the operator ignored (`skip`).
+ * ended without delivering.
  */
 async function classify(
   deps: PlanningDeps,
   blocker: IssueSummary,
-  skip: ReadonlySet<string>,
   signal: AbortSignal,
-): Promise<Blocker[]> {
-  const one = await standing(deps, blocker, signal);
-  if (!("children" in one)) return [one];
-  const blockers: Blocker[] = [];
-  for (const issue of one.children) {
-    if (skip.has(`#${issue}`)) continue;
-    const child = await deps.github.issue(issue, signal);
-    const found = await standing(
-      deps,
-      { ...child, id: 0, number: issue },
-      signal,
-    );
-    // Children never split again, so this is one level.
-    blockers.push(
-      "children" in found
-        ? {
-            ref: `#${issue}`,
-            kind: "ended",
-            why: "a split child that split again",
-          }
-        : found.kind === "done"
-          ? found
-          : { ...found, why: `${found.why}; a child of ${one.ref}` },
-    );
-  }
-  return blockers;
-}
-
-async function standing(
-  deps: PlanningDeps,
-  blocker: IssueSummary,
-  signal: AbortSignal,
-): Promise<Blocker | { ref: string; children: number[] }> {
+): Promise<Blocker> {
   const issue = blocker.number;
   const ref = reference(deps.github, blocker);
   if (!deps.github.ownIssue(blocker))
@@ -268,15 +232,13 @@ async function standing(
   const final = previous.done.final as
     | { commit: string; tree: string; commands: string[] }
     | undefined;
-  const split = plan?.split ? splitRecord(previous) : undefined;
-  if (!plan || (!final && !split))
+  if (!plan || !final)
     return {
       ref,
       kind: "ended",
       why: "its Objective is done, but its record has no accepted result",
     };
-  // What its issue shows now must be what Factory accepted, a split
-  // parent's too.
+  // What its issue shows now must be what Factory accepted.
   const accepted = acceptedInputs(previous);
   const rendered = await deps.github.renderedIssue(issue, signal);
   const digest =
@@ -292,9 +254,6 @@ async function standing(
       kind: "ended",
       why: "its issue was edited after Factory accepted its result",
     };
-  // A split parent has no accepted result: its children deliver it. (Any
-  // other has `final`, checked above.)
-  if (split || !final) return { ref, children: Object.values(split!.children) };
   return {
     ref,
     kind: "done",
@@ -323,8 +282,7 @@ async function standing(
 }
 
 /**
- * The shortest cycle of open blocked-by links (and split parents' waits
- * on their children, work/split.ts) through `self`, as the
+ * The shortest cycle of open blocked-by links through `self`, as the
  * issues along it from `self` back to `self`; undefined when none is found
  * within CYCLE_READS reads. A link it can't read is passed over: the wait
  * looks again on its next run.
@@ -346,21 +304,12 @@ async function cycleThrough(
     if (seen.has(issue)) continue;
     seen.add(issue);
     reads += 1;
-    const read = async (list: () => Promise<IssueSummary[]>) => {
-      try {
-        return await list();
-      } catch (error) {
-        if (signal.aborted) throw error;
-        return [];
-      }
-    };
-    // A split parent waits for its children as for its blockers.
-    const next = [
-      ...(await read(() => github.blockedBy(issue, signal))),
-      ...(await read(() => github.subIssues(issue, signal))).filter(
-        (child) => childOf(child.body ?? "")?.parent === issue,
-      ),
-    ];
+    let next: IssueSummary[] = [];
+    try {
+      next = await github.blockedBy(issue, signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+    }
     for (const blocker of next.filter(open)) {
       if (blocker.number === self) return [...path, self];
       if (!seen.has(blocker.number)) queue.push([...path, blocker.number]);

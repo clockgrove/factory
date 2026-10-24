@@ -1,4 +1,4 @@
-// The plan's steps end to end: dependencies, predecessors, splits, the build,
+// The plan's steps end to end: dependencies, predecessors, the build,
 // QA and discovery, and approval of a non-writer's Objective.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -21,7 +21,6 @@ import {
   githubOrigin,
   installation,
   offered,
-  REPO,
   refusal,
   seed,
   serve,
@@ -31,7 +30,7 @@ import {
   until,
 } from "./helpers.mjs";
 
-test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence; a split creates its blocked-by children once, waits for them and stands for them", async () => {
+test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence", async () => {
   const inst = installation();
   const SHOWN_95 = "<p>Ship the parser.</p>";
   let state90 = { state: "open" };
@@ -146,366 +145,6 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   const [ignored] = stateOf(inst, 91).done.predecessors.ignored;
   assert.deepEqual([ignored.ref, ignored.reason], ["#90", "Done by hand"]);
   await stopped(service);
-
-  // An accepted split creates its children once, through a crash right
-  // after the first create: sub-issues of the parent, the dependent one
-  // blocked by the other, both queued. The parent stays open, waiting on
-  // them with no question and showing each one's status; a cancelled child
-  // holds, naming it; once every child is done, the parent closes, done by
-  // its split, and an Objective blocked by it takes the children's evidence.
-  const split = installation();
-  const render = (markdown) =>
-    micromark(markdown, { extensions: [gfm()], htmlExtensions: [gfmHtml()] });
-  const RAW_97 =
-    "## Goal\n\nShip parser and printer.\n\n## Acceptance\n\n- Parser parses\n- Printer prints\n\n## Constraints\n\nKeep it small.\n";
-  const now = () => new Date().toISOString();
-  const entry = (number, fields) => ({
-    id: number * 100,
-    number,
-    state: "open",
-    labels: [],
-    created_at: now(),
-    comments: [],
-    subs: [],
-    blockers: [],
-    ...fields,
-  });
-  const issues = {
-    97: entry(97, {
-      title: "Parser and printer",
-      body: RAW_97,
-      user: { login: "kirk" },
-      labels: [{ name: "factory:objective" }, { name: "P1" }],
-    }),
-    98: entry(98, {
-      title: "After",
-      body: "",
-      user: { login: "kirk" },
-      blockers: [97],
-    }),
-  };
-  let next = 100;
-  const queuedCards = [];
-  // Each issue's card option on the Project, by issue.
-  const cards = {};
-  const view = ({ comments: _c, subs: _s, blockers: _b, ...issue }) => ({
-    ...issue,
-    body_html: render(issue.body ?? ""),
-    type: null,
-    repository_url: `http://api/repos/${REPO}`,
-  });
-  const byId = (id) => Object.values(issues).find((issue) => issue.id === id);
-  const splitServer = createHttpServer(async (req, res) => {
-    let text = "";
-    for await (const chunk of req) text += chunk;
-    const body = text ? JSON.parse(text) : {};
-    const reply = (code, value) => {
-      res.writeHead(code, { "content-type": "application/json" });
-      res.end(JSON.stringify(value));
-    };
-    const { pathname: path, searchParams } = new URL(req.url, "http://g");
-    const at = /^\/repos\/drill\/target\/issues\/(\d+)(\/.*)?$/.exec(path);
-    const issue = at && issues[at[1]];
-    if (path === "/user") return reply(200, { login: "factory" });
-    if (path.startsWith(`/repos/${REPO}/labels/`)) return reply(200, {});
-    if (path === "/graphql") {
-      const { query, variables } = body;
-      if (query.includes("issueTypes"))
-        return reply(200, {
-          data: { repository: { issueTypes: { nodes: [] } } },
-        });
-      if (query.includes("issue(number: $issue)") && issues[variables.issue])
-        return reply(200, {
-          data: {
-            repository: {
-              nameWithOwner: REPO,
-              issue: {
-                id: `I_${variables.issue}`,
-                number: variables.issue,
-                state: issues[variables.issue].state.toUpperCase(),
-                repository: { nameWithOwner: REPO },
-                projectItems: {
-                  nodes: cards[variables.issue]
-                    ? [
-                        {
-                          id: `PVTI_I_${variables.issue}`,
-                          isArchived: false,
-                          project: { id: "PVT_none" },
-                          option: {
-                            name: cards[variables.issue],
-                            updatedAt: now(),
-                          },
-                        },
-                      ]
-                    : [],
-                },
-              },
-            },
-          },
-        });
-      if (query.includes("addProjectV2ItemById"))
-        return reply(200, {
-          data: {
-            addProjectV2ItemById: { item: { id: `PVTI_${variables.content}` } },
-          },
-        });
-      if (query.includes("{ id options { id name } }"))
-        return reply(200, {
-          data: {
-            node: {
-              field: { id: "F", options: [{ id: "O", name: "Queued" }] },
-            },
-          },
-        });
-      if (query.includes("updateProjectV2ItemFieldValue")) {
-        queuedCards.push(variables.item);
-        cards[variables.item.replace("PVTI_I_", "")] = "Queued";
-        return reply(200, {
-          data: {
-            updateProjectV2ItemFieldValue: {
-              projectV2Item: { value: { updatedAt: now() } },
-            },
-          },
-        });
-      }
-      return reply(200, { errors: [{ message: "not served" }] });
-    }
-    if (path === `/repos/${REPO}/issues` && req.method === "POST") {
-      const number = next++;
-      issues[number] = entry(number, {
-        ...body,
-        user: { login: "factory" },
-        labels: body.labels.map((name) => ({ name })),
-      });
-      return reply(201, view(issues[number]));
-    }
-    if (path === `/repos/${REPO}/issues`) {
-      const label = searchParams.get("labels");
-      return reply(
-        200,
-        searchParams.get("page") === "1"
-          ? Object.values(issues)
-              .filter((found) => found.labels.some((l) => l.name === label))
-              .reverse()
-              .map(view)
-          : [],
-      );
-    }
-    if (!issue) return reply(404, { message: "Not Found" });
-    const rest = at[2] ?? "";
-    const page = searchParams.get("page") ?? "1";
-    if (rest === "" && req.method === "PATCH") {
-      Object.assign(issue, body);
-      return reply(200, view(issue));
-    }
-    if (rest === "") return reply(200, view(issue));
-    if (rest === "/comments" && req.method === "POST") {
-      const posted = {
-        id: issue.comments.length + 1,
-        body: body.body,
-        created_at: now(),
-        user: { login: "factory" },
-      };
-      issue.comments.push(posted);
-      return reply(201, posted);
-    }
-    if (rest === "/comments")
-      return reply(200, page === "1" ? issue.comments : []);
-    if (rest === "/labels") return reply(200, []);
-    const linked = {
-      "/sub_issues": "subs",
-      "/dependencies/blocked_by": "blockers",
-    }[rest];
-    if (linked && req.method === "POST") {
-      issue[linked].push(byId(body.sub_issue_id ?? body.issue_id).number);
-      return reply(201, {});
-    }
-    if (linked)
-      return reply(
-        200,
-        page === "1" ? issue[linked].map((n) => view(issues[n])) : [],
-      );
-    reply(404, { message: "Not Found" });
-  });
-  await new Promise((resolve) => splitServer.listen(0, "127.0.0.1", resolve));
-  after(() => splitServer.close());
-  configured(split, `http://127.0.0.1:${splitServer.address().port}`);
-  const children = [
-    {
-      key: "parser",
-      title: "Parser",
-      goal: "Parse <input> for @someone & more.",
-      outcomes: ["Parser parses"],
-      sources: [{ path: "docs/parse.md", heading: "Parse" }],
-      dependsOn: [],
-    },
-    {
-      key: "printer",
-      title: "Printer",
-      goal: "Print.",
-      outcomes: ["Printer prints"],
-      sources: [],
-      dependsOn: ["parser"],
-    },
-  ];
-  seed(split, 97, "building", {
-    startedAt: now(),
-    done: {
-      predecessors: { predecessors: [], ignored: [] },
-      check: {
-        shown: readShown(render(RAW_97), { sources: false }),
-        title: "Parser and printer",
-      },
-      plan: { items: [], coverage: [], split: { children } },
-    },
-    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
-  });
-  const crashing = serve(split, "split:create:after");
-  assert.equal((await crashing.exit).signal, "SIGKILL");
-  assert.deepEqual(
-    Object.keys(issues),
-    ["97", "98", "100"],
-    "one child, then the crash",
-  );
-  // #98 is blocked by the parent: it waits while the parent is open.
-  seed(split, 98, "checking", { done: {} });
-  const resumed = serve(split);
-  const waiting = (issue, step) =>
-    stateOf(split, issue).retries[step]?.wait?.kind === "gate";
-  await until(
-    () => waiting(97, "build:split:children") && waiting(98, "predecessors"),
-    "the parent waits on its children, and #98 on the parent",
-  );
-  const record = stateOf(split, 97).done["build:split"];
-  assert.deepEqual(record.children, { parser: 100, printer: 101 });
-  assert.deepEqual(
-    Object.keys(issues),
-    ["97", "98", "100", "101"],
-    "no duplicate",
-  );
-  assert.equal(issues[97].state, "open", "the parent stays open");
-  assert.deepEqual(issues[97].subs, [100, 101]);
-  assert.deepEqual(issues[101].blockers, [100]);
-  assert.deepEqual(issues[100].blockers, []);
-  assert.deepEqual([...new Set(queuedCards)].sort(), [
-    "PVTI_I_100",
-    "PVTI_I_101",
-  ]);
-  assert.deepEqual(
-    issues[100].labels.map((label) => label.name),
-    ["factory:objective", "P1"],
-  );
-  assert.equal(
-    issues[100].body,
-    "<!-- factory:parent=97;child=parser -->\nPart of #97. Factory created this child Objective from its accepted plan.\n\n## Goal\n\nParse &lt;input&gt; for &#64;someone &amp; more.\n\n## Acceptance\n\n- Parser parses\n\n## Sources\n\n- `docs/parse.md#Parse`\n\n## Constraints\n\nKeep it small.\n",
-  );
-  const told = issues[97].comments.filter((c) =>
-    c.body.startsWith("<!-- factory:97:split:"),
-  );
-  assert.equal(told.length, 1);
-  assert.match(
-    told[0].body,
-    /- #100 `parser` Parser\n- #101 `printer` Printer \(after #100\)/,
-  );
-  const row = () => status(split).objectives.find((each) => each.issue === 97);
-  assert.deepEqual(row().children, [
-    { key: "parser", issue: 100, status: "queued" },
-    { key: "printer", issue: 101, status: "queued" },
-  ]);
-  // A child's record, done with its accepted result, or cancelled.
-  const child = (issue, ended) => {
-    Object.assign(issues[issue], {
-      state: "closed",
-      state_reason: ended === "done" ? "completed" : "not_planned",
-    });
-    seed(split, issue, ended, {
-      done: {
-        check: {
-          shown: readShown(render(issues[issue].body), { sources: false }),
-          title: issues[issue].title,
-        },
-        plan: { items: [{ id: "a", title: "A", ownedPaths: ["src/"] }] },
-        "item:a:merge": { mergeSha: `${issue}`.repeat(10).slice(0, 40) },
-        final: { commit: "b".repeat(40), tree: "c".repeat(40), commands: [] },
-        report: true,
-      },
-    });
-  };
-  // A cancelled child asks; `continue` goes on without it and the parent
-  // still waits for the other.
-  child(101, "cancelled");
-  await until(() => stateOf(split, 97).holds.length, "the parent asks");
-  const [asked] = stateOf(split, 97).holds;
-  assert.match(asked.question, /#101 `printer` \(cancelled\)/);
-  assert.deepEqual(
-    asked.options.map((option) => option.answer),
-    ["continue", "retry", "cancel"],
-  );
-  assert.equal(
-    cli(split, "answer", "97", "continue", "--question", asked.id).code,
-    0,
-  );
-  await until(
-    () =>
-      !stateOf(split, 97).holds.length &&
-      stateOf(split, 97).kept["split:dropped"] &&
-      waiting(97, "build:split:children"),
-    "the parent waits on the other child",
-  );
-  assert.deepEqual(
-    row().children.map((each) => each.status),
-    ["queued", "cancelled (gone on without)"],
-  );
-  // A child closed by hand before its admission would never run: it asks.
-  Object.assign(issues[100], { state: "closed", state_reason: "completed" });
-  await until(() => stateOf(split, 97).holds.length, "the parent asks again");
-  const [closed] = stateOf(split, 97).holds;
-  assert.match(closed.question, /#100 `parser` \(closed\)/);
-  // It runs after all and is done: retry closes the parent.
-  child(100, "done");
-  assert.equal(
-    cli(split, "answer", "97", "retry", "--question", closed.id).code,
-    0,
-  );
-  await until(() => stateOf(split, 97).status === "done", "the split is done");
-  assert.equal(stateOf(split, 97).ended.by, "split");
-  assert.deepEqual(
-    [issues[97].state, issues[97].state_reason],
-    ["closed", "completed"],
-  );
-  const finished = issues[97].comments.filter((c) =>
-    c.body.startsWith("<!-- factory:97:split-done:"),
-  );
-  assert.equal(finished.length, 1);
-  assert.match(
-    finished[0].body,
-    /#101 `printer`: cancelled \(gone on without it\)/,
-  );
-  // The parent stands for its children: #98 holds on the cancelled one,
-  // and once that is ignored, takes the done one's evidence.
-  await until(() => stateOf(split, 98).holds.length, "#98 asks");
-  const [blocked] = stateOf(split, 98).holds;
-  assert.match(blocked.question, /#101: closed as not planned; a child of #97/);
-  assert.equal(
-    cli(
-      split,
-      "answer",
-      "98",
-      "ignore",
-      "101",
-      "--question",
-      blocked.id,
-      "--text",
-      "Dropped from the split",
-    ).code,
-    0,
-  );
-  await until(() => stateOf(split, 98).done.predecessors, "#98's evidence");
-  assert.deepEqual(
-    stateOf(split, 98).done.predecessors.predecessors.map((each) => each.issue),
-    [100],
-  );
-  await stopped(resumed);
 });
 
 test("a state file that can't be read now is read again, not marked unreadable", {
@@ -1007,24 +646,13 @@ _No response_
 
 1. Shown note.`;
 
-test("a non-writer's Objective is approved by the text GitHub shows; a split child Factory wrote needs no approval", async () => {
+test("a non-writer's Objective is approved by the text GitHub shows", async () => {
   const inst = installation();
   const server = createHttpServer((req, res) => {
     const reply = (code, body) => {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     };
-    if (req.url === "/user") return reply(200, { login: "factory[bot]" });
-    // #72 is a split child Factory wrote; #73 copies its marker.
-    const child = /\/issues\/(7[23])$/.exec(req.url);
-    if (child)
-      return reply(200, {
-        title: `Child ${child[1]}`,
-        body: `<!-- factory:parent=70;child=golden -->\n${HIDDEN_BODY}`,
-        body_html: HIDDEN_HTML,
-        state: "open",
-        user: { login: child[1] === "72" ? "factory" : "outsider" },
-      });
     if (req.url.endsWith("/issues/71"))
       return reply(200, {
         title: "Golden 71",
@@ -1044,7 +672,7 @@ test("a non-writer's Objective is approved by the text GitHub shows; a split chi
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   after(() => server.close());
   configured(inst, `http://127.0.0.1:${server.address().port}`);
-  for (const issue of [71, 72, 73]) seed(inst, issue);
+  seed(inst, 71);
   const service = serve(inst);
   await until(() => stateOf(inst, 71).holds.length, "#71 asks");
   const shown = readShown(HIDDEN_HTML, { sources: false });
@@ -1093,15 +721,5 @@ test("a non-writer's Objective is approved by the text GitHub shows; a split chi
     stateOf(inst, 71).holds[0].question,
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
-  // A split child Factory wrote inherits its parent's approval; the same
-  // marker from anyone else is approved like any non-writer's Objective.
-  await until(() => stateOf(inst, 73).holds.length, "#73 asks");
-  assert.match(stateOf(inst, 73).holds[0].question, /approve to plan it/);
-  await until(
-    () => stateOf(inst, 72).holds.length || stateOf(inst, 72).retries.check,
-    "#72 is checked",
-  );
-  for (const asked of stateOf(inst, 72).holds)
-    assert.doesNotMatch(asked.question, /approve/);
   await stopped(service);
 });

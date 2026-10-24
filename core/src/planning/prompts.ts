@@ -344,7 +344,7 @@ Examples (illustrations, not command or source authority):
 `;
   const evidence = `\n\n${repository ? repository.map + repository.conventions : ""}Native Objective prerequisites:\n${JSON.stringify(input.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(input.localExecutables ?? null)}\n${configuredReviewArtifacts(reviewArtifacts)}${bodies.text ? `Pinned source bodies. ${bodies.guidance}\n${bodies.text}` : ""}Compiler choices (JSON data), one top-level field per paragraph:`;
   const revision = input.revising
-    ? `\n\n- Revision answer: currentPlan is your earlier complete answer and stays the plan except for what you change. Answer with only the changes: items holds new items and complete replacements (same id) of current items; itemEdits replaces single fields of a current item, null keeping a field (so setting a nullable field such as media to null needs a complete replacement in items), and its acceptanceReplace rewrites single acceptance entries by index while acceptanceAppend adds entries at the end, so existing acceptance indices keep their meaning (prefer these to replacing a long acceptance list); removedItemIds drops items; coverage replaces the entries its obligationIndex selects; sourceObligations and requiredPreIntegrationChecks are null to keep the current list or the complete new list; decisionRequired and any split are given in full, as in a complete answer. Name each item id at most once. Keep indices consistent: when a change moves an item's validation entries, also replace the coverage entries and source obligations that refer to them. citedSections holds the exact base bytes of the repository sections the affected items cite; read other files only when the findings need them.\n`
+    ? `\n\n- Revision answer: currentPlan is your earlier complete answer and stays the plan except for what you change. Answer with only the changes: items holds new items and complete replacements (same id) of current items; itemEdits replaces single fields of a current item, null keeping a field (so setting a nullable field such as media to null needs a complete replacement in items), and its acceptanceReplace rewrites single acceptance entries by index while acceptanceAppend adds entries at the end, so existing acceptance indices keep their meaning (prefer these to replacing a long acceptance list); removedItemIds drops items; coverage replaces the entries its obligationIndex selects; sourceObligations and requiredPreIntegrationChecks are null to keep the current list or the complete new list; decisionRequired is given in full, as in a complete answer. Name each item id at most once. Keep indices consistent: when a change moves an item's validation entries, also replace the coverage entries and source obligations that refer to them. citedSections holds the exact base bytes of the repository sections the affected items cite; read other files only when the findings need them.\n`
     : "";
   const lookupRules = input.lookups
     ? `\n\n${lookupGuidance(input.lookups.open)}`
@@ -393,22 +393,10 @@ export interface RevisionScope {
   changedFields: string[];
 }
 
-/** Every item of a draft, including the graphs of split children. */
-export function draftItems(draft: Draft): WorkItem[] {
-  return [
-    ...draft.items,
-    ...(draft.split?.children ?? []).flatMap((child) =>
-      child.graph ? draftItems(child.graph) : [],
-    ),
-  ];
-}
-
 function reviewedShape(draft: Draft, decisions: readonly PlannerDecision[]) {
   const { items: _items, ...fields } = draft;
   return {
-    items: new Map(
-      draftItems(draft).map((item) => [item.id, JSON.stringify(item)]),
-    ),
+    items: new Map(draft.items.map((item) => [item.id, JSON.stringify(item)])),
     fields: new Map(
       Object.entries({ ...fields, operatorDecisions: decisions }).map(
         ([key, value]) => [key, JSON.stringify(value)],
@@ -512,25 +500,16 @@ function reviewGraphView(draft: Draft, evidence: readonly ReviewEvidence[]) {
       return index < 0 ? citation : { ...citation, evidenceIndex: index };
     }),
   });
-  const view = (graph: Draft): unknown => ({
-    ...graph,
-    items: graph.items.map(itemView),
-    ...(graph.expansions && {
-      expansions: graph.expansions.map((envelope) => ({
+  return {
+    ...draft,
+    items: draft.items.map(itemView),
+    ...(draft.expansions && {
+      expansions: draft.expansions.map((envelope) => ({
         ...envelope,
         template: itemView(envelope.template),
       })),
     }),
-    ...(graph.split && {
-      split: {
-        children: graph.split.children.map((child) => ({
-          ...child,
-          ...(child.graph && { graph: view(child.graph) }),
-        })),
-      },
-    }),
-  });
-  return view(draft);
+  };
 }
 
 export interface GraphReviewInput {

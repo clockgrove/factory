@@ -284,10 +284,9 @@ export interface ObjectiveState {
   deadline?: string;
   /**
    * The first save at a terminal status; `by` names who cancelled
-   * (`deadline`: the deadline did), or, for a done Objective, `split`: its
-   * child Objectives deliver it (work/split.ts); `source` says `by` is the GitHub
-   * login of a `/factory cancel` comment's author (absent: the CLI's host
-   * user, never shown on GitHub).
+   * (`deadline`: the deadline did); `source` says `by` is the GitHub login
+   * of a `/factory cancel` comment's author (absent: the CLI's host user,
+   * never shown on GitHub).
    */
   ended?: { at: string; by?: string; source?: "github" };
 }

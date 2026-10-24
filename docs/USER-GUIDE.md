@@ -187,7 +187,7 @@ With `enabled`, and with `memory: true`, the planner, workers and reviewers get 
 - Put workspace settings and dependency build approvals on the default branch first.
 - Keep stable repository facts in `AGENTS.md` or contributor docs, not in every Objective.
 - Keep it to about one page of prose.
-- Factory can't create child Objectives yet. If a plan splits the Objective into children, the run holds with `replan` or `cancel`; split a large goal into separate Objectives yourself.
+- Split a large goal into separate Objectives, linked as blocked-by where one builds on another, or let `factory propose` draft them.
 
 ### Propose Objectives
 

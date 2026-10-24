@@ -33,7 +33,7 @@ import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { ACCEPTED_AT, currentPlan, splitRecord } from "./planning/plan.js";
+import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -1027,28 +1027,10 @@ export async function serve(options: ServeOptions): Promise<number> {
         // A `factory run` request waiting for this admission chooses the
         // provider and the deadline.
         const asked = runs.get(issue);
-        // A split child runs on its parent's frozen configuration while
-        // the parent waits for it (work/split.ts), unless `factory run
-        // --provider` names another. A configuration changed since the
-        // parent froze it gives only the provider choice, frozen anew, so
-        // the child doesn't start on a question.
-        const inherited = (from: Frozen | undefined): Frozen | undefined => {
-          if (!from) return undefined;
-          const live = options.freeze?.(from.provider);
-          if (!live) return undefined;
-          return live.digest === from.digest
-            ? from
-            : { ...live, selectedBy: from.selectedBy };
-        };
-        const parent = [...runners.values()].find((runner) =>
-          Object.values(splitRecord(runner.state)?.children ?? {}).includes(
-            issue,
-          ),
-        );
         const frozen =
           asked?.request.provider !== undefined
             ? (options.freeze?.(asked.request.provider) ?? options.frozen)
-            : (inherited(parent?.state.frozen) ?? options.frozen);
+            : options.frozen;
         const state = newObjective(issue, now, frozen);
         const deadline = deadlineAt(
           now,

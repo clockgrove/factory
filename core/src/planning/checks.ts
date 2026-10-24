@@ -54,7 +54,6 @@ export async function checkPlan(
     });
   const graph = validateGraph(draft, facts, previous);
   findings.push(...graph.findings);
-  if (draft.split) await splitFindings(draft, facts, files, findings);
   if (!graph.usable) return findings;
   const shapes = workShapes(draft);
   await commandFindings(shapes, facts, files, found);
@@ -75,7 +74,6 @@ export async function checkPlan(
         ),
       ),
     },
-    new Map(),
     facts.authorizedCommands,
     facts.coverageObligations,
     found,
@@ -304,8 +302,6 @@ const bounded = (entry: CoverageObligation): string => {
  */
 function graphLint(
   draft: Draft,
-  /** In a split, each item's child Objective: children run as separate Objectives. */
-  childOf: ReadonlyMap<string, string>,
   authorized: readonly string[],
   obligations: readonly CoverageObligation[],
   found: Found,
@@ -337,7 +333,6 @@ function graphLint(
       if (
         !shared.length ||
         exclusive ||
-        childOf.get(left.id) !== childOf.get(right.id) ||
         ancestorsOf(left.id).has(right.id) ||
         ancestorsOf(right.id).has(left.id)
       )
@@ -644,81 +639,4 @@ function gateFindings(draft: Draft, facts: PlanningFacts, found: Found): void {
   ];
   for (const name of unknownCheckNames(used, facts.checkNames))
     found(unknownCheckMessage(name, facts.checkNames));
-}
-
-// ── Split ───────────────────────────────────────────────────────────────
-
-/**
- * A split's child Objectives: they carry exactly the Objective's criteria,
- * with unique keys, known sibling dependencies and pinned sources. Each
- * planned child graph is checked like a plan whose Acceptance is the
- * child's outcomes, against the parent's pinned sources.
- */
-async function splitFindings(
-  draft: Draft,
-  facts: PlanningFacts,
-  files: BaseFiles,
-  findings: Finding[],
-): Promise<void> {
-  const children = draft.split?.children ?? [];
-  const found = (message: string) =>
-    findings.push({ source: "check", message });
-  if (draft.items.length || draft.coverage.length)
-    found(
-      "A split plan has no Work Items or coverage of its own; put them in the child Objectives",
-    );
-  const sorted = (values: string[]) => JSON.stringify([...values].sort());
-  const criteria = facts.coverageObligations.flatMap((obligation) =>
-    obligation.source.path === "OBJECTIVE"
-      ? [obligation.source.text ?? ""]
-      : [],
-  );
-  if (
-    sorted(children.flatMap((child) => child.outcomes ?? [])) !==
-    sorted(criteria)
-  )
-    found(
-      "Child Objectives must carry exactly the Objective's Acceptance criteria between them: give each criterion, verbatim, to exactly one child as an outcome",
-    );
-  const keys = new Set(children.map((child) => child.key));
-  const seen = new Set<string>();
-  for (const child of children) {
-    const label = `Split child ${JSON.stringify(child.key)}`;
-    if (!/^[a-z][a-z0-9-]{0,63}$/.test(child.key) || seen.has(child.key))
-      found(
-        `${label} needs a unique key of lowercase letters, digits and hyphens that starts with a letter`,
-      );
-    seen.add(child.key);
-    if (!child.title?.trim() || !child.goal?.trim() || !child.outcomes?.length)
-      found(`${label} needs a title, a goal and at least one outcome`);
-    for (const dependency of child.dependsOn ?? [])
-      if (!keys.has(dependency) || dependency === child.key)
-        found(
-          `${label} depends on ${JSON.stringify(dependency)}; name another child's key`,
-        );
-    for (const source of child.sources ?? [])
-      if (!facts.sources.some((pin) => pin.path === source.path))
-        found(
-          `${label} names source ${source.path}, which is not one of the parent's pinned sources`,
-        );
-    if (!child.graph) continue;
-    if (child.dependsOn?.length) {
-      found(
-        `${label} depends on siblings, so its graph is planned after they merge; leave graph out`,
-      );
-      continue;
-    }
-    const childFacts: PlanningFacts = {
-      ...facts,
-      // An outcome keeps its parent criterion's command.
-      coverageObligations: child.outcomes.map(
-        (text) =>
-          facts.coverageObligations.find(
-            ({ source }) => source.path === "OBJECTIVE" && source.text === text,
-          ) ?? { source: { path: "OBJECTIVE", text } },
-      ),
-    };
-    for (const finding of await checkPlan(child.graph, childFacts, files))
-      findings.push({ ...finding, message: `${label}: ${finding.message}` });
-  }
 }

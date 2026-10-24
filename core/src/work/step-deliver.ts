@@ -634,7 +634,6 @@ export function freshable(state: ObjectiveState, key: string): boolean {
   return (
     !!item &&
     key !== stepKey(item.id, "merge") &&
-    !plan?.split &&
     executable(item.kind) &&
     !["aggregate", "qa", "discovery"].includes(item.kind ?? "") &&
     !mergeOf(state, item.id)

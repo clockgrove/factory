@@ -221,23 +221,6 @@ export interface DeclaredWorkCondition {
       };
 }
 
-/** One child Objective of a split. */
-export interface ChildObjectiveSpec {
-  /** Stable key within the split: lowercase letters, digits and hyphens. */
-  key: string;
-  title: string;
-  /** One paragraph: what this child changes and what it leaves to others. */
-  goal: string;
-  /** Observable outcomes; they become the child's Acceptance bullets. */
-  outcomes: string[];
-  /** The parent's sources this child needs, as Sources selectors. */
-  sources: Citation[];
-  /** Keys of sibling children whose merged code this child builds on. */
-  dependsOn: string[];
-  /** The child's graph, planned in the parent's pass; only without dependencies. */
-  graph?: Draft;
-}
-
 /** The graph one planning round produces. */
 export interface Draft {
   base: string;
@@ -252,8 +235,6 @@ export interface Draft {
   conditions?: DeclaredWorkCondition[];
   /** Reviewed inventory-driven additions. */
   expansions?: GraphExpansionEnvelope[];
-  /** Child Objectives instead of Work Items: items and coverage are then empty. */
-  split?: { children: ChildObjectiveSpec[] };
 }
 
 /** The accepted plan; currentPlan (plan.ts) reads it. */

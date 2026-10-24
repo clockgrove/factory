@@ -354,10 +354,8 @@ function checkGraphShape(
     found("The plan needs an items list");
     return { order: [], findings, usable: false };
   }
-  if (!draft.items.length && !draft.split)
-    found(
-      "The plan has no Work Items: add at least one item, or split the Objective into child Objectives",
-    );
+  if (!draft.items.length)
+    found("The plan has no Work Items: add at least one item");
   const items = draft.items.filter((item, at) => itemFields(item, at, found));
   if (items.length !== draft.items.length)
     return { order: [], findings, usable: false };
@@ -1021,7 +1019,7 @@ function checkCoverageShape(
     found("The plan needs a coverage list with one entry per obligation");
     return findings;
   }
-  if (!draft.coverage.length && !draft.split)
+  if (!draft.coverage.length)
     found(
       "The plan's coverage is empty: map every Objective Acceptance criterion to an owning item and proof",
     );

@@ -28,7 +28,6 @@ import {
   proposalsOf,
 } from "./plan.js";
 import {
-  draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
@@ -485,9 +484,8 @@ export function discoveryText(discovery: WorkDiscovery): string {
 
 /**
  * The planner's full answer for the current plan: the base the next
- * revision edits. A plan with none (a ready split child's graph from its
- * parent's pass, or one `factory reset` rebuilt from its comment) is
- * amended by a whole plan instead.
+ * revision edits. A plan with none (one `factory reset` rebuilt from its
+ * comment) is amended by a whole plan instead.
  */
 function currentAnswer(state: ObjectiveState): unknown {
   const proposals = proposalsOf(state);
@@ -625,10 +623,6 @@ export function amendmentFindings(
       message,
       ...(itemId ? { itemId } : {}),
     });
-  if (next.split)
-    found(
-      "An amendment adds Work Items to this plan; it cannot split the Objective",
-    );
   for (const old of current.items) {
     const item = next.items.find((entry) => entry.id === old.id);
     if (!item) {
@@ -863,7 +857,6 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const progress = amendmentProgress(state, plan, proposal);
       const profiles = offeredProfiles(config);
       const wire = {
-        child: inputs.child === true,
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
         adaptive: adaptiveGraph(
           inputs.shown.blocks,
@@ -890,8 +883,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           : []),
       ];
       const base = currentAnswer(state);
-      // No planner answer to revise (a ready split child's first plan came
-      // from its parent's pass, or factory reset rebuilt the plan): the
+      // No planner answer to revise (factory reset rebuilt the plan): the
       // planner answers in full, with the plan as it stands to amend.
       const whole = base === undefined;
       const schema = (whole ? planSchema : revisionSchema)(facts, wire);
@@ -1183,7 +1175,7 @@ function amendReviewStep(
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
-        draftItems(draft).map((item) => item.id),
+        draft.items.map((item) => item.id),
       );
       const invalidReview = "The amendment review answer was invalid";
       if (decoded.invalid)

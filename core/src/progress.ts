@@ -187,16 +187,6 @@ function render(
         ? ["", ...more(view.items.length - LISTED.items, "Work Items")]
         : []),
     );
-  if (view.children?.length)
-    lines.push(
-      "",
-      "| Child Objective | Key | Status |",
-      "| --- | --- | --- |",
-      ...view.children.map(
-        (child) =>
-          `| #${child.issue} | ${cell(code(child.key))} | ${cell(prose(child.status))} |`,
-      ),
-    );
   const running = view.items.filter(
     (item) => input.activity[item.id] && item.phase.endsWith("(running)"),
   );

@@ -12,12 +12,7 @@ import {
 import { GitRefusal } from "./git.js";
 import { githubOutcome } from "./github.js";
 import { amendmentSteps } from "./planning/amendments.js";
-import {
-  currentPlan,
-  SPLIT_CHILDREN,
-  SPLIT_END,
-  splitRecord,
-} from "./planning/plan.js";
+import { currentPlan } from "./planning/plan.js";
 import { PREDECESSORS, predecessorsStep } from "./planning/predecessors.js";
 import {
   type PlanningDeps,
@@ -30,7 +25,6 @@ import { PlannerError, providerOutcome } from "./providers/planner.js";
 import type { Answer, ObjectiveState, ObjectiveStatus } from "./state.js";
 import { errorMessage } from "./text.js";
 import { fact } from "./work/facts.js";
-import { splitSteps, waitingOnChildren } from "./work/split.js";
 import {
   type BuildDeps,
   built,
@@ -55,8 +49,7 @@ const MINUTE = 60_000;
 
 /**
  * The Objective workflow: predecessors → check → plan → build → final →
- * report (or, for a plan that splits, creating its child Objectives and
- * waiting for them in place of the build), then cleanup after cancel. Steps are ported onto the core slice by slice; a
+ * report, then cleanup after cancel. Steps are ported onto the core slice by slice; a
  * step that isn't ported yet holds with an honest question, so an Objective
  * on this build always has an answer that works. `deps` is absent when
  * Factory has no configuration.
@@ -89,22 +82,15 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
         return step ? [step] : [];
       }
       if (!deps) return [unavailable("build")];
-      // A split delivers through its child Objectives (work/split.ts).
-      if (currentPlan(state)!.split) return splitSteps(state, deps);
       const amend = amendmentSteps(state, deps);
       return amend.length ? amend : deliverySteps(state, deps);
     },
-
-    deadlineExempt: waitingOnChildren,
-
-    endedBy: (state) => (state.done[SPLIT_CHILDREN] ? SPLIT_END : undefined),
 
     upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),
 
     status(state: ObjectiveState): ObjectiveStatus {
       if (!state.done.check) return "checking";
       if (!currentPlan(state)) return "planning";
-      if (state.done[SPLIT_CHILDREN]) return "done";
       if (!built(state)) return "building";
       if (!state.done.report) return "finishing";
       return "done";
@@ -137,10 +123,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
 
     replannable: (state, key) =>
       currentPlan(state)
-        ? // Once a split's children exist, a new plan would orphan them.
-          (key.startsWith("build:split")
-            ? !splitRecord(state)
-            : /^(item|build):/.test(key)) ||
+        ? /^(item|build):/.test(key) ||
           ["final", "final-review", "report"].includes(key)
         : /^(plan|review|decide):\d+:\d+$/.test(key),
 

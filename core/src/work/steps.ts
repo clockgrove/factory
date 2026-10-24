@@ -253,7 +253,7 @@ export function layersBelow(
   id: string,
 ): string[] {
   const plan = currentPlan(state);
-  if (!plan || plan.split) return [];
+  if (!plan) return [];
   const place = multiLayer(stackOf(plan, deps), id);
   return place
     ? place.unit.items.slice(0, place.layer).map((layer) => layer.id)
@@ -283,8 +283,7 @@ export function startedItems(state: ObjectiveState): Set<string> {
 /** Whether every item has merged (or, for aggregates, completed). */
 export function built(state: ObjectiveState): boolean {
   const plan = currentPlan(state);
-  // A split delivers through its children (work/split.ts).
-  if (!plan || plan.split) return false;
+  if (!plan) return false;
   return plan.items.every((item) => mergeOf(state, item.id));
 }
 

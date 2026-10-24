@@ -39,8 +39,6 @@ export async function planningKnowledge(input: {
   state: ObjectiveState;
   /** The Objective as shown. */
   shown: ShownObjective;
-  /** The Objective is a Factory-created split child. */
-  child: boolean;
   files: BaseFiles;
   /** The target's curated playbook at the base; empty when there is none. */
   playbook: string;
@@ -52,7 +50,7 @@ export async function planningKnowledge(input: {
     : undefined;
   // Git reads fail as TransientError, which the planning step retries.
   const sources = context?.memory
-    ? (await planningSources(input.shown, input.files, input.child)).sources
+    ? (await planningSources(input.shown, input.files)).sources
     : [];
   const issue = input.state.issue;
   const run = runOf(input.state);

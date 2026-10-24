@@ -8,7 +8,6 @@ import {
 import { WORK_ITEM_ENTRY_SIGNAL } from "./rubric.js";
 import {
   type AcceptanceCoverage,
-  type ChildObjectiveSpec,
   type Citation,
   type CoverageEnvironment,
   type CoverageProof,
@@ -43,8 +42,6 @@ type ObjectValue = Record<string, unknown>;
 
 /** Options the facts don't carry. */
 export interface WireOptions {
-  /** This Objective is itself a split child: children never split again. */
-  child?: boolean;
   /** Execution profiles the planner chooses from, by id, with what each is for. */
   profiles?: { id: string; description?: string; selectionHints?: string[] }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
@@ -530,37 +527,19 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     Object.entries(allModes).filter(([kind]) => executable(kind as ItemKind)),
   );
   const offeredForms = new Set(Object.values(modes).flat());
-  // A plan may split the Objective into child Objectives, unless it is itself
-  // a child: children never split again. An obligation a stub child carries
-  // names that child's key as its itemId.
-  const splittable = !options.child;
   const proofFields: Record<string, Schema> = {
     itemId: { ...text, minLength: 1 },
     proof: {
       description:
         "Choose a kind allowed for the owner's item kind by proofModesByItemKind in the compiler choices.",
-      anyOf: [
-        ...Object.keys(proofForms)
-          .filter((form) => offeredForms.has(form))
-          .map((form) =>
-            strict({
-              kind: { type: "string", enum: [form] },
-              ...proofForms[form],
-            }),
-          ),
-        ...(splittable
-          ? [
-              strict({
-                kind: {
-                  type: "string",
-                  enum: ["child-objective"],
-                  description:
-                    "Only in a split: a stub child Objective carries this obligation; itemId is that child's key.",
-                },
-              }),
-            ]
-          : []),
-      ],
+      anyOf: Object.keys(proofForms)
+        .filter((form) => offeredForms.has(form))
+        .map((form) =>
+          strict({
+            kind: { type: "string", enum: [form] },
+            ...proofForms[form],
+          }),
+        ),
     },
     environment,
   };
@@ -786,57 +765,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     coverage: coverageSchema,
     ...adaptiveFields,
     sourceObligations: sourceObligationsSchema,
-    ...(splittable
-      ? {
-          split: {
-            description:
-              "null for one Work Item graph. Otherwise the child Objectives that replace it: every Work Item belongs to one ready child through itemIds, every Objective obligation goes to one child, and every child owns at least one.",
-            anyOf: [
-              { type: "null" },
-              strict({
-                children: {
-                  type: "array",
-                  minItems: 2,
-                  maxItems: MAX_CHILDREN,
-                  items: strict({
-                    key: {
-                      type: "string",
-                      pattern: "^[a-z][a-z0-9-]{0,63}$",
-                      description:
-                        "Stable child key: lowercase letters, digits and hyphens.",
-                    },
-                    title: { ...text, minLength: 1 },
-                    goal: {
-                      ...text,
-                      minLength: 1,
-                      description:
-                        "One paragraph: what this child delivers and what it leaves to its siblings.",
-                    },
-                    sources: {
-                      type: "array",
-                      items: itemSchema.properties!.citations!.items!,
-                      description:
-                        "The sections and files this child's own Objective cites as its Sources, by reference; never the OBJECTIVE.",
-                    },
-                    dependsOn: {
-                      type: "array",
-                      items: text,
-                      description:
-                        "Keys of earlier children whose merged code this child builds on; empty for a ready child.",
-                    },
-                    itemIds: {
-                      type: "array",
-                      items: text,
-                      description:
-                        "A ready child's Work Items; empty for a stub, which is compiled after its dependencies merge.",
-                    },
-                  }),
-                },
-              }),
-            ],
-          },
-        }
-      : {}),
     decisionRequired: {
       description:
         "null when the graph covers every obligation. Otherwise the one obligation the Objective as written does not let you cover (for example, it needs a change the Objective forbids or a human-owned choice) and the concrete question the operator must answer; Factory asks it before using this graph.",
@@ -915,7 +843,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
       ]),
     ),
     decisionRequired: schema.properties!.decisionRequired!,
-    ...(splittable ? { split: schema.properties!.split! } : {}),
   });
   return {
     sources,
@@ -928,7 +855,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     profiles: options.profiles,
     proofForms,
     modes,
-    splittable,
     adaptive,
     schema,
     changeSchema,
@@ -1125,7 +1051,6 @@ function revise(wire: Contract, current: unknown, value: unknown): unknown {
   for (const field of wire.replaceable)
     if (change[field] !== null) plan[field] = change[field];
   plan.decisionRequired = change.decisionRequired;
-  if (wire.splittable) plan.split = change.split;
   return plan;
 }
 
@@ -1154,7 +1079,7 @@ export function decodePlan(
   options?: WireOptions,
 ): DecodedPlan {
   const wire = contract(facts, options);
-  const { sources, obligations, checkNames, splittable } = wire;
+  const { sources, obligations, checkNames } = wire;
   let answer: ObjectValue;
   try {
     answer = object(raw, "response");
@@ -1166,7 +1091,6 @@ export function decodePlan(
         "sourceObligations",
         "requiredPreIntegrationChecks",
         "decisionRequired",
-        ...(splittable ? ["split"] : []),
         ...(wire.adaptive ? ["conditions", "expansions"] : []),
       ],
       "response",
@@ -1267,23 +1191,6 @@ export function decodePlan(
     const owner = (entry as { itemId?: unknown } | null)?.itemId;
     return typeof owner === "string" && failed.has(owner);
   };
-  // Obligations a stub child carries, by obligation index, and the stub keys
-  // source obligations name; only a split can have them.
-  const stubObligations = new Map<number, string>();
-  const obligationOwner = new Map<number, string>();
-  const stubSourceKeys: StubSource[] = [];
-  const stubOwner = (entry: ObjectValue, label: string) => {
-    const proof = object(entry.proof, "proof");
-    if (proof.kind !== "child-objective") return undefined;
-    if (!splittable || answer.split === null)
-      throw new Refusal(
-        `Planner ${label} names a child Objective, but the plan has no split: choose a proof kind from proofModesByItemKind`,
-      );
-    keys(proof, ["kind"], "proof");
-    if (typeof entry.itemId !== "string")
-      throw new Refusal("Planner child Objective owner must be its key");
-    return entry.itemId;
-  };
   for (const [obligationIndex, value] of (
     answer.coverage as unknown[]
   ).entries()) {
@@ -1291,17 +1198,9 @@ export function decodePlan(
     attempt(undefined, () => {
       const entry = object(value, "coverage");
       keys(entry, ["itemId", "proof", "environment"], "coverage");
-      const label = `coverage ${obligationIndex}`;
-      const stub = stubOwner(entry, label);
-      if (stub !== undefined) {
-        stubObligations.set(obligationIndex, stub);
-        return;
-      }
-      const proved = prove(wire, draft.items, entry, label);
-      obligationOwner.set(obligationIndex, proved.itemId);
       draft.coverage.push({
         ...structuredClone(obligations[obligationIndex]!),
-        ...proved,
+        ...prove(wire, draft.items, entry, `coverage ${obligationIndex}`),
       });
     });
   }
@@ -1359,21 +1258,15 @@ export function decodePlan(
           "covered disposition",
         );
         if (skipped(disposition)) return;
-        const label = `source obligation ${position}`;
-        // A stub compiles later from its own sources and extracts this again.
-        const stub = stubOwner(disposition, label);
-        if (stub !== undefined) {
-          stubSourceKeys.push({
-            key: stub,
-            path: source.path,
-            ...(source.heading ? { heading: source.heading } : {}),
-          });
-          return;
-        }
         draft.coverage.push({
           source,
           statement,
-          ...prove(wire, draft.items, disposition, label),
+          ...prove(
+            wire,
+            draft.items,
+            disposition,
+            `source obligation ${position}`,
+          ),
         });
         return;
       }
@@ -1426,35 +1319,13 @@ export function decodePlan(
         message: `Planner QA node ${item.id} has no acceptance coverage: make it the owner of the obligations it proves, or remove it`,
         itemId: item.id,
       });
-  const split = splittable ? (answer.split as ObjectValue | null) : null;
   // Last, so a plan gets every lint finding with its choice findings in one
   // correction instead of a paid review finding.
   findings.push(...lint);
   if (invalidShape) return { findings, invalidShape: true };
   if (findings.length) return { findings };
-  if (split === null) return { plan: draft, findings };
-  try {
-    return {
-      plan: splitDraft(
-        wire,
-        draft,
-        split,
-        stubObligations,
-        obligationOwner,
-        stubSourceKeys,
-      ),
-      findings,
-    };
-  } catch (error) {
-    return {
-      findings: [finding(error)],
-      ...(shapeError(error) ? { invalidShape: true as const } : {}),
-    };
-  }
+  return { plan: draft, findings };
 }
-
-/** A source obligation a stub child carries, by its exact pin. */
-type StubSource = { key: string; path: string; heading?: string };
 
 const citation = (path: string, heading: string): Citation =>
   heading ? { path, heading } : { path };
@@ -1919,228 +1790,6 @@ function prove(
     preparedBy: env.preparedBy,
   };
   return { itemId: owner.id, proof: canonical, environment };
-}
-
-const KEY = /^[a-z][a-z0-9-]{0,63}$/;
-const MAX_CHILDREN = 16;
-
-/**
- * The decoded union draft regrouped as child Objectives: each ready child gets
- * its own Work Items and the coverage they own, and every Objective obligation
- * becomes an Acceptance outcome of exactly one child. Planning checks each
- * ready child's graph against that child's own Objective.
- */
-function splitDraft(
-  wire: Contract,
-  union: Draft,
-  raw: ObjectValue,
-  stubObligations: Map<number, string>,
-  obligationOwner: Map<number, string>,
-  stubSourceKeys: StubSource[],
-): Draft {
-  keys(raw, ["children"], "split");
-  if (!Array.isArray(raw.children) || raw.children.length < 2)
-    throw new Refusal(
-      "A split needs at least two children, or use null for one graph",
-    );
-  const children = raw.children.map((value) => {
-    const child = object(value, "split child");
-    keys(
-      child,
-      ["key", "title", "goal", "sources", "dependsOn", "itemIds"],
-      "split child",
-    );
-    if (
-      typeof child.key !== "string" ||
-      typeof child.title !== "string" ||
-      typeof child.goal !== "string" ||
-      !Array.isArray(child.sources)
-    )
-      throw new Refusal("Planner split child is invalid");
-    const sources = child.sources.map((value) => {
-      const selected = object(value, "split child source");
-      keys(selected, ["path", "heading"], "split child source");
-      const { path, heading } = selected;
-      if (typeof path !== "string" || !path || typeof heading !== "string")
-        throw new Refusal(
-          "Planner split child source needs a path and heading",
-        );
-      if (path === "OBJECTIVE")
-        throw new Refusal(
-          `Child ${child.key} cites the OBJECTIVE as a source; its own Objective replaces it`,
-        );
-      return citation(path, heading);
-    });
-    return {
-      key: child.key,
-      title: child.title.trim(),
-      goal: child.goal.trim(),
-      sources,
-      dependsOn: strings(child.dependsOn, "dependsOn"),
-      itemIds: strings(child.itemIds, "itemIds"),
-    };
-  });
-  const owner = new Map<string, string>();
-  for (const child of children) {
-    if (child.dependsOn.length && child.itemIds.length)
-      throw new Refusal(
-        `Child ${child.key} depends on siblings, so it is a stub: it is compiled after they merge and has no Work Items now`,
-      );
-    if (!child.dependsOn.length && !child.itemIds.length)
-      throw new Refusal(
-        `Child ${child.key} has no dependencies, so it is ready: list its Work Items in itemIds`,
-      );
-    for (const id of child.itemIds) {
-      if (!union.items.some((item) => item.id === id) || owner.has(id))
-        throw new Refusal(
-          `Child ${child.key} lists a missing or already assigned Work Item ${id}`,
-        );
-      owner.set(id, child.key);
-    }
-  }
-  for (const item of union.items) {
-    const key = owner.get(item.id);
-    if (key === undefined)
-      throw new Refusal(
-        `Work Item ${item.id} belongs to no ready child`,
-        item.id,
-      );
-    if (
-      [...item.dependencies, ...(item.children ?? [])].some(
-        (id) => owner.get(id) !== key,
-      )
-    )
-      throw new Refusal(
-        `Work Item ${item.id} depends on another child's Work Item; children depend on each other through dependsOn`,
-        item.id,
-      );
-  }
-  const stubs = new Set(
-    children.filter((child) => child.dependsOn.length).map(({ key }) => key),
-  );
-  for (const key of [
-    ...stubObligations.values(),
-    ...stubSourceKeys.map(({ key }) => key),
-  ])
-    if (!stubs.has(key))
-      throw new Refusal(
-        `A child-objective proof names ${key}, which is not a stub child`,
-      );
-  // A stub extracts its source obligations again from its own sources.
-  // A whole-file child source carries every section of that file.
-  for (const { key, path, heading } of stubSourceKeys)
-    if (
-      !children
-        .find((child) => child.key === key)!
-        .sources.some(
-          (source) =>
-            source.path === path &&
-            (source.heading === undefined || source.heading === heading),
-        )
-    )
-      throw new Refusal(
-        `Stub ${key} carries a source obligation in ${heading ? `${path}#${heading}` : path}, which is not among its sources`,
-      );
-  const assigned = new Map<string, number[]>(
-    children.map(({ key }) => [key, []]),
-  );
-  for (const [position, obligation] of wire.obligations.entries()) {
-    if (obligation.source.path !== "OBJECTIVE")
-      throw new Refusal("Only a new plan's Objective obligations can be split");
-    const itemId = obligationOwner.get(position);
-    const key =
-      stubObligations.get(position) ??
-      (itemId !== undefined ? owner.get(itemId) : undefined);
-    if (key !== undefined) assigned.get(key)?.push(position);
-  }
-  const specs: ChildObjectiveSpec[] = children.map((child) => {
-    const outcomes = (assigned.get(child.key) ?? []).map((position) =>
-      coverageCriterion(wire.obligations[position]!),
-    );
-    if (!outcomes.length)
-      throw new Refusal(
-        `Child ${child.key} owns no Objective Acceptance outcome, and every child owns at least one (the Child Objectives rule). Remove child ${child.key}: move ${child.itemIds.length ? `its Work Items (${child.itemIds.join(", ")})` : "its work"} into the ready child that needs it, or leave it to the stub that depends on it, which plans it later`,
-      );
-    const { itemIds, ...spec } = child;
-    return {
-      ...spec,
-      outcomes,
-      ...(itemIds.length
-        ? {
-            graph: {
-              base: union.base,
-              items: union.items.filter((item) => itemIds.includes(item.id)),
-              coverage: union.coverage.filter(
-                (entry) => owner.get(entry.itemId) === child.key,
-              ),
-              // Planning keeps each with the children whose sources need it.
-              requiredPreIntegrationChecks: structuredClone(
-                union.requiredPreIntegrationChecks ?? [],
-              ),
-              ...(union.sourceExclusions
-                ? { sourceExclusions: structuredClone(union.sourceExclusions) }
-                : {}),
-            },
-          }
-        : {}),
-    };
-  });
-  const problem = childObjectivesProblem(specs);
-  if (problem) throw new Refusal(problem);
-  return {
-    base: union.base,
-    items: [],
-    coverage: [],
-    requiredPreIntegrationChecks: [],
-    split: { children: specs },
-  };
-}
-
-/** Shape, identity and dependency checks; semantics belong to the planner and review. */
-function childObjectivesProblem(
-  children: ChildObjectiveSpec[],
-): string | undefined {
-  if (!children.length) return "A split needs at least one child Objective";
-  if (children.length > MAX_CHILDREN)
-    return `A split has at most ${MAX_CHILDREN} child Objectives`;
-  const seen = new Set<string>();
-  for (const child of children) {
-    if (!KEY.test(child.key) || seen.has(child.key))
-      return `Child Objective key is invalid or repeated: ${child.key}`;
-    seen.add(child.key);
-    if (!child.title.trim() || child.title.includes("\n"))
-      return `Child Objective ${child.key} needs a one-line title`;
-    if (!child.goal.trim()) return `Child Objective ${child.key} needs a goal`;
-    if (
-      !child.outcomes.length ||
-      child.outcomes.some(
-        (outcome) => !outcome.trim() || outcome.includes("\n"),
-      )
-    )
-      return `Child Objective ${child.key} needs single-line observable outcomes`;
-    for (const source of child.sources)
-      if (
-        !source.path ||
-        /[`\n#]/.test(source.path) ||
-        (source.heading !== undefined &&
-          (!source.heading.trim() || /[`\n]/.test(source.heading)))
-      )
-        return `Child Objective ${child.key} has an invalid source`;
-  }
-  for (const child of children)
-    for (const dependency of child.dependsOn)
-      if (!seen.has(dependency) || dependency === child.key)
-        return `Child Objective ${child.key} depends on an unknown sibling: ${dependency}`;
-  // Children are created in this order, so a dependency always exists first.
-  const done = new Set<string>();
-  for (const child of children) {
-    if (child.dependsOn.some((dependency) => !done.has(dependency)))
-      return "Child Objectives must be listed after the siblings they depend on";
-    done.add(child.key);
-  }
-  if (!children.some((child) => !child.dependsOn.length))
-    return "A split needs a child Objective with no dependencies";
-  return undefined;
 }
 
 // ---------------------------------------------------------------------------

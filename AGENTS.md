@@ -26,7 +26,7 @@ A change that needs a new kind of hold, lock, owner, archive, background loop or
 - **Lean code.** One implementation per job, no dead code, and tests that prove behavior ([the design](docs/DESIGN.md#lean-code)). Sweep for duplication at every milestone.
 - CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
 - Finish the product outcome with meaningful affected tests, independent review and green CI. A milestone also needs its crash drill (see Testing). Stop when the behavior works and the required checks pass.
-- **One topic, one file.** The design is split by topic under `docs/reference/`; a change edits only the topics whose behaviour it changes. How a module does its job belongs in its own header comment, not the spec.
+- **One topic, one file.** The design is split by topic under `docs/reference/`; a change edits only the topics whose behaviour it changes. How a module does its job belongs in its own header comment, not the spec. Code follows the same rule: a CLI command is `core/src/commands/<name>.ts`, a phase's step is its own module under `core/src/work/`, and the service tests are split by area in `core/test/` (shared setup in `helpers.mjs`). Add a file rather than grow a shared one.
 - **No status documents or changelogs in the repository.** A capability Factory still lacks is one GitHub issue labelled `cutover-gap`; cutover waits until none is open. Docs describe behaviour, never progress.
 - **Land through the merge queue.** main has a merge queue: enqueue with `gh pr merge --auto --squash N`, never merge directly. Changes that build on each other are one stack (`gh stack`), merged with `gh stack merge`.
 - Issues and pull requests record scope, decisions and results. Follow the issue metadata rules below, existing Project status and applicable relationships. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or new label taxonomy.
@@ -62,7 +62,7 @@ Keep credentials, configuration and state outside targets. Preserve the sandbox,
 No mocks, fake services, fake providers or scripted responses.
 
 - Tests use real Git repositories, processes and files, and the real `factory serve`.
-- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered.
+- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point, listed in `core/test/crash.test.mjs`, and is covered.
 - **Drill.** At each milestone, run a small real Objective on the scratch drill repository with real providers. Kill the service at every crash point, cut the network, and stop a model mid-turn. The milestone passes only if the Objective finishes with no duplicate effect and every hold had a working answer.
 - Don't add unit tests of private helpers or provider/profile matrices.
 

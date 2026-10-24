@@ -6,7 +6,7 @@
  */
 import { isAbsolute, relative, resolve } from "node:path";
 import type { HoldScope } from "../engine.js";
-import { redact } from "../log.js";
+import { type RunFile, redact } from "../log.js";
 import type { WorkItem } from "../planning/types.js";
 import type { Conversation, Session } from "../providers/session.js";
 import type { PromptFacts } from "../providers/usage.js";
@@ -45,6 +45,12 @@ export interface WorkerInput {
    * and redacted as `worker-activity` (ActivityLog). Never contents.
    */
   activity(event: WorkerActivity): void;
+  /**
+   * The provider's own stream, each event as it came (an SDK event or
+   * message, a hosted session event): the attempt's transcript gets it
+   * redacted and bounded (ActivityLog). Streamed deltas are left out.
+   */
+  output(event: unknown): void;
   /** The Work Item's spend so far, for workers that bill per run. */
   spend?: WorkerSpend;
   /** The answer to this step's last hold, such as `more`. */
@@ -91,7 +97,13 @@ export interface Worker {
  * file contents or model output.
  */
 export type WorkerActivity =
-  | { kind: "tool"; phase: "started" | "finished"; tool: string }
+  /** `target`: what a started tool acts on (its file, command, pattern or URL), when it names one. */
+  | {
+      kind: "tool";
+      phase: "started" | "finished";
+      tool: string;
+      target?: string;
+    }
   | { kind: "edit"; path: string }
   | { kind: "command"; command: string }
   /** A command ended with a non-zero exit, a signal or its time limit. */
@@ -104,6 +116,22 @@ export type WorkerActivity =
   | { kind: "context"; tokens: number; window?: number }
   /** The provider compacted the worker's conversation. */
   | { kind: "compaction" };
+
+/** What a tool call acts on, from its arguments: a file, a command, a pattern or a URL. */
+export function targetOf(fields: Record<string, unknown>): { target?: string } {
+  const target = [
+    fields.file_path,
+    fields.notebook_path,
+    fields.path,
+    fields.command,
+    fields.pattern,
+    fields.url,
+    fields.query,
+  ].find((value) => typeof value === "string" && value.length) as
+    | string
+    | undefined;
+  return target ? { target } : {};
+}
 
 /** At most one `worker-activity` event per Work Item per this long. */
 export const ACTIVITY_INTERVAL_MS = 5_000;
@@ -122,6 +150,8 @@ interface ActivityWindow {
     compactions: number;
   };
   tools: string[];
+  /** Started tools with what they act on, `{tool, target}`. */
+  targets: { tool: string; target: string }[];
   paths: string[];
   command?: string;
   /** The last context report in this interval. */
@@ -139,14 +169,22 @@ const emptyWindow = (): ActivityWindow => ({
     compactions: 0,
   },
   tools: [],
+  targets: [],
   paths: [],
 });
+
+/** Provider events that only stream a delta of text already in a later event. */
+const DELTA = /(?:^stream_event$|_delta$|\.delta$)/;
 
 /**
  * A worker run's activity into the run log: the first report after a
  * quiet interval is written at once, and later ones are coalesced into
  * one `worker-activity` event per interval (docs/reference/run-log.md#Run log), so a busy
  * worker can't balloon the log. Every string is redacted and truncated.
+ *
+ * With a transcript (the attempt's file, docs/reference/run-log.md#Attempt files), every
+ * report and every provider event (`output`) also goes there at once, in
+ * full: `{at, activity}` and `{at, output}` lines, redacted and bounded.
  */
 export class ActivityLog {
   private window = emptyWindow();
@@ -160,18 +198,38 @@ export class ActivityLog {
     private readonly worktree: string,
     private readonly log: (event: Record<string, unknown>) => void,
     private readonly secrets: readonly string[],
+    private readonly transcript?: RunFile,
     private readonly intervalMs = ACTIVITY_INTERVAL_MS,
-  ) {}
+  ) {
+    if (transcript) log({ event: "transcript", item, file: transcript.file });
+  }
+
+  readonly output = (event: unknown): void => {
+    if (this.closed || !this.transcript) return;
+    const type =
+      event && typeof event === "object"
+        ? (event as { type?: unknown }).type
+        : undefined;
+    if (typeof type === "string" && DELTA.test(type)) return;
+    this.transcript.record({ output: event });
+  };
 
   readonly report = (activity: WorkerActivity): void => {
     if (this.closed) return;
+    this.transcript?.record({ activity });
     const window = this.window;
     switch (activity.kind) {
       case "tool":
         if (activity.phase === "finished") window.counts.toolsFinished += 1;
         else {
           window.counts.toolsStarted += 1;
-          listOnce(window.tools, this.clean(activity.tool, NAME_CHARS));
+          const tool = this.clean(activity.tool, NAME_CHARS);
+          listOnce(window.tools, tool);
+          if (activity.target && window.targets.length < LISTED)
+            window.targets.push({
+              tool,
+              target: this.clean(this.inTree(activity.target), COMMAND_CHARS),
+            });
         }
         break;
       case "edit":
@@ -221,18 +279,20 @@ export class ActivityLog {
   close(): void {
     this.flush();
     this.closed = true;
+    this.transcript?.close();
   }
 
   private flush(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
     if (!this.pending) return;
-    const { counts, tools, paths, command, context } = this.window;
+    const { counts, tools, targets, paths, command, context } = this.window;
     this.log({
       event: "worker-activity",
       item: this.item,
       counts,
       tools,
+      ...(targets.length ? { targets } : {}),
       paths,
       ...(command !== undefined ? { command } : {}),
       ...(context ? { context } : {}),

@@ -16,6 +16,7 @@ import {
   logFiles,
   parseLines,
   readFrom,
+  readRunFile,
   runOfFile,
   sizeOf,
   untilInterrupted,
@@ -63,6 +64,7 @@ export interface Entry {
     | "model"
     | "activity"
     | "cancelled"
+    | "transcript"
     | "event";
   step?: string;
   item?: string;
@@ -203,8 +205,42 @@ export async function diagnostics(
         `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (docs/reference/run-log.md#Content capture).\n`,
       );
   };
+  // `--logs ITEM`: each worker attempt's transcript, after the attempt ends.
+  const transcripts = new Map<string, LogEvent>();
+  const printTranscript = (entry: Entry, opened: LogEvent) => {
+    const file = String(opened.file);
+    const read = readRunFile(options.logs, file, options.secrets);
+    const records = read ? transcriptRecords(read.text) : [];
+    const path = join(options.logs, file);
+    if (options.json) {
+      write(
+        `${JSON.stringify({ ...entry, kind: "transcript", text: `transcript ${String(opened.attemptId)}`, transcript: { file, path, available: Boolean(read), cut: read?.cut ?? false, records } })}\n`,
+      );
+      return;
+    }
+    write(
+      `        transcript of ${String(opened.attemptId)}: ${read ? `${count(records.length)} records${read.cut ? ", its middle rotated away" : ""}` : "gone (rotated away with its run, or never written)"} · ${path}\n`,
+    );
+    for (const record of records)
+      write(`          ${transcriptLine(record)}\n`);
+  };
   const visit = (event: LogEvent) => {
-    for (const entry of timeline.add(event)) print(entry);
+    if (
+      options.item !== undefined &&
+      event.event === "transcript" &&
+      event.item === options.item &&
+      typeof event.attemptId === "string"
+    )
+      transcripts.set(event.attemptId, event);
+    for (const entry of timeline.add(event)) {
+      print(entry);
+      const attempt = str(entry.event.attemptId);
+      const opened = attempt ? transcripts.get(attempt) : undefined;
+      if (entry.event.event === "outcome" && attempt && opened) {
+        transcripts.delete(attempt);
+        printTranscript(entry, opened);
+      }
+    }
   };
   const offsets = new Map<string, number>();
   for (const file of files) offsets.set(file, read(file, 0, visit));
@@ -213,6 +249,19 @@ export async function diagnostics(
   if (!options.follow) {
     // Steps still running when the log ends: their activity so far.
     for (const entry of timeline.running()) print(entry);
+    // And the transcripts of attempts still running, as far as written.
+    for (const opened of transcripts.values())
+      printTranscript(
+        {
+          at: opened.at,
+          run: String(opened.run),
+          elapsedMs: 0,
+          kind: "transcript",
+          text: "",
+          event: opened,
+        },
+        opened,
+      );
     captureNote();
     return;
   }
@@ -248,6 +297,44 @@ function captureOf(
   if (!bodies) return { path };
   const body = readCapture(options.logs, file, options.secrets);
   return body ? { path, ...body } : { path };
+}
+
+/** A transcript's records: its complete JSON lines, a torn or cut one skipped. */
+function transcriptRecords(text: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try {
+      records.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // Cut where the middle rotated away.
+    }
+  }
+  return records;
+}
+
+/** One transcript record as a line: what the worker did, or the provider's event as it came. */
+function transcriptLine(record: Record<string, unknown>): string {
+  const at =
+    typeof record.at === "string"
+      ? displayTime(record.at).slice(11)
+      : "--:--:--";
+  const activity = record.activity as Record<string, unknown> | undefined;
+  if (!activity) return `${at} output ${JSON.stringify(record.output)}`;
+  switch (activity.kind) {
+    case "tool":
+      return `${at} tool ${String(activity.tool)} ${String(activity.phase)}${typeof activity.target === "string" ? `: ${oneLine(activity.target, 2_000)}` : ""}`;
+    case "edit":
+      return `${at} edit ${String(activity.path)}`;
+    case "command":
+      return `${at} $ ${oneLine(String(activity.command), 2_000)}`;
+    case "command-failed":
+      return `${at} command failed`;
+    case "context":
+      return `${at} context ${String(activity.tokens)} tokens${typeof activity.window === "number" ? ` of ${activity.window}` : ""}`;
+    default:
+      return `${at} ${String(activity.kind)}`;
+  }
 }
 
 /** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */

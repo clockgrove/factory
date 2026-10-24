@@ -54,11 +54,12 @@ import { hold } from "../engine.js";
 import { validPath } from "../objective.js";
 import { ContainedError, copyContained } from "../paths.js";
 import { errorMessage } from "../text.js";
-import type {
-  Worker,
-  WorkerInput,
-  WorkerResult,
-  WorkerSpend,
+import {
+  targetOf,
+  type Worker,
+  type WorkerInput,
+  type WorkerResult,
+  type WorkerSpend,
 } from "../work/worker.js";
 import { hostGit } from "../worktree.js";
 import { serviceCredential } from "./claude.js";
@@ -862,8 +863,10 @@ export class OpenAIManagedWorker extends ManagedWorker {
       await wait(POLL_MS, signal);
       const previous = turn?.id;
       turn = (await this.turns(session, signal))[0];
-      if (turn?.id !== undefined && turn.id !== previous)
+      if (turn?.id !== undefined && turn.id !== previous) {
+        input.output(turn);
         input.activity({ kind: "turn" });
+      }
       if (
         turn &&
         ["completed", "failed", "cancelled"].includes(String(turn.status))
@@ -1044,11 +1047,16 @@ function managedActivity(
   }
   if (event.type !== "agent.tool_use" || !event.name) return;
   toolNames.set(event.id, event.name);
-  input.activity({ kind: "tool", phase: "started", tool: event.name });
   const args =
     event.input && typeof event.input === "object"
       ? (event.input as Record<string, unknown>)
       : {};
+  input.activity({
+    kind: "tool",
+    phase: "started",
+    tool: event.name,
+    ...targetOf(args),
+  });
   const path = [args.file_path, args.path].find(
     (value) => typeof value === "string",
   ) as string | undefined;
@@ -1304,6 +1312,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
       for (const e of fresh.reverse()) {
         seen.add(e.id);
         observeTools(record, native, e, toolNames);
+        input.output(e);
         managedActivity(input, e, toolNames);
       }
       if (terminated)

@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { captureDir } from "./paths.js";
+import { attemptDir, captureDir, readContained } from "./paths.js";
 
 /**
  * A new run id: the start time, then the process id. Ids sort by start
@@ -101,6 +101,8 @@ interface FileHealth {
  */
 export class RunLog {
   private readonly files = new Map<number, FileHealth>();
+  /** Attempt files given out this run, oldest first, and their bytes on disk. */
+  private readonly attempts: RunFile[] = [];
 
   constructor(
     private readonly dir: string,
@@ -121,6 +123,51 @@ export class RunLog {
     if (!this.append(file, { ...event, ...(id ? { capture: id } : {}) }))
       return;
     if (file.failed > file.reported) this.health(file);
+  }
+
+  /**
+   * A private file of this run for one attempt, `<issue>/<run id>.attempts/<name>`
+   * (docs/reference/run-log.md#Attempt files): `0600` segments in a `0700`
+   * directory, redacted line by line, its head kept and its tail rolling,
+   * and rotated with the run. A name given out before gets `-2`, `-3`, ...
+   * Past the run's budget the oldest closed files go first, each noted with
+   * an `attempt-file-dropped` event.
+   */
+  runFile(issue: number, name: string): RunFile {
+    const clean = name.replace(/[^\w.-]/g, "_");
+    const at = (unique: string) => `${attemptDir(issue, this.runId)}/${unique}`;
+    // Taken: a file of this run still listed, or one already on disk.
+    const taken = (unique: string) =>
+      this.attempts.some((file) => file.file === at(unique)) ||
+      existsSync(join(this.dir, `${at(unique)}.0`));
+    let unique = clean;
+    for (let n = 2; taken(unique); n++) unique = `${clean}-${n}`;
+    const file = new RunFile(this.dir, at(unique), this.secrets, () =>
+      this.budget(),
+    );
+    this.attempts.push(file);
+    return file;
+  }
+
+  /** Over the run's attempt-file budget: remove the oldest closed files until within it. */
+  private budget(): void {
+    // Closed files with nothing left on disk (a passing command's) go from the list.
+    for (let i = this.attempts.length - 1; i >= 0; i--) {
+      const file = this.attempts[i]!;
+      if (file.closed && file.onDisk === 0) this.attempts.splice(i, 1);
+    }
+    let total = this.attempts.reduce((sum, file) => sum + file.onDisk, 0);
+    while (total > ATTEMPT_FILES_PER_RUN) {
+      const oldest = this.attempts.findIndex((file) => file.closed);
+      if (oldest < 0) return;
+      const [file] = this.attempts.splice(oldest, 1);
+      total -= file!.onDisk;
+      file!.remove();
+      this.write(Number(file!.file.split("/")[0]), {
+        event: "attempt-file-dropped",
+        file: file!.file,
+      });
+    }
   }
 
   /**
@@ -230,6 +277,257 @@ export class RunLog {
     }
     return file;
   }
+}
+
+/** What one service run keeps in attempt files, all issues together: the oldest closed go first past it. */
+const ATTEMPT_FILES_PER_RUN = 1024 ** 3;
+/** An attempt file's head, kept whole. */
+const ATTEMPT_HEAD = 8 * 1024 ** 2;
+/** Each tail segment past the head; the last two are kept. */
+const ATTEMPT_SEGMENT = 4 * 1024 ** 2;
+/** A line held for its newline at most this long before it is written anyway. */
+const PENDING_LINE = 64 * 1024;
+/** How much of such a line's end waits for the rest, at least. */
+const PENDING_KEEP = 1024;
+/** A character a redacted token (`redact`) can hold, or a pair's first half. */
+const TOKEN_CHAR = /[\w.\-\uD800-\uDBFF]/;
+
+/**
+ * Where a line held past PENDING_LINE is cut: before its last
+ * PENDING_KEEP characters (or the longest secret line), after a character
+ * no token holds, and outside every secret, so each secret and token is
+ * redacted whole once the rest comes. The whole text when no such place
+ * exists (one unbroken token-like run).
+ */
+function flushCut(text: string, secrets: readonly string[]): number {
+  const lines = secrets.flatMap((secret) =>
+    secret.split(/\r?\n/).filter(Boolean),
+  );
+  let cut =
+    text.length - Math.max(PENDING_KEEP, ...lines.map((line) => line.length));
+  for (let was = -1; cut > 0 && was !== cut; ) {
+    was = cut;
+    while (cut > 0 && TOKEN_CHAR.test(text[cut - 1]!)) cut -= 1;
+    for (const line of lines) {
+      const start = text.lastIndexOf(line, cut - 1);
+      if (start >= 0 && start + line.length > cut) cut = start;
+    }
+  }
+  return cut > 0 ? cut : text.length;
+}
+
+/**
+ * One attempt's private file (RunLog.runFile): text appended line by line,
+ * each line redacted before it is written. The first ATTEMPT_HEAD bytes
+ * stay in segment 0; after it, segments of ATTEMPT_SEGMENT roll and the
+ * last two are kept, so the file keeps its start and its end within 16
+ * MiB. Segments are `<file>.<n>`; `readRunFile` joins them. A write that
+ * fails is counted, never retried: the file only observes.
+ */
+export class RunFile {
+  /** Bytes written, and bytes rotated away from the middle. */
+  written = 0;
+  dropped = 0;
+  failed = 0;
+  closed = false;
+  private segment = 0;
+  private segmentBytes = 0;
+  /** Bytes of the segments still on disk. */
+  private kept = new Map<number, number>();
+  /** Each stream's text waiting for its newline. */
+  private pending = new Map<string, string>();
+
+  constructor(
+    private readonly logs: string,
+    /** Under the logs directory, without its segment number: what an event names. */
+    readonly file: string,
+    private readonly secrets: readonly string[],
+    private readonly grew: () => void,
+  ) {}
+
+  get onDisk(): number {
+    let sum = 0;
+    for (const bytes of this.kept.values()) sum += bytes;
+    return sum;
+  }
+
+  /**
+   * Text of one `stream` (a command's stdout and stderr apart, so their
+   * chunks never split each other's lines): complete lines are written,
+   * redacted, and the rest waits for its newline or `close`. A line past
+   * PENDING_LINE is written up to `flushCut`.
+   */
+  append(text: string, stream = ""): void {
+    if (this.closed) return;
+    const pending = (this.pending.get(stream) ?? "") + text;
+    const end = pending.lastIndexOf("\n");
+    const cut =
+      end >= 0
+        ? end + 1
+        : pending.length < PENDING_LINE
+          ? 0
+          : flushCut(pending, this.secrets);
+    this.pending.set(stream, pending.slice(cut));
+    this.write(redact(pending.slice(0, cut), this.secrets));
+  }
+
+  /**
+   * One JSON line: `{at, ...record}`, each string redacted and cut to 64
+   * KiB (`cutStrings`). A record that can't be serialized (a cycle, a
+   * BigInt) is counted as a failed write: the caller is never stopped.
+   */
+  record(record: Record<string, unknown>): void {
+    let line: string;
+    try {
+      line = `${JSON.stringify({ at: new Date().toISOString(), ...(cutStrings(record, this.secrets) as object) })}\n`;
+    } catch {
+      this.failed += 1;
+      return;
+    }
+    this.append(line);
+  }
+
+  /** Write what is pending and stop. */
+  close(): void {
+    if (this.closed) return;
+    for (const text of this.pending.values())
+      this.write(redact(text, this.secrets));
+    this.pending.clear();
+    this.closed = true;
+    this.grew();
+  }
+
+  /** Remove every segment: the run's budget dropped this file. */
+  remove(): void {
+    this.closed = true;
+    for (const segment of this.kept.keys()) this.unlink(segment);
+    this.kept.clear();
+  }
+
+  /** Remove one segment; a failure is counted, never thrown: the file only observes. */
+  private unlink(segment: number): void {
+    try {
+      rmSync(this.path(segment), { force: true });
+    } catch {
+      this.failed += 1;
+    }
+  }
+
+  private path(segment: number): string {
+    return join(this.logs, `${this.file}.${segment}`);
+  }
+
+  private write(text: string): void {
+    if (!text) return;
+    let bytes = Buffer.from(text, "utf8");
+    const limit = this.segment ? ATTEMPT_SEGMENT : ATTEMPT_HEAD;
+    if (this.segmentBytes && this.segmentBytes + bytes.length > limit) {
+      this.segment += 1;
+      this.segmentBytes = 0;
+      // Keep the head and the last two tail segments.
+      const old = this.segment - 2;
+      if (old >= 1 && this.kept.has(old)) {
+        this.dropped += this.kept.get(old)!;
+        this.unlink(old);
+        this.kept.delete(old);
+      }
+    }
+    const room = this.segment ? ATTEMPT_SEGMENT : ATTEMPT_HEAD;
+    if (bytes.length > room) {
+      this.dropped += bytes.length - room;
+      bytes = bytes.subarray(bytes.length - room);
+    }
+    try {
+      mkdirSync(join(this.logs, dirname(this.file)), {
+        recursive: true,
+        mode: 0o700,
+      });
+      appendFileSync(this.path(this.segment), bytes, { mode: 0o600 });
+      this.segmentBytes += bytes.length;
+      this.written += bytes.length;
+      this.kept.set(
+        this.segment,
+        (this.kept.get(this.segment) ?? 0) + bytes.length,
+      );
+    } catch {
+      this.failed += 1;
+      return;
+    }
+    if (this.segmentBytes === bytes.length) this.grew();
+  }
+}
+
+/** The longest string an attempt-file record keeps: its head and tail, the middle cut. */
+const RECORD_STRING = 64 * 1024;
+
+/** `value` with every string redacted, then cut in the middle when over RECORD_STRING. */
+function cutStrings(value: unknown, secrets: readonly string[]): unknown {
+  if (typeof value === "string") {
+    // Redacted before the cut and the JSON escaping, so neither hides a secret.
+    const shown = redact(value, secrets);
+    return shown.length > RECORD_STRING
+      ? `${shown.slice(0, RECORD_STRING / 2)}\n[… ${shown.length - RECORD_STRING} characters cut …]\n${shown.slice(-RECORD_STRING / 2)}`
+      : shown;
+  }
+  if (Array.isArray(value))
+    return value.map((entry) => cutStrings(entry, secrets));
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        cutStrings(entry, secrets),
+      ]),
+    );
+  return value;
+}
+
+/** The most `readRunFile` reads of one segment: a little over its bound. */
+const SEGMENT_READ_MAX = ATTEMPT_HEAD + 1024 * 1024;
+
+/**
+ * An attempt file's text (`file` as its event names it, under `logs`):
+ * its segments in order, read without following links, with a note where
+ * the middle rotated away; redacted again with `secrets`. Undefined when
+ * no segment is there (rotated away with its run, or never written).
+ */
+export function readRunFile(
+  logs: string,
+  file: string,
+  secrets: readonly string[],
+): { text: string; cut: boolean } | undefined {
+  if (!/^\d+\/[\w.-]+\.attempts\/[\w.-]+$/.test(file)) return undefined;
+  const dir = dirname(file);
+  const name = basename(file);
+  const segments = safeList(join(logs, dir))
+    .filter(
+      (entry) =>
+        entry.startsWith(`${name}.`) &&
+        /^\d+$/.test(entry.slice(name.length + 1)),
+    )
+    .map((entry) => Number(entry.slice(name.length + 1)))
+    .sort((a, b) => a - b);
+  if (!segments.length) return undefined;
+  let text = "";
+  let cut = false;
+  let previous = -1;
+  for (const segment of segments) {
+    if (segment > previous + 1) {
+      cut = true;
+      text += "\n[… the middle rotated away …]\n";
+    }
+    previous = segment;
+    try {
+      text += readContained(
+        logs,
+        `${file}.${segment}`,
+        SEGMENT_READ_MAX,
+        true,
+      ).toString("utf8");
+    } catch {
+      cut = true;
+    }
+  }
+  return { text: redact(text, secrets), cut };
 }
 
 /**
@@ -505,8 +803,8 @@ const LIVE_MS = 10 * 60 * 1000;
 
 /**
  * Keep the newest runs per Objective, then the newest runs overall within
- * the byte cap. A run is its log file and its capture directory, removed
- * together. Run ids sort by start time, so id order is age order. The
+ * the byte cap. A run is its log file, its capture directory and its
+ * attempt directory, removed together. Run ids sort by start time, so id order is age order. The
  * `active` run (the caller's own) and any run changed in the last 10
  * minutes (a `factory dream` call still running) are never removed; they
  * still count toward both bounds. Each removed run is first recorded in

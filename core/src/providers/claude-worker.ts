@@ -54,7 +54,12 @@ import {
   VALIDATION_TOOL_NAME,
   worktreeGitlinks,
 } from "../work/self-validate.js";
-import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
+import {
+  targetOf,
+  type Worker,
+  type WorkerInput,
+  type WorkerResult,
+} from "../work/worker.js";
 import { validationEnvironment } from "../worktree.js";
 import {
   ACTIVE_TOOL_IDLE_MS,
@@ -1065,12 +1070,17 @@ const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", COPY_TOOL];
 
 /** A tool call as worker activity: its name, the file it edits, the command it runs. */
 function reportToolUse(input: WorkerInput, tool: string, args: unknown): void {
-  input.activity({ kind: "tool", phase: "started", tool });
   const fields =
     args && typeof args === "object" ? (args as Record<string, unknown>) : {};
   const path = [fields.file_path, fields.notebook_path, fields.to].find(
     (value) => typeof value === "string",
   ) as string | undefined;
+  input.activity({
+    kind: "tool",
+    phase: "started",
+    tool,
+    ...targetOf(fields),
+  });
   if (path !== undefined && EDIT_TOOLS.includes(tool))
     input.activity({ kind: "edit", path });
   if (typeof fields.command === "string")
@@ -1387,6 +1397,7 @@ export class ClaudeWorker implements Worker {
         const next = await watchdog.race(events.next());
         if (next.done) break;
         const message = next.value;
+        input.output(message);
         watchdog.progress(
           message.type === "system"
             ? `system.${message.subtype}`

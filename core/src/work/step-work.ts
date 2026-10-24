@@ -340,12 +340,6 @@ export async function workStep(
       );
 
     const spent = fact(state, "spend", item.id);
-    const activity = new ActivityLog(
-      item.id,
-      worktree,
-      context.log,
-      deps.config.secrets,
-    );
     // A repair continues the item's worker conversation when it can.
     const conversation = retained(
       state,
@@ -354,8 +348,16 @@ export async function workStep(
       item,
       fact(state, "workSession", item.id),
     );
-    const { spend, session, ...result } = await deps
-      .worker(plan, shown.blocks, profile)
+    const worker = deps.worker(plan, shown.blocks, profile);
+    // Made last before the run, which always closes it.
+    const activity = new ActivityLog(
+      item.id,
+      worktree,
+      context.log,
+      deps.config.secrets,
+      context.runFile("transcript"),
+    );
+    const { spend, session, ...result } = await worker
       .run({
         worktree,
         prompt: prepared.prompt,
@@ -369,6 +371,7 @@ export async function workStep(
         signal,
         log: context.log,
         activity: activity.report,
+        output: activity.output,
         ...(spent ? { spend: spent } : {}),
         ...(context.answer ? { answer: context.answer } : {}),
       })

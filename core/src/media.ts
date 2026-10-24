@@ -151,8 +151,8 @@ export interface Selection {
 
 /** A file a worker gets read-only under `.factory-inputs/assets`. */
 export interface MediaInput {
-  /** An Objective source asset, or a dependency's selected member. */
-  origin: "source" | "selected";
+  /** An Objective source asset, a dependency's selected member, or a member of a set the operator sent back. */
+  origin: "source" | "selected" | "sent-back";
   role: string;
   mediaType: string;
   sha256: string;
@@ -1191,6 +1191,57 @@ export async function materializeSelection(input: {
   } finally {
     await removeWorktree(checkout, directory, signal);
   }
+}
+
+/**
+ * Keep the sets the operator sent back with a select `repair` apart from
+ * `candidates/`, which the next capture replaces: copies under
+ * `<directory>/sent-back/<set>/`. A set whose copies are gone is left out.
+ */
+export async function keepSentBack(
+  directory: string,
+  sets: readonly CandidateSet[],
+): Promise<CandidateSet[]> {
+  const root = join(directory, "sent-back");
+  await forceRemove(root);
+  const kept: CandidateSet[] = [];
+  for (const set of sets) {
+    if (await missingMember(set)) continue;
+    const members: CapturedMember[] = [];
+    for (const member of set.members) {
+      const file = join(root, set.id.toLowerCase(), basename(member.file));
+      await mkdir(join(file, ".."), { recursive: true, mode: 0o700 });
+      await copyFile(member.file, file);
+      members.push({ ...member, file });
+    }
+    kept.push({ ...set, members });
+  }
+  return kept;
+}
+
+/** The sent-back sets' members as read-only worker inputs; a set whose copies are gone is left out. */
+export async function sentBackInputs(
+  itemId: string,
+  sets: readonly CandidateSet[],
+): Promise<MediaInput[]> {
+  const inputs: MediaInput[] = [];
+  for (const set of sets) {
+    if (await missingMember(set)) continue;
+    for (const member of set.members)
+      inputs.push({
+        origin: "sent-back",
+        role: member.role,
+        mediaType: member.mediaType,
+        sha256: member.sha256,
+        bytes: member.bytes,
+        file: member.file,
+        fromItem: itemId,
+        set: set.id,
+        destination: member.destination,
+        provenance: set.provenance,
+      });
+  }
+  return inputs;
 }
 
 /** The first member whose private copy is missing or no longer has its captured digest. */

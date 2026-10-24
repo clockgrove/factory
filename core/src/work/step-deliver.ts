@@ -522,6 +522,7 @@ export function repairOutcome(
           rebase: null,
           onto: null,
           selection: null,
+          sentBack: null,
           refused: null,
           diagnosis: null,
           workSession: null,

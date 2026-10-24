@@ -1,5 +1,6 @@
 import type { Outcome, StepContext } from "../engine.js";
 import {
+  keepSentBack,
   materializeSelection,
   mediaDirectory,
   readSelection,
@@ -10,7 +11,7 @@ import {
 import { currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import { worktreePath } from "../worktree.js";
-import { fact } from "./facts.js";
+import { fact, facts } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
 import { mediaOutcome } from "./step-work.js";
 import {
@@ -72,7 +73,14 @@ export async function selectStep(
     return { ...question, question: `${read.problem}\n\n${question.question}` };
   if (read.kind === "repair") {
     const finding = `The operator asked for new candidates${answer?.text ? `: ${answer.text}` : "."}`;
-    return repairOutcome(item, "select", finding, context.state, place);
+    // The new attempt sees the sets the answer is about: capture replaces these.
+    const sentBack = await keepSentBack(
+      mediaDirectory(workDir, item.id),
+      work.sets,
+    );
+    return repairOutcome(item, "select", finding, context.state, place, {
+      keep: facts({ sentBack }, item.id),
+    });
   }
   const made = await materializeSelection({
     checkout: deps.config.checkout,

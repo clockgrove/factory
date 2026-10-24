@@ -10,6 +10,7 @@ import {
   missingMember,
   needsSelection,
   resolveInputs,
+  sentBackInputs,
 } from "../media.js";
 import { objectiveText } from "../objective.js";
 import { forceRemove } from "../paths.js";
@@ -348,7 +349,13 @@ export async function workStep(
       fixedScripts: scripts.map((script) => script.name),
       ...(pin ? { packageManagerUpdate: pin } : {}),
       ...(repair ? { repair: repair.context } : {}),
-      mediaInputs: inputs.value,
+      mediaInputs: [
+        ...inputs.value,
+        ...(await sentBackInputs(
+          item.id,
+          fact(state, "sentBack", item.id) ?? [],
+        )),
+      ],
       ...(own
         ? {
             keptSelection: {
@@ -456,7 +463,7 @@ export async function workStep(
         keep: {
           ...keepAll,
           ...facts(
-            { finished: { ...finished, sets: captured.value } },
+            { finished: { ...finished, sets: captured.value }, sentBack: null },
             item.id,
           ),
         },

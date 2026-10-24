@@ -55,6 +55,12 @@ Provider options need `--provider NAME`. They add the provider or change it:
 
 Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
 
+`planning.context` is written by hand too, and every key is optional. It sets what every Objective's planning context, repository memory and planner lookups may read:
+
+- `selectors`: 1–64 literal repository files or directory prefixes ending in `/`. Absent: all tracked paths.
+- `memory`: `true` by default. `false` turns repository memory off in every role, and the planner's memory lookups with it; the planning context and the other lookups stay.
+- `bounds`: `maxRounds` (4), `maxRequestsPerRound` (8), `maxResults` (64), `maxBytes` (262144), `maxElapsedMs` (30000) and `maxProviderCalls` (5).
+
 ### Background service
 
 The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.

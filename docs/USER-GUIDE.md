@@ -174,12 +174,6 @@ Exact backticked package directories, one per bullet, each listed once:
 
 When validation runs package scripts, a change to `pnpm-workspace.yaml` is blocked unless it only appends listed directories, each with a valid `package.json`. Existing entries cannot be removed or reordered. Any other workspace change, such as dependency build approvals, is the operator's call: merge it to the default branch before queueing.
 
-#### Adaptive workflow
-
-Exactly `enabled` or `disabled` as its only line, like the Quality checkpoint. `enabled` needs a `planning.context` section in the installation configuration (`selectors`, optional `memory` and `bounds`); without it the Objective is refused before any model call.
-
-With `enabled`, and with `memory: true`, the planner, workers and reviewers get advisory repository memory.
-
 ### Writing Objectives that deliver
 
 - Deliver one coherent change per Objective, without unrelated fixes.
@@ -319,7 +313,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 ## Repository knowledge
 
 - **Playbook.** A curated playbook (`.factory/playbook.md` in the target, read at the base) goes into planning and work prompts.
-- **Repository memory.** When `planning.context` turns memory on, Factory records what each finished Objective learned. For an Objective with an Adaptive workflow, it shows the relevant records, as advisory data, to planning, workers and reviews.
+- **Repository memory.** Factory records what each finished Objective learned, and shows the relevant records, as advisory data, to planning, workers and reviews of every Objective. The planner may also look up memory, files and tracked paths before it plans. `planning.context.memory: false` turns memory off for the installation; the lookups stay.
 - **Dream.** `factory dream --preview` proposes a playbook from settled Objectives. `--file PATH --approve SHA256` or `--reject SHA256` decides it, and `--show` shows the playbook in force.
 
 ## One installation per repository

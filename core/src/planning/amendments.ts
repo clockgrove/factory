@@ -873,7 +873,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
         },
-        ...(lookups ? { contextLookups: lookups.data } : {}),
+        contextLookups: lookups.data,
       };
       const { workDir, repository } = await planningTree(
         deps,
@@ -892,14 +892,14 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         reviewArtifacts: inputs.reviewArtifacts,
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
-        ...(lookups ? { lookups } : {}),
+        lookups,
       });
       const answer = await deps.planner.answer({
         role: "planner",
         phase: "plan",
         prompt,
         facts: promptFacts,
-        schema: lookups ? lookups.schema(schema) : schema,
+        schema: lookups.schema(schema),
         readDir: workDir,
         // The planner of the accepted plan's generation, while it is warm.
         conversation: planningConversation(
@@ -920,14 +920,12 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         ms: answer.ms,
         usage: answer.usage,
       });
-      const taken = lookups
-        ? await lookups.take(answer.value, {
-            issue: state.issue,
-            files,
-            secrets: config.secrets,
-            log: context.log,
-          })
-        : { value: answer.value };
+      const taken = await lookups.take(answer.value, {
+        issue: state.issue,
+        files,
+        secrets: config.secrets,
+        log: context.log,
+      });
       if ("outcome" in taken) return taken.outcome;
       const revised = whole
         ? { answer: taken.value, findings: [] }

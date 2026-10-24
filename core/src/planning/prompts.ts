@@ -264,7 +264,7 @@ export interface CompilationInput {
    * The planner may ask for context (planning/lookup.ts): the data carries
    * `contextLookups`, whose answered contents are these bodies by label.
    */
-  lookups?: {
+  lookups: {
     open: boolean;
     bodies: readonly { label: string; content: string }[];
   };
@@ -337,13 +337,11 @@ Examples (illustrations, not command or source authority):
   const revision = input.revising
     ? `\n\n- Revision answer: currentPlan is your earlier complete answer and stays the plan except for what you change. Answer with only the changes: items holds new items and complete replacements (same id) of current items; itemEdits replaces single fields of a current item, null keeping a field (so setting a nullable field such as media to null needs a complete replacement in items), and its acceptanceReplace rewrites single acceptance entries by index while acceptanceAppend adds entries at the end, so existing acceptance indices keep their meaning (prefer these to replacing a long acceptance list); removedItemIds drops items; coverage replaces the entries its obligationIndex selects; sourceObligations and requiredPreIntegrationChecks are null to keep the current list or the complete new list; decisionRequired is given in full, as in a complete answer. Name each item id at most once. Keep indices consistent: when a change moves an item's validation entries, also replace the coverage entries and source obligations that refer to them. citedSections holds the exact base bytes of the repository sections the affected items cite; read other files only when the findings need them.\n`
     : "";
-  const lookupRules = input.lookups
-    ? `\n\n${lookupGuidance(input.lookups.open)}`
-    : "";
+  const lookupRules = `\n\n${lookupGuidance(input.lookups.open)}`;
   const choices = Object.entries(data)
     .map(([key, value]) => `\n\n${JSON.stringify({ [key]: value })}`)
     .join("");
-  const answers = literalBodyBlocks(input.lookups?.bodies ?? []);
+  const answers = literalBodyBlocks(input.lookups.bodies);
   const followUp = cited.text
     ? `\n\nCited repository sections. ${cited.guidance} A citedSections content {"block": LABEL} is the complete literal body in that block.\n${cited.text}`
     : "";

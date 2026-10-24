@@ -92,9 +92,7 @@ export function knowledge(config: CoreConfig, paths: Paths): KnowledgeSettings {
     repository: config.repository,
     root: paths.root,
     checkout: config.checkout,
-    ...(config.planning.context
-      ? { planningContext: config.planning.context }
-      : {}),
+    planningContext: config.planning.context,
     secrets: config.secrets,
   };
 }

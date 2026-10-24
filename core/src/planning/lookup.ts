@@ -1,7 +1,6 @@
 /**
  * Planner-requested context lookups: a structured turn inside a planner
- * step. For an Adaptive workflow Objective on an installation with planning
- * context, the planner's answer may ask for context (repository memory, a
+ * step. The planner's answer may ask for context (repository memory, a
  * file's text, tracked paths) instead of planning. Factory answers each
  * request read-only at the base, inside the admitted selectors, keeps the
  * round in `state.kept` and asks the planner again with every answer so far.
@@ -9,7 +8,7 @@
  * it is never asked again. The rounds, the requests per round and the
  * answer bytes are bounded by `planning.context.bounds`, which the Objective
  * froze; a request past them is refused to the planner by name, never
- * dropped. Without planning context the planner call is exactly as before.
+ * dropped.
  */
 import type { CoreConfig } from "../config.js";
 import type { Outcome, Step } from "../engine.js";
@@ -20,7 +19,6 @@ import { validPath } from "../objective.js";
 import { type ShownObjective, shownDigest } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import { errorMessage } from "../text.js";
-import { adaptiveWorkflow } from "../validate.js";
 import { type BaseFiles, sectionText } from "./facts.js";
 import {
   LOOKUP_FIELD,
@@ -75,20 +73,14 @@ export interface Lookups {
   ): Promise<{ value: unknown } | { outcome: Outcome }>;
 }
 
-/**
- * The lookups offered to the planner step `step`: undefined unless the
- * Objective's Adaptive workflow is enabled and the installation has planning
- * context, so planning without them is unchanged.
- */
+/** The lookups offered to the planner step `step`. */
 export function plannerLookups(
   state: ObjectiveState,
   step: string,
   inputs: { base: string; shown: ShownObjective },
   config: CoreConfig,
-): Lookups | undefined {
+): Lookups {
   const context = config.planning.context;
-  if (!context || !adaptiveWorkflow(inputs.shown.blocks).enabled)
-    return undefined;
   const { bounds, selectors } = context;
   // Rounds answered for another base or another issue body (a replan's
   // re-read moved) no longer hold: start fresh.

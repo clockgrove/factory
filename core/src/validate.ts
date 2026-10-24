@@ -27,7 +27,6 @@ import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal } from "./git.js";
-import { knowledgeSettings } from "./knowledge/settings.js";
 import {
   hydrateTree,
   type LfsFile,
@@ -1435,9 +1434,8 @@ function workspaceAdditions(blocks: readonly ObjectiveBlock[]): {
 
 /**
  * The problems in the Objective's optional declarations: Package manager
- * update, Quality checkpoint, Workspace package additions and Adaptive
- * workflow. The check step runs this once; validation and planning then
- * trust what it accepted.
+ * update, Quality checkpoint and Workspace package additions. The check
+ * step runs this once; validation and planning then trust what it accepted.
  */
 export function declarationProblems(
   blocks: readonly ObjectiveBlock[],
@@ -1473,33 +1471,7 @@ export function declarationProblems(
   }
   const workspace = workspaceAdditions(blocks).problem;
   if (workspace) problems.push(workspace);
-  const adaptive = adaptiveWorkflow(blocks);
-  if (adaptive.problem) problems.push(adaptive.problem);
-  else if (adaptive.enabled && !knowledgeSettings()?.planningContext)
-    problems.push(
-      "Adaptive workflow is enabled, but this installation admits no planning context. Add a planning.context section (selectors, and optionally bounds and memory) to the configuration and restart the service, or set the section to disabled.",
-    );
   return problems;
-}
-
-/** The Objective's Adaptive workflow section: on only when it reads `enabled`. */
-export function adaptiveWorkflow(blocks: readonly ObjectiveBlock[]): {
-  enabled: boolean;
-  problem?: string;
-} {
-  const found = declaration(blocks, "adaptive workflow", "Adaptive workflow");
-  if (!found.entries)
-    return { enabled: false, ...(found.problem && { problem: found.problem }) };
-  const only = onlyEntry(found.entries);
-  if (only?.kind === "empty") return { enabled: false };
-  const selection = only?.kind === "text" ? only.text : undefined;
-  if (selection !== "enabled" && selection !== "disabled")
-    return {
-      enabled: false,
-      problem:
-        "Adaptive workflow requires exactly enabled or disabled as its only line.",
-    };
-  return { enabled: selection === "enabled" };
 }
 
 // ---------------------------------------------------------------------------

@@ -75,8 +75,8 @@ export interface CoreConfig {
   planning: {
     /** A curated playbook file in the target, read at the base. */
     playbook: string;
-    /** Admits Adaptive workflow Objectives; absent, they are refused. */
-    context?: PlanningContext;
+    /** The planning context, memory and lookups every Objective gets. */
+    context: PlanningContext;
   };
   execution: {
     /** Steps of one Objective running at once (independent Work Items run in parallel). */
@@ -585,7 +585,7 @@ export function loadConfig(repository: string): CoreConfig {
       planning: object(
         {
           playbook: text(".factory/playbook.md"),
-          context: optional(planningContext),
+          context: planningContext,
         },
         RETIRED.planning,
       ),

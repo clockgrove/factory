@@ -440,7 +440,7 @@ function planRoundStep(
               })),
             }
           : {}),
-        ...(lookups ? { contextLookups: lookups.data } : {}),
+        contextLookups: lookups.data,
       };
       const local = await localExecutables(inputs, config, signal);
       const { prompt, facts: promptFacts } = renderCompilationCall({
@@ -454,7 +454,7 @@ function planRoundStep(
         reviewArtifacts: inputs.reviewArtifacts,
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
-        ...(lookups ? { lookups } : {}),
+        lookups,
       });
       const schema = revising
         ? revisionSchema(facts, wire)
@@ -464,7 +464,7 @@ function planRoundStep(
         phase: "plan",
         prompt,
         facts: promptFacts,
-        schema: lookups ? lookups.schema(schema) : schema,
+        schema: lookups.schema(schema),
         readDir: workDir,
         // A revision or lookup turn continues the generation's planner.
         conversation: planningConversation(deps, state, "planner", g, prompt),
@@ -478,14 +478,12 @@ function planRoundStep(
         ms: answer.ms,
         usage: answer.usage,
       });
-      const taken = lookups
-        ? await lookups.take(answer.value, {
-            issue: state.issue,
-            files,
-            secrets: config.secrets,
-            log: context.log,
-          })
-        : { value: answer.value };
+      const taken = await lookups.take(answer.value, {
+        issue: state.issue,
+        files,
+        secrets: config.secrets,
+        log: context.log,
+      });
       if ("outcome" in taken) return taken.outcome;
       let full: unknown = taken.value;
       if (revising) {
@@ -1235,8 +1233,8 @@ export async function readObjective(
 /**
  * The Objective checks on what GitHub shows of it at `inputs.base`: its
  * sections, its declarations (Package manager update, Quality checkpoint,
- * Workspace package additions, Adaptive workflow; checked here once,
- * trusted afterwards), its commands and local executables. The check step
+ * Workspace package additions; checked here once, trusted afterwards), its
+ * commands and local executables. The check step
  * and `factory propose` (proposals.ts) both use it.
  */
 export async function objectiveProblems(
@@ -1346,7 +1344,7 @@ export async function planningFacts(
     extraCommands: allowedCommands(state),
     localAssetRoots: config.media.localAssetRoots,
     // No playbook in the target reads as empty. Knowledge adds the pinned
-    // Dream playbook and, for Adaptive workflow, planning context and memory.
+    // Dream playbook, the planning context and memory.
     playbook: await planningKnowledge({
       state,
       shown: inputs.shown,

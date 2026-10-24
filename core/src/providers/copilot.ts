@@ -26,7 +26,12 @@ import {
   VALIDATION_TOOL_NAME,
   worktreeGitlinks,
 } from "../work/self-validate.js";
-import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
+import {
+  targetOf,
+  type Worker,
+  type WorkerInput,
+  type WorkerResult,
+} from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
 import { ACTIVE_TOOL_IDLE_MS } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
@@ -683,8 +688,8 @@ function copilotActivity(
   if (event.type !== "tool.execution_start") return;
   const tool = event.data.toolName;
   toolNames.set(event.data.toolCallId, tool);
-  input.activity({ kind: "tool", phase: "started", tool });
   const args = isObject(event.data.arguments) ? event.data.arguments : {};
+  input.activity({ kind: "tool", phase: "started", tool, ...targetOf(args) });
   if (EDIT_TOOLS.includes(tool) && typeof args.path === "string")
     input.activity({ kind: "edit", path: args.path });
   if (typeof args.command === "string")
@@ -789,7 +794,10 @@ export class CopilotWorker implements Worker {
           ),
         }),
         signal: input.signal,
-        onEvent: (event) => copilotActivity(input, event, toolNames),
+        onEvent: (event) => {
+          input.output(event);
+          copilotActivity(input, event, toolNames);
+        },
       });
       record.session = result.session;
       captureResponse(record, result.text);

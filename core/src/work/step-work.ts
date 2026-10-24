@@ -345,6 +345,7 @@ export async function workStep(
       worktree,
       context.log,
       deps.config.secrets,
+      context.runFile("transcript"),
     );
     // A repair continues the item's worker conversation when it can.
     const conversation = retained(
@@ -369,6 +370,7 @@ export async function workStep(
         signal,
         log: context.log,
         activity: activity.report,
+        output: activity.output,
         ...(spent ? { spend: spent } : {}),
         ...(context.answer ? { answer: context.answer } : {}),
       })

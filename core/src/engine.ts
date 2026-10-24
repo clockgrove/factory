@@ -11,7 +11,7 @@ import {
 } from "./allowances.js";
 import { crashPoint } from "./crash.js";
 import { displayTime, duration } from "./display.js";
-import type { RunLog } from "./log.js";
+import type { RunFile, RunLog } from "./log.js";
 import { profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
@@ -273,6 +273,12 @@ export interface StepContext {
   readonly answer?: Answer;
   readonly signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+  /**
+   * A private file of this attempt beside the run log, such as a worker's
+   * transcript or a failed command's whole output (log.ts RunLog.runFile).
+   * Its event names it by `file`.
+   */
+  runFile(kind: string): RunFile;
   /**
    * Facts to keep with whatever outcome this attempt ends in, an error
    * included (`state.kept`, as an outcome's `keep`, which wins on a
@@ -829,6 +835,8 @@ export class ObjectiveRunner {
           attemptId,
           ...event,
         }),
+      runFile: (kind) =>
+        this.log.runFile(this.state.issue, `${attemptId}.${kind}`),
       keep: (facts) => {
         kept = { ...kept, ...facts };
       },

@@ -74,6 +74,11 @@ export function captureDir(issue: number, run: string): string {
   return `${issue}/${run}.captures`;
 }
 
+/** A run's attempt files under the logs directory: `<issue>/<run id>.attempts` (docs/reference/run-log.md#Attempt files). */
+export function attemptDir(issue: number, run: string): string {
+  return `${issue}/${run}.attempts`;
+}
+
 /** A capture file under the logs directory, or undefined when `id` isn't a capture id. */
 export function captureFile(
   issue: number,

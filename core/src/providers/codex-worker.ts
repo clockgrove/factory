@@ -451,7 +451,19 @@ function codexActivity(
         : item.type === "web_search"
           ? "web_search"
           : undefined;
-  if (tool) input.activity({ kind: "tool", phase, tool });
+  const target =
+    item.type === "command_execution"
+      ? item.command
+      : item.type === "web_search"
+        ? item.query
+        : undefined;
+  if (tool)
+    input.activity({
+      kind: "tool",
+      phase,
+      tool,
+      ...(phase === "started" && target ? { target } : {}),
+    });
   if (phase === "started" && item.type === "command_execution")
     input.activity({ kind: "command", command: item.command });
   if (
@@ -646,6 +658,7 @@ export class CodexWorker implements Worker {
         const next = await watchdog.race(events.next());
         if (next.done) break;
         const event = next.value;
+        input.output(event);
         const item =
           event.type === "item.started" ||
           event.type === "item.updated" ||

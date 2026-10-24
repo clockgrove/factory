@@ -86,20 +86,14 @@ Queue an Objective by setting its card's Factory field to the queued option on t
 
 Sections are level-two or level-three headings (the issue form renders `###`). Text before the first section is not checked.
 
-- **Goal** (or **Outcome**): required. One paragraph: what changes, for whom, and what is out of scope.
+- **Goal**: required. One paragraph: what changes, for whom, and what is out of scope.
 - **Acceptance**: required, at least one bullet. One observable fact per bullet; see below.
 - **Context**: optional prose and links. Not parsed; the planner reads it with the rest of the issue.
 - **Sources**: optional. Files every worker must receive verbatim; see below.
 - **Constraints** or **Non-goals**: optional limits workers must respect.
 - **May change**: optional, once. The protected paths a worker may change: anything under `.github/`, a CODEOWNERS file, or other CI configuration ([Security](reference/security.md)). Each bullet is exactly one backticked repository path, such as ``- `.github/workflows/ci.yml` ``. Naming a path anywhere else allows nothing.
 
-Any other heading is read as prose. Each section above may appear once; a second copy is refused with "merge the two sections into one". Three old headings are refused so their meaning is not silently lost:
-
-| Heading           | Refusal says                                                                      |
-| ----------------- | --------------------------------------------------------------------------------- |
-| Final validation  | write each command as an Acceptance bullet that is exactly one backticked command |
-| Planning sources  | rename it to Sources                                                              |
-| What must be true | rename it to Acceptance                                                           |
+Any other heading is read as prose. Each section above may appear once; a second copy is refused with "merge the two sections into one".
 
 ### Acceptance and final commands
 
@@ -120,7 +114,7 @@ At queue time each final command must be runnable:
 - A command listed in the installation's `finalValidation.ciOnlyCommands` is refused: final validation runs offline, so leave it to CI.
 - Each executable the command starts must be on the service's PATH, and an npm or pnpm it uses must match the `packageManager` pin. Factory never installs tools.
 
-Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well.
+Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well. With no final command, final validation runs each Work Item's own validation commands on the merged default branch instead, each item's list whole in a fresh checkout, so QA runs there either way.
 
 A backticked command in a sentence ("the probe is `node scripts/probe.mjs`") is declared, because you wrote it: the plan may use it as a Work Item check. It is not a final command. If the Objective has no final command at all but backticks a command the base already declares (a `package.json` script, or an own-line command in a Sources file), the check refuses it: make it an Acceptance bullet, or remove the backticks.
 
@@ -177,37 +171,6 @@ Exact backticked package directories, one per bullet, each listed once:
 
 When validation runs package scripts, a change to `pnpm-workspace.yaml` is blocked unless it only appends listed directories, each with a valid `package.json`. Existing entries cannot be removed or reordered. Any other workspace change, such as dependency build approvals, is the operator's call: merge it to the default branch before queueing.
 
-#### Adaptive workflow
-
-Exactly `enabled` or `disabled` as its only line, like the Quality checkpoint. `enabled` needs a `planning.context` section in the installation configuration (`selectors`, optional `memory` and `bounds`); without it the Objective is refused before any model call.
-
-With `enabled`, and with `memory: true`, the planner, workers and reviewers get advisory repository memory. If the installation also sets `planning.adaptiveGraph: true`, the planner may add discovery Work Items, declared work conditions and reviewed expansion envelopes for work whose file list is unknown up front. With `adaptiveGraph` off, the Objective still plans with its context and memory, and the run log says the graph features are off.
-
-#### Workflow recipe
-
-A recipe gives the plan a reviewed structure (stages, discovery, expansions). It never adds acceptance, commands or permissions. Declare exactly one fenced JSON block:
-
-````markdown
-## Workflow recipe
-
-```json
-{
-  "selector": "repository-migration",
-  "arguments": { "selectors": ["src/"], "maxChildren": 8 }
-}
-```
-````
-
-The selector is a recipe id, optionally prefixed `repository:` or `plugin:`. An unprefixed id uses `.factory/recipes/<id>.json` at the base when that file exists, otherwise the packaged recipe of that name. A broken repository recipe is refused rather than replaced by the packaged one. The packaged recipes are `repository-migration`, `api-feature` (also needs `sharedSelectors`) and `bounded-audit`. Arguments are typed values checked against the recipe, never shell text.
-
-A recipe needs Adaptive workflow `enabled`, `planning.context` selectors that cover every recipe selector, and `planning.adaptiveGraph: true` for its discovery and expansion stages. Its memory inputs are looked up by their query before planning when `planning.context.memory` is on, and a `required` one needs it on. Preview a draft against the checkout's HEAD before you queue it:
-
-```sh
-factory recipe --repo OWNER/NAME --file /absolute/path/objective.md
-```
-
-The preview prints JSON with the resolved recipe, its stages, capabilities and any missing prerequisites, and exits 1 when the recipe can't be used. It makes no model call and queues nothing. Queueing resolves the recipe again at the base and pins it for the run; later edits to the recipe file affect only new Objectives.
-
 ### Writing Objectives that deliver
 
 - Deliver one coherent change per Objective, without unrelated fixes.
@@ -215,7 +178,7 @@ The preview prints JSON with the resolved recipe, its stages, capabilities and a
 - Put workspace settings and dependency build approvals on the default branch first.
 - Keep stable repository facts in `AGENTS.md` or contributor docs, not in every Objective.
 - Keep it to about one page of prose.
-- Factory can't create child Objectives yet. If a plan splits the Objective into children, the run holds with `replan` or `cancel`; split a large goal into separate Objectives yourself.
+- Split a large goal into separate Objectives, linked as blocked-by where one builds on another, or let `factory propose` draft them.
 
 ### Propose Objectives
 
@@ -244,7 +207,9 @@ factory propose --file /abs/draft.json --approve SHA256 --enqueue --repo OWNER/N
   - wait for CI;
   - merge.
 
-  Then the final validation and final review on the default branch, and a report comment that closes the issue.
+  A read-only QA item has no worker or PR: it validates the default branch once its dependencies have merged, and is reviewed.
+
+  Then QA on the default branch: final validation (the final commands, or each Work Item's own commands when there are none) and final review, and a report comment that closes the issue.
 
 - **No approval step.** A clean, reviewed plan starts at once. Factory asks only when the review finds a decision for you.
 - **Dequeue:** move the card off Queued before planning starts, and the Objective is withdrawn as if never admitted. To run a finished Objective again, set its card to Queued after its final status shows.
@@ -301,12 +266,16 @@ Common answers:
 - `answer` with text: your decision, sent back to the planner or worker.
 - `more`: grant more repairs or rounds.
 - `replan`, and `revalidate` (check a refused result again, unchanged).
+- `accept N` and `refuse N` with a reason: decide one review criterion on this exact result.
 - `wait` and `switch NAME` (provider limits).
 - `adopt` (a configuration change).
 - `recheck` (an edited issue).
+- A candidate set id, optionally `bind ITEM...`, then your reason: the media set to deliver, asked when a media Work Item staged two or more sets (a single set is selected without asking and given to every Work Item that depends on it).
 - `cancel`.
 
 The options a hold offers are the only ones that apply.
+
+When the planner finds that no plan can meet the Objective as written (it contradicts itself, needs something the repository lacks, or its constraints rule the outcome out), planning asks one question with the planner's reason and what would have to change. Edit the issue and answer `replan`, `answer` with guidance for another round, or `cancel`. Factory plans no further round on its own, and the planner's answer counts as a round against `planningRevisions`.
 
 ### Allowances
 
@@ -333,6 +302,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
 - **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.
+- **A new machine.** `factory reset N` needs no local state: it rebuilds the Objective from GitHub alone. A delivered one comes back done. One still building checks its plan again and sends it through plan review before any work runs; merged Work Items stay merged and open PRs are reused. Repair counts start again, and open questions are asked again ([State](reference/state.md#state)).
 - **Never edit Factory's files.** Don't edit or delete files under the state directory: the service is their only writer, and a hand edit breaks its crash recovery.
 
 ## Sandbox and security
@@ -346,7 +316,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 ## Repository knowledge
 
 - **Playbook.** A curated playbook (`.factory/playbook.md` in the target, read at the base) goes into planning and work prompts.
-- **Repository memory.** When `planning.context` turns memory on, Factory records what each finished Objective learned. For an Objective with an Adaptive workflow, it shows the relevant records, as advisory data, to planning, workers and reviews.
+- **Repository memory.** Factory records what each finished Objective learned, and shows the relevant records, as advisory data, to planning, workers and reviews of every Objective. The planner may also look up memory, files and tracked paths before it plans. `planning.context.memory: false` turns memory off for the installation; the lookups stay.
 - **Dream.** `factory dream --preview` proposes a playbook from settled Objectives. `--file PATH --approve SHA256` or `--reject SHA256` decides it, and `--show` shows the playbook in force.
 
 ## One installation per repository

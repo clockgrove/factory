@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { gitEnvironment } from "../git.js";
@@ -13,13 +12,11 @@ import {
 } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
-import {
-  type CoverageObligation,
-  DISCOVERY_LIMITS,
-  type DiscoveryLimits,
-  type PinnedSource,
-  type PlanningFacts,
-  type ValidationCommand,
+import type {
+  CoverageObligation,
+  PinnedSource,
+  PlanningFacts,
+  ValidationCommand,
 } from "./types.js";
 
 const run = promisify(execFile);
@@ -190,32 +187,8 @@ function utf8(bytes: Buffer): string | undefined {
 
 // ── Objective ───────────────────────────────────────────────────────────
 
-/**
- * The parent and key a split child's marker names. A Factory-created child
- * Objective carries its parent's model-written goal. Read from the raw
- * issue body by the marker's exact pattern, as structure; the marker is
- * never planning text.
- */
-export function childOf(
-  raw: string,
-): { parent: number; key: string } | undefined {
-  const match =
-    /^<!-- factory:parent=([1-9][0-9]{0,15});child=([a-z][a-z0-9-]{0,63}) -->\r?\n/.exec(
-      raw,
-    );
-  return match ? { parent: Number(match[1]), key: match[2]! } : undefined;
-}
-
-/** What ties a child issue to the graph its parent planned: its title and body as written. */
-export function childDigest(title: string, body: string): string {
-  return createHash("sha256").update(`${title}\0${body}`).digest("hex");
-}
-
-/**
- * The Objective body as a pinned source. A split child's body carries the
- * model-written goal, so it isn't operator-authored.
- */
-function objectiveSource(shown: ShownObjective, child: boolean): PinnedSource {
+/** The Objective body as a pinned source: operator-authored. */
+function objectiveSource(shown: ShownObjective): PinnedSource {
   return {
     path: "OBJECTIVE",
     content: shown.body,
@@ -223,7 +196,7 @@ function objectiveSource(shown: ShownObjective, child: boolean): PinnedSource {
       lines: objectiveText(shown.blocks).split("\n"),
       spans: shown.spans,
     },
-    ...(!child && { operatorAuthored: true as const }),
+    operatorAuthored: true,
   };
 }
 
@@ -301,9 +274,8 @@ export function sectionText(text: string, heading: string): string | undefined {
 export async function planningSources(
   objective: ShownObjective,
   files: BaseFiles,
-  child = false,
 ): Promise<{ sources: PinnedSource[]; problems: string[] }> {
-  const sources: PinnedSource[] = [objectiveSource(objective, child)];
+  const sources: PinnedSource[] = [objectiveSource(objective)];
   const pinned = checkObjective(objective.blocks).objective.sources;
   const problems: string[] = [];
   const defaults: SourceRef[] = [];
@@ -636,8 +608,7 @@ async function authorizedCommand(
           check.command,
         ) ||
           // An operator-authored Objective body may declare a backticked
-          // command in its prose. Repository docs and split-child bodies
-          // (which carry a model-written goal) keep the own-line rule.
+          // command in its prose. Repository docs keep the own-line rule.
           (source.operatorAuthored === true &&
             inlineCommand(source, check.command))),
     );
@@ -1034,8 +1005,6 @@ export interface FactsArgs {
   objective: number;
   /** The Objective as shown: its structure and the planner text. */
   shown: ShownObjective;
-  /** The Objective is a Factory-created split child (childOf). */
-  child?: boolean;
   base: string;
   checkout: string;
   /** The installation's required final commands; their scripts stay fixed. */
@@ -1048,8 +1017,6 @@ export interface FactsArgs {
   playbook?: string;
   /** The operator's media.localAssetRoots. */
   localAssetRoots?: readonly string[];
-  /** The operator's planning.discoveryLimits. */
-  discoveryLimits?: DiscoveryLimits;
   signal?: AbortSignal;
 }
 
@@ -1065,11 +1032,7 @@ export async function buildFacts(
   args: FactsArgs,
 ): Promise<{ facts: PlanningFacts } | { problems: string[] }> {
   const files = new BaseFiles(args.checkout, args.base, args.signal);
-  const { sources, problems } = await planningSources(
-    args.shown,
-    files,
-    args.child,
-  );
+  const { sources, problems } = await planningSources(args.shown, files);
   if (problems.length) return { problems };
   const ciOnlyCommands = [...(args.ciOnlyCommands ?? [])];
   const facts: PlanningFacts = {
@@ -1097,7 +1060,6 @@ export async function buildFacts(
     coverageObligations: coverageObligations(args.shown.blocks),
     playbook: args.playbook ?? "",
     localAssetRoots: args.localAssetRoots ?? [],
-    discoveryLimits: args.discoveryLimits ?? DISCOVERY_LIMITS,
   };
   return { facts };
 }
@@ -1117,13 +1079,10 @@ export async function objectiveCommandProblems(
     requiredCommands?: readonly string[];
     ciOnlyCommands?: readonly string[];
     signal?: AbortSignal;
-    /** The Objective is a Factory-created split child (childOf). */
-    child?: boolean;
   } = {},
 ): Promise<string[]> {
-  const child = options.child === true;
   const files = new BaseFiles(checkout, base, options.signal);
-  const { sources, problems } = await planningSources(shown, files, child);
+  const { sources, problems } = await planningSources(shown, files);
   const finals = finalObjectiveCommands(shown.blocks);
   const ciOnly = new Set((options.ciOnlyCommands ?? []).map(ciOnlyKey));
   let authorized: string[] | undefined;
@@ -1153,8 +1112,7 @@ export async function objectiveCommandProblems(
       );
   }
 
-  // A Factory-created child carries its parent's prose; the parent was checked.
-  if (!finals.length && !child) {
+  if (!finals.length) {
     const named: string[] = [];
     for (const span of new Set(shown.spans.map((span) => span.trim()))) {
       if (!span) continue;
@@ -1195,7 +1153,7 @@ export async function objectiveCommandProblems(
 
   const required = options.requiredCommands ?? [];
   const requiredSources: PinnedSource[] = [
-    objectiveSource(shown, child),
+    objectiveSource(shown),
     { path: REQUIRED_COMMANDS_SOURCE, content: required.join("\n") },
   ];
   for (const command of required)

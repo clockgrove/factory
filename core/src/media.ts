@@ -957,7 +957,7 @@ export async function destinationFinding(input: {
 // ── Selection ───────────────────────────────────────────────────────────
 
 /** Plan items that depend directly on `item`: the only ones a selection can bind. */
-function directDependents(plan: Plan, item: WorkItem): string[] {
+export function directDependents(plan: Plan, item: WorkItem): string[] {
   return plan.items
     .filter((other) => other.dependencies.includes(item.id))
     .map((other) => other.id);

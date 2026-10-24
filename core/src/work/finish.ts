@@ -14,12 +14,11 @@ import { roleMemory } from "../knowledge/index.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
-import { expansionsOf } from "../planning/expansion.js";
-import { coverageCriterion } from "../planning/graph.js";
 import {
   acceptedInputs,
   currentPlan,
   decisionsOf,
+  fallbackRuns,
   retiredLines,
 } from "../planning/plan.js";
 import { objectiveNotes } from "../planning/schedule.js";
@@ -31,7 +30,13 @@ import { reviewObjective } from "../review/final.js";
 import { decisionLines, type ResultReview } from "../review/result.js";
 import { runOf, sinceRun } from "../state.js";
 import { errorMessage } from "../text.js";
-import { validateTree, validationDeadlineMs } from "../validate.js";
+import {
+  laterScriptChanges,
+  type ValidateInput,
+  type Validation,
+  validateTree,
+  validationDeadlineMs,
+} from "../validate.js";
 import {
   clearStaleLocks,
   hostGit,
@@ -44,7 +49,6 @@ import {
   finalRetirable,
   keepFirst,
   planWith,
-  RETIRE,
   RETIRE_COMMAND,
   retireKeep,
   retireOffer,
@@ -56,13 +60,15 @@ import {
   pinnedSources,
 } from "./shared.js";
 import { RERUN, RERUN_CLEANUP } from "./step-deliver.js";
-import { type QaResult, skippedItems } from "./step-qa.js";
+import type { QaResult } from "./step-qa.js";
 import {
   criterionDecisions,
   criterionOffers,
   reviewOutcome,
+  standingRefusals,
   workerInputs,
 } from "./step-review.js";
+import { rerunOnce } from "./step-validate.js";
 import { acceptedNotes, retained, secondLook, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
@@ -110,7 +116,6 @@ export function finalStep(plan: Plan, deps: BuildDeps): Step {
                 failed,
                 config.finalValidation.requiredCommands,
               ),
-              { name: "final:retired" },
             )
           : {};
       if (typeof recorded === "string")
@@ -140,25 +145,15 @@ export async function finalValidation(
   if (problem) return problem;
   const workDir = deps.workDir(state.issue);
   const members = validationMembers(plan, undefined, selection(state));
-  const result = await validateTree({
-    checkout: config.checkout,
-    repository: config.repository,
-    directory: join(workDir, "final"),
-    commit: head,
-    plan,
-    blocks: acceptedInputs(state).shown.blocks,
-    reviewArtifacts: {
-      configured: config.reviewArtifacts,
-      planned: plan.reviewArtifacts,
-      dir: join(workDir, "artifacts", "final"),
-    },
-    media: members,
-    sandbox: config.sandbox,
-    commandTimeoutMs: commandTimeoutMs(deps),
-    signal,
-    log: context.log,
-  });
+  const { result, item } = await finalRuns(context, deps, plan, head);
   if (result.kind === "failed") {
+    const again = rerunOnce(
+      result,
+      fact(state, "final:flaky"),
+      "failed on the default branch",
+      (rerun) => facts({ "final:flaky": rerun }),
+    );
+    if (again) return again;
     const offer = retireOffer(
       finalRetirable(
         plan,
@@ -168,7 +163,7 @@ export async function finalValidation(
     );
     return {
       ...hold(
-        `Final validation failed on the default branch (${head.slice(0, 12)}):\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.${offer.note}`,
+        `Final validation failed on the default branch (${head.slice(0, 12)})${item ? `, running Work Item ${item}'s own commands` : ""}:\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.${offer.note}`,
         ["retry", ...offer.options, "replan", "cancel"],
       ),
       ...(result.failed
@@ -209,6 +204,97 @@ export async function finalValidation(
   };
 }
 
+/**
+ * Final validation's runs on `head`: the final commands in one fresh
+ * checkout, or, with none, each Work Item's own commands
+ * (planning/plan.ts `fallbackRuns`), each in a fresh checkout as its
+ * validate step ran them. A command whose package script a later merge
+ * changed is skipped: its own item validated it, and the later item owns
+ * the change. `item` names the run that did not pass.
+ */
+async function finalRuns(
+  context: StepContext,
+  deps: BuildDeps,
+  plan: Plan,
+  head: string,
+): Promise<{ result: Validation; item?: string }> {
+  const { state, signal } = context;
+  const { config } = deps;
+  const workDir = deps.workDir(state.issue);
+  const run = (
+    under: string[],
+    fields: Partial<ValidateInput>,
+  ): Promise<Validation> =>
+    validateTree({
+      checkout: config.checkout,
+      repository: config.repository,
+      directory: join(workDir, "final", ...under),
+      commit: head,
+      plan,
+      blocks: acceptedInputs(state).shown.blocks,
+      reviewArtifacts: {
+        configured: config.reviewArtifacts,
+        planned: plan.reviewArtifacts,
+        dir: join(workDir, "artifacts", "final", ...under),
+      },
+      media: validationMembers(plan, fields.item, selection(state)),
+      sandbox: config.sandbox,
+      commandTimeoutMs: commandTimeoutMs(deps),
+      signal,
+      log: context.log,
+      ...fields,
+    });
+  const merges = objectiveMerges(state, plan).map(({ id, merged }) => ({
+    items: merged.items ?? [id],
+    mergeSha: merged.mergeSha,
+  }));
+  const passed: Extract<Validation, { kind: "passed" }> = {
+    kind: "passed",
+    tree: "",
+    commands: [],
+    results: [],
+    artifacts: [],
+  };
+  for (const item of fallbackRuns(plan)) {
+    const start = (
+      state.done[stepKey(item.id, "work")] as WorkResult | undefined
+    )?.base;
+    const predecessor = start && start !== plan.base ? start : undefined;
+    const skipped = await laterScriptChanges({
+      checkout: config.checkout,
+      base: plan.base,
+      ...(predecessor ? { predecessor } : {}),
+      head,
+      commands: item.validation.map((check) => check.command),
+      merges,
+      signal,
+    });
+    for (const { command, changedBy } of skipped)
+      context.log({
+        event: "final-check-skipped",
+        item: item.id,
+        command,
+        changedBy,
+      });
+    const validation = item.validation.filter(
+      (check) => !skipped.some((entry) => entry.command === check.command),
+    );
+    if (!validation.length) continue;
+    const result = await run([item.id], {
+      item: { ...item, validation },
+      ...(predecessor ? { predecessor } : {}),
+      requirePackageManagerUpdate: true,
+    });
+    if (result.kind !== "passed") return { result, item: item.id };
+    passed.tree = result.tree;
+    passed.commands.push(...result.commands);
+    passed.results.push(...result.results);
+    passed.artifacts!.push(...(result.artifacts ?? []));
+  }
+  // No Work Item run: the final commands, if any, in one checkout.
+  return { result: passed.tree ? passed : await run([], {}) };
+}
+
 /** `final-review`: every Objective criterion against the integrated result. */
 export function finalReviewStep(deps: BuildDeps): Step {
   return {
@@ -234,22 +320,7 @@ export function finalReviewStep(deps: BuildDeps): Step {
             "final-review:held": null,
           }),
         };
-      // `retire <n>` to the refusal: recorded, and the same integrated
-      // result is reviewed again without it.
-      const refusedBefore = fact(state, "final-review:refused");
-      const recorded =
-        context.answer?.answer === RETIRE && refusedBefore
-          ? retireKeep(
-              context,
-              { criteria: refusedBefore },
-              { name: "final-review:retired" },
-            )
-          : undefined;
-      const retired =
-        typeof recorded === "object"
-          ? { ...recorded, ...facts({ "final-review:refused": null }) }
-          : {};
-      const plan = planWith(state, retired);
+      const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
       const merges = objectiveMerges(state, plan);
       const decided = criterionDecisions(
@@ -348,13 +419,6 @@ export function finalReviewStep(deps: BuildDeps): Step {
         ],
         ...(decided.earlier ? { earlier: decided.earlier } : {}),
         qa,
-        skipped: skippedItems(state, plan).map(({ item, condition }) => ({
-          itemId: item.id,
-          ...condition,
-        })),
-        expansions: expansionsOf(state, plan).flatMap(({ expanded }) =>
-          expanded ? [expanded] : [],
-        ),
         signal,
         log: context.log,
       });
@@ -362,50 +426,33 @@ export function finalReviewStep(deps: BuildDeps): Step {
         context.keep(facts({ "session:final-review": conversation.kept }));
       const held = (asked: ResultReview | null) =>
         facts({ "final-review:held": asked });
-      // Only an Objective criterion or a coverage obligation can be
-      // retired, never an integration question.
-      const obligations = new Set([
-        ...acceptance,
-        ...plan.coverage.map(coverageCriterion),
-      ]);
-      // The retirement first: a new refusal's criteria replace the old.
-      return keepFirst(
-        retired,
-        withKeep(
-          reviewOutcome(
-            review,
-            held,
-            "and final review refuses the integrated result",
-            (refusal) => {
-              const lines = refusal.refused.map(
-                (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
-              );
-              const open = refusal.questions.map(
-                (q) =>
-                  `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
-              );
-              const offers = criterionOffers(refusal, "and the refusal stands");
-              const cited = refusal.refused
-                .filter((entry) => obligations.has(entry.criterion))
-                .map(({ criterionIndex, criterion }) => ({
-                  criterionIndex,
-                  criterion,
-                }));
-              const retire = retireOffer({ criteria: cited });
-              return {
-                ...hold(
-                  `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${retire.note}`,
-                  ["retry", "replan", ...offers, ...retire.options, "cancel"],
-                ),
-                keep: {
-                  ...facts({ "final-review:refused": cited }),
-                  ...held(refusal),
-                },
-              };
-            },
-          ),
-          decided.keep,
+      return withKeep(
+        reviewOutcome(
+          review,
+          held,
+          "and final review refuses the integrated result",
+          (refusal) => {
+            const lines = refusal.refused.map(
+              (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
+            );
+            const open = refusal.questions.map(
+              (q) =>
+                `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
+            );
+            const offers = criterionOffers(refusal, "and the refusal stands");
+            return {
+              ...hold(
+                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${standingRefusals(refusal.refused, "this integrated result", "a fix with `retry`, `replan`, or cancel")}`,
+                ["retry", "replan", ...offers, "cancel"],
+              ),
+              keep: {
+                ...facts({ "final-review:refused": true }),
+                ...held(refusal),
+              },
+            };
+          },
         ),
+        decided.keep,
       );
     },
   };
@@ -440,16 +487,7 @@ export function reportStep(deps: BuildDeps): Step {
       }
       const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
-      const skipped = new Map(
-        skippedItems(state, plan).map(({ item, condition }) => [
-          item.id,
-          condition,
-        ]),
-      );
       const lines = plan.items.map((item) => {
-        const condition = skipped.get(item.id);
-        if (condition)
-          return `- **${item.id}** ${item.title} — skipped: it runs only when condition ${condition.conditionId} is ${condition.when}. ${condition.evidence}`;
         const published = state.done[stepKey(item.id, "publish")] as
           | PublishResult
           | undefined;
@@ -460,18 +498,14 @@ export function reportStep(deps: BuildDeps): Step {
             : undefined;
         return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
       });
-      for (const { envelope, expanded } of expansionsOf(state, plan))
-        lines.push(
-          `- Expansion **${envelope.id}** from ${envelope.input.producerItemId}: ${expanded!.children.length} children${expanded!.children.length ? ` (${expanded!.children.map((child) => child.id).join(", ")})` : ""}. ${expanded!.evidence}`,
-        );
       const repairs = Object.values(state.repairs ?? {}).reduce(
         (sum, r) => sum + r.count,
         0,
       );
       const decided = decisionLines(decisionsOf(state));
-      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
+      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
         plan.retired?.length
-          ? `\n\nRetired criteria and commands:\n${retiredLines(plan)
+          ? `\n\nRetired final validation commands:\n${retiredLines(plan)
               .map((line) => `- ${line}`)
               .join("\n")}`
           : ""

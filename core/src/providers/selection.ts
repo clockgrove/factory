@@ -407,15 +407,11 @@ export function providerWorkflow(
     status: (state) => (frozen(state) ?? fallback).status(state),
     upstream: (state, item) =>
       (frozen(state) ?? fallback).upstream?.(state, item) ?? [],
-    // The same on every provider: GitHub, Git and provider errors, replan
-    // and what ended a done Objective.
+    // The same on every provider: GitHub, Git and provider errors and
+    // replan.
     ...(fallback.outcomeOf ? { outcomeOf: fallback.outcomeOf } : {}),
     ...(fallback.replannable ? { replannable: fallback.replannable } : {}),
     ...(fallback.replan ? { replan: fallback.replan } : {}),
-    ...(fallback.endedBy ? { endedBy: fallback.endedBy } : {}),
-    ...(fallback.deadlineExempt
-      ? { deadlineExempt: fallback.deadlineExempt }
-      : {}),
     freezable,
   };
 }

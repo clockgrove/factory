@@ -12,7 +12,6 @@ import { spec as log } from "./log.js";
 import { spec as propose } from "./propose.js";
 import { spec as proposeAmendment } from "./propose-amendment.js";
 import { spec as queue } from "./queue.js";
-import { spec as recipe } from "./recipe.js";
 import { spec as run } from "./run.js";
 import { spec as serve } from "./serve.js";
 import { spec as setup } from "./setup.js";
@@ -41,6 +40,5 @@ export const COMMANDS: Record<string, Command> = {
   queue,
   dream,
   propose,
-  recipe,
   help: { args: "", flags: {}, help: "Show this help" },
 };

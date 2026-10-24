@@ -32,8 +32,6 @@ export type Request =
       writtenAt?: string;
       /** The id of the question this answers (`hold.id`); absent: see `ObjectiveRunner.answer`. */
       question?: string;
-      /** `revalidate --review-artifacts`: configured selectors' numbers, or `none`, as given; the engine checks them. */
-      reviewArtifacts?: string[];
     }
   | { kind: "cancel"; issue: number }
   | { kind: "retry"; issue: number; question?: string }

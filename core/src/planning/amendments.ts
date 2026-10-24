@@ -27,12 +27,10 @@ import {
   proposalsOf,
 } from "./plan.js";
 import {
-  draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
 } from "./prompts.js";
-import { adaptiveGraph, recipeFindings } from "./recipes.js";
 import {
   decodeGraphReview,
   graphReviewSchema,
@@ -485,9 +483,8 @@ export function discoveryText(discovery: WorkDiscovery): string {
 
 /**
  * The planner's full answer for the current plan: the base the next
- * revision edits. A plan with none (a ready split child's graph from its
- * parent's pass, or one `factory reset` rebuilt from its comment) is
- * amended by a whole plan instead.
+ * revision edits. A plan with none (one `factory reset` rebuilt from its
+ * comment) is amended by a whole plan instead.
  */
 function currentAnswer(state: ObjectiveState): unknown {
   const proposals = proposalsOf(state);
@@ -625,10 +622,6 @@ export function amendmentFindings(
       message,
       ...(itemId ? { itemId } : {}),
     });
-  if (next.split)
-    found(
-      "An amendment adds Work Items to this plan; it cannot split the Objective",
-    );
   for (const old of current.items) {
     const item = next.items.find((entry) => entry.id === old.id);
     if (!item) {
@@ -684,29 +677,6 @@ export function amendmentFindings(
     )
       found(
         `The amendment drops the excluded source item at ${exclusion.source.path} lines ${exclusion.source.lines.join("-")}; list it again under sourceObligations as out-of-scope, or cover it`,
-      );
-  const startedProducer = (id: string) => progress.started.has(id);
-  for (const condition of current.conditions ?? [])
-    if (
-      startedProducer(condition.input.producerItemId) &&
-      !isDeepStrictEqual(
-        condition,
-        next.conditions?.find((entry) => entry.id === condition.id),
-      )
-    )
-      found(
-        `Work condition ${condition.id} reads a discovery that has started; keep it as it is and add a successor condition instead`,
-      );
-  for (const envelope of current.expansions ?? [])
-    if (
-      startedProducer(envelope.input.producerItemId) &&
-      !isDeepStrictEqual(
-        envelope,
-        next.expansions?.find((entry) => entry.id === envelope.id),
-      )
-    )
-      found(
-        `Expansion ${envelope.id} reads a discovery that has started; keep it as it is and add a separately reviewed successor envelope instead`,
       );
   if (options.nativeStack) {
     const before = units(current);
@@ -857,18 +827,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if ("problems" in built)
         return done({ rejected: built.problems.join("; ") });
       const { facts } = built;
-      // The saved plan: settled expansions' children derive from it, and
-      // an amendment keeps every envelope whose producer started.
       const plan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, plan, proposal);
       const profiles = offeredProfiles(config);
       const wire = {
-        child: inputs.child === true,
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
-        adaptive: adaptiveGraph(
-          inputs.shown.blocks,
-          inputs.adaptiveGraph === true,
-        ),
         ...(profiles ? { profiles } : {}),
       };
       const lastError = state.retries[key]?.lastError;
@@ -890,15 +853,13 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           : []),
       ];
       const base = currentAnswer(state);
-      // No planner answer to revise (a ready split child's first plan came
-      // from its parent's pass, or factory reset rebuilt the plan): the
+      // No planner answer to revise (factory reset rebuilt the plan): the
       // planner answers in full, with the plan as it stands to amend.
       const whole = base === undefined;
       const schema = (whole ? planSchema : revisionSchema)(facts, wire);
       const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, !whole)}${await commandInstructions(facts, config.checkout, signal)}`,
         // No planner answer to revise: the plan as Factory holds it.
         ...(whole
@@ -912,7 +873,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
         },
-        ...(lookups ? { contextLookups: lookups.data } : {}),
+        contextLookups: lookups.data,
       };
       const { workDir, repository } = await planningTree(
         deps,
@@ -929,18 +890,16 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         workers: workers(config),
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
-        adaptive: wire.adaptive,
-        recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
-        ...(lookups ? { lookups } : {}),
+        lookups,
       });
       const answer = await deps.planner.answer({
         role: "planner",
         phase: "plan",
         prompt,
         facts: promptFacts,
-        schema: lookups ? lookups.schema(schema) : schema,
+        schema: lookups.schema(schema),
         readDir: workDir,
         // The planner of the accepted plan's generation, while it is warm.
         conversation: planningConversation(
@@ -961,14 +920,12 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         ms: answer.ms,
         usage: answer.usage,
       });
-      const taken = lookups
-        ? await lookups.take(answer.value, {
-            issue: state.issue,
-            files,
-            secrets: config.secrets,
-            log: context.log,
-          })
-        : { value: answer.value };
+      const taken = await lookups.take(answer.value, {
+        issue: state.issue,
+        files,
+        secrets: config.secrets,
+        log: context.log,
+      });
       if ("outcome" in taken) return taken.outcome;
       const revised = whole
         ? { answer: taken.value, findings: [] }
@@ -999,6 +956,19 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if (!revised.answer) return reject(revised.findings);
       const decoded = decodePlan(revised.answer, facts, wire);
       if (decoded.invalidShape) return invalid(decoded.findings);
+      if (decoded.cannot) {
+        context.log({
+          event: "planner-cannot-plan",
+          amendment: proposal.id,
+          ...decoded.cannot,
+        });
+        return reject([
+          {
+            source: "check",
+            message: `The planner says it can't be planned: ${decoded.cannot.reason} What would have to change: ${decoded.cannot.change}`,
+          },
+        ]);
+      }
       if (decoded.question)
         return hold(
           `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; \`refuse\` rejects the amendment.`,
@@ -1022,9 +992,6 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, plan)),
-        ...(inputs.recipe
-          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-          : []),
         ...amendmentFindings(plan, decoded.plan, progress, {
           answered: answered.length > 0,
           nativeStack: config.delivery.kind === "native-stack",
@@ -1163,7 +1130,6 @@ function amendReviewStep(
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
         workers: workers(config),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
@@ -1189,7 +1155,7 @@ function amendReviewStep(
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
-        draftItems(draft).map((item) => item.id),
+        draft.items.map((item) => item.id),
       );
       const invalidReview = "The amendment review answer was invalid";
       if (decoded.invalid)
@@ -1262,7 +1228,7 @@ function amendAcceptStep(
       };
       // Crash points `amend:post:*` (and `amend:data:*` for a plan
       // posted in parts); the marker makes a rerun edit, never repeat.
-      await postPlan(deps, state.issue, plan, signal, {
+      await postPlan(deps, state, plan, signal, {
         point: "amend",
         note: `Amended by ${code(proposal.id)} (${prose(proposal.actor)}): ${prose(proposal.discovery.reason)}`,
       });

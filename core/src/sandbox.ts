@@ -1340,8 +1340,11 @@ function launch(
     // Nor does it fetch and run another pnpm version.
     env.pnpm_config_manage_package_manager_versions = "false";
   }
-  const system = SYSTEM_DIRECTORIES.filter((path) => existsSync(path)).map(
-    (path) => real(path),
+  // systemMounts already provides both the real directories and aliases
+  // such as /bin -> usr/bin. Binding a PATH entry over an alias would make
+  // bubblewrap refuse the symlink destination.
+  const system = SYSTEM_DIRECTORIES.filter((path) => existsSync(path)).flatMap(
+    (path) => [path, real(path)],
   );
   const mounts = new Map<string, "ro" | "rw">();
   // Git metadata is the checkout's own, never a login or Factory's files.

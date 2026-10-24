@@ -2,11 +2,7 @@ import { itemOf } from "../engine.js";
 import { needsSelection } from "../media.js";
 import { currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
-import {
-  type ReviewArtifactSelector,
-  selectorIdentity,
-} from "../review/artifacts.js";
-import type { Answer, ObjectiveState } from "../state.js";
+import type { ObjectiveState } from "../state.js";
 import { hostGitExit } from "../worktree.js";
 import { fact, facts, type Refused } from "./facts.js";
 import { mergeOf } from "./merged.js";
@@ -72,6 +68,24 @@ export async function refusedResult(
 }
 
 /**
+ * Whether only the operator's own refusals (`refuse <n>`) remain on the
+ * kept refused result: a rereview of that tree reads them again and
+ * refuses again, so `revalidate` isn't offered.
+ */
+export function operatorRefusalsOnly(
+  state: ObjectiveState,
+  id: string,
+): boolean {
+  const finding = fact(state, "finding", id);
+  return (
+    finding?.kind === "review" &&
+    finding.tree === refusedOf(state, id)?.tree &&
+    finding.refused.length > 0 &&
+    finding.refused.every((entry) => entry.source === "operator")
+  );
+}
+
+/**
  * Whether `revalidate` can answer a question of item step `key`
  * (workflow.ts, for the engine): a coding item's work step while its
  * refused result is kept (and, for media, its selection stands), or a QA
@@ -92,76 +106,11 @@ export function revalidatable(state: ObjectiveState, key: string): boolean {
     key === stepKey(item.id, "work") &&
     !!refusedOf(state, item.id) &&
     !refusedOf(state, item.id)?.unrecheckable &&
+    !operatorRefusalsOnly(state, item.id) &&
     // The work step takes `revalidate` only before a finished worker
     // run is collected and when no replay onto a new start is due.
     !fact(state, "finished", item.id) &&
     !fact(state, "rebase", item.id) &&
     (!needsSelection(item) || !!fact(state, "selection", item.id))
   );
-}
-
-/**
- * The configured selectors `--review-artifacts` values name, resolved
- * when the answer lands, or why they can't be: each a configured
- * selector's number (from 1), or `none` alone.
- */
-export function reviewArtifactSelection(
-  values: readonly string[],
-  configured: readonly ReviewArtifactSelector[],
-): ReviewArtifactSelector[] | string {
-  const listed = configured
-    .map((selector, index) => `${index + 1} \`${selector.command}\``)
-    .join(", ");
-  const known = configured.length
-    ? `The configured reviewArtifacts selectors are ${listed}; name them by number, or none.`
-    : "This installation configures no reviewArtifacts selectors, so the only choice is none.";
-  if (values.includes("none"))
-    return values.every((value) => value === "none")
-      ? []
-      : `--review-artifacts none can't be given with selectors. ${known}`;
-  const numbers = values.map(Number);
-  const bad = values.filter(
-    (_, index) =>
-      !Number.isInteger(numbers[index]) ||
-      numbers[index]! < 1 ||
-      numbers[index]! > configured.length,
-  );
-  if (bad.length)
-    return `--review-artifacts ${bad.join(", ")} names no configured selector. ${known}`;
-  return [...new Set(numbers)]
-    .sort((a, b) => a - b)
-    .map((number) => configured[number - 1]!);
-}
-
-/** The rereview fact a `revalidate` answer writes: its selectors, else none (null). */
-export function rereviewOf(answer: Answer | undefined) {
-  return answer?.reviewArtifacts
-    ? { reviewArtifacts: answer.reviewArtifacts, by: answer.by, at: answer.at }
-    : null;
-}
-
-/** The selectors a rereview's validation captures, when the operator chose them. */
-export function rereviewCapture(
-  state: ObjectiveState,
-  id: string,
-  configured: readonly ReviewArtifactSelector[],
-): { selected?: ReviewArtifactSelector[] } {
-  const chosen = fact(state, "rereview", id)?.reviewArtifacts;
-  if (!chosen) return {};
-  // Only selectors still configured: a restart may have changed them.
-  const named = new Set(chosen.map(selectorIdentity));
-  return {
-    selected: configured.filter((selector) =>
-      named.has(selectorIdentity(selector)),
-    ),
-  };
-}
-
-/** The rereview's selectors, recorded on the validation result. */
-export function rereviewRecord(
-  state: ObjectiveState,
-  id: string,
-): { reviewArtifacts?: ReviewArtifactSelector[] } {
-  const chosen = fact(state, "rereview", id)?.reviewArtifacts;
-  return chosen ? { reviewArtifacts: chosen } : {};
 }

@@ -20,6 +20,7 @@ import {
   closedPort,
   comment,
   configured,
+  exited,
   githubOrigin,
   installation,
   offered,
@@ -586,7 +587,7 @@ test("one installation serves a repository: another is refused, a restart resume
   let serving = serve(first);
   await until(() => record(), "the first installation takes the repository");
   const taken = record();
-  const refused = await serve(second).exit;
+  const refused = await exited(serve(second), "the refused installation");
   assert.equal(refused.code, 78, refused.stderr);
   assert.match(
     refused.stderr,
@@ -596,7 +597,7 @@ test("one installation serves a repository: another is refused, a restart resume
 
   // A crash keeps the record; the same installation resumes on it.
   serving.child.kill("SIGKILL");
-  await serving.exit;
+  await exited(serving, "the killed holder");
   serving = serve(first);
   await new Promise((resolve) => setTimeout(resolve, 3000));
   assert.equal(serving.child.exitCode, null, "the restart serves");
@@ -606,7 +607,7 @@ test("one installation serves a repository: another is refused, a restart resume
   const taker = serve(second, undefined, [], ["--take-over"]);
   await until(() => record() && record() !== taken, "the take-over");
   const holder = named();
-  const lost = await serving.exit;
+  const lost = await exited(serving, "the holder that was taken over");
   assert.equal(lost.code, 78, lost.stderr);
   assert.match(
     lost.stderr,

@@ -22,9 +22,7 @@ export interface DeliveryUnit {
 export type Units = { units: DeliveryUnit[] } | { problem: string };
 
 /** A fork ends its parent's chain; a join starts a new chain. */
-export function units(
-  plan: Pick<Plan, "items" | "coverage" | "expansions">,
-): Units {
+export function units(plan: Pick<Plan, "items" | "coverage">): Units {
   const byId = new Map(plan.items.map((item) => [item.id, item]));
   for (const item of plan.items)
     for (const dependency of item.dependencies)
@@ -51,20 +49,9 @@ export function units(
   for (const item of plan.items)
     for (const dependency of item.dependencies)
       children.set(dependency, [...(children.get(dependency) ?? []), item.id]);
-  const blocked = expansionBarriers(plan);
-  // An expansion's children will depend on these, so the units keep their
-  // shape when the children appear: they never chain as a parent.
-  const envelopeDependencies = new Set(
-    (plan.expansions ?? []).flatMap((envelope) => envelope.dependencies),
-  );
   // Items that never join a chain, as a child or as a parent.
   const standalone = (item: WorkItem | undefined) =>
-    item === undefined ||
-    item.kind === "qa" ||
-    item.kind === "aggregate" ||
-    item.kind === "discovery" ||
-    item.condition !== undefined ||
-    blocked(item.id);
+    item === undefined || item.kind === "qa" || item.kind === "aggregate";
   const continuation = new Map<string, string>();
   const childOf = new Set<string>();
   for (const item of plan.items) {
@@ -78,11 +65,7 @@ export function units(
     )
       continue;
     const parent = item.dependencies[0] as string;
-    if (
-      standalone(byId.get(parent)) ||
-      envelopeDependencies.has(parent) ||
-      children.get(parent)?.length !== 1
-    )
+    if (standalone(byId.get(parent)) || children.get(parent)?.length !== 1)
       continue;
     continuation.set(parent, item.id);
     childOf.add(item.id);
@@ -124,32 +107,4 @@ export function unitOf(
     if (layer >= 0) return { unit, layer };
   }
   return undefined;
-}
-
-/**
- * Items at or behind an expansion's integration barrier never chain: the
- * barrier waits for every child the expansion adds (planning/expansion.ts),
- * so it integrates on its own. Children never chain either: each depends
- * on the discovery producer, which is standalone.
- */
-function expansionBarriers(
-  plan: Pick<Plan, "items" | "expansions">,
-): (id: string) => boolean {
-  const barriers = new Set(
-    (plan.expansions ?? []).flatMap(
-      (envelope) => envelope.integrationBarrierItemIds,
-    ),
-  );
-  const byId = new Map(plan.items.map((item) => [item.id, item]));
-  const memo = new Map<string, boolean>();
-  const blocked = (id: string): boolean => {
-    const known = memo.get(id);
-    if (known !== undefined) return known;
-    memo.set(id, false);
-    const value =
-      barriers.has(id) || (byId.get(id)?.dependencies.some(blocked) ?? false);
-    memo.set(id, value);
-    return value;
-  };
-  return blocked;
 }

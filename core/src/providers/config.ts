@@ -13,7 +13,6 @@ import {
   object,
   oneOf,
   optional,
-  type Retired,
   type Spec,
   section,
   strings,
@@ -169,19 +168,6 @@ export const MAX_HOSTED_SECONDS = 6000;
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
-/** What replaced each key of an earlier provider shape. */
-const RETIRED_PROVIDER: Retired = {
-  planning: "name the planner with planner and models",
-  execution:
-    "name the worker with worker; worker runs at once are the top-level execution.workers",
-};
-
-/** What replaced each key of the earlier execution profile shape. */
-const RETIRED_PROFILE: Retired = {
-  harness:
-    "a profile names a provider; put its worker under providers.<name>.worker",
-};
-
 /** An environment variable's name. */
 const envName: Check<string> = (value, path, problems) => {
   if (typeof value === "string" && /^[A-Z_][A-Z0-9_]*$/.test(value))
@@ -247,7 +233,6 @@ function providerConfig(
       worker: (entry: unknown) => entry,
     },
     problems,
-    RETIRED_PROVIDER,
   );
   const { planner } = provider;
   const models =
@@ -494,7 +479,6 @@ export const executionProfiles: Check<
         worktreeRead: optional(flag(false)),
       },
       problems,
-      RETIRED_PROFILE,
     );
   }
   return profiles;

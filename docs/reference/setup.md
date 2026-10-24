@@ -55,6 +55,12 @@ Provider options need `--provider NAME`. They add the provider or change it:
 
 Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
 
+`planning.context` is written by hand too, and every key is optional. It sets what every Objective's planning context, repository memory and planner lookups may read:
+
+- `selectors`: 1–64 literal repository files or directory prefixes ending in `/`. Absent: all tracked paths.
+- `memory`: `true` by default. `false` turns repository memory off in every role, and the planner's memory lookups with it; the planning context and the other lookups stay.
+- `bounds`: `maxRounds` (4), `maxRequestsPerRound` (8), `maxResults` (64), `maxBytes` (262144), `maxElapsedMs` (30000) and `maxProviderCalls` (5).
+
 ### Background service
 
 The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.
@@ -85,7 +91,7 @@ A configuration that doesn't load prints its problems without a stack trace and 
 From an earlier version of Factory to this one: start clean, with no compatibility layer and no importer. The configuration is about 40 lines, and the setup options cover it.
 
 1. **Stop the old service** (`systemctl --user disable --now <old unit>`). Close or cancel the Objectives it was running.
-2. **Delete the old state and configuration**, after copying anything you still need from the old configuration by hand (paths such as `sandbox.readOnlyPaths`). Old keys are refused by name, each with what replaced it, so a copied old configuration won't load.
+2. **Delete the old state and configuration**, after copying anything you still need from the old configuration by hand (paths such as `sandbox.readOnlyPaths`). An unknown key is refused by name, so a copied old configuration won't load.
 3. **Install this release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
 4. **Prepare the target:**
    - a clone that only Factory uses;

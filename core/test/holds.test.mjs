@@ -382,9 +382,10 @@ test("an item's question holds only that item and its dependents", async () => {
     ...(kind === "aggregate" ? { children: [] } : {}),
   });
   const asked = new Date().toISOString();
-  // a holds; b is unrelated; c depends on a; d is unrelated and asks too
-  // (a discovery item with no specification holds).
+  // a holds; b is unrelated; c depends on a; d is unrelated and asks too:
+  // its kept base is missing from the checkout, so its work keeps failing.
   seed(inst, 61, "holding", {
+    kept: { "item:a:base": "0".repeat(40), "item:d:base": "0".repeat(40) },
     holds: [
       {
         id: `item:a:work@${asked}`,
@@ -396,13 +397,13 @@ test("an item's question holds only that item and its dependents", async () => {
       },
     ],
     done: {
-      check: {},
+      check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
       plan: {
         items: [
-          item("a", "discovery"),
+          item("a", "work"),
           item("b", "aggregate"),
           item("c", "aggregate", ["a"]),
-          item("d", "discovery"),
+          item("d", "work"),
         ],
       },
     },
@@ -420,6 +421,7 @@ test("an item's question holds only that item and its dependents", async () => {
     both.holds.map((hold) => hold.item),
     ["a", "d"],
   );
+  assert.match(both.holds[1].question, /keeps failing/);
   const held = (state) =>
     [
       ...Object.keys(state.done),
@@ -619,7 +621,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
     "../dist/engine.js"
   );
   const { newObjective } = await import("../dist/state.js");
-  const { reviewArtifactSelection } = await import("../dist/work/steps.js");
   const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
   const started = [];
   const outcomes = {};
@@ -650,11 +651,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
       freezable: { claude: { digest: "c", config } },
       // c keeps a refused result it can check again.
       revalidatable: (_, key) => key === "item:c:work",
-      reviewArtifacts: (values) =>
-        reviewArtifactSelection(values, [
-          { command: "npm run shots" },
-          { command: "npm test" },
-        ]),
     },
     mkdtempSync(join(tmpdir(), "factory-defer-")),
     { write() {} },
@@ -834,41 +830,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
   runner.apply("item:c:work", blame);
   assert.equal(perPath(runner.state)["item:c:work"].used, charged - 1);
   assert.equal(perPath(runner.state)["item:a:work"].used, 2);
-  // `--review-artifacts` goes with a rereview only, names configured
-  // selectors by number (or none alone), and is recorded on the answer.
-  delete runner.state.answers["item:b:ci"];
-  runner.apply(
-    "item:b:ci",
-    hold("Diagnosis needs you.", [
-      { answer: "revalidate", family: "accept", consequence: "Again." },
-      "cancel",
-    ]),
-  );
-  const choose = (answer, values) => {
-    const open = runner.state.holds.find((h) => h.step === "item:b:ci");
-    return runner.transact(() =>
-      runner.answer(
-        answer,
-        undefined,
-        "op",
-        undefined,
-        open.id,
-        undefined,
-        values,
-      ),
-    );
-  };
-  for (const values of [["3"], ["none", "1"], ["x"]])
-    assert.match(
-      choose("revalidate", values)?.message ?? "",
-      /names no configured selector|can't be given with selectors/,
-    );
-  assert.equal(choose("revalidate", ["2"]), null, "past the allowance");
-  // That `more` reuses the selectors, resolved when the answer landed.
-  assert.equal(choose("more", undefined), null);
-  assert.deepEqual(runner.state.answers["item:b:ci"].reviewArtifacts, [
-    { command: "npm test" },
-  ]);
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {
@@ -1112,4 +1073,57 @@ test("a wait on a human gate takes no slot", async () => {
   await until(() => stateOf(inst, 42).holds.length, "#42 runs and asks");
   assert.deepEqual(stateOf(inst, 41).holds, [], "#41 still waits on its gate");
   await stopped(service);
+});
+
+test("a planner's can't-be-planned answer holds once with replan and cancel, and plans no round on its own", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  // The round the plan step saves for that answer (planning/steps.ts).
+  const reason =
+    "Acceptance requires changing src/config.ts; the constraints forbid touching src/, and nothing outside it can change the behaviour.";
+  seed(inst, 71, "planning", {
+    done: {
+      predecessors: { predecessors: [], ignored: [] },
+      check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
+      "plan:1:1": {
+        cannot: { reason, change: "Allow changes under src/." },
+      },
+    },
+  });
+  const service = serve(inst);
+  await until(
+    () => stateOf(inst, 71).holds.length,
+    "the planner's reason asks",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const state = stateOf(inst, 71);
+  assert.equal(state.holds.length, 1);
+  const [held] = state.holds;
+  assert.equal(held.step, "decide:1:1");
+  assert.ok(held.question.includes(reason));
+  assert.match(held.question, /What would have to change: Allow changes/);
+  assert.deepEqual(
+    held.options.map((option) => option.answer),
+    ["replan", "answer", "cancel"],
+  );
+  assert.deepEqual(
+    Object.keys(state.done).filter((key) => /^(plan|review|decide):/.test(key)),
+    ["plan:1:1"],
+    "no review and no next round",
+  );
+  // `replan` starts a new generation, which re-reads the issue first.
+  assert.equal(
+    cli(inst, "answer", "71", "replan", "--question", held.id).code,
+    0,
+  );
+  await until(
+    () => stateOf(inst, 71).retries["plan:2:1"],
+    "the new generation reads the issue",
+  );
+  assert.equal(stateOf(inst, 71).done["decide:1:1"].replan, true);
+  await stopped(service);
+  const log = readdirSync(join(inst.logs, "71"))
+    .map((file) => readFileSync(join(inst.logs, "71", file), "utf8"))
+    .join("");
+  assert.doesNotMatch(log, /"model-usage"/, "no planner call");
 });

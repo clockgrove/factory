@@ -443,9 +443,7 @@ test("a planner lookup reads a file at the base inside the selectors and refuses
     selectors: ["docs/"],
     memory: false,
   };
-  const shown = readShown("<h2>Adaptive workflow</h2><p>enabled</p>", {
-    sources: false,
-  });
+  const shown = readShown("<p>Read the docs.</p>", { sources: false });
   const lookups = plannerLookups(
     { kept: {} },
     "plan:1:1",

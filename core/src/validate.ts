@@ -27,7 +27,6 @@ import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal } from "./git.js";
-import { knowledgeSettings } from "./knowledge/settings.js";
 import {
   hydrateTree,
   type LfsFile,
@@ -45,7 +44,7 @@ import {
   packageScriptInvocation,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
-import { retiredCommands, runnableItem } from "./planning/plan.js";
+import { dependencyOrder, fallbackRuns, finalChecks } from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
@@ -78,13 +77,19 @@ const VALIDATION_MARGIN_MS = 15 * MINUTE;
 
 /**
  * The deadline of a step that validates a Work Item, or a plan's final
- * validation: every command it runs at its full limit, plus a margin. It
- * grows with the commands, so a long command list never outlasts it.
+ * validation: every command it runs at its full limit, plus a margin (one
+ * per Work Item run, when final validation runs those). It grows with the
+ * commands, so a long command list never outlasts it.
  */
 export function validationDeadlineMs(
   of: WorkItem | Plan,
   commandTimeoutMs: number,
 ): number {
+  if (!("validation" in of) && fallbackRuns(of).length)
+    return fallbackRuns(of).reduce(
+      (sum, item) => sum + validationDeadlineMs(item, commandTimeoutMs),
+      0,
+    );
   const { preparation, commands } =
     "validation" in of ? validationSequence(of) : finalSequence(of);
   return (
@@ -115,6 +120,8 @@ export interface ValidateInput {
   blocks: readonly ObjectiveBlock[];
   /** The commit a later item started from, when not the base: its new scripts stay fixed too. */
   predecessor?: string;
+  /** Final validation of one Work Item's commands: the declared Package manager update must have landed. */
+  requirePackageManagerUpdate?: true;
   sandbox: SandboxConfig;
   /** Each command's limit (`validation.commandTimeoutSeconds`); past it the command failed. */
   commandTimeoutMs: number;
@@ -137,12 +144,6 @@ export interface ValidateInput {
      * installation no longer configures holds before anything runs.
      */
     planned?: readonly ReviewArtifactSelector[];
-    /**
-     * A rereview's `--review-artifacts`: the configured selectors this run
-     * captures instead of all (none when empty). The planned check still
-     * reads `configured`.
-     */
-    selected?: readonly ReviewArtifactSelector[];
     /** Private capture directory, such as `<state>/artifacts/<issue>/<item>` or `.../final`; emptied first. */
     dir: string;
   };
@@ -214,7 +215,7 @@ export type Validation =
 export async function validateTree(input: ValidateInput): Promise<Validation> {
   const { checkout, commit, plan, item } = input;
   const { preparation, commands } = item
-    ? validationSequence(runnableItem(plan, item))
+    ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   const { signal } = input;
@@ -239,9 +240,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         ["retry", "replan", "cancel"],
       ),
     );
-  const selectors = capture
-    ? selectorsFor(capture.selected ?? capture.configured, item)
-    : [];
+  const selectors = capture ? selectorsFor(capture.configured, item) : [];
   const refusal = await pinRefusal(
     new Revisions(checkout, commit, signal),
     plan.base,
@@ -253,6 +252,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           workspacePackageAdditions: workspaceAdditions(input.blocks).additions,
           packageManagerUpdate: packageManagerUpdate(input.blocks),
           predecessor: input.predecessor,
+          requirePackageManagerUpdate: input.requirePackageManagerUpdate,
         }
       : {
           sourceDeclared: [
@@ -721,12 +721,12 @@ async function dependencyInputsChanged(
 
 /**
  * The commands final validation runs: the declared prerequisites, then the
- * final commands less those the operator retired (planning/plan.ts). Only a bootstrap that runs first installs, so the
- * sequence starts with one exactly once: a bootstrap the final commands list
- * moves to the front, and otherwise the plan's source-declared bootstrap
- * leads. The plan's declared prerequisites run first unless the final
- * commands already start with them; when they do run first, the bootstrap
- * leads them.
+ * final checks (planning/plan.ts `finalChecks`). Only a bootstrap that runs
+ * first installs, so the sequence starts with one exactly once: a bootstrap
+ * the final checks list moves to the front, and otherwise the plan's
+ * source-declared bootstrap leads. The plan's declared prerequisites run
+ * first unless the final checks already start with them; when they do run
+ * first, the bootstrap leads them.
  */
 function finalSequence(plan: Plan): {
   preparation: string[];
@@ -735,10 +735,8 @@ function finalSequence(plan: Plan): {
   const key = (command: string) => command.trim();
   const isBootstrap = (command: string) =>
     packageBootstrap(command) !== undefined;
-  const retired = retiredCommands(plan);
-  const finalCommands = plan.finalCommands.filter(
-    (command) => !retired.has(command),
-  );
+  // A plan without final commands runs its Work Items' own (fallbackRuns).
+  const finalCommands = plan.finalCommands.length ? finalChecks(plan) : [];
   const listed = finalCommands.filter(isBootstrap);
   let commands = [
     ...listed.filter(
@@ -780,19 +778,7 @@ function finalSequence(plan: Plan): {
  * acceptance is inferred from its success.
  */
 function preparationCommands(plan: Plan): string[] {
-  const ordered: WorkItem[] = [];
-  const seen = new Set<string>();
-  const visit = (item: WorkItem) => {
-    if (seen.has(item.id)) return;
-    seen.add(item.id);
-    for (const id of item.dependencies) {
-      const dependency = plan.items.find((candidate) => candidate.id === id);
-      if (dependency) visit(dependency);
-    }
-    ordered.push(item);
-  };
-  for (const item of plan.items) visit(item);
-  return ordered.flatMap((item) => {
+  return dependencyOrder(plan).flatMap((item) => {
     const selected = new Set(
       plan.coverage
         .filter((entry) => entry.itemId === item.id)
@@ -953,6 +939,71 @@ function packageScriptCommands(commands: readonly string[]): string[] {
       !packageBootstrap(check) &&
       !packageManagerVersionProbe(check),
   );
+}
+
+/**
+ * The package-script commands among `commands` whose script, or one of its
+ * lifecycle hooks, a merge of this Objective changed: on `head` it differs
+ * from the script the item validated (the accepted base's where the base
+ * has it, else `predecessor`'s), so the pin check would refuse it there.
+ * Each names the items whose merge changed it. A change no merge made is
+ * left to the pin check.
+ */
+export async function laterScriptChanges(input: {
+  checkout: string;
+  base: string;
+  predecessor?: string;
+  head: string;
+  commands: readonly string[];
+  merges: readonly { items: string[]; mergeSha: string }[];
+  signal: AbortSignal;
+}): Promise<{ command: string; changedBy: string[] }[]> {
+  const git = new Revisions(input.checkout, input.head, input.signal);
+  const scriptsAt = async (
+    revision: string,
+  ): Promise<Record<string, unknown>> => {
+    try {
+      const scripts = JSON.parse(
+        (await git.text(revision, "package.json")) ?? "{}",
+      ).scripts;
+      return scripts && typeof scripts === "object" ? scripts : {};
+    } catch {
+      input.signal.throwIfAborted();
+      // Unreadable: the pin check refuses it.
+      return {};
+    }
+  };
+  const changes: { command: string; changedBy: string[] }[] = [];
+  for (const command of packageScriptCommands(input.commands)) {
+    const name = packageScriptInvocation(command)?.name;
+    if (!name) continue;
+    const hooks = [`pre${name}`, `post${name}`];
+    const base = await scriptsAt(input.base);
+    const reference =
+      typeof base[name] === "string" || !input.predecessor
+        ? base
+        : await scriptsAt(input.predecessor);
+    const head = await scriptsAt(input.head);
+    if (
+      !(
+        (typeof reference[name] === "string" &&
+          head[name] !== reference[name]) ||
+        hooks.some((hook) => head[hook] !== reference[hook])
+      )
+    )
+      continue;
+    const changedBy: string[] = [];
+    for (const merge of input.merges) {
+      const [before, after] = await Promise.all([
+        scriptsAt(`${merge.mergeSha}^1`),
+        scriptsAt(merge.mergeSha),
+      ]);
+      if ([name, ...hooks].some((key) => before[key] !== after[key]))
+        changedBy.push(...merge.items);
+    }
+    if (changedBy.length) changes.push({ command, changedBy });
+  }
+  return changes;
 }
 
 /** Why `commands` may not run on `commit`, or undefined when every pin holds. */
@@ -1443,9 +1494,8 @@ function workspaceAdditions(blocks: readonly ObjectiveBlock[]): {
 
 /**
  * The problems in the Objective's optional declarations: Package manager
- * update, Quality checkpoint, Workspace package additions and Adaptive
- * workflow. The check step runs this once; validation and planning then
- * trust what it accepted.
+ * update, Quality checkpoint and Workspace package additions. The check
+ * step runs this once; validation and planning then trust what it accepted.
  */
 export function declarationProblems(
   blocks: readonly ObjectiveBlock[],
@@ -1481,33 +1531,7 @@ export function declarationProblems(
   }
   const workspace = workspaceAdditions(blocks).problem;
   if (workspace) problems.push(workspace);
-  const adaptive = adaptiveWorkflow(blocks);
-  if (adaptive.problem) problems.push(adaptive.problem);
-  else if (adaptive.enabled && !knowledgeSettings()?.planningContext)
-    problems.push(
-      "Adaptive workflow is enabled, but this installation admits no planning context. Add a planning.context section (selectors, and optionally bounds and memory) to the configuration and restart the service, or set the section to disabled.",
-    );
   return problems;
-}
-
-/** The Objective's Adaptive workflow section: on only when it reads `enabled`. */
-export function adaptiveWorkflow(blocks: readonly ObjectiveBlock[]): {
-  enabled: boolean;
-  problem?: string;
-} {
-  const found = declaration(blocks, "adaptive workflow", "Adaptive workflow");
-  if (!found.entries)
-    return { enabled: false, ...(found.problem && { problem: found.problem }) };
-  const only = onlyEntry(found.entries);
-  if (only?.kind === "empty") return { enabled: false };
-  const selection = only?.kind === "text" ? only.text : undefined;
-  if (selection !== "enabled" && selection !== "disabled")
-    return {
-      enabled: false,
-      problem:
-        "Adaptive workflow requires exactly enabled or disabled as its only line.",
-    };
-  return { enabled: selection === "enabled" };
 }
 
 // ---------------------------------------------------------------------------

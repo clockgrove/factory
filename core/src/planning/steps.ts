@@ -14,9 +14,9 @@ import {
   type StepContext,
 } from "../engine.js";
 import { defaultHead } from "../git.js";
-import { type GitHub, sameLogin } from "../github.js";
+import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
-import { prose } from "../markdown.js";
+import { planMarks, prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
 import type { Planner, PlannerAnswer } from "../providers/planner.js";
 import { profileWorker, resolvedProvider } from "../providers/selection.js";
@@ -28,17 +28,15 @@ import {
 import { logRefused } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
-import { type Answer, findState, type ObjectiveState } from "../state.js";
+import { type Answer, type ObjectiveState, runOf } from "../state.js";
 import { oneLine } from "../text.js";
-import { adaptiveWorkflow, declarationProblems } from "../validate.js";
+import { declarationProblems } from "../validate.js";
 import { fact, facts as keptFacts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
 import {
   BaseFiles,
   buildFacts,
-  childDigest,
-  childOf,
   commandInstructions,
   finalCommands,
   objectiveCommandProblems,
@@ -52,7 +50,6 @@ import {
   generationInputs,
   position,
   proposalsOf,
-  splitRecord,
 } from "./plan.js";
 import {
   type PredecessorEvidence,
@@ -61,20 +58,11 @@ import {
   predecessorsOnBase,
 } from "./predecessors.js";
 import {
-  draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
   revisionScope,
 } from "./prompts.js";
-import {
-  adaptiveGraph,
-  type RecipeSelection,
-  recipeFindings,
-  recipeInstallation,
-  recipePrerequisites,
-  selectRecipe,
-} from "./recipes.js";
 import {
   exportTree,
   type RepositoryView,
@@ -96,6 +84,7 @@ import type {
 } from "./types.js";
 import {
   applyRevision,
+  type CannotPlan,
   controllerGuarantees,
   decodePlan,
   planChoices,
@@ -137,13 +126,7 @@ export function planningStep(
   const { g, n } = position(state);
   const planKey = `plan:${g}:${n}`;
   const planned = state.done[planKey] as PlanRound | undefined;
-  if (!planned)
-    return g === 1 &&
-      n === 1 &&
-      generationInputs(state, 1).adopt &&
-      !state.kept[ADOPT_TRIED]
-      ? adoptStep(planKey, deps)
-      : forgetting(planRoundStep(planKey, g, n, deps));
+  if (!planned) return forgetting(planRoundStep(planKey, g, n, deps));
   const reviewKey = `review:${g}:${n}`;
   if (cleanDraft(planned) && !state.done[reviewKey])
     return reviewStep(reviewKey, g, n, deps);
@@ -163,15 +146,6 @@ export interface ObjectiveInputs {
   shown: ShownObjective;
   /** The author can write: mermaid and math sources stay as code. */
   writer?: true;
-  /** A Factory-created split child, from the raw body's marker (structure, never text). */
-  child?: true;
-  /**
-   * A split child Factory wrote: its parent, key and title and body digest
-   * (facts.ts childDigest). Its first plan round takes the graph its
-   * parent's pass planned for it when the parent's record names this
-   * issue with this digest (`adoptedGraph`).
-   */
-  adopt?: { parent: number; key: string; digest: string };
   base: string;
   title: string;
   /**
@@ -180,13 +154,6 @@ export interface ObjectiveInputs {
    * accepted plan all use these, whatever the configuration says later.
    */
   reviewArtifacts: ReviewArtifactSelector[];
-  /** The Objective's Workflow recipe, resolved once at the base. */
-  recipe?: RecipeSelection;
-  /**
-   * planning.adaptiveGraph when the Objective was admitted: the recipe check
-   * and every plan round use this, so a config change can't split them.
-   */
-  adaptiveGraph?: true;
   /** The done predecessors' accepted results, checked to be on `base` (planning/predecessors.ts). */
   predecessors?: PredecessorEvidence[];
 }
@@ -201,35 +168,10 @@ interface PlanRound {
   draft?: Draft;
   findings?: Finding[];
   question?: string;
+  /** The planner declared the Objective can't be planned as written: no plan to review or revise. */
+  cannot?: CannotPlan;
   /** The operator answered `replan` to a problem with the Objective. */
   replan?: true;
-  /** The draft is the graph this split parent's pass planned (no planner answer). */
-  adopted?: number;
-}
-
-/**
- * The graph a split parent's accepted plan holds for this child: only
- * while the parent's record names this issue for `key` with the digest of
- * the title and body it wrote, and the child has no dependencies (a stub is
- * planned now, against its dependencies' merged code).
- */
-function adoptedGraph(
-  objectives: string,
-  issue: number,
-  adopt: NonNullable<ObjectiveInputs["adopt"]>,
-): Draft | undefined {
-  const found = findState(objectives, adopt.parent);
-  if (found?.kind !== "ok") return undefined;
-  const record = splitRecord(found.state);
-  if (
-    record?.children[adopt.key] !== issue ||
-    record.bodies[adopt.key] !== adopt.digest
-  )
-    return undefined;
-  const child = currentPlan(found.state)?.split?.children.find(
-    (each) => each.key === adopt.key,
-  );
-  return child && !child.dependsOn.length ? child.graph : undefined;
 }
 
 interface ReviewRound {
@@ -319,6 +261,10 @@ function decisionsBefore(
 /** Workers get a sandboxed shell (docs/DESIGN.md). */
 const WORKERS = { default: "shell" } as const;
 
+/** The execution profile ids the planner is offered: every configured one. */
+const profileIds = (config: CoreConfig): string[] =>
+  Object.keys(config.execution.profiles ?? {});
+
 /**
  * What the workers the planner may assign can execute: the Objective's
  * provider's (a sandboxed shell, as before), or with execution profiles,
@@ -328,7 +274,7 @@ const WORKERS = { default: "shell" } as const;
 export function workers(
   config: CoreConfig,
 ): Readonly<Record<string, WorkerCommandAccess>> {
-  const offered = recipeInstallation(config).profileIds;
+  const offered = profileIds(config);
   if (!offered.length) return WORKERS;
   return Object.fromEntries(
     offered.map((id) => {
@@ -356,14 +302,13 @@ export function workers(
 }
 
 /**
- * The execution profiles the planner is offered, with what each is for:
- * the ones a recipe's expansions are checked against (recipeInstallation),
- * so the two agree. Undefined without any: the planner assigns none.
+ * The execution profiles the planner is offered, with what each is for.
+ * Undefined without any: the planner assigns none.
  */
 export function offeredProfiles(
   config: CoreConfig,
 ): WireOptions["profiles"] | undefined {
-  const ids = recipeInstallation(config).profileIds;
+  const ids = profileIds(config);
   if (!ids.length) return undefined;
   return ids.map((id) => {
     const { provider, description, selectionHints, worktreeRead } =
@@ -398,7 +343,7 @@ async function citedSections(
   );
   const seen = new Set<string>();
   const sections: { path: string; heading?: string; content: string }[] = [];
-  for (const item of draftItems(draft)) {
+  for (const item of draft.items) {
     if (!ids.has(item.id)) continue;
     for (const citation of item.citations) {
       const id = `${citation.path}#${citation.heading ?? ""}`;
@@ -422,50 +367,6 @@ async function citedSections(
 
 // ---------------------------------------------------------------------------
 // plan:g:n
-
-/** Set once a split child found no graph of its parent's to adopt: its first round asks the planner. */
-const ADOPT_TRIED = "plan:adopt-tried";
-
-/**
- * A ready split child's first round: the graph its parent's pass planned
- * and reviewed for it, checked here against its own Objective, with no
- * planner call and no planner slot; review follows as for any round.
- * Without one to adopt (`adoptedGraph`), the round asks the planner.
- */
-function adoptStep(key: string, deps: PlanningDeps): Step {
-  return {
-    key,
-    deadlineMs: 10 * MINUTE,
-    run: async (context): Promise<Outcome> => {
-      const { state, signal } = context;
-      const inputs = generationInputs(state, 1);
-      const adopt = inputs.adopt!;
-      const adopted = adoptedGraph(deps.objectives, state.issue, adopt);
-      if (!adopted)
-        return {
-          kind: "retry",
-          reason: "No planned graph of its parent's to adopt: planning it.",
-          progress: true,
-          keep: { [ADOPT_TRIED]: true },
-        };
-      const files = new BaseFiles(deps.config.checkout, inputs.base, signal);
-      const built = await planningFacts(state, inputs, files, deps.config);
-      if ("problems" in built)
-        return objectiveProblemsHold(built.problems, "replan");
-      const draft: Draft = { ...adopted, base: inputs.base };
-      const findings = [
-        ...(await checkPlan(draft, built.facts, files)),
-        ...(inputs.recipe ? recipeFindings(draft, inputs.recipe.recipe) : []),
-      ];
-      context.log({ event: "child-graph-adopted", parent: adopt.parent });
-      return done({
-        draft,
-        adopted: adopt.parent,
-        ...(findings.length ? { findings } : {}),
-      });
-    },
-  };
-}
 
 function planRoundStep(
   key: string,
@@ -520,33 +421,15 @@ function planRoundStep(
       const revising = Boolean(previous?.answer);
       const profiles = offeredProfiles(config);
       const wire = {
-        child: inputs.child === true,
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
-        adaptive: adaptiveGraph(
-          inputs.shown.blocks,
-          inputs.adaptiveGraph === true,
-        ),
         ...(profiles ? { profiles } : {}),
       };
-      // An enabled section still plans, with its context and memory but
-      // without the graph kinds; say so once per generation.
-      if (
-        n === 1 &&
-        adaptiveWorkflow(inputs.shown.blocks).enabled &&
-        inputs.adaptiveGraph !== true
-      )
-        context.log({
-          event: "adaptive-graph-off",
-          message:
-            "Adaptive workflow is enabled, but planning.adaptiveGraph is off: the planner isn't offered discovery items, work conditions or expansions",
-        });
       const cited = revising
         ? await citedSections(previous!.draft, fixes, facts, files)
         : [];
       const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         instructions: `${renderPlanningInstructions(
           inputs.shown.blocks,
           corrections,
@@ -562,7 +445,7 @@ function planRoundStep(
               })),
             }
           : {}),
-        ...(lookups ? { contextLookups: lookups.data } : {}),
+        contextLookups: lookups.data,
       };
       const local = await localExecutables(inputs, config, signal);
       const { prompt, facts: promptFacts } = renderCompilationCall({
@@ -574,11 +457,9 @@ function planRoundStep(
         citedSections: cited,
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
-        adaptive: wire.adaptive,
-        recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
-        ...(lookups ? { lookups } : {}),
+        lookups,
       });
       const schema = revising
         ? revisionSchema(facts, wire)
@@ -588,7 +469,7 @@ function planRoundStep(
         phase: "plan",
         prompt,
         facts: promptFacts,
-        schema: lookups ? lookups.schema(schema) : schema,
+        schema: lookups.schema(schema),
         readDir: workDir,
         // A revision or lookup turn continues the generation's planner.
         conversation: planningConversation(deps, state, "planner", g, prompt),
@@ -602,14 +483,12 @@ function planRoundStep(
         ms: answer.ms,
         usage: answer.usage,
       });
-      const taken = lookups
-        ? await lookups.take(answer.value, {
-            issue: state.issue,
-            files,
-            secrets: config.secrets,
-            log: context.log,
-          })
-        : { value: answer.value };
+      const taken = await lookups.take(answer.value, {
+        issue: state.issue,
+        files,
+        secrets: config.secrets,
+        log: context.log,
+      });
       if ("outcome" in taken) return taken.outcome;
       let full: unknown = taken.value;
       if (revising) {
@@ -632,6 +511,14 @@ function planRoundStep(
       const decoded = decodePlan(full, facts, wire);
       if (decoded.invalidShape)
         return refusedAnswer(context.log, answer, decoded.findings);
+      if (decoded.cannot) {
+        context.log({ event: "planner-cannot-plan", ...decoded.cannot });
+        // No plan to revise: a round after it answers in full.
+        return done({
+          ...(g > 1 && n === 1 ? { inputs } : {}),
+          cannot: decoded.cannot,
+        } satisfies PlanRound);
+      }
       const round: PlanRound = {
         ...(g > 1 && n === 1 ? { inputs } : {}),
         answer: full,
@@ -642,9 +529,6 @@ function planRoundStep(
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
-        ...(inputs.recipe
-          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-          : []),
       ];
       return done({
         ...round,
@@ -719,7 +603,6 @@ function reviewStep(
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
         workers: workers(config),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
@@ -758,7 +641,7 @@ function reviewStep(
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
-        draftItems(draft).map((item) => item.id),
+        draft.items.map((item) => item.id),
       );
       if (decoded.invalid) {
         logRefused(context.log, answer.callId, decoded.reason);
@@ -1089,6 +972,11 @@ function questionFor(
     offers,
   });
   const ASK = ask(spent);
+  if (planned.cannot)
+    return question(
+      `The planner says this Objective can't be planned as written:\n\n${planned.cannot.reason}\n\nWhat would have to change: ${planned.cannot.change}\n\nEdit the issue, then \`replan\` plans again from it. \`answer <guidance>\` sends your guidance to the planner for another round.`,
+      ["replan", answering(spent), "cancel"],
+    );
   if (planned.question)
     return question(
       `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,
@@ -1199,12 +1087,9 @@ function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
           ? { reviewArtifacts: inputs.reviewArtifacts }
           : {}),
       };
-      await postPlan(deps, state.issue, plan, signal);
-      return {
-        kind: "done",
-        result: plan,
-        keep: { [ACCEPTED_AT]: new Date().toISOString() },
-      };
+      const accepted = new Date().toISOString();
+      await postPlan(deps, state, plan, signal, { accepted });
+      return { kind: "done", result: plan, keep: { [ACCEPTED_AT]: accepted } };
     },
   };
 }
@@ -1234,26 +1119,25 @@ const LISTED_ITEMS = 200;
  * Post the plan on the issue, or edit the comments already there. The plan
  * data (what `factory reset` rebuilds from) goes in the plan comment when
  * it fits, else in numbered continuation comments the plan comment names;
- * it is never dropped. An accepted amendment posts its plan the same way,
- * with `note` saying which amendment it is and its own crash points
+ * it is never dropped. The line after the marker names the run, the
+ * accepted plan (`accepted`, else the one accepted now) and the data's
+ * digest, so a reset takes only its own run's plan, as Factory wrote it. An accepted amendment posts its plan the same
+ * way, with `note` saying which amendment it is and its own crash points
  * (`point`: `<point>:post:*`, `<point>:data:*`).
  */
 export async function postPlan(
-  deps: PlanningDeps,
-  issue: number,
+  deps: Pick<PlanningDeps, "github">,
+  state: ObjectiveState,
   plan: Plan,
   signal: AbortSignal,
-  { point = "plan", note }: { point?: string; note?: string } = {},
+  {
+    point = "plan",
+    note,
+    accepted = state.kept[ACCEPTED_AT] as string,
+  }: { point?: string; note?: string; accepted?: string } = {},
 ): Promise<void> {
+  const issue = state.issue;
   const marker = PLAN_MARK(issue);
-  const children = plan.split
-    ? plan.split.children
-        .map(
-          (child) =>
-            `- **${child.key}** ${prose(child.title)} (child Objective)`,
-        )
-        .join("\n")
-    : "";
   const listed = plan.items.slice(0, LISTED_ITEMS);
   const items = `${listed
     .map(
@@ -1263,12 +1147,12 @@ export async function postPlan(
     .join(
       "\n",
     )}${plan.items.length > listed.length ? `\n- and ${plan.items.length - listed.length} more (see the plan data)` : ""}`;
+  const json = JSON.stringify(plan);
   const summary =
-    `${marker}\n**Factory's plan** (${plan.split ? `split into ${plan.split.children.length} child Objectives` : `${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}`}, base \`${plan.base.slice(0, 12)}\`)${note ? `\n\n${note}` : ""}\n\n${plan.split ? children : items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${prose(d.text)}` : ""} (${prose(d.by)})`).join("\n")}` : ""}`.slice(
+    `${marker}\n${planMarks(runOf(state), accepted, json)}\n**Factory's plan** (${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}, base \`${plan.base.slice(0, 12)}\`)${note ? `\n\n${note}` : ""}\n\n${items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${prose(d.text)}` : ""} (${prose(d.by)})`).join("\n")}` : ""}`.slice(
       0,
       COMMENT_LIMIT - 200,
     );
-  const json = JSON.stringify(plan);
   const data = (text: string, label: string) =>
     `\n\n<details><summary>${label}</summary>\n\n\`\`\`json\n${text}\n\`\`\`\n</details>`;
   const whole = data(json, "Plan data");
@@ -1336,50 +1220,25 @@ export async function readObjective(
       ),
     };
   }
-  // Planning reads what GitHub shows; Factory's own marker is structure.
+  // Planning reads what GitHub shows.
   const author = found.user?.login;
   const writer = !!author && (await deps.github.canWrite(author, signal));
   const shown = readShown(found.body_html, { sources: writer });
-  // A child Objective Factory created from an accepted split carries only
-  // its parent's approved text and the accepted plan: it inherits the
-  // parent's approval (work/split.ts).
-  const marked = childOf(found.body ?? "");
-  const factoryChild =
-    marked !== undefined &&
-    !!author &&
-    sameLogin(author, await deps.github.login(signal));
-  if (!writer && !factoryChild) {
+  if (!writer) {
     const unapproved = authorHold(author, shown, context);
     if (unapproved) return { hold: unapproved };
   }
   const inputs: ObjectiveInputs = {
     shown,
     ...(writer && { writer: true as const }),
-    ...(marked && { child: true as const }),
-    ...(factoryChild && {
-      adopt: {
-        ...marked,
-        digest: childDigest(found.title, found.body ?? ""),
-      },
-    }),
     base: await defaultHead(config.checkout, config.repository, signal),
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,
   };
   const problems = await objectiveProblems(config, inputs, signal);
   if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
-  // Planning reads a base that has its predecessors' accepted work; a
-  // split child's include its parent's, whose plan it carries.
-  const parent = inputs.adopt
-    ? findState(deps.objectives, inputs.adopt.parent)
-    : null;
-  const direct = predecessorEvidence(state);
-  const predecessors = [
-    ...(parent?.kind === "ok" ? predecessorEvidence(parent.state) : []).filter(
-      (evidence) => !direct.some((each) => each.issue === evidence.issue),
-    ),
-    ...direct,
-  ];
+  // Planning reads a base that has its predecessors' accepted work.
+  const predecessors = predecessorEvidence(state);
   if (predecessors.length) {
     const off = await predecessorsOnBase(
       config.checkout,
@@ -1396,10 +1255,9 @@ export async function readObjective(
 /**
  * The Objective checks on what GitHub shows of it at `inputs.base`: its
  * sections, its declarations (Package manager update, Quality checkpoint,
- * Workspace package additions, Adaptive workflow; checked here once,
- * trusted afterwards), its recipe, its commands and local executables.
- * Sets `inputs.recipe` and `inputs.adaptiveGraph`. The check step and
- * `factory propose` (proposals.ts) both use it.
+ * Workspace package additions; checked here once, trusted afterwards), its
+ * commands and local executables. The check step
+ * and `factory propose` (proposals.ts) both use it.
  */
 export async function objectiveProblems(
   config: CoreConfig,
@@ -1409,26 +1267,9 @@ export async function objectiveProblems(
   const { shown } = inputs;
   const { problems } = checkObjective(shown.blocks);
   problems.push(...declarationProblems(shown.blocks));
-  const recipe = await selectRecipe(
-    shown.blocks,
-    new BaseFiles(config.checkout, inputs.base, signal),
-  );
-  if (recipe.problem) problems.push(recipe.problem);
-  if (recipe.selected) {
-    problems.push(
-      ...recipePrerequisites(
-        recipe.selected.recipe,
-        adaptiveWorkflow(shown.blocks).enabled,
-        recipeInstallation(config),
-      ),
-    );
-    inputs.recipe = recipe.selected;
-  }
-  if (config.planning.adaptiveGraph) inputs.adaptiveGraph = true;
   if (!problems.length)
     problems.push(
       ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {
-        child: inputs.child === true,
         requiredCommands: config.finalValidation.requiredCommands,
         ciOnlyCommands: config.finalValidation.ciOnlyCommands,
         signal,
@@ -1518,23 +1359,19 @@ export async function planningFacts(
   return buildFacts({
     objective: state.issue,
     shown: inputs.shown,
-    child: inputs.child === true,
     base: inputs.base,
     checkout: config.checkout,
     requiredCommands: config.finalValidation.requiredCommands,
     ciOnlyCommands: config.finalValidation.ciOnlyCommands,
     extraCommands: allowedCommands(state),
     localAssetRoots: config.media.localAssetRoots,
-    discoveryLimits: config.planning.discoveryLimits,
     // No playbook in the target reads as empty. Knowledge adds the pinned
-    // Dream playbook and, for Adaptive workflow, planning context and memory.
+    // Dream playbook, the planning context and memory.
     playbook: await planningKnowledge({
       state,
       shown: inputs.shown,
-      child: inputs.child === true,
       files,
       playbook: (await files.text(config.planning.playbook)) ?? "",
-      ...(inputs.recipe ? { recipe: inputs.recipe.recipe } : {}),
     }),
     ...(files.signal ? { signal: files.signal } : {}),
   });

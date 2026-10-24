@@ -329,11 +329,20 @@ export class RunFile {
     this.write(redact(complete, this.secrets));
   }
 
-  /** One JSON line: `{at, ...record}`, each string redacted and cut to 64 KiB (`cutStrings`). */
+  /**
+   * One JSON line: `{at, ...record}`, each string redacted and cut to 64
+   * KiB (`cutStrings`). A record that can't be serialized (a cycle, a
+   * BigInt) is counted as a failed write: the caller is never stopped.
+   */
   record(record: Record<string, unknown>): void {
-    this.append(
-      `${JSON.stringify({ at: new Date().toISOString(), ...(cutStrings(record) as object) })}\n`,
-    );
+    let line: string;
+    try {
+      line = `${JSON.stringify({ at: new Date().toISOString(), ...(cutStrings(record) as object) })}\n`;
+    } catch {
+      this.failed += 1;
+      return;
+    }
+    this.append(line);
   }
 
   /** Write what is pending and stop. */

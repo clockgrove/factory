@@ -1,6 +1,11 @@
 import type { CoreConfig } from "./config.js";
 import { hold, type Outcome, type Step, type Workflow } from "./engine.js";
-import { type GitHub, GitHubError, type IssueComment } from "./github.js";
+import {
+  type GitHub,
+  GitHubError,
+  type IssueComment,
+  TransientError,
+} from "./github.js";
 import type { GitHubModule } from "./github-sync.js";
 import { readExpansionComments } from "./planning/expansion.js";
 import { ACCEPTED_AT, currentPlan, decisionsOf } from "./planning/plan.js";
@@ -208,9 +213,12 @@ export async function rebuildState(
       );
     throw error;
   }
-  const card = (await readQueue(github, config, [issue], signal)).items.find(
-    (item) => item.issue === issue,
-  );
+  const read = await readQueue(github, config, [issue], signal);
+  if (read.unread.includes(issue))
+    throw new TransientError(
+      `GitHub couldn't read #${issue}'s card: ${read.skipped.find((s) => s.issue === issue)?.error}`,
+    );
+  const card = read.items.find((item) => item.issue === issue);
   const self = (await github.login(signal)).toLowerCase();
   const mine = (await github.comments(issue, undefined, signal)).filter(
     (comment) => comment.user?.login.toLowerCase() === self,

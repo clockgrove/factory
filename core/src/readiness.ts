@@ -18,6 +18,7 @@ import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
 import { installationPaths } from "./paths.js";
 import { networkToolOfCommand } from "./planning/facts.js";
+import { codexLauncherProblem } from "./providers/codex.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { executable, sandboxStatus } from "./sandbox.js";
 import { errorMessage } from "./text.js";
@@ -310,6 +311,22 @@ async function providerChecks(
               detail: found.missing,
               fix: found.fix,
             },
+      );
+    }
+    // Planning and review start codex through the same launcher as a
+    // worker (its sandbox probe below covers the worker).
+    if (provider.planner === "codex" && installed(SDK.codex!)) {
+      const problem = codexLauncherProblem();
+      const at = `provider ${name}: codex planner and reviewer launch`;
+      checks.push(
+        problem
+          ? {
+              name: at,
+              status: "blocked",
+              detail: problem,
+              fix: "Allow unprivileged user namespaces on this host (as for bubblewrap) and install util-linux, then repeat",
+            }
+          : ok(at, "codex starts in its own process namespace"),
       );
     }
     // Codex sandboxes its workers' commands itself: try it, as a worker would.

@@ -32,7 +32,12 @@ import { decisionLines, type ResultReview } from "../review/result.js";
 import { runOf, sinceRun } from "../state.js";
 import { errorMessage } from "../text.js";
 import { validateTree, validationDeadlineMs } from "../validate.js";
-import { hostGit, removeWorktree, worktreePath } from "../worktree.js";
+import {
+  clearStaleLocks,
+  hostGit,
+  removeWorktree,
+  worktreePath,
+} from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import {
@@ -480,7 +485,7 @@ export function reportStep(deps: BuildDeps): Step {
         sinceRun(state),
       );
       await github.closeIssue(state.issue, "completed", "report:close", signal);
-      await removeWorkFiles(state.issue, deps, signal);
+      await removeWorkFiles(state.issue, deps, signal, context.log);
       return { kind: "done" };
     },
   };
@@ -566,7 +571,7 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
         }
       });
       await part(`the work files of #${issue}`, () =>
-        removeWorkFiles(issue, deps, signal),
+        removeWorkFiles(issue, deps, signal, log),
       );
       if (!left.length) return { kind: "done" };
       return {
@@ -629,7 +634,7 @@ export function rerunCleanupStep(deps: BuildDeps): Step {
         `Factory is running Objective #${state.issue} again from a new plan; closing this PR from the earlier one.`,
         signal,
       );
-      await removeWorkFiles(state.issue, deps, signal);
+      await removeWorkFiles(state.issue, deps, signal, context.log);
       // The check that follows sees whether it stayed open.
       return {
         kind: "done",
@@ -684,6 +689,7 @@ export async function removeWorkFiles(
   issue: number,
   deps: BuildDeps,
   signal: AbortSignal,
+  log: (event: Record<string, unknown>) => void,
 ): Promise<void> {
   const { checkout } = deps.config;
   const workDir = deps.workDir(issue);
@@ -707,6 +713,7 @@ export async function removeWorkFiles(
     .toString("utf8")
     .split("\n")
     .filter(Boolean);
+  if (refs.length) await clearStaleLocks(checkout, { signal, log });
   for (const ref of refs)
     await hostGit(checkout, ["update-ref", "-d", ref], { signal });
   await forceRemove(workDir);

@@ -194,6 +194,8 @@ const MAX_BACKOFF_MS = 10 * 60_000;
 const DEADLINE_MS = 10 * 60_000;
 /** Comments kept waiting for their author's access to be read, per Objective. */
 const MAX_UNCHECKED = 20;
+/** Queue reads failing this long show as an intake problem in `factory status`. */
+const INTAKE_PROBLEM_MS = 10 * 60_000;
 const COMMAND = /^\/factory\s+(\S+)(?:\s+([\s\S]*))?$/;
 /**
  * The options right after the answer, before its text: `--question ID`
@@ -233,6 +235,18 @@ export class GitHubSync {
   private readonly changed = new Set<number>();
   /** A queue read landed since the last intake. */
   private fresh = false;
+  /**
+   * Known issues the last read couldn't read, with when that began (this
+   * host's clock) and GitHub's error: their last good cards stay in
+   * `view`, and intake leaves them alone.
+   */
+  private unread = new Map<number, { since: number; error: string }>();
+  /** The entries the last read left out, as logged: each is logged once while it lasts. */
+  private skipped = new Set<string>();
+  /** When the queue read started failing as a whole (this host's clock). */
+  private failingSince: number | undefined;
+  /** Why intake is stopped, once queue reads have failed for INTAKE_PROBLEM_MS. */
+  private intakeStopped: string | undefined;
   /**
    * Withdrawn runs' last queued time, by GitHub's clock: a card that still
    * reads queued from then (a read that began before the dequeue) is never
@@ -308,6 +322,41 @@ export class GitHubSync {
     return this.github.moved?.message;
   }
 
+  /**
+   * What intake hasn't seen for INTAKE_PROBLEM_MS, naming the fix; `factory
+   * status` shows it: no queue read worked (the Project's permission lost,
+   * a wrong `queue.projectId`), or a known issue's card kept erroring.
+   * Running Objectives carry on, and intake resumes at the next good read.
+   */
+  intakeProblem(): string | undefined {
+    const now = this.now();
+    const frozen = [...this.unread]
+      .filter(([, entry]) => now - entry.since >= INTAKE_PROBLEM_MS)
+      .map(
+        ([issue, entry]) =>
+          `#${issue}'s card unreadable for ${Math.floor((now - entry.since) / 60_000)} min: ${redact(entry.error)}; card changes aren't seen`,
+      );
+    const problems = [
+      ...(this.intakeStopped ? [this.intakeStopped] : []),
+      ...frozen,
+    ];
+    return problems.length ? problems.join(". ") : undefined;
+  }
+
+  /** A queue read that failed as a whole: past INTAKE_PROBLEM_MS, intake reports it. */
+  private queueFailed(error: unknown, startedAt: number): void {
+    this.failingSince ??= startedAt;
+    const minutes = Math.floor((this.now() - this.failingSince) / 60_000);
+    if (this.now() - this.failingSince < INTAKE_PROBLEM_MS) return;
+    const first = this.intakeStopped === undefined;
+    this.intakeStopped = `Factory hasn't read the queue for ${minutes} min (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued. Check that the service's GitHub login can still read Project ${this.config.queue.projectId} (a token needs the project scope) and that queue.projectId names it; intake resumes at the next good read`;
+    if (first)
+      this.log.write(0, {
+        event: "intake-stopped",
+        error: errorMessage(error),
+      });
+  }
+
   tick(sync: SyncView): void {
     if (this.problem()) return;
     // Read once at start: a rename while the service was down pauses
@@ -338,8 +387,24 @@ export class GitHubSync {
         "queue",
         async (signal) => {
           const read = await readQueue(this.github, this.config, known, signal);
-          this.view = read.items;
-          this.viewKnown = new Set(known);
+          // An issue GitHub answered with an error for keeps its last good card.
+          const unread = new Map(
+            read.unread.map((issue) => [
+              issue,
+              {
+                since: this.unread.get(issue)?.since ?? startedAt,
+                error:
+                  read.skipped.find((entry) => entry.issue === issue)?.error ??
+                  "",
+              },
+            ]),
+          );
+          this.view = [
+            ...read.items,
+            ...this.view.filter((item) => unread.has(item.issue)),
+          ];
+          this.unread = unread;
+          this.viewKnown = new Set(known.filter((issue) => !unread.has(issue)));
           this.viewAt = startedAt;
           this.fresh = true;
           for (const issue of read.gone) this.lose(issue, "queue");
@@ -348,8 +413,25 @@ export class GitHubSync {
               event: "queue-truncated",
               unread: read.truncated,
             });
+          const skipped = new Set<string>();
+          for (const entry of read.skipped) {
+            const key = `${entry.issue ?? ""} ${entry.error}`;
+            if (!this.skipped.has(key))
+              this.log.write(entry.issue ?? 0, {
+                event: "queue-entry-skipped",
+                error: entry.error,
+              });
+            skipped.add(key);
+          }
+          this.skipped = skipped;
+          this.failingSince = undefined;
+          if (this.intakeStopped) {
+            this.intakeStopped = undefined;
+            this.log.write(0, { event: "intake-resumed" });
+          }
         },
         false,
+        (error) => this.queueFailed(error, startedAt),
       );
     }
     if (this.fresh) {
@@ -532,7 +614,7 @@ export class GitHubSync {
     const queuedOption = this.config.queue.options.queued;
     const items = new Map(this.view.map((item) => [item.issue, item]));
     for (const issue of new Set([...items.keys(), ...this.viewKnown])) {
-      if (sync.unreadable.has(issue)) continue;
+      if (sync.unreadable.has(issue) || this.unread.has(issue)) continue;
       if (
         this.jobs.active(`show:${issue}`) ||
         (this.wroteAt.get(issue) ?? -1) >= this.viewAt

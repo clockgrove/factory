@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -21,6 +22,7 @@ import type {
   ThreadOptions,
 } from "@openai/codex-sdk";
 import { within } from "../paths.js";
+import { LaunchedGroup, namespacedLauncher } from "../sandbox.js";
 import { errorMessage } from "../text.js";
 import {
   addCodexTelemetry,
@@ -157,6 +159,70 @@ export function codexRuntimeDirectory(): string {
     dirname(cli.resolve(`@openai/codex-linux-${arch}/package.json`)),
     "vendor",
   );
+}
+
+/**
+ * A launcher at `<root>/codex` for the SDK's `codexPathOverride` that runs
+ * the Codex runtime as the init of its own PID namespace (sandbox.ts
+ * namespacedLauncher), and the file it writes its process group to, for a
+ * LaunchedGroup: an abort ends codex and every command it started. The SDK
+ * puts the runtime's helper directory (rg) on PATH only for its own
+ * binary, so it goes on `env.PATH` here. `stderr` appends codex's standard
+ * error to that file.
+ */
+export function codexLauncher(
+  root: string,
+  env: Record<string, string>,
+  stderr?: string,
+): { launcher: string; pidFile: string } {
+  const target = join(
+    codexRuntimeDirectory(),
+    process.arch === "arm64"
+      ? "aarch64-unknown-linux-musl"
+      : "x86_64-unknown-linux-musl",
+  );
+  env.PATH = [join(target, "codex-path"), env.PATH].filter(Boolean).join(":");
+  const launcher = join(root, "codex");
+  const pidFile = join(root, "codex.pid");
+  namespacedLauncher(launcher, join(target, "bin", "codex"), pidFile, stderr);
+  return { launcher, pidFile };
+}
+
+/** The launcher's own failure (setsid or unshare), as the SDK reports codex's exit. */
+const LAUNCHER_FAILURE =
+  /exited with (?:code \d+|signal \w+): (?:unshare|setsid): /;
+
+const NAMESPACE_FIX =
+  "The service host must allow unprivileged user namespaces, as bubblewrap needs (on Ubuntu, kernel.apparmor_restrict_unprivileged_userns=0), and have util-linux's setsid and unshare";
+
+/**
+ * Whether codex starts through codexLauncher on this host, tried with
+ * `codex --version` and no model call: the problem, or undefined.
+ * Readiness runs it for every role that uses Codex.
+ */
+export function codexLauncherProblem(): string | undefined {
+  const root = mkdtempSync(join(tmpdir(), "factory-codex-probe-"));
+  try {
+    const env: Record<string, string> = {
+      ...(process.env.PATH !== undefined && { PATH: process.env.PATH }),
+      HOME: root,
+    };
+    const { launcher } = codexLauncher(root, env);
+    const run = spawnSync(launcher, ["--version"], {
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+      // The launcher ignores SIGTERM; SIGKILL ends its namespace.
+      killSignal: "SIGKILL",
+    });
+    return run.status === 0
+      ? undefined
+      : `Codex couldn't start in its own process namespace (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(`${run.stderr}`.trim())}. ${NAMESPACE_FIX}`;
+  } catch (error) {
+    return `Factory could not set up the Codex launcher: ${detail(errorMessage(error))}`;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -315,6 +381,8 @@ function codexHome(
   root: string;
   workdir: string;
   env: Record<string, string>;
+  launcher: string;
+  pidFile: string;
 } {
   return privateCodexHome({
     ...(root && { root }),
@@ -326,7 +394,17 @@ function codexHome(
     finish: ({ root, env }) => {
       const workdir = join(root, "work");
       mkdirSync(workdir, { mode: 0o700 });
-      return { root, workdir, env };
+      // FACTORY_PROVIDER_TRACE keeps codex's stderr, with RUST_LOG from
+      // FACTORY_CODEX_RUST_LOG.
+      const trace = Boolean(process.env.FACTORY_PROVIDER_TRACE);
+      if (trace && process.env.FACTORY_CODEX_RUST_LOG)
+        env.RUST_LOG = process.env.FACTORY_CODEX_RUST_LOG;
+      const launched = codexLauncher(
+        root,
+        env,
+        trace ? join(root, "codex-stderr.log") : undefined,
+      );
+      return { root, workdir, env, ...launched };
     },
   });
 }
@@ -359,6 +437,11 @@ export function codexFailure(message: string): PlannerError {
   const has = (...phrases: string[]) =>
     phrases.some((phrase) => text.includes(phrase));
   const shown = detail(message);
+  if (LAUNCHER_FAILURE.test(message))
+    return new PlannerError(
+      "hold",
+      `Factory couldn't start Codex in its own process namespace (${shown}). ${NAMESPACE_FIX}; fix the host, then answer retry`,
+    );
   if (jsonStatus(message) === 401 || CODEX_EXEC_LOGIN.test(message))
     return new PlannerError(
       "hold",
@@ -499,10 +582,11 @@ export class CodexPlanner implements Planner {
       call.phase !== "dream" &&
       call.phase !== "propose" &&
       ["minimal", "low", "medium"].includes(choice.effort);
-    const watchdog = new IdleWatchdog(
-      lowerEffortReview ? LOWER_EFFORT_REVIEW_IDLE_MS : PLANNER_IDLE_MS,
-      call.signal,
-    );
+    const idleMs = lowerEffortReview
+      ? LOWER_EFFORT_REVIEW_IDLE_MS
+      : PLANNER_IDLE_MS;
+    // A running read-only command gets the same bound: none would hang it.
+    const watchdog = new IdleWatchdog(idleMs, call.signal, idleMs);
     let home: ReturnType<typeof codexHome>;
     let turn: Turn;
     try {
@@ -534,6 +618,8 @@ export class CodexPlanner implements Planner {
     }
     let events: AsyncGenerator<ThreadEvent> | undefined;
     let baseline: CodexBaseline | undefined;
+    // An abort ends codex and every command it started (namespacedLauncher).
+    const group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
       const tier =
         choice.serviceTier === "fast"
@@ -542,10 +628,9 @@ export class CodexPlanner implements Planner {
             ? "default"
             : undefined;
       const callStarted = Date.now();
-      const traced = traceWrapper(home.root, home.env);
       const codex = new Codex({
         env: home.env,
-        ...(traced ? { codexPathOverride: traced } : {}),
+        codexPathOverride: home.launcher,
         ...(tier && { config: { service_tier: tier } }),
       });
       const options: ThreadOptions = {
@@ -576,10 +661,7 @@ export class CodexPlanner implements Planner {
             ...images.map((path) => ({ type: "local_image" as const, path })),
           ]
         : turn.prompt;
-      // The SDK spawns codex with only our env and kills it on this signal.
-      // Finding 10 (left as is, checked by the milestone drill): the SDK
-      // spawns codex outside its own process group and signals only codex,
-      // so a read-only shell child of a tree review may outlive the call.
+      // The SDK spawns the launcher with only our env; the abort kills its group.
       ({ events } = await thread.runStreamed(input, {
         outputSchema: call.schema,
         signal: watchdog.signal,
@@ -709,8 +791,7 @@ export class CodexPlanner implements Planner {
       throw overflowed(codexFailure(errorMessage(error)), turn);
     } finally {
       watchdog.stop();
-      // Closing the stream makes the SDK kill a codex process still running.
-      // An aborted spawn was already sent SIGTERM, so don't wait long on it.
+      // Closing the stream ends the SDK's read; group.end kills codex.
       if (events) {
         let timer: NodeJS.Timeout | undefined;
         await Promise.race([
@@ -721,6 +802,7 @@ export class CodexPlanner implements Planner {
         ]);
         clearTimeout(timer);
       }
+      group.end();
       saveModelsCache(home.env.CODEX_HOME!);
       addCodexTelemetry(record, home.env.CODEX_HOME!, baseline?.size);
       // A retained conversation's home stays for its next turn, unless a
@@ -731,35 +813,6 @@ export class CodexPlanner implements Planner {
         keepOrRemove(home.root, record.thread as string | undefined, call.log);
     }
   }
-}
-
-/**
- * With FACTORY_PROVIDER_TRACE set, run codex through a wrapper that appends
- * its stderr to <home>/codex-stderr.log, with RUST_LOG from
- * FACTORY_CODEX_RUST_LOG. Returns the wrapper's path, or undefined.
- */
-function traceWrapper(
-  root: string,
-  env: Record<string, string>,
-): string | undefined {
-  if (!process.env.FACTORY_PROVIDER_TRACE) return undefined;
-  const require = createRequire(import.meta.url);
-  const vendor = join(
-    dirname(require.resolve("@openai/codex-linux-x64/package.json")),
-    "vendor",
-    "x86_64-unknown-linux-musl",
-    "bin",
-    "codex",
-  );
-  if (process.env.FACTORY_CODEX_RUST_LOG)
-    env.RUST_LOG = process.env.FACTORY_CODEX_RUST_LOG;
-  const wrapper = join(root, "codex-traced");
-  writeFileSync(
-    wrapper,
-    `#!/bin/sh\nexec '${vendor}' "$@" 2>>'${join(root, "codex-stderr.log")}'\n`,
-    { mode: 0o700 },
-  );
-  return wrapper;
 }
 
 /**

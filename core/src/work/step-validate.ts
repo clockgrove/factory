@@ -40,7 +40,7 @@ export async function validateStep(
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const workDir = deps.workDir(state.issue);
   const worktree = worktreePath(workDir, state.issue, item.id);
-  await addWorktree(config.checkout, worktree, work.base, signal);
+  await addWorktree(config.checkout, worktree, work.base, signal, context.log);
   const result = await validateTree({
     checkout: config.checkout,
     repository: config.repository,

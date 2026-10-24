@@ -281,7 +281,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
   const worktree = input.directory;
   try {
     await removeWorktree(checkout, worktree, input.signal);
-    await addWorktree(checkout, worktree, commit, input.signal);
+    await addWorktree(checkout, worktree, commit, input.signal, input.log);
   } catch (error) {
     input.signal.throwIfAborted();
     // Refused Git is the operator's to fix: the caller holds.

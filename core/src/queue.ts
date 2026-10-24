@@ -24,6 +24,38 @@ export interface QueueRead {
   gone: number[];
   /** Queued cards past the read's bound, left for a later read. */
   truncated: number;
+  /**
+   * Known issues GitHub answered with an error for that issue alone, and
+   * no card for them from the Project: callers keep their last good view
+   * of each.
+   */
+  unread: number[];
+  /** What the read left out and why (GitHub's error), for the log: the issue when known. */
+  skipped: Skipped[];
+}
+
+/** An entry a read left out: GitHub answered with an error for it alone. */
+export interface Skipped {
+  issue?: number;
+  error: string;
+}
+
+/** Whether `error` lies below `prefix` in the data. */
+const under = (error: GraphQLError, prefix: readonly string[]) =>
+  (error.path?.length ?? 0) > prefix.length &&
+  prefix.every((part, at) => error.path?.[at] === part);
+
+/** The first error below `prefix`, by the index or alias that follows it. */
+function errorsUnder(
+  errors: readonly GraphQLError[],
+  prefix: readonly string[],
+): Map<string, string> {
+  const found = new Map<string, string>();
+  for (const error of errors) {
+    const key = String(error.path?.[prefix.length]);
+    if (under(error, prefix) && !found.has(key)) found.set(key, error.message);
+  }
+  return found;
 }
 
 /*
@@ -189,43 +221,65 @@ export async function readCards(
   github: GitHub,
   config: CoreConfig,
   signal?: AbortSignal,
-): Promise<{ items: QueueItem[]; truncated: number }> {
+): Promise<{ items: QueueItem[]; truncated: number; skipped: Skipped[] }> {
   const items: QueueItem[] = [];
+  const skipped: Skipped[] = [];
   const truncated = await readItems(
     github,
     config,
     "is:open",
     (item) => items.push(item),
+    skipped,
     signal,
   );
-  return { items, truncated };
+  return { items, truncated, skipped };
 }
 
-/** Read the Project's items matching `query`, page by page; returns how many were left unread. */
+/**
+ * Read the Project's items matching `query`, page by page; returns how
+ * many were left unread. An item GitHub answers with an error for (an
+ * issue in a repository the login can't read, say) is left out and noted
+ * in `skipped`; an error for the Project or its item list fails the read.
+ */
 async function readItems(
   github: GitHub,
   config: CoreConfig,
   query: string,
   each: (item: QueueItem) => void,
+  skipped: Skipped[],
   signal?: AbortSignal,
 ): Promise<number> {
+  const entry = ["node", "items", "nodes"];
   let after: string | null = null;
   for (let page = 0; ; page++) {
-    const data: ItemsPage = await github.graphql<ItemsPage>(
-      ITEMS,
-      {
-        project: config.queue.projectId,
-        after,
-        query: query + NOT_WORK_ITEM,
-        field: config.queue.field,
-        order: config.queue.orderField,
-      },
-      signal,
-    );
-    const items = data.node?.items;
+    const read: { data: ItemsPage; errors: GraphQLError[] } =
+      await github.graphqlPartial<ItemsPage>(
+        ITEMS,
+        {
+          project: config.queue.projectId,
+          after,
+          query: query + NOT_WORK_ITEM,
+          field: config.queue.field,
+          order: config.queue.orderField,
+        },
+        signal,
+        (error) => under(error, entry) && Number.isInteger(error.path?.[3]),
+      );
+    const items = read.data.node?.items;
     if (!items) throw new Error(`Project ${config.queue.projectId} not found`);
-    for (const node of items.nodes) {
+    const errored = errorsUnder(read.errors, entry);
+    for (const [at, node] of items.nodes.entries()) {
       const content = node?.content;
+      const error = errored.get(String(at));
+      if (error !== undefined) {
+        skipped.push({
+          ...(typeof content?.number === "number" && {
+            issue: content.number,
+          }),
+          error,
+        });
+        continue;
+      }
       if (
         !node ||
         node.isArchived ||
@@ -253,10 +307,11 @@ async function readItems(
 /**
  * Queued issues of this repository on the configured Project, open or
  * closed, and `known` issues (read from the issue side) whatever their
- * option. A known
- * issue GitHub no longer has is reported in `gone`, never a failed read;
- * any other failed or partial read throws, and callers keep their last
- * good view.
+ * option. A known issue GitHub no longer has is reported in `gone`, never
+ * a failed read. GitHub's error for one entry (a Project item, a known
+ * issue, a recent issue) leaves out that entry alone, noted in `skipped`,
+ * and a known issue left out is `unread`. Any other failed read throws,
+ * and callers keep their last good view.
  */
 export async function readQueue(
   github: GitHub,
@@ -284,11 +339,14 @@ export async function readQueue(
           }
         : null,
     );
+  const skipped: Skipped[] = [];
+  const unread: number[] = [];
   const truncated = await readItems(
     github,
     config,
     queuedFilter(config),
     (item) => cards.set(item.issue, item),
+    skipped,
     signal,
   );
   // The issue side is read directly, so it wins over the lagging index.
@@ -297,14 +355,13 @@ export async function readQueue(
   for (let at = 0; at === 0 || at < numbers.length; at += BY_NUMBER) {
     const chunk = numbers.slice(at, at + BY_NUMBER);
     const aliases = new Set(chunk.map((n) => `i${n}`));
-    // A missing issue is an error on its own alias: that issue is gone,
-    // and the rest of the read stands.
-    const missing = (error: GraphQLError) =>
-      error.type === "NOT_FOUND" &&
-      error.path?.length === 2 &&
-      error.path[0] === "repository" &&
-      aliases.has(String(error.path[1]));
-    const { data } = await github.graphqlPartial<{
+    // An error under one issue's alias, or under the recent issues, is
+    // that entry's alone: a missing issue (NOT_FOUND on its alias) is
+    // gone, any other leaves it unread, and the rest of the read stands.
+    const entry = (error: GraphQLError) =>
+      error.path?.[0] === "repository" &&
+      (aliases.has(String(error.path[1])) || error.path[1] === "recent");
+    const { data, errors } = await github.graphqlPartial<{
       repository:
         | (Record<string, Card | { nodes: Card[] } | null> & {
             nameWithOwner: string;
@@ -314,21 +371,60 @@ export async function readQueue(
       issuesQuery(chunk),
       { owner: github.owner, name: github.name, ...fields },
       signal,
-      missing,
+      entry,
     );
     if (!data.repository)
       throw new Error(`Repository ${config.repository} not found`);
     // GraphQL resolves an old name: a renamed or transferred repository
     // throws RepositoryMoved here, so `ours` never loses its issues.
     github.sameRepository(data.repository.nameWithOwner);
-    for (const issue of (data.repository.recent as { nodes: Card[] } | null)
-      ?.nodes ?? [])
-      await read(issue);
+    const errored = errorsUnder(errors, ["repository"]);
+    // The recent issues only find new cards early: one with an error is
+    // left out, and all of them when the list itself has one.
+    const recentErrors = errorsUnder(errors, ["repository", "recent", "nodes"]);
+    const recent = data.repository.recent as { nodes: (Card | null)[] } | null;
+    const listError = errors.find(
+      (error) =>
+        error.path?.[1] === "recent" &&
+        error.path.length <= 3 &&
+        error.path[0] === "repository",
+    )?.message;
+    if (listError !== undefined) skipped.push({ error: listError });
+    else
+      for (const [at, issue] of (recent?.nodes ?? []).entries()) {
+        const error = recentErrors.get(String(at));
+        if (error !== undefined || !issue) {
+          if (error !== undefined)
+            skipped.push({
+              ...(typeof issue?.number === "number" && {
+                issue: issue.number,
+              }),
+              error,
+            });
+          continue;
+        }
+        const problem = await read(issue);
+        if (problem) skipped.push({ issue: issue.number, error: problem });
+      }
     for (const n of chunk) {
-      const issue = data.repository[`i${n}`] as Card | null | undefined;
-      // One transferred away reads as the issue it is now: gone from here.
-      if (issue && ours(issue, n)) await read(issue);
-      else {
+      const alias = `i${n}`;
+      const issue = data.repository[alias] as Card | null | undefined;
+      const missing = errors.some(
+        (error) =>
+          error.type === "NOT_FOUND" &&
+          error.path?.length === 2 &&
+          error.path[0] === "repository" &&
+          error.path[1] === alias,
+      );
+      const error = missing ? undefined : errored.get(alias);
+      const problem =
+        error ?? (issue && ours(issue, n) ? await read(issue) : undefined);
+      if (problem !== undefined) {
+        skipped.push({ issue: n, error: problem });
+        // The Project's own list may still have shown its card.
+        if (!cards.has(n)) unread.push(n);
+      } else if (!issue || !ours(issue, n)) {
+        // One transferred away reads as the issue it is now: gone from here.
         gone.push(n);
         cards.set(n, null);
       }
@@ -342,9 +438,12 @@ export async function readQueue(
         config.repository.toLowerCase()
     );
   }
-  /** An issue's queue card, paging its cards past the first page until found. */
-  async function read(issue: Card): Promise<void> {
-    if (workItem(issue.body)) return;
+  /**
+   * An issue's queue card, paging its cards past the first page until
+   * found; GitHub's error when a further page had one for it.
+   */
+  async function read(issue: Card): Promise<string | undefined> {
+    if (workItem(issue.body)) return undefined;
     const find = (items: CardPage) =>
       items.nodes.find(
         (n) => n?.project.id === config.queue.projectId && !n.isArchived,
@@ -352,7 +451,7 @@ export async function readQueue(
     let items = issue.projectItems;
     let node = find(items);
     while (!node && items.pageInfo.hasNextPage) {
-      const data = await github.graphql<{
+      const { data, errors } = await github.graphqlPartial<{
         repository: { issue: { projectItems: CardPage } | null } | null;
       }>(
         MORE_ITEMS,
@@ -364,19 +463,23 @@ export async function readQueue(
           ...fields,
         },
         signal,
+        (error) => under(error, ["repository"]),
       );
       const more = data.repository?.issue?.projectItems;
-      // A partial read throws: callers keep their last good view.
-      if (!more) throw new Error(`Issue #${issue.number}'s cards not found`);
+      if (!more || errors.length)
+        return errors[0]?.message ?? `Issue #${issue.number}'s cards not found`;
       items = more;
       node = find(items);
     }
     card(issue.number, issue.state === "OPEN", node);
+    return undefined;
   }
   return {
     items: [...cards.values()].filter((item): item is QueueItem => !!item),
     gone,
     truncated,
+    unread,
+    skipped,
   };
 }
 

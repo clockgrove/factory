@@ -139,6 +139,8 @@ export interface ObjectiveView {
 export interface ServiceView {
   crashLoop?: { crashes: number; resumeAt: string };
   problem?: string;
+  /** Why the service admits nothing from the queue now (GitHubSync.intakeProblem). */
+  intake?: string;
   /** The host limiter's slots and memory in use (engine.ts HostLimiter). */
   capacity?: CapacityUse;
   waits: Record<string, { slot: true } | { paths: number }>;
@@ -149,6 +151,7 @@ export interface StatusView {
   service: "running" | "stopped";
   crashLoop?: ServiceView["crashLoop"];
   problem?: string;
+  intake?: string;
   capacity?: CapacityUse;
   queue: QueueControl;
   objectives: ObjectiveView[];
@@ -534,8 +537,8 @@ function nextAction(
  * The running service's record, from `service.json`: its crash loop (the
  * deaths in a row before this start, and when it resumes interrupted
  * steps; shown until the run has lived 10 min past that time), a problem
- * that pauses its GitHub effects, and the Objectives waiting for a slot or
- * on another's paths.
+ * that pauses its GitHub effects, why it admits nothing from the queue,
+ * and the Objectives waiting for a slot or on another's paths.
  */
 function serviceRecord(paths: Paths): ServiceView {
   try {
@@ -545,6 +548,7 @@ function serviceRecord(paths: Paths): ServiceView {
       deaths?: Death[];
       resumeAt?: string;
       problem?: string;
+      intake?: string;
       capacity?: CapacityUse;
       waits?: ServiceView["waits"];
     };
@@ -561,6 +565,7 @@ function serviceRecord(paths: Paths): ServiceView {
       ...(typeof record.problem === "string"
         ? { problem: record.problem }
         : {}),
+      ...(typeof record.intake === "string" ? { intake: record.intake } : {}),
       ...(record.capacity ? { capacity: record.capacity } : {}),
       waits: record.waits ?? {},
     };
@@ -580,6 +585,7 @@ export function statusText(
   const lines = [`Service: ${view.service}`];
   if (view.problem)
     lines.push(`  Problem: ${view.problem}. GitHub effects are paused.`);
+  if (view.intake) lines.push(`  Intake: ${view.intake}.`);
   const loop = view.crashLoop;
   if (loop)
     lines.push(

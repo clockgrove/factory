@@ -52,7 +52,7 @@ async function queueCommand(
       `Factory has no configuration for ${repository}, so it can't read the Project.`,
     );
   const github = new GitHub(config.repository, process.env.FACTORY_GITHUB_API);
-  const { items, truncated } = await readCards(github, config);
+  const { items, truncated, skipped } = await readCards(github, config);
   const control = loadQueueControl(paths.root);
   const queuedOption = config.queue.options.queued;
   const queued: { issue: number; order: number | null; status: string }[] = [];
@@ -110,7 +110,14 @@ async function queueCommand(
       (a.order ?? Number.MAX_SAFE_INTEGER) -
         (b.order ?? Number.MAX_SAFE_INTEGER) || a.issue - b.issue,
   );
-  const result = { queue: control, queued, candidates, inert, truncated };
+  const result = {
+    queue: control,
+    queued,
+    candidates,
+    inert,
+    truncated,
+    skipped,
+  };
   if (args.flags.json !== undefined) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return 0;
@@ -136,6 +143,13 @@ async function queueCommand(
       ...inert.map((i) => `  #${i.issue}: ${i.reason}`),
     );
   if (truncated) lines.push(`${truncated} more cards weren't read.`);
+  if (skipped.length)
+    lines.push(
+      "Cards GitHub answered with an error for (left out):",
+      ...skipped.map(
+        (s) => `  ${s.issue ? `#${s.issue}` : "a card"}: ${s.error}`,
+      ),
+    );
   process.stdout.write(`${lines.join("\n")}\n`);
   return 0;
 }

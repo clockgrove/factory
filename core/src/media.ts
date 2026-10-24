@@ -86,6 +86,7 @@ import {
 } from "./work/collect.js";
 import {
   addWorktree,
+  clearStaleLocks,
   hasGitlink,
   hostGit,
   hostGitExit,
@@ -1106,6 +1107,7 @@ export async function materializeSelection(input: {
   /** The ref that keeps the selection commit from Git's pruning (selectionRef). */
   ref: string;
   signal: AbortSignal;
+  log: (event: Record<string, unknown>) => void;
 }): Promise<MediaOutcome<{ commit: string; tree: string }>> {
   const { checkout, directory, item, set, signal } = input;
   const again = set.id.toLowerCase();
@@ -1116,7 +1118,7 @@ export async function materializeSelection(input: {
       [NEW_CANDIDATES, "cancel"],
     );
   await removeWorktree(checkout, directory, signal);
-  await addWorktree(checkout, directory, input.commit, signal);
+  await addWorktree(checkout, directory, input.commit, signal, input.log);
   try {
     const git = (args: string[]) => hostGit(directory, args, { signal });
     if (await hasGitlink(directory, { commit: input.commit, signal }))
@@ -1223,6 +1225,7 @@ export async function materializeSelection(input: {
       .toString("utf8")
       .trim();
     // The worktree goes below; the ref keeps the commit until cleanup.
+    await clearStaleLocks(checkout, { signal, log: input.log });
     await hostGit(checkout, ["update-ref", input.ref, commit], { signal });
     return { kind: "done", value: { commit, tree } };
   } finally {

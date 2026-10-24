@@ -30,6 +30,7 @@ import {
   closeSync,
   copyFileSync,
   createReadStream,
+  createWriteStream,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -39,12 +40,14 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { create, extract, list } from "tar";
 import { crashPoint } from "../crash.js";
 import { hold } from "../engine.js";
@@ -270,7 +273,30 @@ async function pack(
 }
 
 /**
- * Check every entry of the result archive, then write it into the
+ * Stream a downloaded result archive to `path`, refusing it as soon as it
+ * passes RESULT_MAX_BYTES, so an oversized one is never held in memory.
+ */
+async function saveResult(response: Response, path: string): Promise<void> {
+  let bytes = 0;
+  await pipeline(
+    response.body
+      ? Readable.fromWeb(response.body as WebReadableStream<Uint8Array>)
+      : Readable.from([]),
+    async function* (source: AsyncIterable<Buffer>) {
+      for await (const chunk of source) {
+        bytes += chunk.length;
+        if (bytes > RESULT_MAX_BYTES)
+          throw new Error("The managed result is larger than 200 MiB");
+        yield chunk;
+      }
+    },
+    createWriteStream(path, { mode: 0o600 }),
+  );
+}
+
+/**
+ * Check every entry of the result archive (saveResult bounded its size),
+ * then write it into the
  * worktree: changed and new files, and deletions of files the agent
  * removed. Private staging is never written back.
  */
@@ -280,8 +306,6 @@ async function apply(
   scratch: string,
   sent: readonly string[],
 ): Promise<number> {
-  if (statSync(archive).size > RESULT_MAX_BYTES)
-    throw new Error("The managed result is larger than 200 MiB");
   const files = new Map<string, number>();
   let total = 0;
   let invalid: string | undefined;
@@ -867,7 +891,7 @@ export class OpenAIManagedWorker extends ManagedWorker {
       signal,
     );
     const path = join(scratch, "result.tar");
-    writeFileSync(path, Buffer.from(await content!.arrayBuffer()));
+    await saveResult(content!, path);
     return path;
   }
 
@@ -1317,7 +1341,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
       sdk.beta.files.download(file!.id, this.scope, options),
     );
     const path = join(scratch, "result.tar");
-    writeFileSync(path, Buffer.from(await response.arrayBuffer()));
+    await saveResult(response, path);
     return path;
   }
 

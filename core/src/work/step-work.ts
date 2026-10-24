@@ -102,7 +102,13 @@ export async function workStep(
   };
   const keptBase = fact(state, "base", item.id);
   let base = keptBase ?? (await start());
-  const added = await addWorktree(config.checkout, worktree, base, signal);
+  const added = await addWorktree(
+    config.checkout,
+    worktree,
+    base,
+    signal,
+    context.log,
+  );
   let replayed = false;
   if (added === "kept" && keptBase === undefined) {
     // A worktree from an attempt that never kept its base (interrupted

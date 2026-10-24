@@ -124,9 +124,57 @@ export interface GitExit {
   stderr: string;
 }
 
+/** How long a Git sent SIGTERM (timeout or abort) has to clean up its lock files before SIGKILL. */
+const TERM_GRACE_MS = 2_000;
+/**
+ * How long, once Git has exited, its process group may live on (a child
+ * it left) before SIGKILL, and its output may stay open (a helper outside
+ * the group still holding the pipe).
+ */
+const LINGER_MS = 1_000;
+/** Standard output pinnedGitExit collects; more ends Git and rejects. */
+const MAX_STDOUT_BYTES = 256 * 1024 * 1024;
+
+/** pinnedGitExit's process groups not yet gone; the service's exit kills them. */
+const gitGroups = new Set<number>();
+process.once("exit", () => {
+  for (const group of gitGroups) signalGroup(group, "SIGKILL");
+});
+
+/** Signal a whole process group; false when none of it is left. */
+function signalGroup(group: number, signal: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(-group, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wait until no process of `group` is left: a Git's own children (`git
+ * worktree add` runs `git reset --hard`) can hold its locks after it
+ * exits. What lingers past LINGER_MS gets SIGKILL.
+ */
+async function reap(group: number): Promise<void> {
+  for (const kill of [true, false]) {
+    const end = Date.now() + LINGER_MS;
+    while (signalGroup(group, 0) && Date.now() < end)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    if (!signalGroup(group, 0)) return;
+    if (kill) signalGroup(group, "SIGKILL");
+  }
+}
+
 /**
  * Run Git in `directory` with `env` (gitEnvironment by default) and report
- * how it exited. No timeout unless `timeoutMs` is given.
+ * how it exited. No timeout unless `timeoutMs` is given. Git leads a
+ * process group of its own. A timeout or an abort sends the group SIGTERM,
+ * so Git and its children remove their lock files, and SIGKILL after a
+ * short grace; an abort rejects with the signal's reason. It settles only
+ * once the whole group is gone, waiting a bounded time for the output to
+ * close, so no child of it still holds a lock; standard output past 256
+ * MiB ends Git and rejects.
  */
 export function pinnedGitExit(
   directory: string,
@@ -141,25 +189,96 @@ export function pinnedGitExit(
   } = {},
 ): Promise<GitExit> {
   return new Promise((done, failed) => {
+    const { signal } = options;
+    if (signal?.aborted) {
+      failed(signal.reason);
+      return;
+    }
     const child = spawn("git", ["-C", directory, ...args], {
       env: options.env ?? gitEnvironment(),
       stdio: ["pipe", options.stdout ?? "pipe", "pipe"],
-      ...(options.timeoutMs !== undefined && {
-        timeout: options.timeoutMs,
-        killSignal: "SIGKILL" as const,
-      }),
-      ...(options.signal ? { signal: options.signal } : {}),
+      detached: true,
     });
+    const group = child.pid;
+    if (group !== undefined) gitGroups.add(group);
     const out: Buffer[] = [];
+    let size = 0;
     let err = "";
-    child.stdout?.on("data", (chunk: Buffer) => out.push(chunk));
+    let refused: unknown;
+    let killTimer: NodeJS.Timeout | undefined;
+    let closeTimer: NodeJS.Timeout | undefined;
+    const stop = () => {
+      if (group === undefined || killTimer) return;
+      signalGroup(group, "SIGTERM");
+      killTimer = setTimeout(
+        () => signalGroup(group, "SIGKILL"),
+        TERM_GRACE_MS,
+      );
+    };
+    const onAbort = () => {
+      refused ??= signal?.reason;
+      stop();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timeout =
+      options.timeoutMs !== undefined
+        ? setTimeout(stop, options.timeoutMs)
+        : undefined;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_STDOUT_BYTES) {
+        refused ??= new Error(
+          `git ${args[0]} in ${directory} wrote more than ${MAX_STDOUT_BYTES} bytes`,
+        );
+        out.length = 0;
+        stop();
+        return;
+      }
+      if (refused === undefined) out.push(chunk);
+    });
     child.stderr?.on("data", (chunk: Buffer) => {
       if (err.length < 4096) err += chunk.toString("utf8");
     });
-    child.on("error", failed);
-    child.on("close", (code, signal) =>
-      done({ code, signal, stdout: Buffer.concat(out), stderr: err.trim() }),
-    );
+    let exit:
+      | { code: number | null; signal: NodeJS.Signals | null }
+      | undefined;
+    let closed = false;
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      clearTimeout(closeTimer);
+      if (group !== undefined) gitGroups.delete(group);
+      signal?.removeEventListener("abort", onAbort);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (refused !== undefined || !exit) failed(refused);
+      else
+        done({
+          code: exit.code,
+          signal: exit.signal,
+          stdout: Buffer.concat(out),
+          stderr: err.trim(),
+        });
+    };
+    child.on("error", (error) => {
+      refused ??= error;
+      if (child.exitCode === null && child.signalCode === null) stop();
+      if (group === undefined) settle();
+    });
+    child.on("close", () => {
+      closed = true;
+      if (exit) settle();
+    });
+    child.on("exit", (code, exitSignal) => {
+      void reap(group!).then(() => {
+        exit = { code, signal: exitSignal };
+        if (closed) settle();
+        else closeTimer = setTimeout(settle, LINGER_MS);
+      });
+    });
     child.stdin?.on("error", () => {
       // git may exit before reading stdin; its exit code reports the failure.
     });
@@ -260,13 +379,26 @@ async function operatorGit(
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<string> {
   const { LANGUAGE: _language, LC_ALL: _all, ...env } = process.env;
-  const { stdout } = await run("git", ["-C", checkout, ...args], {
-    env: { ...env, GIT_TERMINAL_PROMPT: "0", LC_MESSAGES: "C" },
-    encoding: "utf8",
-    timeout: options.timeoutMs ?? MINUTE,
-    maxBuffer: 16 * 1024 * 1024,
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  // No gc or maintenance that would outlive the call in the background.
+  const { stdout } = await run(
+    "git",
+    [
+      "-C",
+      checkout,
+      "-c",
+      "gc.auto=0",
+      "-c",
+      "maintenance.auto=false",
+      ...args,
+    ],
+    {
+      env: { ...env, GIT_TERMINAL_PROMPT: "0", LC_MESSAGES: "C" },
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? MINUTE,
+      maxBuffer: 16 * 1024 * 1024,
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
   return stdout;
 }
 

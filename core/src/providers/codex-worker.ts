@@ -24,9 +24,8 @@ import { errored } from "../engine.js";
 import { redact } from "../log.js";
 import {
   gitMetadata,
-  killGroup,
+  LaunchedGroup,
   packageCacheEnvironment,
-  processGroups,
   ROOT_REFUSAL,
   readOnlyMounts,
   runsAsRoot,
@@ -44,6 +43,7 @@ import {
   type CodexEffort,
   codexFailure,
   codexHomeOf,
+  codexLauncher,
   codexRuntimeDirectory,
   privateCodexHome,
   saveModelsCache,
@@ -118,7 +118,6 @@ const TMP_SUFFIX =
   "\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment: it has a private writable $TMPDIR but no /tmp or /var/tmp. Factory's validation runs the same commands with a writable /tmp. When a command fails here only because it uses /tmp, do not change files or propose ownership for that alone: report the command and that it needs /tmp; Factory's validation still decides.";
 
 const real = (path: string) => realpathSync(path);
-const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /** A classified Codex failure as the Worker's outcome (planner.ts providerOutcome). */
 const outcome = (error: PlannerError): WorkerResult => providerOutcome(error);
@@ -203,13 +202,6 @@ function workerHome(
   /** A retained conversation's home (privateCodexHome `root`). */
   root?: string,
 ): WorkerHome {
-  const setsid = ["/usr/bin/setsid", "/bin/setsid"].find((path) =>
-    existsSync(path),
-  );
-  if (!setsid)
-    throw new Error(
-      "setsid (util-linux) is not installed, so Factory can't stop a Codex worker's commands; install util-linux",
-    );
   const workspace = real(worktree);
   const source: NodeJS.ProcessEnv = {
     ...process.env,
@@ -282,25 +274,8 @@ ${shellPolicy(source, network, sandbox.environment, [
     finish: ({ root, home, env }) => {
       // Package caches stay in the private HOME, never in the worktree.
       Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
-      // The SDK adds the runtime's helper directory (rg) only for its own binary.
-      const target = join(
-        runtime,
-        process.arch === "arm64"
-          ? "aarch64-unknown-linux-musl"
-          : "x86_64-unknown-linux-musl",
-      );
-      env.PATH = [join(target, "codex-path"), env.PATH]
-        .filter(Boolean)
-        .join(":");
-      // setsid makes codex the leader of a new process group, so an abort
-      // kills it and every command it started, not just codex.
-      const pidFile = join(root, "codex.pid");
-      const launcher = join(root, "codex");
-      writeFileSync(
-        launcher,
-        `#!/bin/sh\necho $$ > ${quote(pidFile)}\nexec ${setsid} ${quote(join(target, "bin", "codex"))} "$@"\n`,
-        { mode: 0o700, flag: "wx" },
-      );
+      // Commands it starts end with it, an abort's included.
+      const { launcher, pidFile } = codexLauncher(root, env);
       return { root, launcher, pidFile, env };
     },
   });
@@ -345,6 +320,7 @@ function probeRun(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      group.end();
       resolve({ ...result, stderr });
     };
     const child = spawn(command, args, {
@@ -352,13 +328,13 @@ function probeRun(
       env: options.env,
       stdio: ["ignore", "ignore", "pipe"],
     });
+    // The launcher ignores SIGTERM; killing its group ends its namespace.
+    const group = new LaunchedGroup(
+      options.pidFile,
+      new AbortController().signal,
+    );
     const timer = setTimeout(() => {
-      const group = launchedGroup(options.pidFile);
-      try {
-        if (group) process.kill(-group, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
+      group.end();
       child.kill("SIGKILL");
       done({
         status: null,
@@ -451,16 +427,6 @@ export async function codexSandboxProblem(
     listener.close();
     for (const directory of [worktree, outside, home?.root])
       if (directory) rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-/** The process group a launcher recorded, once codex has started. */
-function launchedGroup(pidFile: string): number | undefined {
-  try {
-    const pid = Number(readFileSync(pidFile, "utf8").trim());
-    return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -614,7 +580,6 @@ export class CodexWorker implements Worker {
       if (turn.resumed && error.tooLarge) throw new ResumeOverflow();
       return outcome(error);
     };
-    let group: number | undefined;
     turnFields(record, turn);
     let baseline: CodexBaseline | undefined;
     if (turn.resumed) {
@@ -635,24 +600,9 @@ export class CodexWorker implements Worker {
     };
     const reading = setInterval(readLive, ACTIVITY_INTERVAL_MS);
     reading.unref();
-    /** Track codex's group with the shared registry as soon as it exists. */
-    const track = () => {
-      if (group !== undefined) return;
-      group = launchedGroup(home.pidFile);
-      if (group !== undefined) processGroups.add(group);
-    };
-    const kill = () => {
-      track();
-      if (group !== undefined) killGroup(group);
-    };
-    watchdog.signal.addEventListener("abort", kill, { once: true });
-    // The SDK hides the child: poll for the group its launcher records, so a
-    // service exit kills it even before its first event.
-    const polling = setInterval(() => {
-      track();
-      if (group !== undefined) clearInterval(polling);
-    }, 100);
-    polling.unref();
+    // The SDK hides the child: the group its launcher records is killed on
+    // an abort, and a service exit kills it even before its first event.
+    const group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
       const tier =
         this.model.serviceTier === "fast"
@@ -681,7 +631,7 @@ export class CodexWorker implements Worker {
       const thread = turn.resumed
         ? codex.resumeThread(turn.resumed.id, options)
         : codex.startThread(options);
-      // The SDK kills codex on this signal; the abort listener kills its group.
+      // The abort kills the launcher's group, and with it the namespace.
       ({ events } = await watchdog.race(
         thread.runStreamed(turn.prompt + TMP_SUFFIX, {
           signal: watchdog.signal,
@@ -696,7 +646,6 @@ export class CodexWorker implements Worker {
         const next = await watchdog.race(events.next());
         if (next.done) break;
         const event = next.value;
-        track();
         const item =
           event.type === "item.started" ||
           event.type === "item.updated" ||
@@ -761,10 +710,8 @@ export class CodexWorker implements Worker {
     } finally {
       clearInterval(reading);
       readLive();
-      clearInterval(polling);
       watchdog.stop();
-      watchdog.signal.removeEventListener("abort", kill);
-      // Closing the stream makes the SDK kill a codex process still running.
+      // Closing the stream ends the SDK's read; group.end kills codex.
       if (events) {
         let timer: NodeJS.Timeout | undefined;
         await Promise.race([
@@ -776,8 +723,7 @@ export class CodexWorker implements Worker {
         clearTimeout(timer);
       }
       // Commands the worker left running end with its turn.
-      kill();
-      if (group !== undefined) processGroups.delete(group);
+      group.end();
       saveModelsCache(join(home.root, "codex-home"));
       addCodexTelemetry(record, join(home.root, "codex-home"), baseline?.size);
       // A retained conversation's Codex state stays for the item's next

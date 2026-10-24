@@ -90,6 +90,7 @@ export async function selectStep(
     set: read.set,
     ref: selectionRef(state.issue, item.id),
     signal,
+    log: context.log,
   });
   // A missing LFS rule isn't about the set: the choice stands for the repair.
   if (made.kind === "repair" && made.keepsSelection)

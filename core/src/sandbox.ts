@@ -31,6 +31,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import type * as path from "node:path";
@@ -953,6 +954,93 @@ function killWorkerProcesses(): void {
 }
 
 process.once("exit", killWorkerProcesses);
+
+/** Quote one shell word. */
+const shellWord = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Write an executable launcher at `path` that runs `program` (with the
+ * launcher's arguments) as the leader of a new process group, as the init
+ * of a PID namespace of its own (`unshare --user --map-current-user --pid
+ * --fork --kill-child --mount-proc`). Its process id, the group's, goes to
+ * `pidFile` first. Killing the group, or the program ending, ends the
+ * namespace, and the kernel then kills every process left in it, however
+ * its commands regrouped or detached: an abort can't leave a command
+ * running. The launcher ignores SIGTERM; LaunchedGroup kills it. `stderr`
+ * appends the program's standard error to that file. Throws when
+ * util-linux's `setsid` or `unshare` is missing.
+ */
+export function namespacedLauncher(
+  path: string,
+  program: string,
+  pidFile: string,
+  stderr?: string,
+): void {
+  const find = (name: string) =>
+    [`/usr/bin/${name}`, `/bin/${name}`].find((candidate) =>
+      existsSync(candidate),
+    );
+  const setsid = find("setsid");
+  const unshare = find("unshare");
+  if (!setsid || !unshare)
+    throw new Error(
+      "setsid and unshare (util-linux) are needed to stop a Codex process and every command it started; install util-linux",
+    );
+  writeFileSync(
+    path,
+    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nexec ${setsid} ${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc ${shellWord(program)} "$@"${stderr ? ` 2>>${shellWord(stderr)}` : ""}\n`,
+    { mode: 0o700, flag: "wx" },
+  );
+}
+
+/**
+ * The process group a namespacedLauncher records, in processGroups from
+ * when it appears until `end`, so a service exit kills it even before the
+ * caller sees it start. `signal` aborting kills it; so does `end`, which
+ * ends whatever the run left behind.
+ */
+export class LaunchedGroup {
+  private group: number | undefined;
+  private readonly polling: NodeJS.Timeout;
+
+  constructor(
+    private readonly pidFile: string,
+    private readonly signal: AbortSignal,
+  ) {
+    this.polling = setInterval(() => {
+      if (this.track() !== undefined) clearInterval(this.polling);
+    }, 100);
+    this.polling.unref();
+    signal.addEventListener("abort", this.kill, { once: true });
+  }
+
+  /** The group, once the launcher has written it. */
+  track(): number | undefined {
+    if (this.group !== undefined) return this.group;
+    try {
+      const pid = Number(readFileSync(this.pidFile, "utf8").trim());
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        this.group = pid;
+        processGroups.add(pid);
+      }
+    } catch {
+      // Not started yet.
+    }
+    return this.group;
+  }
+
+  readonly kill = (): void => {
+    const group = this.track();
+    if (group !== undefined) killGroup(group);
+  };
+
+  end(): void {
+    clearInterval(this.polling);
+    this.signal.removeEventListener("abort", this.kill);
+    this.kill();
+    if (this.group !== undefined) processGroups.delete(this.group);
+  }
+}
 
 /** Process group and start time of `pid`, from /proc. */
 function processStat(

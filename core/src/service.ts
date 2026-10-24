@@ -363,6 +363,9 @@ export async function serve(options: ServeOptions): Promise<number> {
     });
   const heartbeat = (stopped = false): void => {
     record.queue = queue;
+    const intake = options.sync?.intakeProblem();
+    if (intake) record.intake = intake;
+    else delete record.intake;
     record.capacity = hostLimits.usage();
     record.waits = Object.fromEntries([
       ...[...waitingForSlot].map((issue) => [issue, { slot: true as const }]),
@@ -1403,6 +1406,8 @@ interface ServiceRecord {
   unreadable: Record<string, string>;
   /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
   problem?: string;
+  /** Why queue reads have failed for a while (GitHubSync.intakeProblem); `status` shows it. */
+  intake?: string;
   /** The queue's mode. */
   queue?: QueueControl;
   /** The host limiter's slots and memory in use, as of the last heartbeat. */

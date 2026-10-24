@@ -13,6 +13,13 @@ import type {
  * would pass, so the planner fixes all of them in one round.
  */
 
+/**
+ * Candidate media set and role ids (media.ts capture; set ids are also
+ * select answers), as a schema pattern and a test.
+ */
+export const MEDIA_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]*$";
+export const MEDIA_ID = new RegExp(MEDIA_ID_PATTERN);
+
 /** Ownership is literal Git-relative files or trailing-slash directory prefixes. */
 function validOwnershipPath(path: string): boolean {
   const normalized = path.endsWith("/") ? path.slice(0, -1) : path;

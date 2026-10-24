@@ -2,6 +2,7 @@ import type { ProfileWorker } from "../providers/selection.js";
 import { errorMessage } from "../text.js";
 import {
   coverageCriterion,
+  MEDIA_ID_PATTERN,
   ownsPath,
   sourceLines,
   validValidationCommand,
@@ -359,9 +360,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
           expectedOutputRoles: {
             type: "array",
             minItems: 1,
-            items: text,
+            items: { ...text, pattern: MEDIA_ID_PATTERN },
             description:
-              "Roles of staged media outputs, never code, tests or documentation categories.",
+              "Roles of staged media outputs, never code, tests or documentation categories. Each is an id of letters, digits, - and _ (such as model or preview-image): the worker's manifest names members by these exact roles.",
           },
           // Numeric bounds are not supported by every structured-output grammar.
           // A decimal pattern enforces positivity before strict safe-integer decoding.

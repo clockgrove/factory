@@ -206,6 +206,30 @@ test("the plan check refuses a media item whose destinations can't reach Git LFS
   );
   // A sibling that owns it is no help: its rule isn't in this item's tree.
   assert.equal((await lfs(rules, item(["assets/"]))).length, 1);
+
+  // Capture names members by role ids, so a role with a space is refused here.
+  const roles = (
+    await checkPlan(
+      {
+        base: target.commit,
+        items: [
+          item(["assets/a.png", "assets/b.png"], {
+            expectedOutputRoles: ["cube model", "preview"],
+          }),
+        ],
+        coverage: [],
+        finalCommands: [],
+        decisions: [],
+      },
+      facts,
+      new BaseFiles(target.directory, target.commit),
+    )
+  )
+    .map((finding) => finding.message)
+    .filter((message) => /expected output role/.test(message));
+  assert.deepEqual(roles, [
+    'Work Item badge expected output role "cube model" is not an id: use letters, digits, - and _ starting with a letter or digit (no spaces)',
+  ]);
 });
 
 test("validation holds when a selected destination holds plain bytes instead of its LFS pointer", async () => {

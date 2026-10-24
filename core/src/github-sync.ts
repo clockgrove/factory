@@ -35,6 +35,7 @@ import {
   unqueueIssue,
 } from "./queue.js";
 import { type RequestResult, refused, writeRequest } from "./requests.js";
+import { resetting, statusRecordOf } from "./reset.js";
 import type {
   Hold,
   ObjectiveState,
@@ -82,8 +83,7 @@ export interface GitHubModule {
   writing?: string;
   /**
    * When the card was set to queued for this run, by GitHub's clock: a
-   * stale read after a dequeue never admits the issue again (`withdrawnAt`),
-   * and `reset` tells this run's plan comment from an earlier run's.
+   * stale read after a dequeue never admits the issue again (`withdrawnAt`).
    */
   queuedAt?: string;
   /** An unreadable state's question comment exists (open holds keep theirs: `Hold.shownAt`). */
@@ -198,12 +198,10 @@ const MAX_UNCHECKED = 20;
 const INTAKE_PROBLEM_MS = 10 * 60_000;
 const COMMAND = /^\/factory\s+(\S+)(?:\s+([\s\S]*))?$/;
 /**
- * The options right after the answer, before its text: `--question ID`
- * names the hold it answers, and each `--review-artifacts N` a selector a
- * `revalidate` captures.
+ * The option right after the answer, before its text: `--question ID`
+ * names the hold it answers.
  */
-const ANSWER_OPTION =
-  /^--(question|review-artifacts)\s+(\S+)(?:\s+([\s\S]*))?$/;
+const ANSWER_OPTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
 
 /**
  * GitHub is input and display, never a precondition: every call here runs in
@@ -985,7 +983,8 @@ export class GitHubSync {
       return;
     }
     const given = (state.modules.github as GitHubModule).statusGivenUp;
-    if (!this.config.progress.enabled || given) return;
+    // A resetting record shows nothing: its rebuild reads the run's comment.
+    if (!this.config.progress.enabled || given || resetting(state)) return;
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;
@@ -1015,6 +1014,7 @@ export class GitHubSync {
             ...this.tally.read(issue, state.startedAt ?? ""),
             decisions: decisionsOf(state),
             ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+            record: statusRecordOf(state),
           },
           this.config.secrets,
           { questions: this.config.progress.includeQuestions },
@@ -1551,15 +1551,13 @@ export class GitHubSync {
     const answer = command[1]!.toLowerCase();
     let rest = command[2]?.trim() ?? "";
     let question: string | undefined;
-    let reviewArtifacts: string[] | undefined;
     for (
       let option = ANSWER_OPTION.exec(rest);
       option;
       option = ANSWER_OPTION.exec(rest)
     ) {
-      if (option[1] === "question") question = option[2];
-      else reviewArtifacts = [...(reviewArtifacts ?? []), option[2]!];
-      rest = option[3]?.trim() ?? "";
+      question = option[1];
+      rest = option[2]?.trim() ?? "";
     }
     const text = rest;
     writeRequest(
@@ -1575,7 +1573,6 @@ export class GitHubSync {
               ...(text ? { text } : {}),
               writtenAt: comment.createdAt,
               ...(question ? { question } : {}),
-              ...(reviewArtifacts ? { reviewArtifacts } : {}),
             },
       comment.login,
       `comment-${comment.id}`,

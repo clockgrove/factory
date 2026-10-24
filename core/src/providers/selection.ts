@@ -23,6 +23,7 @@ import {
 import {
   ClaudeWorker,
   type ClaudeWorkerConfig,
+  claudeWorkerTools,
   DEFAULT_CLAUDE_WORKER,
 } from "./claude-worker.js";
 import {
@@ -45,6 +46,15 @@ import {
   type PlannerModels,
 } from "./planner.js";
 
+/** A planner kind's adapter defaults for its models. */
+export function defaultModels(planner: string): PlannerModels {
+  return planner === "claude"
+    ? DEFAULT_CLAUDE_MODELS
+    : planner === "copilot"
+      ? DEFAULT_COPILOT_MODELS
+      : DEFAULT_CODEX_MODELS;
+}
+
 /**
  * The provider's settings with every adapter default filled in: what its
  * planner and worker run with, and what an Objective freezes, so an
@@ -54,12 +64,7 @@ export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
   const worker = provider.worker;
   return {
     ...provider,
-    models:
-      provider.planner === "claude"
-        ? { ...DEFAULT_CLAUDE_MODELS, ...provider.models }
-        : provider.planner === "copilot"
-          ? { ...DEFAULT_COPILOT_MODELS, ...provider.models }
-          : { ...DEFAULT_CODEX_MODELS, ...provider.models },
+    models: { ...defaultModels(provider.planner), ...provider.models },
     worker:
       worker.kind === "claude"
         ? {
@@ -70,6 +75,69 @@ export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
           ? { ...DEFAULT_CODEX_WORKER_MODEL, ...worker }
           : worker,
   } as ProviderConfig;
+}
+
+/** What a profile's worker runs with, shown to the planner beside its description. */
+export interface ProfileWorker {
+  kind: string;
+  model?: string;
+  effort?: string;
+  /** The tools the worker may use. */
+  tools: string[];
+  /** Whether the worker's own commands reach the network. */
+  network: "off" | "host" | "hosted";
+}
+
+/** A provider's worker as the planner sees it, adapter defaults filled in. */
+export function profileWorker(
+  provider: ProviderConfig,
+  worktreeRead: boolean,
+): ProfileWorker {
+  const worker = resolvedProvider(provider).worker;
+  switch (worker.kind) {
+    case "codex":
+      return {
+        kind: worker.kind,
+        model: worker.model!,
+        effort: worker.effort!,
+        tools: ["sandboxed shell"],
+        network: worker.network,
+      };
+    case "claude": {
+      const settings = worker.settings as ClaudeWorkerConfig;
+      return {
+        kind: worker.kind,
+        model: settings.model,
+        effort: settings.effort,
+        tools: claudeWorkerTools(settings, worktreeRead),
+        network: "off",
+      };
+    }
+    case "copilot":
+      return {
+        kind: worker.kind,
+        model: worker.model,
+        effort: worker.effort,
+        tools: worker.tools,
+        network: "off",
+      };
+    case "openai-agents":
+      return {
+        kind: worker.kind,
+        model: worker.model,
+        effort: worker.effort,
+        tools: ["hosted container shell"],
+        network: "hosted",
+      };
+    case "claude-managed-agents":
+      return {
+        kind: worker.kind,
+        tools: [
+          `agent ${worker.agentId} version ${worker.agentVersion}'s tools`,
+        ],
+        network: "hosted",
+      };
+  }
 }
 
 /** The provider's planner, hedged against stalled calls. */
@@ -339,15 +407,11 @@ export function providerWorkflow(
     status: (state) => (frozen(state) ?? fallback).status(state),
     upstream: (state, item) =>
       (frozen(state) ?? fallback).upstream?.(state, item) ?? [],
-    // The same on every provider: GitHub, Git and provider errors, replan
-    // and what ended a done Objective.
+    // The same on every provider: GitHub, Git and provider errors and
+    // replan.
     ...(fallback.outcomeOf ? { outcomeOf: fallback.outcomeOf } : {}),
     ...(fallback.replannable ? { replannable: fallback.replannable } : {}),
     ...(fallback.replan ? { replan: fallback.replan } : {}),
-    ...(fallback.endedBy ? { endedBy: fallback.endedBy } : {}),
-    ...(fallback.deadlineExempt
-      ? { deadlineExempt: fallback.deadlineExempt }
-      : {}),
     freezable,
   };
 }

@@ -42,7 +42,7 @@ import {
   type RequestResult,
   writeRequest,
 } from "./requests.js";
-import { rebuildStep, resettable } from "./reset.js";
+import { resettable } from "./reset.js";
 import { serve } from "./service.js";
 import { type Frozen, type ObjectiveState, TERMINAL } from "./state.js";
 import { readStatus, type StatusView, statusText } from "./status.js";
@@ -92,9 +92,7 @@ export function knowledge(config: CoreConfig, paths: Paths): KnowledgeSettings {
     repository: config.repository,
     root: paths.root,
     checkout: config.checkout,
-    ...(config.planning.context
-      ? { planningContext: config.planning.context }
-      : {}),
+    planningContext: config.planning.context,
     secrets: config.secrets,
   };
 }
@@ -181,7 +179,8 @@ export async function serveInstallation(
       });
     workflow = resettable(
       providerWorkflow(routes, routes.get(name)!.workflow),
-      rebuildStep(github, config),
+      github,
+      config,
     );
     freeze = (each) => {
       const route = routes.get(each);
@@ -194,7 +193,7 @@ export async function serveInstallation(
     hostLimits.configure(
       hostCapacity(loaded.execution, loaded.queue.maxActiveObjectives),
     );
-  const serveWith = () =>
+  const serveWith = (signal?: AbortSignal) =>
     serve({
       paths,
       workflow,
@@ -212,6 +211,7 @@ export async function serveInstallation(
         ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
         : {}),
       drainMs: options.drainMs,
+      ...(signal ? { signal } : {}),
       limits: {
         ...limits,
         ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
@@ -223,27 +223,60 @@ export async function serveInstallation(
     repository: loaded.repository,
     root: paths.root,
   };
-  const holder = await holderFor(context, options.takeOver ?? false);
-  if (!holder) return 0;
-  if (holder.replaced)
-    process.stderr.write(
-      `factory: took ${loaded.repository} over from ${holderText(holder.replaced)}\n`,
-    );
-  // Checked every queue poll: another installation that took over stops
-  // this one before its next effects, the way SIGTERM does. So does a
-  // record that can't be checked for UNCHECKED_POLLS polls in a row: Git
-  // can fail while REST works, and a take-over must not go unseen. It
-  // exits with a code systemd restarts on, and the restart waits until it
-  // can confirm the record again.
-  let serving = true;
+  // One stop for this whole run: SIGTERM, SIGINT, or a take-over seen at a
+  // check. The signal keeps it, so a stop is never lost between the wait
+  // for the record and serve's own handlers.
+  const stopping = new AbortController();
+  const onSignal = (): void => stopping.abort();
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
+  try {
+    let holder: Holder | undefined;
+    try {
+      holder = await holderFor(
+        context,
+        options.takeOver ?? false,
+        stopping.signal,
+      );
+    } catch (error) {
+      if (!(error instanceof Unconfirmed)) throw error;
+      process.stderr.write(`factory: ${error.message}\n`);
+      return UNCHECKED_EXIT;
+    }
+    if (!holder) return 0;
+    if (holder.replaced)
+      process.stderr.write(
+        `factory: took ${loaded.repository} over from ${holderText(holder.replaced)}\n`,
+      );
+    return await serveHolding(context, holder, loaded, stopping, serveWith);
+  } finally {
+    process.off("SIGTERM", onSignal);
+    process.off("SIGINT", onSignal);
+  }
+}
+
+/**
+ * Serve while this installation holds the repository. Every queue poll
+ * checks the record: another installation that took over stops this one
+ * before its next effects. So does a record that can't be checked for
+ * UNCHECKED_POLLS polls in a row: Git can fail while REST works, and a
+ * take-over must not go unseen. That stop exits with a code systemd
+ * restarts on, and the restart waits until it can confirm the record.
+ */
+async function serveHolding(
+  context: { checkout: string; repository: string; root: string },
+  holder: Holder,
+  loaded: CoreConfig,
+  stopping: AbortController,
+  serveWith: (signal?: AbortSignal) => Promise<number>,
+): Promise<number> {
   let stop: "lost" | "unchecked" | undefined;
   let taker: HolderRecord | undefined;
   let failures = 0;
   const end = (why: "lost" | "unchecked"): void => {
-    if (!serving || stop) return;
+    if (stop) return;
     stop = why;
-    // Serve's own handler, if it is still listening; never Node's default.
-    process.emit("SIGTERM", "SIGTERM");
+    stopping.abort();
   };
   const watch = setInterval(() => {
     holderChanged(context, holder).then(
@@ -260,9 +293,8 @@ export async function serveInstallation(
   }, loaded.queue.pollSeconds * 1000);
   let code: number;
   try {
-    code = await serveWith();
+    code = await serveWith(stopping.signal);
   } finally {
-    serving = false;
     clearInterval(watch);
   }
   if (stop === "lost")
@@ -291,53 +323,66 @@ const UNCHECKED_POLLS = 10;
 /** Exit code for that stop: systemd restarts on it (EX_TEMPFAIL). */
 const UNCHECKED_EXIT = 75;
 
+/** Attempts to confirm the record at a start, about 4 minutes in all. */
+const START_ATTEMPTS = 8;
+
+/** The record couldn't be confirmed at a start: the service exits to be restarted. */
+class Unconfirmed extends Error {}
+
 /**
  * Take the repository for this installation (holder.ts) before anything
- * reaches GitHub: transient Git failures wait and retry (rule 5) until
- * SIGTERM or SIGINT stops the wait (undefined). Another holder, a ruleset
- * that refuses the record, or an origin that doesn't name the repository is
- * a ConfigurationError that names the fix.
+ * reaches GitHub: transient Git failures wait and retry (rule 5), at most
+ * START_ATTEMPTS times, then throw Unconfirmed, so the process exits with
+ * a code systemd restarts on rather than waiting unseen. `signal` stops
+ * the wait (undefined). Another holder, a ruleset that refuses the record,
+ * or an origin that doesn't name the repository is a ConfigurationError
+ * that names the fix.
  */
 async function holderFor(
   context: { checkout: string; repository: string; root: string },
   takeOver: boolean,
+  signal: AbortSignal,
 ): Promise<Holder | undefined> {
-  let stopped = false;
-  let wake = (): void => undefined;
-  const stop = (): void => {
-    stopped = true;
-    wake();
-  };
-  process.once("SIGTERM", stop);
-  process.once("SIGINT", stop);
-  try {
-    for (let wait = 2000; !stopped; wait = Math.min(wait * 2, 60_000)) {
-      try {
-        const holder = await takeHolder(context, takeOver);
-        // A stop that came during a slow Git call: the record is kept, and
-        // starting again resumes it.
-        return stopped ? undefined : holder;
-      } catch (error) {
-        if (error instanceof HolderRefusal)
-          throw new ConfigurationError(error.message);
-        if (error instanceof GitRefusal)
-          throw new ConfigurationError(
-            `Can't check which installation serves ${context.repository}: ${error.message}`,
-          );
-        process.stderr.write(
-          `factory: waiting to check which installation serves ${context.repository} (${errorMessage(error).split("\n")[0]}); retrying in ${wait / 1000} s\n`,
+  let last = "";
+  for (
+    let attempt = 1, wait = 2000;
+    attempt <= START_ATTEMPTS && !signal.aborted;
+    attempt++, wait = Math.min(wait * 2, 60_000)
+  ) {
+    try {
+      const holder = await takeHolder(context, takeOver);
+      // A stop that came during a slow Git call: the record is kept, and
+      // starting again resumes it.
+      return signal.aborted ? undefined : holder;
+    } catch (error) {
+      if (error instanceof HolderRefusal)
+        throw new ConfigurationError(error.message);
+      if (error instanceof GitRefusal)
+        throw new ConfigurationError(
+          `Can't check which installation serves ${context.repository}: ${error.message}`,
         );
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-          setTimeout(resolve, wait);
-        });
-      }
+      last = errorMessage(error).split("\n")[0] ?? "";
+      if (attempt === START_ATTEMPTS) break;
+      process.stderr.write(
+        `factory: waiting to check which installation serves ${context.repository} (${last}); retrying in ${wait / 1000} s\n`,
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, wait);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
     }
-    return undefined;
-  } finally {
-    process.off("SIGTERM", stop);
-    process.off("SIGINT", stop);
   }
+  if (signal.aborted) return undefined;
+  throw new Unconfirmed(
+    `couldn't check which installation serves ${context.repository} after ${START_ATTEMPTS} tries (${last}); exiting so the service starts again`,
+  );
 }
 
 export interface FollowOptions {

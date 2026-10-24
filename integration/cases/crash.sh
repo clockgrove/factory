@@ -3,10 +3,12 @@
 # Objectives, with two network cuts. Runs as one background job (lane_c).
 #   holder   installation C serves; H is refused; H takes over with --take-over and C stops; H's clean stop frees the repository
 #   crash    every serve runs in a network namespace (lib/netns-serve.sh) and is
-#            armed with one point at a time (FACTORY_CRASH_AT); a death starts the
-#            next point. CA (two items), CB and CC (one each) run to done; CQ holds at a
-#            planner question for sync:remind, then is cancelled for sync:cancel
-#            (armed before the cancel is sent). At the end every Objective must
+#            armed with the next exact point (FACTORY_CRASH_AT); a death starts
+#            the next point immediately, against one shared deadline. CQ first
+#            holds for sync:remind and is cancelled for sync:cancel. Only then
+#            are CA (two items), CB and CC (one each) queued concurrently, so
+#            lifecycle effects cannot pass while reminder points are armed.
+#            At the end every Objective must
 #            be done or cancelled once, with no duplicate comment, PR or issue.
 #   netcut   60 s cuts of the namespace's network while CA or CB plans and while one waits for CI: no hold
 CRASH_LIFECYCLE="plan:post:before plan:post:after deliver:push:before deliver:push:after deliver:pr-create:before deliver:pr-create:after deliver:merge:before deliver:merge:after report:comment:before report:comment:after report:close:before report:close:after"
@@ -14,128 +16,177 @@ CRASH_REMIND="sync:remind:before sync:remind:after"
 CRASH_CANCEL="sync:cancel:before sync:cancel:after"
 
 # The repository's holder record: its commit sha, or empty.
-holder_sha() { git ls-remote "https://github.com/$REPO.git" refs/factory/holder 2>/dev/null | cut -f1; }
-wait_exit() { local i; for i in $(seq 1 "$1"); do serve_exited && return 0; sleep 1; done; return 1; }
+holder_sha() { local s; s=$(c_budget "$STOP_AT" 30) || return 1; timeout "$s" git ls-remote "https://github.com/$REPO.git" refs/factory/holder 2>/dev/null | cut -f1; }
+c_holder_present() { local sha; sha=$(holder_sha) || return 1; [ -n "$sha" ]; }
+wait_exit() { local end=$(( $(now) + $1 )); [ "$end" -gt "$STOP_AT" ] && end=$STOP_AT; while [ "$(now)" -lt "$end" ] && ! stopping; do serve_exited && return 0; sleep 1; done; return 1; }
+# A bounded command's seconds, never zero (timeout 0 would disable its limit).
+c_budget() { local s=$(( $1 - $(now) )); [ "$s" -gt 0 ] || return 1; [ "$s" -le "$2" ] || s=$2; echo "$s"; }
 
 c_holder() {
   local CASE=holder t0; t0=$(now)
   inst C; serve_up || return 1
-  wait_for 90 bash -c "[ -n \"\$(git ls-remote https://github.com/$REPO.git refs/factory/holder 2>/dev/null)\" ]"
-  local sha0; sha0=$(holder_sha); local cdir=$SERVE_DIR
+  wait_for 90 c_holder_present
+  local sha0; sha0=$(holder_sha) || return 1; local cdir=$SERVE_DIR
   inst H; serve_up || return 1
   wait_exit 120; local rc; rc=$(cat "$SERVE_DIR/exit" 2>/dev/null)
-  local sha1; sha1=$(holder_sha)
+  local sha1; sha1=$(holder_sha) || return 1
   SERVE_DIR=$cdir; local calive=0; serve_alive && calive=1
-  [ -n "$sha0" ] && [ -n "$rc" ] && [ "$rc" != 0 ] && [ "$sha1" = "$sha0" ] && [ $calive = 1 ]
+  [ -n "$sha0" ] && [ "$rc" = 78 ] && [ "$sha1" = "$sha0" ] && [ $calive = 1 ]
   rec_if holder.second-refused $? "C holds ($sha0); a second installation's serve exited ${rc:-not at all} in 120 s; holder then $sha1; C serving $calive" "$t0"
   t0=$(now); inst H; serve_up "" takeover || return 1
   local hdir=$SERVE_DIR; sleep 10
   SERVE_DIR=$cdir; wait_exit 120; local crc; crc=$(cat "$SERVE_DIR/exit" 2>/dev/null)
-  SERVE_DIR=$hdir; local halive=0; serve_alive && halive=1; local sha2; sha2=$(holder_sha)
-  [ $halive = 1 ] && [ -n "$crc" ] && [ -n "$sha2" ] && [ "$sha2" != "$sha0" ]
+  SERVE_DIR=$hdir; local halive=0; serve_alive && halive=1; local sha2; sha2=$(holder_sha) || return 1
+  [ $halive = 1 ] && [ "$crc" = 78 ] && [ -n "$sha2" ] && [ "$sha2" != "$sha0" ]
   rec_if holder.take-over $? "H serving with --take-over: $halive; holder $sha0 -> $sha2; C stopped by itself with exit ${crc:-none}" "$t0"
-  t0=$(now); serve_down; local sha3; sha3=$(holder_sha)
+  t0=$(now); serve_down; local sha3; sha3=$(holder_sha) || return 1
   [ -z "$sha3" ] && [ "$(cat "$SERVE_DIR/exit")" = 0 ]; rec_if holder.release $? "H's clean stop (exit $(cat "$SERVE_DIR/exit")) leaves holder '${sha3:-none}'" "$t0"
 }
 
 # The lane's Objectives and their hold policies.
 c_tick() {
-  local n; for n in $CA $CB $CC; do [[ $(st phase "$n") == hold:* ]] && HOLD_POLICY="d2 review decide more" auto_answer "$n" >/dev/null; done
-  [[ $(st phase "$CQ") == hold:* ]] && HOLD_POLICY="d2" auto_answer "$CQ" >/dev/null
+  local n; for n in ${CA:-} ${CB:-} ${CC:-}; do [[ $(st phase "$n") == hold:* ]] && HOLD_POLICY="d2 review decide more" auto_answer "$n" >/dev/null; done
+  [ -z "${CQ:-}" ] || { [[ $(st phase "$CQ") == hold:* ]] && HOLD_POLICY="d2" auto_answer "$CQ" >/dev/null; }
   c_netcut
 }
-# Whether some lifecycle Objective can still move: not settled, and not held at a question the lane doesn't answer.
-c_can_move() {
-  local n p; for n in $CA $CB $CC; do p=$(st phase "$n"); case $p in done|cancelled|failed) ;; hold:*) [ -n "$(HOLD_POLICY="d2 review decide more" auto_answer "$n" && echo y)" ] && return 0 ;; *) return 0 ;; esac; done
-  return 1
+# A live step of this serve, not an unmatched historical start from a crash.
+c_step_running() {
+  python3 - "$ROOT" "$1" "$2" <<'PY'
+import fnmatch, json, os, sys
+root, issue, pattern = sys.argv[1:]
+try:
+    with open(os.path.join(root, 'service.json')) as f: service = json.load(f)
+    with open(os.path.join(root, 'objectives', issue + '.json')) as f: state = json.load(f)
+except (OSError, ValueError): sys.exit(1)
+sys.exit(0 if any(fnmatch.fnmatchcase(step, pattern) and attempt.get('run') == service.get('runId')
+                 for step, attempt in state.get('attempts', {}).items()) else 1)
+PY
 }
-c_question_open() { [ "$(hold_field "$(st hold "$CQ" 'decide*')" id)" != "" ]; }
 # Cut the network once while CA or CB plans, once while one waits for CI.
 c_netcut() {
   local n
-  if [ -z "$CUT1" ]; then for n in $CA $CB $CC; do
-    if started "$n" 'plan*' && [ "$(st status "$n")" = planning ]; then CUT1=$(iso); serve_cut plan; CUT1E=$(iso); return; fi; done; fi
-  if [ -z "$CUT2" ]; then for n in $CA $CB $CC; do
-    if [ "$(st events "$n" event=start 'step=item:*:ci')" -gt "$(st events "$n" event=outcome 'step=item:*:ci')" ]; then CUT2=$(iso); serve_cut ci; CUT2E=$(iso); return; fi; done; fi
+  if [ -z "$CUT1" ]; then for n in ${CA:-} ${CB:-} ${CC:-}; do
+    if c_step_running "$n" 'plan:*'; then CUT1=$(iso); serve_cut plan && CUT1E=$(iso); return; fi; done; fi
+  if [ -z "$CUT2" ]; then for n in ${CA:-} ${CB:-} ${CC:-}; do
+    if c_step_running "$n" 'item:*:ci'; then CUT2=$(iso); serve_cut ci && CUT2E=$(iso); return; fi; done; fi
 }
-# c_arm POINT WINDOW [TRIGGER]: start a serve armed with POINT; 0 when it crashed there.
-CRASHES=0
-c_arm() {
-  local pt=$1 win=$2 trig=${3:-}
-  if [ "$CRASHES" -ge 2 ]; then serve_up "" netns && sleep 8 && serve_down; CRASHES=0; fi   # a clean stop ends the crash streak
+# Pause requests apply before steps start. A clean stop of a paused queue
+# clears the intentional crash streak without advancing past unseen hooks.
+# Keep the next exact hook armed even for this reset; never run live work
+# unarmed just to clear the streak.
+c_queue_paused() {
+  python3 - "$ROOT/service.json" "$RESET_RUN" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f: service = json.load(f)
+except (OSError, ValueError): sys.exit(1)
+sys.exit(0 if service.get('runId') and service['runId'] != sys.argv[2]
+         and service.get('queue', {}).get('mode') == 'paused' else 1)
+PY
+}
+c_reset_streak() {
+  local pt=$1 s
+  local RESET_RUN; RESET_RUN=$(python3 - "$ROOT/service.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f: print(json.load(f).get('runId', ''))
+except (OSError, ValueError): print('')
+PY
+)
+  s=$(c_budget "$CRASH_END" 15) || return 1
+  cli_t "$s" queue pause >>"$RUN_DIR/crash-queue.out" 2>&1 || return 1
   serve_up "$pt" netns || return 1
-  [ -n "$trig" ] && { sleep 5; $trig; }
-  local end=$(( $(now) + win )) odd=0; [ "$end" -gt "$CRASH_END" ] && end=$CRASH_END
-  while [ "$(now)" -lt "$end" ]; do
-    serve_tick
-    if serve_exited; then
-      if [ "$(cat "$SERVE_DIR/exit")" = 137 ]; then CH[$pt]="crashed $(ts)"; CRASHES=$((CRASHES + 1)); RESTARTS=$((RESTARTS + 1)); log "CRASHED at $pt"; kill_desc_survivors "$SERVE_DIR/desc"; return 0; fi
-      log "serve exited $(cat "$SERVE_DIR/exit") while armed at $pt: $(tail -c 300 "$SERVE_DIR/out.log" | tr '\n' ' ')"; UNEXPECTED="$UNEXPECTED $pt:exit$(cat "$SERVE_DIR/exit")"
-      odd=$((odd + 1)); [ $odd -ge 3 ] && return 1
-      sleep 5; serve_up "$pt" netns || return 1
-    fi
-    c_tick
-    # Nothing can reach a lifecycle point: stop waiting for it.
-    [ -n "${LIFECYCLE:-}" ] && ! c_can_move && { log "no lifecycle Objective can move: giving up on $pt"; serve_down; CRASHES=0; return 1; }
-    # A remind point is due before CQ's reminder: hand over to it.
-    [ -n "${PREEMPT:-}" ] && $PREEMPT && { serve_down; CRASHES=0; return 2; }
-    sleep 2
-  done
-  serve_down; CRASHES=0; return 1
+  s=$(c_budget "$CRASH_END" 30) || return 1
+  if ! wait_for "$s" c_queue_paused; then
+    UNEXPECTED="$UNEXPECTED paused-reset:$pt"
+    serve_down; return 1
+  fi
+  serve_down
+  [ "$(cat "$SERVE_DIR/exit" 2>/dev/null)" = 0 ] || return 1
+  s=$(c_budget "$CRASH_END" 15) || return 1
+  cli_t "$s" queue resume >>"$RUN_DIR/crash-queue.out" 2>&1 || return 1
+  CRASHES=0
 }
-c_remind_due() { [ -z "${CH[sync:remind:before]:-}" ] && [ -z "$REMIND_TRIED" ] && c_question_open; }
-c_cancel_cq() { cli_t 60 cancel "$CQ" >/dev/null 2>&1; log "#$CQ cancel sent"; }
+c_cancel_cq() {
+  local s; s=$(c_budget "$CRASH_END" 30) || return 1
+  cli_t "$s" cancel "$CQ" >/dev/null 2>&1 || return 1
+  log "#$CQ cancel sent"
+}
+# All hooks share CRASH_END. The globally first write in each family stops
+# the whole service, so the next before/after hook is armed before any
+# Objective can pass that frontier. Literal targets retain hook identity;
+# a 137 from a broad wildcard would not say which hook was exercised.
+c_drive() {
+  local pt s
+  for pt in $1; do
+    [ "$(now)" -lt "$CRASH_END" ] && ! stopping || return 1
+    if [ "$CRASHES" -ge 2 ]; then c_reset_streak "$pt" || return 1; fi
+    serve_up "$pt" netns || return 1
+    if [ "$pt" = sync:cancel:before ]; then c_cancel_cq || return 1; fi
+    while [ "$(now)" -lt "$CRASH_END" ] && ! stopping; do
+      serve_tick
+      if serve_exited; then
+        local rc; rc=$(cat "$SERVE_DIR/exit")
+        if [ "$rc" != 137 ]; then
+          UNEXPECTED="$UNEXPECTED $pt:exit$rc"
+          log "serve exited $rc while armed at $pt"
+          return 1
+        fi
+        CH[$pt]="crashed $(ts), PID $(serve_pid), exact target $pt"
+        CRASHES=$((CRASHES + 1)); RESTARTS=$((RESTARTS + 1))
+        log "CRASHED at $pt"
+        kill_desc_survivors "$SERVE_DIR/desc"
+        break
+      fi
+      c_tick
+      sleep 1
+    done
+    [ -n "${CH[$pt]:-}" ] || { serve_down; return 1; }
+  done
+}
 
 c_crash() {
-  local CASE=crash t0; t0=$(now); declare -gA CH=(); CUT1=""; CUT2=""; CUT1E=""; CUT2E=""; UNEXPECTED=""; REMIND_TRIED=""; RESTARTS=0
-  CRASH_END=$(( STOP_AT - 1200 ))
+  local CASE=crash t0; t0=$(now); declare -gA CH=(); CUT1=""; CUT2=""; CUT1E=""; CUT2E=""; UNEXPECTED=""; RESTARTS=0; CRASHES=0
+  CA=""; CB=""; CC=""; CQ=""
+  # Fifteen minutes remain after arming: ten to settle, five for end checks.
+  CRASH_END=$(( STOP_AT - 900 ))
   inst C
-  CA=$(new_objective chain2 "crash lane two items" ID="$(uid)") || return
-  CB=$(new_objective happy "crash lane one item" ID="$(uid)") || return
-  local fn; fn="trimEnd$(uid)"
-  CC=$(new_objective exec "crash lane one item" FN="$fn" SPEC="\`$fn(s)\` removes the spaces at the end of \`s\`: \`$fn(\"ab  \")\` is \`\"ab\"\`.") || return
   CQ=$(new_objective hold "crash lane held" PROVIDER=codex-plan ID="$(uid)") || return
-  local pt missed=()
-  for pt in $CRASH_LIFECYCLE; do
-    # sync:remind:* first whenever CQ's question is open and its reminder not yet due.
-    if c_remind_due; then
-      REMIND_TRIED=1
-      c_arm sync:remind:before 300 && c_arm sync:remind:after 180
-      c_arm sync:cancel:before 180 c_cancel_cq && c_arm sync:cancel:after 180
+  local ready=0
+  if c_drive "$CRASH_REMIND $CRASH_CANCEL"; then
+    CA=$(new_objective chain2 "crash lane two items" ID="$(uid)") &&
+      CB=$(new_objective happy "crash lane one item" ID="$(uid)") && ready=1
+    if [ "$ready" = 1 ]; then
+      local fn; fn="trimEnd$(uid)"
+      CC=$(new_objective exec "crash lane one item" FN="$fn" SPEC="\`$fn(s)\` removes the spaces at the end of \`s\`: \`$fn(\"ab  \")\` is \`\"ab\"\`.") || ready=0
     fi
-    LIFECYCLE=1 PREEMPT=c_remind_due c_arm "$pt" 300; local r=$?
-    if [ $r = 2 ]; then REMIND_TRIED=1; c_arm sync:remind:before 300 && c_arm sync:remind:after 180
-      c_arm sync:cancel:before 180 c_cancel_cq && c_arm sync:cancel:after 180
-      LIFECYCLE=1 c_arm "$pt" 300; r=$?; fi
-    [ $r = 0 ] || missed+=("$pt")
-    [ "$(now)" -ge "$CRASH_END" ] && break
-  done
-  if [ -z "$REMIND_TRIED" ]; then c_arm sync:remind:before 300 && c_arm sync:remind:after 180; fi
-  [ -z "${CH[sync:cancel:before]:-}" ] && { c_arm sync:cancel:before 180 c_cancel_cq && c_arm sync:cancel:after 180; }
-  # Settle: a clean serve until CA and CB are done and CQ is cancelled.
+    [ "$ready" != 1 ] || c_drive "$CRASH_LIFECYCLE"
+  fi
+  # Settle every admitted Objective, even after a missing hook. That failure
+  # remains a failure; successful cleanup cannot turn it into a pass.
+  serve_down
   serve_up "" netns
-  cancelled_clean "$CQ" || c_cancel_cq
-  local end=$(( STOP_AT - 600 ))
-  while [ "$(now)" -lt "$end" ]; do
+  cancelled_clean "$CQ" || { local s; s=$(c_budget "$STOP_AT" 30) && cli_t "$s" cancel "$CQ" >/dev/null 2>&1; }
+  local end=$(( STOP_AT - 300 ))
+  while [ "$(now)" -lt "$end" ] && ! stopping; do
     serve_tick; c_tick
-    settled "$CA" && settled "$CB" && settled "$CC" && cancelled_clean "$CQ" && break
-    c_can_move || { cancelled_clean "$CQ" && break; }
+    local pending=0 n
+    for n in ${CA:-} ${CB:-} ${CC:-}; do settled "$n" || pending=1; done
+    [ "$pending" = 0 ] && cancelled_clean "$CQ" && break
     serve_exited && { log "clean serve exited $(cat "$SERVE_DIR/exit")"; UNEXPECTED="$UNEXPECTED clean:exit$(cat "$SERVE_DIR/exit")"; serve_up "" netns; }
-    sleep 5
+    sleep 2
   done
-  sleep 20
   local ok=0 ev=""
-  end_done "$CA" || ok=1; ev="$EVID"; end_done "$CB" || ok=1; ev="$ev | $EVID"; end_done "$CC" || ok=1; ev="$ev | $EVID"
+  [ "$ready" = 1 ] || { ok=1; ev="lifecycle Objectives could not all be admitted"; }
+  for n in ${CA:-} ${CB:-} ${CC:-}; do end_done "$n" || ok=1; ev="$ev | $EVID"; done
   end_cancelled "$CQ" || ok=1; ev="$ev | $EVID"
-  local open=""; settled "$CA" || open="$open #$CA"; settled "$CB" || open="$open #$CB"; settled "$CC" || open="$open #$CC"; cancelled_clean "$CQ" || open="$open #$CQ"
   local cc rm; cc=$(marker_prefix_count "$(gh_markers "$CQ")" cancelled:); rm=$(marker_prefix_count "$(gh_markers "$CQ")" remind:)
   ev="$ev; CQ cancel comments $cc, reminders $rm${UNEXPECTED:+; unexpected exits:$UNEXPECTED}"
-  [ "$cc" = 1 ] && [ "$rm" -le 1 ] || ok=1
+  [ "$cc" = 1 ] && [ "$rm" = 1 ] && [ -z "$UNEXPECTED" ] || ok=1
+  local pt
   for pt in $CRASH_LIFECYCLE $CRASH_REMIND $CRASH_CANCEL; do
-    if [ "$(node "$SUITE/lib/crashpoints.mjs" "$BUILD" check "$pt" | cut -f2)" != yes ]; then record "crash.$pt" UNREACHABLE "no crashPoint site for $pt in this build" "$t0"
-    elif [[ ${CH[$pt]:-} == crashed* ]] && [ -n "$open" ] && [[ $ev != *DUPES* ]]; then record "crash.$pt" UNREACHABLE "${CH[$pt]}; unsettled at the stop:$open, so no end check; $ev" "$t0"
-    elif [[ ${CH[$pt]:-} == crashed* ]]; then rec_if "crash.$pt" $ok "${CH[$pt]}; $ev" "$t0"
-    else record "crash.$pt" UNREACHABLE "not reached while armed; $ev" "$t0"; fi
+    if [ -n "${CH[$pt]:-}" ]; then rec_if "crash.$pt" $ok "${CH[$pt]}; $ev" "$t0"
+    else record "crash.$pt" FAIL "not reached before the shared crash deadline; $ev" "$t0"; fi
   done
   # A crashed installation restarts on its own holder record with no --take-over.
   local CASE=holder
@@ -146,7 +197,7 @@ c_crash() {
 # No hold (planner questions aside) from a cut: none at a step of CA, CB or CC that ran during it, within 3 min of its end.
 c_cut_check() {
   local name=$1 a=$2 b=$3 t0=$4
-  [ -n "$a" ] || { record "netcut.$name" UNREACHABLE "no cut ($name): the moment didn't come while a serve ran" "$t0"; return; }
+  [ -n "$a" ] || { record "netcut.$name" FAIL "no cut ($name): the moment didn't come while a serve ran" "$t0"; return; }
   [ -n "$b" ] || { record "netcut.$name" FAIL "the $name cut started at $a and was never restored" "$t0"; return; }
   local h; h=$(python3 - "$ROOT" "$a" "$b" $CA $CB $CC <<'PY'
 import datetime, glob, json, os, sys
@@ -170,7 +221,12 @@ PY
 }
 
 lane_c() {
-  c_holder || log "holder steps failed to start a serve"
+  local lane_start suite_stop=$STOP_AT; lane_start=$(now)
+  local STOP_AT=$(( lane_start + 45 * 60 ))
+  # Bash dynamic scope gives all wait, CLI and serve helpers this tighter bound.
+  [ "$STOP_AT" -le "$suite_stop" ] || STOP_AT=$suite_stop
+  local HARD_STOP_AT=$STOP_AT
+  if ! c_holder; then local CASE=holder; record holder.setup FAIL "holder steps failed to start a serve" "$lane_start"; fi
   c_crash
   serve_down
 }

@@ -18,7 +18,6 @@ import {
   object,
   oneOf,
   optional,
-  type Retired,
   section,
   strings,
   text,
@@ -28,9 +27,10 @@ import { remoteRepository } from "./git.js";
 import { type PlanningContext, planningContext } from "./knowledge/settings.js";
 import { CAPTURE_OFF, type CaptureSettings } from "./log.js";
 import { stateRoot, within } from "./paths.js";
-import { DISCOVERY_LIMITS, type DiscoveryLimits } from "./planning/types.js";
 import { serviceCredential } from "./providers/claude.js";
 import {
+  COPILOT_REDACTED,
+  copilotConfigured,
   type ExecutionProfile,
   executionProfiles,
   type ProviderConfig,
@@ -76,21 +76,8 @@ export interface CoreConfig {
   planning: {
     /** A curated playbook file in the target, read at the base. */
     playbook: string;
-    /** Admits Adaptive workflow Objectives; absent, they are refused. */
-    context?: PlanningContext;
-    /**
-     * Offer discovery items, declared work conditions and expansion
-     * envelopes to the planner for an Adaptive workflow Objective. The core
-     * runs them all: discovery items observe (work/discovery.ts), conditions
-     * skip the other branch (planning/plan.ts conditionVerdict) and
-     * expansions add their children (planning/expansion.ts). Still off by
-     * default: an operator turns on plans that grow at run time.
-     */
-    adaptiveGraph: boolean;
-    /** The controller's cap on the children one expansion envelope adds; over it the producer holds. */
-    maxExpansionChildren: number;
-    /** The ceiling on a discovery item's entry, byte and attempt allowance: the wire and graph.ts refuse more. */
-    discoveryLimits: DiscoveryLimits;
+    /** The planning context, memory and lookups every Objective gets. */
+    context: PlanningContext;
   };
   execution: {
     /** Steps of one Objective running at once (independent Work Items run in parallel). */
@@ -440,22 +427,26 @@ export function configPath(repository: string): string {
 const MIN_SECRET_LENGTH = 4;
 
 /**
- * The values of the operator variables workers may see, and of each managed
- * provider's credential (apiKeyEnv, credentialEnv) from the environment or
- * the service's credentials. Only `names` reach a worker's environment;
- * all of them are redacted from output.
+ * The values of the operator variables workers may see, and, from the
+ * environment or the service's credentials, of each managed provider's
+ * credential (apiKeyEnv, credentialEnv) and, with Copilot configured, of
+ * its secrets and endpoint (COPILOT_REDACTED). Only `names` reach a
+ * worker's environment; all of them are redacted from output.
  */
 function secretValues(
   names: readonly string[],
   providers: Record<string, ProviderConfig>,
 ): string[] {
-  const credentials = Object.values(providers).flatMap(({ worker }) =>
-    worker.kind === "openai-agents"
-      ? [worker.apiKeyEnv]
-      : worker.kind === "claude-managed-agents"
-        ? [worker.credentialEnv]
-        : [],
-  );
+  const credentials = [
+    ...Object.values(providers).flatMap(({ worker }) =>
+      worker.kind === "openai-agents"
+        ? [worker.apiKeyEnv]
+        : worker.kind === "claude-managed-agents"
+          ? [worker.credentialEnv]
+          : [],
+    ),
+    ...(copilotConfigured(providers) ? COPILOT_REDACTED : []),
+  ];
   const values = new Set<string>();
   for (const name of names) values.add(process.env[name] ?? "");
   for (const name of credentials) {
@@ -469,54 +460,6 @@ function secretValues(
   }
   return [...values].filter((value) => value.length >= MIN_SECRET_LENGTH);
 }
-
-/** What replaced each key an earlier Factory configuration used. */
-const PROVIDERS_HINT = "name the planner and worker under providers.<name>";
-const RETIRED: Record<string, Retired> = {
-  "": {
-    schemaVersion: "the configuration has no schema version; remove it",
-    gitPersistence: "removed: Factory keeps no remote state history",
-    nativeBoundaryTelemetry:
-      "removed: Codex native telemetry is always read into each call's model-usage event",
-    planningContext: "moved to planning.context",
-    githubManagement:
-      "removed: Factory always writes queue.field and progress comments",
-    scheduling: "host limits are execution.workers and execution.validations",
-  },
-  queue: {
-    project:
-      "use queue.projectId, queue.field, queue.orderField and queue.options",
-    orderFieldId: "queue.orderField names the order field",
-    metadataFieldId: "removed: Factory keeps no metadata field",
-    controlItemId: "removed: Factory has no control card",
-    factoryManagedFields:
-      "removed: Factory manages queue.field and queue.orderField",
-  },
-  planning: {
-    provider: PROVIDERS_HINT,
-    models: PROVIDERS_HINT,
-    revisions: "moved to autonomy.allowances.planningRevisions",
-  },
-  execution: {
-    repairs:
-      "replaced by autonomy.allowances.perPath (repairs of one Work Item) and autonomy.allowances.implementationRepairs (the Objective's)",
-    workerProvider: PROVIDERS_HINT,
-    codexNetwork: "use providers.<name>.worker.network",
-    claudeWorker: PROVIDERS_HINT,
-    kind: PROVIDERS_HINT,
-    harness: PROVIDERS_HINT,
-    defaultProfile:
-      "removed: a Work Item without a profile runs on its Objective's provider",
-  },
-  policy: {
-    network: "use providers.<name>.worker.network for a Codex worker",
-  },
-  autonomy: {
-    repairClasses:
-      "replaced: every failure holds with its cause, and your answer decides",
-    repairPolicy: "per-path repairs are autonomy.allowances.perPath",
-  },
-};
 
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Names a worker never receives (worktree.ts), so requiring one checks nothing. */
@@ -571,81 +514,59 @@ export function loadConfig(repository: string): CoreConfig {
     {
       repository: text(repository),
       checkout: text(),
-      queue: object(
-        {
-          projectId: text(),
-          field: text("Factory"),
-          orderField: text("Factory order"),
-          options: object(
-            Object.fromEntries(
-              Object.entries(DEFAULT_OPTIONS).map(([name, option]) => [
-                name,
-                text(option),
-              ]),
-            ) as Record<QueueOption, Check<string>>,
-          ),
-          pollSeconds: whole(5, 30),
-          maxActiveObjectives: whole(1, 3),
-          objectiveDeadlineSeconds: optional(whole(60)),
-        },
-        RETIRED.queue,
-      ),
+      queue: object({
+        projectId: text(),
+        field: text("Factory"),
+        orderField: text("Factory order"),
+        options: object(
+          Object.fromEntries(
+            Object.entries(DEFAULT_OPTIONS).map(([name, option]) => [
+              name,
+              text(option),
+            ]),
+          ) as Record<QueueOption, Check<string>>,
+        ),
+        pollSeconds: whole(5, 30),
+        maxActiveObjectives: whole(1, 3),
+        objectiveDeadlineSeconds: optional(whole(60)),
+      }),
       providers: (value) => value,
       defaultProvider: (value) => value,
-      planning: object(
-        {
-          playbook: text(".factory/playbook.md"),
-          context: optional(planningContext),
-          adaptiveGraph: flag(false),
-          maxExpansionChildren: whole(1, 50, 1000),
-          discoveryLimits: object({
-            maxEntries: whole(1, DISCOVERY_LIMITS.maxEntries, 100_000),
-            maxBytes: whole(1, DISCOVERY_LIMITS.maxBytes, 1024 * 1024 * 1024),
-            maxAttempts: whole(1, DISCOVERY_LIMITS.maxAttempts, 10),
-          }),
-        },
-        RETIRED.planning,
-      ),
-      execution: object(
-        {
-          concurrency: whole(1, 8),
-          workers: whole(1, host.workers),
-          validations: whole(1, host.validations),
-          planners: optional(whole(1)),
-          memoryMiB: whole(256, host.budgetMiB),
-          reservations: object(
-            Object.fromEntries(
-              Object.entries(DEFAULT_RESERVATIONS).map(([name, fallback]) => [
-                name,
-                whole(0, fallback),
-              ]),
-            ) as Record<keyof Reservations, Check<number>>,
-          ),
-          profiles: executionProfiles,
-        },
-        RETIRED.execution,
-      ),
-      autonomy: object(
-        {
-          allowances: object(
-            Object.fromEntries(
-              Object.entries(DEFAULT_ALLOWANCES).map(([name, fallback]) => [
-                name,
-                whole(0, fallback),
-              ]),
-            ) as Record<keyof Allowances, Check<number>>,
-          ),
-          requiredEnvironment: environmentNames,
-        },
-        RETIRED.autonomy,
-      ),
-      policy: object(
-        {
-          allowedSecretNames: strings,
-          secretlintConfig: optional(secretlintConfig),
-        },
-        RETIRED.policy,
-      ),
+      planning: object({
+        playbook: text(".factory/playbook.md"),
+        context: planningContext,
+      }),
+      execution: object({
+        concurrency: whole(1, 8),
+        workers: whole(1, host.workers),
+        validations: whole(1, host.validations),
+        planners: optional(whole(1)),
+        memoryMiB: whole(256, host.budgetMiB),
+        reservations: object(
+          Object.fromEntries(
+            Object.entries(DEFAULT_RESERVATIONS).map(([name, fallback]) => [
+              name,
+              whole(0, fallback),
+            ]),
+          ) as Record<keyof Reservations, Check<number>>,
+        ),
+        profiles: executionProfiles,
+      }),
+      autonomy: object({
+        allowances: object(
+          Object.fromEntries(
+            Object.entries(DEFAULT_ALLOWANCES).map(([name, fallback]) => [
+              name,
+              whole(0, fallback),
+            ]),
+          ) as Record<keyof Allowances, Check<number>>,
+        ),
+        requiredEnvironment: environmentNames,
+      }),
+      policy: object({
+        allowedSecretNames: strings,
+        secretlintConfig: optional(secretlintConfig),
+      }),
       validation: object({
         commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
       }),
@@ -671,20 +592,14 @@ export function loadConfig(repository: string): CoreConfig {
           workItem: text("Task"),
         }),
       }),
-      capture: object(
-        {
-          enabled: flag(CAPTURE_OFF.enabled),
-          maxBytesPerCall: whole(
-            1024,
-            CAPTURE_OFF.maxBytesPerCall,
-            256 * 1024 * 1024,
-          ),
-        },
-        {
-          maxBytesPerInvocation: "renamed capture.maxBytesPerCall",
-          retainInRecovery: "removed: Factory keeps no recovery archive",
-        },
-      ),
+      capture: object({
+        enabled: flag(CAPTURE_OFF.enabled),
+        maxBytesPerCall: whole(
+          1024,
+          CAPTURE_OFF.maxBytesPerCall,
+          256 * 1024 * 1024,
+        ),
+      }),
       sessions: object({
         enabled: flag(DEFAULT_SESSIONS.enabled),
         maxTurns: whole(1, DEFAULT_SESSIONS.maxTurns, 100),
@@ -692,7 +607,6 @@ export function loadConfig(repository: string): CoreConfig {
       }),
     },
     problems,
-    RETIRED[""],
   );
   const { providers, defaultProvider } = providersConfig(
     isObject(raw) ? raw : {},

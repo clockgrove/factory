@@ -33,7 +33,7 @@ import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { ACCEPTED_AT, currentPlan, splitRecord } from "./planning/plan.js";
+import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -101,6 +101,8 @@ export interface ServeOptions {
    * after, which ends what is still in flight.
    */
   drainMs: number;
+  /** Stops the service like SIGTERM: another installation took the repository over (holder.ts). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -619,7 +621,6 @@ export async function serve(options: ServeOptions): Promise<number> {
             request.writtenAt,
             request.question,
             request.arg,
-            request.reviewArtifacts,
           );
           break;
         case "pause":
@@ -1027,28 +1028,10 @@ export async function serve(options: ServeOptions): Promise<number> {
         // A `factory run` request waiting for this admission chooses the
         // provider and the deadline.
         const asked = runs.get(issue);
-        // A split child runs on its parent's frozen configuration while
-        // the parent waits for it (work/split.ts), unless `factory run
-        // --provider` names another. A configuration changed since the
-        // parent froze it gives only the provider choice, frozen anew, so
-        // the child doesn't start on a question.
-        const inherited = (from: Frozen | undefined): Frozen | undefined => {
-          if (!from) return undefined;
-          const live = options.freeze?.(from.provider);
-          if (!live) return undefined;
-          return live.digest === from.digest
-            ? from
-            : { ...live, selectedBy: from.selectedBy };
-        };
-        const parent = [...runners.values()].find((runner) =>
-          Object.values(splitRecord(runner.state)?.children ?? {}).includes(
-            issue,
-          ),
-        );
         const frozen =
           asked?.request.provider !== undefined
             ? (options.freeze?.(asked.request.provider) ?? options.frozen)
-            : (inherited(parent?.state.frozen) ?? options.frozen);
+            : options.frozen;
         const state = newObjective(issue, now, frozen);
         const deadline = deadlineAt(
           now,
@@ -1132,6 +1115,9 @@ export async function serve(options: ServeOptions): Promise<number> {
     log.write(0, { event: "unhandled-rejection", error: String(reason) });
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
+  // An abort before this point is kept by the signal, so it is never lost.
+  if (options.signal?.aborted) stop();
+  options.signal?.addEventListener("abort", stop, { once: true });
   process.on("unhandledRejection", stray);
   try {
     const housekeeping = (): void => {
@@ -1195,6 +1181,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
     process.off("unhandledRejection", stray);
+    options.signal?.removeEventListener("abort", stop);
   }
 }
 
@@ -1269,14 +1256,7 @@ function control(
 }
 
 function ownedPaths(state: ObjectiveState): string[] {
-  const plan = currentPlan(state);
-  // An envelope owns its selectors from acceptance, before children exist.
-  return plan
-    ? [
-        ...plan.items.flatMap((item) => item.ownedPaths),
-        ...(plan.expansions ?? []).flatMap((envelope) => envelope.selectors),
-      ]
-    : [];
+  return (currentPlan(state)?.items ?? []).flatMap((item) => item.ownedPaths);
 }
 
 /** When the Objective's plan was accepted (planning/steps.ts keeps it). */

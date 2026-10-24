@@ -18,9 +18,9 @@ npm run integration -- --build ../other-checkout     # test another build (its c
 
 `--dry-run` is the one list of cases. Each case runs its own Objectives; every case of a suite starts at once and they run concurrently.
 
-**Time limit.** A suite enforces 60 minutes of wall clock itself: at 55 minutes it stops its cases, cancels every unsettled Objective, then runs the end checks, the cleanup and the report.
+**Time limit.** A suite has 60 minutes of wall clock: at 55 minutes it stops its cases, cancels unsettled Objectives concurrently, then runs the end checks, cleanup and report. CLI and remote calls share the deadline. The crash lane advances through exact hooks against one shared deadline, with time reserved for terminal checks.
 
-**Results.** `integration/.runs/results/<PDT timestamp>.md` has the total wall time, each case's start, end and duration, and every check with its result and evidence. `integration/.runs/<timestamp>/` holds serve logs, configurations, rendered Objectives and the journal; `.runs/` is gitignored. Results are PASS, FAIL or UNREACHABLE (the build lacks the feature, or the moment didn't come within the wave). The suite exits 0 when nothing failed, 1 on any FAIL, 2 on bad usage and 3 when it refuses to start.
+**Results.** `/tmp/factory-integration-runs/results/<PDT timestamp>.md` has the total wall time, each case's start, end and duration, and every check with its result and evidence. The matching run directory holds serve logs, configurations, rendered Objectives and the journal. The suite exits 0 only when every selected check has exactly one PASS and every case completed. Failed, missing, duplicate or unreachable checks fail the run. Exit 1 means qualification failed, 2 means bad usage, and 3 means a prerequisite prevented a start.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ npm run integration -- --build ../other-checkout     # test another build (its c
 - Project "Factory drill" with Factory's single-select field `Factory`; both repositories queue on it.
 - A `gh` login with admin on both repositories; Codex and Claude logins (subscription, no API key); `pasta` and `unshare` for the network namespace; `git-lfs`.
 
-Each run makes fresh state directories under `~/work/suite60-state-<time>/` and writes its own configuration there: plumbing runs on the fastest model and lowest effort each provider offers, and the cases whose check is a planner decision use the production planner.
+Each run makes fresh state directories under `/tmp/factory-integration/<time>/` and writes its own configuration there. An existing `--state-base` is refused. Plumbing runs on the fastest model and lowest effort each provider offers, and the cases whose check is a planner decision use the production planner.
 
 ## Safety
 

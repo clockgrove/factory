@@ -1,6 +1,6 @@
 /**
  * The `model-usage` run-log event: one per model call (planner, reviewer,
- * worker, discovery, dream), the same shape for every provider
+ * worker, dream), the same shape for every provider
  * (docs/reference/run-log.md#Model usage). Diagnostics, analysis and the scorecard read it.
  * A count a provider doesn't report is null, never zero.
  */
@@ -8,12 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { CAPTURE, type CaptureBody, capturingTools } from "../log.js";
 
-export type ModelRole =
-  | "planner"
-  | "reviewer"
-  | "worker"
-  | "discovery"
-  | "dream";
+export type ModelRole = "planner" | "reviewer" | "worker" | "dream";
 
 /**
  * Tokens of one call. `input` includes `cached`; `output` includes
@@ -395,12 +390,12 @@ export function logRefused(
   });
 }
 
-/** The planner role a call logs: discovery and dream are their own. */
+/** The planner role a call logs: dream is its own. */
 export function plannerRole(
   role: "planner" | "reviewer",
   phase: string,
 ): ModelRole {
-  return phase === "discovery" || phase === "dream" ? phase : role;
+  return phase === "dream" ? phase : role;
 }
 
 /** Add the response body to the request `captureRequest` attached. */

@@ -20,7 +20,7 @@ Each service run appends to `logs/<issue>/<run id>.jsonl`: step start and end, o
 
 ### Model usage
 
-Every model call writes one `model-usage` event when it ends, whatever its outcome: planning, plan and result review, final review, diagnosis, semantic discovery, Dream and every worker run. The shape is the same for Codex, Claude, Copilot and managed workers (providers/usage.ts). A count the provider doesn't report is `null`, never 0. Diagnostics, analysis and the scorecard (wave 5) read this event.
+Every model call writes one `model-usage` event when it ends, whatever its outcome: planning, plan and result review, final review, diagnosis, Dream and every worker run. The shape is the same for Codex, Claude, Copilot and managed workers (providers/usage.ts). A count the provider doesn't report is `null`, never 0. Diagnostics, analysis and the scorecard (wave 5) read this event.
 
 ```json
 {
@@ -53,7 +53,7 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
 }
 ```
 
-- `role`: `planner`, `reviewer`, `worker`, `discovery` or `dream`. A planner-seam call also has `phase` (`plan`, `graph-review`, `result-review`, `objective-review`, `diagnosis`, `discovery`, `dream`, `propose`) and `tools` (it could read a tree); a worker has `item`.
+- `role`: `planner`, `reviewer`, `worker` or `dream`. A planner-seam call also has `phase` (`plan`, `graph-review`, `result-review`, `objective-review`, `diagnosis`, `dream`, `propose`) and `tools` (it could read a tree); a worker has `item`.
 - `outcome`: a planner call's `done`, `retry`, `hold`, `fail` or `error` (with `error`); a worker's result kind (`finished`, `retry`, `hold`) or `error`. `ms` is the call's wall time. A hedged second call (planner.ts HedgedPlanner) logs its own event with `hedge: 1`.
 - `tokens`: `input` includes `cached`; `output` includes `reasoning`; `total` is input plus output, or the provider's own total when it reports no split (managed workers). Claude and Copilot report no reasoning count; a Claude worker sums its queries, credential retries included.
 - `tokenSource` (Codex only): `sdk`, from the SDK's `turn.completed`, or `native`, from Codex's session record when the stream ended before it.
@@ -61,7 +61,7 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
 - `sdkOperations`: the SDK's own operation items, each item id once across its started, updated and completed events (Codex: command executions, file changes, MCP calls, web searches, to-do lists); `null` where the SDK has no such view (Claude, Copilot, managed).
 - `nativeToolActivity`: the model-visible tool calls by name, each call id once (Codex: from its session record, providers/codex-telemetry.ts; Claude: `tool_use` blocks; Copilot: tool executions); `null` where unseen. One call can run many commands. `nativePartial: true` when the Codex record was past its 8 MiB read bound.
 - `cacheEffectiveness`: this call's `hitRate` (cached over input, 4 places; `null` with no input) and `uncachedInput` (input minus cached); `null` when either count is unknown. Aggregates weight by input; never average hit rates.
-- `callId`: the call's id; a `model-refused` event (or a `diagnosis-rejected` or `discovery-rejected` one) with `stage: "semantic"` names it when Factory's checks refused a well-formed answer.
+- `callId`: the call's id; a `model-refused` event (or a `diagnosis-rejected` one) with `stage: "semantic"` names it when Factory's checks refused a well-formed answer.
 - `reportedModel`: the model as the provider reported it (Claude's init and messages, Codex's session record, Copilot's usage events, a managed agent's), else `null`.
 - `promptDigest`, `schemaDigest`, `sourceDigest`: sha256 of the prompt, of the answer schema (planner calls) and over the source bodies the call was given (a worker's pinned sources, the Objective's sources for planning and plan review); `null` when there is none. `requestBytes`: prompt, schema and images as sent; `promptComponents`: bytes of `prompt`, `schema`, `images`, and `sections`, the prompt's parts as its builder rendered them (the worker prompt, planning and plan review).
 - `stage`: where a failed call failed: `provider` (the default), `parse` (an answer that isn't JSON) or `protocol` (an answer that breaks its schema or contract).

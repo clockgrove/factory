@@ -9,12 +9,9 @@
  */
 import { TransientError } from "../github.js";
 import { BaseFiles, planningSources } from "../planning/facts.js";
-import { acceptedInputs } from "../planning/plan.js";
-import type { ResolvedRecipe } from "../planning/recipes.js";
 import type { ShownObjective } from "../shown.js";
 import { type ObjectiveState, runOf } from "../state.js";
 import { errorMessage } from "../text.js";
-import { adaptiveWorkflow } from "../validate.js";
 import { pinnedPlaybook } from "./dream.js";
 import {
   type MemoryRole,
@@ -25,104 +22,62 @@ import {
   retain,
   sourceRecords,
 } from "./memory.js";
-import { knowledgeSettings, type PlanningContext } from "./settings.js";
+import {
+  knowledgeSettings,
+  type PlanningContext,
+  selectorText,
+} from "./settings.js";
 import { type Database, openStore, readStore } from "./store.js";
 
 /**
  * The advisory text planning appends to its prompts: the target's curated
  * playbook, then the approved Dream playbook this Objective is pinned to,
- * then, for an Adaptive workflow Objective, the admitted planning context
- * and the relevant repository memory. With nothing beyond the target's
- * playbook it returns that playbook unchanged. A store that can't be read
+ * then the admitted planning context and, unless the installation turns
+ * memory off, the relevant repository memory. Without knowledge settings
+ * it returns the target's playbook unchanged. A store that can't be read
  * is named in the text; it never stops planning.
  */
 export async function planningKnowledge(input: {
   state: ObjectiveState;
   /** The Objective as shown. */
   shown: ShownObjective;
-  /** The Objective is a Factory-created split child. */
-  child: boolean;
   files: BaseFiles;
   /** The target's curated playbook at the base; empty when there is none. */
   playbook: string;
-  /** The Objective's Workflow recipe: each memory input is looked up by its query. */
-  recipe?: ResolvedRecipe;
 }): Promise<string> {
   const settings = knowledgeSettings();
-  const context =
-    settings && adaptiveWorkflow(input.shown.blocks).enabled
-      ? settings.planningContext
-      : undefined;
-  // A required recipe memory input is never skipped: the plan step fails,
-  // retries, and holds if the lookup still can't run.
-  const required = (input.recipe?.memoryInputs ?? []).filter(
-    (entry) => entry.required,
-  );
-  const unlooked = (why: string) =>
-    new Error(
-      `The Workflow recipe's required memory input${required.length === 1 ? "" : "s"} ${required.map((entry) => entry.id).join(", ")} can't be looked up: ${why}`,
-    );
-  if (required.length && !context?.memory)
-    throw unlooked(
-      !settings
-        ? "the knowledge store isn't configured"
-        : !context
-          ? "the Objective's Adaptive workflow or planning.context is off"
-          : "planning.context.memory is off",
-    );
   if (!settings) return input.playbook;
+  const context = settings.planningContext;
   // Git reads fail as TransientError, which the planning step retries.
-  const sources = context?.memory
-    ? (await planningSources(input.shown, input.files, input.child)).sources
+  const sources = context.memory
+    ? (await planningSources(input.shown, input.files)).sources
     : [];
   const issue = input.state.issue;
   const run = runOf(input.state);
   const parts = [input.playbook.trim() ? input.playbook : ""];
-  const inputs = context?.memory ? (input.recipe?.memoryInputs ?? []) : [];
   let db: Database | undefined;
   try {
     db = openStore(settings.root);
     parts.push(pinnedPlaybook(db, issue, run));
-    if (context) {
-      parts.push(
-        `Adaptive workflow: planning context is admitted for ${context.selectors.join(", ")}. Read those paths with your repository tools as needed.`,
-      );
-      if (context.memory) {
-        retain(db, sourceRecords(issue, run, input.files.base, sources));
-        // The recipe's memory inputs share the bound with the Objective's.
-        const maxBytes = Math.floor(
-          context.bounds.maxBytes / (inputs.length + 1),
-        );
-        const query = {
-          role: "planning" as const,
-          objective: issue,
-          maxBytes,
-          context,
-          supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
-          digest: (path: string) => pathDigest(input.files, path),
-        };
-        const memory = await queryMemory(db, {
-          ...query,
-          text: input.shown.body,
-          paths: context.selectors,
-        });
-        parts.push(memory.text);
-        for (const recipeInput of inputs) {
-          const found = await queryMemory(db, {
-            ...query,
-            text: recipeInput.query,
-            paths: recipeInput.selectors,
-            kinds: recipeInput.kinds,
-          });
-          parts.push(
-            `Workflow recipe memory input ${recipeInput.id} (${recipeInput.required ? "required" : "optional"}; query: ${JSON.stringify(recipeInput.query)}): ${found.shown ? found.text : "no record matched."}`,
-          );
-        }
-      }
+    parts.push(
+      `Planning context is admitted for ${selectorText(context.selectors)}. Read those paths with your repository tools as needed.`,
+    );
+    if (context.memory) {
+      retain(db, sourceRecords(issue, run, input.files.base, sources));
+      const memory = await queryMemory(db, {
+        role: "planning",
+        objective: issue,
+        text: input.shown.body,
+        paths: context.selectors,
+        maxBytes: context.bounds.maxBytes,
+        context,
+        supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
+        digest: (path) => pathDigest(input.files, path),
+      });
+      parts.push(memory.text);
     }
   } catch (error) {
     if (error instanceof TransientError) throw error;
-    if (required.length) throw unlooked(errorMessage(error));
     parts.push(
       `Factory's knowledge store is unavailable for this call (${errorMessage(error)}); plan without the Dream playbook and repository memory.`,
     );
@@ -154,12 +109,11 @@ const ROLE_BYTES: Record<Exclude<MemoryRole, "planning">, number> = {
 const ROLE_BUSY_MS = 1000;
 
 /**
- * Repository memory for one role call, gated as planning's is: only for an
- * Objective whose Adaptive workflow section is enabled, on an installation
- * whose planning context turns `memory` on. Empty otherwise, and when no
- * record is relevant: a role isn't told about memory it lacks. Memory is
- * advisory, so a store that can't be read or is slow gives empty memory and
- * a log line, never a hold or a retry.
+ * Repository memory for one role call, as planning's is: empty when the
+ * installation turns `memory` off, and when no record is relevant: a role
+ * isn't told about memory it lacks. Memory is advisory, so a store that
+ * can't be read or is slow gives empty memory and a log line, never a hold
+ * or a retry.
  */
 export async function roleMemory(input: {
   role: Exclude<MemoryRole, "planning">;
@@ -177,13 +131,8 @@ export async function roleMemory(input: {
   log(event: Record<string, unknown>): void;
 }): Promise<string> {
   const settings = knowledgeSettings();
-  const context = settings?.planningContext;
-  if (
-    !settings ||
-    !context?.memory ||
-    !adaptiveWorkflow(acceptedInputs(input.state).shown.blocks).enabled
-  )
-    return "";
+  if (!settings?.planningContext.memory) return "";
+  const context = settings.planningContext;
   const files = new BaseFiles(input.checkout, input.tree, input.signal);
   try {
     const section = await readStore(

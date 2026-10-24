@@ -3,7 +3,6 @@ import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
-import { withExpansions } from "./expansion.js";
 import { coverageCriterion } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
 import type { Plan, Retirement, WorkItem } from "./types.js";
@@ -13,38 +12,10 @@ import type { Plan, Retirement, WorkItem } from "./types.js";
  * `state.done.plan`; an accepted amendment saves its plan under its own key.
  * Everything else reads the plan the Objective runs now through
  * `currentPlan`, and what it was planned from through `acceptedInputs`.
- * Settled expansion envelopes join it as a derived layer (expansion.ts
- * withExpansions): their children run like any Work Item. Only amendments,
- * which keep every envelope whose producer started, read the saved plan
- * without that layer (`acceptedPlan`).
- * The operator's retirements (`retire <n>`) are kept apart, by the step
- * whose refusal they answer, and `currentPlan` returns them in `retired`.
- * A conditional Work Item's declared condition is read here too
- * (`conditionVerdict`), from its producer's kept discovery result.
+ * The operator's retirements of final validation commands
+ * (`retire-command <n>`) are kept apart, by the final step, and
+ * `currentPlan` returns them in `retired`.
  */
-
-/**
- * A split's record (work/split.ts): `build:split` saves each child's issue
- * and the digest of the title and body Factory wrote for it; then
- * `build:split:children` waits for the children and closes the parent.
- */
-export const SPLIT = "build:split";
-export const SPLIT_QUEUE = "build:split:queue";
-export const SPLIT_CHILDREN = "build:split:children";
-/** `ended.by` of a parent its child Objectives delivered. */
-export const SPLIT_END = "split";
-
-export interface SplitRecord {
-  /** Each child's issue, by key. */
-  children: Record<string, number>;
-  /** Each child's title and body digest as created (facts.ts childDigest), by key. */
-  bodies: Record<string, string>;
-}
-
-/** The split's record once its children exist; undefined otherwise. */
-export function splitRecord(state: ObjectiveState): SplitRecord | undefined {
-  return state.done[SPLIT] as SplitRecord | undefined;
-}
 
 /** When the plan was accepted, for the order of owned-path waits (service.ts). */
 export const ACCEPTED_AT = "plan:acceptedAt";
@@ -109,21 +80,16 @@ export function decisionsOf(state: ObjectiveState): CriterionDecision[] {
 }
 
 /**
- * The plan the Objective runs now, with its settled expansions' children
- * and the criteria and commands the operator retired from it.
+ * The plan the Objective runs now, with the final validation commands the
+ * operator retired from it.
  */
 export function currentPlan(state: ObjectiveState): Plan | undefined {
-  const saved = acceptedPlan(state);
-  if (!saved) return undefined;
-  const plan = withExpansions(state, saved);
+  const plan = acceptedPlan(state);
+  if (!plan) return undefined;
   const accepted = state.kept[ACCEPTED_AT];
-  const retired = [
-    ...itemsWith(state, "retired").flatMap(
-      (id) => fact(state, "retired", id) ?? [],
-    ),
-    ...(fact(state, "final:retired") ?? []),
-    ...(fact(state, "final-review:retired") ?? []),
-  ].filter((entry) => entry.plan === accepted);
+  const retired = (fact(state, "final:retired") ?? []).filter(
+    (entry) => entry.plan === accepted,
+  );
   return retired.length ? { ...plan, retired } : plan;
 }
 
@@ -155,111 +121,103 @@ export function profilesLacking(
       : {};
   const plan = currentPlan(state);
   const used = new Set(
-    [
-      ...(plan?.items ?? []),
-      ...(plan?.expansions ?? []).map((envelope) => envelope.template),
-    ].flatMap((item) =>
+    (plan?.items ?? []).flatMap((item) =>
       item.executionProfile ? [item.executionProfile.id] : [],
     ),
   );
   return [...used].filter((id) => !Object.hasOwn(profiles, id)).sort();
 }
 
+/** The plan's items in dependency order: each after the items it depends on. */
+export function dependencyOrder(plan: Plan): WorkItem[] {
+  const ordered: WorkItem[] = [];
+  const seen = new Set<string>();
+  const visit = (item: WorkItem) => {
+    if (seen.has(item.id)) return;
+    seen.add(item.id);
+    for (const id of item.dependencies) {
+      const dependency = plan.items.find((candidate) => candidate.id === id);
+      if (dependency) visit(dependency);
+    }
+    ordered.push(item);
+  };
+  for (const item of plan.items) visit(item);
+  return ordered;
+}
+
+const retiredOf = (plan: Plan) =>
+  new Set((plan.retired ?? []).map((entry) => entry.command.trim()));
+
 /**
- * The criteria a review no longer judges: with `itemId`, that item's
- * review (its own retirements and final review's); without, final review
- * (every retirement).
+ * Final validation's Work Item runs, for a plan with no final command
+ * (neither the Objective nor the installation declares one): each Work
+ * Item's own validation commands, intact and in dependency order, less
+ * those the operator retired, so QA runs on the merged default branch
+ * whenever the plan has a command. A list identical to one already listed
+ * is left out. Empty when the plan has final commands.
  */
-export function retiredCriteria(plan: Plan, itemId?: string): Set<string> {
-  return new Set(
-    (plan.retired ?? [])
-      .filter(
-        (entry) =>
-          itemId === undefined ||
-          entry.itemId === undefined ||
-          entry.itemId === itemId,
-      )
-      .flatMap((entry) => (entry.criterion ? [entry.criterion] : [])),
-  );
+export function fallbackRuns(plan: Plan): WorkItem[] {
+  if (plan.finalCommands.length) return [];
+  const retired = retiredOf(plan);
+  const listed = new Set<string>();
+  return dependencyOrder(plan).flatMap((item) => {
+    if ((item.kind ?? "work") !== "work") return [];
+    const validation = item.validation.filter(
+      (check) => !retired.has(check.command.trim()),
+    );
+    const key = JSON.stringify(validation.map((check) => check.command.trim()));
+    if (!validation.length || listed.has(key)) return [];
+    listed.add(key);
+    return [{ ...item, validation }];
+  });
 }
 
 /**
- * The validation commands the operator retired: with `itemId`, from that
- * item's validation; without, from final validation.
+ * The checks final validation runs on the merged default branch, less
+ * those the operator retired: the plan's final commands, each once, or,
+ * with none, the commands of its Work Item runs (`fallbackRuns`).
  */
-export function retiredCommands(plan: Plan, itemId?: string): Set<string> {
-  return new Set(
-    (plan.retired ?? [])
-      .filter((entry) => entry.itemId === itemId)
-      .flatMap((entry) => (entry.command ? [entry.command] : [])),
-  );
+export function finalChecks(plan: Plan): string[] {
+  if (!plan.finalCommands.length)
+    return fallbackRuns(plan).flatMap((item) =>
+      item.validation.map((check) => check.command),
+    );
+  const retired = retiredOf(plan);
+  const seen = new Set<string>();
+  return plan.finalCommands.filter((command) => {
+    const key = command.trim();
+    if (retired.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
- * Work Item `item` as it runs now: without the commands and acceptance
- * criteria the operator retired for it. The worker, its notes, the
- * collector and its review all read this one, so criterion indices agree.
- */
-export function runnableItem(plan: Plan, item: WorkItem): WorkItem {
-  const commands = retiredCommands(plan, item.id);
-  const criteria = retiredCriteria(plan, item.id);
-  return commands.size || criteria.size
-    ? {
-        ...item,
-        acceptance: item.acceptance.filter(
-          (criterion) => !criteria.has(criterion),
-        ),
-        validation: item.validation.filter(
-          (check) => !commands.has(check.command),
-        ),
-      }
-    : item;
-}
-
-/**
- * The obligations retired command `entry` proved: a Work Item's by its
- * coverage's validation index, final validation's by the Objective
+ * The Objective criteria retired command `entry` proved, by the
  * criterion's command. Review judges them on other evidence now.
  */
 export function provedBy(plan: Plan, entry: Retirement): string[] {
-  const item = plan.items.find((each) => each.id === entry.itemId);
   return [
     ...new Set(
       plan.coverage
-        .filter((coverage) =>
-          item
-            ? coverage.itemId === item.id &&
-              "validationIndex" in coverage.proof &&
-              item.validation[coverage.proof.validationIndex]?.command ===
-                entry.command
-            : entry.itemId === undefined &&
-              coverage.source.command === entry.command,
-        )
+        .filter((coverage) => coverage.source.command === entry.command)
         .map(coverageCriterion),
     ),
   ];
 }
 
 /**
- * The retirements as lines for the report and status: criterion or
- * command, where, reason, who and when; for a command, the obligations it
- * proved, which review judges now. `kind` selects one kind.
+ * The retirements as lines for the report and status: command, reason,
+ * who and when, and the obligations it proved, which review judges now.
  */
 export function retiredLines(
   plan: Plan,
   time: (at: string) => string = (at) => at,
-  kind?: "criterion" | "command",
 ): string[] {
-  return (plan.retired ?? [])
-    .filter(
-      (entry) =>
-        kind === undefined ||
-        (kind === "command") === (entry.command !== undefined),
-    )
-    .map((entry) => {
-      const proved = entry.command !== undefined ? provedBy(plan, entry) : [];
-      return `${entry.command !== undefined ? `command \`${entry.command}\`` : entry.criterion}${entry.itemId ? ` (Work Item ${entry.itemId})` : entry.command !== undefined ? " (final validation)" : " (final review)"}: retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}${proved.length ? `. Judged by review instead: ${proved.join("; ")}` : ""}`;
-    });
+  return (plan.retired ?? []).map((entry) => {
+    const proved = provedBy(plan, entry);
+    return `command \`${entry.command}\` (final validation): retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}${proved.length ? `. Judged by review instead: ${proved.join("; ")}` : ""}`;
+  });
 }
 
 /** The current planning generation and round, from the saved decisions. */
@@ -291,82 +249,4 @@ export function generationInputs(
 /** The Objective as the accepted generation read it: its text, base and selectors. */
 export function acceptedInputs(state: ObjectiveState): ObjectiveInputs {
   return generationInputs(state, position(state).g);
-}
-
-/** A conditional Work Item's declared condition, evaluated over its producer's kept result. */
-export interface ConditionVerdict {
-  conditionId: string;
-  /** The branch the item runs on. */
-  when: boolean;
-  /** The condition's value: the item runs only when it equals `when`. */
-  value: boolean;
-  /** What the value was read from, for the skip record, final review and the report. */
-  evidence: string;
-}
-
-/** The first few paths of a list, for evidence. */
-const someOf = (paths: readonly string[]) =>
-  paths.length
-    ? `: ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? `, and ${paths.length - 5} more` : ""}`
-    : "";
-
-/**
- * Item `item`'s declared condition over its producer's kept discovery
- * result (work/facts.ts `discovery`): deterministic, with no model call.
- * Undefined for unconditional work; a string when it can't be evaluated
- * (no kept result for the declared producer and role, or a classification
- * missing or outside the condition's reviewed labels): an unknown fact
- * never counts as false. The item depends directly on the producer, so it
- * is read only once the producer has settled.
- */
-export function conditionVerdict(
-  state: ObjectiveState,
-  item: WorkItem,
-): ConditionVerdict | string | undefined {
-  if (!item.condition) return undefined;
-  const { conditionId, when } = item.condition;
-  const condition = currentPlan(state)?.conditions?.find(
-    (entry) => entry.id === conditionId,
-  );
-  if (!condition)
-    return `Work Item ${item.id} selects condition ${conditionId}, which the plan doesn't declare.`;
-  const { producerItemId, role, schema } = condition.input;
-  const result = fact(state, "discovery", producerItemId);
-  if (
-    !result ||
-    result.producerItemId !== producerItemId ||
-    result.role !== role ||
-    result.schema !== schema
-  )
-    return `Condition ${conditionId} reads discovery role ${JSON.stringify(role)} from ${producerItemId}, which has no such kept result.`;
-  const at = `discovery ${producerItemId} (role ${JSON.stringify(role)}) at ${result.commit.slice(0, 12)}`;
-  const { predicate } = condition;
-  if (predicate.kind === "inventory-empty") {
-    const value = result.entries.length === 0;
-    return {
-      conditionId,
-      when,
-      value,
-      evidence: `Condition ${conditionId} (inventory-empty) is ${value}: ${at} listed ${result.entries.length} files${someOf(result.entries.map((entry) => entry.path))}.`,
-    };
-  }
-  const labels = [predicate.classification, ...predicate.otherClassifications];
-  const unknown = result.entries.filter(
-    (entry) =>
-      result.mode !== "semantic" ||
-      entry.classification === undefined ||
-      !labels.includes(entry.classification),
-  );
-  if (unknown.length)
-    return `Condition ${conditionId} (has-classification ${JSON.stringify(predicate.classification)}) can't be read: ${at} has ${unknown.length} files with no classification from ${JSON.stringify(labels)}${someOf(unknown.map((entry) => `${entry.path} (${entry.classification ?? "unclassified"})`))}. A missing label is never a negative finding.`;
-  const matched = result.entries
-    .filter((entry) => entry.classification === predicate.classification)
-    .map((entry) => entry.path);
-  const value = matched.length > 0;
-  return {
-    conditionId,
-    when,
-    value,
-    evidence: `Condition ${conditionId} (has-classification ${JSON.stringify(predicate.classification)}) is ${value}: ${at} classified ${matched.length} of ${result.entries.length} files so${someOf(matched)}.`,
-  };
 }

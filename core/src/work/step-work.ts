@@ -1,5 +1,6 @@
 import { lstat, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { ACCEPT } from "../delivery.js";
 import { hold, type Outcome, type StepContext } from "../engine.js";
 import { defaultHead } from "../git.js";
 import {
@@ -17,14 +18,7 @@ import {
 import { mayChange, objectiveText } from "../objective.js";
 import { forceRemove } from "../paths.js";
 import { BaseFiles, finalCommands, fixedScripts } from "../planning/facts.js";
-import {
-  ACCEPTED_AT,
-  acceptedInputs,
-  currentPlan,
-  retiredCommands,
-  retiredCriteria,
-  runnableItem,
-} from "../planning/plan.js";
+import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
 import { peerNotes } from "../planning/schedule.js";
@@ -44,14 +38,13 @@ import {
 } from "../worktree.js";
 import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
-import { discoveryInputs } from "./discovery.js";
 import { fact, facts } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
-import { refusedOf, refusedResult, rereviewOf } from "./refused.js";
+import { refusedOf, refusedResult } from "./refused.js";
 import { repairContext } from "./repair-context.js";
-import { itemRetirable, planWith, retireKeep, retiring } from "./retire.js";
 import { itemMemory } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
+import { refusalDecisions } from "./step-review.js";
 import {
   type BuildDeps,
   candidate,
@@ -76,7 +69,7 @@ export async function workStep(
 ): Promise<Outcome> {
   const { state, signal } = context;
   const { config } = deps;
-  let plan = currentPlan(state)!;
+  const plan = currentPlan(state)!;
   const { shown } = acceptedInputs(state);
   const body = shown.body;
   const workDir = deps.workDir(state.issue);
@@ -191,58 +184,25 @@ export async function workStep(
       result: refused,
       keep: {
         ...keepBase,
-        ...facts(
-          {
-            finished: null,
-            finding: null,
-            refused: null,
-            rereview: rereviewOf(context.answer),
-          },
-          item.id,
-        ),
+        ...facts({ finished: null, finding: null, refused: null }, item.id),
       },
     };
   }
-  // `retire <n>` or `retire-command <n>` to a question about a refusal:
-  // recorded, then the refused result is checked again when nothing it was
-  // refused on still counts, else what still counts is diagnosed, within
-  // the repair allowances.
+  // `accept <n>` to a question about a review refusal: recorded as the
+  // operator's decision on the refused tree, then the refused result is
+  // checked again when nothing it was refused on still stands, else what
+  // still stands is diagnosed, within the repair allowances.
   let finding = fact(state, "finding", item.id);
-  /** A retirement narrowed the finding: its saved diagnosis no longer applies. */
+  /** A decision narrowed the finding: its saved diagnosis no longer applies. */
   let narrowed = false;
-  if (!finished && retiring(context.answer) && finding) {
-    const recorded = retireKeep(
-      context,
-      itemRetirable(
-        plan,
-        item,
-        finding,
-        config.finalValidation.requiredCommands,
-      ),
-      { itemId: item.id },
-    );
-    if (typeof recorded === "string")
-      return withKeep(
-        hold(
-          `${recorded} Answer \`retry\` to diagnose the failure again, or cancel.`,
-        ),
-        keepAll,
-      );
-    keepAll = { ...keepAll, ...recorded };
-    // The plan as it reads with the retirement, for the rest of the step.
-    plan = planWith(state, keepAll);
-    const retired = retiredCriteria(plan, item.id);
-    const remaining =
-      finding.kind === "review"
-        ? finding.refused.filter((entry) => !retired.has(entry.criterion))
-        : [];
-    const settled =
-      finding.kind === "review"
-        ? !remaining.length
-        : finding.kind === "failure" &&
-          finding.failed !== undefined &&
-          retiredCommands(plan, item.id).has(finding.failed.command);
-    if (settled) {
+  if (
+    !finished &&
+    context.answer?.answer === ACCEPT &&
+    finding?.kind === "review"
+  ) {
+    const decided = refusalDecisions(context, finding, item.id);
+    keepAll = { ...keepAll, ...decided.keep };
+    if (!decided.standing.length) {
       const refused = await refusedResult(
         state,
         item,
@@ -254,7 +214,7 @@ export async function workStep(
       if (!refused)
         return withKeep(
           hold(
-            `What Work Item ${item.id}'s result was refused on is retired, but the refused result can no longer be checked again (it is gone, or no longer sits on ${base}). Answer \`fresh\` to start it again on the current base, or cancel.`,
+            `What Work Item ${item.id}'s result was refused on is accepted, but the refused result can no longer be checked again (it is gone, or no longer sits on ${base}). Answer \`fresh\` to start it again on the current base, or cancel.`,
             ["fresh", "cancel"],
           ),
           keepAll,
@@ -268,21 +228,19 @@ export async function workStep(
         },
       };
     }
-    if (finding.kind === "review") {
-      finding = { ...finding, refused: remaining };
-      // The saved diagnosis was of the whole finding: what still counts is
-      // diagnosed again (repairContext), keeping the corrections tried.
-      const saved = fact(state, "diagnosis", item.id);
-      keepAll = {
-        ...keepAll,
-        ...facts(
-          { finding, ...(saved ? { diagnosis: { ...saved, repair: 0 } } : {}) },
-          item.id,
-        ),
-      };
-      narrowed = true;
-    }
-    // Past a spent allowance, repairContext diagnoses what still counts,
+    finding = { ...finding, refused: decided.standing };
+    // The saved diagnosis was of the whole finding: what still stands is
+    // diagnosed again (repairContext), keeping the corrections tried.
+    const saved = fact(state, "diagnosis", item.id);
+    keepAll = {
+      ...keepAll,
+      ...facts(
+        { finding, ...(saved ? { diagnosis: { ...saved, repair: 0 } } : {}) },
+        item.id,
+      ),
+    };
+    narrowed = true;
+    // Past a spent allowance, repairContext diagnoses what still stands,
     // saves it, and the engine asks for `more` (`diagnoseFirst`).
   }
   if (!finished) {
@@ -299,10 +257,10 @@ export async function workStep(
       plan,
       narrowed,
     );
-    // A question keeps this attempt's base and any retirement just
+    // A question keeps this attempt's base and any decision just
     // recorded; a predecessor's repair moves this item onto the
     // predecessor's new head, so its facts win.
-    // Its own facts win: a fresh diagnosis replaces one a retirement voided.
+    // Its own facts win: a fresh diagnosis replaces one a decision voided.
     if (repair && "outcome" in repair)
       return repair.outcome.kind === "replace"
         ? repair.outcome
@@ -345,15 +303,13 @@ export async function workStep(
       profile === undefined
         ? undefined
         : config.execution.profiles?.[profile]?.instructions;
-    // The worker runs the commands validation will: none the operator retired.
-    const runnable = runnableItem(plan, item);
     const prepared = await prepareWorkPrompt({
       checkout: config.checkout,
       worktree,
       objective: state.issue,
       objectiveBody: body,
       plan,
-      item: runnable,
+      item,
       base,
       conventions: (await repositoryView(config.checkout, base, false, signal))
         .conventions,
@@ -373,7 +329,6 @@ export async function workStep(
           }
         : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
-      discoveryInputs: discoveryInputs(state, item),
       ...(memory ? { memory } : {}),
       ...(instructions ? { profileInstructions: instructions } : {}),
       signal,
@@ -396,7 +351,7 @@ export async function workStep(
       state,
       deps,
       `work-${item.id}`,
-      runnable,
+      item,
       fact(state, "workSession", item.id),
     );
     const { spend, session, ...result } = await deps
@@ -408,8 +363,8 @@ export async function workStep(
         ...(conversation
           ? { conversation: { ...conversation, prompt: prepared.prompt } }
           : {}),
-        item: runnable,
-        commands: runnable.validation.map((v) => v.command),
+        item,
+        commands: item.validation.map((v) => v.command),
         base,
         signal,
         log: context.log,
@@ -500,7 +455,7 @@ export async function workStep(
     worktree,
     base,
     plan,
-    item: runnableItem(plan, item),
+    item,
     mayChange: mayChange(shown.blocks).paths,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
@@ -639,17 +594,13 @@ export function retained(
 }
 
 /**
- * An answer or fact that asks for an independent second look (`retry`,
- * `revalidate`, a rereview): the review starts fresh, not from its own
- * earlier verdict.
+ * An answer that asks for an independent second look (`retry`,
+ * `revalidate`): the review starts fresh, not from its own earlier
+ * verdict.
  */
-export function secondLook(context: StepContext, item?: string): boolean {
+export function secondLook(context: StepContext): boolean {
   const answer = context.answer?.answer;
-  return (
-    answer === "retry" ||
-    answer === "revalidate" ||
-    (item !== undefined && fact(context.state, "rereview", item) !== undefined)
-  );
+  return answer === "retry" || answer === "revalidate";
 }
 
 /** Add facts to keep to any outcome that can carry them. */

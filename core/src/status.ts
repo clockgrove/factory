@@ -17,13 +17,7 @@ import {
 } from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
-import {
-  currentPlan,
-  decisionsOf,
-  retiredLines,
-  SPLIT_END,
-  splitRecord,
-} from "./planning/plan.js";
+import { currentPlan, decisionsOf, retiredLines } from "./planning/plan.js";
 import { planningRevisions } from "./planning/steps.js";
 import type { ItemKind, Plan } from "./planning/types.js";
 import { RESET, type ResetRecord } from "./reset.js";
@@ -44,7 +38,6 @@ import {
 } from "./state.js";
 import type { Tracking } from "./tracking.js";
 import { mergeOf } from "./work/merged.js";
-import { childRows } from "./work/split.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /** The list view hides Objectives that finished longer ago than this. */
@@ -79,8 +72,6 @@ export interface ObjectiveView {
   frozen?: Pick<Frozen, "provider" | "selectedBy" | "digest">;
   /** The current plan's Work Items. */
   items: ItemRow[];
-  /** A split's child Objectives: each one's issue and status as the parent last read it (work/split.ts). */
-  children?: { key: string; issue: number; status: string }[];
   /** The current plan, in full. */
   plan?: Plan;
   waiting: {
@@ -97,12 +88,6 @@ export interface ObjectiveView {
   running: string[];
   /** Work Items whose validation failed once and passed on its one rerun. */
   flakyRerun: { item: string; command: string }[];
-  /**
-   * Work Items whose current result is a rereview with the operator's
-   * `--review-artifacts`: the commands of the selectors it captures
-   * instead of all (empty for none).
-   */
-  rereviews: { item: string; reviewArtifacts: string[]; by: string }[];
   /** The operator's `accept <n>` and `refuse <n>` of single criteria under the current plan, with their reasons. */
   decisions: CriterionDecision[];
   /**
@@ -274,7 +259,6 @@ export function statusOf(
       waitsOn: null,
       running: [],
       flakyRerun: [],
-      rereviews: [],
       decisions: [],
       nextAction: {
         command: `factory reset ${issue}`,
@@ -303,7 +287,6 @@ export function statusOf(
         }
       : {}),
     items: plan ? itemRows(state, plan) : [],
-    ...(splitRecord(state) ? { children: childRows(state) } : {}),
     ...(plan ? { plan } : {}),
     waiting: Object.entries(state.retries).map(([step, retry]) => ({
       step,
@@ -315,7 +298,6 @@ export function statusOf(
     waitsOn: context.waitsOn,
     running: Object.keys(state.attempts),
     flakyRerun: flakyReruns(state),
-    rereviews: rereviews(state),
     decisions: decisionsOf(state),
     allowances: {
       planningRevisions: planningRevisions(state),
@@ -390,13 +372,7 @@ export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
       id: item.id,
       kind: item.kind ?? "work",
       phase: mergeOf(state, item.id)
-        ? (
-            state.done[`item:${item.id}:merge`] as
-              | { settled?: string }
-              | undefined
-          )?.settled === "skipped"
-          ? "skipped"
-          : "merged"
+        ? "merged"
         : running
           ? `${phase(running)} (running)`
           : hold
@@ -430,27 +406,6 @@ function flakyReruns(state: ObjectiveState): ObjectiveView["flakyRerun"] {
   return reruns;
 }
 
-/** The rereviews whose review artifacts the operator chose (work/facts.ts `rereview`). */
-function rereviews(state: ObjectiveState): ObjectiveView["rereviews"] {
-  const chosen: ObjectiveView["rereviews"] = [];
-  for (const [key, value] of Object.entries(state.kept ?? {})) {
-    const item = /^item:(.+):rereview$/.exec(key)?.[1];
-    const rereview = value as {
-      reviewArtifacts?: { command: string }[];
-      by?: string;
-    };
-    if (item && rereview?.reviewArtifacts)
-      chosen.push({
-        item,
-        reviewArtifacts: rereview.reviewArtifacts.map(
-          (selector) => selector.command,
-        ),
-        by: rereview.by ?? "",
-      });
-  }
-  return chosen;
-}
-
 /** The one thing that moves the Objective on, or what it waits for. */
 function nextAction(
   row: ObjectiveView,
@@ -471,7 +426,7 @@ function nextAction(
         .join(", ")}.`,
     };
   if (TERMINAL.includes(row.status as ObjectiveStatus)) {
-    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : row.endedBy === SPLIT_END ? ": its child Objectives deliver it" : ""}`;
+    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : ""}`;
     return row.running.length || row.waiting.length
       ? { command: null, reason: `${how}; Factory is cleaning up.` }
       : { command: null, reason: `${how}.` };
@@ -626,13 +581,6 @@ function objectiveText(row: ObjectiveView): string[] {
       `  Deadline: ${displayTime(row.deadline.at)} (${row.deadline.leftSeconds ? `${duration(row.deadline.leftSeconds * 1000)} left` : "passed: Factory cancels it"})`,
     );
   if (row.items.length) lines.push("  Work Items:", ...itemTable(row.items));
-  if (row.children?.length)
-    lines.push(
-      "  Child Objectives:",
-      ...row.children.map(
-        (child) => `    #${child.issue} ${child.key}: ${child.status}`,
-      ),
-    );
   if (row.frozen)
     lines.push(
       `  Provider: ${row.frozen.provider} (selectedBy: ${row.frozen.selectedBy}); configuration ${row.frozen.digest.slice(0, 12)}`,
@@ -681,10 +629,6 @@ function objectiveText(row: ObjectiveView): string[] {
     );
   for (const line of decisionLines(row.decisions, displayTime))
     lines.push(`  Decided: ${line}`);
-  for (const rereview of row.rereviews)
-    lines.push(
-      `  Rereview: ${rereview.item} captures ${rereview.reviewArtifacts.length ? `only the review artifacts of ${rereview.reviewArtifacts.map((command) => `\`${command}\``).join(", ")}` : "no review artifacts"} (--review-artifacts, by ${rereview.by})`,
-    );
   if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
   return lines;
 }

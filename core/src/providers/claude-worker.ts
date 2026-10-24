@@ -34,6 +34,7 @@ import type {
   Options,
   Query,
   SDKResultMessage,
+  SDKSystemMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
@@ -852,6 +853,43 @@ function toolAllowed(
 }
 
 /**
+ * What the settings grant, before an attempt narrows Validate and the shell
+ * (no commands, a gitlink, no sandbox, root). Write and Validate together
+ * grant the shell: it adds nothing they don't grant together. `read_file`
+ * comes only beside Read, so it grants no file the worker couldn't read.
+ */
+function claudeGrants(
+  config: ClaudeWorkerConfig,
+  worktreeRead: boolean,
+): { shell: boolean; validate: boolean; files: boolean; read: boolean } {
+  const granted = (tool: string) =>
+    config.tools.includes(tool) && config.allowedTools.includes(tool);
+  return {
+    shell: granted("Write") && granted(VALIDATE),
+    validate: granted(VALIDATE),
+    files: granted("Write"),
+    read: worktreeRead && granted("Read"),
+  };
+}
+
+/** The tools a worker on these settings is offered, by name, for the planner. */
+export function claudeWorkerTools(
+  config: ClaudeWorkerConfig,
+  worktreeRead: boolean,
+): string[] {
+  const grants = claudeGrants(config, worktreeRead);
+  return [
+    ...nativeTools(config, grants.shell).filter((tool) =>
+      config.allowedTools.includes(tool),
+    ),
+    ...(grants.files ? ["delete_file", "copy_file"] : []),
+    ...(grants.read ? ["read_file"] : []),
+    ...(grants.validate ? [VALIDATE] : []),
+    ...(grants.shell ? ["run_command (sandboxed, no network)"] : []),
+  ];
+}
+
+/**
  * The SDK built-ins a worker is offered. Glob and Grep walk the worktree on
  * the host, and a shell can link any host path into it, so they are
  * withheld with the shell; its `find` walks the same files in the sandbox.
@@ -954,6 +992,74 @@ function failure(
   }
 }
 
+/** A path as the filesystem resolves it, links followed where it exists. */
+function real(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * The session must start as configured: another directory or permission
+ * mode, or a reported effort that differs, holds before any tool runs.
+ * Init echoes the requested model, so the model is checked on the answers
+ * (`servedOther`).
+ */
+function startedOther(
+  message: SDKSystemMessage,
+  config: ClaudeWorkerConfig,
+  worktree: string,
+): WorkerResult | undefined {
+  if (real(message.cwd) !== real(worktree))
+    return hold(
+      `Claude SDK initialized in ${detail(message.cwd)}, not the Work Item's worktree; check the host's Claude installation, then answer retry`,
+    );
+  if (message.permissionMode !== config.permissionMode)
+    return hold(
+      `Claude SDK selected permission mode ${message.permissionMode}, not the configured ${config.permissionMode}; check the operator's Claude settings, then answer retry`,
+    );
+  // The pinned SDK may omit effort or report null: only a value can differ.
+  const effort = (message as { effort?: unknown }).effort;
+  if (effort !== undefined && effort !== null && effort !== config.effort)
+    return substitutionHold(
+      `${message.model} at ${String(effort)} effort`,
+      config,
+    );
+  return undefined;
+}
+
+/** A model id without the `[1m]` window suffix or a `-YYYYMMDD` snapshot date. */
+const modelId = (model: string) =>
+  model.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
+
+/**
+ * The main thread's answer came from another model than the configured
+ * full id. An alias (`opus`, `sonnet`) names no exact model, so it is
+ * never compared.
+ */
+function servedOther(
+  served: string,
+  config: ClaudeWorkerConfig,
+): WorkerResult | undefined {
+  if (!config.model.startsWith("claude-")) return undefined;
+  return modelId(served) === modelId(config.model)
+    ? undefined
+    : substitutionHold(served, config);
+}
+
+/** Copilot's substitution hold, for Claude: fix the model, then `switch`. */
+function substitutionHold(
+  served: string,
+  config: ClaudeWorkerConfig,
+): WorkerResult {
+  return hold(
+    `Claude served ${served}, not the configured ${config.model} at ${config.effort} effort. Set this provider's worker model to one the Claude login can use and restart the service, then answer \`switch NAME\` with this provider's name to run on its new settings, or with another configured provider's name; or cancel.`,
+    ["switch", "cancel"],
+  );
+}
+
 /** Built-in tools whose path argument names the file they write. */
 const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", COPY_TOOL];
 
@@ -1017,33 +1123,24 @@ export class ClaudeWorker implements Worker {
       throw error;
     }
     const { config } = this;
-    const granted = (tool: string) =>
-      config.tools.includes(tool) && config.allowedTools.includes(tool);
+    const granted = claudeGrants(config, this.options.worktreeRead === true);
     // Host Git must not enter a repository the commands could write behind
     // a gitlink, so neither Validate nor the shell runs in such a checkout.
     const gitlinks = await worktreeGitlinks(input);
     if (typeof gitlinks !== "boolean") return gitlinks;
-    const validate =
-      granted(VALIDATE) && input.commands.length > 0 && !gitlinks;
-    // Write and Validate together grant the shell: it adds nothing they
-    // don't grant together. Not as root (the sandbox refuses root), and
-    // only where bubblewrap runs.
-    const shell =
-      granted("Write") &&
-      granted(VALIDATE) &&
-      !gitlinks &&
-      process.geteuid?.() !== 0 &&
-      sandboxAvailable().available;
     const attempt = new Attempt(
       input,
       config,
       this.options,
       {
-        shell,
-        validate,
-        files: granted("Write"),
-        // Only beside Read, so it grants no file the worker couldn't read.
-        read: this.options.worktreeRead === true && granted("Read"),
+        ...granted,
+        validate: granted.validate && input.commands.length > 0 && !gitlinks,
+        // Not as root (the sandbox refuses root), and only where bubblewrap runs.
+        shell:
+          granted.shell &&
+          !gitlinks &&
+          process.geteuid?.() !== 0 &&
+          sandboxAvailable().available,
       },
       sdk,
       z,
@@ -1060,8 +1157,8 @@ export class ClaudeWorker implements Worker {
       provider: "claude",
       model: config.model,
       effort: config.effort,
-      shell,
-      validate,
+      shell: attempt.grants.shell,
+      validate: attempt.grants.validate,
       worktreeRead: attempt.grants.read,
     });
     const record = usageRecord({
@@ -1306,6 +1403,10 @@ export class ClaudeWorker implements Worker {
         ) {
           firstToken(record, callStarted);
           record.reportedModel = message.message.model;
+          if (message.parent_tool_use_id === null) {
+            const other = servedOther(message.message.model, this.config);
+            if (other) return other;
+          }
           // The main thread's context at this request; the SDK gives no window.
           const usage = message.message.usage;
           if (message.parent_tool_use_id === null && usage)
@@ -1379,6 +1480,8 @@ export class ClaudeWorker implements Worker {
           facts.initialized = true;
           record.session = message.session_id;
           record.reportedModel = message.model;
+          const other = startedOther(message, this.config, input.worktree);
+          if (other) return other;
         }
         if (message.type !== "result") continue;
         result = message;

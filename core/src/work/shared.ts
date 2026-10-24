@@ -173,7 +173,6 @@ export async function pinnedSources(
   const { sources } = await planningSources(
     objective.shown,
     new BaseFiles(deps.config.checkout, plan.base, signal),
-    objective.child === true,
   );
   return sources;
 }

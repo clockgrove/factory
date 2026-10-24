@@ -13,7 +13,6 @@ import {
   object,
   oneOf,
   optional,
-  type Retired,
   type Spec,
   section,
   strings,
@@ -24,8 +23,8 @@ import type { ClaudeWorkerConfig } from "./claude-worker.js";
 import type { CodexEffort } from "./codex.js";
 import {
   type ModelChoice,
-  PLANNER_PHASES,
   type PlannerModels,
+  REVIEW_PHASES,
 } from "./planner.js";
 
 export const PLANNERS = ["codex", "claude", "copilot"] as const;
@@ -125,6 +124,33 @@ export const CLAUDE_TOOLS = [
   "Validate",
 ] as const;
 
+/**
+ * The Copilot login's secrets: each read from the environment or, for a
+ * supervised service, its loaded credentials (claude.ts serviceCredential).
+ * They reach only the Copilot runtime (copilot.ts copilotEnvironment).
+ */
+export const COPILOT_SECRETS = [
+  "COPILOT_GITHUB_TOKEN",
+  "COPILOT_PROVIDER_API_KEY",
+  "COPILOT_PROVIDER_BEARER_TOKEN",
+  "GITHUB_COPILOT_API_TOKEN",
+] as const;
+
+/** Redacted from output wherever Copilot is configured: the secrets, and an endpoint that may embed a key. */
+export const COPILOT_REDACTED = [
+  ...COPILOT_SECRETS,
+  "COPILOT_PROVIDER_BASE_URL",
+] as const;
+
+/** A Copilot planner or worker is configured. */
+export function copilotConfigured(
+  providers: Readonly<Record<string, ProviderConfig>>,
+): boolean {
+  return Object.values(providers).some(
+    ({ planner, worker }) => planner === "copilot" || worker.kind === "copilot",
+  );
+}
+
 /** The Copilot worker's tools: the SDK's file tools and Factory's Validate. */
 export const COPILOT_TOOLS = [
   "view",
@@ -140,19 +166,6 @@ export const COPILOT_TOOLS = [
 export const MAX_HOSTED_SECONDS = 6000;
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
-
-/** What replaced each key of an earlier provider shape. */
-const RETIRED_PROVIDER: Retired = {
-  planning: "name the planner with planner and models",
-  execution:
-    "name the worker with worker; worker runs at once are the top-level execution.workers",
-};
-
-/** What replaced each key of the earlier execution profile shape. */
-const RETIRED_PROFILE: Retired = {
-  harness:
-    "a profile names a provider; put its worker under providers.<name>.worker",
-};
 
 /** An environment variable's name. */
 const envName: Check<string> = (value, path, problems) => {
@@ -219,7 +232,6 @@ function providerConfig(
       worker: (entry: unknown) => entry,
     },
     problems,
-    RETIRED_PROVIDER,
   );
   const { planner } = provider;
   const models =
@@ -268,10 +280,11 @@ function modelsSpec(planner: PlannerKind): Spec {
   return {
     planner: choice,
     reviewer: choice,
+    // Only review phases: a planner phase runs on models.planner.
     reviewEffort: optional(
       object(
         Object.fromEntries(
-          PLANNER_PHASES.map((phase) => [phase, optional(effort)]),
+          REVIEW_PHASES.map((phase) => [phase, optional(effort)]),
         ),
       ),
     ),
@@ -457,7 +470,6 @@ export const executionProfiles: Check<
         worktreeRead: optional(flag(false)),
       },
       problems,
-      RETIRED_PROFILE,
     );
   }
   return profiles;

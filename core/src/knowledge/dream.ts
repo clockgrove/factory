@@ -43,7 +43,6 @@ import {
   observedRecords,
 } from "./memory.js";
 import {
-  DEFAULT_BOUNDS,
   DREAM_DEADLINE_MS,
   type KnowledgeSettings,
   knowledgeDir,
@@ -314,7 +313,7 @@ function selectInput(
   budget: { playbook?: number; input?: number },
 ): Selection {
   const parent = latest(db);
-  const limits = settings.planningContext?.bounds ?? DEFAULT_BOUNDS;
+  const limits = settings.planningContext.bounds;
   const bounds = {
     maxBytes: budget.input ?? limits.maxBytes,
     maxResults: limits.maxResults,

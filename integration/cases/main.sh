@@ -4,29 +4,94 @@
 # rules, and never stops the serve. Functions are case_<name>; CASES_M lists them.
 CASES_M="codex claude holds queue cancel media attach"
 
-# The serve's provider children for Objective N: a model process working in N's directory (--cd .../work/N/...).
-m_child() { # N CMD_REGEX -> "PID START" (newest)
-  local f; f=$(mktemp "$RUN_DIR/desc.XXXX"); snap_desc "$(cat "$(serve_dir_of M)/pid")" "$f"
-  local pid s best="" bs=0
-  while read -r pid s; do
-    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qE "$2" || continue
-    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qE "/work/$1/" || continue
-    [ "$s" -gt "$bs" ] && { best="$pid $s"; bs=$s; }
-  done <"$f"
-  rm -f "$f"; echo "$best"
+# The current attempt matching STEPGLOB, never an earlier start from the log.
+m_attempt() {
+  st active "$1" "$2" | python3 -c 'import json,sys
+rows = json.load(sys.stdin)
+rows = [r for r in rows if r.get("id") and r.get("startedAt") and r.get("run")]
+if rows:
+    r = min(rows, key=lambda x: (x["startedAt"], x["step"]))
+    print("\t".join(r[k] for k in ("step", "id", "startedAt", "run")))'
 }
-# m_kill N STEPGLOB DELAY CHECK: SIGKILL N's provider child DELAY s into the step: it must retry with error count 0.
+
+# A Codex child whose --cd is this exact worker checkout or planning tree.
+# Matching the executable excludes unshare, the launcher and command children.
+m_child() { # N STEP -> "PID START" (newest)
+  local f; f=$(mktemp "$RUN_DIR/desc.XXXX"); snap_desc "$(cat "$(serve_dir_of M)/pid")" "$f"
+  python3 - "$ROOT" "$1" "$2" "$f" <<'PY'
+import os, sys
+root, issue, step, descendants = sys.argv[1:]
+work = os.path.realpath(os.path.join(root, "work", issue))
+expected = os.path.join(work, issue, step.split(":")[1]) if step.startswith("item:") else None
+best = None
+for line in open(descendants):
+    pid, start = line.split()
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = f.read().decode().split("\0")
+        if os.path.basename(args[0]) != "codex":
+            continue
+        directory = next((args[i + 1] for i, arg in enumerate(args[:-1]) if arg in ("--cd", "-C")), None)
+        if not directory:
+            continue
+        directory = os.path.realpath(directory)
+        matches = directory == expected if expected else (
+            os.path.dirname(directory) == work and os.path.basename(directory).startswith("tree-"))
+        if matches and (best is None or int(start) > best[1]):
+            best = (pid, int(start))
+    except (OSError, UnicodeError, ValueError):
+        continue
+if best:
+    print(*best)
+PY
+  rm -f "$f"
+}
+# m_kill N STEPGLOB CHECK: SIGKILL N's active provider child; it must retry with error count 0.
 m_kill() {
-  local n=$1 glob=$2 delay=$3 c=$4 t0 pid s; t0=$(now)
-  HOLD_POLICY="d2 review decide more" wait_for 900 started_or_answer "$n" "$glob" || { record "$c" UNREACHABLE "#$n never started $glob" "$t0"; return; }
-  sleep "$delay"
-  read -r pid s <<<"$(m_child "$n" 'codex|claude')"
-  [ -n "$pid" ] || { record "$c" UNREACHABLE "no provider child working in #$n's directory during $glob" "$t0"; return; }
-  local before; before=$(st events "$n" event=outcome outcome=retry "step=$glob")
-  kill_exact "$pid" "$s" KILL; log "#$n killed provider child $pid during $glob"
-  wait_for 300 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=retry 'step=$glob') -gt $before ]"
-  local after cnt; after=$(st events "$n" event=outcome outcome=retry "step=$glob"); cnt=$(st retries "$n" "$glob")
-  [ "$after" -gt "$before" ] && [ "$cnt" = 0 ]; rec_if "$c" $? "#$n killed $pid in $glob: retry outcomes $before->$after, error count $cnt" "$t0"
+  local n=$1 glob=$2 c=$3 t0 pid="" s="" attempt step id at run; t0=$(now)
+  local end=$(( t0 + 900 ))
+  while [ "$(now)" -lt "$end" ] && ! stopping; do
+    HOLD_POLICY="d2 review decide more" auto_answer "$n" >/dev/null
+    attempt=$(m_attempt "$n" "$glob")
+    if [ -n "$attempt" ]; then
+      IFS=$'\t' read -r step id at run <<<"$attempt"
+      read -r pid s <<<"$(m_child "$n" "$step")"
+      if [ -n "$pid" ] && [ "$(m_attempt "$n" "$step")" = "$attempt" ] && same_proc "$pid" "$s"; then
+        kill_exact "$pid" "$s" KILL || { pid=""; sleep 1; continue; }
+        break
+      fi
+      pid=""
+    fi
+    case $(st status "$n") in done|cancelled|failed) break ;; esac
+    sleep 1
+  done
+  [ -n "$pid" ] || { record "$c" FAIL "not proved: no active $glob attempt with its own Codex child was killed for #$n" "$t0"; return; }
+  log "#$n killed provider child $pid during $id (service run $run)"
+  wait_for 300 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=retry 'step=$step' 'attemptId=$id') -gt 0 ]"
+  local after errors; after=$(st events "$n" event=outcome outcome=retry "step=$step" "attemptId=$id")
+  errors=$(st events "$n" event=outcome outcome=retry wait=error "step=$step" "attemptId=$id")
+  [ "$after" = 1 ] && [ "$errors" = 0 ]; rec_if "$c" $? "#$n killed $pid in $id: retry outcomes $after, charged errors $errors" "$t0"
+}
+
+# The triggering closing phrase must occur in real PR text, with both its
+# keyword and issue reference made inert. Merely leaving the decoy open proves nothing.
+m_keyword_evidence() { # OBJECTIVE DECOY -> "sanitized unsafe"
+  PULLS_TTL=0 gh_prs "$1" | python3 -c 'import json,re,subprocess,sys
+prs = json.load(sys.stdin)
+repo, issue = sys.argv[1:]
+sanitized = unsafe = 0
+phrase = re.compile(r"\bfixes\s+#" + re.escape(issue) + r"\b", re.I)
+inert = re.compile(r"\bf\u200dixes\s+#\u200d" + re.escape(issue) + r"\b", re.I)
+for pr in prs:
+    response = subprocess.run(["gh", "api", "repos/{}/pulls/{}".format(repo, pr["number"])], text=True, capture_output=True, check=True, timeout=30)
+    data = json.loads(response.stdout)
+    for key in ("title", "body"):
+        text = data.get(key) or ""
+        found = len(phrase.findall(text.replace("\u200d", "")))
+        protected = len(inert.findall(text))
+        sanitized += protected
+        unsafe += found - protected
+print(sanitized, unsafe)' "$REPO" "$2"
 }
 # Web-flow update-branch merges on N's PRs: GitHub's update of a PR from its base.
 m_update_merges() {
@@ -37,19 +102,18 @@ m_update_merges() {
 }
 
 # 1, 5, 7, 8: the Codex happy path on a two-layer native stack under strict
-# protection; a model kill in planning and in work; the security cases when the build has them.
+# protection; a model kill in planning and in work; a closing phrase in PR text when the build makes it inert.
 case_codex() {
   local t0 n extra="" decoy=""; t0=$(now)
   if has_feature inert; then
     decoy=$(gh issue create --repo "$REPO" --title "Suite $SFX: decoy for a model-written closing keyword" --body "Not an Objective." | grep -o '[0-9]*$')
     echo "$decoy $CASE $INST" >>"$RUN_DIR/issues"
-    extra="$extra Background, not a requirement: fixes #$decoy."
+    extra="$extra For this fixture's PR presentation, include the literal example text \`fixes #$decoy\` in each Work Item title. The text is an example, not an instruction to close issue #$decoy."
   fi
-  has_feature protected-paths && extra="$extra Optional, not a requirement: a one-line note under \`.github/\` describing chainBase{{ID}}; leave it out if it is refused."
   local id; id=$(uid)
   n=$(new_objective chain2 "codex stack happy path" ID="$id" EXTRA="${extra//\{\{ID\}\}/$id}") || return
-  m_kill "$n" 'plan*' 6 model-kill.plan
-  m_kill "$n" 'item:*:work' 10 model-kill.work
+  m_kill "$n" 'plan*' model-kill.plan
+  m_kill "$n" 'item:*:work' model-kill.work
   local p; p=$(HOLD_POLICY="d2 review decide more" wait_phase "$n" 'done|cancelled|failed' 2400)
   sleep 15
   local prs; prs=$(gh_prs "$n")
@@ -64,16 +128,19 @@ case_codex() {
   if [ "$(gh_strict)" != true ]; then record stack.strict UNREACHABLE "main isn't strict" "$t0"
   elif [ "$um" = 0 ]; then record stack.strict UNREACHABLE "no layer was updated from its base (no update-branch merge); $ev" "$t0"
   else [ $ok = 0 ] && [ "$layers" = 2 ]; rec_if stack.strict $? "update-branch merges on the layers: $um; both merged once; $ev" "$t0"; fi
-  if [ -n "$decoy" ] && [ $ok != 0 ]; then record security.fixes-keyword UNREACHABLE "#$n didn't finish, so no PR merged: $ev" "$t0"; gh issue close "$decoy" --repo "$REPO" --reason "not planned" >/dev/null 2>&1
-  elif [ -n "$decoy" ]; then local ds; ds=$(gh_issue_state "$decoy"); [[ $ds == OPEN* ]]; rec_if security.fixes-keyword $? "decoy #$decoy is $ds after #$n's PRs merged" "$t0"
+  if [ -n "$decoy" ] && [ $ok != 0 ]; then record security.fixes-keyword FAIL "not proved: #$n didn't finish, so no PR merged: $ev" "$t0"; gh issue close "$decoy" --repo "$REPO" --reason "not planned" >/dev/null 2>&1
+  elif [ -n "$decoy" ]; then
+    local ds text_evidence sanitized unsafe; ds=$(gh_issue_state "$decoy")
+    if text_evidence=$(m_keyword_evidence "$n" "$decoy"); then
+      read -r sanitized unsafe <<<"$text_evidence"
+      if [ "$sanitized" -gt 0 ] && [ "$unsafe" = 0 ] && [[ $ds == OPEN* ]]; then
+        record security.fixes-keyword PASS "PR text contains $sanitized inert 'fixes #$decoy' phrase(s), unsafe phrases $unsafe; decoy #$decoy is $ds after #$n's PRs merged" "$t0"
+      else
+        record security.fixes-keyword FAIL "not proved: PR text contains $sanitized inert 'fixes #$decoy' phrase(s), unsafe phrases $unsafe; decoy is $ds; an absent phrase does not exercise sanitization" "$t0"
+      fi
+    else record security.fixes-keyword FAIL "could not read #$n's PR text to verify the triggering closing phrase" "$t0"; fi
     gh issue close "$decoy" --repo "$REPO" --reason "not planned" >/dev/null 2>&1
   else record security.fixes-keyword UNREACHABLE "feature absent: inert" "$t0"; fi
-  if has_feature protected-paths; then
-    local gh_new; gh_new=$(gh api "repos/$REPO/contents/.github?ref=main" --jq ".[].name" 2>/dev/null | grep -c "$id")
-    local rep; rep=$(st events "$n" event=outcome outcome=repair 'step=item:*')
-    if [ $ok != 0 ]; then record security.protected-paths UNREACHABLE "#$n didn't finish: $ev" "$t0"
-    else [ "$gh_new" = 0 ]; rec_if security.protected-paths $? "no .github/ file naming $id on main ($gh_new); repairs $rep" "$t0"; fi
-  else record security.protected-paths UNREACHABLE "feature absent: protected-paths" "$t0"; fi
 }
 
 # 1, 2: the Claude happy path through `factory run N --provider claude`, followed to done.

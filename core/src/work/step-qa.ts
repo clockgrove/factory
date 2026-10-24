@@ -3,23 +3,13 @@ import { type NamedCheck, observeNamedCheck } from "../delivery.js";
 import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
 import { defaultHead } from "../git.js";
 import { validationMembers } from "../media.js";
-import { expandAt } from "../planning/expansion.js";
-import { baselineQa } from "../planning/graph.js";
-import {
-  acceptedInputs,
-  type ConditionVerdict,
-  currentPlan,
-} from "../planning/plan.js";
+import { acceptedInputs, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
-import type { Plan, WorkItem } from "../planning/types.js";
+import type { WorkItem } from "../planning/types.js";
 import { type ResultReview, reviewQa } from "../review/result.js";
-import type { ObjectiveState } from "../state.js";
 import { validateTree } from "../validate.js";
 import { worktreePath } from "../worktree.js";
-import { discover } from "./discovery.js";
 import { fact, facts } from "./facts.js";
-import { mergeOf } from "./merged.js";
-import { rereviewCapture, rereviewOf, rereviewRecord } from "./refused.js";
 import {
   integrationProblem,
   objectiveMerges,
@@ -36,7 +26,6 @@ import {
   type BuildDeps,
   commandTimeoutMs,
   MINUTE,
-  type Phase,
   REVALIDATE,
   selection,
   stepKey,
@@ -114,7 +103,6 @@ export async function qaValidateStep(
     reviewArtifacts: {
       configured: config.reviewArtifacts,
       planned: plan.reviewArtifacts,
-      ...rereviewCapture(state, item.id, config.reviewArtifacts),
       dir: join(workDir, "artifacts", item.id),
     },
     media: validationMembers(plan, item, selection(state)),
@@ -130,7 +118,6 @@ export async function qaValidateStep(
         tree: result.tree,
         commands: result.commands,
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
-        ...rereviewRecord(state, item.id),
         checks,
       };
       return { kind: "done", result: done };
@@ -179,10 +166,7 @@ export async function qaReviewStep(
       target: steps[0]!,
       clear: steps,
       ...(again === REVALIDATE ? { rereview: true as const } : {}),
-      keep: facts(
-        { qaRefused: null, rereview: rereviewOf(context.answer) },
-        item.id,
-      ),
+      keep: facts({ qaRefused: null }, item.id),
     };
   const plan = currentPlan(state)!;
   const checked = state.done[steps[0]!] as QaResult;
@@ -248,158 +232,13 @@ export function qaRefusal(
   );
 }
 
-/** A discovery item's observation: read-only, with no worker (work/discovery.ts). */
-export function discoveryStep(item: WorkItem, deps: BuildDeps): Step {
-  return {
-    key: stepKey(item.id, "work"),
-    deadlineMs: 45 * MINUTE,
-    run: (context) =>
-      discover(item, context, {
-        checkout: deps.config.checkout,
-        planner: deps.planner,
-        limits: deps.config.planning.discoveryLimits,
-        dir: `${worktreePath(deps.workDir(context.state.issue), context.state.issue, item.id)}.discovery`,
-        base: () => discoveryBase(item, context, deps),
-      }),
-  };
-}
-
-/**
- * The commit a discovery item observes: the plan base, unless something
- * it depends on, directly or not, has merged; then the default branch,
- * once every merge of this Objective is still on it (integrationProblem,
- * as QA checks). An Objective made only of QA and discovery observes the
- * plan base.
- */
-export async function discoveryBase(
-  item: WorkItem,
-  context: StepContext,
-  deps: BuildDeps,
-): Promise<string | Outcome> {
-  const { state, signal } = context;
-  const plan = currentPlan(state)!;
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const upstream = new Set<string>();
-  const visit = (id: string) => {
-    for (const dependency of byId.get(id)?.dependencies ?? [])
-      if (!upstream.has(dependency)) {
-        upstream.add(dependency);
-        visit(dependency);
-      }
-  };
-  visit(item.id);
-  if (
-    baselineQa(plan.items) ||
-    ![...upstream].some((id) => mergeOf(state, id)?.mergeSha)
-  )
-    return plan.base;
-  const head = await defaultHead(
-    deps.config.checkout,
-    deps.config.repository,
-    signal,
-  );
-  return (await integrationProblem(state, plan, head, deps, signal)) ?? head;
-}
-
-/** A conditional item's settled result off its branch: no worker, no PR. */
-export interface Skipped {
-  settled: "skipped";
-  condition: ConditionVerdict;
-}
-
-/** A conditional item off its branch settles as skipped, with the condition and its evidence. */
-export function skipStep(item: WorkItem, condition: ConditionVerdict): Step {
+/** The merge step of an item that delivers nothing (aggregate, QA): it settles. */
+export function settleStep(item: WorkItem): Step {
   return {
     key: stepKey(item.id, "merge"),
-    deadlineMs: MINUTE,
-    async run(context): Promise<Outcome> {
-      context.log({ event: "item-skipped", item: item.id, ...condition });
-      const result: Skipped = { settled: "skipped", condition };
-      return { kind: "done", result };
-    },
-  };
-}
-
-/** A conditional item whose condition can't be read: it asks at its first step. */
-export function conditionUnknown(
-  item: WorkItem,
-  phase: Phase,
-  problem: string,
-): Step {
-  return {
-    key: stepKey(item.id, phase),
-    deadlineMs: MINUTE,
-    run: async () =>
-      hold(
-        `Work Item ${item.id} runs only when its condition holds, and it can't be evaluated: ${problem}\n\nAnswer \`replan\` to plan it again, \`retry\` to evaluate it again, or cancel.`,
-        ["replan", "retry", "cancel"],
-      ),
-  };
-}
-
-/** The items the plan's conditions skipped, with each verdict. */
-export function skippedItems(
-  state: ObjectiveState,
-  plan: Plan,
-): { item: WorkItem; condition: ConditionVerdict }[] {
-  return plan.items.flatMap((item) => {
-    const settled = state.done[stepKey(item.id, "merge")] as
-      | Partial<Skipped>
-      | undefined;
-    return settled?.settled === "skipped" && settled.condition
-      ? [{ item, condition: settled.condition }]
-      : [];
-  });
-}
-
-/** The merge step of an item that delivers nothing (aggregate, QA, discovery): it settles. */
-export function settleStep(item: WorkItem, deps: BuildDeps): Step {
-  return {
-    key: stepKey(item.id, "merge"),
-    deadlineMs: MINUTE,
-    async run({ state, log }): Promise<Outcome> {
-      if (item.kind !== "discovery")
-        return { kind: "done", result: { settled: item.kind } };
-      // A discovery item settles its expansions with it: their children
-      // join the plan from this result (planning/expansion.ts).
-      const expansions = expandAt(
-        state,
-        currentPlan(state)!,
-        item,
-        deps.config.planning.maxExpansionChildren,
-      );
-      if (typeof expansions === "string")
-        return hold(
-          `Discovery item ${item.id} can't settle the expansions that read it:\n\n${expansions}\n\nAnswer \`replan\` to plan the work again, or cancel.`,
-          ["replan", "cancel"],
-        );
-      for (const expanded of expansions)
-        log({
-          event: "expansion-settled",
-          item: item.id,
-          expansion: expanded.envelopeId,
-          children: expanded.children.map((child) => child.id),
-        });
-      return {
-        kind: "done",
-        result: {
-          settled: item.kind,
-          ...(expansions.length ? { expansions } : {}),
-        },
-      };
-    },
-  };
-}
-
-export function notYet(item: WorkItem, what: string): Step {
-  return {
-    key: stepKey(item.id, "work"),
     deadlineMs: MINUTE,
     async run(): Promise<Outcome> {
-      return hold(
-        `Work Item ${item.id} is one of the ${what}, which this Factory build can't run yet.`,
-        ["cancel", "retry", "replan"],
-      );
+      return { kind: "done", result: { settled: item.kind } };
     },
   };
 }

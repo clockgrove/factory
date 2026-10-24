@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /** The ATX headings and fenced-code boundaries used by source selectors. */
 export function markdownLines(content: string): {
   text: string;
@@ -104,4 +106,49 @@ export function inert(text: string): string {
  */
 export function mark(issue: number, kind: string, id: string): string {
   return `<!-- factory:${issue}:${kind}:${id} -->`;
+}
+
+/**
+ * The run and accepted plan a pull request body or the plan comment
+ * belongs to (state.ts `runOf`, planning/plan.ts `ACCEPTED_AT`): `factory
+ * reset` restores only what names the run and plan it rebuilds (reset.ts).
+ */
+export function runMarks(run: string, plan: string): string {
+  return `<!-- factory-run:${run} --><!-- factory-plan:${plan} -->`;
+}
+
+/** The run and plan `runMarks` wrote at the end of `text`, if it ends with them. */
+export function readRunMarks(
+  text: string,
+): { run: string; plan: string } | undefined {
+  const found =
+    /<!-- factory-run:(\S+) --><!-- factory-plan:(\S+) -->\s*$/.exec(text);
+  return found ? { run: found[1]!, plan: found[2]! } : undefined;
+}
+
+/** SHA-256 of `text` in hex: a record Factory writes carries its own, so a casual edit of it shows. */
+export function digest(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * The plan comment's line after its marker: its run and accepted plan
+ * (`runMarks`), and the digest of its plan data's JSON (`json`, joined
+ * from its continuations when it has them).
+ */
+export function planMarks(run: string, plan: string, json: string): string {
+  return `${runMarks(run, plan)}<!-- factory-data:${digest(json)} -->`;
+}
+
+/** What `planMarks` wrote on `line`, if it is exactly that line. */
+export function readPlanMarks(
+  line: string,
+): { run: string; plan: string; digest: string } | undefined {
+  const found =
+    /^<!-- factory-run:(\S+) --><!-- factory-plan:(\S+) --><!-- factory-data:([0-9a-f]{64}) -->$/.exec(
+      line,
+    );
+  return found
+    ? { run: found[1]!, plan: found[2]!, digest: found[3]! }
+    : undefined;
 }

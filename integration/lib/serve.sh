@@ -7,7 +7,9 @@ SERVE_N=0
 # Extra environment for the installation is in $RUN_DIR/inst/$INST/extra_env
 # (KEY=VALUE per line, no spaces). Sets SERVE_DIR and the installation's serve_dir file.
 serve_up() {
-  local point=${1:-} opts=" ${2:-} " d
+  local point=${1:-} opts=" ${2:-} " d end=$(( $(now) + 30 ))
+  [ "$end" -le "$STOP_AT" ] || end=$STOP_AT
+  [ "$(now)" -lt "$end" ] || return 124
   SERVE_N=$((SERVE_N + 1))
   d="$RUN_DIR/serve/$INST-$(date +%H%M%S)-$SERVE_N-${point:-clean}"; d=${d//\*/x}; d=${d//\#/_}
   mkdir -p "$d"; SERVE_DIR=$d
@@ -20,8 +22,9 @@ serve_up() {
     (cd "$BUILD" && BUILD="$BUILD" REPO="$REPO" SERVE_ARGS="$args" EXTRA_ENV="${envs[*]}" \
       setsid bash "$SUITE/lib/netns-serve.sh" "$d" </dev/null >"$d/pasta.log" 2>&1 & echo $! >"$d/pasta.pid")
     echo netns >"$d/mode"
+    track "$(cat "$d/pasta.pid")"
     # The namespace has its own PIDs: find the serve's host PID under pasta.
-    local i hp=""; for i in $(seq 1 150); do
+    local hp=""; while [ "$(now)" -lt "$end" ]; do
       hp=$(: >"$d/pasta.desc"; snap_desc "$(cat "$d/pasta.pid")" "$d/pasta.desc"; while read -r p _; do tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | grep -q 'cli.js serve' && { echo "$p"; break; }; done <"$d/pasta.desc")
       [ -n "$hp" ] && break; sleep 0.1; done
     [ -n "$hp" ] && echo "$hp" >"$d/hostpid"
@@ -31,7 +34,7 @@ serve_up() {
       _ "$REPO" "$d" "$args" </dev/null >/dev/null 2>&1 &)
   fi
   local pf="$d/pid"; [[ $opts == *" netns "* ]] && pf="$d/hostpid"
-  local i; for i in $(seq 1 100); do [ -s "$pf" ] && break; sleep 0.1; done
+  while [ "$(now)" -lt "$end" ]; do [ -s "$pf" ] && break; sleep 0.1; done
   [ -s "$pf" ] || { log "serve did not start ($d)"; return 1; }
   SERVE_DIR=$d; track "$(serve_pid)"
   echo "$d" >"$RUN_DIR/inst/$INST/serve_dir"
@@ -47,8 +50,10 @@ serve_down() {
   if serve_alive; then
     local p s; p=$(serve_pid); s=$(starttime "$p"); serve_tick
     kill_exact "$p" "$s" "${1:-TERM}"
-    local i; for i in $(seq 1 90); do serve_exited && break; sleep 1; done
-    serve_exited || { log "serve $p alive 90 s after ${1:-TERM}: SIGKILL"; kill_exact "$p" "$s" KILL; sleep 2; }
+    local end=$(( $(now) + 25 ))
+    [ "$end" -le "$STOP_AT" ] || end=$STOP_AT
+    while [ "$(now)" -lt "$end" ]; do serve_exited && break; sleep 1; done
+    serve_exited || { log "serve $p did not stop before the deadline: SIGKILL"; kill_exact "$p" "$s" KILL; }
   fi
   kill_desc_survivors "$SERVE_DIR/desc"
   log "serve $(serve_pid) down (exit $(cat "$SERVE_DIR/exit" 2>/dev/null))"

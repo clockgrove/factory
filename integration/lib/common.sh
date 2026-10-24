@@ -60,7 +60,12 @@ cfg_get() { python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));v=eval(sy
 
 # ---------- CLI ----------
 cli() { (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node core/dist/cli.js "$@" --repo "$REPO"); }
-cli_t() { local s=$1; shift; (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" timeout "$s" node core/dist/cli.js "$@" --repo "$REPO"); }
+cli_t() {
+  local s=$1 remaining=$(( STOP_AT - $(now) )); shift
+  [ "$remaining" -gt 0 ] || return 124
+  [ "$s" -le "$remaining" ] || s=$remaining
+  (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" timeout --kill-after=2 "$s" node core/dist/cli.js "$@" --repo "$REPO")
+}
 cli_help() {
   local f="$RUN_DIR/cli-help"
   [ -s "$f" ] || (cd "$BUILD" && { node core/dist/cli.js help 2>&1; node core/dist/cli.js 2>&1; }) >"$f"
@@ -175,35 +180,54 @@ hold_pick() { python3 -c 'import json,sys;h=json.loads(sys.argv[1] or "null") or
 
 # Hold policies, by structure (HOLD_POLICY, per case):
 #   d2      retry a failure hold with only retry/cancel (a crash-loop suspect from the suite's restarts)
-#   review  accept at result/final review
-#   decide  take the planner's recommended answer at a planner question (at most AUTO_DECIDE_MAX per Objective)
+#   review  apply an exact fixture decision from AUTO_REVIEW_DECISIONS
+#           ([{step,answer,arg,text}]); never invent evidence for a criterion
+#   decide  ask the planner to choose within the existing Objective, without new authority
+#           (at most AUTO_DECIDE_MAX per Objective)
 #   more    answer `more` when it is the recommended answer (an allowance reached by the suite's own answers)
 HOLD_POLICY=${HOLD_POLICY-d2 review}
 auto_answer() { # N -> 0 when it answered at least one open hold
-  local n=$1 holds id step pick rc=1
-  holds=$(st holds "$n")
-  [ "$holds" = "[]" ] && return 1
-  while IFS=$'\t' read -r id step pick; do
-    [ -n "$pick" ] || continue
-    [ -f "$RUN_DIR/answered/$n.$id" ] && continue
-    if [[ $step == decide:* ]] && [ "$(ls "$RUN_DIR"/answered/"$n".* 2>/dev/null | wc -l)" -ge "${AUTO_DECIDE_MAX:-4}" ]; then continue; fi
-    touch "$RUN_DIR/answered/$n.$id"
-    if [ "$pick" = answer ]; then answer_t 60 "$n" answer --question "$id" --text "Take your recommended option." >/dev/null 2>&1
-    else answer_t 60 "$n" "$pick" --question "$id" >/dev/null 2>&1; fi
-    echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$n"
-    log "#$n auto-answered $pick (question $id at $step)"; rc=0
-  done < <(python3 - "$holds" "$HOLD_POLICY" <<'PY'
-import json, sys
-pol = sys.argv[2].split()
-for h in json.loads(sys.argv[1]):
-    a = h.get("answers") or []; step = h.get("step", ""); pick = ""
-    if "review" in pol and (step.endswith(":review") or step == "final-review") and "accept" in a: pick = "accept"
-    elif "decide" in pol and step.startswith("decide:") and h.get("recommended") not in (None, "cancel"): pick = h["recommended"]
-    elif "more" in pol and "more" in a and h.get("recommended") == "more": pick = "more"
-    elif "d2" in pol and "retry" in a and "cancel" in a and len(a) == 2 and (h.get("cause") == "failure" or not step.startswith(("check", "plan", "decide"))): pick = "retry"
-    print(f"{h.get('id', '')}\t{step}\t{pick}")
+  local n=$1 choices choice id step pick arg text marker at seconds count rc=1
+  local fields=() args=()
+  choices=$(st auto-answers "$n" "$HOLD_POLICY" "${AUTO_REVIEW_DECISIONS:-[]}") || return 1
+  while IFS= read -r choice; do
+    [ -n "$choice" ] || continue
+    mapfile -d '' -t fields < <(python3 -c 'import hashlib,json,sys
+c=json.loads(sys.argv[1])
+for k in ("id","step","answer","arg","text"): print(c.get(k,""),end="\0")
+print(hashlib.sha256(c["id"].encode()).hexdigest(),end="\0")' "$choice")
+    id=${fields[0]}; step=${fields[1]}; pick=${fields[2]}; arg=${fields[3]}; text=${fields[4]}
+    marker="$RUN_DIR/answered/$n.${fields[5]}"
+    [ -f "$marker" ] && continue
+    if [[ $step == decide:* ]]; then
+      count=$(python3 - "$RUN_DIR/answered" "$n" <<'PY'
+import glob,json,os,sys
+print(sum(1 for p in glob.glob(os.path.join(sys.argv[1],sys.argv[2]+".*"))
+          if json.load(open(p)).get("step", "").startswith("decide:")))
 PY
-)
+) || return 1
+      [ "$count" -lt "${AUTO_DECIDE_MAX:-4}" ] || continue
+    fi
+    # A CLI exit of zero can mean only "queued". Wait for the service's
+    # structured request result before recording an answer as accepted.
+    [ "$(st answer-state "$n" "$choice")" = pending ] && continue
+    seconds=$(left); [ "$seconds" -gt 0 ] || break
+    [ "$seconds" -le 60 ] || seconds=60
+    args=(); [ -z "$arg" ] || args+=("$arg")
+    args+=(--question "$id"); [ -z "$text" ] || args+=(--text "$text")
+    at=$(iso_ms)
+    if ! answer_t "$seconds" "$n" "$pick" "${args[@]}" >"$RUN_DIR/answer.$n.out" 2>&1; then
+      log "#$n answer $pick${arg:+ $arg} was refused or interrupted ($id at $step)"
+      continue
+    fi
+    if [ "$(st answer-state "$n" "$choice" "$at")" != accepted ]; then
+      log "#$n answer $pick${arg:+ $arg} is not confirmed applied ($id at $step)"
+      continue
+    fi
+    printf '%s\n' "$choice" >"$marker"
+    echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$n"
+    log "#$n auto-answered $pick${arg:+ $arg} (question $id at $step)"; rc=0
+  done <<<"$choices"
   return $rc
 }
 # wait_phase N REGEX SECS: poll the state until the phase matches (status, or

@@ -988,6 +988,8 @@ export function namespacedLauncher(
     throw new Error(
       "setsid and unshare (util-linux) are needed to stop a Codex process and every command it started; install util-linux",
     );
+  // Private like every telemetry file, whatever the umask.
+  if (stderr) writeFileSync(stderr, "", { mode: 0o600, flag: "a" });
   writeFileSync(
     path,
     `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nexec ${setsid} ${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc ${shellWord(program)} "$@"${stderr ? ` 2>>${shellWord(stderr)}` : ""}\n`,

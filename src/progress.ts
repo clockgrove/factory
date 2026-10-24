@@ -36,6 +36,8 @@ export interface ProgressInput {
   activity: Record<string, LogEvent>;
   /** Model calls logged this run: planner-seam (planning, review, Dream) and worker, and the tokens they reported. */
   calls: { planner: number; worker: number; tokens: number };
+  /** Planner-seam calls running now (`model-call` without its `model-usage`), oldest first. */
+  running: RunningCall[];
   /** Answers taken: planning decisions and step answers, oldest first. */
   decisions: {
     question: string;
@@ -63,6 +65,19 @@ export interface StatusRecord {
   dropped?: number;
 }
 
+/** A running planner or reviewer call, from its `model-call` and latest `model-progress`. */
+export interface RunningCall {
+  role: string;
+  phase?: string;
+  item?: string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  startedAt: string;
+  tokens?: number;
+  turns: number;
+}
+
 /** What the comment includes: `questions` is `progress.includeQuestions`. */
 export interface ProgressOptions {
   questions: boolean;
@@ -81,12 +96,16 @@ export class RunTally {
       offsets: Map<string, number>;
       calls: { planner: number; worker: number; tokens: number };
       activity: Record<string, LogEvent>;
+      running: Map<string, RunningCall & { step?: string }>;
     }
   >();
 
   constructor(private readonly dir: string) {}
 
-  read(issue: number, run: string): Pick<ProgressInput, "calls" | "activity"> {
+  read(
+    issue: number,
+    run: string,
+  ): Pick<ProgressInput, "calls" | "activity" | "running"> {
     let tally = this.runs.get(issue);
     if (tally?.run !== run) {
       tally = {
@@ -94,6 +113,7 @@ export class RunTally {
         offsets: new Map(),
         calls: { planner: 0, worker: 0, tokens: 0 },
         activity: {},
+        running: new Map(),
       };
       this.runs.set(issue, tally);
     }
@@ -106,7 +126,24 @@ export class RunTally {
     for (const event of readNew(this.dir, issue, tally.offsets)) {
       if (event.at < run) continue;
       // One `model-usage` event per model call (docs/reference/run-log.md#Model usage).
+      if (event.event === "model-call" && typeof event.callId === "string")
+        tally.running.set(event.callId, runningCall(event));
+      else if (
+        event.event === "model-progress" &&
+        typeof event.callId === "string"
+      ) {
+        const call = tally.running.get(event.callId);
+        if (call && typeof event.tokens === "number")
+          call.tokens = event.tokens;
+        if (call && typeof event.turns === "number") call.turns = event.turns;
+      } else if (event.event === "outcome" && typeof event.step === "string") {
+        // A call its step outlived ran no more.
+        for (const [id, call] of tally.running)
+          if (call.step === event.step) tally.running.delete(id);
+      }
       if (event.event === "model-usage") {
+        if (typeof event.callId === "string")
+          tally.running.delete(event.callId);
         if (event.role === "worker") tally.calls.worker += 1;
         else tally.calls.planner += 1;
         const total = (event.tokens as { total?: unknown } | null)?.total;
@@ -117,12 +154,37 @@ export class RunTally {
       )
         tally.activity[event.item] = event;
     }
-    return { calls: { ...tally.calls }, activity: { ...tally.activity } };
+    return {
+      calls: { ...tally.calls },
+      activity: { ...tally.activity },
+      running: [...tally.running.values()].map(({ step: _step, ...call }) => ({
+        ...call,
+      })),
+    };
   }
 
   forget(issue: number): void {
     this.runs.delete(issue);
   }
+}
+
+/** A `model-call` event as a running call, with the step it runs in. */
+function runningCall(event: LogEvent): RunningCall & { step?: string } {
+  const text = (value: unknown) =>
+    typeof value === "string" ? value : undefined;
+  const step = text(event.step);
+  const item = step?.startsWith("item:") ? step.split(":")[1] : undefined;
+  return {
+    role: text(event.role) ?? "model",
+    ...(text(event.phase) ? { phase: text(event.phase) } : {}),
+    ...(item ? { item } : {}),
+    ...(text(event.provider) ? { provider: text(event.provider) } : {}),
+    ...(text(event.model) ? { model: text(event.model) } : {}),
+    ...(text(event.effort) ? { effort: text(event.effort) } : {}),
+    ...(step ? { step } : {}),
+    startedAt: event.at,
+    turns: 0,
+  };
 }
 
 /** The answers the run has taken: planning decisions, then step answers not among them. */
@@ -327,6 +389,17 @@ function render(
       const tools = Array.isArray(event.tools) ? event.tools.join(", ") : "";
       lines.push(
         `- ${code(item.id)}: ${state}; last reported ${when(event.at)}; since its report before: turns ${counts.turns ?? 0}, edits ${counts.edits ?? 0}, commands ${counts.commands ?? 0}${tools ? `; tools ${text(tools)}` : ""}${typeof event.command === "string" ? `; ran ${code(event.command)}` : ""}`,
+      );
+    }
+  }
+  if (input.running.length) {
+    lines.push("", "**Model calls running**");
+    for (const call of input.running.slice(0, LISTED.items)) {
+      const name = `${call.role}${call.phase ? ` ${call.phase}` : ""}${call.item ? ` (Work Item ${code(call.item)})` : ""}: ${prose([call.provider, call.model, call.effort].filter(Boolean).join(" ") || "model unknown")}`;
+      lines.push(
+        full
+          ? `- ${name}, started ${when(call.startedAt)}; ${call.turns} turn${call.turns === 1 ? "" : "s"}; ${call.tokens === undefined ? "context not reported" : `${call.tokens} input tokens in context`}`
+          : `- ${name}`,
       );
     }
   }

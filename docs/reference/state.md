@@ -16,7 +16,7 @@ Each Objective has one JSON file: `objectives/<issue>.json` under the installati
   "kept": { "<fact key>": "<value>" }, // facts that outlive repairs, such as item:<id>:base and item:<id>:pushed
   "attempts": { "<step key>": { "startedAt", "run" } }, // started, not finished; `run` is the service run
   "retries": { "<step key>": { "count", "attempts", "since", "nextAt", "lastError", "cause", "wait"?, "grantedUntil"? } },
-  "repairs": { "<target step>": { "count", "findings": [...] } },
+  "repairs": { "<target step>": { "count", "findings": [...], "from"? } }, // the latest repaired last; from: the step whose failure sent it
   "answers": { "<step key>": { "holdId", "question", "answer", "text"?, "by", "at" } },
   "holds": [], // open questions, oldest first: { "id", "step", "item"?, "question", "options": [...], "cause", "askedAt", "shownAt"?, "shortForm"? }
   "lastShownAt": "<latest GitHub time any question's comment was shown>",

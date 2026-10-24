@@ -11,14 +11,16 @@ import { CAPTURE, type CaptureBody, capturingTools } from "../log.js";
 export type ModelRole = "planner" | "reviewer" | "worker" | "dream";
 
 /**
- * Tokens of one call. `input` includes `cached`; `output` includes
- * `reasoning`; `total` is input plus output, or the provider's own total
- * when it reports no split. Null: the provider didn't report it.
+ * Tokens of one call. `input` includes `cached` (read from the prompt
+ * cache) and `cacheWrite` (written to it); `output` includes `reasoning`;
+ * `total` is input plus output, or the provider's own total when it
+ * reports no split. Null: the provider didn't report it.
  */
 export interface Tokens {
   input: number | null;
   output: number | null;
   cached: number | null;
+  cacheWrite: number | null;
   reasoning: number | null;
   total: number | null;
 }
@@ -36,6 +38,7 @@ export function tokens(counts: {
   input?: Count;
   output?: Count;
   cached?: Count;
+  cacheWrite?: Count;
   reasoning?: Count;
   total?: Count;
 }): Tokens {
@@ -47,6 +50,7 @@ export function tokens(counts: {
     input,
     output,
     cached: known(counts.cached),
+    cacheWrite: known(counts.cacheWrite),
     reasoning: known(counts.reasoning),
     total:
       input !== null && output !== null ? input + output : known(counts.total),
@@ -61,6 +65,7 @@ export function addTokens(a: Tokens, b: Tokens): Tokens {
     input: add(a.input, b.input),
     output: add(a.output, b.output),
     cached: add(a.cached, b.cached),
+    cacheWrite: add(a.cacheWrite, b.cacheWrite),
     reasoning: add(a.reasoning, b.reasoning),
     total: add(a.total, b.total),
   };
@@ -403,6 +408,9 @@ export function captureResponse(
   record: Record<string, unknown>,
   response: string,
 ): void {
+  // Its size and digest whether or not capture keeps its body.
+  record.responseBytes = Buffer.byteLength(response);
+  record.responseDigest = sha256(response);
   const body = (record as { [CAPTURE]?: CaptureBody })[CAPTURE];
   if (body) body.response = response;
 }

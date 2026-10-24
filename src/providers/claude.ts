@@ -26,6 +26,7 @@ import {
   detail,
   freshOnOverflow,
   IdleWatchdog,
+  type LiveCall,
   loggedCall,
   type ModelChoice,
   modelChoice,
@@ -996,17 +997,15 @@ export function usageOf(
       (sum, [name, model]) => {
         const before = baseline[name];
         const read = less(model.cacheRead, before?.cacheRead);
+        const written = less(model.cacheCreation, before?.cacheCreation);
         return {
-          input:
-            sum.input +
-            less(model.input, before?.input) +
-            read +
-            less(model.cacheCreation, before?.cacheCreation),
+          input: sum.input + less(model.input, before?.input) + read + written,
           output: sum.output + less(model.output, before?.output),
           cached: (sum.cached ?? 0) + read,
+          cacheWrite: (sum.cacheWrite ?? 0) + written,
         };
       },
-      { input: 0, output: 0, cached: 0 },
+      { input: 0, output: 0, cached: 0, cacheWrite: 0 },
     );
   }
   // A resumed session's own counts can't be told from a query's main loop.
@@ -1014,13 +1013,12 @@ export function usageOf(
   const usage = result.usage;
   if (!usage) return undefined;
   const read = usage.cache_read_input_tokens ?? 0;
+  const written = usage.cache_creation_input_tokens ?? 0;
   return {
-    input:
-      (usage.input_tokens ?? 0) +
-      read +
-      (usage.cache_creation_input_tokens ?? 0),
+    input: (usage.input_tokens ?? 0) + read + written,
     output: usage.output_tokens ?? 0,
     cached: read,
+    cacheWrite: written,
   };
 }
 
@@ -1084,8 +1082,8 @@ export class ClaudePlanner implements Planner {
 
   private async attempt(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.options, call);
-    return loggedCall("claude", call, choice, (record) =>
-      this.run(call, choice, record),
+    return loggedCall("claude", call, choice, (record, live) =>
+      this.run(call, choice, record, live),
     );
   }
 
@@ -1093,6 +1091,7 @@ export class ClaudePlanner implements Planner {
     call: PlannerCall,
     choice: ModelChoice<ClaudeEffort>,
     record: Record<string, unknown>,
+    live: LiveCall,
   ): Promise<Omit<PlannerAnswer, "ms">> {
     call.signal.throwIfAborted();
     let query: typeof import("@anthropic-ai/claude-agent-sdk").query;
@@ -1219,8 +1218,19 @@ export class ClaudePlanner implements Planner {
         ) {
           firstToken(record, callStarted);
           record.reportedModel = message.message.model;
+          // The main thread's context at this request; the SDK gives no window.
+          const usage = message.message.usage;
+          if (message.parent_tool_use_id === null && usage)
+            live.context(
+              usage.input_tokens +
+                (usage.cache_read_input_tokens ?? 0) +
+                (usage.cache_creation_input_tokens ?? 0),
+            );
           // One response may arrive split over several messages with its id.
-          if (message.message.id !== response) tools.response();
+          if (message.message.id !== response) {
+            tools.response();
+            live.turn();
+          }
           response = message.message.id;
         }
         if (message.type === "assistant" || message.type === "user") {

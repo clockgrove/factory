@@ -335,6 +335,34 @@ export async function hostGit(
 }
 
 /**
+ * The files that differ from HEAD in `worktree`, untracked ones included
+ * (whatever wrote them: an edit tool or a shell command), read without
+ * taking Git's optional index lock, so a worker's own Git never waits on it.
+ */
+export async function changedFiles(
+  worktree: string,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const listing = await hostGit(
+    worktree,
+    [
+      "--no-optional-locks",
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--no-renames",
+    ],
+    { signal, timeoutMs: 30_000 },
+  );
+  return listing
+    .toString("utf8")
+    .split("\0")
+    .filter((entry) => entry.length > 3)
+    .map((entry) => entry.slice(3));
+}
+
+/**
  * `git merge-base --is-ancestor`: exit 0 is yes, exit 1 is no, and anything
  * else (a missing object, a killed Git) is a TransientError to retry.
  */

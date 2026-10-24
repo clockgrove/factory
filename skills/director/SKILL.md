@@ -63,7 +63,8 @@ Run `factory status ISSUE --json`. Each entry in `objectives` has:
 - `status`: `checking`, `planning`, `building`, `finishing`, `holding`, `resetting`, `done`, `cancelled`, or `unreadable`.
 - `mode`: `running`, `paused` or `draining`, the operator's control of this Objective.
 - `phase`: the headline: the stage (`checking`, `planning`, `building`, `finishing`) and how many questions are open, or the status when it ended. `endedAt`: when it reached `done` or `cancelled`.
-- `items`: the Work Item table, each `{id, kind, phase, pr, repairs, hold}`: `phase` is its step now (`review (running)`, `ci (waiting)`, `work (held)`), else the last phase done (`validated`, `merged`), else `pending`; `repairs` counts the repairs used; `hold` is the id of the question that stops it. `plan`: the full current plan.
+- `items`: the Work Item table, each `{id, kind, phase, pr, repairs, hold, attempt, base, tree, head, lastError, repair, blocker}`: `phase` is its step now (`review (running)`, `ci (waiting)`, `work (held)`), else the last phase done (`validated`, `merged`), else `pending`; `repairs` counts the repairs used; `hold` is the id of the question that stops it; `attempt` is the step attempt running now or started last (`{id, n, startedAt?}`); `base`, `tree` and `head` are the commit its work started from, its result's tree and its candidate commit; `lastError` is a waiting step's last error; `repair` is its latest repair (`{target, class, finding}`, `class` the phase whose failure sent it back, such as `validate`, `review` or `ci`); `blocker` says what a pending item waits on. `plan`: the full current plan.
+- `github`, when present, is `{statusComment, tracking}`, each `given-up` or `ok`: `given-up` means Factory stopped updating the live status comment or the Work Item issue tracking for this run after GitHub kept refusing it; report it.
 - `holds`: the open questions, oldest first, each `{id, step, item?, question, options, cause, askedAt}` (see Answer a hold). A hold with `item` stops only that Work Item and the items that depend on it; one without stops the whole Objective.
 - `waiting`: steps that will retry on their own, each with `step`, `nextAt`, `lastError` and `since`. With `gate` set, the step waits on a person outside Factory, such as an environment approval or a required review; name that gate to the operator.
 - `waitsOn`: `{slot: true}` (no free slot) or `{paths: N}` (Objective #N owns overlapping paths), else `null`.
@@ -76,6 +77,7 @@ Run `factory status ISSUE --json`. Each entry in `objectives` has:
 At the top level:
 
 - `service` is `running` or `stopped`. A stopped service means no progress at all, so say it first.
+- `setup` is `{defaultProvider, sandbox: {required, network}}`, and `unit`, when the installation has a systemd unit, `{active, restarts}`: report a unit that isn't `active` or keeps restarting.
 - `queue.mode` is `running`, `paused` or `draining`.
 - `crashLoop`, when present, is `{crashes, resumeAt}`: the service died that many times in a row and holds interrupted steps until `resumeAt`. Report it; read `factory log` for the cause.
 - `problem`, when present, names a fault that pauses GitHub effects. Report it first.

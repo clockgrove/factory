@@ -16,6 +16,7 @@ import {
   logFiles,
   parseLines,
   readFrom,
+  readRunFile,
   runOfFile,
   sizeOf,
   untilInterrupted,
@@ -63,6 +64,7 @@ export interface Entry {
     | "model"
     | "activity"
     | "cancelled"
+    | "transcript"
     | "event";
   step?: string;
   item?: string;
@@ -175,8 +177,17 @@ export async function diagnostics(
         ? undefined
         : captureOf(options, entry, Boolean(options.captures));
     if (capture) captured = true;
+    // A failed command's whole output, in its attempt file.
+    const output =
+      options.item !== undefined &&
+      entry.kind === "validation" &&
+      typeof entry.event.output === "string"
+        ? join(options.logs, entry.event.output)
+        : undefined;
     if (options.json) {
-      write(`${JSON.stringify(capture ? { ...entry, capture } : entry)}\n`);
+      write(
+        `${JSON.stringify({ ...entry, ...(capture ? { capture } : {}), ...(output ? { outputPath: output } : {}) })}\n`,
+      );
       return;
     }
     if (entry.run !== lastRun) {
@@ -189,13 +200,17 @@ export async function diagnostics(
         ? entry.text
         : withDetail(entry.text, entry.event);
     write(`${relative(entry.elapsedMs)}  ${text}\n`);
+    if (output) write(`        whole output: ${output}\n`);
     if (!capture) return;
     write(`        capture: ${capture.path}\n`);
     if (capture.request !== undefined)
       write(`        request:\n${capture.request}\n`);
     if (capture.response !== undefined)
       write(`        response:\n${capture.response}\n`);
-    if (capture.truncated) write("        (cut to capture.maxBytesPerCall)\n");
+    if (capture.truncated)
+      write(
+        `        (cut to capture.maxBytesPerCall${originalText(capture.original)})\n`,
+      );
   };
   const captureNote = () => {
     if (options.item !== undefined && !captured && !options.json)
@@ -203,8 +218,42 @@ export async function diagnostics(
         `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (docs/reference/run-log.md#Content capture).\n`,
       );
   };
+  // `--logs ITEM`: each worker attempt's transcript, after the attempt ends.
+  const transcripts = new Map<string, LogEvent>();
+  const printTranscript = (entry: Entry, opened: LogEvent) => {
+    const file = String(opened.file);
+    const read = readRunFile(options.logs, file, options.secrets);
+    const records = read ? transcriptRecords(read.text) : [];
+    const path = join(options.logs, file);
+    if (options.json) {
+      write(
+        `${JSON.stringify({ ...entry, kind: "transcript", text: `transcript ${String(opened.attemptId)}`, transcript: { file, path, available: Boolean(read), cut: read?.cut ?? false, records } })}\n`,
+      );
+      return;
+    }
+    write(
+      `        transcript of ${String(opened.attemptId)}: ${read ? `${count(records.length)} records${read.cut ? ", its middle rotated away" : ""}` : "gone (rotated away with its run, or never written)"} · ${path}\n`,
+    );
+    for (const record of records)
+      write(`          ${transcriptLine(record)}\n`);
+  };
   const visit = (event: LogEvent) => {
-    for (const entry of timeline.add(event)) print(entry);
+    if (
+      options.item !== undefined &&
+      event.event === "transcript" &&
+      event.item === options.item &&
+      typeof event.attemptId === "string"
+    )
+      transcripts.set(event.attemptId, event);
+    for (const entry of timeline.add(event)) {
+      print(entry);
+      const attempt = str(entry.event.attemptId);
+      const opened = attempt ? transcripts.get(attempt) : undefined;
+      if (entry.event.event === "outcome" && attempt && opened) {
+        transcripts.delete(attempt);
+        printTranscript(entry, opened);
+      }
+    }
   };
   const offsets = new Map<string, number>();
   for (const file of files) offsets.set(file, read(file, 0, visit));
@@ -213,6 +262,19 @@ export async function diagnostics(
   if (!options.follow) {
     // Steps still running when the log ends: their activity so far.
     for (const entry of timeline.running()) print(entry);
+    // And the transcripts of attempts still running, as far as written.
+    for (const opened of transcripts.values())
+      printTranscript(
+        {
+          at: opened.at,
+          run: String(opened.run),
+          elapsedMs: 0,
+          kind: "transcript",
+          text: "",
+          event: opened,
+        },
+        opened,
+      );
     captureNote();
     return;
   }
@@ -236,7 +298,13 @@ function captureOf(
   entry: Entry,
   bodies: boolean,
 ):
-  | { path: string; request?: string; response?: string; truncated?: boolean }
+  | {
+      path: string;
+      request?: string;
+      response?: string;
+      truncated?: boolean;
+      original?: Record<string, unknown>;
+    }
   | undefined {
   const id = entry.event.capture;
   const file =
@@ -248,6 +316,58 @@ function captureOf(
   if (!bodies) return { path };
   const body = readCapture(options.logs, file, options.secrets);
   return body ? { path, ...body } : { path };
+}
+
+/** A transcript's records: its complete JSON lines, a torn or cut one skipped. */
+function transcriptRecords(text: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try {
+      records.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // Cut where the middle rotated away.
+    }
+  }
+  return records;
+}
+
+/** One transcript record as a line: what the worker did, or the provider's event as it came. */
+function transcriptLine(record: Record<string, unknown>): string {
+  const at =
+    typeof record.at === "string"
+      ? displayTime(record.at).slice(11)
+      : "--:--:--";
+  const activity = record.activity as Record<string, unknown> | undefined;
+  if (!activity) return `${at} output ${JSON.stringify(record.output)}`;
+  switch (activity.kind) {
+    case "tool":
+      return `${at} tool ${String(activity.tool)} ${String(activity.phase)}${typeof activity.target === "string" ? `: ${oneLine(activity.target, 2_000)}` : ""}`;
+    case "edit":
+      return `${at} edit ${String(activity.path)}`;
+    case "command":
+      return `${at} $ ${oneLine(String(activity.command), 2_000)}`;
+    case "command-failed":
+      return `${at} command failed`;
+    case "context":
+      return `${at} context ${String(activity.tokens)} tokens${typeof activity.window === "number" ? ` of ${activity.window}` : ""}`;
+    default:
+      return `${at} ${String(activity.kind)}`;
+  }
+}
+
+/** `; the request was 12,345 bytes (sha256 ab12…), the response …`: a cut capture's originals. */
+export function originalText(original?: Record<string, unknown>): string {
+  const part = (name: string) => {
+    const body = original?.[name] as
+      | { bytes?: unknown; sha256?: unknown }
+      | undefined;
+    return typeof body?.bytes === "number" && typeof body.sha256 === "string"
+      ? `the ${name} was ${count(body.bytes)} bytes (sha256 ${body.sha256.slice(0, 12)}…)`
+      : undefined;
+  };
+  const parts = [part("request"), part("response")].filter(Boolean);
+  return parts.length ? `; ${parts.join(", ")}` : "";
 }
 
 /** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */
@@ -263,7 +383,15 @@ export function readCapture(
   logs: string,
   file: string,
   secrets: readonly string[],
-): { request?: string; response?: string; truncated?: true } | undefined {
+):
+  | {
+      request?: string;
+      response?: string;
+      truncated?: true;
+      /** The bodies' sizes and digests before redaction and the cut. */
+      original?: Record<string, unknown>;
+    }
+  | undefined {
   try {
     const body = redactDeep(
       JSON.parse(
@@ -275,6 +403,9 @@ export function readCapture(
       ...(typeof body.request === "string" ? { request: body.request } : {}),
       ...(typeof body.response === "string" ? { response: body.response } : {}),
       ...(body.truncated === true ? { truncated: true as const } : {}),
+      ...(body.original && typeof body.original === "object"
+        ? { original: body.original as Record<string, unknown> }
+        : {}),
     };
   } catch {
     return undefined;
@@ -601,6 +732,7 @@ export interface Usage {
     input: number;
     output: number;
     cached: number;
+    cacheWrite: number;
     reasoning: number;
     total: number;
   };
@@ -655,7 +787,14 @@ export interface SummaryReport {
 export const emptyUsage = (): Usage => ({
   calls: 0,
   ms: 0,
-  tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+  tokens: {
+    input: 0,
+    output: 0,
+    cached: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    total: 0,
+  },
   tokensUnknown: 0,
   costUsd: null,
   costUnknown: 0,
@@ -827,7 +966,7 @@ export function usageText(usage: Usage): string {
   const t = usage.tokens;
   return [
     `${usage.calls} calls`,
-    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, out ${count(t.output)}, reasoning ${count(t.reasoning)})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
+    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, cache writes ${count(t.cacheWrite)}, out ${count(t.output)}, reasoning ${count(t.reasoning)})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
     usage.costUsd === null
       ? "cost unknown"
       : `$${usage.costUsd.toFixed(2)}${usage.costUnknown ? ` (+${usage.costUnknown} calls unknown)` : ""}`,

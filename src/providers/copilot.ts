@@ -27,7 +27,12 @@ import {
   VALIDATION_TOOL_NAME,
   worktreeGitlinks,
 } from "../work/self-validate.js";
-import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
+import {
+  targetOf,
+  type Worker,
+  type WorkerInput,
+  type WorkerResult,
+} from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
 import { ACTIVE_TOOL_IDLE_MS, serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
@@ -325,7 +330,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
       );
     let text = "";
 
-    const usage = { input: 0, output: 0, cached: 0 };
+    const usage = { input: 0, output: 0, cached: 0, cacheWrite: 0 };
     let reasoning: number | null = null;
     const calls = new Tallies();
     const tools = new NativeTools();
@@ -449,6 +454,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
             usage.input += event.data.inputTokens ?? 0;
             usage.output += event.data.outputTokens ?? 0;
             usage.cached += event.data.cacheReadTokens ?? 0;
+            usage.cacheWrite += event.data.cacheWriteTokens ?? 0;
             if (event.data.reasoningTokens !== undefined)
               reasoning = (reasoning ?? 0) + event.data.reasoningTokens;
             turn.record.tokens = tokens({ ...usage, reasoning });
@@ -595,7 +601,7 @@ export class CopilotPlanner implements Planner {
 
   private once(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
-    return loggedCall("copilot", call, choice, async (record) => {
+    return loggedCall("copilot", call, choice, async (record, live) => {
       const started = Date.now();
       const images = callImages(call);
       const turn = copilotTurn(call.conversation, call.prompt, choice.model);
@@ -627,6 +633,11 @@ export class CopilotPlanner implements Planner {
               type: event.type,
               ms: Date.now() - started,
             });
+            // The main agent's turns and context; a sub-agent's carry its agentId.
+            if (event.type === "assistant.turn_start" && !event.agentId)
+              live.turn();
+            if (event.type === "session.usage_info" && !event.agentId)
+              live.context(event.data.currentTokens, event.data.tokenLimit);
           },
         });
         record.session = result.session;
@@ -703,8 +714,8 @@ function copilotActivity(
   if (event.type !== "tool.execution_start") return;
   const tool = event.data.toolName;
   toolNames.set(event.data.toolCallId, tool);
-  input.activity({ kind: "tool", phase: "started", tool });
   const args = isObject(event.data.arguments) ? event.data.arguments : {};
+  input.activity({ kind: "tool", phase: "started", tool, ...targetOf(args) });
   if (EDIT_TOOLS.includes(tool) && typeof args.path === "string")
     input.activity({ kind: "edit", path: args.path });
   if (typeof args.command === "string")
@@ -809,7 +820,10 @@ export class CopilotWorker implements Worker {
           ),
         }),
         signal: input.signal,
-        onEvent: (event) => copilotActivity(input, event, toolNames),
+        onEvent: (event) => {
+          input.output(event);
+          copilotActivity(input, event, toolNames);
+        },
       });
       record.session = result.session;
       captureResponse(record, result.text);

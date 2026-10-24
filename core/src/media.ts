@@ -61,6 +61,7 @@ import {
   type CatFile,
   GitRefusal,
   LFS_POINTER_MAX_BYTES,
+  lfsFiltered,
   lfsPointer,
   originBound,
   readBlobs,
@@ -1077,8 +1078,8 @@ const MAX_REASON_CHARS = 2000;
  * fresh worktree, through Git LFS, and commit it as `Factory: selected
  * <set> assets`. Checks first that every captured copy still has its
  * digest, that `.gitattributes` routes every destination through LFS (a
- * repair when the item owns `.gitattributes`, else a hold with `replan`
- * and `cancel`), and that no destination exists
+ * repair when the item owns `.gitattributes`, else a hold with `repair`,
+ * `replan` and `cancel`), and that no destination exists
  * (except a plain tracked repository source of the same bytes that LFS
  * converts); after, that the staged paths are exactly the destinations and
  * each LFS pointer carries the member's sha256 and size.
@@ -1140,8 +1141,8 @@ export async function materializeSelection(input: {
             keepsSelection: true,
           }
         : hold(
-            `The repository's .gitattributes does not route ${uncovered} through Git LFS, where selected media must be stored, and Work Item ${item.id} doesn't own .gitattributes. Answer replan to give an item that rule, or cancel.`,
-            ["replan", "cancel"],
+            `The repository's .gitattributes does not route ${uncovered} through Git LFS, where selected media must be stored, and Work Item ${item.id} doesn't own .gitattributes. Answer repair to have the worker make new candidates at destinations .gitattributes routes through Git LFS, replan to give an item that rule, or cancel.`,
+            [NEW_CANDIDATES, "replan", "cancel"],
           );
     for (const member of set.members) {
       const placed = await place(directory, input.commit, item, member, signal);
@@ -1358,15 +1359,6 @@ async function place(
   }
 }
 
-/** The paths `git check-attr -z filter` reports as `filter=lfs`. */
-function lfsFiltered(output: Buffer): Set<string> {
-  const fields = output.toString("utf8").split("\0");
-  const paths = new Set<string>();
-  for (let index = 0; index + 2 < fields.length; index += 3)
-    if (fields[index + 2] === "lfs") paths.add(fields[index]!);
-  return paths;
-}
-
 // ── Validation ──────────────────────────────────────────────────────────
 
 /**
@@ -1441,8 +1433,8 @@ const RESERVED_BYTES = 1024 * MIB;
  * who clones it does, whatever the format. Objects come from the local LFS
  * store; those it lacks are fetched from origin at `commit` first. Each
  * file is checked against its pointer's size, and a copy against its
- * sha256 too. A selected member marked `required` must be its exact pointer
- * in the tree, else it holds. Returns the restored files: they now differ
+ * sha256 too. Every selected member must be its exact Git LFS pointer in
+ * the tree, else it holds. Returns the restored files: they now differ
  * from their pointer blobs, so the caller leaves them out of its
  * clean-checkout and mutation checks, mounts the linked ones read-only for
  * its commands, and gives them to rewrittenMedia after the commands.

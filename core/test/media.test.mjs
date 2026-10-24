@@ -1,5 +1,6 @@
-// Selected media travels in Git LFS: the select step writes a chosen set
-// only through LFS, in a real repository with git-lfs, and validation
+// Selected media travels in Git LFS: the plan check refuses a media item
+// with no way to LFS-routed destinations, the select step writes a chosen
+// set only through LFS, in a real repository with git-lfs, and validation
 // refuses a destination that holds plain bytes.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -9,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { hydrateTree, materializeSelection } from "../dist/media.js";
+import { checkPlan } from "../dist/planning/checks.js";
+import { BaseFiles } from "../dist/planning/facts.js";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -69,7 +72,7 @@ function candidateSet(root, destinations) {
   };
 }
 
-function item(ownedPaths) {
+function item(ownedPaths, fields = {}) {
   return {
     kind: "work",
     id: "badge",
@@ -81,9 +84,10 @@ function item(ownedPaths) {
     dependencies: [],
     ownedPaths,
     validation: [],
-    brief: "",
+    brief: "Add the badge.",
     expectedOutputRoles: ["image-0", "image-1"],
     minimumAssetSets: 1,
+    ...fields,
   };
 }
 
@@ -117,7 +121,7 @@ test("every selected member is committed as its Git LFS pointer, whatever its fo
   assert.match(pointer, new RegExp(`^size ${member.bytes}$`, "m"));
 });
 
-test("a member .gitattributes doesn't route through LFS is the item's repair when it owns .gitattributes, else replan or cancel", async () => {
+test("a member .gitattributes doesn't route through LFS is the item's repair when it owns .gitattributes, else new candidates, replan or cancel", async () => {
   const target = checkout();
   // A small file in a format no rule names: it would otherwise ship as a
   // plain blob.
@@ -133,7 +137,7 @@ test("a member .gitattributes doesn't route through LFS is the item's repair whe
   assert.match(held.question, /assets\/a\.bin/);
   assert.deepEqual(
     held.options.map((option) => option.answer),
-    ["replan", "cancel"],
+    ["repair", "replan", "cancel"],
   );
   // Nothing was committed or kept.
   assert.equal(
@@ -142,6 +146,64 @@ test("a member .gitattributes doesn't route through LFS is the item's repair whe
     }).status,
     128,
   );
+});
+
+test("the plan check refuses a media item whose destinations can't reach Git LFS", async () => {
+  // The base routes *.png through LFS, and no rule covers a whole directory.
+  const target = checkout();
+  const facts = {
+    objective: 1,
+    body: "",
+    blocks: [],
+    base: target.commit,
+    sources: [],
+    authorizedCommands: [],
+    ciOnlyCommands: [],
+    checkNames: [],
+    integratedCheckNames: [],
+    fixedScripts: [],
+    coverageObligations: [],
+    playbook: "",
+    localAssetRoots: [],
+    lfsRules: [".gitattributes: *.png filter=lfs diff=lfs merge=lfs -text"],
+  };
+  const lfs = async (...items) =>
+    (
+      await checkPlan(
+        {
+          base: target.commit,
+          items,
+          coverage: [],
+          finalCommands: [],
+          decisions: [],
+        },
+        facts,
+        new BaseFiles(target.directory, target.commit),
+      )
+    )
+      .filter((finding) => /stored in Git LFS/.test(finding.message))
+      .map((finding) => finding.message);
+
+  const [directory] = await lfs(item(["assets/"]));
+  assert.match(directory, /routes none of its owned paths through LFS/);
+  assert.match(directory, /Add \.gitattributes to its owned paths/);
+  const [short] = await lfs(item(["assets/a.png", "src/gallery.ts"]));
+  assert.match(short, /routes only assets\/a\.png through LFS/);
+
+  // One routed file per role, ownership of .gitattributes, or depending on
+  // the item that owns it each pass.
+  assert.deepEqual(await lfs(item(["assets/a.png", "assets/b.png"])), []);
+  assert.deepEqual(await lfs(item(["assets/", ".gitattributes"])), []);
+  const rules = item([".gitattributes"], {
+    id: "rules",
+    expectedOutputRoles: [],
+  });
+  assert.deepEqual(
+    await lfs(rules, item(["assets/"], { dependencies: ["rules"] })),
+    [],
+  );
+  // A sibling that owns it is no help: its rule isn't in this item's tree.
+  assert.equal((await lfs(rules, item(["assets/"]))).length, 1);
 });
 
 test("validation holds when a selected destination holds plain bytes instead of its LFS pointer", async () => {

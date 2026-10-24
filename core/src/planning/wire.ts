@@ -739,6 +739,7 @@ export function planChoices(
     })),
     executionProfiles: options.profiles ?? null,
     ...(facts.fixedScripts.length ? { fixedScripts: facts.fixedScripts } : {}),
+    ...(facts.lfsRules.length ? { lfsRules: facts.lfsRules } : {}),
     checkNames: checkNames.map((name, checkIndex) => ({ checkIndex, name })),
     ...(modes.qa?.includes("integrated-ci")
       ? {

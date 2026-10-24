@@ -76,15 +76,13 @@ Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the comple
 
 ### Integration tests
 
-[Integration tests](integration/README.md) run real Objectives with real providers against the scratch repository `clockgrove/factory-drill`, and never run in CI. They crash the service at every crash point, cut the network and stop models mid-turn. Run them on demand, as bounded groups:
+[Integration tests](integration/README.md) run real Objectives with real providers against the scratch repositories `clockgrove/factory-drill` and `clockgrove/factory-drill-2`, and never run in CI. A suite runs all its cases at once and stops itself within 60 minutes:
 
 ```sh
 npm run build:core
-npm run integration -- --dry-run          # groups, expected minutes and preconditions
-npm run integration -- --only queue
+npm run integration -- --dry-run          # every case, what it checks and the budget
+npm run integration                       # the main suite
 ```
-
-A plan expected to take over 60 minutes needs the maintainer's approval, then `--approved-long`.
 
 ### Recovery end-to-end test
 

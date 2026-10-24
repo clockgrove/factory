@@ -322,7 +322,13 @@ export function offeredProfiles(
   });
 }
 
-export const INVALID_ANSWER = "The planner's answer didn't match the schema";
+const INVALID_ANSWER = "The planner's answer didn't match the schema";
+
+/**
+ * The kept fact that marks step `step`'s last model answer invalid, holding
+ * the refusal; the step's next valid answer clears it.
+ */
+export const invalidKey = (step: string) => `${step}:invalid`;
 
 /**
  * The exact base text of the repository sections the items named in the
@@ -409,14 +415,12 @@ function planRoundStep(
               (state.done[`decide:${g}:${n - 1}`] as Decision).corrections ?? []
             ).filter((f) => f.source !== "operator")
           : [];
-      // A broken answer last time: the planner sees why, once.
-      const lastError = state.retries[key]?.lastError;
+      // A broken answer last time: the planner sees why, until it answers validly.
+      const invalid = state.kept[invalidKey(key)] as string | undefined;
       const corrections = [
         ...operatorCorrections(generationDecisions(state, g)),
         ...fixes,
-        ...(lastError?.startsWith(INVALID_ANSWER)
-          ? [{ source: "check" as const, message: lastError }]
-          : []),
+        ...(invalid ? [{ source: "check" as const, message: invalid }] : []),
       ];
       const revising = Boolean(previous?.answer);
       const profiles = offeredProfiles(config);
@@ -490,6 +494,8 @@ function planRoundStep(
         log: context.log,
       });
       if ("outcome" in taken) return taken.outcome;
+      // An answer clears the mark; an invalid one sets it again (refusedAnswer).
+      context.keep({ [invalidKey(key)]: null });
       let full: unknown = taken.value;
       if (revising) {
         const revised = applyRevision(
@@ -499,7 +505,7 @@ function planRoundStep(
           wire,
         );
         if (revised.invalidShape)
-          return refusedAnswer(context.log, answer, revised.findings);
+          return refusedAnswer(key, context.log, answer, revised.findings);
         if (!revised.answer)
           return done({
             ...(g > 1 && n === 1 ? { inputs } : {}),
@@ -510,7 +516,7 @@ function planRoundStep(
       }
       const decoded = decodePlan(full, facts, wire);
       if (decoded.invalidShape)
-        return refusedAnswer(context.log, answer, decoded.findings);
+        return refusedAnswer(key, context.log, answer, decoded.findings);
       if (decoded.cannot) {
         context.log({ event: "planner-cannot-plan", ...decoded.cannot });
         // No plan to revise: a round after it answers in full.
@@ -884,8 +890,10 @@ export function planningReplan(
         decision,
         ...(key.startsWith("review:") ? { findings: [] } : {}),
       } satisfies PlanRound | ReviewRound,
-      // A plan step's kept lookup rounds end with it.
-      ...(key.startsWith("plan:") ? { keep: { [lookupsKey(key)]: null } } : {}),
+      // A plan step's kept lookup rounds and invalid-answer mark end with it.
+      ...(key.startsWith("plan:")
+        ? { keep: { [lookupsKey(key)]: null, [invalidKey(key)]: null } }
+        : {}),
     };
   // An `approve` that found the Objective edited (see changedHold).
   const approvedKey = `${key}:approved`;
@@ -1465,18 +1473,29 @@ function done(result: unknown): Outcome {
 
 /** An answer Factory's checks refused: logged as such (usage.ts logRefused), and retried. */
 function refusedAnswer(
+  step: string,
   log: (event: Record<string, unknown>) => void,
   answer: PlannerAnswer,
   findings: Finding[],
 ): Extract<Outcome, { kind: "retry" }> {
   logRefused(log, answer.callId, findings.map((f) => f.message).join("; "));
-  return invalidAnswer(findings);
+  return invalidAnswer(step, findings);
+}
+
+/** Retry step `step` after an invalid model answer, marked for its next attempt (`invalidKey`). */
+export function invalidRetry(
+  step: string,
+  reason: string,
+): Extract<Outcome, { kind: "retry" }> {
+  return { ...errored(reason), keep: { [invalidKey(step)]: reason } };
 }
 
 export function invalidAnswer(
+  step: string,
   findings: Finding[],
 ): Extract<Outcome, { kind: "retry" }> {
-  return errored(
+  return invalidRetry(
+    step,
     `${INVALID_ANSWER}: ${findings
       .map((f) => f.message)
       .join("; ")

@@ -1,13 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { grant } from "../allowances.js";
 import { isObject } from "../checked.js";
-import {
-  errored,
-  hold,
-  type Outcome,
-  type Step,
-  type StepContext,
-} from "../engine.js";
+import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
 import { code, prose } from "../markdown.js";
 import { logRefused } from "../providers/usage.js";
 import type { ObjectiveState } from "../state.js";
@@ -40,8 +34,9 @@ import {
 import {
   acceptedRoundAnswer,
   decisions,
-  INVALID_ANSWER,
   invalidAnswer,
+  invalidKey,
+  invalidRetry,
   keepSession,
   localExecutables,
   type ObjectiveInputs,
@@ -835,7 +830,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
         ...(profiles ? { profiles } : {}),
       };
-      const lastError = state.retries[key]?.lastError;
+      const invalidBefore = state.kept[invalidKey(key)] as string | undefined;
       const corrections: Finding[] = [
         ...answered.map(({ question, answer }) => ({
           source: "operator" as const,
@@ -849,8 +844,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
               },
             ]
           : []),
-        ...(lastError?.startsWith(INVALID_ANSWER)
-          ? [{ source: "check" as const, message: lastError }]
+        ...(invalidBefore
+          ? [{ source: "check" as const, message: invalidBefore }]
           : []),
       ];
       const base = currentAnswer(state);
@@ -928,6 +923,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         log: context.log,
       });
       if ("outcome" in taken) return taken.outcome;
+      // An answer clears the mark; an invalid one sets it again (invalidAnswer).
+      context.keep({ [invalidKey(key)]: null });
       const revised = whole
         ? { answer: taken.value, findings: [] }
         : applyRevision(base, taken.value, facts, wire);
@@ -944,14 +941,14 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           answer.callId,
           findings.map((f) => f.message).join("; "),
         );
-        return lastError?.startsWith(INVALID_ANSWER)
+        return invalidBefore
           ? reject([
               {
                 source: "check",
                 message: `The planner's answer stayed invalid: ${findings.map((f) => f.message).join("; ")}`,
               },
             ])
-          : invalidAnswer(findings);
+          : invalidAnswer(key, findings);
       };
       if (revised.invalidShape) return invalid(revised.findings);
       if (!revised.answer) return reject(revised.findings);
@@ -1075,8 +1072,9 @@ function amendReviewStep(
   proposal: AmendmentProposal,
   deps: PlanningDeps,
 ): Step {
+  const key = `${KEY(proposal.id)}:review`;
   return {
-    key: `${KEY(proposal.id)}:review`,
+    key,
     deadlineMs: 45 * MINUTE,
     redo: "refuse",
     run: async (context): Promise<Outcome> => {
@@ -1159,17 +1157,17 @@ function amendReviewStep(
         draft.items.map((item) => item.id),
       );
       const invalidReview = "The amendment review answer was invalid";
+      // An answer clears the mark; an invalid one sets it again.
+      context.keep({ [invalidKey(key)]: null });
       if (decoded.invalid)
         logRefused(context.log, answer.callId, decoded.reason);
       // One retry with the error; a second invalid answer rejects it.
       if (decoded.invalid)
-        return state.retries[
-          `${KEY(proposal.id)}:review`
-        ]?.lastError?.startsWith(invalidReview)
+        return state.kept[invalidKey(key)] !== undefined
           ? done({
               rejected: `${invalidReview} twice: ${decoded.reason}`,
             })
-          : errored(`${invalidReview}: ${decoded.reason}`);
+          : invalidRetry(key, `${invalidReview}: ${decoded.reason}`);
       return done(
         decoded.findings.length
           ? {

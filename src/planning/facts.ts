@@ -472,9 +472,6 @@ const VALIDATION_ENVIRONMENT = {
 const NETWORK_TOOLS = new Set([
   "curl",
   "wget",
-  "npx",
-  "pnpx",
-  "bunx",
   "gh",
   "pip",
   "pip3",
@@ -488,23 +485,23 @@ const NETWORK_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   pnpm: new Set(["audit", "install", "i", "dlx", "fetch", "publish", "view"]),
   yarn: new Set(["audit", "install", "dlx", "npm"]),
   git: new Set(["fetch", "clone", "pull", "push", "ls-remote"]),
-  docker: new Set(["pull", "push", "build"]),
+  docker: new Set(["pull", "push"]),
   go: new Set(["get", "install"]),
 };
 
-/** The network tool a script body invokes, from its command words; never prose. */
-function networkToolIn(
-  body: string,
-  /** A segment known to run offline (the authorized bootstrap or a local bin). */
-  skip?: (segment: string) => boolean,
-): string | undefined {
+/**
+ * The network tool a script body invokes, from its command words; never
+ * prose. The authorized package bootstrap, the one command granted a
+ * network, is not one.
+ */
+function networkToolIn(body: string): string | undefined {
   for (const segment of body.split(/&&|\|\||[;|\n&(){}`]|\$\(/)) {
     const words = segment
       .trim()
       .split(/\s+/)
       .filter((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
     const tool = words[0]?.replace(/^.*\//, "");
-    if (!tool || skip?.(segment.trim())) continue;
+    if (!tool || packageBootstrap(segment.trim()) !== undefined) continue;
     if (NETWORK_TOOLS.has(tool)) return tool;
     const subcommand = words.slice(1).find((word) => !word.startsWith("-"));
     if (subcommand && NETWORK_SUBCOMMANDS[tool]?.has(subcommand))
@@ -513,30 +510,18 @@ function networkToolIn(
   return undefined;
 }
 
-/**
- * Segments that run offline: the authorized package bootstrap (the one
- * command granted a network) and npx/pnpx/bunx, which run a local bin.
- */
-function offlineSegment(segment: string): boolean {
-  if (packageBootstrap(segment) !== undefined) return true;
-  const first = segment
-    .split(/\s+/)
-    .find((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-  return first !== undefined && /^(?:npx|pnpx|bunx)$/.test(first);
-}
-
 /** The network tool a validation command reaches, directly or through root package scripts (to a fixed depth). */
 export function networkToolOfCommand(
   command: string,
   scripts: Record<string, unknown>,
   depth = 0,
 ): string | undefined {
-  const direct = networkToolIn(command, offlineSegment);
+  const direct = networkToolIn(command);
   if (direct) return direct;
   const invocation = packageScriptInvocation(command);
   const body = invocation ? scripts[invocation.name] : undefined;
   if (typeof body !== "string" || depth > 3) return undefined;
-  const own = networkToolIn(body, offlineSegment);
+  const own = networkToolIn(body);
   if (own) return own;
   for (const segment of body.split(/&&|\|\||[;|\n&]/))
     if (packageScriptInvocation(segment.trim())) {

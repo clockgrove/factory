@@ -191,13 +191,12 @@ export const COMPILER_READINESS_GUIDANCE =
 
 /**
  * A line-number reference next to a file name in an acceptance entry
- * (`store.ts:88`, `store.ts#L88`, `store.ts line 88`, `store.ts (lines
- * 40-210)`). Structural only: a file name with an extension directly followed
- * by a line marker. Only source-file extensions count, so host:port and data
- * files ("data.csv line 1") do not match, nor do URLs or "line 1" of output.
+ * (`store.ts:88`, `store.ts#L88`). Structural only: a file name with an
+ * extension directly followed by a line marker. Only source-file extensions
+ * count, so host:port and data files (`data.csv:1`) do not match.
  */
 const LINE_REFERENCE =
-  /(?<![:/\w.-])[\w.-]+(?:\/[\w.-]+)*\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|hpp|swift|sh|sql|css|scss|vue|svelte|md|ya?ml|toml|json|html)`?(?::\d+\b|#L\d+\b|\s*,?\s*\(?\s*(?:around\s+|near\s+|at\s+)?lines?\s+\d+)/i;
+  /(?<![:/\w.-])[\w.-]+(?:\/[\w.-]+)*\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|hpp|swift|sh|sql|css|scss|vue|svelte|md|ya?ml|toml|json|html)`?(?::\d+\b|#L\d+\b)/i;
 
 /**
  * The plan standard's deterministic lint, run before paid review on each

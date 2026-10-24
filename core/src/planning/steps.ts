@@ -366,13 +366,13 @@ export function offeredProfiles(
   const ids = recipeInstallation(config).profileIds;
   if (!ids.length) return undefined;
   return ids.map((id) => {
-    const { provider, description, selectionHints } =
+    const { provider, description, selectionHints, worktreeRead } =
       config.execution.profiles![id]!;
     return {
       id,
       description,
       ...(selectionHints.length ? { selectionHints } : {}),
-      worker: profileWorker(config.providers[provider]!),
+      worker: profileWorker(config.providers[provider]!, worktreeRead === true),
     };
   });
 }

@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import type { CoreConfig } from "./config.js";
 import type { Paths } from "./paths.js";
 import { CLAUDE_LOGIN_CREDENTIALS } from "./providers/claude.js";
+import { COPILOT_SECRETS, copilotConfigured } from "./providers/config.js";
 
 /** Exit code of a serve whose configuration doesn't load (EX_CONFIG): not restarted. */
 export const CONFIGURATION_EXIT = 78;
@@ -45,6 +46,9 @@ const KEPT = [
   "CODEX_HOME",
   "CLAUDE_CONFIG_DIR",
   "COPILOT_HOME",
+  "COPILOT_API_URL",
+  "COPILOT_PROVIDER_BASE_URL",
+  "COPILOT_PROVIDER_TYPE",
   "GH_CONFIG_DIR",
   "HTTPS_PROXY",
   "HTTP_PROXY",
@@ -137,6 +141,8 @@ export function credentialFiles(
   config: CoreConfig,
 ): Credential[] {
   const readable = new Set<string>(CLAUDE_LOGIN_CREDENTIALS);
+  if (copilotConfigured(config.providers))
+    for (const name of COPILOT_SECRETS) readable.add(name);
   for (const { worker } of Object.values(config.providers))
     if (worker.kind === "openai-agents") readable.add(worker.apiKeyEnv);
     else if (worker.kind === "claude-managed-agents")

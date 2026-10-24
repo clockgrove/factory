@@ -467,13 +467,17 @@ const LOGIN_PROBE_MS = 30_000;
 /**
  * The login the Claude SDK resolves, asked of the SDK itself with no model
  * call: a keychain, token, profile or third-party login counts, and an
- * expired one the CLI could not refresh reports none. `unchecked` when the
- * SDK could not answer in time.
+ * expired one the CLI could not refresh reports none. Like any Claude
+ * client, it may refresh the operator's login and update ~/.claude.json.
+ * `unreadable` when a service credential can't be read; `unchecked` when
+ * the SDK could not answer.
  */
 export async function claudeLoginProbe(): Promise<
-  { found: string } | { missing: string } | { unchecked: string }
+  | { found: string }
+  | { missing: string; unreadable?: true }
+  | { unchecked: string }
 > {
-  const root = mkdtempSync(join(tmpdir(), "factory-claude-login-"));
+  let root: string | undefined;
   const controller = new AbortController();
   let release!: () => void;
   const idle = new Promise<void>((done) => {
@@ -482,6 +486,7 @@ export async function claudeLoginProbe(): Promise<
   let session: Query | undefined;
   let timer: NodeJS.Timeout | undefined;
   try {
+    root = mkdtempSync(join(tmpdir(), "factory-claude-login-"));
     const credentials = join(root, "gh");
     mkdirSync(credentials, { mode: 0o700 });
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -534,7 +539,8 @@ export async function claudeLoginProbe(): Promise<
     return { missing: "the Claude SDK found no usable login" };
   } catch (error) {
     // A loaded service credential that can't be read is a missing login.
-    if (error instanceof PlannerError) return { missing: error.message };
+    if (error instanceof PlannerError)
+      return { missing: error.message, unreadable: true };
     return {
       unchecked: `the Claude login could not be checked: ${detail(errorMessage(error))}`,
     };
@@ -543,7 +549,7 @@ export async function claudeLoginProbe(): Promise<
     release();
     session?.close();
     controller.abort();
-    rmSync(root, { recursive: true, force: true });
+    if (root) rmSync(root, { recursive: true, force: true });
   }
 }
 

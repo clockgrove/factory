@@ -4,8 +4,9 @@
  * no model call and no change to the target or its settings (the Codex
  * probe writes only its own temporary directories). Setup shows it; a `blocked` check names its
  * fix. Codex and Copilot logins are checked by presence, Claude's by asking
- * its SDK which login it resolves; account access, billing and
- * entitlements are first known when a provider is called.
+ * its SDK which login it resolves, which may refresh the operator's login
+ * and update ~/.claude.json as any Claude client does; account access,
+ * billing and entitlements are first known when a provider is called.
  */
 
 import { execFileSync } from "node:child_process";
@@ -25,6 +26,7 @@ import {
 } from "./providers/claude.js";
 import { codexLauncherProblem } from "./providers/codex.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
+import { COPILOT_SECRETS } from "./providers/config.js";
 import { executable, sandboxStatus } from "./sandbox.js";
 import { errorMessage } from "./text.js";
 
@@ -227,6 +229,10 @@ const SDK: Record<string, string> = {
   copilot: "@github/copilot-sdk",
 };
 
+/** The Claude SDK's login, probed once per process: every Claude provider shares it. */
+let claudeProbe: ReturnType<typeof claudeLoginProbe> | undefined;
+const claudeLogin = () => (claudeProbe ??= claudeLoginProbe());
+
 /**
  * The login each kind uses, or why it is missing: Codex's and Copilot's by
  * presence, Claude's as its SDK resolves it, with no model call.
@@ -256,21 +262,23 @@ async function login(
         (name) => !process.env[name] && bound.includes(name),
       );
       if (credential) return `${credential} in the service's credentials`;
-      const probe = await claudeLoginProbe();
+      const probe = await claudeLogin();
       if ("found" in probe) return probe.found;
       if ("unchecked" in probe) return { unchecked: probe.unchecked };
       return {
         missing: probe.missing,
-        fix: "Run `claude auth login` as the user the service runs as, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
+        fix: probe.unreadable
+          ? "Restore the private file the service loads that credential from (`--credential-file`), then repeat"
+          : "Run `claude auth login` as the user the service runs as, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
       };
     }
     default: {
-      const named = set(
-        "COPILOT_PROVIDER_BASE_URL",
-        "GITHUB_COPILOT_API_TOKEN",
-        "COPILOT_GITHUB_TOKEN",
-      );
-      return named ? `${named} in the environment` : "the GitHub CLI login";
+      const named = set("COPILOT_PROVIDER_BASE_URL", ...COPILOT_SECRETS);
+      if (named) return `${named} in the environment`;
+      const credential = COPILOT_SECRETS.find((name) => loaded(name, bound));
+      return credential
+        ? `${credential} in the service's credentials`
+        : "the GitHub CLI login";
     }
   }
 }

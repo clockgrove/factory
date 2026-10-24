@@ -127,9 +127,9 @@ export const CLAUDE_TOOLS = [
 ] as const;
 
 /**
- * The Copilot login's secret values in the service's environment: they
- * reach only the Copilot runtime (copilot.ts copilotEnvironment), and are
- * redacted from output wherever a Copilot planner or worker is configured.
+ * The Copilot login's secrets: each read from the environment or, for a
+ * supervised service, its loaded credentials (claude.ts serviceCredential).
+ * They reach only the Copilot runtime (copilot.ts copilotEnvironment).
  */
 export const COPILOT_SECRETS = [
   "COPILOT_GITHUB_TOKEN",
@@ -137,6 +137,21 @@ export const COPILOT_SECRETS = [
   "COPILOT_PROVIDER_BEARER_TOKEN",
   "GITHUB_COPILOT_API_TOKEN",
 ] as const;
+
+/** Redacted from output wherever Copilot is configured: the secrets, and an endpoint that may embed a key. */
+export const COPILOT_REDACTED = [
+  ...COPILOT_SECRETS,
+  "COPILOT_PROVIDER_BASE_URL",
+] as const;
+
+/** A Copilot planner or worker is configured. */
+export function copilotConfigured(
+  providers: Readonly<Record<string, ProviderConfig>>,
+): boolean {
+  return Object.values(providers).some(
+    ({ planner, worker }) => planner === "copilot" || worker.kind === "copilot",
+  );
+}
 
 /** The Copilot worker's tools: the SDK's file tools and Factory's Validate. */
 export const COPILOT_TOOLS = [

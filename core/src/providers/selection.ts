@@ -23,6 +23,7 @@ import {
 import {
   ClaudeWorker,
   type ClaudeWorkerConfig,
+  claudeWorkerTools,
   DEFAULT_CLAUDE_WORKER,
 } from "./claude-worker.js";
 import {
@@ -88,7 +89,10 @@ export interface ProfileWorker {
 }
 
 /** A provider's worker as the planner sees it, adapter defaults filled in. */
-export function profileWorker(provider: ProviderConfig): ProfileWorker {
+export function profileWorker(
+  provider: ProviderConfig,
+  worktreeRead: boolean,
+): ProfileWorker {
   const worker = resolvedProvider(provider).worker;
   switch (worker.kind) {
     case "codex":
@@ -105,9 +109,7 @@ export function profileWorker(provider: ProviderConfig): ProfileWorker {
         kind: worker.kind,
         model: settings.model,
         effort: settings.effort,
-        tools: settings.tools.filter((tool) =>
-          settings.allowedTools.includes(tool),
-        ),
+        tools: claudeWorkerTools(settings, worktreeRead),
         network: "off",
       };
     }

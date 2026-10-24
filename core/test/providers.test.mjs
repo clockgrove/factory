@@ -1,5 +1,5 @@
 // Provider settings through `factory setup`, and the readiness check that
-// asks the Claude SDK which login it resolves (no model call).
+// asks the Claude SDK which login it resolves (no model call, no network).
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -66,7 +66,8 @@ test("setup completes a half-given model choice and sets Copilot's idle bound; r
   );
 });
 
-test("Claude readiness asks the SDK for its login: none or an expired one is blocked, a token counts", async () => {
+// Offline: the SDK answers from local state, with no model call.
+test("Claude readiness asks the SDK for its login: none is blocked, and so is a service credential it can't read", async () => {
   const inst = installation();
   configured(
     inst,
@@ -81,9 +82,13 @@ test("Claude readiness asks the SDK for its login: none or an expired one is blo
   mkdirSync(home);
   inst.env.HOME = home;
   for (const name of [
-    "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_PROFILE",
+    "ANTHROPIC_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "CREDENTIALS_DIRECTORY",
   ])
     delete inst.env[name];
@@ -98,24 +103,15 @@ test("Claude readiness asks the SDK for its login: none or an expired one is blo
   assert.match(none.detail, /found no usable login/);
   assert.match(none.fix, /claude auth login/);
 
-  // An expired login file the CLI can't refresh is no login either.
-  mkdirSync(join(home, ".claude"), { recursive: true });
-  writeFileSync(
-    join(home, ".claude", ".credentials.json"),
-    JSON.stringify({
-      claudeAiOauth: {
-        accessToken: "sk-ant-oat01-expired",
-        refreshToken: "sk-ant-ort01-revoked",
-        expiresAt: 1_700_000_000_000,
-        scopes: ["user:inference"],
-      },
-    }),
-    { mode: 0o600 },
-  );
-  assert.equal(check().status, "blocked");
-
-  inst.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-readiness-check";
-  const token = check();
-  assert.equal(token.status, "ok", JSON.stringify(token));
-  assert.match(token.detail, /CLAUDE_CODE_OAUTH_TOKEN/);
+  // A loaded credential that is empty names the file, not a login.
+  const credentials = join(inst.root, "credentials");
+  mkdirSync(credentials);
+  writeFileSync(join(credentials, "CLAUDE_CODE_OAUTH_TOKEN"), "", {
+    mode: 0o600,
+  });
+  inst.env.CREDENTIALS_DIRECTORY = credentials;
+  const unreadable = check();
+  assert.equal(unreadable.status, "blocked", JSON.stringify(unreadable));
+  assert.match(unreadable.detail, /CLAUDE_CODE_OAUTH_TOKEN is empty/);
+  assert.match(unreadable.fix, /--credential-file/);
 });

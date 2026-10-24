@@ -123,7 +123,7 @@ Check documentation commands, links and formatting when they change. Use the [re
 
 ## Pull requests
 
-Link the issue, explain the user-visible change, and report the checks you ran. Keep each pull request focused on one complete outcome, with adjacent cleanup left out. Describe any remaining limitations and distinguish local test results from live acceptance evidence. Never include credentials, private repository content, raw agent transcripts, or private run details.
+Link the issue, explain the user-visible change, and report the checks you ran. Land through the merge queue, in stacks where changes build on each other, and push with `scripts/land-prep.sh`; see [Landing changes](docs/LANDING.md). Keep each pull request focused on one complete outcome, with adjacent cleanup left out. Describe any remaining limitations and distinguish local test results from live acceptance evidence. Never include credentials, private repository content, raw agent transcripts, or private run details.
 
 Preserve these boundaries:
 

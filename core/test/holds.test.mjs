@@ -235,6 +235,73 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   await stopped(service);
 });
 
+test("a changed delivery.kind can't be adopted or switched to: the question names cancel and re-queue", async () => {
+  const inst = installation();
+  const providers = {
+    codex: { planner: "codex", worker: { kind: "codex" } },
+    claude: { planner: "claude", worker: { kind: "claude" } },
+  };
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    { providers, defaultProvider: "codex" },
+  );
+  seed(inst, 47);
+  const before = stateOf(inst, 47).frozen;
+  const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+  config.delivery = { kind: "native-stack" };
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  let service = serve(inst);
+  await until(() => stateOf(inst, 47).holds.length > 0, "the question");
+  const [asked] = stateOf(inst, 47).holds;
+  assert.equal(asked.step, "config");
+  assert.deepEqual(
+    asked.options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
+  assert.match(
+    asked.question,
+    /: delivery\.kind\. Its plan is split for delivery\.kind "regular", so it can't run on "native-stack"\. To deliver it with "native-stack", cancel it and queue it again\./,
+  );
+  await stopped(service);
+  // Its provider is gone too: a switch would freeze native-stack, so the
+  // engine refuses it.
+  config.providers = { claude: providers.claude };
+  config.defaultProvider = "claude";
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  service = serve(inst);
+  await until(() => status(inst).service === "running", "service");
+  assert.equal(
+    cli(inst, "answer", "47", "retry", "--question", asked.id).code,
+    0,
+  );
+  await until(
+    () => stateOf(inst, 47).holds.some((open) => open.id !== asked.id),
+    "the removed provider's question",
+  );
+  const [removed] = stateOf(inst, 47).holds;
+  assert.ok(removed.options.some((option) => option.answer === "switch"));
+  const switched = cli(
+    inst,
+    "answer",
+    "47",
+    "switch",
+    "claude",
+    "--question",
+    removed.id,
+  );
+  assert.equal(switched.code, 1);
+  assert.equal(refusal(switched), "invalid_answer");
+  assert.match(
+    switched.err,
+    /`switch claude` would deliver this Objective with delivery\.kind "native-stack", but its plan is split for "regular"/,
+  );
+  assert.deepEqual(stateOf(inst, 47).frozen, before);
+  assert.equal(cli(inst, "cancel", "47").code, 0);
+  await stopped(service);
+});
+
 test("an execution profile frozen at admission is kept through a config change; a removed one holds with retry", async () => {
   const inst = installation();
   const providers = {

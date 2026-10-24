@@ -128,6 +128,22 @@ export function profilesLacking(
   return [...used].filter((id) => !Object.hasOwn(profiles, id)).sort();
 }
 
+/**
+ * The delivery kind a frozen configuration has and the one `config`
+ * would freeze instead, when they differ. A plan is split by the kind
+ * its Objective froze (work/steps.ts `stackOf`), so `adopt` and `switch`
+ * never change it; delivering with the other kind takes a new run.
+ */
+export function deliveryChange(
+  frozen: Record<string, unknown>,
+  config: Record<string, unknown>,
+): { was: string; now: string } | undefined {
+  const kind = (of: Record<string, unknown>) =>
+    String(isObject(of.delivery) ? of.delivery.kind : undefined);
+  const [was, now] = [kind(frozen), kind(config)];
+  return was === now ? undefined : { was, now };
+}
+
 /** The plan's items in dependency order: each after the items it depends on. */
 export function dependencyOrder(plan: Plan): WorkItem[] {
   const ordered: WorkItem[] = [];

@@ -19,7 +19,7 @@ Part of [the design](../DESIGN.md).
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - git, git lfs, node and each final command's program are on the PATH;
   - a final command that needs the network is flagged.
-- **Providers:** each planner's and worker's SDK is installed and its login is present. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
+- **Providers:** each planner's and worker's SDK is installed and its login is present. Codex and Copilot logins are checked by presence. Claude's is the login the Claude SDK resolves, asked of it once per setup with no model call and a 30-second bound. A keychain, token, profile or cloud-provider login counts. An expired login whose refresh the server rejects is `blocked`, but one whose refresh fails for network reasons still reads `ok`. No answer is `warn`. Like any Claude client, the probe may refresh the operator's login and update `~/.claude.json`. A credential the background service loads at start counts by name, and one it can't read is `blocked` with the file to restore. Copilot's tokens and keys may be service credentials too (`--credential-file`), and its endpoint settings carry over from the setup shell. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
 - **Repository:**
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;
@@ -48,10 +48,10 @@ Provider options need `--provider NAME`. They add the provider or change it:
 
 - `--planner codex|claude|copilot` and `--worker codex|claude|copilot`. Changing a kind drops that kind's settings.
 - `--default`. The first provider is the default until `--default` moves it.
-- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`.
+- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`. One given alone keeps the other half of the choice in effect, or the planner kind's default.
 - Codex worker settings: `--codex-network`, `--codex-model`, `--codex-effort` and `--codex-service-tier`.
 - Claude worker settings: `--claude-model`, `--claude-effort`, `--claude-max-turns`, `--claude-tools`, `--claude-allowed-tools`, `--claude-permission-mode` and `--claude-setting-sources`.
-- Copilot worker settings: `--copilot-model`, `--copilot-effort` and `--copilot-tools`.
+- Copilot worker settings: `--copilot-model`, `--copilot-effort`, `--copilot-tools` and `--copilot-timeout-seconds` (`worker.idleSeconds`, how long a turn may be silent).
 
 Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
 
@@ -66,12 +66,12 @@ Tool and source lists are comma-separated. A worker option for another worker ki
 The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.
 
 - **`--background`:** setup as above. Only once its status is `configured` does it write the unit and enable and start it, then wait up to 30 s for the service to take its lock.
-  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations and proxies.
+  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations, Copilot endpoint settings (`COPILOT_API_URL`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`) and proxies.
   - It restarts on failure, except on exit 2 (usage) and 78 (a configuration that doesn't load).
   - `KillMode=mixed`: the service stops at its next tick, and then its children are killed.
   - Repeated with nothing changed, it leaves the running service alone. The service reads its configuration and credentials once, so it restarts when the unit changed (an upgrade, or a changed environment or credential list), when setup changed the configuration, or when `--credential-file` is given.
   - A service that exits or restarts before taking its lock blocks `--background` and names the journal.
-- **`--credential-file NAME=FILE`...** (with `--background`): each is a LoadCredential. NAME is one Factory reads from the service's credentials: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a managed worker's credential variable. FILE is an absolute path to a regular file, not a link, that only its owner can read, in a directory no one else can write. Setup never reads it, and readiness counts it as present. Without the option, the unit keeps its credentials, which are checked again.
+- **`--credential-file NAME=FILE`...** (with `--background`): each is a LoadCredential. NAME is one Factory reads from the service's credentials: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. FILE is an absolute path to a regular file, not a link, that only its owner can read, in a directory no one else can write. Setup never reads it, and readiness counts it as present. Without the option, the unit keeps its credentials, which are checked again.
 - **`--check`:** the unit's enabled and active state, whether the service holds its lock, the credential names, and whether the unit is current. Exit 0 only when it is running.
 - **`--stop`:** stop the service and disable it, so it doesn't start at the next login. `--background` starts it again.
 - **`--uninstall`:** stop the service and remove its unit. The configuration and state stay.

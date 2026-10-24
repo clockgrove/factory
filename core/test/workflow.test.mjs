@@ -333,6 +333,146 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   await stopped(service);
 });
 
+test("an Objective with no final command still gets QA on the default branch: final validation runs each Work Item's commands there, intact, in a fresh checkout", async () => {
+  const inst = installation();
+  mkdirSync(inst.root, { recursive: true });
+  const git = (cwd, ...args) => {
+    const result = spawnSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@t", ...args],
+      { cwd, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(inst.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
+  git(inst.root, "clone", "--quiet", "origin.git", "work");
+  const work = join(inst.root, "work");
+  const commit = (path, text, message) => {
+    writeFileSync(join(work, path), text);
+    git(work, "add", path);
+    git(work, "commit", "--quiet", "-m", message);
+    git(work, "push", "--quiet", "origin", "HEAD:main");
+    return git(work, "rev-parse", "HEAD");
+  };
+  // Both items run check.mjs, which passes only once the parser is fixed.
+  // a's leak.mjs and b's gen.mjs leave ignored files; b.mjs needs its own
+  // gen.out and none of a's leak.out.
+  commit(".gitignore", "*.out\n", "ignore outputs");
+  commit(
+    "leak.mjs",
+    'import { writeFileSync } from "node:fs";\nwriteFileSync("leak.out", "a");\n',
+    "leak",
+  );
+  commit(
+    "gen.mjs",
+    'import { writeFileSync } from "node:fs";\nwriteFileSync("gen.out", "b");\n',
+    "gen",
+  );
+  commit(
+    "b.mjs",
+    'import { existsSync } from "node:fs";\nprocess.exit(existsSync("gen.out") && !existsSync("leak.out") ? 0 : 1);\n',
+    "b",
+  );
+  const base = commit(
+    "check.mjs",
+    'import { readFileSync } from "node:fs";\nprocess.exit(readFileSync("parser.txt", "utf8") === "fixed\\n" ? 0 : 1);\n',
+    "base",
+  );
+  const merged = commit("parser.txt", "broken\n", "a merged");
+  const mergedB = commit("b.txt", "b\n", "b merged");
+  git(inst.root, "clone", "--quiet", "origin.git", "checkout");
+  githubOrigin(join(inst.root, "checkout"), join(inst.root, "origin.git"));
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const at = "2026-01-01T00:00:00.000Z";
+  seed(inst, 61, "building", {
+    done: {
+      check: {
+        shown: readShown(
+          "<h2>Goal</h2><p>Fix the parser.</p><h2>Acceptance</h2><ul><li>The parser is fixed.</li></ul>",
+          { sources: false },
+        ),
+        title: "Parser",
+      },
+      plan: {
+        base,
+        // b, listed first, depends on a: a's commands run first.
+        items: [
+          {
+            id: "b",
+            ownedPaths: ["b.txt"],
+            dependencies: ["a"],
+            validation: ["node gen.mjs", "node check.mjs", "node b.mjs"].map(
+              (command) => ({ command, provenance: "base-observed" }),
+            ),
+          },
+          {
+            id: "a",
+            ownedPaths: ["parser.txt"],
+            dependencies: [],
+            validation: ["node check.mjs", "node leak.mjs"].map((command) => ({
+              command,
+              provenance: "base-observed",
+            })),
+          },
+        ],
+        coverage: [],
+        finalCommands: [],
+      },
+      "item:a:work": {},
+      "item:a:validate": {},
+      "item:a:review": {},
+      "item:a:publish": {},
+      "item:a:ci": {},
+      "item:a:merge": { mergeSha: merged, integratedSha: merged, at },
+      "item:b:work": {},
+      "item:b:validate": {},
+      "item:b:review": {},
+      "item:b:publish": {},
+      "item:b:ci": {},
+      "item:b:merge": { mergeSha: mergedB, integratedSha: mergedB, at },
+    },
+    kept: { "plan:acceptedAt": at },
+  });
+  const service = serve(inst);
+  // Final validation ran a's check on the merged default branch, and it
+  // failed twice: once, then its one rerun.
+  await until(() => stateOf(inst, 61).holds.length, "final asks", 30_000);
+  const [failed] = stateOf(inst, 61).holds;
+  assert.equal(failed.step, "final");
+  assert.match(
+    failed.question,
+    new RegExp(
+      `default branch \\(${mergedB.slice(0, 12)}\\), running Work Item a's own commands`,
+    ),
+  );
+  assert.match(failed.question, /node check\.mjs/);
+  assert.equal(stateOf(inst, 61).kept["final:flaky"].command, "node check.mjs");
+  // Other checks are left, so it can be retired too.
+  assert.deepEqual(
+    failed.options.map((option) => option.answer),
+    ["retry", "retire-command", "replan", "cancel"],
+  );
+  const fixed = commit("parser.txt", "fixed\n", "fixed on main");
+  assert.equal(
+    cli(inst, "answer", "61", "retry", "--question", failed.id).code,
+    0,
+  );
+  await until(() => stateOf(inst, 61).done.final, "final passes", 30_000);
+  const { final } = stateOf(inst, 61).done;
+  assert.equal(final.commit, fixed);
+  // Each item's list ran whole, a's first, the shared check in both.
+  assert.deepEqual(final.commands, [
+    "node check.mjs",
+    "node leak.mjs",
+    "node gen.mjs",
+    "node check.mjs",
+    "node b.mjs",
+  ]);
+  assert.equal(cli(inst, "cancel", "61").code, 0);
+  await stopped(service);
+});
+
 // A non-writer's Objective: Factory reads its structure from GitHub's
 // rendering (body_html) and plans from that rendering as Markdown text; the
 // approval names their digest. The stand-in renders like GitHub (micromark

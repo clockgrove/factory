@@ -27,7 +27,7 @@ import type { QueueMode, RefusalCode } from "./requests.js";
  * `factory reset` rebuilds it from GitHub (reset.ts), with no open
  * question.
  */
-const STATE_VERSION = 6;
+const STATE_VERSION = 7;
 
 export type ObjectiveStatus =
   | "checking"
@@ -598,8 +598,8 @@ const STATUSES: readonly ObjectiveStatus[] = [
  * Why `value` isn't a state file of Objective `issue` this version can
  * run; undefined when it is one. Checked once, where a file is read: the
  * engine, the sync and status trust every state they get. It checks what
- * every reader relies on (the top-level fields and each open question);
- * a module's own data is its module's to check.
+ * every reader relies on (the top-level fields, each open question and
+ * the accepted plans' shape); a module's own data is its module's to check.
  */
 function stateProblem(value: unknown, issue: number): string | undefined {
   if (!isObject(value)) return "the state isn't an object";
@@ -665,11 +665,65 @@ function stateProblem(value: unknown, issue: number): string | undefined {
     )
       return `holds has a question that isn't one: ${JSON.stringify(hold).slice(0, 200)}`;
   }
+  // The accepted plan and each accepted amendment's (planning/plan.ts).
+  for (const [key, entry] of Object.entries(value.done as object))
+    if (key === "plan" || /^amend:[^:]+$/.test(key)) {
+      const plan = key === "plan" ? entry : (entry as { plan?: unknown })?.plan;
+      if (key !== "plan" && plan === undefined) continue;
+      const problem = planProblem(plan);
+      if (problem) return `done.${key}${problem}`;
+    }
+  return undefined;
+}
+
+const isTexts = (value: unknown): boolean =>
+  Array.isArray(value) && value.every((entry) => typeof entry === "string");
+
+/**
+ * Why a saved plan lacks what the service reads on every tick (its items,
+ * coverage and final commands); undefined when it has it. The planner's
+ * answer was checked where it entered (planning/wire.ts); this checks
+ * only that the file, or a plan comment a reset reads (reset.ts
+ * `planShaped`), still holds a plan.
+ */
+export function planProblem(plan: unknown): string | undefined {
+  if (!isObject(plan)) return " isn't a plan";
+  if (!isTexts(plan.finalCommands))
+    return ".finalCommands isn't a list of commands";
+  if (
+    !Array.isArray(plan.coverage) ||
+    !plan.coverage.every(
+      (entry) => isObject(entry) && typeof entry.itemId === "string",
+    )
+  )
+    return ".coverage isn't a list of covered obligations";
+  if (!Array.isArray(plan.items)) return ".items isn't a list";
+  for (const item of plan.items as unknown[])
+    if (
+      !isObject(item) ||
+      !["id", "title", "goal", "brief"].every(
+        (key) => typeof item[key] === "string",
+      ) ||
+      !["acceptance", "nonGoals", "dependencies", "ownedPaths"].every((key) =>
+        isTexts(item[key]),
+      ) ||
+      !Array.isArray(item.citations) ||
+      !Array.isArray(item.validation) ||
+      !item.validation.every(
+        (command) => isObject(command) && typeof command.command === "string",
+      ) ||
+      (item.children !== undefined && !isTexts(item.children))
+    )
+      return ` has a Work Item that isn't one: ${JSON.stringify(item).slice(0, 200)}`;
   return undefined;
 }
 
 const digest = (text: string): string =>
   createHash("sha256").update(text).digest("hex").slice(0, 16);
+
+/** The digest of `state`'s file as saveState writes it: an incident's id, like an unreadable file's. */
+export const stateDigest = (state: ObjectiveState): string =>
+  digest(`${JSON.stringify(state, null, 2)}\n`);
 
 /** Issue numbers with a state file. Leftover temporary files are ignored. */
 export function listObjectives(dir: string): number[] {

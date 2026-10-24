@@ -52,7 +52,6 @@ export interface WorkItem {
   sourceAssets?: SourceAssetBinding[];
   expectedOutputRoles?: string[];
   minimumAssetSets?: number;
-  requiredLfsRoles?: string[];
 }
 
 /**
@@ -234,4 +233,6 @@ export interface PlanningFacts {
   playbook: string;
   /** The operator's media.localAssetRoots: the only places a local source asset may come from. */
   localAssetRoots: readonly string[];
+  /** The base's `.gitattributes` lines that set filter=lfs, as `file: line`. */
+  lfsRules: string[];
 }

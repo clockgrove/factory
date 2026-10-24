@@ -131,6 +131,35 @@ function quoted(value: string, exec = false): string {
   );
 }
 
+/** The names Factory reads from the service's credentials. */
+function credentialNames(config: CoreConfig): Set<string> {
+  const readable = new Set<string>(CLAUDE_LOGIN_CREDENTIALS);
+  if (copilotConfigured(config.providers))
+    for (const name of COPILOT_SECRETS) readable.add(name);
+  for (const { worker } of Object.values(config.providers))
+    if (worker.kind === "openai-agents") readable.add(worker.apiKeyEnv);
+    else if (worker.kind === "claude-managed-agents")
+      readable.add(worker.credentialEnv);
+  return readable;
+}
+
+/**
+ * The logins a shell may set that the unit doesn't keep: the service has
+ * them only as its credentials (`--credential-file`), or not at all. The
+ * Codex and GitHub keys are never kept, so the service logs in with Codex's
+ * auth.json and the GitHub CLI's stored login.
+ */
+export const unkeptLogins = (config: CoreConfig): string[] => [
+  ...credentialNames(config),
+  "CODEX_API_KEY",
+  "OPENAI_API_KEY",
+  "FACTORY_GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+];
+
 /**
  * `NAME=ABSOLUTE_FILE` bindings, checked: a name Factory reads from the
  * service's credentials, and a regular file only its owner can read. The
@@ -140,13 +169,7 @@ export function credentialFiles(
   bindings: readonly string[],
   config: CoreConfig,
 ): Credential[] {
-  const readable = new Set<string>(CLAUDE_LOGIN_CREDENTIALS);
-  if (copilotConfigured(config.providers))
-    for (const name of COPILOT_SECRETS) readable.add(name);
-  for (const { worker } of Object.values(config.providers))
-    if (worker.kind === "openai-agents") readable.add(worker.apiKeyEnv);
-    else if (worker.kind === "claude-managed-agents")
-      readable.add(worker.credentialEnv);
+  const readable = credentialNames(config);
   const credentials: Credential[] = [];
   for (const binding of bindings) {
     const at = binding.indexOf("=");

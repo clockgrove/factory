@@ -323,13 +323,18 @@ factory reset N                           # rebuild its state from GitHub: its p
 
 One installation serves a repository at a time, on one machine. Factory records which one in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
 
-To move to another machine, stop the first installation (a clean stop frees the repository), then start the second. If the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
+To move to another machine:
 
-```sh
-factory serve --repo OWNER/NAME --take-over
-```
+1. Stop the first installation. A clean stop frees the repository.
+2. Start the second. Only if the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
 
-Use it only for an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
+   ```sh
+   factory serve --repo OWNER/NAME --take-over
+   ```
+
+3. On the new machine, run `factory reset N` for each Objective that was in flight (see A new machine in [Stopping and recovery](#stopping-and-recovery)). The new installation has no state for them, so until then it doesn't run them or answer their questions; `factory queue list` lists them as inert with that command.
+
+Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
 
 ## Upgrade
 

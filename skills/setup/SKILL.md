@@ -77,6 +77,8 @@ After installing a new release, run `--background` again: it updates the unit an
 
 An idle service with an empty queue makes no model calls.
 
+To move the service to another machine, `--stop` it on the old one, then set up and start it on the new one. Use `factory serve --take-over` only when the old machine is gone or its state was wiped. Then run `factory reset N` on the new machine for each Objective that was in flight: until then the new installation doesn't run them.
+
 ## Queue work
 
 The operator queues an Objective by setting its card's `Factory` field to Queued; `factory run N` does the same and follows it. Only queue Objectives the operator named. Day-to-day operation is the `director` skill.

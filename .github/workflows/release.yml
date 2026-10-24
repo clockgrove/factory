@@ -42,7 +42,7 @@ jobs:
       - run: npm run notices:check
       - name: Run Factory's tests
         timeout-minutes: 15
-        run: npm run test:core
+        run: npm test
 
       - name: Pack
         run: |

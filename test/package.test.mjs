@@ -19,12 +19,12 @@ test("the packed tarball installs offline and runs the core's CLI", {
 }, () => {
   const root = mkdtempSync(join(tmpdir(), "factory-package-"));
   try {
-    const project = resolve(import.meta.dirname, "..", "..");
+    const project = resolve(import.meta.dirname, "..");
     const pack = join(root, "pack");
     mkdirSync(pack);
     const tarball = join(
       pack,
-      // test:core built core/dist; rebuilding it here (prepack) would
+      // npm test built dist; rebuilding it here (prepack) would
       // rewrite modules other tests are loading.
       execFileSync(
         "npm",
@@ -42,10 +42,10 @@ test("the packed tarball installs offline and runs the core's CLI", {
       encoding: "utf8",
       maxBuffer: 64 * 1024 ** 2,
     }).split("\n");
-    assert.ok(listed.includes("package/core/dist/cli.js"), "core/dist ships");
+    assert.ok(listed.includes("package/dist/cli.js"), "dist ships");
     assert.ok(
-      !listed.some((path) => /^package\/(dist|src|core\/src)\//.test(path)),
-      "neither the old dist nor any source ships",
+      !listed.some((path) => /^package\/(src|test)\//.test(path)),
+      "no source or test ships",
     );
 
     const prefix = join(root, "prefix");

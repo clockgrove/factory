@@ -13,7 +13,7 @@
     "indentStyle": "space"
   },
   "linter": {
-    "includes": ["core/src/**/*.ts", "integration/**/*.mjs"],
+    "includes": ["src/**/*.ts", "integration/**/*.mjs"],
     "rules": {
       "preset": "recommended",
       "complexity": {

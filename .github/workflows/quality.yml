@@ -27,7 +27,7 @@ jobs:
       - run: npm run format:check
       - run: npm run notices:check
 
-  core:
+  tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -35,18 +35,18 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/bubblewrap
       - run: git lfs version
-      - run: npm run test:core
+      - run: npm test
 
   # The single required check for main; it passes only when every job above
   # passes, including offline installation in the CI tests.
   package-gate:
     if: always()
-    needs: [checks, core]
+    needs: [checks, tests]
     runs-on: ubuntu-24.04
     steps:
       - env:
           CHECKS: ${{ needs.checks.result }}
-          CORE: ${{ needs.core.result }}
+          TESTS: ${{ needs.tests.result }}
         run: |
           test "$CHECKS" = success
-          test "$CORE" = success
+          test "$TESTS" = success

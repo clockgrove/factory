@@ -71,6 +71,7 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
 - `currency`: `USD` beside a known `costUsd`, else `null`.
 - `capture`: the id of the call's capture file, only when capture is on and the file was written.
 - A call that continued a retained conversation has `sessionMode` `resumed` and its turn number in `sessionTurn` (see [Retained conversations](#retained-conversations)). Its tokens and cost are its own turn's, never the conversation's running totals; its capture holds the delta it sent, and `deltaBytes` its size.
+- `codexBoundary` (Codex calls, workers included): what the Codex runtime's own records say about the call's transport (see [Codex boundary](#codex-boundary)).
 - An adapter adds its own fields: `session` or `thread`, `turns`, `stopReason`, `finalTreeValidated`, managed `key` and `spend`.
 
 **Codex native telemetry.** Each Codex call runs in a private `CODEX_HOME`. Before it is removed, providers/codex-telemetry.ts reads the thread's session record (`sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`, its last 8 MiB): the last `token_count` gives the thread's counts (reasoning included), and the `function_call`, `custom_tool_call`, `local_shell_call` and `web_search_call` items give `nativeToolActivity`. Unreadable or missing, it adds nothing.
@@ -84,6 +85,14 @@ A planner-seam call (planning, plan and result review, final review, diagnosis, 
 - Copilot: the main agent's `assistant.turn_start` and `session.usage_info`.
 
 `factory watch` and the live status comment show each running call, until its `model-usage` or its step's outcome.
+
+### Codex boundary
+
+Every Codex call, planner and worker, runs with `RUST_LOG` adding the runtime's trace-safe records (`codex_otel.trace_safe=trace`, beside its own errors; under `FACTORY_PROVIDER_TRACE`, after `FACTORY_CODEX_RUST_LOG`). The launcher appends codex's standard error to `codex-stderr.log` in the call's private Codex home, and once the call has stopped providers/codex-boundary.ts reads what came after the call began (its last 8 MiB). It keeps numbers and enumerated names only; the other standard error lines are appended to the call's error message.
+
+- `codexBoundary` on the call's `model-usage`: `coverage` (`observed`, `incomplete` when a record couldn't be read or the call's stderr was past its 8 MiB read, `unavailable` when none came), `requests` (WebSocket requests and HTTP requests to `/responses`; the model list is not one) and `failedRequests`, `connects`, `responsesCompleted` (the start-up warm-up's included) and `zeroOutputResponses` (responses with no output tokens, the warm-up's left out), `streamFailures`, `retries` (`http` and `stream`) and `retryDelayMs`, `firstOutputMs`, and `completionLost`: the call ended without its turn completing, with no stream failure, and with a request (one that didn't fail at the transport) whose response never completed; a call cancelled mid-response shows the same. That is the lost `response.completed` of a stalled stream (about 3% of concurrent calls), which the planner's hedge works around.
+- A `codex-retry` event per retry Codex made (at most 20 per call, then one with `unlogged`): `callId`, `layer` (`http` or `stream`), `operation`, `delayMs`, `attempt` and `nativeAt`, Codex's own time.
+- `--analyze` sums them per group: calls observed, requests and failures, responses and zero-output ones, retries by layer and their delay, stream failures and lost completions.
 
 ### Content capture
 

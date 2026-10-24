@@ -177,6 +177,7 @@ export function seed(inst, issue, status = "checking", fields = {}) {
       answers: {},
       retries: {},
       asking: {},
+      repairs: {},
       kept: {},
       // No blocked-by links: these tests start at the check.
       done: { predecessors: { predecessors: [], ignored: [] } },

@@ -32,18 +32,18 @@ cfg_get() { python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));v=eval(sy
 cfg_for_group() { CUR_CFG="$RUN_DIR/config.$1.json"; cp "$BASE_CFG" "$CUR_CFG"; }
 
 # ---------- CLI ----------
-cli() { (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node core/dist/cli.js "$@" --repo "$REPO"); }
+cli() { (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node dist/cli.js "$@" --repo "$REPO"); }
 # cli_t SECS ARGS...: cli under a time limit (`timeout` can't run the cli function itself).
-cli_t() { local s=$1; shift; (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" timeout "$s" node core/dist/cli.js "$@" --repo "$REPO"); }
+cli_t() { local s=$1; shift; (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" timeout "$s" node dist/cli.js "$@" --repo "$REPO"); }
 # The build's usage text, read once per run (help, or the bare command on old builds).
 cli_help() {
   local f="$RUN_DIR/cli-help"
-  [ -s "$f" ] || (cd "$BUILD" && { node core/dist/cli.js help 2>&1; node core/dist/cli.js 2>&1; }) >"$f"
+  [ -s "$f" ] || (cd "$BUILD" && { node dist/cli.js help 2>&1; node dist/cli.js 2>&1; }) >"$f"
   cat "$f"
 }
 cli_has() { cli_help | grep -qE "^\s+$1( |$)"; }
-build_has_env() { grep -rqs -- "$1" "$BUILD/core/dist"; }
-build_has_token() { grep -rqsF -- "$1" "$BUILD/core/dist"; }
+build_has_env() { grep -rqs -- "$1" "$BUILD/dist"; }
+build_has_token() { grep -rqsF -- "$1" "$BUILD/dist"; }
 
 # ---------- build features ----------
 # A case names the features it needs. A build without one records the case
@@ -193,7 +193,7 @@ serve_start() { # [CRASH_POINT]
   [ -n "$point" ] && envs+=("FACTORY_CRASH_AT=$point")
   printf '%s\n' "${envs[@]}" >"$d/env"
   (cd "$BUILD" && setsid env "${envs[@]}" bash -c \
-    'node core/dist/cli.js serve --repo "$1" $3 >"$2/out.log" 2>&1 & echo $! >"$2/pid"; wait $!; echo $? >"$2/exit"' \
+    'node dist/cli.js serve --repo "$1" $3 >"$2/out.log" 2>&1 & echo $! >"$2/pid"; wait $!; echo $? >"$2/exit"' \
     _ "$REPO" "$d" "$SERVE_ARGS" </dev/null >/dev/null 2>&1 &)
   local i; for i in $(seq 1 100); do [ -s "$d/pid" ] && break; sleep 0.1; done
   [ -s "$d/pid" ] || { log "serve did not start"; return 1; }

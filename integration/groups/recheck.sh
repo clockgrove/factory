@@ -119,8 +119,8 @@ iso_ms() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 # qa-not-offered: the traced planner prompt and the accepted plan.
 rc_qa() {
   local g=recheck n=$1 t0; t0=$(now)
-  # The kinds this build runs (core/dist/planning/types.js EXECUTABLE_KINDS).
-  local kinds; kinds=$(node -e 'import(process.argv[1]).then(m=>console.log((m.EXECUTABLE_KINDS||[]).join(",")))' "$BUILD/core/dist/planning/types.js" 2>/dev/null)
+  # The kinds this build runs (dist/planning/types.js EXECUTABLE_KINDS).
+  local kinds; kinds=$(node -e 'import(process.argv[1]).then(m=>console.log((m.EXECUTABLE_KINDS||[]).join(",")))' "$BUILD/dist/planning/types.js" 2>/dev/null)
   local case=recheck.qa-not-offered; [[ ,$kinds, == *,qa,* ]] && case=recheck.qa-offered
   local r; r=$(python3 - "$RUN_DIR/trace" "$ROOT" "$n" "$kinds" <<'PY'
 import json, os, re, sys

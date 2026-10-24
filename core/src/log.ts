@@ -237,6 +237,12 @@ export class RunLog {
         toolBytes -= Buffer.byteLength(output.text);
         toolsCut ||= output.cut;
       }
+      // What was sent and answered before redaction and the cut: a cut
+      // body still says how large it was and which it was.
+      const original = (text: string) => ({
+        bytes: Buffer.byteLength(text),
+        sha256: createHash("sha256").update(text).digest("hex"),
+      });
       writeFileSync(
         join(dir, `${id}.json`),
         JSON.stringify({
@@ -246,6 +252,23 @@ export class RunLog {
           ...(response ? { response: response.text } : {}),
           ...(tools.length ? { tools } : {}),
           truncated: request.cut || Boolean(response?.cut) || toolsCut,
+          original: {
+            request: original(body.request),
+            ...(body.response === undefined
+              ? {}
+              : { response: original(body.response) }),
+            ...(body.tools?.length
+              ? {
+                  tools: {
+                    count: body.tools.length,
+                    bytes: body.tools.reduce(
+                      (sum, tool) => sum + Buffer.byteLength(tool.output),
+                      0,
+                    ),
+                  },
+                }
+              : {}),
+          },
         }),
         { mode: 0o600 },
       );

@@ -207,7 +207,10 @@ export async function diagnostics(
       write(`        request:\n${capture.request}\n`);
     if (capture.response !== undefined)
       write(`        response:\n${capture.response}\n`);
-    if (capture.truncated) write("        (cut to capture.maxBytesPerCall)\n");
+    if (capture.truncated)
+      write(
+        `        (cut to capture.maxBytesPerCall${originalText(capture.original)})\n`,
+      );
   };
   const captureNote = () => {
     if (options.item !== undefined && !captured && !options.json)
@@ -295,7 +298,13 @@ function captureOf(
   entry: Entry,
   bodies: boolean,
 ):
-  | { path: string; request?: string; response?: string; truncated?: boolean }
+  | {
+      path: string;
+      request?: string;
+      response?: string;
+      truncated?: boolean;
+      original?: Record<string, unknown>;
+    }
   | undefined {
   const id = entry.event.capture;
   const file =
@@ -347,6 +356,20 @@ function transcriptLine(record: Record<string, unknown>): string {
   }
 }
 
+/** `; the request was 12,345 bytes (sha256 ab12…), the response …`: a cut capture's originals. */
+export function originalText(original?: Record<string, unknown>): string {
+  const part = (name: string) => {
+    const body = original?.[name] as
+      | { bytes?: unknown; sha256?: unknown }
+      | undefined;
+    return typeof body?.bytes === "number" && typeof body.sha256 === "string"
+      ? `the ${name} was ${count(body.bytes)} bytes (sha256 ${body.sha256.slice(0, 12)}…)`
+      : undefined;
+  };
+  const parts = [part("request"), part("response")].filter(Boolean);
+  return parts.length ? `; ${parts.join(", ")}` : "";
+}
+
 /** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */
 const CAPTURE_READ_MAX = 768 * 1024 * 1024;
 
@@ -360,7 +383,15 @@ export function readCapture(
   logs: string,
   file: string,
   secrets: readonly string[],
-): { request?: string; response?: string; truncated?: true } | undefined {
+):
+  | {
+      request?: string;
+      response?: string;
+      truncated?: true;
+      /** The bodies' sizes and digests before redaction and the cut. */
+      original?: Record<string, unknown>;
+    }
+  | undefined {
   try {
     const body = redactDeep(
       JSON.parse(
@@ -372,6 +403,9 @@ export function readCapture(
       ...(typeof body.request === "string" ? { request: body.request } : {}),
       ...(typeof body.response === "string" ? { response: body.response } : {}),
       ...(body.truncated === true ? { truncated: true as const } : {}),
+      ...(body.original && typeof body.original === "object"
+        ? { original: body.original as Record<string, unknown> }
+        : {}),
     };
   } catch {
     return undefined;
@@ -698,6 +732,7 @@ export interface Usage {
     input: number;
     output: number;
     cached: number;
+    cacheWrite: number;
     reasoning: number;
     total: number;
   };
@@ -752,7 +787,14 @@ export interface SummaryReport {
 export const emptyUsage = (): Usage => ({
   calls: 0,
   ms: 0,
-  tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+  tokens: {
+    input: 0,
+    output: 0,
+    cached: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    total: 0,
+  },
   tokensUnknown: 0,
   costUsd: null,
   costUnknown: 0,
@@ -924,7 +966,7 @@ export function usageText(usage: Usage): string {
   const t = usage.tokens;
   return [
     `${usage.calls} calls`,
-    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, out ${count(t.output)}, reasoning ${count(t.reasoning)})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
+    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, cache writes ${count(t.cacheWrite)}, out ${count(t.output)}, reasoning ${count(t.reasoning)})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
     usage.costUsd === null
       ? "cost unknown"
       : `$${usage.costUsd.toFixed(2)}${usage.costUnknown ? ` (+${usage.costUnknown} calls unknown)` : ""}`,

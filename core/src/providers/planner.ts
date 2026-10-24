@@ -75,7 +75,12 @@ export interface PlannerAnswer {
   value: unknown;
   model: string;
   effort: string;
-  usage?: { input: number; output: number; cached?: number };
+  usage?: {
+    input: number;
+    output: number;
+    cached?: number;
+    cacheWrite?: number;
+  };
   costUsd?: number;
   turns?: number;
   ms: number;

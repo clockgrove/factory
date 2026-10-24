@@ -73,6 +73,7 @@ import {
   logUsage,
   NativeTools,
   providerUsage,
+  type Tokens,
   tokens,
   usageRecord,
 } from "./usage.js";
@@ -185,12 +186,58 @@ interface Usage {
   reported?: Record<string, number>;
 }
 
-/** Add `counts`' finite numbers into `usage.reported`. */
+/** Add `counts`' finite numbers into `usage.reported`, a nested object's as `key.inner`. */
 function report(usage: Usage, counts: Record<string, unknown>): void {
   usage.reported ??= {};
-  for (const [key, value] of Object.entries(counts))
+  const add = (key: string, value: unknown) => {
     if (typeof value === "number" && Number.isFinite(value))
-      usage.reported[key] = (usage.reported[key] ?? 0) + value;
+      usage.reported![key] = (usage.reported![key] ?? 0) + value;
+  };
+  for (const [key, value] of Object.entries(counts))
+    if (value && typeof value === "object" && !Array.isArray(value))
+      for (const [inner, count] of Object.entries(value))
+        add(`${key}.${inner}`, count);
+    else add(key, value);
+}
+
+/**
+ * A run's tokens from its sessions' own counts: input with cache reads
+ * and writes, output, cached and cache writes (Claude: `cache_read_input_tokens`
+ * and `cache_creation.*`; OpenAI: `input_tokens_details.cached_tokens` and
+ * `output_tokens_details.reasoning_tokens`). `total` is the run's spend,
+ * which also holds what a crashed earlier run left, so it can exceed
+ * input plus output. Without counts, the total only.
+ */
+function splitTokens(
+  kind: Managed["kind"],
+  reported: Record<string, number> | undefined,
+  total: number,
+  own: number,
+): Tokens {
+  const input = reported?.input_tokens;
+  const output = reported?.output_tokens;
+  if (input === undefined || output === undefined) return tokens({ total });
+  const leftover = Math.max(0, total - own);
+  if (kind === "claude-managed-agents") {
+    const read = reported?.cache_read_input_tokens ?? 0;
+    const written = Object.entries(reported ?? {})
+      .filter(([key]) => key.startsWith("cache_creation."))
+      .reduce((sum, [, n]) => sum + n, 0);
+    const split = tokens({
+      input: input + read + written,
+      output,
+      cached: read,
+      cacheWrite: written,
+    });
+    return { ...split, total: split.total! + leftover };
+  }
+  const split = tokens({
+    input,
+    output,
+    cached: reported?.["input_tokens_details.cached_tokens"],
+    reasoning: reported?.["output_tokens_details.reasoning_tokens"],
+  });
+  return { ...split, total: split.total! + leftover };
 }
 
 /** The model a hosted agent reports: a name, or an object with its `id`. */
@@ -634,9 +681,11 @@ abstract class ManagedWorker implements Worker {
             : undefined;
       return { ...result, spend };
     } finally {
+      let own: Usage | undefined;
       if (marker)
         await this.cleanUp(marker, input, spend).then(
           (usage) => {
+            own = usage;
             record.providerUsage = providerUsage(usage.reported) ?? null;
           },
           (error: unknown) =>
@@ -653,9 +702,14 @@ abstract class ManagedWorker implements Worker {
         captureResponse(record, record.finalResponse);
       delete record.finalResponse;
       record.spend = spend;
-      // The hosted session reports a total only: no input, output or cache
-      // split. It includes what a crashed earlier run left, collected above.
-      record.tokens = tokens({ total: spend.tokens - before.tokens });
+      // The split from this run's own sessions; the total includes what a
+      // crashed earlier run left, collected above.
+      record.tokens = splitTokens(
+        this.config.kind,
+        own?.reported,
+        spend.tokens - before.tokens,
+        own?.tokens ?? 0,
+      );
       if (this.config.kind === "claude-managed-agents")
         record.costUsd = (spend.cents - before.cents) / 100;
       record.ms = Date.now() - started;

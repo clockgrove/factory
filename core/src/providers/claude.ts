@@ -997,17 +997,15 @@ export function usageOf(
       (sum, [name, model]) => {
         const before = baseline[name];
         const read = less(model.cacheRead, before?.cacheRead);
+        const written = less(model.cacheCreation, before?.cacheCreation);
         return {
-          input:
-            sum.input +
-            less(model.input, before?.input) +
-            read +
-            less(model.cacheCreation, before?.cacheCreation),
+          input: sum.input + less(model.input, before?.input) + read + written,
           output: sum.output + less(model.output, before?.output),
           cached: (sum.cached ?? 0) + read,
+          cacheWrite: (sum.cacheWrite ?? 0) + written,
         };
       },
-      { input: 0, output: 0, cached: 0 },
+      { input: 0, output: 0, cached: 0, cacheWrite: 0 },
     );
   }
   // A resumed session's own counts can't be told from a query's main loop.
@@ -1015,13 +1013,12 @@ export function usageOf(
   const usage = result.usage;
   if (!usage) return undefined;
   const read = usage.cache_read_input_tokens ?? 0;
+  const written = usage.cache_creation_input_tokens ?? 0;
   return {
-    input:
-      (usage.input_tokens ?? 0) +
-      read +
-      (usage.cache_creation_input_tokens ?? 0),
+    input: (usage.input_tokens ?? 0) + read + written,
     output: usage.output_tokens ?? 0,
     cached: read,
+    cacheWrite: written,
   };
 }
 

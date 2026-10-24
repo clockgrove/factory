@@ -2,6 +2,7 @@
 // and how diagnostics, watch and status show it.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -18,6 +19,13 @@ import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
 import { RunTally, statusComment } from "../dist/progress.js";
 import { CodexStderr, logBoundary } from "../dist/providers/codex-boundary.js";
+import {
+  captureResponse,
+  describeRequest,
+  logUsage,
+  tokens,
+  usageRecord,
+} from "../dist/providers/usage.js";
 import { validateTree } from "../dist/validate.js";
 import { ActivityLog } from "../dist/work/worker.js";
 import {
@@ -468,5 +476,63 @@ test("a Codex call's boundary telemetry: requests, responses, retries and a lost
   assert.match(
     analysis.out,
     /Codex boundary: observed in 1\/1 calls · 2 requests \(0 failed\) · 1 responses completed \(0 with no output\) · retries 0 HTTP, 0 stream \(0 s delay\) · 0 stream failures · 1 lost completions/,
+  );
+});
+
+test("a model call's answer is sized and digested with capture off; a cut capture keeps its originals' size and digest", () => {
+  const sha = (text) => createHash("sha256").update(text).digest("hex");
+  const prompt = `Plan ${"p".repeat(4_000)}`;
+  const answer = `{"plan": "${"a".repeat(3_000)}"}`;
+  const call = (capture, issue) => {
+    const inst = installation();
+    const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-5", capture);
+    const record = usageRecord({
+      role: "planner",
+      provider: "codex",
+      model: "gpt-6.1-sol",
+      effort: "high",
+      phase: "plan",
+    });
+    describeRequest(record, { prompt });
+    captureResponse(record, answer);
+    record.tokens = tokens({ input: 10, output: 2, cached: 4, cacheWrite: 3 });
+    record.outcome = "done";
+    logUsage((event) => log.write(issue, { step: "plan", ...event }), record);
+    return inst;
+  };
+  const off = call(CAPTURE_OFF, 66);
+  const usage = events(off, 66).find((e) => e.event === "model-usage");
+  assert.equal(usage.responseBytes, Buffer.byteLength(answer));
+  assert.equal(usage.responseDigest, sha(answer));
+  assert.equal(usage.capture, undefined);
+  assert.deepEqual(usage.tokens, {
+    input: 10,
+    output: 2,
+    cached: 4,
+    cacheWrite: 3,
+    reasoning: null,
+    total: 12,
+  });
+  const summary = JSON.parse(
+    cli(off, "diagnostics", "66", "--summary", "--json").out,
+  );
+  assert.equal(summary.roles.planner.tokens.cacheWrite, 3);
+  const on = call({ enabled: true, maxBytesPerCall: 2048 }, 67);
+  const [captured] = JSON.parse(
+    cli(on, "diagnostics", "67", "--captures", "--json").out,
+  ).captures;
+  const shown = cli(
+    on,
+    "diagnostics",
+    "67",
+    "--captures",
+    "--content",
+    captured.id,
+  );
+  assert.match(
+    shown.out,
+    new RegExp(
+      `\\(cut to capture\\.maxBytesPerCall; the request was 4,005 bytes \\(sha256 ${sha(prompt).slice(0, 12)}…\\), the response was 3,012 bytes \\(sha256 ${sha(answer).slice(0, 12)}…\\)\\)`,
+    ),
   );
 });

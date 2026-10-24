@@ -415,6 +415,7 @@ export function turnTokens(total: Tokens, baseline?: Tokens): Tokens {
     input: less(total.input, baseline?.input),
     output: less(total.output, baseline?.output),
     cached: less(total.cached, baseline?.cached),
+    cacheWrite: less(total.cacheWrite, baseline?.cacheWrite),
     reasoning: less(total.reasoning, baseline?.reasoning),
   });
 }
@@ -460,12 +461,14 @@ export function codexTokens(usage: {
   input_tokens: number;
   output_tokens: number;
   cached_input_tokens: number;
+  cache_write_input_tokens?: number;
   reasoning_output_tokens?: number;
 }): Tokens {
   return tokens({
     input: usage.input_tokens,
     output: usage.output_tokens,
     cached: usage.cached_input_tokens,
+    cacheWrite: usage.cache_write_input_tokens,
     reasoning: usage.reasoning_output_tokens,
   });
 }

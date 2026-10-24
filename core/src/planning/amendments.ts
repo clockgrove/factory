@@ -1221,11 +1221,10 @@ function amendAcceptStep(
       const inputs = amendmentInputs(state);
       // The paths it adds are owned from now: they rank after every plan
       // accepted before it (service.ts `pathOwners`).
-      const since = ownedSince(
-        round.draft!.items,
-        new Date().toISOString(),
-        saved,
-      );
+      const since = ownedSince(round.draft!.items, new Date().toISOString(), {
+        plan: saved,
+        accepted: String(state.kept[ACCEPTED_AT] ?? ""),
+      });
       const plan: Plan = {
         ...round.draft!,
         finalCommands: currentPlan(state)!.finalCommands,

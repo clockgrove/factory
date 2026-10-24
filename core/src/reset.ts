@@ -785,14 +785,18 @@ export function rebuildFrom(
       ),
     };
   }
-  // With no readable old state it owned no paths meanwhile, so an
-  // Objective accepted since may have started on them: it owns them all
-  // again from now, after every plan accepted before (service.ts
-  // `pathOwners`).
-  if (!old) {
-    const since = ownedSince(plan.plan.items, new Date().toISOString());
-    if (since) restored.plan = { ...plan.plan, ownedSince: since };
-  }
+  // Its paths keep the times the old state owned them from, even a rebuilt
+  // plan's it kept (which only `land` posts); a path it didn't own (all,
+  // with no readable old state) an Objective accepted since may have
+  // started on, so it owns it from now, after every plan accepted before
+  // (service.ts `pathOwners`).
+  const { ownedSince: _since, ...rebuiltPlan } = plan.plan;
+  const since = ownedSince(
+    plan.plan.items,
+    new Date().toISOString(),
+    old && ownedPlan(old),
+  );
+  restored.plan = since ? { ...rebuiltPlan, ownedSince: since } : rebuiltPlan;
   state.kept[REBUILT] = restored;
   plan.plan.decisions.forEach((decision, at) => {
     state.done[`decide:0:${at + 1}`] = { decision };

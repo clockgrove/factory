@@ -153,9 +153,11 @@ export interface Plan extends Draft {
    * The owned paths the Objective came to own after its plan was
    * accepted, each with when (plan.ts `ownedSince`): an accepted
    * amendment's new paths, or every path of a plan rebuilt for a state
-   * that couldn't be read. They take that place in the owned-path order
-   * (service.ts `pathOwners`); every other path ranks by the plan's
-   * acceptance. Absent means none.
+   * that couldn't be read; and, beside a path an amendment widened, the
+   * paths it owned before inside it, with their times. They take that
+   * place in the owned-path order (service.ts `pathOwners`, plan.ts
+   * `rankedPaths`); every other path ranks by the plan's acceptance.
+   * Absent means none.
    */
   ownedSince?: Record<string, string>;
   /**

@@ -35,7 +35,7 @@ import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { currentPlan, sinceOf } from "./planning/plan.js";
+import { currentPlan, rankedPaths } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -1341,7 +1341,7 @@ export async function serve(options: ServeOptions): Promise<number> {
  * Objectives, the one that owned its side of their first overlap first
  * goes first (the earlier issue on a tie), so an amendment never stops a
  * later Objective that already builds the paths it adds, and a later
- * amendment never reverses an order that stands. An Objective with no
+ * amendment never reverses an order that stands (plan.ts `ownedSince`). An Objective with no
  * accepted plan of its own (planning, resetting, or reviewing a rebuilt
  * plan) or with every item built never waits, but owns its paths until it
  * is done or cancelled, through final validation, final review and the
@@ -1349,7 +1349,9 @@ export async function serve(options: ServeOptions): Promise<number> {
  * `ownedPlan`). The waits are taken oldest overlap first, and one that
  * would close a circle (three Objectives' amendments can make one) is
  * left out: the one it would wait on waits already, so no two build
- * overlapping paths at once, and one of the circle builds. The owner
+ * overlapping paths at once, and one of the circle builds. Once a member
+ * stops waiting the wait left out is taken again, even over items its
+ * Objective started meanwhile (docs/reference/queue.md). The owner
  * shown is the first in `owned`'s order.
  */
 function pathOwners(owned: readonly Owned[]): Map<number, number> {
@@ -1416,16 +1418,10 @@ interface Owned {
 function ownedPaths(runner: ObjectiveRunner): Owned | undefined {
   const owned = ownedPlan(runner.state);
   if (!owned) return undefined;
-  const { plan, accepted } = owned;
   return {
     issue: runner.state.issue,
     waits: Boolean(currentPlan(runner.state)) && !built(runner.state),
-    paths: plan.items.flatMap((item) =>
-      item.ownedPaths.map((path) => ({
-        path,
-        since: sinceOf(plan, path) ?? accepted,
-      })),
-    ),
+    paths: rankedPaths(owned.plan, owned.accepted),
   };
 }
 

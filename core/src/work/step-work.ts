@@ -495,6 +495,7 @@ export async function workStep(
     base,
     plan,
     item: runnableItem(plan, item),
+    objective: objectiveText(shown.blocks),
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,

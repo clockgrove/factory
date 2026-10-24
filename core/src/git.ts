@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -69,6 +69,33 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
     env[`GIT_CONFIG_VALUE_${index}`] = value;
   });
   return env;
+}
+
+/**
+ * The checkout's own Git configuration entries that carry a credential:
+ * `http.*extraheader` (an Authorization header, as CI checkouts write) and
+ * `credential.*`. Sandboxed commands read that file (sandbox.ts
+ * gitMetadata), so readiness refuses a checkout that has any. Names only,
+ * never values; empty when Git can't read it.
+ */
+export function checkoutCredentialEntries(checkout: string): string[] {
+  const found = spawnSync(
+    "git",
+    [
+      "-C",
+      checkout,
+      "config",
+      "--local",
+      "--includes",
+      "--name-only",
+      "--get-regexp",
+      "^http\\..*extraheader$|^credential\\.",
+    ],
+    { env: gitEnvironment(), encoding: "utf8", timeout: 30_000 },
+  );
+  return found.status === 0
+    ? [...new Set(found.stdout.split("\n").filter(Boolean))]
+    : [];
 }
 
 export interface GitExit {

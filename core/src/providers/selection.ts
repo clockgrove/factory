@@ -176,6 +176,7 @@ function profileProvider(
  */
 export const OPERATIONAL: readonly string[] = [
   // Derived secret values: never written to state.
+  "credentials",
   "secrets",
   // Polling, the slots for Objectives at once, and the Project fields progress is shown in.
   "queue",

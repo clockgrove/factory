@@ -278,7 +278,8 @@ export interface InputsRequest {
  * Step: call before prepareWorkPrompt on every attempt. done → pass on;
  * retry → retry; hold → hold. Its holds carry `retry` (run the work step
  * again), `replan` (the work step's replan route) and `cancel`; a source
- * attachment over its byte bound holds with `replan` and `cancel` only.
+ * attachment over its byte bound, or of another repository, holds with
+ * `replan` and `cancel` only.
  */
 export async function resolveInputs(
   request: InputsRequest,
@@ -474,7 +475,8 @@ class TooLarge extends Error {}
 
 /**
  * A GitHub attachment the Objective names, with the service's token sent
- * only to the URL itself; at most 5 redirects, only to GitHub content
+ * only to the URL itself, and only for a user attachment or one of the
+ * configured repository's (another repository's holds); at most 5 redirects, only to GitHub content
  * hosts, never an HTML page, at most MAX_ATTACHMENT_BYTES, and 30 minutes
  * for the whole download.
  */
@@ -491,6 +493,16 @@ async function attachmentSource(
   const tooLarge = (bytes?: number): Copied =>
     hold(
       `GitHub attachment ${path} is larger than Factory's bound of ${MAX_ATTACHMENT_BYTES} bytes for an attachment${bytes ? ` (${bytes} bytes)` : ""}. Answer replan to cite a smaller file (or put it in the repository through Git LFS), or cancel.`,
+      ["replan", "cancel"],
+    );
+  // The token goes only to the configured repository's own attachments
+  // (and to user-attachments, which GitHub checks against the viewer).
+  const owner = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/assets\//.exec(
+    path,
+  )?.[1];
+  if (owner && owner.toLowerCase() !== request.repository.toLowerCase())
+    return hold(
+      `GitHub attachment ${path} belongs to ${owner}, not ${request.repository}, and Factory sends its GitHub token only to ${request.repository}'s attachments. Answer replan to cite a copy attached to an issue of ${request.repository} (or put the file in the repository), or cancel.`,
       ["replan", "cancel"],
     );
   const token = await request.githubToken();

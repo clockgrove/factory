@@ -636,11 +636,15 @@ export function sizeOf(path: string): number {
   }
 }
 
-/** Tokens, bearer headers and the named secret values, line by line, as [REDACTED]. */
+/** Tokens, JWTs, bearer headers and the named secret values, line by line, as [REDACTED]. */
 export function redact(value: string, secrets: readonly string[] = []): string {
   let result = value
     .replace(
       /\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{8,}\b/g,
+      "[REDACTED]",
+    )
+    .replace(
+      /\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g,
       "[REDACTED]",
     )
     .replace(/(Authorization:\s*Bearer\s+)\S+/gi, "$1[REDACTED]");

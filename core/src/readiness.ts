@@ -12,6 +12,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
+import { checkoutCredentialEntries } from "./git.js";
 import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
@@ -61,7 +62,7 @@ export async function readiness(
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
-    ...providerChecks(config, bound),
+    ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
   ];
   const environment = validationEnvironment(config, scripts);
@@ -134,6 +135,15 @@ function hostChecks(
       name: "sandbox.environment",
       status: "warn",
       detail: warning,
+    });
+  // Sandboxed commands read the checkout's Git configuration.
+  const credentials = checkoutCredentialEntries(config.checkout);
+  if (credentials.length)
+    checks.push({
+      name: "checkout git config",
+      status: "blocked",
+      detail: `${config.checkout}'s Git configuration holds ${credentials.join(", ")}, which sandboxed commands can read`,
+      fix: `Remove ${credentials.length === 1 ? "it" : "them"} with \`git -C ${config.checkout} config --local --unset-all NAME\`, and keep Git credentials in the user's global configuration (for example \`gh auth setup-git\`)`,
     });
   const store = config.sandbox.packageStore;
   if (store && existsSync(store) && !statSync(store).isDirectory())
@@ -257,10 +267,10 @@ function loaded(name: string, bound: readonly string[]): boolean {
   );
 }
 
-function providerChecks(
+async function providerChecks(
   config: CoreConfig,
   bound: readonly string[],
-): ReadinessCheck[] {
+): Promise<ReadinessCheck[]> {
   const checks: ReadinessCheck[] = [];
   for (const [name, provider] of Object.entries(config.providers)) {
     const worker = provider.worker;
@@ -298,7 +308,7 @@ function providerChecks(
     // Codex sandboxes its workers' commands itself: try it, as a worker would.
     if (worker.kind === "codex" && installed(SDK.codex!)) {
       const network = worker.network === "host";
-      const problem = codexSandboxProblem(
+      const problem = await codexSandboxProblem(
         network,
         config.policy.allowedSecretNames,
         config.sandbox,
@@ -314,7 +324,7 @@ function providerChecks(
             }
           : ok(
               at,
-              `a command writes its worktree${config.sandbox.readOnlyPaths.length ? ", reads a read-only path" : ""} and is refused outside it (network ${network ? "host" : "off"})`,
+              `a command writes its worktree${config.sandbox.readOnlyPaths.length ? ", reads a read-only path" : ""} and is refused writes outside it and a sealed file${network ? " (network host)" : ", and can't connect out (network off)"}`,
             ),
       );
     }

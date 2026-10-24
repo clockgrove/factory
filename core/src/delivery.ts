@@ -42,6 +42,7 @@ import {
   Unreadable,
 } from "./github.js";
 import { redact } from "./log.js";
+import { inert, prose } from "./markdown.js";
 import { lfsObjectsHoldingSecrets, lfsPushIfPointers } from "./media.js";
 import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
@@ -173,7 +174,7 @@ export interface PublishInput {
   republish?: boolean;
   /** The operator answered RESET_BRANCH: replace the branch whoever made it. */
   reset?: boolean;
-  /** The values no pushed blob may hold (config.secrets). */
+  /** The values no pushed blob may hold (config.credentials). */
   secrets: readonly string[];
   /** The digest of a secret finding the operator let through (`publish`). */
   allowSecret?: string;
@@ -311,7 +312,7 @@ export async function publish(
           "cancel",
         ],
       );
-    // Nothing Factory pushes carries a secret value it knows (config.secrets).
+    // Nothing Factory pushes carries a secret value it knows (config.credentials).
     const leaked = [
       ...(await pathsHoldingSecrets(
         context.checkout,
@@ -385,7 +386,7 @@ export async function publish(
   let created: PullRequest;
   try {
     created = await github.createPull(
-      { head: branch, base: baseBranch, title: input.item.title, body },
+      { head: branch, base: baseBranch, title: inert(input.item.title), body },
       signal,
     );
   } catch (error) {
@@ -615,7 +616,9 @@ async function pullRequestBody(
     `<code>${safe(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "&#10;").replaceAll("\r", "&#13;")}</code>`;
   const issues = `https://github.com/${context.github.repository}/issues`;
   const parts: string[] = [
-    safe(input.item.goal).trim().slice(0, 4000) ||
+    // The goal is the model's: no reference, closing keyword or mention
+    // in it acts, so the Closes line below is the PR's only closing one.
+    prose(inert(safe(input.item.goal).trim().slice(0, 4000))) ||
       "This candidate contains the changes listed below.",
     `Work Item: ${code(input.item.id)} · Objective: [#${input.issue}](${issues}/${input.issue})`,
     // GitHub closes the item's issue when this PR merges into the default

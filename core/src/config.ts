@@ -131,8 +131,14 @@ export interface CoreConfig {
     secretlintConfig?: string;
   };
   /**
-   * Every secret value Factory's output is redacted of, derived once here:
-   * the allowedSecretNames values and each managed provider's credential.
+   * The secret values themselves, derived once here: the allowedSecretNames
+   * values and each managed provider's credential. No pushed blob and no
+   * profile text may hold one.
+   */
+  credentials: string[];
+  /**
+   * Every value Factory's output (GitHub, logs, captures) is redacted of:
+   * the credentials and each sandbox.environment value.
    */
   secrets: string[];
   validation: {
@@ -716,17 +722,29 @@ export function loadConfig(repository: string): CoreConfig {
       );
     else
       execution.reservations[name as keyof Reservations] = execution.memoryMiB;
+  const credentials = secretValues(
+    checked.policy.allowedSecretNames,
+    providers,
+  );
   const config: CoreConfig = {
     ...checked,
     execution,
     providers,
     defaultProvider,
-    secrets: secretValues(checked.policy.allowedSecretNames, providers),
+    credentials,
+    secrets: [
+      ...new Set([
+        ...credentials,
+        ...Object.values(checked.sandbox.environment).filter(
+          (value) => value.length >= MIN_SECRET_LENGTH,
+        ),
+      ]),
+    ],
   };
   profileProblems(
     config.execution.profiles,
     providers,
-    config.secrets,
+    config.credentials,
     problems,
   );
   if (config.repository !== repository)

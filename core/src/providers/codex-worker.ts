@@ -6,7 +6,7 @@
  * bubblewrap; Factory's validation still decides. Factory collects and
  * commits the result.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -15,6 +15,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
@@ -140,7 +141,7 @@ const PROXY = /^(?:HTTPS?|NO|ALL)_PROXY$/i;
  * nothing when the shell has no network; with network, each URL (one
  * without a scheme read as http://) without its user name and password (a
  * URL that doesn't parse is left out), so the shell never holds a proxy
- * credential.
+ * credential. OPENAI_API_KEY and CODEX_API_KEY are always excluded.
  */
 function shellPolicy(
   source: NodeJS.ProcessEnv,
@@ -149,7 +150,8 @@ function shellPolicy(
   factory: readonly string[],
 ): string {
   const set: string[] = [];
-  const exclude: string[] = [];
+  // Codex's own API keys stay with Codex, whatever its default excludes are.
+  const exclude: string[] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
   for (const [name, value] of Object.entries(source)) {
     if (!PROXY.test(name) || value === undefined) continue;
     if (!network) {
@@ -179,7 +181,8 @@ function shellPolicy(
   return `
 [shell_environment_policy]
 inherit = "all"
-${exclude.length ? `exclude = ${JSON.stringify(exclude)}\n` : ""}${set.length ? `\n[shell_environment_policy.set]\n${set.join("\n")}\n` : ""}`;
+exclude = ${JSON.stringify(exclude)}
+${set.length ? `\n[shell_environment_policy.set]\n${set.join("\n")}\n` : ""}`;
 }
 
 /**
@@ -236,7 +239,19 @@ function workerHome(
       // (systemd-resolved under /run, WSL under /mnt/wsl).
       if (network && existsSync("/etc/resolv.conf"))
         grants.push(`${path(realpathSync("/etc/resolv.conf"))} = "read"`);
+      // As planning's configuration (codex.ts), every tool but the shell,
+      // unified exec and view_image is off.
       return `default_permissions = "factory"
+web_search = "disabled"
+
+[features]
+apps = false
+plugins = false
+hooks = false
+memories = false
+browser_use = false
+computer_use = false
+image_generation = false
 
 [permissions.factory.filesystem]
 ${grants.join("\n")}
@@ -283,57 +298,117 @@ ${shellPolicy(source, network, sandbox.environment, [
 }
 
 /**
- * What the probe runs: a write outside its worktree and a read of one
- * read-only path (when given), then their results in the worktree. A file,
- * since a network-off sandbox may not write to the pipe.
+ * What the probe runs: a write outside its worktree, a read of one
+ * read-only path (when given), a read of a sealed file and, when given a
+ * port, a connection to the host's loopback; then their results in the
+ * worktree. A file, since a network-off sandbox may not write to the pipe.
  */
-const PROBE = `const fs=require("node:fs");let refused="",unread="";try{fs.writeFileSync(process.argv[1]+"/outside","x")}catch(e){refused=e.code}const p=process.argv[2];if(p)try{fs.statSync(p).isDirectory()?fs.readdirSync(p):fs.closeSync(fs.openSync(p,"r"))}catch(e){unread=e.code||"error"}fs.writeFileSync("result",JSON.stringify({refused,unread}))`;
+const PROBE = `const fs=require("node:fs"),net=require("node:net"),[,out,p,sealedFile,port]=process.argv;let refused="",unread="",sealed=false,connected=false;try{fs.writeFileSync(out+"/outside","x")}catch(e){refused=e.code}if(p)try{fs.statSync(p).isDirectory()?fs.readdirSync(p):fs.closeSync(fs.openSync(p,"r"))}catch(e){unread=e.code||"error"}try{fs.readFileSync(sealedFile);sealed=true}catch{}const done=()=>fs.writeFileSync("result",JSON.stringify({refused,unread,sealed,connected}));if(!Number(port))done();else try{const s=net.connect(Number(port),"127.0.0.1");s.setTimeout(5000);s.on("connect",()=>{connected=true;s.destroy();done()});s.on("error",done);s.on("timeout",()=>{s.destroy();done()})}catch{done()}`;
+
+/** A command's exit and stderr, killed after `timeout` ms. */
+function probeRun(
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+): Promise<{
+  status: number | null;
+  signal: string | null;
+  stderr: string;
+  error?: Error;
+}> {
+  return new Promise((done) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: options.timeout,
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < 4096) stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) =>
+      done({ status: null, signal: null, stderr, error }),
+    );
+    child.on("close", (status, signal) => done({ status, signal, stderr }));
+  });
+}
 
 /**
  * Codex's sandbox under a worker's own permission profile, tried with no
  * model call (\`codex sandbox\`): a command must write its worktree, be
- * refused a directory outside it and read the first sandbox.readOnlyPaths
- * entry. The problem, or undefined. Readiness runs it.
+ * refused a directory outside it, read the first sandbox.readOnlyPaths
+ * entry and not read a sealed file outside its grants; with the network
+ * off, a connection to a listener on the host's loopback must fail. The
+ * problem, or undefined. Readiness runs it.
  */
-export function codexSandboxProblem(
+export async function codexSandboxProblem(
   network: boolean,
   keep: readonly string[],
   sandbox: Pick<SandboxConfig, "readOnlyPaths" | "environment">,
-): string | undefined {
+): Promise<string | undefined> {
   let worktree: string | undefined;
   let outside: string | undefined;
   let home: WorkerHome | undefined;
+  const listener = createServer((socket) => socket.destroy());
   try {
     worktree = mkdtempSync(join(tmpdir(), "factory-probe-"));
     outside = mkdtempSync(join(tmpdir(), "factory-probe-outside-"));
+    const sealedFile = join(outside, "sealed");
+    writeFileSync(sealedFile, "sealed", { mode: 0o600 });
     home = workerHome(worktree, network, keep, sandbox);
+    let port = 0;
+    if (!network) {
+      await new Promise<void>((listening, failed) => {
+        listener.once("error", failed);
+        listener.listen(0, "127.0.0.1", listening);
+      });
+      port = (listener.address() as AddressInfo).port;
+    }
     // workerHome checked it exists; read where it is granted.
     const readable = sandbox.readOnlyPaths[0] && real(sandbox.readOnlyPaths[0]);
-    const run = spawnSync(
+    const run = await probeRun(
       home.launcher,
-      ["sandbox", "--", "node", "-e", PROBE, outside, readable ?? ""],
-      { cwd: worktree, env: home.env, encoding: "utf8", timeout: 30_000 },
+      [
+        "sandbox",
+        "--",
+        "node",
+        "-e",
+        PROBE,
+        outside,
+        readable ?? "",
+        sealedFile,
+        String(port),
+      ],
+      { cwd: worktree, env: home.env, timeout: 30_000 },
     );
-    let refused: unknown;
-    let unread: unknown;
+    let found: {
+      refused?: unknown;
+      unread?: unknown;
+      sealed?: unknown;
+      connected?: unknown;
+    };
     try {
-      ({ refused, unread } = JSON.parse(
-        readFileSync(join(worktree, "result"), "utf8"),
-      ));
+      found = JSON.parse(readFileSync(join(worktree, "result"), "utf8"));
     } catch {
-      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(`${run.stderr}`.trim())}`;
+      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(run.stderr.trim())}`;
     }
     if (
-      !["EACCES", "EPERM", "EROFS", "ENOENT"].includes(String(refused)) ||
+      !["EACCES", "EPERM", "EROFS", "ENOENT"].includes(String(found.refused)) ||
       existsSync(join(outside, "outside"))
     )
       return "Codex's sandbox let a command write outside its worktree";
-    if (unread)
-      return `Codex's sandbox couldn't read read-only path ${readable} (${unread})`;
+    if (found.unread)
+      return `Codex's sandbox couldn't read read-only path ${readable} (${found.unread})`;
+    if (found.sealed !== false)
+      return "Codex's sandbox let a command read a file outside its grants";
+    if (found.connected !== false)
+      return "Codex's sandbox let a command connect out with the network off";
     return undefined;
   } catch (error) {
     return `Factory could not set up a Codex worker home: ${detail(errorMessage(error))}`;
   } finally {
+    listener.close();
     for (const directory of [worktree, outside, home?.root])
       if (directory) rmSync(directory, { recursive: true, force: true });
   }

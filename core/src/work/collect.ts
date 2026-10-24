@@ -1,10 +1,11 @@
 /**
  * Result collection: Factory, not the worker, turns a worker's files into
  * a commit. The worktree is staged minus private staging, checked for
- * ownership and filesystem safety, scanned for secrets, and committed under
- * the Factory identity on the exact base. A wrong result is a repair
- * finding, a suspected secret a question for the operator, and a scanner
- * that can't run a retry. A failed Git read throws, and the step retries.
+ * ownership, protected paths and filesystem safety, scanned for secrets,
+ * and committed under the Factory identity on the exact base. A wrong
+ * result is a repair finding, a suspected secret a question for the
+ * operator, and a scanner that can't run a retry. A failed Git read
+ * throws, and the step retries.
  */
 import { spawn } from "node:child_process";
 import {
@@ -22,7 +23,8 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
 import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
-import { validPath } from "../objective.js";
+import { inert } from "../markdown.js";
+import { namesPath, validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
 import {
   type WorkDiscovery,
@@ -43,9 +45,41 @@ import {
 /** The committer email on every commit Factory writes. */
 export const FACTORY_EMAIL = "factory@users.noreply.github.com";
 
-/** The commit message of a collected result. */
+/** The commit message of a collected result; the title can't close or mention (markdown.ts inert). */
 function collectionMessage(item: Pick<WorkItem, "title">): string {
-  return `Factory: ${item.title}`;
+  return `Factory: ${inert(item.title)}`;
+}
+
+/** CI configuration Factory knows of, by path from the root. */
+const CI_PATHS = [
+  ".gitlab-ci.yml",
+  ".travis.yml",
+  ".drone.yml",
+  ".appveyor.yml",
+  "appveyor.yml",
+  "azure-pipelines.yml",
+  "bitbucket-pipelines.yml",
+  "Jenkinsfile",
+];
+const CI_DIRECTORIES = [
+  ".github/",
+  ".circleci/",
+  ".buildkite/",
+  ".woodpecker/",
+];
+
+/**
+ * Whether `path` steers CI or review: anything under `.github/` (workflows,
+ * CODEOWNERS, settings), a CODEOWNERS file anywhere, or another CI
+ * system's configuration. A worker changes one only when the Objective
+ * names that path.
+ */
+function protectedPath(path: string): boolean {
+  return (
+    CI_DIRECTORIES.some((directory) => path.startsWith(directory)) ||
+    CI_PATHS.includes(path) ||
+    basename(path) === "CODEOWNERS"
+  );
 }
 
 /** A worker's advisory note from `.factory-handoff.json`. */
@@ -69,6 +103,8 @@ export interface CollectInput {
   base: string;
   plan: Plan;
   item: WorkItem;
+  /** The accepted Objective's shown text: a protected path changes only when it names it (namesPath). */
+  objective: string;
   sandbox: SandboxConfig;
   /** The worker's last message, carried by an empty-result finding. */
   finalResponse: string;
@@ -594,6 +630,13 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
   if (unowned.length)
     throw new WorkFinding(
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,
+    );
+  const guarded = paths.filter(
+    (path) => protectedPath(path) && !namesPath(input.objective, path),
+  );
+  if (guarded.length)
+    throw new WorkFinding(
+      `Worker changed protected paths the Objective doesn't name: ${guarded.join(", ")}. CI configuration, .github/ and CODEOWNERS change only when the Objective names the exact path; undo these changes`,
     );
   const findings: SecretFinding[] = [];
   for (const path of paths) {

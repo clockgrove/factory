@@ -216,7 +216,7 @@ factory propose --file /abs/draft.json --approve SHA256 --enqueue --repo OWNER/N
 
 ### Several Objectives at once
 
-Up to `queue.maxActiveObjectives` Objectives (default 3) run at once, in queue order. An Objective builds only when no earlier unfinished Objective owns an overlapping path; planning never waits.
+Up to `queue.maxActiveObjectives` Objectives (default 3) run at once, in queue order. An Objective builds only when no unfinished Objective that came to own an overlapping path first still owns it; planning never waits.
 
 Host-wide limits apply across all Objectives:
 

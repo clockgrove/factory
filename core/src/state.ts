@@ -614,6 +614,7 @@ function stateProblem(value: unknown, issue: number): string | undefined {
     "retries",
     "asking",
     "kept",
+    "repairs",
     "done",
     "attempts",
     "modules",
@@ -624,7 +625,7 @@ function stateProblem(value: unknown, issue: number): string | undefined {
       value[key] as Record<string, unknown>,
     ))
       if (!isObject(entry)) return `${key}.${step} isn't an object`;
-  for (const key of ["repairs", "frozen", "control", "ended", "stepRuns"])
+  for (const key of ["frozen", "control", "ended", "stepRuns"])
     if (value[key] !== undefined && !isObject(value[key]))
       return `${key} isn't an object`;
   for (const key of [

@@ -31,6 +31,7 @@ import { stateRoot, within } from "./paths.js";
 import { DISCOVERY_LIMITS, type DiscoveryLimits } from "./planning/types.js";
 import { serviceCredential } from "./providers/claude.js";
 import {
+  COPILOT_SECRETS,
   type ExecutionProfile,
   executionProfiles,
   type ProviderConfig,
@@ -440,7 +441,8 @@ export function configPath(repository: string): string {
 const MIN_SECRET_LENGTH = 4;
 
 /**
- * The values of the operator variables workers may see, and of each managed
+ * The values of the operator variables workers may see, of the Copilot
+ * login's secrets when Copilot is configured, and of each managed
  * provider's credential (apiKeyEnv, credentialEnv) from the environment or
  * the service's credentials. Only `names` reach a worker's environment;
  * all of them are redacted from output.
@@ -456,8 +458,12 @@ function secretValues(
         ? [worker.credentialEnv]
         : [],
   );
+  const copilot = Object.values(providers).some(
+    ({ planner, worker }) => planner === "copilot" || worker.kind === "copilot",
+  );
   const values = new Set<string>();
-  for (const name of names) values.add(process.env[name] ?? "");
+  for (const name of [...names, ...(copilot ? COPILOT_SECRETS : [])])
+    values.add(process.env[name] ?? "");
   for (const name of credentials) {
     let value = process.env[name];
     try {

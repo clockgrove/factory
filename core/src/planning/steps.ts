@@ -19,7 +19,7 @@ import { planningKnowledge } from "../knowledge/index.js";
 import { prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
 import type { Planner, PlannerAnswer } from "../providers/planner.js";
-import { resolvedProvider } from "../providers/selection.js";
+import { profileWorker, resolvedProvider } from "../providers/selection.js";
 import {
   type Conversation,
   conversationDir,
@@ -366,11 +366,13 @@ export function offeredProfiles(
   const ids = recipeInstallation(config).profileIds;
   if (!ids.length) return undefined;
   return ids.map((id) => {
-    const { description, selectionHints } = config.execution.profiles![id]!;
+    const { provider, description, selectionHints } =
+      config.execution.profiles![id]!;
     return {
       id,
       description,
       ...(selectionHints.length ? { selectionHints } : {}),
+      worker: profileWorker(config.providers[provider]!),
     };
   });
 }

@@ -26,6 +26,7 @@ import {
   type ModelChoice,
   PLANNER_PHASES,
   type PlannerModels,
+  REVIEW_PHASES,
 } from "./planner.js";
 
 export const PLANNERS = ["codex", "claude", "copilot"] as const;
@@ -123,6 +124,18 @@ export const CLAUDE_TOOLS = [
   "Glob",
   "Grep",
   "Validate",
+] as const;
+
+/**
+ * The Copilot login's secret values in the service's environment: they
+ * reach only the Copilot runtime (copilot.ts copilotEnvironment), and are
+ * redacted from output wherever a Copilot planner or worker is configured.
+ */
+export const COPILOT_SECRETS = [
+  "COPILOT_GITHUB_TOKEN",
+  "COPILOT_PROVIDER_API_KEY",
+  "COPILOT_PROVIDER_BEARER_TOKEN",
+  "GITHUB_COPILOT_API_TOKEN",
 ] as const;
 
 /** The Copilot worker's tools: the SDK's file tools and Factory's Validate. */
@@ -268,10 +281,19 @@ function modelsSpec(planner: PlannerKind): Spec {
   return {
     planner: choice,
     reviewer: choice,
+    // A planner phase runs on models.planner, so its effort is refused here.
     reviewEffort: optional(
       object(
         Object.fromEntries(
-          PLANNER_PHASES.map((phase) => [phase, optional(effort)]),
+          REVIEW_PHASES.map((phase) => [phase, optional(effort)]),
+        ),
+        Object.fromEntries(
+          PLANNER_PHASES.filter(
+            (phase) => !(REVIEW_PHASES as readonly string[]).includes(phase),
+          ).map((phase) => [
+            phase,
+            `${phase} runs on models.planner: set models.planner.effort; reviewEffort takes ${REVIEW_PHASES.join(", ")}`,
+          ]),
         ),
       ),
     ),

@@ -1,3 +1,4 @@
+import type { ProfileWorker } from "../providers/selection.js";
 import { errorMessage } from "../text.js";
 import {
   coverageCriterion,
@@ -45,8 +46,13 @@ type ObjectValue = Record<string, unknown>;
 export interface WireOptions {
   /** This Objective is itself a split child: children never split again. */
   child?: boolean;
-  /** Execution profiles the planner chooses from, by id, with what each is for. */
-  profiles?: { id: string; description?: string; selectionHints?: string[] }[];
+  /** Execution profiles the planner chooses from, by id, with what each is for and its worker's model, tools and network. */
+  profiles?: {
+    id: string;
+    description?: string;
+    selectionHints?: string[];
+    worker?: ProfileWorker;
+  }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
   /**

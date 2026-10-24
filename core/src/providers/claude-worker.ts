@@ -34,6 +34,7 @@ import type {
   Options,
   Query,
   SDKResultMessage,
+  SDKSystemMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
@@ -954,6 +955,39 @@ function failure(
   }
 }
 
+/**
+ * The session must run what was configured: a substituted model or effort
+ * holds with `switch`, as Copilot's does; another permission mode or
+ * directory holds before any tool runs.
+ */
+function substituted(
+  message: SDKSystemMessage,
+  config: ClaudeWorkerConfig,
+  worktree: string,
+): WorkerResult | undefined {
+  if (resolve(message.cwd) !== resolve(worktree))
+    return hold(
+      `Claude SDK initialized in ${detail(message.cwd)}, not the Work Item's worktree; check the host's Claude installation, then answer retry`,
+    );
+  if (message.permissionMode !== config.permissionMode)
+    return hold(
+      `Claude SDK selected permission mode ${message.permissionMode}, not the configured ${config.permissionMode}; check the operator's Claude settings, then answer retry`,
+    );
+  // The SDK reports the requested string, `[1m]` suffix included; the pinned
+  // SDK may omit effort, so only a reported value can differ.
+  const effort = (message as { effort?: unknown }).effort;
+  const model = sdkModel(config.model);
+  if (
+    message.model === model &&
+    (effort === undefined || effort === config.effort)
+  )
+    return undefined;
+  return hold(
+    `Claude served ${message.model}${effort === undefined ? "" : ` at ${String(effort)} effort`}, not the configured ${model} at ${config.effort}. Set this provider's worker model to one the Claude login can use and restart the service, then answer \`switch NAME\` with this provider's name to run on its new settings, or with another configured provider's name; or cancel.`,
+    ["switch", "cancel"],
+  );
+}
+
 /** Built-in tools whose path argument names the file they write. */
 const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", COPY_TOOL];
 
@@ -1379,6 +1413,8 @@ export class ClaudeWorker implements Worker {
           facts.initialized = true;
           record.session = message.session_id;
           record.reportedModel = message.model;
+          const refused = substituted(message, this.config, input.worktree);
+          if (refused) return refused;
         }
         if (message.type !== "result") continue;
         result = message;

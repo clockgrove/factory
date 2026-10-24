@@ -57,7 +57,7 @@ A provider pairs a **planner** (it plans and reviews) with a **worker** (it writ
 | --------- | ------- | ------ | ------------------------------------------------------------------------------------------------------------ |
 | `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY`                                                         |
 | `claude`  | yes     | yes    | `claude auth login`, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`; needs the optional Claude Agent SDK |
-| `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK                              |
+| `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK (see below)                  |
 
 ```sh
 factory setup --repo OWNER/NAME --provider claude --planner claude --worker claude \
@@ -65,6 +65,9 @@ factory setup --repo OWNER/NAME --provider claude --planner claude --worker clau
 factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer-effort high --default
 ```
 
+- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). They never reach the sandboxed commands, and their values are redacted from output.
+- **Model choices.** `models.planner` and `models.reviewer` each name a model and an effort. `models.reviewEffort` sets one review phase's effort: `graph-review`, `result-review`, `objective-review` or `discovery`. The other phases run on `models.planner`.
+- **What runs is what's configured.** A Claude or Copilot worker that is served another model or effort holds with `switch NAME`. A Claude worker that starts in another permission mode or directory holds before any tool runs.
 - **One provider per Objective.** An Objective runs on the provider it was admitted with. It never falls back to another one, and a missing login holds with the fix.
 - **Usage limits.** When a provider hits its usage limit, the hold offers `wait` and `switch NAME`, which moves the Objective to another configured provider.
 - **Choosing at start:** `factory run N --provider NAME` picks the provider for one Objective; `factory serve --provider NAME` picks it for all new work.

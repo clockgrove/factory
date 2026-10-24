@@ -19,7 +19,7 @@ Part of [the design](../DESIGN.md).
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - git, git lfs, node and each final command's program are on the PATH;
   - a final command that needs the network is flagged.
-- **Providers:** each planner's and worker's SDK is installed and its login is present. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
+- **Providers:** each planner's and worker's SDK is installed and its login is present. Codex and Copilot logins are checked by presence. Claude's is the login the Claude SDK resolves, asked of it with no model call and a 30-second bound: a keychain, token, profile or cloud-provider login counts, an expired one the CLI can't refresh is `blocked`, and no answer is `warn`. A credential the background service loads at start counts by name. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
 - **Repository:**
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;
@@ -48,10 +48,10 @@ Provider options need `--provider NAME`. They add the provider or change it:
 
 - `--planner codex|claude|copilot` and `--worker codex|claude|copilot`. Changing a kind drops that kind's settings.
 - `--default`. The first provider is the default until `--default` moves it.
-- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`.
+- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`. One given alone keeps the other half of the choice in effect, or the planner kind's default.
 - Codex worker settings: `--codex-network`, `--codex-model`, `--codex-effort` and `--codex-service-tier`.
 - Claude worker settings: `--claude-model`, `--claude-effort`, `--claude-max-turns`, `--claude-tools`, `--claude-allowed-tools`, `--claude-permission-mode` and `--claude-setting-sources`.
-- Copilot worker settings: `--copilot-model`, `--copilot-effort` and `--copilot-tools`.
+- Copilot worker settings: `--copilot-model`, `--copilot-effort`, `--copilot-tools` and `--copilot-timeout-seconds` (`worker.idleSeconds`, how long a turn may be silent).
 
 Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
 

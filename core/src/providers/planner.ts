@@ -40,6 +40,14 @@ export const PLANNER_PHASES = [
   "propose",
 ] as const;
 export type PlannerPhase = (typeof PLANNER_PHASES)[number];
+/** The phases called with the reviewer's model, so the ones `reviewEffort` can set. */
+export const REVIEW_PHASES = [
+  "graph-review",
+  "result-review",
+  "objective-review",
+  "discovery",
+] as const satisfies readonly PlannerPhase[];
+export type ReviewPhase = (typeof REVIEW_PHASES)[number];
 
 export interface PlannerCall {
   role: "planner" | "reviewer";
@@ -181,8 +189,8 @@ export interface ModelChoice<Effort extends string = string> {
 export interface PlannerModels<Effort extends string = string> {
   planner: ModelChoice<Effort>;
   reviewer: ModelChoice<Effort>;
-  /** An omitted phase uses `reviewer.effort`. */
-  reviewEffort?: Partial<Record<PlannerPhase, Effort>>;
+  /** A review phase's effort; an omitted one uses `reviewer.effort`. */
+  reviewEffort?: Partial<Record<ReviewPhase, Effort>>;
 }
 
 /** The model a call uses: the planner, or the reviewer at its phase's effort. */
@@ -191,7 +199,7 @@ export function modelChoice<Effort extends string>(
   call: Pick<PlannerCall, "role" | "phase">,
 ): ModelChoice<Effort> {
   if (call.role === "planner") return models.planner;
-  const effort = models.reviewEffort?.[call.phase];
+  const effort = models.reviewEffort?.[call.phase as ReviewPhase];
   return effort ? { ...models.reviewer, effort } : models.reviewer;
 }
 

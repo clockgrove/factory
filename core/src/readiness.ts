@@ -3,7 +3,8 @@
  * target repository need before the service runs an Objective, read with
  * no model call and no change to the target or its settings (the Codex
  * probe writes only its own temporary directories). Setup shows it; a `blocked` check names its
- * fix. Logins are checked by presence: account access, billing and
+ * fix. Codex and Copilot logins are checked by presence, Claude's by asking
+ * its SDK which login it resolves; account access, billing and
  * entitlements are first known when a provider is called.
  */
 
@@ -18,6 +19,10 @@ import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
 import { installationPaths } from "./paths.js";
 import { networkToolOfCommand } from "./planning/facts.js";
+import {
+  CLAUDE_LOGIN_CREDENTIALS,
+  claudeLoginProbe,
+} from "./providers/claude.js";
 import { codexLauncherProblem } from "./providers/codex.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { executable, sandboxStatus } from "./sandbox.js";
@@ -222,11 +227,14 @@ const SDK: Record<string, string> = {
   copilot: "@github/copilot-sdk",
 };
 
-/** The login each kind uses, found by presence alone, or why it is missing. */
-function login(
+/**
+ * The login each kind uses, or why it is missing: Codex's and Copilot's by
+ * presence, Claude's as its SDK resolves it, with no model call.
+ */
+async function login(
   kind: string,
   bound: readonly string[],
-): string | { missing: string; fix: string } {
+): Promise<string | { missing: string; fix: string } | { unchecked: string }> {
   const set = (...names: string[]) => names.find((name) => process.env[name]);
   switch (kind) {
     case "codex": {
@@ -243,26 +251,27 @@ function login(
       };
     }
     case "claude": {
-      const file = join(
-        process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
-        ".credentials.json",
+      // A credential the service loads at start can't be read here.
+      const credential = CLAUDE_LOGIN_CREDENTIALS.find(
+        (name) => !process.env[name] && bound.includes(name),
       );
-      // Only Claude takes a login from the service's credentials.
-      const names = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
-      const named = set(...names);
-      if (named) return `${named} in the environment`;
-      const credential = names.find((name) => loaded(name, bound));
       if (credential) return `${credential} in the service's credentials`;
-      if (existsSync(file)) return `the Claude login in ${file}`;
+      const probe = await claudeLoginProbe();
+      if ("found" in probe) return probe.found;
+      if ("unchecked" in probe) return { unchecked: probe.unchecked };
       return {
-        missing: `no Claude login at ${file}, and no CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY`,
-        fix: "Run `claude auth login` as the user the service runs as",
+        missing: probe.missing,
+        fix: "Run `claude auth login` as the user the service runs as, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
       };
     }
-    default:
-      return set("COPILOT_GITHUB_TOKEN")
-        ? "COPILOT_GITHUB_TOKEN in the environment"
-        : "the GitHub CLI login";
+    default: {
+      const named = set(
+        "COPILOT_PROVIDER_BASE_URL",
+        "GITHUB_COPILOT_API_TOKEN",
+        "COPILOT_GITHUB_TOKEN",
+      );
+      return named ? `${named} in the environment` : "the GitHub CLI login";
+    }
   }
 }
 
@@ -301,16 +310,18 @@ async function providerChecks(
         });
         continue;
       }
-      const found = login(kind, bound);
+      const found = await login(kind, bound);
       checks.push(
         typeof found === "string"
           ? ok(at, `${found}; account access is checked at the first call`)
-          : {
-              name: at,
-              status: "blocked",
-              detail: found.missing,
-              fix: found.fix,
-            },
+          : "unchecked" in found
+            ? { name: at, status: "warn", detail: found.unchecked }
+            : {
+                name: at,
+                status: "blocked",
+                detail: found.missing,
+                fix: found.fix,
+              },
       );
     }
     // Planning and review start codex through the same launcher as a

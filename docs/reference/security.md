@@ -8,7 +8,7 @@ These always hold:
 
 - Credentials stay with the service. Workers never see them.
 - Workers run in the OS sandbox with the configured network policy.
-- Secrets are named by reference. The configuration derives the secret values once: those named in `policy.allowedSecretNames` and each managed provider's credential (`apiKeyEnv`, `credentialEnv`, from the environment or a service credential). Everything Factory writes to GitHub, its run log and captures, Dream input and the Codex worker's reported commands and errors are redacted of them, of GitHub and `sk-` tokens, of JWT-shaped tokens and of bearer headers. Only the named ones reach a worker's environment.
+- Secrets are named by reference. The configuration derives the secret values once: those named in `policy.allowedSecretNames`, the Copilot login's tokens and keys when Copilot is configured, and each managed provider's credential (`apiKeyEnv`, `credentialEnv`, from the environment or a service credential). Everything Factory writes to GitHub, its run log and captures, Dream input and the Codex worker's reported commands and errors are redacted of them, of GitHub and `sk-` tokens, of JWT-shaped tokens and of bearer headers. Only the named ones reach a worker's environment.
 - `sandbox.environment` is not for secrets: its values are not redacted, and names that look like secrets (`TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `KEY`) are refused at load. A secret a command needs goes in `policy.allowedSecretNames`.
 - Deploys stay in the target's own GitHub Actions, behind environment approvals.
 

@@ -108,7 +108,7 @@ Use the listing for your host. `factory help` lists the installed commands. A pa
 
 ## Use the plugin
 
-1. **Prepare the target.** Make a clone of the target repository that only Factory uses. On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, and a number field `Factory order`.
+1. **Prepare the target.** Make a clone of the target repository that only Factory uses. On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`.
 2. **Set up.** In Codex or Claude Code, ask:
 
    > Use Factory to set up OWNER/NAME with the clone at /absolute/clone and Project PVT_.... Do not start work.

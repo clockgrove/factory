@@ -169,7 +169,7 @@ export function seed(inst, issue, status = "checking", fields = {}) {
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 6,
+      version: 7,
       issue,
       status,
       frozen: frozen(inst),
@@ -310,6 +310,11 @@ export function item(id, fields = {}) {
     brief: id,
     ...fields,
   };
+}
+
+/** An accepted plan of `items` (each built with item()): nothing else to cover, run or decide. */
+export function plan(items = [], fields = {}) {
+  return { items, coverage: [], finalCommands: [], decisions: [], ...fields };
 }
 
 /** An operator's `retire-command` record, against the plan accepted at `plan`. */

@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isObject } from "../checked.js";
 import type { CoreConfig } from "../config.js";
 import { ADOPTS, hold, type Step, type Workflow } from "../engine.js";
-import { profilesLacking } from "../planning/plan.js";
+import { deliveryChange, profilesLacking } from "../planning/plan.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { type ObjectiveState, TERMINAL } from "../state.js";
@@ -446,6 +446,21 @@ function changed(
               family: "retry",
               consequence:
                 "Runs on the frozen profiles again, once they are restored and the service restarted.",
+            },
+            "cancel",
+          ],
+        );
+      // delivery.kind is the installation's: no provider's configuration
+      // keeps the kind a planned Objective froze.
+      const delivery = now && deliveryChange(state, now.config);
+      if (delivery)
+        return hold(
+          `This Objective's plan is split for delivery.kind "${delivery.was}", which the configuration now sets to "${delivery.now}". To deliver it with "${delivery.now}", cancel it and queue it again. To keep "${delivery.was}", set delivery.kind back, restart the service and answer retry.`,
+          [
+            {
+              answer: "retry",
+              family: "retry",
+              consequence: `Checks the configuration again, once delivery.kind is "${delivery.was}" and the service restarted.`,
             },
             "cancel",
           ],

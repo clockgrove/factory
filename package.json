@@ -50,7 +50,7 @@
     "x64"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build:core",
     "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
@@ -72,7 +72,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.129.0",
-    "@octokit/core": "^7.0.8",
     "@openai/codex-sdk": "0.160.0",
     "@secretlint/node": "13.0.5",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.5",
@@ -84,7 +83,6 @@
     "yaml": "2.9.0"
   },
   "bundleDependencies": [
-    "@octokit/core",
     "@openai/codex-sdk",
     "@secretlint/node",
     "@secretlint/secretlint-rule-preset-recommend",

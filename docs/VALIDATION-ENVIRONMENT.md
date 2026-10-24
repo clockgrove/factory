@@ -1,6 +1,6 @@
 # Validation environment
 
-Factory validation (a Work Item's commands, environment readiness, final validation) runs in a sandbox that differs from a target repository's hosted CI. This is the one list of those differences. The planner receives a compact form of it (`src/validation-environment.ts`), and `factory setup --config-only` reports the installation's facts under `validationEnvironment`.
+Factory validation (a Work Item's commands, environment readiness, final validation) runs in a sandbox that differs from a target repository's hosted CI. This is the one list of those differences. The planner receives a compact form of it (`core/src/planning/facts.ts`), and `factory setup --config-only` reports the installation's facts under `validationEnvironment`.
 
 Rule: a command that needs something below and is not provided is a CI-only command. List it in `finalValidation.ciOnlyCommands` ([user guide](USER-GUIDE.md)); the planner then leaves it out and asks through `decisionRequired` when a criterion needs it.
 

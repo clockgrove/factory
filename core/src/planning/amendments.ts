@@ -23,6 +23,7 @@ import {
   currentPlan,
   grantsKey,
   amendmentKey as KEY,
+  ownedSince,
   proposalKey,
   proposalsOf,
 } from "./plan.js";
@@ -1218,6 +1219,13 @@ function amendAcceptStep(
           rejected: `The build moved on while the amendment was planned: ${fence.map((f) => f.message).join("; ")}`,
         } satisfies AmendmentResult);
       const inputs = amendmentInputs(state);
+      // The paths it adds are owned from now: they rank after every plan
+      // accepted before it (service.ts `pathOwners`).
+      const since = ownedSince(
+        round.draft!.items,
+        new Date().toISOString(),
+        saved,
+      );
       const plan: Plan = {
         ...round.draft!,
         finalCommands: currentPlan(state)!.finalCommands,
@@ -1225,6 +1233,7 @@ function amendAcceptStep(
         ...(inputs.reviewArtifacts.length
           ? { reviewArtifacts: inputs.reviewArtifacts }
           : {}),
+        ...(since ? { ownedSince: since } : {}),
       };
       // Crash points `amend:post:*` (and `amend:data:*` for a plan
       // posted in parts); the marker makes a rerun edit, never repeat.

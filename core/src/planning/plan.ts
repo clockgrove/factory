@@ -93,6 +93,32 @@ export function currentPlan(state: ObjectiveState): Plan | undefined {
   return retired.length ? { ...plan, retired } : plan;
 }
 
+/**
+ * A plan's `ownedSince` for `items`: a path `before` owned keeps its time
+ * there (`sinceOf`), and every other path is owned from `at`. Undefined
+ * when no path has a time of its own.
+ */
+export function ownedSince(
+  items: WorkItem[],
+  at: string,
+  before?: Plan,
+): Record<string, string> | undefined {
+  const had = new Set(before?.items.flatMap((item) => item.ownedPaths));
+  const since = items.flatMap((item) =>
+    item.ownedPaths.flatMap((path) => {
+      const time = had.has(path) ? sinceOf(before!, path) : at;
+      return time ? [[path, time] as const] : [];
+    }),
+  );
+  return since.length ? Object.fromEntries(since) : undefined;
+}
+
+/** When `plan`'s Objective came to own `path`, if later than the plan's acceptance. */
+export const sinceOf = (plan: Plan, path: string): string | undefined =>
+  plan.ownedSince && Object.hasOwn(plan.ownedSince, path)
+    ? plan.ownedSince[path]
+    : undefined;
+
 /** The latest accepted amendment's plan, else the accepted plan, as saved. */
 export function acceptedPlan(state: ObjectiveState): Plan | undefined {
   const proposals = proposalsOf(state);

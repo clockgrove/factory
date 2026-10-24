@@ -150,6 +150,15 @@ export interface Plan extends Draft {
   /** Operator answers; workers and final review get them. */
   decisions: PlannerDecision[];
   /**
+   * The owned paths the Objective came to own after its plan was
+   * accepted, each with when (plan.ts `ownedSince`): an accepted
+   * amendment's new paths, or every path of a plan rebuilt for a state
+   * that couldn't be read. They take that place in the owned-path order
+   * (service.ts `pathOwners`); every other path ranks by the plan's
+   * acceptance. Absent means none.
+   */
+  ownedSince?: Record<string, string>;
+  /**
    * The final validation commands the operator retired, with their
    * reasons: only currentPlan (plan.ts) sets it, from the kept retirements
    * of the plan accepted now. Never part of a saved plan.

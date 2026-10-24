@@ -801,3 +801,113 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   assert.equal(cli(inst, "cancel", "74").code, 0);
   await stopped(service);
 });
+
+test("an amendment's new paths rank by its acceptance: an earlier Objective waits on a later one that builds them, and a circle of waits is broken", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  const at = new Date().toISOString();
+  const seeded = new Date(Date.parse(at) - 60_000).toISOString();
+  const day = (n) => `2026-01-0${n}T00:00:00.000Z`;
+  // A building Objective whose plan was accepted on `accepted`, and,
+  // with `added`, an amendment accepted on `since` that added those items.
+  const building = (issue, accepted, items, added = [], since = accepted) => {
+    const amended = plan([...items, ...added], {
+      ownedSince: Object.fromEntries(
+        added.flatMap((each) => each.ownedPaths.map((path) => [path, since])),
+      ),
+    });
+    seed(inst, issue, "building", {
+      done: {
+        check: {},
+        plan: plan(items),
+        ...(added.length ? { "amend:x": { plan: amended } } : {}),
+      },
+      kept: {
+        "plan:acceptedAt": accepted,
+        ...(added.length
+          ? {
+              "amend:x:proposal": {
+                id: "x",
+                actor: "kirk",
+                at: since,
+                plan: accepted,
+                discovery: {
+                  scope: "in-scope",
+                  reason: "more is needed",
+                  evidence: [],
+                  ownership: added.flatMap((each) => each.ownedPaths),
+                  acceptance: [],
+                  dependencies: [],
+                },
+              },
+            }
+          : {}),
+      },
+      // Its last item's work retried a minute ago and is due.
+      retries: {
+        [`item:${[...items, ...added].at(-1).id}:work`]: {
+          count: 0,
+          attempts: 1,
+          since: seeded,
+          nextAt: at,
+          lastError: "seeded",
+        },
+      },
+    });
+  };
+  // #75's plan (lib/a.ts) was accepted before #76's (src/b.ts, started),
+  // so both built; then #75's amendment added r, which owns src/.
+  building(
+    75,
+    day(1),
+    [item("a", { ownedPaths: ["lib/a.ts"] })],
+    [item("r", { ownedPaths: ["src/"] })],
+    day(3),
+  );
+  building(76, day(2), [item("b", { ownedPaths: ["src/b.ts"] })]);
+  // Three Objectives whose waits would close a circle: #83 waits on #82
+  // (y/ since day 3), #82 on #81 (its amendment's x/ since day 4), and
+  // #81 on #83 (its amendment's z/ since day 5): that last one is left out.
+  building(
+    81,
+    day(1),
+    [item("a1", { ownedPaths: ["x/a.ts"] })],
+    [item("a2", { ownedPaths: ["z/"] })],
+    day(5),
+  );
+  building(
+    82,
+    day(2),
+    [item("b1", { ownedPaths: ["y/b.ts"] })],
+    [item("b2", { ownedPaths: ["x/"] })],
+    day(4),
+  );
+  building(83, day(3), [item("c1", { ownedPaths: ["y/", "z/c.ts"] })]);
+  const tried = (issue) => {
+    const state = stateOf(inst, issue);
+    return [
+      ...Object.keys(state.attempts),
+      ...Object.entries(state.retries)
+        .filter(([, retry]) => retry.lastError !== "seeded")
+        .map(([key]) => key),
+      ...state.holds.map((hold) => hold.step),
+    ];
+  };
+  const waitsOn = (issue) =>
+    status(inst).objectives.find((each) => each.issue === issue).waitsOn;
+  const service = serve(inst);
+  // #76's started item goes on; #75's r waits on it.
+  await until(() => tried(76).includes("item:b:work"), "b's work starts");
+  await until(() => waitsOn(75)?.paths === 76, "#75 waits on #76");
+  assert.equal(waitsOn(76), null);
+  assert.ok(!tried(75).includes("item:r:work"), tried(75));
+  assert.deepEqual(waitsOn(83), { paths: 82 });
+  assert.deepEqual(waitsOn(82), { paths: 81 });
+  assert.equal(waitsOn(81), null);
+  // Once #76 has finished, r builds.
+  assert.equal(cli(inst, "cancel", "76").code, 0);
+  await until(() => tried(75).includes("item:r:work"), "r's work starts");
+  for (const issue of [75, 81, 82, 83])
+    assert.equal(cli(inst, "cancel", String(issue)).code, 0);
+  await stopped(service);
+});

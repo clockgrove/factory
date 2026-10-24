@@ -194,6 +194,7 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
       "2026-10-24T02:10:00.000Z",
     ),
   };
+  const rebuiltAt = new Date().toISOString();
   const found = rebuildFrom(
     record(),
     {
@@ -215,6 +216,12 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
     kept.plan.items.map((item) => item.id),
     ["badge-image", "badge-helper"],
   );
+  // With no readable state it owned no paths meanwhile: it owns them all
+  // again from the rebuild, after every plan accepted before.
+  const paths = new Set(kept.plan.items.flatMap((item) => item.ownedPaths));
+  assert.deepEqual(Object.keys(kept.plan.ownedSince).sort(), [...paths].sort());
+  for (const since of Object.values(kept.plan.ownedSince))
+    assert.ok(since >= rebuiltAt, since);
   assert.deepEqual(Object.keys(kept.merged), ["badge-image"]);
   assert.equal(kept.merged["badge-image"].pr, 401);
   assert.deepEqual(kept.decisions, [decision]);

@@ -25,6 +25,7 @@ import {
   currentPlan,
   decisionsOf,
   generationInputs,
+  ownedSince,
   position,
 } from "./planning/plan.js";
 import { decisions, planningFacts, postPlan } from "./planning/steps.js";
@@ -148,11 +149,13 @@ export function statusRecordOf(state: ObjectiveState): StatusRecord {
 }
 
 /**
- * The plan whose owned paths an Objective holds (service.ts `pathOwner`)
+ * The plan whose owned paths an Objective holds (service.ts `pathOwners`)
  * and when it was accepted: while a reset stands, the old state's; once
  * rebuilt, the rebuilt plan's under its own acceptance, until planning
  * lands it or drops it (`forget`); else the current plan's. So a reset
- * never gives up an Objective's place in the owned-path order.
+ * of a readable state never gives up an Objective's place in the
+ * owned-path order; one of an unreadable state owns the rebuilt plan's
+ * paths from the rebuild (`rebuildFrom`).
  */
 export function ownedPlan(
   state: ObjectiveState,
@@ -309,6 +312,7 @@ function reviewed(rebuilt: Rebuilt, config: CoreConfig): Step {
         decisions: _decisions,
         reviewArtifacts: _artifacts,
         retired: _retired,
+        ownedSince: _since,
         ...draft
       } = rebuilt.plan;
       const round: Draft = { ...draft, base: inputs.base };
@@ -350,6 +354,9 @@ function land(
         decisions: decisions(state),
         ...(inputs.reviewArtifacts.length
           ? { reviewArtifacts: inputs.reviewArtifacts }
+          : {}),
+        ...(rebuilt.plan.ownedSince
+          ? { ownedSince: rebuilt.plan.ownedSince }
           : {}),
       };
       await postPlan({ github }, state, plan, signal, {
@@ -778,6 +785,14 @@ export function rebuildFrom(
       ),
     };
   }
+  // With no readable old state it owned no paths meanwhile, so an
+  // Objective accepted since may have started on them: it owns them all
+  // again from now, after every plan accepted before (service.ts
+  // `pathOwners`).
+  if (!old) {
+    const since = ownedSince(plan.plan.items, new Date().toISOString());
+    if (since) restored.plan = { ...plan.plan, ownedSince: since };
+  }
   state.kept[REBUILT] = restored;
   plan.plan.decisions.forEach((decision, at) => {
     state.done[`decide:0:${at + 1}`] = { decision };
@@ -1005,6 +1020,9 @@ function planShaped(value: unknown): value is Plan {
     ) &&
     (value.retired === undefined ||
       (Array.isArray(value.retired) &&
-        value.retired.every((entry) => isObject(entry))))
+        value.retired.every((entry) => isObject(entry)))) &&
+    (value.ownedSince === undefined ||
+      (isObject(value.ownedSince) &&
+        Object.values(value.ownedSince).every((at) => typeof at === "string")))
   );
 }

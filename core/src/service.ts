@@ -35,7 +35,7 @@ import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { currentPlan } from "./planning/plan.js";
+import { currentPlan, sinceOf } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -1007,9 +1007,19 @@ export async function serve(options: ServeOptions): Promise<number> {
     let slots = maxActive;
     waitingForSlot.clear();
     waitingOnPaths.clear();
+    // An Objective whose plan can't be read is its own error, and the
+    // others' order skips it.
+    const owned = ordered.flatMap((runner) => {
+      let paths: Owned | undefined;
+      guarded(runner.state.issue, () => {
+        paths = ownedPaths(runner);
+      });
+      return paths ? [paths] : [];
+    });
+    const owners = pathOwners(owned);
     for (const runner of ordered)
       guarded(runner.state.issue, () => {
-        slots = schedule(runner, ordered, slots);
+        slots = schedule(runner, owners, slots);
       });
     const observer = options.observer;
     for (const runner of observer ? runners.values() : [])
@@ -1169,7 +1179,7 @@ export async function serve(options: ServeOptions): Promise<number> {
    */
   const schedule = (
     runner: ObjectiveRunner,
-    ordered: readonly ObjectiveRunner[],
+    owners: ReadonlyMap<number, number>,
     free: number,
   ): number => {
     let slots = free;
@@ -1198,7 +1208,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     // resumes. Once the wait ends, the steps it stopped don't count it.
     const owner = TERMINAL.includes(state.status)
       ? undefined
-      : pathOwner(runner, ordered);
+      : owners.get(state.issue);
     if (owner !== undefined) {
       waitingOnPaths.set(state.issue, owner);
       const stops = (key: string) => pathWaitStops(runner.state, key);
@@ -1321,48 +1331,102 @@ export async function serve(options: ServeOptions): Promise<number> {
 }
 
 /**
- * An Objective builds only while no earlier unfinished Objective owns an
- * overlapping path; planning never waits. Earlier means its plan was
- * accepted earlier: an Objective still planning owns nothing yet, and once
- * its plan lands it waits on every plan accepted before it, so two
- * Objectives never build overlapping paths at once. Its paths are its
- * current plan's, so an accepted amendment's count from the next tick; the
- * amendment keeps the plan's acceptance time, so the order never reverses.
- * It owns them until it is done or cancelled, through final validation,
- * final review and the report, which judge those files, and through a
- * reset (reset.ts `ownedPlan`). An amendment that adds paths a later
- * Objective's started items touch makes that one wait with those items
- * unmerged on their branches (docs/reference/queue.md).
+ * Who each Objective waits on for owned paths this tick, by issue: an
+ * Objective builds only while no Objective ahead of it in the owned-path
+ * order owns an overlapping path, so two Objectives never build
+ * overlapping paths at once; planning never waits. Each path ranks by
+ * when the Objective came to own it: its plan's acceptance, or the
+ * acceptance of the amendment that added it, or the rebuild of a state
+ * that couldn't be read (planning/types.ts `Plan.ownedSince`). Of two
+ * Objectives, the one that owned its side of their first overlap first
+ * goes first (the earlier issue on a tie), so an amendment never stops a
+ * later Objective that already builds the paths it adds, and a later
+ * amendment never reverses an order that stands. An Objective with no
+ * accepted plan of its own (planning, resetting, or reviewing a rebuilt
+ * plan) or with every item built never waits, but owns its paths until it
+ * is done or cancelled, through final validation, final review and the
+ * report, which judge those files, and through a reset (reset.ts
+ * `ownedPlan`). The waits are taken oldest overlap first, and one that
+ * would close a circle (three Objectives' amendments can make one) is
+ * left out: the one it would wait on waits already, so no two build
+ * overlapping paths at once, and one of the circle builds. The owner
+ * shown is the first in `owned`'s order.
  */
-function pathOwner(
-  runner: ObjectiveRunner,
-  all: readonly ObjectiveRunner[],
-): number | undefined {
-  // Only building waits: an Objective with no accepted plan of its own
-  // (planning, resetting, or reviewing a rebuilt plan) never does.
-  const mine = currentPlan(runner.state) && ownedPlan(runner.state);
-  if (!mine || built(runner.state)) return undefined;
-  const paths = mine.plan.items.flatMap((item) => item.ownedPaths);
-  return all.find((other) => {
-    if (other === runner) return false;
-    // Another Objective whose plan can't be read is skipped, never this
-    // one's error: its own guard sets it aside (serve `guarded`).
-    try {
-      const theirs = ownedPlan(other.state);
-      if (!theirs) return false;
-      if (
-        theirs.accepted > mine.accepted ||
-        (theirs.accepted === mine.accepted &&
-          other.state.issue > runner.state.issue)
-      )
-        return false;
-      return theirs.plan.items.some((item) =>
-        item.ownedPaths.some((b) => paths.some((a) => pathsOverlap(a, b))),
-      );
-    } catch {
-      return false;
+function pathOwners(owned: readonly Owned[]): Map<number, number> {
+  // Each overlapping pair's wait, from when their first overlap arose.
+  const waits: { from: number; to: number; arose: string }[] = [];
+  for (const [at, a] of owned.entries())
+    for (const b of owned.slice(at + 1)) {
+      let first: { arose: string; aFirst: boolean } | undefined;
+      for (const x of a.paths)
+        for (const y of b.paths) {
+          const arose = x.since > y.since ? x.since : y.since;
+          if ((first && first.arose <= arose) || !pathsOverlap(x.path, y.path))
+            continue;
+          first = {
+            arose,
+            aFirst:
+              x.since < y.since || (x.since === y.since && a.issue < b.issue),
+          };
+        }
+      if (!first) continue;
+      const [ahead, behind] = first.aFirst ? [a, b] : [b, a];
+      if (behind.waits)
+        waits.push({ from: behind.issue, to: ahead.issue, arose: first.arose });
     }
-  })?.state.issue;
+  const taken = new Map<number, number[]>();
+  const reaches = (
+    from: number,
+    to: number,
+    seen = new Set<number>(),
+  ): boolean => {
+    if (from === to) return true;
+    seen.add(from);
+    return (taken.get(from) ?? []).some(
+      (next) => !seen.has(next) && reaches(next, to, seen),
+    );
+  };
+  waits.sort((x, y) => (x.arose < y.arose ? -1 : x.arose > y.arose ? 1 : 0));
+  for (const { from, to } of waits)
+    if (!reaches(to, from)) taken.set(from, [...(taken.get(from) ?? []), to]);
+  return new Map(
+    [...taken].map(([issue, ahead]) => [
+      issue,
+      owned.find((each) => ahead.includes(each.issue))!.issue,
+    ]),
+  );
+}
+
+/**
+ * An Objective's owned paths, each with when it came to own it, and
+ * whether it waits on others' (`pathOwners`).
+ */
+interface Owned {
+  issue: number;
+  /**
+   * Only building waits: with no accepted plan of its own (planning,
+   * resetting, or reviewing a rebuilt plan) or every item built, it never
+   * does.
+   */
+  waits: boolean;
+  paths: { path: string; since: string }[];
+}
+
+/** `runner`'s owned paths (reset.ts `ownedPlan`), or none. */
+function ownedPaths(runner: ObjectiveRunner): Owned | undefined {
+  const owned = ownedPlan(runner.state);
+  if (!owned) return undefined;
+  const { plan, accepted } = owned;
+  return {
+    issue: runner.state.issue,
+    waits: Boolean(currentPlan(runner.state)) && !built(runner.state),
+    paths: plan.items.flatMap((item) =>
+      item.ownedPaths.map((path) => ({
+        path,
+        since: sinceOf(plan, path) ?? accepted,
+      })),
+    ),
+  };
 }
 
 /**

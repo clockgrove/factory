@@ -134,7 +134,7 @@ export function overrunQuestion(
       name === "perPath" ? perPath(state)[key]! : implementationRepairs(state);
     return `${name === "perPath" ? "its repair path's" : "the Objective's"} ${allowed} (autonomy.allowances.${name}; \`more\` allows ${grant(state, name)} more)`;
   });
-  return `${key} needs another repair, past ${past.join(" and ")}. It still fails:\n\n${state.repairs[key]?.findings.at(-1) ?? ""}`;
+  return `${key} needs another repair, past ${past.join(" and ")}. It still fails:\n\n${state.repairs[key]?.findings.at(-1) ?? ""}\n\nAnswer \`more\` to repair it, \`replan\` to plan the remaining work again, or cancel.`;
 }
 
 /**

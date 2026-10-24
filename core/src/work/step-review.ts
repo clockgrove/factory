@@ -261,6 +261,31 @@ export const DECIDE_NOTE =
 export const REFUSES_ITEM =
   "and sends the result back for repair with your reason (a repair, counted against the allowances)";
 
+/** A criterion as a question or an option names it. */
+const short = (text: string) =>
+  text.length > 80 ? `${text.slice(0, 77)}...` : text;
+
+/**
+ * The line a refusal question carries for the criteria the operator
+ * refused (`refuse <n>`), which offer no `accept`: their refusal stands on
+ * `what`, and `wayOn` is how the Objective goes on.
+ */
+export function standingRefusals(
+  refused: readonly RefusedCriterion[],
+  what: string,
+  wayOn: string,
+): string {
+  const own = refused
+    .filter((entry) => entry.source === "operator")
+    .map((entry) => `${entry.criterionIndex + 1} (${short(entry.criterion)})`);
+  if (!own.length) return "";
+  const many = own.length > 1;
+  const named = many
+    ? `${own.slice(0, -1).join(", ")} and ${own.at(-1)}`
+    : own[0];
+  return `\n\nYour refusal${many ? "s" : ""} of criteri${many ? "a" : "on"} ${named} stand${many ? "" : "s"} on ${what}: ${wayOn} is the way on.`;
+}
+
 /**
  * The per-criterion answers to `review`'s open criteria: `accept <n>` for
  * each the reviewer refused, and `accept <n>` and `refuse <n>` for each it
@@ -271,8 +296,6 @@ export function criterionOffers(
   review: Exclude<ResultReview, { kind: "pass" }>,
   refuses: string,
 ): HoldOption[] {
-  const short = (text: string) =>
-    text.length > 80 ? `${text.slice(0, 77)}...` : text;
   const option = (
     outcome: "accept" | "refuse",
     entry: { criterionIndex: number; criterion: string },
@@ -395,9 +418,11 @@ export function refusalOffers(finding: RepairFinding | undefined): {
     .filter((entry) => entry.source === "model")
     .map((entry) => `${entry.criterionIndex + 1}. ${entry.criterion}`);
   return {
-    note: options.length
-      ? `\n\nIf the reviewer was wrong about a refused criterion, answer \`accept <n> <reason>\` with its number: it counts as met by this exact result (a later one is judged again), and the refused result is checked again once no refusal stands, else what still counts is diagnosed. Final review, the report and status list it with your reason. The refused criteria:\n${listed.join("\n")}`
-      : "",
+    note: `${
+      options.length
+        ? `\n\nIf the reviewer was wrong about a refused criterion, answer \`accept <n> <reason>\` with its number: it counts as met by this exact result (a later one is judged again), and the refused result is checked again once no refusal stands, else what still counts is diagnosed. Final review, the report and status list it with your reason. The refused criteria:\n${listed.join("\n")}`
+        : ""
+    }${standingRefusals(finding.refused, "this result", "a repair, `replan`, or `cancel`")}`,
     options,
   };
 }

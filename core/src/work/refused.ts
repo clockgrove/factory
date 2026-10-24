@@ -68,6 +68,24 @@ export async function refusedResult(
 }
 
 /**
+ * Whether only the operator's own refusals (`refuse <n>`) remain on the
+ * kept refused result: a rereview of that tree reads them again and
+ * refuses again, so `revalidate` isn't offered.
+ */
+export function operatorRefusalsOnly(
+  state: ObjectiveState,
+  id: string,
+): boolean {
+  const finding = fact(state, "finding", id);
+  return (
+    finding?.kind === "review" &&
+    finding.tree === refusedOf(state, id)?.tree &&
+    finding.refused.length > 0 &&
+    finding.refused.every((entry) => entry.source === "operator")
+  );
+}
+
+/**
  * Whether `revalidate` can answer a question of item step `key`
  * (workflow.ts, for the engine): a coding item's work step while its
  * refused result is kept (and, for media, its selection stands), or a QA
@@ -88,6 +106,7 @@ export function revalidatable(state: ObjectiveState, key: string): boolean {
     key === stepKey(item.id, "work") &&
     !!refusedOf(state, item.id) &&
     !refusedOf(state, item.id)?.unrecheckable &&
+    !operatorRefusalsOnly(state, item.id) &&
     // The work step takes `revalidate` only before a finished worker
     // run is collected and when no replay onto a new start is due.
     !fact(state, "finished", item.id) &&

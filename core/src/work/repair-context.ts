@@ -15,7 +15,7 @@ import { AMEND } from "./amend.js";
 import { fact, facts, type ItemFacts } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
-import { refusedOf, refusedResult } from "./refused.js";
+import { operatorRefusalsOnly, refusedOf, refusedResult } from "./refused.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
 import { refusalOffers } from "./step-review.js";
@@ -126,20 +126,16 @@ export async function repairContext(
     };
   if (result.kind === "question") {
     const rereviewed = resultRereviews(state);
-    const recheck = (await refusedResult(
-      state,
-      item,
-      deps.config.checkout,
-      base,
-      signal,
-    ))
-      ? `\n\nIf the refused result is correct and Factory's own check was at fault (for example, the check could not see files the result has), answer \`revalidate\`: Factory runs validation, review and delivery again on the same result, unchanged, without running the worker. It doesn't count as a repair; it is a result rereview, and this Objective has used ${rereviewed.used} of ${rereviewed.allowed} (autonomy.allowances.resultRereviews).`
-      : "";
+    const recheck =
+      !operatorRefusalsOnly(state, item.id) &&
+      (await refusedResult(state, item, deps.config.checkout, base, signal))
+        ? `\n\nIf the refused result is correct and Factory's own check was at fault (for example, the check could not see files the result has), answer \`revalidate\`: Factory runs validation, review and delivery again on the same result, unchanged, without running the worker. It doesn't count as a repair; it is a result rereview, and this Objective has used ${rereviewed.used} of ${rereviewed.allowed} (autonomy.allowances.resultRereviews).`
+        : "";
     // The engine offers `revalidate` itself (`revalidatable`).
     const offer = refusalOffers(finding);
     return {
       outcome: hold(
-        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, or \`retry\` to diagnose the failure again.${recheck}${offer.note}`,
+        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, \`retry\` to diagnose the failure again, or \`replan\` to plan again.${recheck}${offer.note}`,
         [
           "answer",
           {
@@ -148,6 +144,7 @@ export async function repairContext(
             consequence: "Diagnoses the failure again.",
           },
           ...offer.options,
+          "replan",
           "cancel",
         ],
       ),

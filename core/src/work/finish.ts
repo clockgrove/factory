@@ -58,6 +58,7 @@ import {
   criterionDecisions,
   criterionOffers,
   reviewOutcome,
+  standingRefusals,
   workerInputs,
 } from "./step-review.js";
 import { acceptedNotes, retained, secondLook, withKeep } from "./step-work.js";
@@ -352,7 +353,7 @@ export function finalReviewStep(deps: BuildDeps): Step {
             const offers = criterionOffers(refusal, "and the refusal stands");
             return {
               ...hold(
-                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}`,
+                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${standingRefusals(refusal.refused, "this integrated result", "a fix with `retry`, `replan`, or cancel")}`,
                 ["retry", "replan", ...offers, "cancel"],
               ),
               keep: {

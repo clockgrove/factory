@@ -1124,6 +1124,8 @@ export class ObjectiveRunner {
         repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         repair.from = key;
+        // Last in key order: the latest repair (status).
+        delete state.repairs[outcome.target];
         state.repairs[outcome.target] = repair;
         if (outcome.conflict) countConflict(state, outcome.target);
         markFree(state, outcome.free);

@@ -750,7 +750,9 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
 /**
  * A call's tokens and cost by model: Claude's `modelUsage`, Copilot's
  * per-model usage, else the whole call under its reported (or configured)
- * model. Input includes cache reads and writes, as in `tokens`.
+ * model. A resumed Claude call's `modelUsage` is its session's running
+ * total, so it counts as the whole call. Input includes cache reads and
+ * writes, as in `tokens`.
  */
 function modelBreakdown(event: LogEvent): [
   string,
@@ -767,7 +769,12 @@ function modelBreakdown(event: LogEvent): [
   const claude = usage.modelUsage as
     | Record<string, Record<string, unknown>>
     | undefined;
-  if (claude && typeof claude === "object" && Object.keys(claude).length)
+  if (
+    claude &&
+    typeof claude === "object" &&
+    Object.keys(claude).length &&
+    event.sessionMode !== "resumed"
+  )
     return Object.entries(claude).map(([model, counts]) => {
       const read = n(counts.cacheReadInputTokens);
       const written = n(counts.cacheCreationInputTokens);

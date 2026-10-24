@@ -683,7 +683,9 @@ test("status --json details each Work Item's attempt, commits, last error, repai
     shown.out,
     /Provider: codex \(the default\) · sandbox (required|optional), network (off|package-install)/,
   );
-  // Analysis: one Claude call with a sub-agent model, one Codex call with child threads.
+  // Analysis: one Claude call with a sub-agent model, a resumed one whose
+  // per-model counts are its session's running total, and one Codex call
+  // with child threads.
   const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-7");
   log.write(69, {
     step: "item:a:review",
@@ -710,6 +712,25 @@ test("status --json details each Work Item's attempt, commits, last error, repai
           cacheCreationInputTokens: 20,
           costUSD: 0.5,
         },
+        "claude-haiku": { inputTokens: 20, outputTokens: 5, costUSD: 0.01 },
+      },
+    },
+  });
+  log.write(69, {
+    step: "item:a:review",
+    attemptId: "item:a:review#1",
+    event: "model-usage",
+    callId: "k3",
+    role: "reviewer",
+    provider: "claude",
+    model: "claude-opus",
+    reportedModel: "claude-opus",
+    sessionMode: "resumed",
+    tokens: { input: 40, output: 4, cached: 0, cacheWrite: 0, total: 44 },
+    costUsd: 0.1,
+    providerUsage: {
+      modelUsage: {
+        "claude-opus": { inputTokens: 120, outputTokens: 19, costUSD: 0.6 },
         "claude-haiku": { inputTokens: 20, outputTokens: 5, costUSD: 0.01 },
       },
     },
@@ -765,7 +786,14 @@ test("status --json details each Work Item's attempt, commits, last error, repai
     cacheWrite: 0,
     costUsd: 0.01,
   });
-  assert.equal(analysis.calls.models["claude-opus"].input, 130);
+  assert.deepEqual(analysis.calls.models["claude-opus"], {
+    calls: 2,
+    input: 170,
+    output: 19,
+    cached: 30,
+    cacheWrite: 20,
+    costUsd: 0.6,
+  });
   assert.equal(analysis.calls.models["gpt-6.1-sol"].input, 1000);
   assert.equal(analysis.calls.descendants.threads, 2);
   const filtered = JSON.parse(

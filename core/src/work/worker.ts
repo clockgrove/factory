@@ -51,6 +51,8 @@ export interface WorkerInput {
    * redacted and bounded (ActivityLog). Streamed deltas are left out.
    */
   output(event: unknown): void;
+  /** The attempt's private files (engine.ts StepContext.runFile), for its own Validate's failed output. */
+  runFile(kind: string): RunFile;
   /** The Work Item's spend so far, for workers that bill per run. */
   spend?: WorkerSpend;
   /** The answer to this step's last hold, such as `more`. */

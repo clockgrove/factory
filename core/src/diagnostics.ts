@@ -177,8 +177,17 @@ export async function diagnostics(
         ? undefined
         : captureOf(options, entry, Boolean(options.captures));
     if (capture) captured = true;
+    // A failed command's whole output, in its attempt file.
+    const output =
+      options.item !== undefined &&
+      entry.kind === "validation" &&
+      typeof entry.event.output === "string"
+        ? join(options.logs, entry.event.output)
+        : undefined;
     if (options.json) {
-      write(`${JSON.stringify(capture ? { ...entry, capture } : entry)}\n`);
+      write(
+        `${JSON.stringify({ ...entry, ...(capture ? { capture } : {}), ...(output ? { outputPath: output } : {}) })}\n`,
+      );
       return;
     }
     if (entry.run !== lastRun) {
@@ -191,6 +200,7 @@ export async function diagnostics(
         ? entry.text
         : withDetail(entry.text, entry.event);
     write(`${relative(entry.elapsedMs)}  ${text}\n`);
+    if (output) write(`        whole output: ${output}\n`);
     if (!capture) return;
     write(`        capture: ${capture.path}\n`);
     if (capture.request !== undefined)

@@ -6,15 +6,19 @@ import {
   existsSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   statSync,
   utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
+import { validateTree } from "../dist/validate.js";
 import { ActivityLog } from "../dist/work/worker.js";
-import { CLI, cli, installation, REPO } from "./helpers.mjs";
+import { CLI, cli, configured, installation, item, REPO } from "./helpers.mjs";
 
 /** The CLI with room for a large output. */
 function large(inst, ...args) {
@@ -145,4 +149,101 @@ test("a worker attempt's transcript is kept redacted and bounded beside the run 
   utimesSync(dir, old, old);
   rotateLogs(inst.logs, undefined, { runsPerObjective: 0, totalBytes: 1 });
   assert.ok(!existsSync(dir));
+});
+
+const git = (cwd, ...args) => {
+  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+};
+
+test("a failed validation command's whole output is kept in its attempt file and named by its event; a passing one keeps none", async () => {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  const { sandbox } = loadConfig(REPO);
+  delete process.env.FACTORY_CONFIG;
+  const checkout = mkdtempSync(join(tmpdir(), "factory-validate-"));
+  git(checkout, "init", "--quiet");
+  // 40,000 numbered lines with a secret at the end: far past the event's head and tail.
+  writeFileSync(
+    join(checkout, "noisy.js"),
+    `for (let i = 0; i < 40000; i++) console.log("line " + i);\nconsole.error("token ${SECRET}");\nprocess.exitCode = 3;\n`,
+  );
+  git(checkout, "add", "noisy.js");
+  git(
+    checkout,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    "base",
+  );
+  const commit = git(checkout, "rev-parse", "HEAD");
+  const run = "2026-01-01T00-00-00-000Z-2";
+  const log = new RunLog(inst.logs, run, CAPTURE_OFF, [SECRET]);
+  const events = [];
+  const work = item("a", {
+    validation: [
+      { command: "node -e 'process.exit(0)'" },
+      { command: "node noisy.js" },
+    ],
+  });
+  const result = await validateTree({
+    checkout,
+    repository: REPO,
+    directory: join(checkout, "..", `${checkout.split("/").at(-1)}.validation`),
+    commit,
+    item: work,
+    plan: { base: commit, items: [work], finalCommands: [] },
+    blocks: [],
+    sandbox,
+    commandTimeoutMs: 60_000,
+    signal: AbortSignal.timeout(120_000),
+    log: (event) => {
+      events.push(event);
+      log.write(62, {
+        step: "item:a:validate",
+        attemptId: "item:a:validate#1",
+        ...event,
+      });
+    },
+    runFile: (kind) => log.runFile(62, `item:a:validate#1.${kind}`),
+  });
+  assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 500));
+  const [passed, failed] = events.filter(
+    (e) => e.event === "validation-result",
+  );
+  assert.equal(passed.passed, true);
+  assert.equal(passed.output, undefined);
+  assert.equal(failed.passed, false);
+  assert.equal(
+    failed.output,
+    `62/${run}.attempts/item_a_validate_1.validation-1`,
+  );
+  assert.ok(failed.tail.length < 12_000, "the event keeps its head and tail");
+  const whole = readRunFile(inst.logs, failed.output, []);
+  assert.equal(whole.cut, false);
+  const lines = whole.text.split("\n");
+  assert.equal(lines.filter((line) => line.startsWith("line ")).length, 40_000);
+  assert.ok(lines.includes("token [REDACTED]"), "redacted as written");
+  assert.ok(
+    !readFileSync(join(inst.logs, `${failed.output}.0`), "utf8").includes(
+      SECRET,
+    ),
+  );
+  // The passing command's file is gone.
+  assert.deepEqual(readdirSync(join(inst.logs, "62", `${run}.attempts`)), [
+    "item_a_validate_1.validation-1.0",
+  ]);
+  const shown = cli(inst, "diagnostics", "62", "--logs", "a");
+  assert.match(
+    shown.out,
+    new RegExp(
+      `whole output: \\S+/62/${run}\\.attempts/item_a_validate_1\\.validation-1`,
+    ),
+  );
 });

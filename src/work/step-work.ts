@@ -32,6 +32,7 @@ import type { ReviewConversation } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import {
   addWorktree,
+  changedFiles,
   hostGit,
   hostGitExit,
   worktreePath,
@@ -340,12 +341,6 @@ export async function workStep(
       );
 
     const spent = fact(state, "spend", item.id);
-    const activity = new ActivityLog(
-      item.id,
-      worktree,
-      context.log,
-      deps.config.secrets,
-    );
     // A repair continues the item's worker conversation when it can.
     const conversation = retained(
       state,
@@ -354,8 +349,19 @@ export async function workStep(
       item,
       fact(state, "workSession", item.id),
     );
-    const { spend, session, ...result } = await deps
-      .worker(plan, shown.blocks, profile)
+    const worker = deps.worker(plan, shown.blocks, profile);
+    // Made last before the run, which always closes it.
+    const activity = new ActivityLog(
+      item.id,
+      worktree,
+      context.log,
+      deps.config.secrets,
+      {
+        transcript: context.runFile("transcript"),
+        changes: () => changedFiles(worktree, signal),
+      },
+    );
+    const { spend, session, ...result } = await worker
       .run({
         worktree,
         prompt: prepared.prompt,
@@ -369,10 +375,16 @@ export async function workStep(
         signal,
         log: context.log,
         activity: activity.report,
+        output: activity.output,
+        runFile: context.runFile,
         ...(spent ? { spend: spent } : {}),
         ...(context.answer ? { answer: context.answer } : {}),
       })
-      .finally(() => activity.close());
+      .finally(async () => {
+        // What the worktree holds at the end, shell edits included.
+        await activity.sample();
+        activity.close();
+      });
     if (conversation)
       context.keep(facts({ workSession: session ?? null }, item.id));
     // A paid worker's spend outlives retries, restarts and repairs.

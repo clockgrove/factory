@@ -415,6 +415,7 @@ export function turnTokens(total: Tokens, baseline?: Tokens): Tokens {
     input: less(total.input, baseline?.input),
     output: less(total.output, baseline?.output),
     cached: less(total.cached, baseline?.cached),
+    cacheWrite: less(total.cacheWrite, baseline?.cacheWrite),
     reasoning: less(total.reasoning, baseline?.reasoning),
   });
 }
@@ -460,12 +461,14 @@ export function codexTokens(usage: {
   input_tokens: number;
   output_tokens: number;
   cached_input_tokens: number;
+  cache_write_input_tokens?: number;
   reasoning_output_tokens?: number;
 }): Tokens {
   return tokens({
     input: usage.input_tokens,
     output: usage.output_tokens,
     cached: usage.cached_input_tokens,
+    cacheWrite: usage.cache_write_input_tokens,
     reasoning: usage.reasoning_output_tokens,
   });
 }
@@ -487,6 +490,8 @@ export function codexLiveRecord(
 ): (thread: string) => {
   context?: { tokens: number; window?: number };
   compactions: number;
+  /** Model responses since the last read (one `token_count` each). */
+  responses: number;
 } {
   let file: string | undefined;
   let offset = from;
@@ -496,15 +501,16 @@ export function codexLiveRecord(
   let compacting = false;
   return (thread) => {
     let compactions = 0;
+    let responses = 0;
     let context: { tokens: number; window?: number } | undefined;
     file ??= sessionRecords(join(codexHome, "sessions")).find((path) =>
       path.endsWith(`${thread}.jsonl`),
     );
-    if (!file) return { compactions };
+    if (!file) return { compactions, responses };
     let text: string;
     try {
       const size = statSync(file).size;
-      if (size <= offset) return { compactions };
+      if (size <= offset) return { compactions, responses };
       const start = Math.max(offset, size - LIVE_BYTES);
       if (start > offset) rest = "";
       const fd = openSync(file, "r");
@@ -517,7 +523,7 @@ export function codexLiveRecord(
         closeSync(fd);
       }
     } catch {
-      return { compactions };
+      return { compactions, responses };
     }
     const lines = text.split("\n");
     rest = lines.pop() ?? "";
@@ -548,12 +554,13 @@ export function codexLiveRecord(
         | undefined;
       const tokens = last?.input_tokens;
       if (typeof tokens !== "number") continue;
+      responses += 1;
       const window = info?.model_context_window;
       context = {
         tokens,
         ...(typeof window === "number" ? { window } : {}),
       };
     }
-    return { ...(context ? { context } : {}), compactions };
+    return { ...(context ? { context } : {}), compactions, responses };
   };
 }

@@ -229,13 +229,20 @@ export interface ObjectiveState {
   /** Facts steps keep across repairs (Outcome `keep`), by key. */
   kept: Record<string, unknown>;
   /**
-   * Repairs per target step, with the latest findings (newest last).
+   * Repairs per target step, the latest repaired last, with the latest
+   * findings (newest last).
    * `free`: the repair numbers that count against no allowance (a failure
    * blamed on a predecessor, allowances.ts).
    */
   repairs: Record<
     string,
-    { count: number; findings: string[]; free?: number[] }
+    {
+      count: number;
+      findings: string[];
+      free?: number[];
+      /** The step whose failure sent the latest repair: its class, for status. */
+      from?: string;
+    }
   >;
   /** Steps that finished, with their saved results. */
   done: Record<string, unknown>;

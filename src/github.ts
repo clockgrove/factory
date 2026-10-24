@@ -3,6 +3,15 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
+import {
+  type NotedRequest,
+  networkCategory,
+  newTransport,
+  note,
+  statusCategory,
+  type Transport,
+  transport,
+} from "./github-trace.js";
 import { redact } from "./log.js";
 import { errorMessage } from "./text.js";
 
@@ -99,6 +108,24 @@ export function issueGone(error: unknown): error is GitHubError {
 }
 
 const TIMEOUT_MS = 60_000;
+
+/**
+ * What `send` measured for each answer it returned, and its trace line
+ * when it noted one: a GraphQL rate limit, found in the body, retags it.
+ */
+const answers = new WeakMap<
+  Response,
+  {
+    answered: {
+      method: string;
+      path: string;
+      status: number;
+      attempt: number;
+      ms: number;
+    };
+    noted: NotedRequest | undefined;
+  }
+>();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
 const FRESH_MS = 2 * 60_000;
 
@@ -265,47 +292,10 @@ export interface AsyncMerge {
 const WRITER_TTL_MS = 10 * 60_000;
 
 /**
- * What one sync job's GitHub requests cost (github-sync.ts `github-call`):
- * requests sent, re-sends (a 401 retried with a fresh login), rate-limit
- * answers, other failed answers, and bytes sent and received (request
- * bodies, response content-length). Counts only, never bodies.
- */
-export interface Transport {
-  calls: number;
-  retries: number;
-  rateLimited: number;
-  failed: number;
-  bytes: number;
-  /**
-   * Each request that failed, was re-sent or was rate-limited, for one
-   * `github-request` event apiece (at most MAX_NOTED per job run; the
-   * rest only counted in `unnoted`).
-   */
-  requests?: NotedRequest[];
-  unnoted?: number;
-}
-
-/** One traced request: never a body, a token or a query value. */
-export interface NotedRequest {
-  method: string;
-  /** The path with its query dropped and ids, numbers and hashes as placeholders. */
-  route: string;
-  /** Null when no answer came (the network). */
-  status: number | null;
-  /** 2: re-sent once with a fresh login after a 401. */
-  attempt: number;
-  rateLimited?: true;
-  requestId?: string;
-  retryAfterSeconds?: number;
-  rateLimitReset?: string;
-}
-
-const MAX_NOTED = 50;
-
-/**
  * Statuses the running read's caller takes as an answer (a 404 for "no
- * such user", for "unprotected"): `send` neither traces nor counts them
- * as failed. Set with `expecting`.
+ * such user", for "unprotected"): `send` neither counts nor traces them
+ * as failed (a step's trace still lists them, with no category). Set with
+ * `expecting`.
  */
 const expectedStatuses = new AsyncLocalStorage<readonly number[]>();
 
@@ -316,58 +306,9 @@ function expecting<T>(
   return expectedStatuses.run(statuses, read);
 }
 
-/** The job whose requests `send` counts; outside a job nothing is counted. */
-export const transport = new AsyncLocalStorage<Transport>();
-
-/** `path` as a route template: no query, and numbers, hashes and node ids as placeholders. */
-export function routeOf(path: string): string {
-  return path
-    .split("?")[0]!
-    .split("/")
-    .map((part) =>
-      /^\d+$/.test(part)
-        ? "{n}"
-        : /^[0-9a-f]{7,64}$/i.test(part) && /\d/.test(part)
-          ? "{sha}"
-          : part,
-    )
-    .join("/");
-}
-
-/** Keep one request of the current job for its `github-request` event. */
-function note(
-  counted: Transport | undefined,
-  method: string,
-  path: string,
-  attempt: number,
-  response: Response | undefined,
-  rateLimited = false,
-): void {
-  if (!counted) return;
-  counted.requests ??= [];
-  if (counted.requests.length >= MAX_NOTED) {
-    counted.unnoted = (counted.unnoted ?? 0) + 1;
-    return;
-  }
-  const header = (name: string) => response?.headers.get(name) ?? undefined;
-  const retryAfter = Number(header("retry-after"));
-  const reset = Number(header("x-ratelimit-reset"));
-  const requestId = header("x-github-request-id");
-  counted.requests.push({
-    method,
-    route: routeOf(path),
-    status: response?.status ?? null,
-    attempt,
-    ...(rateLimited ? { rateLimited: true as const } : {}),
-    ...(requestId ? { requestId: requestId.slice(0, 80) } : {}),
-    ...(retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}),
-    ...(reset > 0 && (rateLimited || response?.status === 429)
-      ? { rateLimitReset: new Date(reset * 1000).toISOString() }
-      : {}),
-  });
-}
-
 export class GitHub {
+  /** Requests outside a step or a sync job: the service run's own (`takeAmbient`). */
+  private ambient = newTransport();
   private token: string | undefined;
   private secrets: readonly string[] = [];
   private self: string | undefined;
@@ -387,6 +328,17 @@ export class GitHub {
    * writes to GitHub: comments, PR bodies, titles. One choke point, so no
    * hold, report or log excerpt can carry a value a worker saw.
    */
+  /**
+   * The requests made outside any step or sync job since the last take,
+   * and a fresh tally for the next; undefined when there were none.
+   */
+  takeAmbient(): Transport | undefined {
+    if (!this.ambient.calls) return undefined;
+    const taken = this.ambient;
+    this.ambient = newTransport();
+    return taken;
+  }
+
   redacting(secrets: readonly string[]): this {
     this.secrets = secrets;
     return this;
@@ -1074,9 +1026,16 @@ export class GitHub {
     if (refused.length) {
       const message = refused.map((e) => e.message).join("; ");
       if (refused.some((e) => e.type === "RATE_LIMITED")) {
-        const counted = transport.getStore();
-        if (counted) counted.rateLimited += 1;
-        note(counted, "POST", "/graphql", 1, response, true);
+        const counted = transport.getStore() ?? this.ambient;
+        counted.rateLimited += 1;
+        // One line per answer: the one send() traced becomes the rate-limit.
+        const { answered, noted } = answers.get(response)!;
+        if (noted) counted.requests?.splice(counted.requests.indexOf(noted), 1);
+        note(
+          counted,
+          { ...answered, category: "rate-limit", rateLimited: true },
+          response,
+        );
         const reset = Number(response.headers.get("x-ratelimit-reset"));
         throw new TransientError(
           `GitHub GraphQL: ${message}`,
@@ -1779,12 +1738,13 @@ export class GitHub {
         : JSON.stringify(
             method === "GET" ? body : redactDeep(body, this.secrets),
           );
-    const counted = transport.getStore();
-    if (counted) {
-      counted.calls += 1;
-      if (refreshed) counted.retries += 1;
-      counted.bytes += sent === undefined ? 0 : Buffer.byteLength(sent);
-    }
+    // A step's or a sync job's scope, else the service run's own.
+    const counted = transport.getStore() ?? this.ambient;
+    counted.calls += 1;
+    if (refreshed) counted.retries += 1;
+    counted.bytes += sent === undefined ? 0 : Buffer.byteLength(sent);
+    const attempt = refreshed ? 2 : 1;
+    const sentAt = Date.now();
     let response: Response;
     try {
       response = await fetch(`${this.api}${path}`, {
@@ -1802,18 +1762,39 @@ export class GitHub {
         redirect: "manual",
       });
     } catch (error) {
-      if (counted) counted.failed += 1;
-      note(counted, method, path, refreshed ? 2 : 1, undefined);
+      const ms = Date.now() - sentAt;
+      counted.requestMs += ms;
+      counted.failed += 1;
+      note(
+        counted,
+        {
+          method,
+          path,
+          status: null,
+          attempt,
+          ms,
+          category: networkCategory(error, Boolean(signal?.aborted)),
+        },
+        undefined,
+      );
       if (signal?.aborted) throw error;
       throw new TransientError(
         `GitHub ${method} ${path}: ${errorMessage(error)}`,
       );
     }
-    if (counted)
-      counted.bytes += Number(response.headers.get("content-length")) || 0;
+    const ms = Date.now() - sentAt;
+    counted.requestMs += ms;
+    counted.bytes += Number(response.headers.get("content-length")) || 0;
+    const answered = { method, path, status: response.status, attempt, ms };
     if (response.ok) {
       // A re-send that worked is traced too: it was retried.
-      if (refreshed) note(counted, method, path, 2, response);
+      answers.set(response, {
+        answered,
+        noted:
+          refreshed || counted.every
+            ? note(counted, answered, response)
+            : undefined,
+      });
       return response;
     }
     const text = await response.text().catch(() => "");
@@ -1825,7 +1806,7 @@ export class GitHub {
     }
     const detail = `GitHub ${method} ${path}: ${response.status} ${text.slice(0, 300)}`;
     if (response.status === 401 && !refreshed) {
-      note(counted, method, path, 1, response);
+      note(counted, { ...answered, category: "credential" }, response);
       return this.send(method, path, body, signal, headers, true);
     }
     const retryAfter = Number(response.headers.get("retry-after"));
@@ -1837,12 +1818,22 @@ export class GitHub {
           /rate limit/i.test(text)));
     const expected =
       !limited && expectedStatuses.getStore()?.includes(response.status);
-    if (counted && !expected) {
+    if (!expected) {
       if (limited) counted.rateLimited += 1;
       else counted.failed += 1;
     }
-    if (!expected)
-      note(counted, method, path, refreshed ? 2 : 1, response, limited);
+    if (!expected || counted.every)
+      note(
+        counted,
+        {
+          ...answered,
+          ...(expected
+            ? {}
+            : { category: statusCategory(response.status, limited) }),
+          ...(limited ? { rateLimited: true as const } : {}),
+        },
+        response,
+      );
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
     if (response.status === 401) throw new GitHubError(detail, 401, answer);
     if (limited)

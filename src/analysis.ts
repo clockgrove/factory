@@ -14,6 +14,7 @@ import {
   emptyUsage,
   itemOfEvent,
   num,
+  originalText,
   phaseOf,
   type RunChoice,
   readCapture,
@@ -135,7 +136,8 @@ export function captures(
     write(`${rowText(row)}\n`);
     if (body.request !== undefined) write(`request:\n${body.request}\n`);
     if (body.response !== undefined) write(`response:\n${body.response}\n`);
-    if (body.truncated) write("(cut to capture.maxBytesPerCall)\n");
+    if (body.truncated)
+      write(`(cut to capture.maxBytesPerCall${originalText(body.original)})\n`);
     return undefined;
   }
   if (options.json) {
@@ -189,10 +191,20 @@ export const ANALYSIS_FIELDS = [
   "stage",
   "sessionMode",
   "currency",
+  "attemptId",
+  "callId",
+  "promptDigest",
+  "schemaDigest",
+  "sourceDigest",
 ] as const;
 export type AnalysisField = (typeof ANALYSIS_FIELDS)[number];
 /** The fields a step attempt has too: other filters select model calls only. */
-const STEP_FIELDS: readonly AnalysisField[] = ["run", "item", "phase"];
+const STEP_FIELDS: readonly AnalysisField[] = [
+  "run",
+  "item",
+  "phase",
+  "attemptId",
+];
 
 export interface AnalyzeOptions extends AnalysisRead {
   groupBy: AnalysisField[];
@@ -245,7 +257,14 @@ export interface ToolStats {
   ms: number;
 }
 
-const CATEGORIES = ["input", "output", "cached", "reasoning", "total"] as const;
+const CATEGORIES = [
+  "input",
+  "output",
+  "cached",
+  "cacheWrite",
+  "reasoning",
+  "total",
+] as const;
 
 export interface CallGroup {
   key: Partial<Record<AnalysisField, string>>;
@@ -277,6 +296,46 @@ export interface CallGroup {
   sessions: Record<string, number>;
   maxSessionTurn: number;
   imageOutputs: { reportedCalls: number; total: number };
+  /** Codex calls' boundary telemetry (`codexBoundary`), summed over the calls that report it. */
+  codexBoundary: {
+    reportedCalls: number;
+    observedCalls: number;
+    requests: number;
+    failedRequests: number;
+    responsesCompleted: number;
+    zeroOutputResponses: number;
+    streamFailures: number;
+    httpRetries: number;
+    streamRetries: number;
+    retryDelayMs: number;
+    completionLost: number;
+  };
+  /**
+   * Tokens and cost by model as the providers break them down (Claude's
+   * and Copilot's per-model usage, sub-agents included), else by the
+   * call's reported model, else its configured one.
+   */
+  models: Record<
+    string,
+    {
+      calls: number;
+      input: number;
+      output: number;
+      cached: number;
+      cacheWrite: number;
+      costUsd: number;
+    }
+  >;
+  /** Codex child threads (`providerUsage.descendants`), summed: their own view, never in `usage`. */
+  descendants: {
+    calls: number;
+    threads: number;
+    input: number;
+    cached: number;
+    output: number;
+    reasoning: number;
+    total: number;
+  };
   /** Calls with the provider's own usage breakdown (`providerUsage`). */
   providerUsageCalls: number;
   /** Calls by the currency of their cost; `unknown` without a cost. */
@@ -417,7 +476,7 @@ export interface AnalysisReport {
     /** Attempts that continue another (`parentAttemptId`). */
     continued: number;
   };
-  /** GitHub requests of the sync jobs (`github-call`), summed: counts, never bodies. */
+  /** GitHub requests of the run (`github-call`: sync jobs, step attempts, the service's own), summed: counts, never bodies. */
   github: {
     jobs: number;
     runs: number;
@@ -426,8 +485,11 @@ export interface AnalysisReport {
     rateLimited: number;
     failed: number;
     bytes: number;
+    /** Sync job runs' time. */
     ms: number;
-    /** Requests traced one by one (`github-request`: failed, re-sent or rate-limited), by status. */
+    /** The requests' own time. */
+    requestMs: number;
+    /** Requests traced one by one (`github-request`), by status (or `network`) and failure category. */
     traced: Record<string, number>;
   };
   limitations: string[];
@@ -453,7 +515,14 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
   return {
     key,
     usage: emptyUsage(),
-    tokenCalls: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+    tokenCalls: {
+      input: 0,
+      output: 0,
+      cached: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      total: 0,
+    },
     cache: {
       pairedCalls: 0,
       eligibleCalls: 0,
@@ -483,6 +552,29 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
     sessions: {},
     maxSessionTurn: 0,
     imageOutputs: { reportedCalls: 0, total: 0 },
+    codexBoundary: {
+      reportedCalls: 0,
+      observedCalls: 0,
+      requests: 0,
+      failedRequests: 0,
+      responsesCompleted: 0,
+      zeroOutputResponses: 0,
+      streamFailures: 0,
+      httpRetries: 0,
+      streamRetries: 0,
+      retryDelayMs: 0,
+      completionLost: 0,
+    },
+    models: {},
+    descendants: {
+      calls: 0,
+      threads: 0,
+      input: 0,
+      cached: 0,
+      output: 0,
+      reasoning: 0,
+      total: 0,
+    },
     providerUsageCalls: 0,
     currencies: {},
     efficiency: {
@@ -604,6 +696,129 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
   if (event.providerUsage && typeof event.providerUsage === "object")
     group.providerUsageCalls += 1;
   bump(group.currencies, str(event.currency) ?? "unknown");
+  for (const [model, row] of modelBreakdown(event)) {
+    group.models[model] ??= {
+      calls: 0,
+      input: 0,
+      output: 0,
+      cached: 0,
+      cacheWrite: 0,
+      costUsd: 0,
+    };
+    const sum = group.models[model];
+    sum.calls += 1;
+    sum.input += row.input;
+    sum.output += row.output;
+    sum.cached += row.cached;
+    sum.cacheWrite += row.cacheWrite;
+    sum.costUsd += row.costUsd;
+  }
+  const descendants = (
+    event.providerUsage as { descendants?: Record<string, unknown> } | null
+  )?.descendants;
+  if (descendants && typeof descendants === "object") {
+    const d = group.descendants;
+    d.calls += 1;
+    for (const key of [
+      "threads",
+      "input",
+      "cached",
+      "output",
+      "reasoning",
+      "total",
+    ] as const)
+      d[key] += num(descendants[key]) ?? 0;
+  }
+  const boundary = event.codexBoundary as Record<string, unknown> | undefined;
+  if (boundary && typeof boundary === "object") {
+    const b = group.codexBoundary;
+    const retries = (boundary.retries ?? {}) as Record<string, unknown>;
+    b.reportedCalls += 1;
+    if (boundary.coverage === "observed") b.observedCalls += 1;
+    b.requests += num(boundary.requests) ?? 0;
+    b.failedRequests += num(boundary.failedRequests) ?? 0;
+    b.responsesCompleted += num(boundary.responsesCompleted) ?? 0;
+    b.zeroOutputResponses += num(boundary.zeroOutputResponses) ?? 0;
+    b.streamFailures += num(boundary.streamFailures) ?? 0;
+    b.httpRetries += num(retries.http) ?? 0;
+    b.streamRetries += num(retries.stream) ?? 0;
+    b.retryDelayMs += num(boundary.retryDelayMs) ?? 0;
+    if (boundary.completionLost === true) b.completionLost += 1;
+  }
+}
+
+/**
+ * A call's tokens and cost by model: Claude's `modelUsage`, Copilot's
+ * per-model usage, else the whole call under its reported (or configured)
+ * model. A resumed Claude call's `modelUsage` is its session's running
+ * total, so it counts as the whole call. Input includes cache reads and
+ * writes, as in `tokens`.
+ */
+function modelBreakdown(event: LogEvent): [
+  string,
+  {
+    input: number;
+    output: number;
+    cached: number;
+    cacheWrite: number;
+    costUsd: number;
+  },
+][] {
+  const usage = (event.providerUsage ?? {}) as Record<string, unknown>;
+  const n = (value: unknown) => num(value) ?? 0;
+  const claude = usage.modelUsage as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  if (
+    claude &&
+    typeof claude === "object" &&
+    Object.keys(claude).length &&
+    event.sessionMode !== "resumed"
+  )
+    return Object.entries(claude).map(([model, counts]) => {
+      const read = n(counts.cacheReadInputTokens);
+      const written = n(counts.cacheCreationInputTokens);
+      return [
+        model,
+        {
+          input: n(counts.inputTokens) + read + written,
+          output: n(counts.outputTokens),
+          cached: read,
+          cacheWrite: written,
+          costUsd: n(counts.costUSD),
+        },
+      ];
+    });
+  if (event.provider === "copilot") {
+    const models = Object.entries(usage).filter(
+      ([, counts]) =>
+        counts && typeof counts === "object" && "responses" in counts,
+    ) as [string, Record<string, unknown>][];
+    if (models.length)
+      return models.map(([model, counts]) => [
+        model,
+        {
+          input: n(counts.inputTokens),
+          output: n(counts.outputTokens),
+          cached: n(counts.cacheReadTokens),
+          cacheWrite: n(counts.cacheWriteTokens),
+          costUsd: 0,
+        },
+      ]);
+  }
+  const tokens = (event.tokens ?? {}) as Record<string, unknown>;
+  return [
+    [
+      str(event.reportedModel) ?? str(event.model) ?? "unknown",
+      {
+        input: n(tokens.input),
+        output: n(tokens.output),
+        cached: n(tokens.cached),
+        cacheWrite: n(tokens.cacheWrite),
+        costUsd: n(event.costUsd),
+      },
+    ],
+  ];
 }
 
 function settle(group: CallGroup, rates: Rates): CallGroup {
@@ -701,6 +916,7 @@ class Analysis {
     failed: 0,
     bytes: 0,
     ms: 0,
+    requestMs: 0,
     traced: {},
   };
   private from?: string;
@@ -737,7 +953,7 @@ class Analysis {
     };
   }
 
-  /** A step-level event passes the run, item and phase filters. */
+  /** A step-level event passes the run, item, phase and attempt filters. */
   private stepPasses(event: LogEvent): boolean {
     for (const field of STEP_FIELDS) {
       const expected = this.options.filters[field];
@@ -748,9 +964,11 @@ class Analysis {
           ? String(event.run)
           : field === "item"
             ? (itemOfEvent(event) ?? "null")
-            : step
-              ? phaseOf(step)
-              : "null";
+            : field === "attemptId"
+              ? (str(event.attemptId) ?? "null")
+              : step
+                ? phaseOf(step)
+                : "null";
       if (value !== expected) return false;
     }
     return true;
@@ -883,7 +1101,7 @@ class Analysis {
           this.github.traced,
           event.unnoted
             ? "untraced"
-            : `${String(event.status ?? "network")}${event.rateLimited ? " rate-limited" : ""}`,
+            : `${String(event.status ?? "network")}${event.category ? ` ${String(event.category)}` : ""}`,
           num(event.unnoted) ?? 1,
         );
         break;
@@ -898,6 +1116,7 @@ class Analysis {
           "failed",
           "bytes",
           "ms",
+          "requestMs",
         ] as const)
           g[field] += num(event[field]) ?? 0;
         break;
@@ -1200,6 +1419,26 @@ function groupText(group: CallGroup, indent: string): string[] {
       : []),
     `${indent}sessions: ${tally(group.sessions)}${group.maxSessionTurn > 1 ? ` · up to turn ${group.maxSessionTurn}` : ""}${group.firstToken.meanMs === null ? "" : ` · first token after ${duration(group.firstToken.meanMs)} on average (${group.firstToken.reportedCalls} calls)`}${group.imageOutputs.total ? ` · ${group.imageOutputs.total} images out` : ""} · provider usage in ${group.providerUsageCalls}/${group.usage.calls} calls · cost currency: ${tally(group.currencies)}`,
     `${indent}SDK operations: ${toolText(group.sdkOperations)}`,
+    `${indent}by model: ${
+      Object.entries(group.models)
+        .sort((a, b) => b[1].input + b[1].output - (a[1].input + a[1].output))
+        .slice(0, 8)
+        .map(
+          ([model, m]) =>
+            `${model} ${m.calls} calls, ${count(m.input)} in (${count(m.cached)} cached, ${count(m.cacheWrite)} cache writes), ${count(m.output)} out${m.costUsd ? `, $${m.costUsd.toFixed(2)}` : ""}`,
+        )
+        .join("; ") || "none"
+    }`,
+    ...(group.descendants.calls
+      ? [
+          `${indent}Codex child threads: ${group.descendants.threads} in ${group.descendants.calls} calls · ${count(group.descendants.total)} tokens (${count(group.descendants.input)} in, ${count(group.descendants.cached)} cached, ${count(group.descendants.output)} out, ${count(group.descendants.reasoning)} reasoning), not in the totals`,
+        ]
+      : []),
+    ...(group.codexBoundary.reportedCalls
+      ? [
+          `${indent}Codex boundary: observed in ${group.codexBoundary.observedCalls}/${group.codexBoundary.reportedCalls} calls · ${count(group.codexBoundary.requests)} requests (${group.codexBoundary.failedRequests} failed) · ${count(group.codexBoundary.responsesCompleted)} responses completed (${group.codexBoundary.zeroOutputResponses} with no output) · retries ${group.codexBoundary.httpRetries} HTTP, ${group.codexBoundary.streamRetries} stream (${duration(group.codexBoundary.retryDelayMs)} delay) · ${group.codexBoundary.streamFailures} stream failures · ${group.codexBoundary.completionLost} lost completions`,
+        ]
+      : []),
     `${indent}efficiency: ${
       [
         e.msPerCall === null ? undefined : `${duration(e.msPerCall)} per call`,
@@ -1293,10 +1532,10 @@ function analysisText(report: AnalysisReport): string {
     ),
   ]);
   const g = report.github;
-  section("GitHub requests (sync jobs):", [
-    `  ${count(g.calls)} requests in ${g.runs} job runs (${g.jobs} jobs) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.ms)}`,
+  section("GitHub requests (sync jobs, steps and the service):", [
+    `  ${count(g.calls)} requests in ${g.runs} runs (${g.jobs} jobs and steps) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.requestMs)} in requests`,
     ...(Object.keys(g.traced).length
-      ? [`  traced requests by status: ${tally(g.traced)}`]
+      ? [`  traced requests by status and failure: ${tally(g.traced)}`]
       : []),
   ]);
   lines.push("", ...report.limitations.map((line) => `Note: ${line}`));

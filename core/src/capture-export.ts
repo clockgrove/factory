@@ -1,7 +1,7 @@
 /**
  * `factory export-captures ISSUE`: an Objective's model calls as
  * OpenTelemetry spans (OTLP/HTTP JSON), from the run log and, with
- * `--content retained`, its captures (CORE.md#Run log). By default
+ * `--content retained`, its captures (DESIGN.md#Run log). By default
  * a preview: it prints what it would send, or writes it to a local file,
  * and sends nothing. A send needs `--send --endpoint URL --authorize
  * DIGEST`, the digest a preview of exactly that export printed; it binds

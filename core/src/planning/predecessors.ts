@@ -18,7 +18,7 @@ import type { PlanningDeps } from "./steps.js";
 
 /*
  * Objective dependencies through GitHub's native blocked-by links
- * (CORE.md#Predecessors). The `predecessors` step runs before the check:
+ * (DESIGN.md#Predecessors). The `predecessors` step runs before the check:
  * while a blocker is open, or its Objective isn't done, the Objective
  * waits with no question, and takes no slot. A blocker that ended without
  * being done holds; a dependency cycle holds, naming it. Once every

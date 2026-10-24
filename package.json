@@ -35,7 +35,7 @@
     "skills",
     "assets",
     "docs/USER-GUIDE.md",
-    "docs/CORE.md",
+    "docs/DESIGN.md",
     "docs/templates",
     ".codex-plugin",
     ".claude-plugin/plugin.json",

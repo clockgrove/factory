@@ -135,7 +135,7 @@ To add features or fix bugs **in Factory itself**, use a source checkout and fol
 | I want to…                                     | Read                                                                                                                                        |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | Set up, run, answer questions, recover         | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                            |
-| Know exactly how Factory behaves               | [Core design](https://github.com/clockgrove/factory/blob/main/docs/CORE.md)                                                                 |
+| Know exactly how Factory behaves               | [Design](https://github.com/clockgrove/factory/blob/main/docs/DESIGN.md)                                                                    |
 | Report a bug or ask for help                   | [Issue tracker](https://github.com/clockgrove/factory/issues)                                                                               |
 | Build from source or contribute                | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                             |
 | Inspect release changes or the release process | [Releases](https://github.com/clockgrove/factory/releases) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) |

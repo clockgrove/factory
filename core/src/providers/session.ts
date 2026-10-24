@@ -1,5 +1,5 @@
 /**
- * Retained conversations (CORE.md#Retained conversations): a planner,
+ * Retained conversations (DESIGN.md#Retained conversations): a planner,
  * reviewer or worker turn that continues the provider's previous session
  * or thread by its id instead of starting fresh, sending only what is new.
  * The caller keeps the `Session` as a fact (crash-safe in state.kept) and

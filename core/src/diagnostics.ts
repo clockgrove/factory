@@ -200,7 +200,7 @@ export async function diagnostics(
   const captureNote = () => {
     if (options.item !== undefined && !captured && !options.json)
       write(
-        `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (CORE.md#Content capture).\n`,
+        `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (DESIGN.md#Content capture).\n`,
       );
   };
   const visit = (event: LogEvent) => {

@@ -1,7 +1,7 @@
 /**
  * `factory diagnostics ISSUE --captures | --analyze | --gantt`: the
  * captured model calls, the analysis views and a text Gantt chart of an
- * Objective's run(s), from the run log alone (CORE.md#Run log). Every
+ * Objective's run(s), from the run log alone (DESIGN.md#Run log). Every
  * event is redacted as it is read (diagnostics.ts readRun); a capture is
  * read without following links and redacted again. It never writes.
  */
@@ -146,7 +146,7 @@ export function captures(
   }
   if (!rows.length) {
     write(
-      `No captured model calls for #${options.issue}${runs.length ? ` in run ${runs.join(", ")}` : ""}: full requests and responses are kept only with capture.enabled (CORE.md#Content capture).\n`,
+      `No captured model calls for #${options.issue}${runs.length ? ` in run ${runs.join(", ")}` : ""}: full requests and responses are kept only with capture.enabled (DESIGN.md#Content capture).\n`,
     );
     return undefined;
   }

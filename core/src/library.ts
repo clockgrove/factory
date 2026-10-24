@@ -1,5 +1,5 @@
 /**
- * Factory as a library (CORE.md#Library): serve an installation and run
+ * Factory as a library (DESIGN.md#Library): serve an installation and run
  * Objectives from a host program, with the host's own Planner and Worker
  * as registered kinds (kinds.ts), and read the analysis of a run log. The
  * service stays the only writer of Factory state: runFactory sends the
@@ -206,7 +206,7 @@ export function readInteractionMetadata(
 }
 
 /**
- * A captured call's request and response, redacted (CORE.md#Content
+ * A captured call's request and response, redacted (DESIGN.md#Content
  * capture); cut to capture.maxBytesPerCall when `truncated`. Throws when
  * the call captured nothing, or its run was rotated away.
  */

@@ -1,19 +1,6 @@
-# Factory core
+# Factory design
 
-This is the specification for the rebuilt Factory core. Everything that works today keeps working; the rebuild changes how runs are owned, saved, retried and recovered. Once the core ships, this page replaces the state and recovery parts of [the architecture](ARCHITECTURE.md), and [the lifecycle](LIFECYCLE.md).
-
-## Why a new core
-
-Factory should behave like a simple scheduler that runs unattended: take an Objective from the queue, plan it, build it, deliver it, report. The current core has become fragile:
-
-- Code fails closed with no way out, so an error becomes a hold that no command clears.
-- Two writers, the CLI and the service, hand ownership back and forth through claims and bindings.
-- The GitHub Project sits on the critical path, so one missed card read fails a run.
-- Work grows with history: cancel and restart verify a whole Git archive.
-- Timeouts turn into human decisions instead of retries.
-- The rule "unknown stays unknown, never replay" leaves every uncertain effect as a permanent fence.
-
-The new core replaces those mechanisms. Every capability stays and is ported onto it.
+This is the specification for how Factory owns, saves, retries and recovers runs. Factory behaves like a simple scheduler that runs unattended: take an Objective from the queue, plan it, build it, deliver it, report.
 
 ## Stability rules
 
@@ -153,7 +140,7 @@ Other steps: `cancel:cleanup` after cancel, `rerun:cleanup` before a re-run, `co
 
 Every step returns exactly one outcome:
 
-| Outcome                 | Meaning                                                                                            | What the core does                                                                                     |
+| Outcome                 | Meaning                                                                                            | What Factory does                                                                                      |
 | ----------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `done(data)`            | The step finished.                                                                                 | Save the data and move on.                                                                             |
 | `retry(reason, after?)` | A wait classed by its cause, an error among them (see [Waits](#waits)).                            | Back off (30 s doubling to 15 min, or the reset time) and run the step again.                          |
@@ -180,7 +167,7 @@ A step the service's death cut off (a crash, an OOM kill, a reboot) is not that 
 
 Any other retry is a wait. Waiting more than a few hours is never right, so a wait is classed by its cause, not by how long it has gone on:
 
-| Cause                            | Examples                                                                                                                                                                                                                | What the core does                                                                                                                                                                                                                                                                                           |
+| Cause                            | Examples                                                                                                                                                                                                                | What Factory does                                                                                                                                                                                                                                                                                            |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Fatal until a person acts        | An expired or invalid gh or provider login; GitHub 401 or a 403 refusal; a missing repository or issue (404); a full disk; a required check with no run or status 15 min after the push; a workflow that didn't trigger | Hold at once, with a question naming the fix.                                                                                                                                                                                                                                                                |
 | A known reset time               | A GitHub rate limit; a provider usage limit that reports its reset                                                                                                                                                      | Wait until the reset when it is at most 3 h away. Further away or unknown (a weekly limit): hold with `wait` (keep waiting until it resets), `switch NAME` (run this Objective on another configured provider, which becomes its frozen provider; plain `switch` when there is only one other) and `cancel`. |
@@ -305,7 +292,7 @@ An accepted plan that splits the Objective delivers through child Objectives (wo
 
 ## Holds and answers
 
-A hold is a question with named answers. Each answer is an option, core data that says what it does:
+A hold is a question with named answers. Each answer is an option, Factory data that says what it does:
 
 ```jsonc
 {
@@ -597,7 +584,7 @@ A host program imports `@clockgrove/factory` (core/src/index.ts, the package's o
 
 ## Security
 
-These carry over unchanged:
+These always hold:
 
 - Credentials stay with the service. Workers never see them.
 - Workers run in the OS sandbox with the configured network policy.
@@ -717,11 +704,11 @@ A configuration that doesn't load prints its problems without a stack trace and 
 
 ## Migration
 
-From the old Factory to this core: start clean, with no compatibility layer and no importer. The configuration is about 40 lines, and the setup options cover it.
+From an earlier version of Factory to this one: start clean, with no compatibility layer and no importer. The configuration is about 40 lines, and the setup options cover it.
 
 1. **Stop the old service** (`systemctl --user disable --now <old unit>`). Close or cancel the Objectives it was running.
 2. **Delete the old state and configuration**, after copying anything you still need from the old configuration by hand (paths such as `sandbox.readOnlyPaths`). Old keys are refused by name, each with what replaced it, so a copied old configuration won't load.
-3. **Install the core release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
+3. **Install this release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
 4. **Prepare the target:**
    - a clone that only Factory uses;
    - the Project fields `Factory` (single select, with the seven options) and `Factory order` (number);

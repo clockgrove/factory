@@ -311,7 +311,7 @@ function decisionsBefore(
   return decisions(state, (key) => compareKeys(key, `decide:${g}:${m}`) < 0);
 }
 
-/** Workers get a sandboxed shell (docs/CORE.md). */
+/** Workers get a sandboxed shell (docs/DESIGN.md). */
 const WORKERS = { default: "shell" } as const;
 
 /**

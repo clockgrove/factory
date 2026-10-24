@@ -85,7 +85,7 @@ export class RunTally {
       }
     for (const event of readNew(this.dir, issue, tally.offsets)) {
       if (event.at < run) continue;
-      // One `model-usage` event per model call (CORE.md#Model usage).
+      // One `model-usage` event per model call (DESIGN.md#Model usage).
       if (event.event === "model-usage") {
         if (event.role === "worker") tally.calls.worker += 1;
         else tally.calls.planner += 1;

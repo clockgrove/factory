@@ -29,7 +29,7 @@ export const runOfFile = (path: string): string =>
   basename(path).split(".")[0]!;
 
 /**
- * Content capture (CORE.md#Content capture): off by default. Enabled, the
+ * Content capture (DESIGN.md#Content capture): off by default. Enabled, the
  * request and response bodies of each model call go to their own file,
  * redacted and cut to `maxBytesPerCall`, and the run log references it.
  */
@@ -92,7 +92,7 @@ interface FileHealth {
  * diagnostics and analysis. It never drives progress, and losing it loses
  * no work.
  *
- * Its formal history (CORE.md#Run log): each file starts with a
+ * Its formal history (DESIGN.md#Run log): each file starts with a
  * `run-header` (Factory's version and the running build's source digest);
  * every line carries `seq`, consecutive per file from 1, so a missing
  * number is a lost line; a write that fails is counted, and the next line

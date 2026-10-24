@@ -19,7 +19,7 @@ npm run build
 
 Keep optional dependencies enabled for source development: TypeScript and notice checks inspect the optional harness SDKs.
 
-Read [AGENTS.md](AGENTS.md) for contributor rules and [the core spec](docs/CORE.md) for the design. Factory must never execute an Objective against its own source repository.
+Read [AGENTS.md](AGENTS.md) for contributor rules and [the design](docs/DESIGN.md) for how Factory works. Factory must never execute an Objective against its own source repository.
 
 ## Run the CLI from a checkout
 
@@ -59,7 +59,7 @@ npm run notices:check
 npm run test:core
 ```
 
-`npm run test:core` builds the core and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target. `npm test` runs the old implementation's suite until it is removed.
+`npm run test:core` builds Factory and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target. `npm test` runs the old implementation's suite until it is removed.
 
 The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 

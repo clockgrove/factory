@@ -1,5 +1,5 @@
 /**
- * The package entry: Factory as a library (CORE.md#Library). The CLI is
+ * The package entry: Factory as a library (DESIGN.md#Library). The CLI is
  * `factory` (cli.ts); this is what a host program imports.
  */
 

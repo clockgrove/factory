@@ -151,7 +151,7 @@ const BY_NUMBER = 50;
  * The Project filter for queued cards: a field is named in lower case with
  * dashes for spaces, and its option is quoted. Closed issues are read too,
  * so a finished Objective queued again is never ignored because its issue
- * is closed (CORE.md#Queue).
+ * is closed (DESIGN.md#Queue).
  */
 function queuedFilter(config: CoreConfig): string {
   const field = config.queue.field.trim().toLowerCase().replace(/\s+/g, "-");

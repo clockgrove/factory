@@ -180,7 +180,7 @@ const COMMANDS: Record<string, Command> = {
   setup: {
     args: "",
     flags: SETUP_FLAGS,
-    help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; see docs/CORE.md#Setup for every option",
+    help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; see docs/DESIGN.md#Setup for every option",
   },
   run: {
     args: "ISSUE",
@@ -245,7 +245,7 @@ const COMMANDS: Record<string, Command> = {
       scorecard: "value",
       json: "switch",
     },
-    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs. Without ISSUE, --scorecard ABSOLUTE_FILE compares the Factory Objectives and codex-direct sessions the selection FILE names (docs/CORE.md#Run log): per packet, per route and per pair, with how many of each Objective's runs the run log still has",
+    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs. Without ISSUE, --scorecard ABSOLUTE_FILE compares the Factory Objectives and codex-direct sessions the selection FILE names (docs/DESIGN.md#Run log): per packet, per route and per pair, with how many of each Objective's runs the run log still has",
     check: (args) => {
       const { flags, lists } = args;
       if (flags.scorecard !== undefined) {
@@ -729,7 +729,7 @@ async function serveCommand(
 ): Promise<number> {
   try {
     // The process exits once serve returns, ending what still runs: the
-    // stop waits for its drain only briefly (CORE.md#Process model).
+    // stop waits for its drain only briefly (DESIGN.md#Process model).
     return await serveInstallation(repository, paths, {
       drainMs: STOP_DRAIN_MS,
       ...(args.flags.provider !== undefined

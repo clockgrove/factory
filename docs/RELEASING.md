@@ -39,7 +39,7 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
    Verify active protection against updates and deletion for that exact `refs/tags/vX.Y.Z`, with no bypass actors or exclusions. Preserve existing tag protections. Recheck the remote annotated tag and its peeled commit after pushing.
 
-The Release workflow then checks that the tag and every version identity agree and that the commit is on `main`. It runs lint, format, notices and the core's tests, packs the tarball (`prepack` builds `core/dist`), installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with [automatically generated notes](https://cli.github.com/manual/gh_release_create) from the merged pull requests. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
+The Release workflow then checks that the tag and every version identity agree and that the commit is on `main`. It runs lint, format, notices and Factory's tests, packs the tarball (`prepack` builds `core/dist`), installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with [automatically generated notes](https://cli.github.com/manual/gh_release_create) from the merged pull requests. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
 
 ## Verify a release
 

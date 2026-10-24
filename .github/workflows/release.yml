@@ -40,7 +40,7 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run notices:check
-      - name: Run the core's tests
+      - name: Run Factory's tests
         timeout-minutes: 15
         run: npm run test:core
 

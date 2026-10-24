@@ -145,7 +145,7 @@ const emptyWindow = (): ActivityWindow => ({
 /**
  * A worker run's activity into the run log: the first report after a
  * quiet interval is written at once, and later ones are coalesced into
- * one `worker-activity` event per interval (CORE.md#Run log), so a busy
+ * one `worker-activity` event per interval (DESIGN.md#Run log), so a busy
  * worker can't balloon the log. Every string is redacted and truncated.
  */
 export class ActivityLog {

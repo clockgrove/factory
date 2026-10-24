@@ -2,7 +2,7 @@
 
 These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout.
 
-Factory is being rebuilt on a new core: [the core spec](docs/CORE.md) is the design authority. Until cutover, the old tree under `src/` is frozen: no fixes or features there, only deletion as capabilities are ported. [The architecture](docs/ARCHITECTURE.md) and [the lifecycle](docs/LIFECYCLE.md) describe the old tree and are replaced at cutover.
+Factory is being rebuilt: [the design](docs/DESIGN.md) is the authority. Until cutover, the old tree under `src/` is frozen: no fixes or features there; it is deleted at cutover. [The architecture](docs/ARCHITECTURE.md) and [the lifecycle](docs/LIFECYCLE.md) describe the old tree and are replaced at cutover.
 
 ## Stability rules
 
@@ -23,9 +23,11 @@ A change that needs a new kind of hold, lock, owner, archive, background loop or
 - Finish one phase at a time. Use concurrent agents within that phase with clear file ownership.
 - Batch related fixes into a complete outcome. Merge with green CI and the maintainer’s read; independently review the completed milestone once against the stability rules. Credentials, isolation and state changes also need one focused independent review.
 - **Stop rule.** When the same class of failure shows up a second time, stop patching: find the structural cause and fix it in the design, or raise it in an issue.
-- **Lean code.** One implementation per job, no dead code, and tests that prove behavior ([the core spec](docs/CORE.md#lean-code)). Sweep for duplication at every milestone.
+- **Lean code.** One implementation per job, no dead code, and tests that prove behavior ([the design](docs/DESIGN.md#lean-code)). Sweep for duplication at every milestone.
 - CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
 - Finish the product outcome with meaningful affected tests, independent review and green CI. A milestone also needs its crash drill (see Testing). Stop when the behavior works and the required checks pass.
+- **No status documents or changelogs in the repository.** A capability Factory still lacks is one GitHub issue labelled `cutover-gap`; cutover waits until none is open. Docs describe behaviour, never progress.
+- **Land through the merge queue.** main has a merge queue: enqueue with `gh pr merge --auto --squash N`, never merge directly. Changes that build on each other are one stack (`gh stack`), merged with `gh stack merge`.
 - Issues and pull requests record scope, decisions and results. Follow the issue metadata rules below, existing Project status and applicable relationships. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or new label taxonomy.
 - Follow [the release procedure](docs/RELEASING.md) and the release issue’s actual exits. Do not invent additional release gates. GitHub release notes record changes.
 

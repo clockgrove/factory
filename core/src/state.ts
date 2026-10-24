@@ -66,7 +66,7 @@ export type AnswerFamily =
   | "retire"
   | "reset";
 
-/** One answer a hold offers (CORE.md#Holds and answers). */
+/** One answer a hold offers (DESIGN.md#Holds and answers). */
 export interface HoldOption {
   /** The literal answer token: `/factory <answer>`. */
   answer: string;
@@ -89,7 +89,7 @@ export interface Hold {
   /**
    * The Work Item it stops (a Work Item step's question about that item):
    * that item waits, and the items that depend on it. Absent: the whole
-   * Objective waits (CORE.md#Holds and answers).
+   * Objective waits (DESIGN.md#Holds and answers).
    */
   item?: string;
   question: string;
@@ -139,7 +139,7 @@ export interface Answer {
 }
 
 /**
- * Why a retry waits (CORE.md#Waits). Absent: an unknown transient cause,
+ * Why a retry waits (DESIGN.md#Waits). Absent: an unknown transient cause,
  * such as the network, a GitHub or provider outage, or CI still running.
  */
 export type Wait =
@@ -184,7 +184,7 @@ export interface PendingQuestion {
 
 /**
  * The configuration an Objective runs with, frozen at admission
- * (CORE.md#Frozen configuration): its provider, with that provider's
+ * (DESIGN.md#Frozen configuration): its provider, with that provider's
  * resolved settings, and every other key but the operational ones
  * (providers/selection.ts OPERATIONAL). A `switch` or `adopt` answer freezes it again.
  */

@@ -1,7 +1,7 @@
 /**
  * The `model-usage` run-log event: one per model call (planner, reviewer,
  * worker, discovery, dream), the same shape for every provider
- * (CORE.md#Model usage). Diagnostics, analysis and the scorecard read it.
+ * (DESIGN.md#Model usage). Diagnostics, analysis and the scorecard read it.
  * A count a provider doesn't report is null, never zero.
  */
 import { createHash, randomUUID } from "node:crypto";

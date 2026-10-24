@@ -1,6 +1,6 @@
 /**
  * Registered kinds: a host program's own Planner and Worker
- * (CORE.md#Library). The host registers a kind named `host:<name>` before
+ * (DESIGN.md#Library). The host registers a kind named `host:<name>` before
  * it serves the installation; configuration then names it as a
  * provider's `planner` or `worker.kind`, like a built-in kind, and the
  * service builds the host's implementation where it builds a built-in one

@@ -73,7 +73,7 @@ test("the packed tarball installs offline and runs the core's CLI", {
       "skills/director/SKILL.md",
       "skills/setup/SKILL.md",
       "docs/USER-GUIDE.md",
-      "docs/CORE.md",
+      "docs/DESIGN.md",
       "docs/templates/objective.md",
       "assets/recipes/repository-migration.json",
       "THIRD_PARTY_NOTICES.md",

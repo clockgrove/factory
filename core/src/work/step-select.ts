@@ -1,5 +1,6 @@
 import type { Outcome, StepContext } from "../engine.js";
 import {
+  directDependents,
   keepSentBack,
   materializeSelection,
   mediaDirectory,
@@ -24,11 +25,15 @@ import {
 // ---------------------------------------------------------------------------
 // select
 
+/** Who chose a set that was the only candidate (`Selection.by`). */
+const AUTO_SELECTED = "factory";
+
 /**
  * The operator picks one of the worker's candidate media sets; Factory
  * writes it at its destinations on top of the work commit. Until a valid
- * answer, the step asks with the candidates. After a repair that wasn't
- * about the media, the kept selection is written again without asking.
+ * answer, the step asks with the candidates; a single candidate set is
+ * selected without asking and bound to every direct dependent. After a repair that wasn't about the media,
+ * the kept selection is written again without asking.
  */
 export async function selectStep(
   item: WorkItem,
@@ -58,6 +63,19 @@ export async function selectStep(
       ...(own.selection.reason ? { reason: own.selection.reason } : {}),
     };
     decided = own.selection;
+  } else if (!answer && work.sets.length === 1) {
+    // One set is no choice: Factory selects it without asking and gives it
+    // to every direct dependent, the only sensible binding.
+    const set = work.sets[0]!;
+    const bound = directDependents(plan, item);
+    read = { kind: "chosen", set, bound };
+    decided = { by: AUTO_SELECTED, at: new Date().toISOString() };
+    context.log({
+      event: "media-auto-selected",
+      item: item.id,
+      set: set.id,
+      bound,
+    });
   } else {
     if (
       !answer ||

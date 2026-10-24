@@ -96,6 +96,8 @@ export interface ObjectiveFacts {
   "final-review:decisions": CriterionDecision[];
   /** Final review refused the integrated result: its `retry` validates again. */
   "final-review:refused": true;
+  /** A final validation command run once more on the tree it failed on. */
+  "final:flaky": { tree: string; command: string };
   /** The command final validation failed on, for `retire-command <n>`. */
   "final:failed": { index: number; command: string };
   /** The commands the operator retired from final validation (planning/plan.ts reads them). */

@@ -511,6 +511,13 @@ class Timeline {
           ),
         ];
       }
+      case "media-auto-selected":
+        return [
+          entry(
+            "answer",
+            `${step ?? "select"} selected set ${String(event.set)} without asking: the only candidate${Array.isArray(event.bound) && event.bound.length ? `, bound to ${event.bound.join(", ")}` : ""}`,
+          ),
+        ];
       case "diagnosis":
         return [
           entry(

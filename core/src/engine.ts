@@ -76,9 +76,10 @@ export type Outcome =
       polls?: true;
     }
   /**
-   * The whole state is replaced (`factory reset`'s rebuild step, reset.ts):
-   * the rebuilt Objective, or, with `withdraw`, the record is withdrawn as
-   * if never admitted (service.ts). Only that step returns it.
+   * The whole state is replaced (`factory reset`'s steps, reset.ts): the
+   * rebuilt Objective, or, with `withdraw`, the record is withdrawn as if
+   * never admitted (service.ts); or a rebuilt plan, accepted, with what
+   * merged under it. Only those steps return it.
    */
   | {
       kind: "replace";

@@ -210,6 +210,7 @@ export interface PullRequest {
   base: { ref: string; sha: string };
   body?: string | null;
   html_url?: string;
+  user?: { login: string } | null;
 }
 
 export interface CheckRun {
@@ -1201,6 +1202,24 @@ export class GitHub {
 
   pull(number: number, signal?: AbortSignal): Promise<PullRequest> {
     return this.rest("GET", this.repo(`pulls/${number}`), undefined, signal);
+  }
+
+  /** Set PR `pull`'s body, unless it already reads `body`. */
+  async updatePull(
+    pull: Pick<PullRequest, "number" | "body">,
+    body: string,
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (pull.body === body) return;
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "PATCH",
+      this.repo(`pulls/${pull.number}`),
+      { body },
+      signal,
+    );
+    crashPoint(`${point}:after`);
   }
 
   createPull(

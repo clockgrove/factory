@@ -101,6 +101,8 @@ export interface ServeOptions {
    * after, which ends what is still in flight.
    */
   drainMs: number;
+  /** Stops the service like SIGTERM: another installation took the repository over (holder.ts). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1113,6 +1115,9 @@ export async function serve(options: ServeOptions): Promise<number> {
     log.write(0, { event: "unhandled-rejection", error: String(reason) });
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
+  // An abort before this point is kept by the signal, so it is never lost.
+  if (options.signal?.aborted) stop();
+  options.signal?.addEventListener("abort", stop, { once: true });
   process.on("unhandledRejection", stray);
   try {
     const housekeeping = (): void => {
@@ -1176,6 +1181,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
     process.off("unhandledRejection", stray);
+    options.signal?.removeEventListener("abort", stop);
   }
 }
 

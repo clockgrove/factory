@@ -63,7 +63,30 @@ export function serve(inst, crashAt, nodeArgs = [], serveArgs = []) {
   const exit = new Promise((resolve) =>
     child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
   );
-  return { child, exit };
+  return { child, exit, stderr: () => stderr };
+}
+
+/**
+ * The service's exit, waited for at most `ms`: past it, the service is
+ * killed and the wait fails with what it wrote, so a hang explains itself.
+ */
+export async function exited(service, what, ms = 30_000) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      service.child.kill("SIGKILL");
+      reject(
+        new Error(
+          `${what} didn't exit within ${ms / 1000} s; it wrote:\n${service.stderr()}`,
+        ),
+      );
+    }, ms);
+  });
+  try {
+    return await Promise.race([service.exit, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function cli(inst, ...args) {
@@ -269,7 +292,7 @@ export async function until(predicate, what, ms = 10_000) {
 
 export async function stopped(service) {
   service.child.kill("SIGTERM");
-  return await service.exit;
+  return await exited(service, "the stopped service");
 }
 
 /** A planned Work Item with no more than status reads. */

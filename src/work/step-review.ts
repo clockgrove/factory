@@ -100,6 +100,7 @@ export async function reviewStep(
     peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
     ...(memory ? { memory } : {}),
     ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
+    checkFailures: fact(state, "checkFailures", item.id) ?? [],
     decisions: decided.decisions,
     ...(decided.earlier ? { earlier: decided.earlier } : {}),
     delivery: position,

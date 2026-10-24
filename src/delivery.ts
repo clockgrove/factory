@@ -89,6 +89,11 @@ export interface Repair {
    * and let the worker resolve what conflicts, with no diagnosis.
    */
   conflict?: { onto?: string };
+  /**
+   * GitHub's checks failed on the result: result review gets the failure
+   * (work/facts.ts `checkFailures`), whichever step observed it.
+   */
+  checks?: true;
 }
 
 /**
@@ -909,6 +914,7 @@ async function judge(
     }
     return {
       kind: "repair",
+      checks: true,
       finding: [
         `Checks failed on PR #${pr} at ${head}: ${listed(broken)}`,
         ...excerpts,

@@ -219,6 +219,11 @@ export interface ResultReviewInput {
    * rows, and images the reviewer sees. Captures of another tree are ignored.
    */
   artifacts?: readonly ReviewArtifact[];
+  /**
+   * The CI check failures this item's earlier results were repaired
+   * for, newest last (work/facts.ts `checkFailures`).
+   */
+  checkFailures?: readonly string[];
   /** Operator decisions of this item's criteria; they replace the reviewer's verdict (see `decides`). */
   decisions?: readonly CriterionDecision[];
   /** The review the operator is answering: its verdicts on this tree stand, so only the rest are judged again. */
@@ -294,9 +299,33 @@ export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
         complete: true,
       },
       ...deliveryRows(input),
+      ...checkFailureRows(input.checkFailures ?? []),
     ],
     artifacts: [{ artifacts: input.artifacts ?? [] }],
   });
+}
+
+/**
+ * The CI check failures an item was repaired for, as a controller
+ * row: what such a check demands is the repository's enforced convention,
+ * so review never refuses the change made to pass it.
+ */
+export function checkFailureRows(
+  failures: readonly string[],
+): ResultEvidence[] {
+  if (!failures.length) return [];
+  return [
+    {
+      origin: "controller",
+      path: "CI check failures this result was repaired for",
+      content: JSON.stringify({
+        scope:
+          "The repository's CI checks failed on earlier results of this Work Item, as Factory read them from GitHub (newest last), and the worker repaired the result to pass them. A line, file, name or form a failure here demands is the repository's enforced convention: where it differs from the engineering standard the repository wins, so it is no debug leftover or unrelated change. It excuses nothing else: judge every criterion as usual, and a check is never a reason to weaken a test or an acceptance criterion.",
+        failures,
+      }),
+      complete: true,
+    },
+  ];
 }
 
 /**

@@ -82,6 +82,12 @@ export interface ItemFacts {
   workSession: Session;
   /** The result reviewer's retained conversation, which a re-review continues. */
   reviewSession: Session;
+  /**
+   * The latest CI check failures this item's results were repaired for
+   * (failed-checks findings of its CI or merge step, newest last). Result
+   * review gets them: what a check demands is the repository's convention.
+   */
+  checkFailures: string[];
 }
 
 /** What the Objective's own steps keep, by name. */

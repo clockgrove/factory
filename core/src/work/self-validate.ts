@@ -168,6 +168,7 @@ export class SelfValidation {
       predecessor: input.base !== options.plan.base ? input.base : undefined,
       signal,
       log: input.log,
+      runFile: input.runFile,
     });
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);

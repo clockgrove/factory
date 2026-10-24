@@ -46,8 +46,16 @@ interface Row {
   /** The running step's activity so far, from its `worker-activity` events. */
   totals?: Totals;
   tools?: string[];
+  /** The last tools started with what they acted on. */
+  targets?: { tool: string; target: string }[];
   paths?: string[];
+  /** The worktree's changed files, shell edits included, as last sampled. */
+  changed?: { count: number; files: string[] };
   command?: string;
+  /** The running or last step attempt's number (`<step>#<n>`). */
+  attempt?: number;
+  /** Its pull request, once published. */
+  pr?: number;
   activityAt?: string;
   /** The worker's last reported context; absent: its provider reported none. */
   context?: { tokens: number; window?: number };
@@ -55,6 +63,21 @@ interface Row {
   progressAt?: string;
   /** The item's first failed validation since it last passed. */
   failingSince?: string;
+  /** Planner-seam calls running for it, by call id (`model-call`, `model-progress`). */
+  calls?: Record<string, LiveCallRow>;
+}
+
+/** A running planner or reviewer call, as watch shows it. */
+interface LiveCallRow {
+  role: string;
+  phase?: string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  startedAt: string;
+  tokens?: number;
+  window?: number;
+  turns: number;
 }
 
 export interface WatchOutput {
@@ -63,12 +86,19 @@ export interface WatchOutput {
   isTTY?: boolean;
 }
 
-/** Follow the run log of `issue`, or of every recently active Objective, until interrupted. */
+/** `--json`: a JSON line per row instead of text; `--once`: the rows now, then return. */
+export interface WatchOptions {
+  json?: boolean;
+  once?: boolean;
+}
+
+/** Follow the run log of `issue`, or of every recently active Objective, until interrupted; or with `once`, show it now. */
 export async function watch(
   logs: string,
   issue: number | undefined,
   secrets: readonly string[],
   out: WatchOutput,
+  options: WatchOptions = {},
 ): Promise<void> {
   const rows = new Map<string, Row>();
   const offsets = new Map<number, Map<string, number>>();
@@ -93,20 +123,31 @@ export async function watch(
     }
   };
   let drawnAt = 0;
+  const line = (row: Row) =>
+    options.json ? JSON.stringify(rowJson(row)) : rowLine(row);
   const render = () => {
-    if (out.isTTY) {
+    if (out.isTTY && !options.json) {
       if (!changed.size && Date.now() - drawnAt < REDRAW_MS) return;
       drawnAt = Date.now();
       out.write(`\x1b[H\x1b[2J${view([...rows.values()], issue)}`);
     } else
       for (const key of changed) {
         const row = rows.get(key);
-        if (row) out.write(`${rowLine(row)}\n`);
+        if (row) out.write(`${line(row)}\n`);
       }
     changed.clear();
   };
   discover();
-  if (!out.isTTY && !rows.size)
+  if (options.once) {
+    // Each row once, as the log has it now.
+    for (const row of sorted([...rows.values()])) out.write(`${line(row)}\n`);
+    if (!rows.size && !options.json)
+      out.write(
+        `No running work in the run log${issue === undefined ? "" : ` of #${issue}`}.\n`,
+      );
+    return;
+  }
+  if (!out.isTTY && !rows.size && !options.json)
     out.write(
       `No running work in the run log${issue === undefined ? "" : ` of #${issue}`} yet; waiting for it.\n`,
     );
@@ -139,9 +180,11 @@ function applyEvent(
     at: event.at,
   };
   switch (event.event) {
-    case "start":
+    case "start": {
       if (!step) return undefined;
-      // A new step: its activity starts again; failing validation stays.
+      const n = Number(/#(\d+)$/.exec(String(event.attemptId ?? ""))?.[1]);
+      // A new step: its activity starts again; failing validation, the
+      // worktree's changes and the PR stay.
       rows.set(key, {
         issue,
         item,
@@ -149,12 +192,22 @@ function applyEvent(
         state: "running",
         at: event.at,
         progressAt: event.at,
+        ...(n ? { attempt: n } : {}),
         ...(row.failingSince ? { failingSince: row.failingSince } : {}),
+        ...(row.changed ? { changed: row.changed } : {}),
+        ...(row.pr ? { pr: row.pr } : {}),
       });
       return key;
+    }
+    case "published":
+      if (typeof event.pr !== "number") return undefined;
+      row.pr = event.pr;
+      break;
     case "outcome":
       if (!step) return undefined;
       row.phase = phaseOf(step);
+      // A call its step outlived (cancelled, past its deadline) ran no more.
+      delete row.calls;
       row.state = String(event.outcome ?? "ended");
       row.at = event.at;
       if (typeof event.reason === "string") row.reason = event.reason;
@@ -191,6 +244,15 @@ function applyEvent(
         row.tools = event.tools.map(String);
       if (Array.isArray(event.paths) && event.paths.length)
         row.paths = event.paths.map(String);
+      if (Array.isArray(event.targets) && event.targets.length)
+        row.targets = (
+          event.targets as { tool?: unknown; target?: unknown }[]
+        ).map((t) => ({ tool: String(t.tool), target: String(t.target) }));
+      const shown = event.changed as
+        | { count?: unknown; files?: unknown }
+        | undefined;
+      if (typeof shown?.count === "number" && Array.isArray(shown.files))
+        row.changed = { count: shown.count, files: shown.files.map(String) };
       if (typeof event.command === "string") row.command = event.command;
       const context = event.context as Row["context"] | undefined;
       if (typeof context?.tokens === "number")
@@ -206,6 +268,43 @@ function applyEvent(
       if (!row.state) row.state = "running";
       break;
     }
+    // A planner or reviewer call: shown while it runs, until its model-usage.
+    case "model-call": {
+      if (typeof event.callId !== "string") return undefined;
+      row.calls = {
+        ...row.calls,
+        [event.callId]: {
+          role: String(event.role ?? "model"),
+          ...(typeof event.phase === "string" ? { phase: event.phase } : {}),
+          ...(typeof event.provider === "string"
+            ? { provider: event.provider }
+            : {}),
+          ...(typeof event.model === "string" ? { model: event.model } : {}),
+          ...(typeof event.effort === "string" ? { effort: event.effort } : {}),
+          startedAt: event.at,
+          turns: 0,
+        },
+      };
+      if (!row.phase && step) row.phase = phaseOf(step);
+      row.state ||= "running";
+      break;
+    }
+    case "model-progress": {
+      const call =
+        typeof event.callId === "string"
+          ? row.calls?.[event.callId]
+          : undefined;
+      if (!call) return undefined;
+      if (typeof event.tokens === "number") call.tokens = event.tokens;
+      if (typeof event.window === "number") call.window = event.window;
+      if (typeof event.turns === "number") call.turns = event.turns;
+      break;
+    }
+    case "model-usage":
+      if (typeof event.callId !== "string" || !row.calls?.[event.callId])
+        return undefined;
+      delete row.calls[event.callId];
+      break;
     case "cancelled":
       row.phase ||= "objective";
       row.state = "cancelled";
@@ -223,17 +322,37 @@ function phaseOf(step: string): string {
   return itemOf(step) ? step.split(":").slice(2).join(":") : step;
 }
 
+/** Rows in issue, then item order. */
+function sorted(rows: Row[]): Row[] {
+  return rows.sort((a, b) => a.issue - b.issue || a.item.localeCompare(b.item));
+}
+
 /** The whole view, for a terminal. */
 function view(rows: Row[], issue: number | undefined): string {
   const header = `Factory watch${issue === undefined ? "" : ` #${issue}`} · ${displayTime(new Date().toISOString())} · Ctrl-C to stop\n\n`;
   if (!rows.length) return `${header}No running work in the run log yet.\n`;
   return (
     header +
-    rows
-      .sort((a, b) => a.issue - b.issue || a.item.localeCompare(b.item))
+    sorted(rows)
       .map((row) => `${rowLine(row)}\n`)
       .join("")
   );
+}
+
+/** One row as JSON (`--json`): its fields, with its running calls as a list. */
+function rowJson(row: Row): Record<string, unknown> {
+  const { calls, ...rest } = row;
+  return {
+    ...rest,
+    ...(calls && Object.keys(calls).length
+      ? {
+          calls: Object.entries(calls).map(([callId, call]) => ({
+            callId,
+            ...call,
+          })),
+        }
+      : {}),
+  };
 }
 
 /**
@@ -247,8 +366,9 @@ function rowLine(row: Row, now = Date.now()): string {
       ? `for ${age(now, row.at)}`
       : `${age(now, row.at)} ago`;
   const parts = [
-    `#${row.issue} ${row.item} ${row.phase} ${row.state} ${since}${row.reason ? `: ${row.reason}` : ""}`,
+    `#${row.issue} ${row.item} ${row.phase}${row.attempt ? ` #${row.attempt}` : ""} ${row.state} ${since}${row.reason ? `: ${row.reason}` : ""}`,
   ];
+  if (row.pr) parts.push(`PR #${row.pr}`);
   const totals = row.totals;
   if (totals) {
     if (totals.turns) parts.push(`${totals.turns} turns`);
@@ -259,6 +379,13 @@ function rowLine(row: Row, now = Date.now()): string {
     if (totals.edits)
       parts.push(
         `${totals.edits} edits${row.paths ? ` (${row.paths.join(", ")})` : ""}`,
+      );
+    if (row.targets)
+      parts.push(
+        `last tools: ${row.targets
+          .slice(-3)
+          .map((t) => `${t.tool} ${t.target}`)
+          .join(", ")}`,
       );
     if (row.command) parts.push(`$ ${row.command}`);
     if (totals.commandsFailed)
@@ -280,11 +407,29 @@ function rowLine(row: Row, now = Date.now()): string {
     if (quiet >= QUIET_PROGRESS_MS)
       parts.push(`no progress for ${age(now, row.progressAt ?? row.at)}`);
   }
+  if (row.changed)
+    parts.push(
+      `${row.changed.count} files changed in the worktree${row.changed.files.length ? ` (${row.changed.files.slice(0, 5).join(", ")}${row.changed.count > 5 ? ", …" : ""})` : ""}`,
+    );
   if (row.failingSince)
     parts.push(`validation failing for ${age(now, row.failingSince)}`);
   if (totals && row.activityAt)
     parts.push(`active ${age(now, row.activityAt)} ago`);
+  for (const call of Object.values(row.calls ?? {}))
+    parts.push(liveCallText(call, now));
   return parts.join(" · ");
+}
+
+/** `reviewer result-review codex gpt-6.1-sol high for 2m, 3 turns, context 84K/272K`. */
+function liveCallText(call: LiveCallRow, now: number): string {
+  const name = [call.role, call.phase, call.provider, call.model, call.effort]
+    .filter(Boolean)
+    .join(" ");
+  const context =
+    call.tokens === undefined
+      ? "context unknown"
+      : `context ${kilo(call.tokens)}${call.window ? `/${kilo(call.window)}` : ""}`;
+  return `${name} for ${age(now, call.startedAt)}, ${call.turns} turn${call.turns === 1 ? "" : "s"}, ${context}`;
 }
 
 /** A token count: `840`, `84K`, `1.2M`. */

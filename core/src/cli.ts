@@ -149,18 +149,23 @@ function misplaced(name: string, command: string | undefined): string {
   return `Unknown option --${name} for factory ${command ?? "(no command)"}; see factory help`;
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  (error: unknown) => {
-    if (error instanceof Refusal) {
-      process.stderr.write(
-        `${JSON.stringify({ kind: "lifecycle-refusal", code: error.code })}\nfactory: ${error.message}\n`,
-      );
-      process.exit(error.code === "usage" ? 2 : 1);
-    }
+/** Exit once stdout and stderr took everything written: a large write to a pipe is still queued when it returns. */
+function exit(code: number): void {
+  process.stdout.write("", () =>
+    process.stderr.write("", () => process.exit(code)),
+  );
+}
+
+main(process.argv.slice(2)).then(exit, (error: unknown) => {
+  if (error instanceof Refusal) {
     process.stderr.write(
-      `factory: ${error instanceof Error ? error.stack : String(error)}\n`,
+      `${JSON.stringify({ kind: "lifecycle-refusal", code: error.code })}\nfactory: ${error.message}\n`,
     );
-    process.exit(1);
-  },
-);
+    exit(error.code === "usage" ? 2 : 1);
+    return;
+  }
+  process.stderr.write(
+    `factory: ${error instanceof Error ? error.stack : String(error)}\n`,
+  );
+  exit(1);
+});

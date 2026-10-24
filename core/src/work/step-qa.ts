@@ -110,6 +110,7 @@ export async function qaValidateStep(
     commandTimeoutMs: commandTimeoutMs(deps),
     signal,
     log: context.log,
+    runFile: context.runFile,
   });
   switch (result.kind) {
     case "passed": {

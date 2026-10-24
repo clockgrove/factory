@@ -10,7 +10,6 @@
 import { TransientError } from "../github.js";
 import { BaseFiles, planningSources } from "../planning/facts.js";
 import { acceptedInputs } from "../planning/plan.js";
-import type { ResolvedRecipe } from "../planning/recipes.js";
 import type { ShownObjective } from "../shown.js";
 import { type ObjectiveState, runOf } from "../state.js";
 import { errorMessage } from "../text.js";
@@ -45,32 +44,12 @@ export async function planningKnowledge(input: {
   files: BaseFiles;
   /** The target's curated playbook at the base; empty when there is none. */
   playbook: string;
-  /** The Objective's Workflow recipe: each memory input is looked up by its query. */
-  recipe?: ResolvedRecipe;
 }): Promise<string> {
   const settings = knowledgeSettings();
-  const context =
-    settings && adaptiveWorkflow(input.shown.blocks).enabled
-      ? settings.planningContext
-      : undefined;
-  // A required recipe memory input is never skipped: the plan step fails,
-  // retries, and holds if the lookup still can't run.
-  const required = (input.recipe?.memoryInputs ?? []).filter(
-    (entry) => entry.required,
-  );
-  const unlooked = (why: string) =>
-    new Error(
-      `The Workflow recipe's required memory input${required.length === 1 ? "" : "s"} ${required.map((entry) => entry.id).join(", ")} can't be looked up: ${why}`,
-    );
-  if (required.length && !context?.memory)
-    throw unlooked(
-      !settings
-        ? "the knowledge store isn't configured"
-        : !context
-          ? "the Objective's Adaptive workflow or planning.context is off"
-          : "planning.context.memory is off",
-    );
   if (!settings) return input.playbook;
+  const context = adaptiveWorkflow(input.shown.blocks).enabled
+    ? settings.planningContext
+    : undefined;
   // Git reads fail as TransientError, which the planning step retries.
   const sources = context?.memory
     ? (await planningSources(input.shown, input.files, input.child)).sources
@@ -78,7 +57,6 @@ export async function planningKnowledge(input: {
   const issue = input.state.issue;
   const run = runOf(input.state);
   const parts = [input.playbook.trim() ? input.playbook : ""];
-  const inputs = context?.memory ? (input.recipe?.memoryInputs ?? []) : [];
   let db: Database | undefined;
   try {
     db = openStore(settings.root);
@@ -89,40 +67,21 @@ export async function planningKnowledge(input: {
       );
       if (context.memory) {
         retain(db, sourceRecords(issue, run, input.files.base, sources));
-        // The recipe's memory inputs share the bound with the Objective's.
-        const maxBytes = Math.floor(
-          context.bounds.maxBytes / (inputs.length + 1),
-        );
-        const query = {
-          role: "planning" as const,
-          objective: issue,
-          maxBytes,
-          context,
-          supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
-          digest: (path: string) => pathDigest(input.files, path),
-        };
         const memory = await queryMemory(db, {
-          ...query,
+          role: "planning",
+          objective: issue,
           text: input.shown.body,
           paths: context.selectors,
+          maxBytes: context.bounds.maxBytes,
+          context,
+          supplied: sources.map((s) => `${s.path}#${s.heading ?? ""}`),
+          digest: (path) => pathDigest(input.files, path),
         });
         parts.push(memory.text);
-        for (const recipeInput of inputs) {
-          const found = await queryMemory(db, {
-            ...query,
-            text: recipeInput.query,
-            paths: recipeInput.selectors,
-            kinds: recipeInput.kinds,
-          });
-          parts.push(
-            `Workflow recipe memory input ${recipeInput.id} (${recipeInput.required ? "required" : "optional"}; query: ${JSON.stringify(recipeInput.query)}): ${found.shown ? found.text : "no record matched."}`,
-          );
-        }
       }
     }
   } catch (error) {
     if (error instanceof TransientError) throw error;
-    if (required.length) throw unlooked(errorMessage(error));
     parts.push(
       `Factory's knowledge store is unavailable for this call (${errorMessage(error)}); plan without the Dream playbook and repository memory.`,
     );

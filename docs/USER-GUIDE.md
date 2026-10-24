@@ -180,31 +180,6 @@ Exactly `enabled` or `disabled` as its only line, like the Quality checkpoint. `
 
 With `enabled`, and with `memory: true`, the planner, workers and reviewers get advisory repository memory. If the installation also sets `planning.adaptiveGraph: true`, the planner may add discovery Work Items, declared work conditions and reviewed expansion envelopes for work whose file list is unknown up front. With `adaptiveGraph` off, the Objective still plans with its context and memory, and the run log says the graph features are off.
 
-#### Workflow recipe
-
-A recipe gives the plan a reviewed structure (stages, discovery, expansions). It never adds acceptance, commands or permissions. Declare exactly one fenced JSON block:
-
-````markdown
-## Workflow recipe
-
-```json
-{
-  "selector": "repository-migration",
-  "arguments": { "selectors": ["src/"], "maxChildren": 8 }
-}
-```
-````
-
-The selector is a recipe id, optionally prefixed `repository:` or `plugin:`. An unprefixed id uses `.factory/recipes/<id>.json` at the base when that file exists, otherwise the packaged recipe of that name. A broken repository recipe is refused rather than replaced by the packaged one. The packaged recipes are `repository-migration`, `api-feature` (also needs `sharedSelectors`) and `bounded-audit`. Arguments are typed values checked against the recipe, never shell text.
-
-A recipe needs Adaptive workflow `enabled`, `planning.context` selectors that cover every recipe selector, and `planning.adaptiveGraph: true` for its discovery and expansion stages. Its memory inputs are looked up by their query before planning when `planning.context.memory` is on, and a `required` one needs it on. Preview a draft against the checkout's HEAD before you queue it:
-
-```sh
-factory recipe --repo OWNER/NAME --file /absolute/path/objective.md
-```
-
-The preview prints JSON with the resolved recipe, its stages, capabilities and any missing prerequisites, and exits 1 when the recipe can't be used. It makes no model call and queues nothing. Queueing resolves the recipe again at the base and pins it for the run; later edits to the recipe file affect only new Objectives.
-
 ### Writing Objectives that deliver
 
 - Deliver one coherent change per Objective, without unrelated fixes.

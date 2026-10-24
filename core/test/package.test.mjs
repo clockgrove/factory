@@ -75,7 +75,7 @@ test("the packed tarball installs offline and runs the core's CLI", {
       "docs/DESIGN.md",
       "docs/reference/setup.md",
       "docs/templates/objective.md",
-      "assets/recipes/repository-migration.json",
+      "assets/factory-mark.svg",
       "THIRD_PARTY_NOTICES.md",
     ])
       assert.ok(existsSync(join(installed, path)), `missing: ${path}`);

@@ -11,6 +11,7 @@ import {
 import { code, prose } from "../markdown.js";
 import { logRefused } from "../providers/usage.js";
 import type { ObjectiveState } from "../state.js";
+import { adaptiveGraph } from "../validate.js";
 import { fact, facts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
@@ -32,7 +33,6 @@ import {
   renderGraphReviewCall,
   renderPlanningInstructions,
 } from "./prompts.js";
-import { adaptiveGraph, recipeFindings } from "./recipes.js";
 import {
   decodeGraphReview,
   graphReviewSchema,
@@ -898,7 +898,6 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, !whole)}${await commandInstructions(facts, config.checkout, signal)}`,
         // No planner answer to revise: the plan as Factory holds it.
         ...(whole
@@ -930,7 +929,6 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
         adaptive: wire.adaptive,
-        recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
         ...(lookups ? { lookups } : {}),
@@ -1022,9 +1020,6 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, plan)),
-        ...(inputs.recipe
-          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-          : []),
         ...amendmentFindings(plan, decoded.plan, progress, {
           answered: answered.length > 0,
           nativeStack: config.delivery.kind === "native-stack",
@@ -1163,7 +1158,6 @@ function amendReviewStep(
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
         workers: workers(config),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),

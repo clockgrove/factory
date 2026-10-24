@@ -1510,6 +1510,20 @@ export function adaptiveWorkflow(blocks: readonly ObjectiveBlock[]): {
   return { enabled: selection === "enabled" };
 }
 
+/**
+ * Whether the planner is offered discovery items, conditions and
+ * expansions: the Objective enables Adaptive workflow and the installation
+ * enables planning.adaptiveGraph. With the gate off, an enabled section
+ * still plans with its context and memory.
+ */
+export function adaptiveGraph(
+  blocks: readonly ObjectiveBlock[],
+  /** planning.adaptiveGraph as the Objective's inputs froze it at admission. */
+  gate: boolean,
+): boolean {
+  return adaptiveWorkflow(blocks).enabled && gate;
+}
+
 // ---------------------------------------------------------------------------
 // Produced files
 

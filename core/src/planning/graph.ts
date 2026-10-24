@@ -18,7 +18,7 @@ import {
  */
 
 /** Ownership is literal Git-relative files or trailing-slash directory prefixes. */
-export function validOwnershipPath(path: string): boolean {
+function validOwnershipPath(path: string): boolean {
   const normalized = path.endsWith("/") ? path.slice(0, -1) : path;
   return (
     normalized.length > 0 &&
@@ -524,7 +524,7 @@ function checkGraphShape(
 }
 
 /** A declared work condition's literal shape. */
-export function conditionShaped(
+function conditionShaped(
   condition: unknown,
 ): condition is DeclaredWorkCondition {
   if (!isRecord(condition)) return false;
@@ -694,19 +694,16 @@ const distinctStrings = (value: unknown, nonempty: boolean): boolean =>
   new Set(value).size === value.length;
 
 /**
- * An expansion envelope's literal shape, without its template (a recipe
- * names the template by stage instead); returns what is wrong, or undefined.
+ * An expansion envelope's literal shape, without its template; returns
+ * what is wrong, or undefined.
  */
-export function expansionShapeProblem(
-  value: unknown,
-  templateField: string,
-): string | undefined {
+function expansionShapeProblem(value: unknown): string | undefined {
   if (!isRecord(value)) return "it must be an object";
   if (
     Object.keys(value).sort().join() !==
-    [...EXPANSION_FIELDS, templateField].sort().join()
+    [...EXPANSION_FIELDS, "template"].sort().join()
   )
-    return `it needs exactly ${[...EXPANSION_FIELDS, templateField].join(", ")}`;
+    return `it needs exactly ${[...EXPANSION_FIELDS, "template"].join(", ")}`;
   if (
     value.schemaVersion !== 1 ||
     typeof value.id !== "string" ||
@@ -802,7 +799,7 @@ function expansionFindings(
   const valid: GraphExpansionEnvelope[] = [];
   for (const envelope of draft.expansions) {
     const name = isRecord(envelope) ? String(envelope.id) : "?";
-    const problem = expansionShapeProblem(envelope, "template");
+    const problem = expansionShapeProblem(envelope);
     if (problem) {
       found(`Expansion ${name} is invalid: ${problem}`);
       continue;
@@ -963,14 +960,6 @@ export function joinTemplates(
       ],
     });
   return joined;
-}
-
-/**
- * The graph-shape findings alone: ids, kinds, dependencies, discovery,
- * conditions and expansions, with no coverage or source checks.
- */
-export function shapeFindings(draft: Draft): Finding[] {
-  return checkGraphShape(draft, draft.base, new Set(["OBJECTIVE"])).findings;
 }
 
 /** The plan is baseline QA: it qualifies existing bytes and delivers no change. */

@@ -30,7 +30,11 @@ import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import { type Answer, findState, type ObjectiveState } from "../state.js";
 import { oneLine } from "../text.js";
-import { adaptiveWorkflow, declarationProblems } from "../validate.js";
+import {
+  adaptiveGraph,
+  adaptiveWorkflow,
+  declarationProblems,
+} from "../validate.js";
 import { fact, facts as keptFacts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
@@ -67,14 +71,6 @@ import {
   renderPlanningInstructions,
   revisionScope,
 } from "./prompts.js";
-import {
-  adaptiveGraph,
-  type RecipeSelection,
-  recipeFindings,
-  recipeInstallation,
-  recipePrerequisites,
-  selectRecipe,
-} from "./recipes.js";
 import {
   exportTree,
   type RepositoryView,
@@ -180,11 +176,9 @@ export interface ObjectiveInputs {
    * accepted plan all use these, whatever the configuration says later.
    */
   reviewArtifacts: ReviewArtifactSelector[];
-  /** The Objective's Workflow recipe, resolved once at the base. */
-  recipe?: RecipeSelection;
   /**
-   * planning.adaptiveGraph when the Objective was admitted: the recipe check
-   * and every plan round use this, so a config change can't split them.
+   * planning.adaptiveGraph when the Objective was admitted: every plan
+   * round uses this, so a config change can't split them.
    */
   adaptiveGraph?: true;
   /** The done predecessors' accepted results, checked to be on `base` (planning/predecessors.ts). */
@@ -319,6 +313,10 @@ function decisionsBefore(
 /** Workers get a sandboxed shell (docs/DESIGN.md). */
 const WORKERS = { default: "shell" } as const;
 
+/** The execution profile ids the planner is offered: every configured one. */
+const profileIds = (config: CoreConfig): string[] =>
+  Object.keys(config.execution.profiles ?? {});
+
 /**
  * What the workers the planner may assign can execute: the Objective's
  * provider's (a sandboxed shell, as before), or with execution profiles,
@@ -328,7 +326,7 @@ const WORKERS = { default: "shell" } as const;
 export function workers(
   config: CoreConfig,
 ): Readonly<Record<string, WorkerCommandAccess>> {
-  const offered = recipeInstallation(config).profileIds;
+  const offered = profileIds(config);
   if (!offered.length) return WORKERS;
   return Object.fromEntries(
     offered.map((id) => {
@@ -356,14 +354,13 @@ export function workers(
 }
 
 /**
- * The execution profiles the planner is offered, with what each is for:
- * the ones a recipe's expansions are checked against (recipeInstallation),
- * so the two agree. Undefined without any: the planner assigns none.
+ * The execution profiles the planner is offered, with what each is for.
+ * Undefined without any: the planner assigns none.
  */
 export function offeredProfiles(
   config: CoreConfig,
 ): WireOptions["profiles"] | undefined {
-  const ids = recipeInstallation(config).profileIds;
+  const ids = profileIds(config);
   if (!ids.length) return undefined;
   return ids.map((id) => {
     const { description, selectionHints } = config.execution.profiles![id]!;
@@ -451,10 +448,7 @@ function adoptStep(key: string, deps: PlanningDeps): Step {
       if ("problems" in built)
         return objectiveProblemsHold(built.problems, "replan");
       const draft: Draft = { ...adopted, base: inputs.base };
-      const findings = [
-        ...(await checkPlan(draft, built.facts, files)),
-        ...(inputs.recipe ? recipeFindings(draft, inputs.recipe.recipe) : []),
-      ];
+      const findings = await checkPlan(draft, built.facts, files);
       context.log({ event: "child-graph-adopted", parent: adopt.parent });
       return done({
         draft,
@@ -544,7 +538,6 @@ function planRoundStep(
       const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         instructions: `${renderPlanningInstructions(
           inputs.shown.blocks,
           corrections,
@@ -573,7 +566,6 @@ function planRoundStep(
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
         adaptive: wire.adaptive,
-        recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
         ...(lookups ? { lookups } : {}),
@@ -640,9 +632,6 @@ function planRoundStep(
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
-        ...(inputs.recipe
-          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-          : []),
       ];
       return done({
         ...round,
@@ -717,7 +706,6 @@ function reviewStep(
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
         workers: workers(config),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
@@ -1395,8 +1383,8 @@ export async function readObjective(
  * The Objective checks on what GitHub shows of it at `inputs.base`: its
  * sections, its declarations (Package manager update, Quality checkpoint,
  * Workspace package additions, Adaptive workflow; checked here once,
- * trusted afterwards), its recipe, its commands and local executables.
- * Sets `inputs.recipe` and `inputs.adaptiveGraph`. The check step and
+ * trusted afterwards), its commands and local executables. Sets
+ * `inputs.adaptiveGraph`. The check step and
  * `factory propose` (proposals.ts) both use it.
  */
 export async function objectiveProblems(
@@ -1407,21 +1395,6 @@ export async function objectiveProblems(
   const { shown } = inputs;
   const { problems } = checkObjective(shown.blocks);
   problems.push(...declarationProblems(shown.blocks));
-  const recipe = await selectRecipe(
-    shown.blocks,
-    new BaseFiles(config.checkout, inputs.base, signal),
-  );
-  if (recipe.problem) problems.push(recipe.problem);
-  if (recipe.selected) {
-    problems.push(
-      ...recipePrerequisites(
-        recipe.selected.recipe,
-        adaptiveWorkflow(shown.blocks).enabled,
-        recipeInstallation(config),
-      ),
-    );
-    inputs.recipe = recipe.selected;
-  }
   if (config.planning.adaptiveGraph) inputs.adaptiveGraph = true;
   if (!problems.length)
     problems.push(
@@ -1532,7 +1505,6 @@ export async function planningFacts(
       child: inputs.child === true,
       files,
       playbook: (await files.text(config.planning.playbook)) ?? "",
-      ...(inputs.recipe ? { recipe: inputs.recipe.recipe } : {}),
     }),
     ...(files.signal ? { signal: files.signal } : {}),
   });

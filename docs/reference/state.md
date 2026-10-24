@@ -69,7 +69,7 @@ How much an Objective may correct itself unattended is `autonomy.allowances` (al
 
 ### Execution profiles
 
-`execution.profiles.<id> = {provider, description, selectionHints?}` names a configured provider's worker the planner may assign to a Work Item. The planner and the plan review are offered the ids with their descriptions (planning/steps.ts `offeredProfiles`, from the same list a recipe's `eligibleProfileIds` are checked against), and every work item gets one with a reason. The item's worker runs on that provider's worker settings; planning, reviews and the rest stay on the Objective's provider, and a usage-limit `switch` moves only those, so a limit on a provider the Objective doesn't run on (a profile's) offers only `wait` and `cancel`. Without profiles every item runs on the Objective's provider.
+`execution.profiles.<id> = {provider, description, selectionHints?}` names a configured provider's worker the planner may assign to a Work Item. The planner and the plan review are offered the ids with their descriptions (planning/steps.ts `offeredProfiles`), and every work item gets one with a reason. The item's worker runs on that provider's worker settings; planning, reviews and the rest stay on the Objective's provider, and a usage-limit `switch` moves only those, so a limit on a provider the Objective doesn't run on (a profile's) offers only `wait` and `cancel`. Without profiles every item runs on the Objective's provider.
 
 A profile may add two things to its provider's worker, both frozen with the profile, so a change holds a running Objective:
 

@@ -530,13 +530,6 @@ export interface MemoryQuery {
   supplied: readonly string[];
   /** A whole file's SHA-256 in the tree the role reads; undefined when missing. */
   digest(path: string): Promise<string | undefined>;
-  /**
-   * A recipe memory input's lookup: full-text matches of only these kinds,
-   * decisions included (other Objectives', as the old retained history
-   * gave them); this Objective's own decisions are left out, since the
-   * Objective's section shows them.
-   */
-  kinds?: readonly string[];
 }
 
 /** The memory section, how many records it shows and how many the bounds left out. */
@@ -554,9 +547,6 @@ export interface MemorySection {
  * await, so the busy timeout bounds the whole read and a caller may close
  * the store once this returns its promise.
  */
-/** The kinds a recipe memory input may search: the store's, but episodes (Dream reads those). */
-const SEARCHED_KINDS = ["failure", "handoff", "reference", "decision"] as const;
-
 export function queryMemory(
   db: Database,
   query: MemoryQuery,
@@ -578,29 +568,19 @@ export function queryMemory(
   let own: StoredRecord[];
   let matches: StoredRecord[];
   try {
-    own = query.kinds
-      ? []
-      : rows(
-          "SELECT * FROM memory WHERE objective = ? AND kind = 'decision' ORDER BY created, id",
-          query.objective,
-        );
-    // The kinds are part of the query, so the limit counts only them.
-    const kinds = query.kinds
-      ? SEARCHED_KINDS.filter((kind) => query.kinds!.includes(kind))
-      : (["failure", "handoff", "reference"] as const);
-    matches =
-      words.length && kinds.length
-        ? rows(
-            `SELECT memory.* FROM memory_text JOIN memory ON memory.id = memory_text.id
-           WHERE memory_text MATCH ? AND memory.kind IN (${kinds.map(() => "?").join(", ")})
-           AND NOT (memory.kind = 'decision' AND memory.objective = ?)
+    own = rows(
+      "SELECT * FROM memory WHERE objective = ? AND kind = 'decision' ORDER BY created, id",
+      query.objective,
+    );
+    matches = words.length
+      ? rows(
+          `SELECT memory.* FROM memory_text JOIN memory ON memory.id = memory_text.id
+           WHERE memory_text MATCH ? AND memory.kind IN ('failure', 'handoff', 'reference')
            ORDER BY bm25(memory_text), memory.created DESC LIMIT ?`,
-            words.map((word) => `"${word}"`).join(" OR "),
-            ...kinds,
-            query.objective,
-            Math.min(1024, query.context.bounds.maxResults * 4),
-          )
-        : [];
+          words.map((word) => `"${word}"`).join(" OR "),
+          Math.min(1024, query.context.bounds.maxResults * 4),
+        )
+      : [];
   } finally {
     if (db.isTransaction) db.exec("COMMIT");
   }

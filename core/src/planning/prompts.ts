@@ -3,7 +3,6 @@ import { declaration, onlyEntry } from "../objective.js";
 import { type Rendered, rendered } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
-import { RECIPE_GUIDANCE } from "./recipes.js";
 import { REPOSITORY_DIRECTORY, type RepositoryView } from "./repository.js";
 import type { ReviewEvidence } from "./review.js";
 import {
@@ -264,8 +263,6 @@ export interface CompilationInput {
   executionProfiles?: boolean;
   /** The Objective enables Adaptive workflow: discovery, conditions and expansions are offered. */
   adaptive?: boolean;
-  /** The data carries the Objective's workflowRecipe. */
-  recipe?: boolean;
   prerequisites?: unknown;
   localExecutables?: unknown;
   /**
@@ -339,7 +336,7 @@ ${QA_EVIDENCE_GUIDANCE ? `- ${QA_EVIDENCE_GUIDANCE}\n` : ""}- ${ITEM_KINDS}
 - Resources are exact identities; give a higher priority to work the source says must run first. Give explicit non-goals.
 - Architecture risks: derive material risks from actual flows, not a universal checklist. Where asynchronous work outlives intent, assign result/error/metadata/cleanup ownership and identify superseding user transitions for shared state. Per-operation freshness alone does not establish shared-state ownership. Prove source-required interacting transitions, including failure or late cleanup; isolated happy paths may miss them. Use allowed real journeys, production tests and source ownership proof without making every interleaving a browser test. Explicit HTTP/browser, failure, ordering and negative controls retain their required proof. Do not invent framework, acceptance or split requirements from this guidance.
 - Media: workers stage candidates/manifests; Factory captures, selects, uploads and hydrates. Preserve asset path/kind/role/media type/visibility and required/LFS roles and counts. Ordinary work uses media null; code hydrates empty roles/zero candidates. Media work declares media with a staged role and positive decimal candidate-count string, decoded strictly to a safe integer. Code, tests and docs are ordinary deliverables, not media roles. Candidate sets are alternatives for the operator's choice: only the selected set reaches the destinations and validation, so criteria offer the alternatives and check the delivered selection, never each candidate (see the checklist's candidate sets).
-${input.adaptive ? ADAPTIVE_GUIDANCE : ""}${input.recipe ? `- ${RECIPE_GUIDANCE}\n` : ""}${input.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
+${input.adaptive ? ADAPTIVE_GUIDANCE : ""}${input.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
 ${reviewArtifacts?.length ? `- ${REVIEW_ARTIFACT_GUIDANCE} When an obligation needs such runtime bodies as review evidence, plan a proof that runs the exact selector command in the phase whose review judges it, and name the captured bodies in that owner's brief. A selector grants no command authority; its command still needs ordinary source or base authority. These selectors are the installation's configured evidence capture: choose the proof among them and ordinary command receipts yourself, and never ask the operator which evidence mechanism to use. Only a required capture that neither can supply is an operator prerequisite.\n` : ""}
 Examples (illustrations, not command or source authority):
 - An Acceptance bullet that is exactly \`npm test\` already runs on the integrated result. Do not invent a worker just to duplicate it. A requirement for a particular negative control still needs the source-required control and its real evidence.
@@ -559,8 +556,6 @@ export interface GraphReviewInput {
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   /** The installation's execution profile policy; absent means one configured harness. */
   executionProfiles?: unknown;
-  /** The Objective's resolved workflow recipe, the structure the plan keeps. */
-  workflowRecipe?: unknown;
 }
 
 /** The graph-review prompt. The answer schema is graphReviewSchema (review.ts). */
@@ -584,7 +579,7 @@ Each item is assigned an execution profile. Check that each assignment honors ex
 ${GRAPH_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
 
 Objective:\n`;
-  const evidence = `${input.workflowRecipe ? `\nWorkflow recipe (a reviewed structural contract the Objective selected, never normative Sources, command authority or proof; check the instantiated stages fit the Objective and its Sources, and that original acceptance is kept):\n${JSON.stringify(input.workflowRecipe)}` : ""}\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}${QA_OFFERED ? `\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}` : ""}\nAuthorized commands (observed in the repository or declared in a pinned source):\n${JSON.stringify(facts.authorizedCommands)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
+  const evidence = `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}${QA_OFFERED ? `\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}` : ""}\nAuthorized commands (observed in the repository or declared in a pinned source):\n${JSON.stringify(facts.authorizedCommands)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
   // Everything above repeats across revisions of one Objective. The
   // candidate and its round scope follow, so the provider cache reuses the
   // prefix.

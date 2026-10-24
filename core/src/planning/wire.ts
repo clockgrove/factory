@@ -161,7 +161,7 @@ const CONTROLLER_GUARANTEES: { id: string; statement: string }[] = [
   {
     id: "selected-set-materialization",
     statement:
-      "Factory captures complete candidate AssetSets in private staging and stops for explicit human whole-set selection. It then materializes only selected bytes to Work Item-owned destinations, enforces the target Git attributes for every required LFS role, scans the staged result, and verifies each committed LFS pointer against the captured SHA-256 digest and byte count. Unselected sets stay in private staging: they are never committed, validated, reviewed as delivered bytes or merged; review receives a controller receipt of every captured set and the selection.",
+      "Factory captures complete candidate AssetSets in private staging and stops for explicit human whole-set selection. It then materializes only selected bytes to Work Item-owned destinations, requires the target Git attributes to route every destination through Git LFS, scans the staged result, and verifies each committed LFS pointer against the captured SHA-256 digest and byte count. Unselected sets stay in private staging: they are never committed, validated, reviewed as delivered bytes or merged; review receives a controller receipt of every captured set and the selection.",
   },
   {
     id: "review-artifact-capture",
@@ -171,7 +171,7 @@ const CONTROLLER_GUARANTEES: { id: string; statement: string }[] = [
   {
     id: "required-lfs-publication",
     statement:
-      "Factory uploads required selected Git LFS objects for the exact validated result commit before publishing its Git branch or pull request.",
+      "Factory uploads the selected Git LFS objects for the exact validated result commit before publishing its Git branch or pull request.",
   },
   {
     id: "post-integration-hydration",
@@ -236,11 +236,7 @@ const READONLY_FIELDS = [
   "newPackages",
   "executionProfile",
 ];
-const MEDIA_FIELDS = [
-  "expectedOutputRoles",
-  "minimumAssetSets",
-  "requiredLfsRoles",
-];
+const MEDIA_FIELDS = ["expectedOutputRoles", "minimumAssetSets"];
 
 /** The schemas and choice tables for one set of facts. */
 function contract(facts: PlanningFacts, options: WireOptions = {}) {
@@ -376,7 +372,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
             description:
               "How many alternative sets the worker offers for the operator to choose from; only the selected set is delivered and validated.",
           },
-          requiredLfsRoles: { type: "array", items: text },
         }),
       ],
     },
@@ -744,6 +739,7 @@ export function planChoices(
     })),
     executionProfiles: options.profiles ?? null,
     ...(facts.fixedScripts.length ? { fixedScripts: facts.fixedScripts } : {}),
+    ...(facts.lfsRules.length ? { lfsRules: facts.lfsRules } : {}),
     checkNames: checkNames.map((name, checkIndex) => ({ checkIndex, name })),
     ...(modes.qa?.includes("integrated-ci")
       ? {
@@ -1304,10 +1300,6 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
       );
     decoded.expectedOutputRoles = roles;
     decoded.minimumAssetSets = Number(media.minimumAssetSets);
-    decoded.requiredLfsRoles = strings(
-      media.requiredLfsRoles,
-      "requiredLfsRoles",
-    );
   }
   // A new package the item declares becomes literal manifest ownership, the
   // fact workspace validation checks.

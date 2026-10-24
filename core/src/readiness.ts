@@ -253,7 +253,7 @@ async function login(
       if (named) return `${named} in the environment`;
       return {
         missing: `no Codex login at ${file}, and no CODEX_API_KEY or OPENAI_API_KEY`,
-        fix: "Run `codex login` as the user the service runs as",
+        fix: "Run `codex login` as the user the service runs as (a background service doesn't keep CODEX_API_KEY or OPENAI_API_KEY from the setup shell)",
       };
     }
     case "claude": {

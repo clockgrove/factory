@@ -18,7 +18,7 @@ import {
   transport,
 } from "./github-trace.js";
 import type { RunFile, RunLog } from "./log.js";
-import { profilesLacking } from "./planning/plan.js";
+import { deliveryChange, profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
 import {
@@ -1609,6 +1609,12 @@ export class ObjectiveRunner {
       }
       frozen = { ...current, ...structuredClone(live) };
     }
+    const delivery = frozen && deliveryChange(this.state, frozen.config);
+    if (delivery)
+      return refused(
+        "invalid_answer",
+        `\`${answerForm(option)}\` would deliver this Objective with delivery.kind "${delivery.now}", but its plan is split for "${delivery.was}". To deliver it with "${delivery.now}", cancel it and queue it again. Answers: ${answersOf(hold).join(", ")}.`,
+      );
     // `more` to an allowance question is the engine's; any other is the step's.
     const granting =
       answer === MORE ? askedFor(this.state, hold.id) : undefined;

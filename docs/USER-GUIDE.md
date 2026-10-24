@@ -83,20 +83,14 @@ Queue an Objective by setting its card's Factory field to the queued option on t
 
 Sections are level-two or level-three headings (the issue form renders `###`). Text before the first section is not checked.
 
-- **Goal** (or **Outcome**): required. One paragraph: what changes, for whom, and what is out of scope.
+- **Goal**: required. One paragraph: what changes, for whom, and what is out of scope.
 - **Acceptance**: required, at least one bullet. One observable fact per bullet; see below.
 - **Context**: optional prose and links. Not parsed; the planner reads it with the rest of the issue.
 - **Sources**: optional. Files every worker must receive verbatim; see below.
 - **Constraints** or **Non-goals**: optional limits workers must respect.
 - **May change**: optional, once. The protected paths a worker may change: anything under `.github/`, a CODEOWNERS file, or other CI configuration ([Security](reference/security.md)). Each bullet is exactly one backticked repository path, such as ``- `.github/workflows/ci.yml` ``. Naming a path anywhere else allows nothing.
 
-Any other heading is read as prose. Each section above may appear once; a second copy is refused with "merge the two sections into one". Three old headings are refused so their meaning is not silently lost:
-
-| Heading           | Refusal says                                                                      |
-| ----------------- | --------------------------------------------------------------------------------- |
-| Final validation  | write each command as an Acceptance bullet that is exactly one backticked command |
-| Planning sources  | rename it to Sources                                                              |
-| What must be true | rename it to Acceptance                                                           |
+Any other heading is read as prose. Each section above may appear once; a second copy is refused with "merge the two sections into one".
 
 ### Acceptance and final commands
 

@@ -41,16 +41,6 @@ const KNOWN = [
   "non-goals",
 ];
 
-/** Older names Objectives still use for a known section. */
-const ALIASES: Record<string, string> = { outcome: "goal" };
-
-const RETIRED: Record<string, string> = {
-  "final validation":
-    "write each command as an Acceptance bullet that is exactly one backticked command",
-  "planning sources": "rename it to Sources",
-  "what must be true": "rename it to Acceptance",
-};
-
 interface Section {
   name: string;
   blocks: ObjectiveBlock[];
@@ -61,8 +51,7 @@ function sections(blocks: readonly ObjectiveBlock[]): Section[] {
   const result: Section[] = [];
   for (const block of blocks) {
     if (block.kind === "heading" && (block.level === 2 || block.level === 3)) {
-      const text = block.text.toLowerCase();
-      const name = ALIASES[text] ?? text;
+      const name = block.text.toLowerCase();
       const last = result[result.length - 1];
       if (last && last.name === name && last.blocks.length === 0) continue;
       result.push({ name, blocks: [] });
@@ -118,9 +107,6 @@ export function checkObjective(blocks: readonly ObjectiveBlock[]): {
   const all = sections(blocks);
   const seen = new Set<string>();
   for (const section of all) {
-    const retired = RETIRED[section.name];
-    if (retired)
-      problems.push(`The "${section.name}" heading is retired: ${retired}.`);
     if (KNOWN.includes(section.name)) {
       if (seen.has(section.name))
         problems.push(

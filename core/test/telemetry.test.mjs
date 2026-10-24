@@ -37,6 +37,7 @@ import {
   configured,
   installation,
   item,
+  plan,
   REPO,
   seed,
   serve,
@@ -623,7 +624,7 @@ test("status --json details each Work Item's attempt, commits, last error, repai
   seed(inst, 69, "building", {
     done: {
       check: {},
-      plan: { items: [item("a"), item("b", { dependencies: ["a"] })] },
+      plan: plan([item("a"), item("b", { dependencies: ["a"] })]),
       "item:a:work": {
         base: "b0",
         commit: "c1",

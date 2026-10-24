@@ -95,7 +95,7 @@ From an earlier version of Factory to this one: start clean, with no compatibili
 3. **Install this release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
 4. **Prepare the target:**
    - a clone that only Factory uses;
-   - the Project fields `Factory` (single select, with the seven options) and `Factory order` (number);
+   - the Project fields `Factory` (single select, with the six options) and `Factory order` (number);
    - removal of the old control card and metadata field, which nothing reads now.
 5. **Set up** (see [Setup](#setup)):
    - `factory setup --repo OWNER/NAME --checkout … --project-id …` with your limits, delivery, sandbox and final commands, until it reports `configured`;

@@ -19,7 +19,7 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
 ## Gather
 
 - **Target:** the repository `OWNER/NAME`, and an absolute path to a clone of it that Factory owns (not the operator's working copy). The clone's origin must name the repository.
-- **Queue:** the GitHub Project node id (`PVT_...`). The Project needs a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, plus a number field `Factory order`. Setup checks them and never creates them; creating them is the operator's step (`gh project field-create`).
+- **Queue:** the GitHub Project node id (`PVT_...`). The Project needs a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, plus a number field `Factory order`. Setup checks them and never creates them; creating them is the operator's step (`gh project field-create`).
 - **Providers:** `codex` is the default (planner and worker). For Claude or Copilot, add a named provider with `--provider NAME --planner KIND --worker KIND`, and `--default` to make it the default. Ask for the models rather than copying another provider's.
 - **Optional:**
   - limits: `--max-active`, `--workers`, `--validations`;

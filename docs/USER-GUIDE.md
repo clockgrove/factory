@@ -14,11 +14,11 @@ Factory turns a GitHub issue (an Objective) into a reviewed plan of Work Items, 
 You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), and the GitHub CLI logged in. See the [README](../README.md#requirements) for the full list and installation.
 
 1. **A clone for Factory.** Clone the target repository to a directory only Factory uses. Its origin must name the repository: Factory checks it before every fetch and push.
-2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, and a number field `Factory order`. Factory never creates them.
+2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`. Factory never creates them.
 
    ```sh
    gh project field-create NUMBER --owner OWNER --name Factory --data-type SINGLE_SELECT \
-     --single-select-options "Queued,Planning,Building,Needs you,Done,Failed,Cancelled"
+     --single-select-options "Queued,Planning,Building,Needs you,Done,Cancelled"
    gh project field-create NUMBER --owner OWNER --name "Factory order" --data-type NUMBER
    ```
 

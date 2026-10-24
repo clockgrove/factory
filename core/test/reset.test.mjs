@@ -86,6 +86,7 @@ function status(decisions, retired) {
       },
       activity: {},
       calls: { planner: 0, worker: 0, tokens: 0 },
+      running: [],
       decisions: [],
       startedAt: run,
       record: { decisions, retired },

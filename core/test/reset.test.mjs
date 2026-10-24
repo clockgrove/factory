@@ -194,17 +194,15 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
       "2026-10-24T02:10:00.000Z",
     ),
   };
-  const found = rebuildFrom(
-    record(),
-    {
-      open: true,
-      card: card("Building"),
-      self,
-      comments: [shown, plan],
-      pulls: { ...pulls, "factory/394/badge-helper": [replaced, open] },
-    },
-    config,
-  );
+  const rebuiltAt = new Date().toISOString();
+  const read = {
+    open: true,
+    card: card("Building"),
+    self,
+    comments: [shown, plan],
+    pulls: { ...pulls, "factory/394/badge-helper": [replaced, open] },
+  };
+  const found = rebuildFrom(record(), read, config);
   const { state } = found;
   assert.equal(state.status, "checking", "it checks the Objective again");
   assert.equal(state.startedAt, run);
@@ -215,6 +213,12 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
     kept.plan.items.map((item) => item.id),
     ["badge-image", "badge-helper"],
   );
+  // With no readable state it owned no paths meanwhile: it owns them all
+  // again from the rebuild, after every plan accepted before.
+  const paths = new Set(kept.plan.items.flatMap((item) => item.ownedPaths));
+  assert.deepEqual(Object.keys(kept.plan.ownedSince).sort(), [...paths].sort());
+  for (const since of Object.values(kept.plan.ownedSince))
+    assert.ok(since >= rebuiltAt, since);
   assert.deepEqual(Object.keys(kept.merged), ["badge-image"]);
   assert.equal(kept.merged["badge-image"].pr, 401);
   assert.deepEqual(kept.decisions, [decision]);
@@ -228,6 +232,32 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
   );
   assert.match(found.message, /#402 \(badge-helper\)/);
   assert.equal(state.modules.github.shown, "Building");
+  // A second reset while that plan is in review keeps the times it owned
+  // its paths from, which only its landing posts.
+  const old = structuredClone(state);
+  const since = Object.fromEntries(
+    [...paths].map((path) => [path, "2026-10-24T06:00:01.000Z"]),
+  );
+  old.kept["reset:plan"].plan.ownedSince = since;
+  const again = rebuildFrom(
+    resetRecord(
+      394,
+      {
+        id: "reset-2",
+        at: "2026-10-24T06:10:00.000Z",
+        by: "op",
+        request: { kind: "reset", issue: 394 },
+      },
+      old,
+      true,
+      undefined,
+      undefined,
+      undefined,
+    ),
+    read,
+    config,
+  );
+  assert.deepEqual(again.state.kept["reset:plan"].plan.ownedSince, since);
 });
 
 test("a later run GitHub names plans afresh; nothing of Factory's on GitHub and no queued card refuses", () => {

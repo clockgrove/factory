@@ -3,7 +3,7 @@ import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
-import { coverageCriterion } from "./graph.js";
+import { coverageCriterion, ownsPath } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
 import type { Plan, Retirement, WorkItem } from "./types.js";
 
@@ -91,6 +91,61 @@ export function currentPlan(state: ObjectiveState): Plan | undefined {
     (entry) => entry.plan === accepted,
   );
   return retired.length ? { ...plan, retired } : plan;
+}
+
+/**
+ * A plan's `ownedSince` for `items`, against the paths `before` (an owned
+ * plan, reset.ts `ownedPlan`) ranked: a path one of those covers keeps the
+ * earliest time of the ones that do (none for the plan's acceptance), and
+ * every other path is owned from `at`. Beside each path, the ones it
+ * covers that rank earlier keep their times, so what the Objective owned
+ * before keeps its place however an amendment narrows or widens a path.
+ * Undefined when no path has a time of its own.
+ */
+export function ownedSince(
+  items: WorkItem[],
+  at: string,
+  before?: { plan: Plan; accepted: string },
+): Record<string, string> | undefined {
+  const had = before ? rankedPaths(before.plan, before.accepted) : [];
+  const since = new Map<string, string>();
+  const add = (path: string, time: string) => {
+    const known = since.get(path);
+    if (known === undefined || time < known) since.set(path, time);
+  };
+  for (const path of new Set(items.flatMap((item) => item.ownedPaths))) {
+    const covering = had.filter((each) => ownsPath(path, [each.path]));
+    const time = covering.length
+      ? covering.reduce((a, b) => (b.since < a.since ? b : a)).since
+      : at;
+    if (time !== before?.accepted) add(path, time);
+    for (const each of had)
+      if (each.since < time && ownsPath(each.path, [path]))
+        add(each.path, each.since);
+  }
+  return since.size ? Object.fromEntries(since) : undefined;
+}
+
+/**
+ * Each path `plan`'s Objective owns, with when it came to own it: its
+ * items' paths, by their `ownedSince` time or else `accepted`, and the
+ * `ownedSince` paths none of them names but one covers: the paths it
+ * owned before an amendment widened them (`ownedSince`).
+ */
+export function rankedPaths(
+  plan: Plan,
+  accepted: string,
+): { path: string; since: string }[] {
+  const paths = [...new Set(plan.items.flatMap((item) => item.ownedPaths))];
+  const since = plan.ownedSince ?? {};
+  const time = (path: string) =>
+    Object.hasOwn(since, path) ? since[path]! : accepted;
+  return [
+    ...paths.map((path) => ({ path, since: time(path) })),
+    ...Object.keys(since)
+      .filter((path) => !paths.includes(path) && ownsPath(path, paths))
+      .map((path) => ({ path, since: time(path) })),
+  ];
 }
 
 /** The latest accepted amendment's plan, else the accepted plan, as saved. */

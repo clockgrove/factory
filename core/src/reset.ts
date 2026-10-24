@@ -147,6 +147,27 @@ export function statusRecordOf(state: ObjectiveState): StatusRecord {
 }
 
 /**
+ * The plan whose owned paths an Objective holds (service.ts `pathOwner`)
+ * and when it was accepted: while a reset stands, the old state's; once
+ * rebuilt, the rebuilt plan's under its own acceptance, until planning
+ * lands it or drops it (`forget`); else the current plan's. So a reset
+ * never gives up an Objective's place in the owned-path order.
+ */
+export function ownedPlan(
+  state: ObjectiveState,
+): { plan: Plan; accepted: string } | undefined {
+  if (TERMINAL.includes(state.status)) return undefined;
+  if (resetting(state)) {
+    const { old } = state.kept[RESET] as ResetRecord;
+    return old && ownedPlan(old);
+  }
+  const plan = currentPlan(state);
+  if (plan) return { plan, accepted: String(state.kept[ACCEPTED_AT] ?? "") };
+  const rebuilt = state.kept?.[REBUILT] as Rebuilt | undefined;
+  return rebuilt && { plan: rebuilt.plan, accepted: rebuilt.accepted };
+}
+
+/**
  * The workflow, with the rebuild as the only step while a reset stands,
  * and a rebuilt plan's check and landing in place of planning's own
  * first round and acceptance.

@@ -287,6 +287,34 @@ const ATTEMPT_HEAD = 8 * 1024 ** 2;
 const ATTEMPT_SEGMENT = 4 * 1024 ** 2;
 /** A line held for its newline at most this long before it is written anyway. */
 const PENDING_LINE = 64 * 1024;
+/** How much of such a line's end waits for the rest, at least. */
+const PENDING_KEEP = 1024;
+/** A character a redacted token (`redact`) can hold, or a pair's first half. */
+const TOKEN_CHAR = /[\w.\-\uD800-\uDBFF]/;
+
+/**
+ * Where a line held past PENDING_LINE is cut: before its last
+ * PENDING_KEEP characters (or the longest secret line), after a character
+ * no token holds, and outside every secret, so each secret and token is
+ * redacted whole once the rest comes. The whole text when no such place
+ * exists (one unbroken token-like run).
+ */
+function flushCut(text: string, secrets: readonly string[]): number {
+  const lines = secrets.flatMap((secret) =>
+    secret.split(/\r?\n/).filter(Boolean),
+  );
+  let cut =
+    text.length - Math.max(PENDING_KEEP, ...lines.map((line) => line.length));
+  for (let was = -1; cut > 0 && was !== cut; ) {
+    was = cut;
+    while (cut > 0 && TOKEN_CHAR.test(text[cut - 1]!)) cut -= 1;
+    for (const line of lines) {
+      const start = text.lastIndexOf(line, cut - 1);
+      if (start >= 0 && start + line.length > cut) cut = start;
+    }
+  }
+  return cut > 0 ? cut : text.length;
+}
 
 /**
  * One attempt's private file (RunLog.runFile): text appended line by line,
@@ -306,7 +334,8 @@ export class RunFile {
   private segmentBytes = 0;
   /** Bytes of the segments still on disk. */
   private kept = new Map<number, number>();
-  private pending = "";
+  /** Each stream's text waiting for its newline. */
+  private pending = new Map<string, string>();
 
   constructor(
     private readonly logs: string,
@@ -322,15 +351,24 @@ export class RunFile {
     return sum;
   }
 
-  /** Text; complete lines are written, redacted, and the rest waits for its newline or `close`. */
-  append(text: string): void {
+  /**
+   * Text of one `stream` (a command's stdout and stderr apart, so their
+   * chunks never split each other's lines): complete lines are written,
+   * redacted, and the rest waits for its newline or `close`. A line past
+   * PENDING_LINE is written up to `flushCut`.
+   */
+  append(text: string, stream = ""): void {
     if (this.closed) return;
-    this.pending += text;
-    const end = this.pending.lastIndexOf("\n");
-    if (end < 0 && this.pending.length < PENDING_LINE) return;
-    const complete = end < 0 ? this.pending : this.pending.slice(0, end + 1);
-    this.pending = end < 0 ? "" : this.pending.slice(end + 1);
-    this.write(redact(complete, this.secrets));
+    const pending = (this.pending.get(stream) ?? "") + text;
+    const end = pending.lastIndexOf("\n");
+    const cut =
+      end >= 0
+        ? end + 1
+        : pending.length < PENDING_LINE
+          ? 0
+          : flushCut(pending, this.secrets);
+    this.pending.set(stream, pending.slice(cut));
+    this.write(redact(pending.slice(0, cut), this.secrets));
   }
 
   /**
@@ -352,8 +390,9 @@ export class RunFile {
   /** Write what is pending and stop. */
   close(): void {
     if (this.closed) return;
-    if (this.pending) this.write(redact(this.pending, this.secrets));
-    this.pending = "";
+    for (const text of this.pending.values())
+      this.write(redact(text, this.secrets));
+    this.pending.clear();
     this.closed = true;
     this.grew();
   }

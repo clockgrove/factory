@@ -8,7 +8,7 @@ This guide is for developers adding features or fixing bugs in Factory itself. T
 
 ## Development setup
 
-Use Linux x64, Node.js 22.12 or later, npm, Git, and Git LFS. Node.js 24 matches CI. The source-development tools require a newer Node.js minimum than the published runtime package, which supports Node.js 22.0 or later.
+Use Linux x64, Node.js 22.13 or later, npm, Git, and Git LFS. Node.js 24 matches CI.
 
 Fork or clone the repository, create a branch, and install its dependencies:
 

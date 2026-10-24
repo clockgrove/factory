@@ -92,7 +92,7 @@ From an earlier version of Factory to this one: start clean, with no compatibili
 
 1. **Stop the old service** (`systemctl --user disable --now <old unit>`). Close or cancel the Objectives it was running.
 2. **Delete the old state and configuration**, after copying anything you still need from the old configuration by hand (paths such as `sandbox.readOnlyPaths`). An unknown key is refused by name, so a copied old configuration won't load.
-3. **Install this release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
+3. **Install this release** (README#Install). `factory help` lists every command.
 4. **Prepare the target:**
    - a clone that only Factory uses;
    - the Project fields `Factory` (single select, with the six options) and `Factory order` (number);

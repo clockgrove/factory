@@ -1,6 +1,5 @@
 // Draining and amendments: intake checks, the planner's revision and its review.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -244,14 +243,6 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     "z",
     "--reason",
     "x",
-  );
-  console.log(
-    "UNKNOWN",
-    spawnSync(
-      "sh",
-      ["-c", `grep -rh "request-failed" ${inst.logs} | tail -2`],
-      { encoding: "utf8" },
-    ).stdout,
   );
   assert.equal(refusal(unknown), "amendment_refused");
   assert.equal(

@@ -368,6 +368,15 @@ export function lfsPointer(
   return oid && size ? { oid, size: Number(size) } : undefined;
 }
 
+/** The paths `git check-attr -z filter` reports as `filter=lfs`. */
+export function lfsFiltered(output: Buffer): Set<string> {
+  const fields = output.toString("utf8").split("\0");
+  const paths = new Set<string>();
+  for (let index = 0; index + 2 < fields.length; index += 3)
+    if (fields[index + 2] === "lfs") paths.add(fields[index]!);
+  return paths;
+}
+
 /**
  * Git with the operator's configuration, which holds credentials and
  * insteadOf rewrites: never prompting, with C messages. Returns standard

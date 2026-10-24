@@ -64,6 +64,7 @@ import {
   saveObservation,
   saveQueueControl,
   saveState,
+  stateDigest,
   TERMINAL,
 } from "./state.js";
 import { carried } from "./tracking.js";
@@ -142,6 +143,13 @@ const observeKey = (state: ObjectiveState): string =>
   `${state.issue}@${runOf(state)}`;
 
 const KEEP_REQUEST_IDS = 50;
+/** The module without its record that an unreadable state's question was asked. */
+const unasked = ({
+  askedUnreadable: _asked,
+  ...github
+}: GitHubModule): GitHubModule => github;
+/** Ticks in a row in which an Objective's work throws before it is set aside as unreadable. */
+const MAX_OBJECTIVE_ERRORS = 10;
 const RESULT_TTL_MS = 60 * 60 * 1000;
 
 /**
@@ -336,6 +344,68 @@ export async function serve(options: ServeOptions): Promise<number> {
     observed.delete(state.issue);
     if (owed) observeLate(state);
     else observing.forget(key);
+  };
+
+  /**
+   * Rule 1: a throw while the tick works on one Objective (its deadline,
+   * its scheduling, its steps, its sync, its observation, its retirement)
+   * is that Objective's alone. It is logged (`objective-error`), the
+   * Objective is left alone for the rest of the tick, and after
+   * MAX_OBJECTIVE_ERRORS ticks in a row it is set aside as unreadable:
+   * its steps stop, and it holds with `retry` (read its file again),
+   * `reset` and `cancel`. A system call's error (a save or read failing
+   * with ENOSPC, EMFILE, EIO) never counts: the save left memory as on
+   * disk (`transact`), and the next tick tries again.
+   */
+  const failing = new Map<number, { error: string; counts: boolean }>();
+  /** Per Objective: the ticks in a row in which its work threw. */
+  const errors = new Map<number, number>();
+  /** Set-aside runs' stops: what replaces the run waits for them. */
+  const setAsideStops = new Map<number, Promise<void>>();
+  const failed = (issue: number, error: unknown): void => {
+    if (failing.has(issue)) return;
+    const counts =
+      typeof (error as { syscall?: unknown })?.syscall !== "string";
+    failing.set(issue, { error: String(error), counts });
+    log.write(issue, { event: "objective-error", error: String(error) });
+  };
+  /** Run `work` for one Objective, unless its work already threw this tick. */
+  const guarded = (issue: number, work: () => void): void => {
+    if (failing.has(issue)) return;
+    try {
+      work();
+    } catch (error) {
+      failed(issue, error);
+    }
+  };
+  const countErrors = (): void => {
+    for (const issue of [...errors.keys()])
+      if (!failing.has(issue)) errors.delete(issue);
+    for (const [issue, { error, counts }] of failing) {
+      if (!counts) continue;
+      const count = (errors.get(issue) ?? 0) + 1;
+      errors.set(issue, count);
+      if (count >= MAX_OBJECTIVE_ERRORS) setAside(issue, error);
+    }
+  };
+  const setAside = (issue: number, error: string): void => {
+    errors.delete(issue);
+    const runner = runners.get(issue);
+    if (!runner) return;
+    const problem = `working on it failed ${MAX_OBJECTIVE_ERRORS} ticks in a row: ${error}`;
+    const github = runner.state.modules.github as GitHubModule | undefined;
+    unreadable.set(issue, {
+      error: problem,
+      incident: stateDigest(runner.state),
+      setAside: true,
+      // This incident's question is asked afresh.
+      ...(github ? { github: unasked(structuredClone(github)) } : {}),
+    });
+    setAsideStops.set(issue, runner.stop());
+    runners.delete(issue);
+    observed.delete(issue);
+    options.sync?.forget(issue);
+    log.write(issue, { event: "objective-set-aside", error: problem });
   };
 
   // Only the lock holder writes state, so leftover temporary files are from a crash.
@@ -572,11 +642,46 @@ export async function serve(options: ServeOptions): Promise<number> {
       return startReset(stored);
     const runner = find(request.issue);
     const broken = unreadable.get(request.issue);
+    if (
+      !runner &&
+      broken?.setAside &&
+      (request.kind === "retry" ||
+        (request.kind === "answer" && request.answer === "retry"))
+    ) {
+      // A set-aside run reads its file again and runs on, once its stopped
+      // steps have ended, with the card and comment cursor its question
+      // moved on.
+      unreadable.delete(request.issue);
+      let reopened: ObjectiveRunner | undefined;
+      try {
+        reopened = find(request.issue);
+      } finally {
+        if (!reopened && !unreadable.has(request.issue))
+          unreadable.set(request.issue, broken);
+      }
+      if (!reopened)
+        return refused(
+          "state_unreadable",
+          `#${request.issue} has unreadable state (${unreadable.get(request.issue)?.error}). Answers: reset, cancel.`,
+        );
+      const stopped = setAsideStops.get(request.issue);
+      setAsideStops.delete(request.issue);
+      if (stopped) reopened.after(stopped);
+      return reopened.transact(() => {
+        if (broken.github)
+          reopened.state.modules.github = unasked(broken.github);
+        reopened.state.appliedRequests = [
+          ...reopened.state.appliedRequests,
+          { id: stored.id, message: "ok" },
+        ].slice(-KEEP_REQUEST_IDS);
+        return { message: "ok" };
+      });
+    }
     if (!runner && broken) {
       if (!isCancel(request))
         return refused(
           "state_unreadable",
-          `#${request.issue} has unreadable state (${broken.error}). Answers: reset, cancel.`,
+          `#${request.issue} has unreadable state (${broken.error}). Answers: ${broken.setAside ? "retry, " : ""}reset, cancel.`,
         );
       // Start over from a fresh cancelled record that replaces the unreadable
       // file; cleanup closes the Objective's PRs and issue, and the sync
@@ -592,7 +697,10 @@ export async function serve(options: ServeOptions): Promise<number> {
       if (broken.github) state.modules.github = broken.github;
       saveState(paths.objectives, state);
       unreadable.delete(request.issue);
-      open(state);
+      const stopped = setAsideStops.get(request.issue);
+      setAsideStops.delete(request.issue);
+      const cancelled = open(state);
+      if (stopped) cancelled.after(stopped);
       return { message: "ok" };
     }
     if (!runner)
@@ -817,7 +925,8 @@ export async function serve(options: ServeOptions): Promise<number> {
     // ended (each by its deadline at the latest), so no effect of theirs
     // (a merge) lands after the rebuild read GitHub. A cancel meanwhile
     // replaces the reset at once.
-    const stopped = known?.stop();
+    const stopped = known?.stop() ?? setAsideStops.get(issue);
+    setAsideStops.delete(issue);
     runners.delete(issue);
     unreadable.delete(issue);
     options.sync?.forget(issue);
@@ -857,6 +966,7 @@ export async function serve(options: ServeOptions): Promise<number> {
   /** The service-level problem last logged (GitHubSync.problem). */
   let reported: string | undefined;
   const tick = (): void => {
+    failing.clear();
     for (const issue of [...unloaded]) load(issue);
     applyRequests();
     // The repository moved: every GitHub effect pauses. No step runs (no
@@ -872,135 +982,56 @@ export async function serve(options: ServeOptions): Promise<number> {
       heartbeat();
       return;
     }
-    // Running steps keep their slot; then started Objectives; then queue order.
-    const ordered = [...runners.values()].sort(
-      (a, b) =>
-        Number(b.busy) - Number(a.busy) ||
-        Number(started(b.state)) - Number(started(a.state)) ||
-        queueOrder(a) - queueOrder(b) ||
-        a.state.issue - b.state.issue,
-    );
+    // Running steps keep their slot; then started Objectives; then queue
+    // order. One whose place can't be read sits this tick out.
+    const ordered = [...runners.values()]
+      .flatMap((runner) => {
+        let key: [number, number, number] | undefined;
+        guarded(runner.state.issue, () => {
+          key = [
+            Number(runner.busy),
+            Number(started(runner.state)),
+            queueOrder(runner),
+          ];
+        });
+        return key ? [{ runner, key }] : [];
+      })
+      .sort(
+        (a, b) =>
+          b.key[0] - a.key[0] ||
+          b.key[1] - a.key[1] ||
+          a.key[2] - b.key[2] ||
+          a.runner.state.issue - b.runner.state.issue,
+      )
+      .map(({ runner }) => runner);
     let slots = maxActive;
     waitingForSlot.clear();
     waitingOnPaths.clear();
-    for (const runner of ordered) {
-      // The deadline is absolute: checked for every Objective, whatever
-      // it waits on, before what it may run is decided.
-      try {
-        runner.expire();
-      } catch (error) {
-        log.write(runner.state.issue, {
-          event: "tick-failed",
-          error: String(error),
-        });
-      }
-      const { state } = runner;
-      // Dequeued while its check or a re-run's cleanup ran: it goes once
-      // that ends and its status comment shows the withdrawal, and nothing
-      // past them starts. A cleanup the service's death interrupted resumes
-      // first; one that holds or errors is never asked about: the run goes
-      // at once.
-      if (state.withdrawing && !TERMINAL.includes(state.status)) {
-        if (!ending(runner)) {
-          try {
-            if (options.sync?.withdrawShown(state) ?? true) withdrawNow(runner);
-          } catch (error) {
-            log.write(state.issue, {
-              event: "withdraw-failed",
-              error: String(error),
-            });
-          }
-          continue;
-        }
-        if (runner.busy) continue;
-      }
-      let run = false;
-      let allow = allowed(runner, queue);
-      // Waiting its turn on another Objective's paths, however busy it is,
-      // it starts no step but an amendment's (planning never waits) and one
-      // answered `replan` or `fresh`, so the answer applies at once (rule
-      // 3): steps running finish, and one the service's death interrupted
-      // resumes. Once the wait ends, the steps it stopped don't count it.
-      const owner = TERMINAL.includes(state.status)
-        ? undefined
-        : pathOwner(runner, ordered);
-      if (owner !== undefined) {
-        waitingOnPaths.set(state.issue, owner);
-        const stops = (key: string) => pathWaitStops(runner.state, key);
-        runner.waitOn(stops);
-        const operator = allow;
-        allow = (key) => operator(key) && !stops(key);
-      } else {
-        try {
-          runner.waited();
-        } catch (error) {
-          log.write(state.issue, {
-            event: "tick-failed",
-            error: String(error),
-          });
-        }
-      }
-      if (TERMINAL.includes(state.status)) run = runner.hasWork;
-      // Paused (the queue or the Objective), drained with nothing left to
-      // start, or waiting on paths with only building left: no slot, so a
-      // hold that owns common paths can't stall the queue (rule 1); a step
-      // the service's death interrupted resumes.
-      else if (
-        !runner.busy &&
-        !workflow.steps(state).some((step) => allow(step.key))
-      )
-        run = Object.keys(state.attempts).length > 0;
-      // The check (and a new run's cleanup, and the wait for predecessors
-      // before it) runs when the Objective is first seen, slot or not
-      // (rule 7), within the host's `github` cap; planning and building
-      // need a slot. So an Objective waiting on its predecessors takes none.
-      else if (!state.done.check) run = true;
-      else if (runner.busy) {
-        // Running steps keep their slot, even while another step's question is open.
-        slots -= 1;
-        run = true;
-      } else if (runner.held)
-        // Questions that stop every step it could start take no slot; a
-        // step the service's death interrupted resumes.
-        run = Object.keys(state.attempts).length > 0;
-      // A wait on a human gate (an approval, a required review) has no
-      // deadline, so it takes no slot: it polls, and its paths stay owned.
-      else if (gated(runner, workflow)) run = true;
-      else if (slots > 0) {
-        slots -= 1;
-        run = true;
-      } else waitingForSlot.add(state.issue);
-      if (!run) continue;
-      try {
-        runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
-      } catch (error) {
-        // A failed save: that Objective's state stays as on disk and is tried again next tick.
-        log.write(state.issue, {
-          event: "tick-failed",
-          error: String(error),
-        });
-      }
-    }
+    for (const runner of ordered)
+      guarded(runner.state.issue, () => {
+        slots = schedule(runner, ordered, slots);
+      });
     const observer = options.observer;
-    for (const runner of observer ? runners.values() : []) {
-      const { state } = runner;
-      const mark = observeMark(runner);
-      if (observed.get(state.issue) === mark) continue;
-      // The mark is kept only once the observation succeeded, and only
-      // while this run is the issue's (a released one goes on late).
-      const end = runner.settled;
-      observing.run(
-        state.issue,
-        observeKey(state),
-        (signal) => observer!.observe(structuredClone(state), end, signal),
-        {
-          done: () => {
-            if (runners.get(state.issue) === runner)
-              observed.set(state.issue, mark);
+    for (const runner of observer ? runners.values() : [])
+      guarded(runner.state.issue, () => {
+        const { state } = runner;
+        const mark = observeMark(runner);
+        if (observed.get(state.issue) === mark) return;
+        // The mark is kept only once the observation succeeded, and only
+        // while this run is the issue's (a released one goes on late).
+        const end = runner.settled;
+        observing.run(
+          state.issue,
+          observeKey(state),
+          (signal) => observer!.observe(structuredClone(state), end, signal),
+          {
+            done: () => {
+              if (runners.get(state.issue) === runner)
+                observed.set(state.issue, mark);
+            },
           },
-        },
-      );
-    }
+        );
+      });
     for (const [key, entry] of observer ? late : [])
       observing.run(
         entry.state.issue,
@@ -1111,6 +1142,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         return "withdrawn";
       },
       result: (id: string) => readResult(paths.requests, id),
+      guard: guarded,
     });
     // A finished Objective leaves memory, and its file objectives/, once
     // its cleanup and its final sync are done, and no observation of it is
@@ -1118,14 +1150,94 @@ export async function serve(options: ServeOptions): Promise<number> {
     // a re-queue reads it again from finished/.
     for (const runner of [...runners.values()]) {
       const issue = runner.state.issue;
-      if (
-        runner.settled &&
-        (options.sync?.idle(issue) ?? true) &&
-        !observing.active(observeKey(runner.state))
-      )
-        retire(issue);
+      guarded(issue, () => {
+        if (
+          runner.settled &&
+          (options.sync?.idle(issue) ?? true) &&
+          !observing.active(observeKey(runner.state))
+        )
+          retire(issue);
+      });
     }
+    countErrors();
     heartbeat();
+  };
+
+  /**
+   * What one Objective may run this tick, and its start; returns the slots
+   * left after it. Its guard (`guarded`) makes a throw here its own.
+   */
+  const schedule = (
+    runner: ObjectiveRunner,
+    ordered: readonly ObjectiveRunner[],
+    free: number,
+  ): number => {
+    let slots = free;
+    // The deadline is absolute: checked for every Objective, whatever
+    // it waits on, before what it may run is decided.
+    runner.expire();
+    const { state } = runner;
+    // Dequeued while its check or a re-run's cleanup ran: it goes once
+    // that ends and its status comment shows the withdrawal, and nothing
+    // past them starts. A cleanup the service's death interrupted resumes
+    // first; one that holds or errors is never asked about: the run goes
+    // at once.
+    if (state.withdrawing && !TERMINAL.includes(state.status)) {
+      if (!ending(runner)) {
+        if (options.sync?.withdrawShown(state) ?? true) withdrawNow(runner);
+        return slots;
+      }
+      if (runner.busy) return slots;
+    }
+    let run = false;
+    let allow = allowed(runner, queue);
+    // Waiting its turn on another Objective's paths, however busy it is,
+    // it starts no step but an amendment's (planning never waits) and one
+    // answered `replan` or `fresh`, so the answer applies at once (rule
+    // 3): steps running finish, and one the service's death interrupted
+    // resumes. Once the wait ends, the steps it stopped don't count it.
+    const owner = TERMINAL.includes(state.status)
+      ? undefined
+      : pathOwner(runner, ordered);
+    if (owner !== undefined) {
+      waitingOnPaths.set(state.issue, owner);
+      const stops = (key: string) => pathWaitStops(runner.state, key);
+      runner.waitOn(stops);
+      const operator = allow;
+      allow = (key) => operator(key) && !stops(key);
+    } else runner.waited();
+    if (TERMINAL.includes(state.status)) run = runner.hasWork;
+    // Paused (the queue or the Objective), drained with nothing left to
+    // start, or waiting on paths with only building left: no slot, so a
+    // hold that owns common paths can't stall the queue (rule 1); a step
+    // the service's death interrupted resumes.
+    else if (
+      !runner.busy &&
+      !workflow.steps(state).some((step) => allow(step.key))
+    )
+      run = Object.keys(state.attempts).length > 0;
+    // The check (and a new run's cleanup, and the wait for predecessors
+    // before it) runs when the Objective is first seen, slot or not
+    // (rule 7), within the host's `github` cap; planning and building
+    // need a slot. So an Objective waiting on its predecessors takes none.
+    else if (!state.done.check) run = true;
+    else if (runner.busy) {
+      // Running steps keep their slot, even while another step's question is open.
+      slots -= 1;
+      run = true;
+    } else if (runner.held)
+      // Questions that stop every step it could start take no slot; a
+      // step the service's death interrupted resumes.
+      run = Object.keys(state.attempts).length > 0;
+    // A wait on a human gate (an approval, a required review) has no
+    // deadline, so it takes no slot: it polls, and its paths stay owned.
+    else if (gated(runner, workflow)) run = true;
+    else if (slots > 0) {
+      slots -= 1;
+      run = true;
+    } else waitingForSlot.add(state.issue);
+    if (run) runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
+    return slots;
   };
 
   let stopping = false;
@@ -1175,6 +1287,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     );
     const drained = Promise.allSettled([
       ...[...runners.values()].map((runner) => runner.stop()),
+      ...setAsideStops.values(),
       observing.drain(),
       options.sync?.drain(),
     ]).then(() => true);
@@ -1231,17 +1344,24 @@ function pathOwner(
   if (!mine || built(runner.state)) return undefined;
   const paths = mine.plan.items.flatMap((item) => item.ownedPaths);
   return all.find((other) => {
-    const theirs = other !== runner && ownedPlan(other.state);
-    if (!theirs) return false;
-    if (
-      theirs.accepted > mine.accepted ||
-      (theirs.accepted === mine.accepted &&
-        other.state.issue > runner.state.issue)
-    )
+    if (other === runner) return false;
+    // Another Objective whose plan can't be read is skipped, never this
+    // one's error: its own guard sets it aside (serve `guarded`).
+    try {
+      const theirs = ownedPlan(other.state);
+      if (!theirs) return false;
+      if (
+        theirs.accepted > mine.accepted ||
+        (theirs.accepted === mine.accepted &&
+          other.state.issue > runner.state.issue)
+      )
+        return false;
+      return theirs.plan.items.some((item) =>
+        item.ownedPaths.some((b) => paths.some((a) => pathsOverlap(a, b))),
+      );
+    } catch {
       return false;
-    return theirs.plan.items.some((item) =>
-      item.ownedPaths.some((b) => paths.some((a) => pathsOverlap(a, b))),
-    );
+    }
   })?.state.issue;
 }
 
@@ -1416,7 +1536,8 @@ interface ServiceRecord {
   suspected?: Death["running"];
   /** Set by a clean stop. */
   stopped?: boolean;
-  unreadable: Record<string, string>;
+  /** Objectives set aside as unreadable (`setAside`), with why: `status` shows them so. */
+  setAside: Record<string, string>;
   /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
   problem?: string;
   /** Why queue reads have failed for a while (GitHubSync.intakeProblem); `status` shows it. */
@@ -1531,7 +1652,7 @@ function startRecord(
       ? { resumeAt: new Date(startedAt.getTime() + delay).toISOString() }
       : {}),
     finished: 0,
-    unreadable: {},
+    setAside: {},
   };
 }
 
@@ -1562,8 +1683,10 @@ function writeServiceRecord(
 ): void {
   record.at = new Date().toISOString();
   record.finished = run.finished;
-  record.unreadable = Object.fromEntries(
-    [...unreadable].map(([issue, entry]) => [issue, entry.error]),
+  record.setAside = Object.fromEntries(
+    [...unreadable]
+      .filter(([, entry]) => entry.setAside)
+      .map(([issue, entry]) => [issue, entry.error]),
   );
   if (stopped) record.stopped = true;
   const path = join(root, "service.json");

@@ -319,7 +319,7 @@ test("the one step running at three deaths, with progress between, holds", async
         { at, lived: null, running: running(61, 62), progressed: false },
         { at, lived: null, running: running(61), progressed: true },
       ],
-      unreadable: {},
+      setAside: {},
     }),
   );
   const service = serve(inst);
@@ -430,7 +430,7 @@ test("every step running at three deaths, with progress between, holds with its 
         { at, lived: null, running, progressed: false },
         { at, lived: null, running, progressed: true },
       ],
-      unreadable: {},
+      setAside: {},
     }),
   );
   const service = serve(inst);
@@ -491,7 +491,7 @@ test("a finished Objective leaves the startup set, and can't be cancelled", asyn
   const record = JSON.parse(
     readFileSync(join(inst.root, "service.json"), "utf8"),
   );
-  assert.deepEqual(record.unreadable, {});
+  assert.deepEqual(record.setAside, {});
   await stopped(service);
 });
 

@@ -1251,14 +1251,7 @@ function control(
 }
 
 function ownedPaths(state: ObjectiveState): string[] {
-  const plan = currentPlan(state);
-  // An envelope owns its selectors from acceptance, before children exist.
-  return plan
-    ? [
-        ...plan.items.flatMap((item) => item.ownedPaths),
-        ...(plan.expansions ?? []).flatMap((envelope) => envelope.selectors),
-      ]
-    : [];
+  return (currentPlan(state)?.items ?? []).flatMap((item) => item.ownedPaths);
 }
 
 /** When the Objective's plan was accepted (planning/steps.ts keeps it). */

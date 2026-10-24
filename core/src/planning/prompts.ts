@@ -125,15 +125,15 @@ function reviewRepositoryGuidance(
   } Work Item citations without an evidenceIndex name a repository file the planner cited at the base; the worker receives its exact base bytes.\n${repository.map}${repository.conventions}`;
 }
 
-/** What each item kind does, as the planner reads it; discovery is in ADAPTIVE_GUIDANCE, the only place it is offered. */
-const KIND_ROLES: Record<Exclude<ItemKind, "discovery">, string> = {
+/** What each item kind does, as the planner reads it. */
+const KIND_ROLES: Record<ItemKind, string> = {
   work: "work implements",
   qa: "qa checks the integrated result read-only",
   aggregate: "aggregate depends on all children and omits acceptance",
 };
 
-/** The item kinds the planner may choose: the kinds this build executes, discovery only with Adaptive workflow. */
-const ITEM_KINDS = `Item kinds: ${EXECUTABLE_KINDS.flatMap((kind) => (kind === "discovery" ? [] : [KIND_ROLES[kind]])).join("; ")}. Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items.${QA_OFFERED ? " Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage." : ""} Read-only nodes omit ownership, assets, candidate counts and execution profiles.`;
+/** The item kinds the planner may choose: the kinds this build executes. */
+const ITEM_KINDS = `Item kinds: ${EXECUTABLE_KINDS.map((kind) => KIND_ROLES[kind]).join("; ")}. Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items.${QA_OFFERED ? " Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage." : ""} Read-only nodes omit ownership, assets, candidate counts and execution profiles.`;
 
 /** A plan for an Objective that changes nothing: read-only QA when offered. */
 const QUALIFY_ONLY = QA_OFFERED
@@ -261,8 +261,6 @@ export interface CompilationInput {
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   /** True when the installation offers execution profiles to choose from. */
   executionProfiles?: boolean;
-  /** The Objective enables Adaptive workflow: discovery, conditions and expansions are offered. */
-  adaptive?: boolean;
   prerequisites?: unknown;
   localExecutables?: unknown;
   /**
@@ -282,10 +280,6 @@ const lookupGuidance = (open: boolean) =>
       ? `Before you plan, you may ask for context the prompt lacks: set contextLookups to the requests, and Factory answers them and asks you again with every answer so far; otherwise set it to null and plan. kind "memory" searches repository memory (this Objective's operator decisions, and earlier work's failures, handoffs and references) for query, scoped to path when it isn't ""; "file" reads one tracked file at the base commit, or the section under heading; "paths" lists the tracked paths under path ("" for all), and query and heading stay "". Lookups read only the admitted selectors at the base. At most requestsPerRound requests a round, roundsLeft rounds and bytesLeft answer bytes; a request past them or outside the selectors is refused with the reason. Ask only for what you need and can't read with your repository tools.`
       : "No lookup round is left: plan with what you have."
   }\n`;
-
-/** What the planner must know to use discovery, conditions and expansions. */
-const ADAPTIVE_GUIDANCE =
-  "- Adaptive workflow: a discovery item is a source-authorized read-only observation with literal selectors, the inventory schema, a role and finite entry, byte and attempt allowances; it has no commands, owned paths or coverage proof, and its observations are never implementation acceptance. Inventory mode lists files with Git identities; semantic mode also classifies them. A work item reads an observation through discoveryInputs, naming the producer it directly depends on, its exact role and the typed fields; empty when none. A declared condition is a literal predicate over one unconditional discovery item's output (inventory-empty, or has-classification); a conditional work item names it and the branch (when), depends directly on the producer, and owns no coverage, so unconditional proof keeps every obligation. An expansion envelope lets Factory instantiate a reviewed template once per batch of discovered files without another model call: its selectors lie within the producer's, the template owns exactly those selectors and has exactly the envelope's dependencies, and every child joins the integration barriers, which are existing unconditional work or QA items that prove the result. Use them only when the affected set is unknown until observed; otherwise plan ordinary items. Leave conditions and expansions empty when unused.\n";
 
 /** The planner prompt. The answer schema comes from the wire. */
 export function renderCompilationCall(input: CompilationInput): Rendered {
@@ -336,7 +330,7 @@ ${QA_EVIDENCE_GUIDANCE ? `- ${QA_EVIDENCE_GUIDANCE}\n` : ""}- ${ITEM_KINDS}
 - Resources are exact identities; give a higher priority to work the source says must run first. Give explicit non-goals.
 - Architecture risks: derive material risks from actual flows, not a universal checklist. Where asynchronous work outlives intent, assign result/error/metadata/cleanup ownership and identify superseding user transitions for shared state. Per-operation freshness alone does not establish shared-state ownership. Prove source-required interacting transitions, including failure or late cleanup; isolated happy paths may miss them. Use allowed real journeys, production tests and source ownership proof without making every interleaving a browser test. Explicit HTTP/browser, failure, ordering and negative controls retain their required proof. Do not invent framework, acceptance or split requirements from this guidance.
 - Media: workers stage candidates/manifests; Factory captures, selects, uploads and hydrates. Preserve asset path/kind/role/media type/visibility and required/LFS roles and counts. Ordinary work uses media null; code hydrates empty roles/zero candidates. Media work declares media with a staged role and positive decimal candidate-count string, decoded strictly to a safe integer. Code, tests and docs are ordinary deliverables, not media roles. Candidate sets are alternatives for the operator's choice: only the selected set reaches the destinations and validation, so criteria offer the alternatives and check the delivered selection, never each candidate (see the checklist's candidate sets).
-${input.adaptive ? ADAPTIVE_GUIDANCE : ""}${input.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
+${input.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
 ${reviewArtifacts?.length ? `- ${REVIEW_ARTIFACT_GUIDANCE} When an obligation needs such runtime bodies as review evidence, plan a proof that runs the exact selector command in the phase whose review judges it, and name the captured bodies in that owner's brief. A selector grants no command authority; its command still needs ordinary source or base authority. These selectors are the installation's configured evidence capture: choose the proof among them and ordinary command receipts yourself, and never ask the operator which evidence mechanism to use. Only a required capture that neither can supply is an operator prerequisite.\n` : ""}
 Examples (illustrations, not command or source authority):
 - An Acceptance bullet that is exactly \`npm test\` already runs on the integrated result. Do not invent a worker just to duplicate it. A requirement for a particular negative control still needs the source-required control and its real evidence.
@@ -500,16 +494,7 @@ function reviewGraphView(draft: Draft, evidence: readonly ReviewEvidence[]) {
       return index < 0 ? citation : { ...citation, evidenceIndex: index };
     }),
   });
-  return {
-    ...draft,
-    items: draft.items.map(itemView),
-    ...(draft.expansions && {
-      expansions: draft.expansions.map((envelope) => ({
-        ...envelope,
-        template: itemView(envelope.template),
-      })),
-    }),
-  };
+  return { ...draft, items: draft.items.map(itemView) };
 }
 
 export interface GraphReviewInput {

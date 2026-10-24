@@ -14,9 +14,7 @@ import {
 } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateSet } from "../media.js";
-import { expansionComments, expansionsOf } from "../planning/expansion.js";
 import { currentPlan } from "../planning/plan.js";
-import { COMMENT_LIMIT } from "../planning/steps.js";
 import { executable, type WorkItem } from "../planning/types.js";
 import type { DeliveryUnit } from "../planning/units.js";
 import type { RepairFinding } from "../repair.js";
@@ -57,42 +55,6 @@ export function delivery(
   };
 }
 
-/**
- * Before an expansion child's first PR, its producer's settled records go
- * on the issue (planning/expansion.ts expansionComments), so `factory
- * reset` can rebuild the children (reset.ts). Upserting an unchanged
- * comment writes nothing.
- */
-export async function postExpansion(
-  state: ObjectiveState,
-  item: WorkItem,
-  deps: BuildDeps,
-  signal: AbortSignal,
-): Promise<void> {
-  const settled = expansionsOf(state, currentPlan(state)!).find(
-    ({ expanded }) => expanded?.children.some((child) => child.id === item.id),
-  );
-  if (!settled) return;
-  const producer = settled.envelope.input.producerItemId;
-  const records = expansionsOf(state, currentPlan(state)!).flatMap(
-    ({ envelope, expanded }) =>
-      expanded && envelope.input.producerItemId === producer ? [expanded] : [],
-  );
-  for (const { marker, body } of expansionComments(
-    state.issue,
-    producer,
-    records,
-    COMMENT_LIMIT - 1000,
-  ))
-    await deps.github.upsertComment(
-      state.issue,
-      marker,
-      body,
-      "expansion:post",
-      signal,
-    );
-}
-
 export async function publishStep(
   item: WorkItem,
   context: StepContext,
@@ -102,7 +64,6 @@ export async function publishStep(
   const { state } = context;
   const changed = await objectiveEdited(context, deps);
   if (changed) return changed;
-  await postExpansion(state, item, deps, context.signal);
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const validated = state.done[stepKey(item.id, "validate")] as ValidateResult;
   const pushed = fact(state, "pushed", item.id) ?? [];
@@ -625,8 +586,8 @@ export function replanOutcome(state: ObjectiveState): Outcome {
  * `Workflow.freshable`): a Work Item of the current plan that runs a worker
  * and hasn't merged, asked before its merge step. A merge step's question
  * may come after GitHub merged the PR, so it keeps retry and replan only.
- * Aggregate, QA and discovery items keep no worker result or worktree to
- * discard (`retry` already checks or observes again), so they don't offer it.
+ * Aggregate and QA items keep no worker result or worktree to discard
+ * (`retry` already checks again), so they don't offer it.
  */
 export function freshable(state: ObjectiveState, key: string): boolean {
   const plan = currentPlan(state);
@@ -635,7 +596,7 @@ export function freshable(state: ObjectiveState, key: string): boolean {
     !!item &&
     key !== stepKey(item.id, "merge") &&
     executable(item.kind) &&
-    !["aggregate", "qa", "discovery"].includes(item.kind ?? "") &&
+    !["aggregate", "qa"].includes(item.kind ?? "") &&
     !mergeOf(state, item.id)
   );
 }

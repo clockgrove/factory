@@ -86,8 +86,6 @@ export interface CorrectionInput {
   sources: readonly PinnedSource[];
   /** The findings of this item's earlier repairs, oldest first. */
   prior: readonly string[];
-  /** The conditional items settled as skipped: they delivered nothing to blame. */
-  skipped?: ReadonlySet<string>;
   /** The operator's answer to an earlier question: the correction itself. */
   operatorAnswer?: string;
   /**
@@ -392,10 +390,9 @@ interface DiagnosisAnswer {
 
 /**
  * The Work Items `item` builds on, directly or not, that deliver work: the
- * ones a diagnosis may blame. A native-stack layer below is one of them; a
- * conditional item settled as skipped (`skipped`) delivered nothing.
+ * ones a diagnosis may blame. A native-stack layer below is one of them.
  */
-function predecessors({ plan, item, skipped }: CorrectionInput): WorkItem[] {
+function predecessors({ plan, item }: CorrectionInput): WorkItem[] {
   const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
   const seen = new Set<string>();
   const visit = (id: string) => {
@@ -407,10 +404,7 @@ function predecessors({ plan, item, skipped }: CorrectionInput): WorkItem[] {
   };
   visit(item.id);
   return plan.items.filter(
-    (entry) =>
-      seen.has(entry.id) &&
-      (entry.kind ?? "work") === "work" &&
-      !skipped?.has(entry.id),
+    (entry) => seen.has(entry.id) && (entry.kind ?? "work") === "work",
   );
 }
 

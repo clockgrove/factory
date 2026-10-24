@@ -29,7 +29,7 @@ export interface ProgressInput {
   view: Omit<ObjectiveView, "plan">;
   /** Each Work Item's latest `worker-activity` event this run. */
   activity: Record<string, LogEvent>;
-  /** Model calls logged this run: planner-seam (planning, review, discovery, Dream) and worker, and the tokens they reported. */
+  /** Model calls logged this run: planner-seam (planning, review, Dream) and worker, and the tokens they reported. */
   calls: { planner: number; worker: number; tokens: number };
   /** Answers taken: planning decisions and step answers, oldest first. */
   decisions: {

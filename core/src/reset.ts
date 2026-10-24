@@ -7,7 +7,6 @@ import {
   TransientError,
 } from "./github.js";
 import type { GitHubModule } from "./github-sync.js";
-import { readExpansionComments } from "./planning/expansion.js";
 import { ACCEPTED_AT, currentPlan, decisionsOf } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
 import { readQueue } from "./queue.js";
@@ -169,8 +168,7 @@ function carried(
 /**
  * The state rebuilt only from what Factory left on GitHub: its plan
  * comment (and its numbered `plan-data` continuations), the PRs whose head
- * is a Work Item branch, the expansion records posted before an expansion
- * child's first PR, and its report comment. It reads and never
+ * is a Work Item branch, and its report comment. It reads and never
  * writes. A refusal comes back as a result with its code.
  *
  * Everything found is bound to this run and plan. Only comments by
@@ -352,33 +350,9 @@ export async function rebuildState(
           (await github.mergeCommitOf(merged.number, signal)));
       return merged?.merged_at && mergeSha ? { merged, mergeSha } : undefined;
     };
-    // A discovery item's settled expansions, from the records posted
-    // before its children's first PR (work/steps.ts postExpansion), when
-    // one of those children merged in this plan and run: they join the
-    // plan again with the same ids. The child's PR binds the record to
-    // this plan (an id hashes the envelope, commit and batch), so an
-    // older comment counts too. Otherwise the discovery observes again.
-    const expansionText = (marker: string) => marked(marker)?.body;
-    const restored = new Map<string, Awaited<ReturnType<typeof mergedPull>>>();
-    for (const producer of new Set(
-      (plan.expansions ?? []).map((entry) => entry.input.producerItemId),
-    )) {
-      const records = readExpansionComments(issue, producer, expansionText);
-      const children = (records ?? []).flatMap((record) =>
-        record.children.map((child) => child.id),
-      );
-      for (const id of children) restored.set(id, await mergedPull(id));
-      if (children.some((id) => restored.get(id)))
-        state.done[`item:${producer}:merge`] = {
-          settled: "discovery",
-          expansions: records,
-        };
-    }
     for (const item of currentPlan(state)!.items) {
       if (state.done[`item:${item.id}:merge`]) continue;
-      const found = restored.has(item.id)
-        ? restored.get(item.id)
-        : await mergedPull(item.id);
+      const found = await mergedPull(item.id);
       if (!found) {
         // Not merged in this plan: start fresh on the current start, so a
         // kept worktree on an older base is moved, not collected against

@@ -16,13 +16,8 @@
  * memory about its paths as one advisory row.
  */
 import type { CandidateRecord, InputRecord } from "../media.js";
-import type { Expanded } from "../planning/expansion.js";
 import { coverageCriterion } from "../planning/graph.js";
-import {
-  type ConditionVerdict,
-  retiredCriteria,
-  retiredLines,
-} from "../planning/plan.js";
+import { retiredCriteria, retiredLines } from "../planning/plan.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
@@ -39,11 +34,6 @@ import {
   runReview,
   workItemDesign,
 } from "./result.js";
-
-/** A conditional Work Item its declared condition skipped. */
-export interface SkippedItem extends ConditionVerdict {
-  itemId: string;
-}
 
 /** Review the integrated Objective. See the module comment for the outcomes. */
 export function reviewObjective(input: {
@@ -88,22 +78,13 @@ export function reviewObjective(input: {
   earlier?: ResultReview;
   /** What each accepted read-only QA item observed. */
   qa?: readonly QaObservation[];
-  /** The conditional Work Items their declared condition skipped, with its evidence. */
-  skipped?: readonly SkippedItem[];
-  /** The plan's settled expansion envelopes, with the children each added. */
-  expansions?: readonly Expanded[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
 }): Promise<ResultReview> {
   return runReview({
     ...input,
     phase: "objective-review",
-    criteria: finalCriteria(
-      input.plan,
-      input.acceptance,
-      new Set((input.skipped ?? []).map((entry) => entry.itemId)),
-      input.expansions ?? [],
-    ),
+    criteria: finalCriteria(input.plan, input.acceptance),
     instructions: FINAL_INSTRUCTIONS,
     design: [
       ...input.plan.items.map((item) => ({
@@ -114,24 +95,6 @@ export function reviewObjective(input: {
       })),
       ...(input.qa ?? []).map(qaObservationRow),
       ...retiredRows(input.plan),
-      ...(input.skipped ?? []).map((entry) => ({
-        origin: "controller" as const,
-        path: `Skipped Work Item: ${entry.itemId}`,
-        content: JSON.stringify({
-          scope: `Work Item ${entry.itemId} runs only when declared condition ${entry.conditionId} is ${entry.when}; Factory evaluated it as ${entry.value} from the discovery result it reads, so the item was skipped: no worker ran and it merged nothing. Its design is not delivered and is not under review; unconditional items own every obligation.`,
-          ...entry,
-        }),
-        complete: true,
-      })),
-      ...(input.expansions ?? []).map((entry) => ({
-        origin: "controller" as const,
-        path: `Expansion: ${entry.envelopeId}`,
-        content: JSON.stringify({
-          scope: `Expansion ${entry.envelopeId} is a reviewed template Factory copied once per batch of the files its discovery producer selected, with no model call; each child Work Item below owns one batch. Its integration barriers waited for every child.`,
-          ...entry,
-        }),
-        complete: true,
-      })),
     ],
     artifacts: input.artifacts ?? [],
   });
@@ -180,27 +143,15 @@ function retiredRows(plan: Plan) {
  * by index, so its refusal stays tied to them. The criteria the operator
  * retired (planning/plan.ts) are left out.
  */
-function finalCriteria(
-  plan: Plan,
-  objective: readonly string[],
-  skipped: ReadonlySet<string>,
-  expansions: readonly Expanded[],
-): string[] {
+function finalCriteria(plan: Plan, objective: readonly string[]): string[] {
   const retired = retiredCriteria(plan);
   const judged = [
     ...new Set([...objective, ...plan.coverage.map(coverageCriterion)]),
   ].filter((criterion) => !retired.has(criterion));
-  // A skipped item delivered nothing, so it integrates with nothing.
-  const coding = plan.items.filter(
-    (item) => (item.kind ?? "work") === "work" && !skipped.has(item.id),
-  );
+  const coding = plan.items.filter((item) => (item.kind ?? "work") === "work");
   const ids = new Set(coding.map((item) => item.id));
   const linked = (a: WorkItem, b: WorkItem) =>
     a.dependencies.includes(b.id) || b.dependencies.includes(a.id);
-  // An expansion's children share one question, not one per edge.
-  const children = new Set(
-    expansions.flatMap((entry) => entry.children.map((child) => child.id)),
-  );
   const bears = (items: string[], paths?: string[]) => {
     const indices = [
       ...new Set(
@@ -218,9 +169,7 @@ function finalCriteria(
   };
   const questions = coding.flatMap((consumer) =>
     consumer.dependencies
-      .filter(
-        (id) => ids.has(id) && !children.has(id) && !children.has(consumer.id),
-      )
+      .filter((id) => ids.has(id))
       .map(
         (producer) =>
           `Integration of Work Item "${consumer.id}" with its dependency "${producer}" on the integrated tree: "${consumer.id}" accepts the real outputs and types "${producer}" produces, exactly as "${producer}" produces them (cite the producing and consuming file:lines), and reuses the helpers and types "${producer}" owns instead of redefining them.${bears([consumer.id, producer])}`,
@@ -247,26 +196,6 @@ function finalCriteria(
       group.paths.push(path);
       groups.set(key, group);
     }
-  for (const entry of expansions) {
-    const made = entry.children.map((child) => child.id);
-    if (!made.length) continue;
-    const near = [
-      ...new Set(
-        coding
-          .filter(
-            (item) =>
-              !children.has(item.id) &&
-              coding.some(
-                (child) => made.includes(child.id) && linked(item, child),
-              ),
-          )
-          .map((item) => item.id),
-      ),
-    ];
-    questions.push(
-      `Integration of Work Items ${made.map((id) => `"${id}"`).join(", ")}, which expansion "${entry.envelopeId}" made from one reviewed template, on the integrated tree: each makes the template's change in its own files the same way${near.length ? `, they accept the real outputs and types of ${near.map((id) => `"${id}"`).join(", ")} and what consumes them accepts theirs (cite the producing and consuming file:lines)` : ""}, and a helper or type more than one of them needs has one definition the others reuse.${bears([...made, ...near])}`,
-    );
-  }
   for (const { items, paths } of groups.values())
     questions.push(
       `Integration of Work Items ${items.map((id) => `"${id}"`).join(", ")}, which together deliver obligations from ${paths.join(", ")}, on the integrated tree: where one consumes another's outputs it accepts their real shape and types (cite the producing and consuming file:lines), and a helper or type more than one of them needs has one definition the others reuse instead of parallel redefinitions.${bears(items, paths)}`,

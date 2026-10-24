@@ -128,7 +128,7 @@ interface Wanted {
   comment: string;
   /** Closed, and how; open when absent. */
   close?: "completed" | "not_planned";
-  /** The card's Factory option for the item's phase; none before it starts, or skipped. */
+  /** The card's Factory option for the item's phase; none before it starts. */
   status?: QueueOption;
 }
 
@@ -160,24 +160,18 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
   for (const item of plan?.items ?? []) {
     const row = rows.get(item.id)!;
     const close =
-      row.phase === "merged"
-        ? "completed"
-        : row.phase === "skipped" || ended
-          ? "not_planned"
-          : undefined;
+      row.phase === "merged" ? "completed" : ended ? "not_planned" : undefined;
     const why =
       row.phase === "merged"
         ? "merged."
-        : row.phase === "skipped"
-          ? "skipped: its condition doesn't hold."
-          : state.status === "cancelled"
-            ? "not planned: the Objective was cancelled."
-            : "not planned: the Objective finished without it.";
+        : state.status === "cancelled"
+          ? "not planned: the Objective was cancelled."
+          : "not planned: the Objective finished without it.";
     // As the Objective's card, by the item's phase.
     const status: QueueOption | undefined =
       row.phase === "merged"
         ? "done"
-        : row.phase === "skipped" || row.phase === "pending"
+        : row.phase === "pending"
           ? undefined
           : ended
             ? "cancelled"

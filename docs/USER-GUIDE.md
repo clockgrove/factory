@@ -178,7 +178,7 @@ When validation runs package scripts, a change to `pnpm-workspace.yaml` is block
 
 Exactly `enabled` or `disabled` as its only line, like the Quality checkpoint. `enabled` needs a `planning.context` section in the installation configuration (`selectors`, optional `memory` and `bounds`); without it the Objective is refused before any model call.
 
-With `enabled`, and with `memory: true`, the planner, workers and reviewers get advisory repository memory. If the installation also sets `planning.adaptiveGraph: true`, the planner may add discovery Work Items, declared work conditions and reviewed expansion envelopes for work whose file list is unknown up front. With `adaptiveGraph` off, the Objective still plans with its context and memory, and the run log says the graph features are off.
+With `enabled`, and with `memory: true`, the planner, workers and reviewers get advisory repository memory.
 
 ### Writing Objectives that deliver
 

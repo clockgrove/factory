@@ -19,7 +19,6 @@ import { refusedOf, refusedResult } from "./refused.js";
 import { itemRetirable, retireOffer } from "./retire.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
-import { skippedItems } from "./step-qa.js";
 import { withKeep } from "./step-work.js";
 import {
   type BuildDeps,
@@ -94,7 +93,6 @@ export async function repairContext(
     plan,
     item,
     finding,
-    skipped: new Set(skippedItems(state, plan).map((entry) => entry.item.id)),
     checkout: deps.config.checkout,
     base,
     commit: refusedOf(state, item.id)?.commit ?? previous?.commit ?? base,

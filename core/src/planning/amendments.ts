@@ -11,7 +11,6 @@ import {
 import { code, prose } from "../markdown.js";
 import { logRefused } from "../providers/usage.js";
 import type { ObjectiveState } from "../state.js";
-import { adaptiveGraph } from "../validate.js";
 import { fact, facts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
@@ -679,29 +678,6 @@ export function amendmentFindings(
       found(
         `The amendment drops the excluded source item at ${exclusion.source.path} lines ${exclusion.source.lines.join("-")}; list it again under sourceObligations as out-of-scope, or cover it`,
       );
-  const startedProducer = (id: string) => progress.started.has(id);
-  for (const condition of current.conditions ?? [])
-    if (
-      startedProducer(condition.input.producerItemId) &&
-      !isDeepStrictEqual(
-        condition,
-        next.conditions?.find((entry) => entry.id === condition.id),
-      )
-    )
-      found(
-        `Work condition ${condition.id} reads a discovery that has started; keep it as it is and add a successor condition instead`,
-      );
-  for (const envelope of current.expansions ?? [])
-    if (
-      startedProducer(envelope.input.producerItemId) &&
-      !isDeepStrictEqual(
-        envelope,
-        next.expansions?.find((entry) => entry.id === envelope.id),
-      )
-    )
-      found(
-        `Expansion ${envelope.id} reads a discovery that has started; keep it as it is and add a separately reviewed successor envelope instead`,
-      );
   if (options.nativeStack) {
     const before = units(current);
     const after = units(next);
@@ -851,17 +827,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if ("problems" in built)
         return done({ rejected: built.problems.join("; ") });
       const { facts } = built;
-      // The saved plan: settled expansions' children derive from it, and
-      // an amendment keeps every envelope whose producer started.
       const plan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, plan, proposal);
       const profiles = offeredProfiles(config);
       const wire = {
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
-        adaptive: adaptiveGraph(
-          inputs.shown.blocks,
-          inputs.adaptiveGraph === true,
-        ),
         ...(profiles ? { profiles } : {}),
       };
       const lastError = state.retries[key]?.lastError;
@@ -920,7 +890,6 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         workers: workers(config),
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
-        adaptive: wire.adaptive,
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
         ...(lookups ? { lookups } : {}),

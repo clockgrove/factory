@@ -1,7 +1,7 @@
 import { itemBranch } from "../delivery.js";
 import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
 import { type CandidateSet, needsSelection, type Selection } from "../media.js";
-import { conditionVerdict, currentPlan } from "../planning/plan.js";
+import { currentPlan } from "../planning/plan.js";
 import { rank, resourceGate, type ScheduleView } from "../planning/schedule.js";
 import type { PlanningDeps } from "../planning/steps.js";
 import { executable, type Plan, type WorkItem } from "../planning/types.js";
@@ -19,13 +19,7 @@ import { finalReviewStep, finalStep, reportStep } from "./finish.js";
 import { mergeOf } from "./merged.js";
 import { refusedOf, refusedResult } from "./refused.js";
 import { ciStep, mergeStep, publishStep } from "./step-deliver.js";
-import {
-  conditionUnknown,
-  discoveryStep,
-  notYet,
-  settleStep,
-  skipStep,
-} from "./step-qa.js";
+import { notYet, settleStep } from "./step-qa.js";
 import { reviewStep } from "./step-review.js";
 import { selectStep } from "./step-select.js";
 import { validateStep } from "./step-validate.js";
@@ -208,20 +202,9 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
         place?.unit.items.some((layer) => !done(layer.id, "ci")))
     )
       return undefined;
-    // A conditional item's condition decides before it starts: off its
-    // branch it settles as skipped; unreadable, it asks.
-    if (phase === phasesOf(item, place)[0]) {
-      const verdict = conditionVerdict(state, item);
-      if (typeof verdict === "string")
-        return conditionUnknown(item, phase, verdict);
-      if (verdict && verdict.value !== verdict.when)
-        return skipStep(item, verdict);
-    }
-    if (phase === "work" && item.kind === "discovery")
-      return discoveryStep(item, deps);
-    // Aggregates, QA and discovery deliver nothing: their merge step settles them.
+    // Aggregates and QA deliver nothing: their merge step settles them.
     if (phase === "merge" && (item.kind ?? "work") !== "work")
-      return settleStep(item, deps);
+      return settleStep(item);
     return itemStep(item, phase, deps, place);
   };
   const steps: Step[] = [];
@@ -312,8 +295,7 @@ export function multiLayer(
  * The phases the item runs, in order: select only when it needs a media
  * selection, and merge only at the top of its native stack (the top merges
  * the whole stack). An aggregate only settles; read-only QA validates and
- * reviews the integrated result, then settles; discovery observes (its
- * work step, work/discovery.ts), then settles.
+ * reviews the integrated result, then settles.
  */
 export function phasesOf(
   item: WorkItem,
@@ -321,7 +303,6 @@ export function phasesOf(
 ): Phase[] {
   if (item.kind === "aggregate") return ["merge"];
   if (item.kind === "qa") return ["validate", "review", "merge"];
-  if (item.kind === "discovery") return ["work", "merge"];
   const top = !place || place.layer === place.unit.items.length - 1;
   return PHASES.filter(
     (p) => (p !== "select" || needsSelection(item)) && (p !== "merge" || top),

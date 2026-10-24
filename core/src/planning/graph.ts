@@ -1,14 +1,10 @@
-import {
-  type AcceptanceCoverage,
-  type CoverageObligation,
-  type DeclaredWorkCondition,
-  DISCOVERY_LIMITS,
-  type DiscoveryLimits,
-  type Draft,
-  type Finding,
-  type GraphExpansionEnvelope,
-  type PinnedSource,
-  type WorkItem,
+import type {
+  AcceptanceCoverage,
+  CoverageObligation,
+  Draft,
+  Finding,
+  PinnedSource,
+  WorkItem,
 } from "./types.js";
 
 /**
@@ -119,14 +115,7 @@ const CONTROLLER_GUARANTEE_IDS = [
 ] as const;
 
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const KINDS = ["work", "qa", "aggregate", "discovery"];
-const DISCOVERY_FIELDS = [
-  "path",
-  "mode",
-  "blobSha",
-  "contentRef",
-  "classification",
-];
+const KINDS = ["work", "qa", "aggregate"];
 
 type Found = (message: string, itemId?: string) => void;
 
@@ -266,47 +255,6 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
   return usable;
 }
 
-/** A discovery specification's literal shape within the controller's `limits`; returns what is wrong, or undefined. */
-export function discoveryProblem(
-  value: unknown,
-  limits: DiscoveryLimits = DISCOVERY_LIMITS,
-): string | undefined {
-  if (!isRecord(value)) return "it has no discovery specification";
-  if (
-    Object.keys(value).sort().join() !==
-    "allowance,completeness,mode,role,schema,selectors"
-  )
-    return "its specification needs exactly mode, selectors, schema, role, completeness and allowance";
-  if (
-    (value.mode !== "inventory" && value.mode !== "semantic") ||
-    value.schema !== "factory.repository-inventory/v1" ||
-    value.completeness !== "complete" ||
-    typeof value.role !== "string" ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.role) ||
-    !strings(value.selectors) ||
-    !value.selectors.length ||
-    value.selectors.some((path) => !validOwnershipPath(path)) ||
-    new Set(value.selectors).size !== value.selectors.length
-  )
-    return 'it needs mode inventory or semantic, schema "factory.repository-inventory/v1", completeness "complete", a role of letters, digits, ".", "_" or "-", and unique literal read selectors';
-  const allowance = value.allowance;
-  if (
-    !isRecord(allowance) ||
-    Object.keys(allowance).sort().join() !==
-      "maxAttempts,maxBytes,maxEntries" ||
-    [allowance.maxEntries, allowance.maxBytes, allowance.maxAttempts].some(
-      (limit) => !Number.isSafeInteger(limit) || (limit as number) <= 0,
-    )
-  )
-    return "its allowance needs positive integer maxEntries, maxBytes and maxAttempts";
-  const over = (["maxEntries", "maxBytes", "maxAttempts"] as const).filter(
-    (limit) => (allowance[limit] as number) > limits[limit],
-  );
-  if (over.length)
-    return `its allowance may be at most ${over.map((limit) => `${limits[limit]} ${limit}`).join(", ")} (planning.discoveryLimits)`;
-  return undefined;
-}
-
 /**
  * Stable topological order of the items: ties follow plan order. Items in a
  * cycle, or with unknown dependencies, are left out and returned in `cycle`.
@@ -343,7 +291,6 @@ function checkGraphShape(
   draft: Draft,
   base: string,
   pinned: ReadonlySet<string>,
-  limits: DiscoveryLimits = DISCOVERY_LIMITS,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
   const { findings, found } = collector();
   if (draft.base !== base)
@@ -386,7 +333,7 @@ function checkGraphShape(
       );
     if (!KINDS.includes(kind))
       found(
-        `Work Item ${item.id} has unknown kind ${JSON.stringify(kind)}; use work, qa, aggregate or discovery`,
+        `Work Item ${item.id} has unknown kind ${JSON.stringify(kind)}; use work, qa or aggregate`,
         item.id,
       );
     if (
@@ -398,28 +345,6 @@ function checkGraphShape(
     )
       found(
         `Work Item ${item.id} is a read-only ${kind} node, so it cannot own paths, assets, output roles or an execution profile; move those to a work item`,
-        item.id,
-      );
-    if (kind === "discovery") {
-      const problem = discoveryProblem(item.discovery, limits);
-      if (problem)
-        found(`Discovery item ${item.id} is invalid: ${problem}`, item.id);
-      if (
-        item.ownedPaths.length ||
-        item.validation.length ||
-        item.sourceAssets?.length ||
-        item.expectedOutputRoles?.length ||
-        item.minimumAssetSets ||
-        item.requiredLfsRoles?.length ||
-        (item.discovery?.mode === "inventory" && item.executionProfile)
-      )
-        found(
-          `Discovery item ${item.id} only observes: give it no owned paths, validation, media or (for inventory) execution profile`,
-          item.id,
-        );
-    } else if (item.discovery !== undefined)
-      found(
-        `Work Item ${item.id} declares a discovery specification; only kind discovery may`,
         item.id,
       );
     for (const check of item.validation) {
@@ -461,49 +386,6 @@ function checkGraphShape(
         );
       parents.add(child);
     }
-    if (item.discoveryInputs !== undefined) {
-      if (item.discoveryInputs.length && (item.kind ?? "work") !== "work")
-        found(
-          `Work Item ${item.id} reads discovery inputs, which only an ordinary work item may`,
-          item.id,
-        );
-      const seen = new Set<string>();
-      for (const selection of item.discoveryInputs) {
-        const producer = isRecord(selection)
-          ? byId.get(selection.producerItemId)
-          : undefined;
-        if (
-          !isRecord(selection) ||
-          Object.keys(selection).some(
-            (key) => !["producerItemId", "role", "fields"].includes(key),
-          ) ||
-          !producer ||
-          producer.kind !== "discovery" ||
-          !item.dependencies.includes(producer.id) ||
-          selection.role !== producer.discovery?.role ||
-          seen.has(producer.id) ||
-          !strings(selection.fields) ||
-          !selection.fields.length ||
-          new Set(selection.fields).size !== selection.fields.length ||
-          selection.fields.some((field) => !DISCOVERY_FIELDS.includes(field))
-        ) {
-          found(
-            `Work Item ${item.id} discovery input must name a discovery item it directly depends on, once, with that item's exact role and a unique nonempty subset of ${DISCOVERY_FIELDS.join(", ")}`,
-            item.id,
-          );
-          continue;
-        }
-        if (
-          selection.fields.includes("classification") &&
-          producer.discovery?.mode !== "semantic"
-        )
-          found(
-            `Work Item ${item.id} selects classification from inventory discovery ${producer.id}; only semantic discovery classifies`,
-            item.id,
-          );
-        seen.add(producer.id);
-      }
-    }
     for (const dependency of item.dependencies)
       if (!byId.has(dependency) || dependency === item.id)
         found(
@@ -511,8 +393,6 @@ function checkGraphShape(
           item.id,
         );
   }
-  findings.push(...conditionFindings(draft, byId));
-  findings.push(...expansionFindings(draft, byId, base, pinned, limits));
   const { order, cycle } = orderItems(items);
   if (cycle.length)
     found(
@@ -521,451 +401,9 @@ function checkGraphShape(
   return { order, findings, usable: true };
 }
 
-/** A declared work condition's literal shape. */
-function conditionShaped(
-  condition: unknown,
-): condition is DeclaredWorkCondition {
-  if (!isRecord(condition)) return false;
-  const { input, predicate } = condition;
-  return (
-    Object.keys(condition).sort().join() ===
-      "id,input,predicate,schemaVersion" &&
-    condition.schemaVersion === 1 &&
-    typeof condition.id === "string" &&
-    ITEM_ID.test(condition.id) &&
-    isRecord(input) &&
-    Object.keys(input).sort().join() === "producerItemId,role,schema" &&
-    typeof input.producerItemId === "string" &&
-    typeof input.role === "string" &&
-    !!input.role.trim() &&
-    input.schema === "factory.repository-inventory/v1" &&
-    isRecord(predicate) &&
-    ((predicate.kind === "inventory-empty" &&
-      Object.keys(predicate).join() === "kind") ||
-      (predicate.kind === "has-classification" &&
-        Object.keys(predicate).sort().join() ===
-          "classification,kind,otherClassifications" &&
-        typeof predicate.classification === "string" &&
-        !!predicate.classification.trim() &&
-        strings(predicate.otherClassifications) &&
-        predicate.otherClassifications.every(
-          (entry) => entry.trim() && entry !== predicate.classification,
-        ) &&
-        new Set(predicate.otherClassifications).size ===
-          predicate.otherClassifications.length))
-  );
-}
-
-/** Declared work conditions select literal branches over discovery output. */
-function conditionFindings(
-  draft: Draft,
-  byId: ReadonlyMap<string, WorkItem>,
-): Finding[] {
-  const { findings, found } = collector();
-  if (draft.conditions === undefined) {
-    for (const item of byId.values())
-      if (item.condition !== undefined)
-        found(
-          `Work Item ${item.id} selects condition ${item.condition.conditionId}, which the plan does not declare`,
-          item.id,
-        );
-    return findings;
-  }
-  if (!Array.isArray(draft.conditions) || !draft.conditions.length) {
-    found("Declared work conditions must be a nonempty list, or left out");
-    return findings;
-  }
-  const declared = new Map<string, NonNullable<Draft["conditions"]>[number]>();
-  for (const condition of draft.conditions) {
-    if (!conditionShaped(condition)) {
-      found(
-        `Work condition ${JSON.stringify((condition as { id?: unknown } | null)?.id)} needs schemaVersion 1, a stable id, an input {producerItemId, role, schema "factory.repository-inventory/v1"} and a predicate inventory-empty or has-classification with distinct other classifications`,
-      );
-      continue;
-    }
-    const { input, predicate } = condition;
-    if (declared.has(condition.id))
-      found(`Work condition ${condition.id} is declared twice; keep one`);
-    declared.set(condition.id, condition);
-    const producer = byId.get(input.producerItemId);
-    if (
-      producer?.kind !== "discovery" ||
-      !producer.discovery ||
-      producer.condition ||
-      producer.discovery.role !== input.role ||
-      producer.discovery.schema !== input.schema ||
-      (predicate.kind === "has-classification" &&
-        producer.discovery.mode !== "semantic")
-    )
-      found(
-        `Work condition ${condition.id} input must be an unconditional discovery item with the same role and schema (semantic for has-classification)`,
-      );
-  }
-  const referenced = new Set<string>();
-  for (const item of byId.values()) {
-    if (item.condition === undefined) continue;
-    const condition = declared.get(item.condition.conditionId);
-    if (
-      typeof item.condition.when !== "boolean" ||
-      !condition ||
-      !item.dependencies.includes(condition.input.producerItemId) ||
-      (item.kind ?? "work") !== "work"
-    ) {
-      found(
-        `Work Item ${item.id} is conditional, so it must be a work item that selects a declared condition with a boolean when and depends directly on that condition's discovery item; proof, aggregate and discovery nodes stay unconditional`,
-        item.id,
-      );
-      continue;
-    }
-    referenced.add(condition.id);
-    const coverage = draft.coverage ?? [];
-    if (coverage.some((entry) => entry.itemId === item.id))
-      found(
-        `Conditional Work Item ${item.id} owns Objective coverage; unconditional proof must keep every obligation, so move its coverage to an unconditional owner`,
-        item.id,
-      );
-    if (
-      coverage.some(
-        (entry) =>
-          entry.proof?.kind === "published-ci" &&
-          entry.proof.targetItem === item.id,
-      )
-    )
-      found(
-        `Published CI cannot target conditional Work Item ${item.id}: skipped work has no PR or delivery head. Keep unconditional integrated proof instead`,
-        item.id,
-      );
-    if (coverage.some((entry) => entry.environment?.preparedBy === item.id))
-      found(
-        `Environment preparation cannot depend on conditional Work Item ${item.id}: skipped work prepares nothing. Use an unconditional source-authorized preparer`,
-        item.id,
-      );
-    if (
-      [...byId.values()].some(
-        (parent) =>
-          parent.kind === "aggregate" && parent.children?.includes(item.id),
-      )
-    )
-      found(
-        `Conditional Work Item ${item.id} cannot be an aggregate child: skipped work has no completed acceptance. Join alternative branches through an unconditional QA dependency`,
-        item.id,
-      );
-  }
-  for (const id of declared.keys())
-    if (!referenced.has(id))
-      found(
-        `Work condition ${id} has no conditional item that selects it; remove it or add the branch`,
-      );
-  for (const envelope of draft.expansions ?? [])
-    if (
-      envelope.template?.condition !== undefined ||
-      (envelope.integrationBarrierItemIds ?? []).some(
-        (id) => byId.get(id)?.condition,
-      )
-    )
-      found(
-        `Expansion ${envelope.id} template and integration barriers must be unconditional`,
-      );
-  return findings;
-}
-
-const EXPANSION_FIELDS = [
-  "schemaVersion",
-  "id",
-  "input",
-  "selectors",
-  "workShape",
-  "selection",
-  "batching",
-  "limits",
-  "resources",
-  "eligibleProfileIds",
-  "dependencies",
-  "integrationBarrierItemIds",
-  "empty",
-];
-
-const distinctStrings = (value: unknown, nonempty: boolean): boolean =>
-  strings(value) &&
-  (!nonempty || value.length > 0) &&
-  value.every((entry) => entry.trim().length > 0) &&
-  new Set(value).size === value.length;
-
-/**
- * An expansion envelope's literal shape, without its template; returns
- * what is wrong, or undefined.
- */
-function expansionShapeProblem(value: unknown): string | undefined {
-  if (!isRecord(value)) return "it must be an object";
-  if (
-    Object.keys(value).sort().join() !==
-    [...EXPANSION_FIELDS, "template"].sort().join()
-  )
-    return `it needs exactly ${[...EXPANSION_FIELDS, "template"].join(", ")}`;
-  if (
-    value.schemaVersion !== 1 ||
-    typeof value.id !== "string" ||
-    !ITEM_ID.test(value.id) ||
-    !["migration", "cross-cutting-fix"].includes(String(value.workShape)) ||
-    value.empty !== "settle-without-children"
-  )
-    return 'it needs schemaVersion 1, a stable id, workShape migration or cross-cutting-fix, and empty "settle-without-children"';
-  const input = value.input;
-  if (
-    !isRecord(input) ||
-    Object.keys(input).sort().join() !== "producerItemId,role,schema" ||
-    typeof input.producerItemId !== "string" ||
-    !input.producerItemId ||
-    typeof input.role !== "string" ||
-    !input.role.trim() ||
-    input.schema !== "factory.repository-inventory/v1"
-  )
-    return 'its input needs producerItemId, role and schema "factory.repository-inventory/v1"';
-  for (const field of [
-    "selectors",
-    "resources",
-    "eligibleProfileIds",
-    "dependencies",
-    "integrationBarrierItemIds",
-  ])
-    if (
-      !distinctStrings(
-        value[field],
-        field === "selectors" || field === "integrationBarrierItemIds",
-      )
-    )
-      return `its ${field} must be distinct nonempty strings${field === "selectors" || field === "integrationBarrierItemIds" ? ", at least one" : ""}`;
-  if (
-    (value.selectors as string[]).some(
-      (selector) =>
-        !validOwnershipPath(selector) ||
-        [...selector].some((c) => c.charCodeAt(0) < 32 || c === "\x7f"),
-    )
-  )
-    return "its selectors must be literal repository paths or directory prefixes ending in /";
-  const selection = value.selection;
-  if (
-    !isRecord(selection) ||
-    !(
-      (selection.kind === "all-regular-files" &&
-        Object.keys(selection).join() === "kind") ||
-      (selection.kind === "classified" &&
-        Object.keys(selection).sort().join() === "excluded,included,kind" &&
-        distinctStrings(selection.included, true) &&
-        distinctStrings(selection.excluded, false) &&
-        !(selection.included as string[]).some((label) =>
-          (selection.excluded as string[]).includes(label),
-        ))
-    )
-  )
-    return "its selection must be all-regular-files, or classified with nonempty included and disjoint excluded classifications";
-  const positive = (entry: unknown) =>
-    Number.isSafeInteger(entry) && (entry as number) >= 1;
-  const { batching, limits } = value;
-  if (
-    !isRecord(batching) ||
-    Object.keys(batching).join() !== "maxFilesPerChild" ||
-    !positive(batching.maxFilesPerChild) ||
-    !isRecord(limits) ||
-    Object.keys(limits).sort().join() !== "maxChildren,maxIterations" ||
-    !positive(limits.maxChildren) ||
-    limits.maxIterations !== 1
-  )
-    return "it needs a positive batching.maxFilesPerChild, a positive limits.maxChildren and limits.maxIterations 1 (changed inputs need a reviewed successor)";
-  return undefined;
-}
-
-/**
- * Reviewed expansion envelopes: each instantiates its template once over a
- * discovery item's inventory. The template is checked as if it were joined
- * to the graph, so a materialized child can never break a graph rule.
- */
-function expansionFindings(
-  draft: Draft,
-  byId: ReadonlyMap<string, WorkItem>,
-  base: string,
-  pinned: ReadonlySet<string>,
-  limits: DiscoveryLimits,
-): Finding[] {
-  const { findings, found } = collector();
-  if (draft.expansions === undefined) return findings;
-  if (!Array.isArray(draft.expansions) || !draft.expansions.length) {
-    found("Expansions must be a nonempty list, or left out");
-    return findings;
-  }
-  const ids = new Set<string>(byId.keys());
-  const valid: GraphExpansionEnvelope[] = [];
-  for (const envelope of draft.expansions) {
-    const name = isRecord(envelope) ? String(envelope.id) : "?";
-    const problem = expansionShapeProblem(envelope);
-    if (problem) {
-      found(`Expansion ${name} is invalid: ${problem}`);
-      continue;
-    }
-    const template = envelope.template;
-    const shaped: Finding[] = [];
-    if (
-      !itemFields(template, 0, (message) =>
-        shaped.push({ source: "check", message }),
-      )
-    ) {
-      found(
-        `Expansion ${name} template is not a Work Item: ${shaped.map((f) => f.message).join("; ")}`,
-      );
-      continue;
-    }
-    if (
-      (template.kind ?? "work") !== "work" ||
-      template.discovery ||
-      template.children?.length ||
-      template.sourceAssets?.length ||
-      template.expectedOutputRoles?.length ||
-      template.minimumAssetSets ||
-      template.requiredLfsRoles?.length ||
-      template.discoveryInputs?.length ||
-      JSON.stringify(template.ownedPaths) !==
-        JSON.stringify(envelope.selectors) ||
-      JSON.stringify(template.dependencies) !==
-        JSON.stringify(envelope.dependencies) ||
-      (template.resources ?? []).some(
-        (resource) => !envelope.resources.includes(resource),
-      )
-    )
-      found(
-        `Expansion ${name} template must be an ordinary work item without media, children or discovery inputs, owning exactly the envelope's selectors, with exactly its dependencies and only its resources`,
-      );
-    for (const id of [envelope.id, template.id]) {
-      if (ids.has(id))
-        found(
-          `Expansion ${name} reuses the id ${id}; envelope and template ids must differ from every Work Item, envelope and template`,
-        );
-      ids.add(id);
-    }
-    const producer = byId.get(envelope.input.producerItemId);
-    if (
-      producer?.kind !== "discovery" ||
-      !producer.discovery ||
-      producer.discovery.role !== envelope.input.role ||
-      producer.discovery.schema !== envelope.input.schema ||
-      envelope.selectors.some(
-        (selector) => !ownsPath(selector, producer.discovery!.selectors),
-      ) ||
-      (envelope.selection.kind === "classified" &&
-        producer.discovery.mode !== "semantic")
-    ) {
-      found(
-        `Expansion ${name} input must name a discovery item with the same role and schema whose selectors cover the envelope's selectors (semantic discovery for a classified selection)`,
-      );
-      continue;
-    }
-    for (const dependency of envelope.dependencies)
-      if (
-        !byId.has(dependency) ||
-        envelope.integrationBarrierItemIds.includes(dependency)
-      )
-        found(
-          `Expansion ${name} dependency ${dependency} must be an item of this plan and not one of its integration barriers`,
-        );
-    for (const barrierId of envelope.integrationBarrierItemIds) {
-      const barrier = byId.get(barrierId);
-      if (
-        !barrier ||
-        barrier.kind === "discovery" ||
-        barrier.id === producer.id
-      )
-        found(
-          `Expansion ${name} integration barrier ${barrierId} must be an existing work, QA or aggregate item that proves or integrates the children`,
-        );
-    }
-    const profile = template.executionProfile?.id;
-    if (profile !== undefined && !envelope.eligibleProfileIds.includes(profile))
-      found(
-        `Expansion ${name} template chooses execution profile ${profile}, which is not in its eligibleProfileIds`,
-      );
-    valid.push(envelope);
-  }
-  for (const [at, envelope] of valid.entries()) {
-    for (const other of valid.slice(at + 1))
-      if (
-        envelope.selectors.some((left) =>
-          other.selectors.some((right) => pathsOverlap(left, right)),
-        )
-      )
-        found(
-          `Expansions ${envelope.id} and ${other.id} have overlapping selectors; give each envelope disjoint ownership`,
-        );
-    // The future join, on a copy: the template as a child of the producer
-    // and its own dependencies, and every barrier waiting for it.
-    const joined = joinTemplates(draft.items, [envelope]);
-    const { expansions: _expansions, ...rest } = draft;
-    for (const finding of checkGraphShape(
-      { ...rest, items: joined },
-      base,
-      pinned,
-      limits,
-    ).findings)
-      found(
-        `Expansion ${envelope.id}, with its template joined: ${finding.message}`,
-      );
-  }
-  // Each joins without a cycle alone; joined together, barriers of one
-  // envelope may still feed another's producer or dependencies.
-  if (valid.length > 1) {
-    const { cycle } = orderItems(joinTemplates(draft.items, valid));
-    if (cycle.length)
-      found(
-        `With every expansion's template joined, the dependencies of ${cycle.join(", ")} form a cycle; change an envelope's dependencies or integration barriers so the joined graph is acyclic`,
-      );
-  }
-  return findings;
-}
-
-/**
- * `items` with each envelope's template joined as its children will be:
- * depending on the envelope's dependencies and its producer, with every
- * integration barrier depending on it (an aggregate barrier counts it as
- * a child too).
- */
-export function joinTemplates(
-  items: readonly WorkItem[],
-  envelopes: readonly GraphExpansionEnvelope[],
-): WorkItem[] {
-  const joined = items.map((item) => {
-    const templates = envelopes.filter((envelope) =>
-      envelope.integrationBarrierItemIds.includes(item.id),
-    );
-    if (!templates.length) return item;
-    const ids = templates.map((envelope) => envelope.template.id);
-    return {
-      ...item,
-      dependencies: [
-        ...new Set([
-          ...item.dependencies,
-          ...templates.map((envelope) => envelope.input.producerItemId),
-          ...ids,
-        ]),
-      ],
-      ...(item.kind === "aggregate"
-        ? { children: [...new Set([...(item.children ?? []), ...ids])] }
-        : {}),
-    };
-  });
-  for (const envelope of envelopes)
-    joined.push({
-      ...envelope.template,
-      dependencies: [
-        ...new Set([...envelope.dependencies, envelope.input.producerItemId]),
-      ],
-    });
-  return joined;
-}
-
 /** The plan is baseline QA: it qualifies existing bytes and delivers no change. */
 export function baselineQa(items: readonly WorkItem[]): boolean {
-  return (
-    items.length > 0 &&
-    items.every((item) => item.kind === "qa" || item.kind === "discovery")
-  );
+  return items.length > 0 && items.every((item) => item.kind === "qa");
 }
 
 const PROOF_FIELDS: Record<string, string[]> = {
@@ -1048,11 +486,6 @@ function checkCoverageShape(
       );
       continue;
     }
-    if (item.kind === "discovery")
-      found(
-        `Coverage of "${name}" is owned by discovery item ${item.id}; discovery observes and cannot own proof, so name a work or QA item`,
-        item.id,
-      );
     const proof = entry.proof;
     if (
       !isRecord(proof) ||
@@ -1416,17 +849,11 @@ export function validateGraph(
     coverageObligations: readonly CoverageObligation[];
     /** The checks a push to the default branch reports: integrated-ci's only names. */
     integratedCheckNames: readonly string[];
-    discoveryLimits?: DiscoveryLimits;
   },
   previous?: Draft,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
   const pinned = new Set(["OBJECTIVE", ...facts.sources.map((s) => s.path)]);
-  const shape = checkGraphShape(
-    draft,
-    facts.base,
-    pinned,
-    facts.discoveryLimits,
-  );
+  const shape = checkGraphShape(draft, facts.base, pinned);
   // Coverage reads items; a draft whose items are unusable stops at shape.
   if (!shape.usable) return shape;
   return {

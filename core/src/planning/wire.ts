@@ -14,7 +14,6 @@ import {
   type Draft,
   executable,
   type Finding,
-  type GraphExpansionEnvelope,
   type ItemKind,
   type PlanningFacts,
   type RequiredPreIntegrationCheck,
@@ -46,11 +45,6 @@ export interface WireOptions {
   profiles?: { id: string; description?: string; selectionHints?: string[] }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
-  /**
-   * The Objective enables its Adaptive workflow section: the planner may
-   * add discovery items, declared work conditions and reviewed expansions.
-   */
-  adaptive?: boolean;
 }
 
 /** A choice the planner can revise. Caught inside this module and returned as a Finding. */
@@ -237,17 +231,7 @@ const READONLY_FIELDS = [
   "media",
   "newPackages",
   "executionProfile",
-  "condition",
-  "discoveryInputs",
 ];
-const DISCOVERY_INPUT_FIELDS = [
-  "path",
-  "mode",
-  "blobSha",
-  "contentRef",
-  "classification",
-];
-const INVENTORY = "factory.repository-inventory/v1";
 const MEDIA_FIELDS = [
   "expectedOutputRoles",
   "minimumAssetSets",
@@ -403,35 +387,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     });
     itemSchema.required!.push("executionProfile");
   }
-  const adaptive = Boolean(options.adaptive);
-  if (adaptive) {
-    itemSchema.properties!.condition = {
-      description:
-        "null for unconditional work. A work item that runs only on one branch of a declared condition names it and the branch.",
-      anyOf: [
-        { type: "null" },
-        strict({
-          conditionId: { ...text, minLength: 1 },
-          when: { type: "boolean" },
-        }),
-      ],
-    };
-    itemSchema.properties!.discoveryInputs = {
-      type: "array",
-      description:
-        "Observations this work item reads from discovery items it depends on; empty when none.",
-      items: strict({
-        producerItemId: { ...text, minLength: 1 },
-        role: { ...text, minLength: 1 },
-        fields: {
-          type: "array",
-          minItems: 1,
-          items: { type: "string", enum: DISCOVERY_INPUT_FIELDS },
-        },
-      }),
-    };
-    itemSchema.required!.push("condition", "discoveryInputs");
-  }
   // null selects the default environment (see DEFAULT_ENVIRONMENT), so the
   // common case costs the planner no output.
   const environment = {
@@ -519,10 +474,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
       "final-review",
       "final-controller",
     ],
-    // Discovery observes: it owns no proof.
-    ...(adaptive ? { discovery: [] } : {}),
   };
-  // Discovery is in allModes only behind the adaptive gate (adaptiveGraph).
   const modes = Object.fromEntries(
     Object.entries(allModes).filter(([kind]) => executable(kind as ItemKind)),
   );
@@ -608,149 +560,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
           (field) => field !== "acceptance",
         );
       }
-      if (kind === "discovery") {
-        item.properties!.validation = {
-          type: "array",
-          maxItems: 0,
-          items: strict({ kind: text }),
-        };
-        item.properties!.discovery = strict({
-          mode: { type: "string", enum: ["inventory", "semantic"] },
-          selectors: {
-            type: "array",
-            minItems: 1,
-            items: {
-              ...text,
-              description:
-                "Literal repository file or directory prefix ending in / to observe.",
-            },
-          },
-          schema: { type: "string", enum: [INVENTORY] },
-          role: {
-            ...text,
-            minLength: 1,
-            description:
-              "The output's role: letters, digits, '.', '_' or '-'. Consumers and conditions name it exactly.",
-          },
-          completeness: { type: "string", enum: ["complete"] },
-          allowance: strict({
-            // The controller's ceiling (planning.discoveryLimits); graph.ts checks it too.
-            maxEntries: {
-              type: "integer",
-              minimum: 1,
-              maximum: facts.discoveryLimits.maxEntries,
-            },
-            maxBytes: {
-              type: "integer",
-              minimum: 1,
-              maximum: facts.discoveryLimits.maxBytes,
-            },
-            maxAttempts: {
-              type: "integer",
-              minimum: 1,
-              maximum: facts.discoveryLimits.maxAttempts,
-            },
-          }),
-        });
-        item.required!.push("discovery");
-      }
       return [kind, item];
     }),
   );
-  const adaptiveFields: Record<string, Schema> = {};
-  if (adaptive) {
-    // A template is reviewed with the plan but never runs itself: each
-    // child the envelope materializes is a copy owning one batch.
-    const template = structuredClone(kindSchemas.work!);
-    template.properties!.children = { type: "array", maxItems: 0, items: text };
-    template.properties!.newPackages = {
-      type: "array",
-      maxItems: 0,
-      items: text,
-    };
-    template.properties!.sourceAssets = {
-      type: "array",
-      maxItems: 0,
-      items: strict({ kind: text }),
-    };
-    template.properties!.discoveryInputs = {
-      type: "array",
-      maxItems: 0,
-      items: strict({ producerItemId: text }),
-    };
-    template.properties!.media = { type: "null" };
-    template.properties!.condition = { type: "null" };
-    const input = strict({
-      producerItemId: { ...text, minLength: 1 },
-      role: { ...text, minLength: 1 },
-      schema: { type: "string", enum: [INVENTORY] },
-    });
-    adaptiveFields.conditions = {
-      type: "array",
-      description:
-        "Declared work conditions: literal predicates over one discovery item's output that select conditional work. Empty when none.",
-      items: strict({
-        schemaVersion: { type: "integer", enum: [1] },
-        id: { ...text, minLength: 1 },
-        input,
-        predicate: {
-          anyOf: [
-            strict({ kind: { type: "string", enum: ["inventory-empty"] } }),
-            strict({
-              kind: { type: "string", enum: ["has-classification"] },
-              classification: { ...text, minLength: 1 },
-              otherClassifications: {
-                type: "array",
-                items: { ...text, minLength: 1 },
-              },
-            }),
-          ],
-        },
-      }),
-    };
-    adaptiveFields.expansions = {
-      type: "array",
-      description:
-        "Reviewed expansion envelopes: after a discovery item settles, Factory instantiates the template once per batch of discovered files, without a model call. Empty when none.",
-      items: strict({
-        schemaVersion: { type: "integer", enum: [1] },
-        id: { ...text, minLength: 1 },
-        input,
-        selectors: { type: "array", minItems: 1, items: text },
-        workShape: {
-          type: "string",
-          enum: ["migration", "cross-cutting-fix"],
-        },
-        selection: {
-          anyOf: [
-            strict({ kind: { type: "string", enum: ["all-regular-files"] } }),
-            strict({
-              kind: { type: "string", enum: ["classified"] },
-              included: { type: "array", minItems: 1, items: text },
-              excluded: { type: "array", items: text },
-            }),
-          ],
-        },
-        batching: strict({ maxFilesPerChild: { type: "integer", minimum: 1 } }),
-        limits: strict({
-          maxChildren: { type: "integer", minimum: 1 },
-          maxIterations: { type: "integer", enum: [1] },
-        }),
-        resources: { type: "array", items: text },
-        eligibleProfileIds: {
-          type: "array",
-          items: options.profiles
-            ? { type: "string", enum: options.profiles.map(({ id }) => id) }
-            : text,
-          ...(options.profiles ? {} : { maxItems: 0 }),
-        },
-        dependencies: { type: "array", items: text },
-        integrationBarrierItemIds: { type: "array", minItems: 1, items: text },
-        empty: { type: "string", enum: ["settle-without-children"] },
-        template,
-      }),
-    };
-  }
   const schema = strict({
     requiredPreIntegrationChecks: {
       type: "array",
@@ -763,7 +575,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
       items: { anyOf: Object.values(kindSchemas) },
     },
     coverage: coverageSchema,
-    ...adaptiveFields,
     sourceObligations: sourceObligationsSchema,
     decisionRequired: {
       description:
@@ -785,11 +596,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     (entry.anyOf as Schema[]).some((branch) => branch.type === "null")
       ? entry
       : { anyOf: [{ type: "null" }, entry] };
-  const replaceable = [
-    "sourceObligations",
-    "requiredPreIntegrationChecks",
-    ...Object.keys(adaptiveFields),
-  ];
+  const replaceable = ["sourceObligations", "requiredPreIntegrationChecks"];
   const changeSchema = strict({
     items: {
       type: "array",
@@ -855,7 +662,6 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     profiles: options.profiles,
     proofForms,
     modes,
-    adaptive,
     schema,
     changeSchema,
     replaceable,
@@ -1091,7 +897,6 @@ export function decodePlan(
         "sourceObligations",
         "requiredPreIntegrationChecks",
         "decisionRequired",
-        ...(wire.adaptive ? ["conditions", "expansions"] : []),
       ],
       "response",
     );
@@ -1131,11 +936,6 @@ export function decodePlan(
       throw new Shape("Planner source obligations must be an array");
     if (!Array.isArray(answer.requiredPreIntegrationChecks))
       throw new Shape("Planner pre-integration checks must be an array");
-    if (
-      wire.adaptive &&
-      (!Array.isArray(answer.conditions) || !Array.isArray(answer.expansions))
-    )
-      throw new Shape("Planner conditions and expansions must be arrays");
   } catch (error) {
     return {
       findings: [finding(error)],
@@ -1295,20 +1095,6 @@ export function decodePlan(
       });
     });
   if (exclusions.length) draft.sourceExclusions = exclusions;
-  if (wire.adaptive) {
-    // Their values are judged by the graph checks, like every draft's.
-    const conditions = structuredClone(answer.conditions as unknown[]);
-    if (conditions.length)
-      draft.conditions = conditions as NonNullable<Draft["conditions"]>;
-    const expansions: GraphExpansionEnvelope[] = [];
-    for (const raw of answer.expansions as unknown[]) {
-      const envelope = attempt(undefined, () =>
-        decodeExpansion(wire, raw, lint),
-      );
-      if (envelope) expansions.push(envelope);
-    }
-    if (expansions.length) draft.expansions = expansions;
-  }
   for (const item of draft.items)
     if (
       item.kind === "qa" &&
@@ -1404,45 +1190,7 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
     ...(item.priority ? { priority: item.priority as number } : {}),
     ...(scheduling ? { scheduling } : {}),
   };
-  if (kind === "discovery") {
-    if (item.validation.length)
-      throw new Refusal(
-        "A discovery item only observes: give it no validation",
-        id,
-      );
-    const spec = object(item.discovery, "discovery");
-    keys(
-      spec,
-      ["mode", "selectors", "schema", "role", "completeness", "allowance"],
-      "discovery",
-    );
-    keys(
-      object(spec.allowance, "discovery allowance"),
-      ["maxEntries", "maxBytes", "maxAttempts"],
-      "discovery allowance",
-    );
-    decoded.discovery = structuredClone(
-      spec,
-    ) as unknown as WorkItem["discovery"];
-  }
   if (kind !== "work") return decoded;
-  if (wire.adaptive) {
-    if (item.condition !== null) {
-      const condition = object(item.condition, "condition");
-      keys(condition, ["conditionId", "when"], "condition");
-      decoded.condition = structuredClone(condition) as WorkItem["condition"] &
-        object;
-    }
-    if (!Array.isArray(item.discoveryInputs))
-      throw new Shape("Planner discoveryInputs must be an array");
-    const inputs = item.discoveryInputs.map((value) => {
-      const selection = object(value, "discovery input");
-      keys(selection, ["producerItemId", "role", "fields"], "discovery input");
-      return structuredClone(selection);
-    });
-    if (inputs.length)
-      decoded.discoveryInputs = inputs as WorkItem["discoveryInputs"];
-  }
   if (item.executionProfile !== undefined) {
     const profile = object(item.executionProfile, "executionProfile");
     keys(profile, ["id", "reason"], "executionProfile");
@@ -1536,36 +1284,6 @@ function schedulingHint(value: unknown): WorkItem["scheduling"] | undefined {
       typeof hint.reason === "string"
         ? hint.reason.trim()
         : (hint.reason as string),
-  };
-}
-
-/**
- * An expansion envelope with its template decoded as an ordinary work item.
- * The graph checks judge the envelope's values (graph.ts expansionFindings).
- */
-function decodeExpansion(
-  wire: Contract,
-  raw: unknown,
-  lint: Finding[],
-): GraphExpansionEnvelope {
-  const envelope = object(raw, "expansion");
-  keys(
-    envelope,
-    Object.keys(
-      (wire.schema.properties!.expansions!.items as Schema).properties!,
-    ),
-    "expansion",
-  );
-  const template = decodeItem(wire, envelope.template, lint);
-  const offered = new Set((wire.profiles ?? []).map(({ id }) => id));
-  for (const id of strings(envelope.eligibleProfileIds, "eligibleProfileIds"))
-    if (!offered.has(id))
-      throw new Refusal(
-        `Expansion ${String(envelope.id)} names execution profile ${id}, which is not offered: choose from executionProfiles`,
-      );
-  return {
-    ...(structuredClone(envelope) as Omit<GraphExpansionEnvelope, "template">),
-    template,
   };
 }
 

@@ -23,45 +23,19 @@ export interface SourceAssetBinding {
   visibility: "private" | "repository";
 }
 
-/** Read-only observation a discovery item makes; never coding or publication. */
-export interface DiscoverySpecification {
-  mode: "inventory" | "semantic";
-  selectors: string[];
-  schema: "factory.repository-inventory/v1";
-  role: string;
-  completeness: "complete";
-  allowance: { maxEntries: number; maxBytes: number; maxAttempts: number };
-}
-
-/** The controller's ceiling on a discovery allowance (config.ts planning.discoveryLimits). */
-export interface DiscoveryLimits {
-  maxEntries: number;
-  maxBytes: number;
-  maxAttempts: number;
-}
-
-/** The ceiling when the configuration sets none. */
-export const DISCOVERY_LIMITS: DiscoveryLimits = {
-  maxEntries: 5000,
-  maxBytes: 64 * 1024 * 1024,
-  maxAttempts: 3,
-};
-
 /** Every kind a saved plan may hold; graph.ts knows each shape. */
-export type ItemKind = "work" | "qa" | "aggregate" | "discovery";
+export type ItemKind = "work" | "qa" | "aggregate";
 
 /**
  * The kinds this build executes (work/steps.ts), and so the only kinds the
  * planner is offered: the wire, the planner prompt and the review rubric
  * read this list. A kind joins it when its executor lands; a saved plan
- * with any other kind holds at that item. Discovery is offered only behind
- * Adaptive workflow with `planning.adaptiveGraph` on as well (wire.ts).
+ * with any other kind holds at that item.
  */
 export const EXECUTABLE_KINDS: readonly ItemKind[] = [
   "work",
   "qa",
   "aggregate",
-  "discovery",
 ];
 
 /** Whether this build executes, and the planner is offered, `kind`. */
@@ -69,18 +43,8 @@ export const executable = (kind: ItemKind = "work"): boolean =>
   EXECUTABLE_KINDS.includes(kind);
 
 export interface WorkItem {
-  /** A reviewed branch selector; absent or unknown facts never mean false. */
-  condition?: { conditionId: string; when: boolean };
   /** Absent means work. See EXECUTABLE_KINDS for the kinds this build runs. */
   kind?: ItemKind;
-  /** Read-only observation; never coding or publication. */
-  discovery?: DiscoverySpecification;
-  /** Dependency observations, selected by exact role and typed fields. */
-  discoveryInputs?: {
-    producerItemId: string;
-    role: string;
-    fields: ("path" | "mode" | "blobSha" | "contentRef" | "classification")[];
-  }[];
   /** Hierarchy only; every required child also has an explicit dependency edge. */
   children?: string[];
   /** The execution profile the planner chose, by id. */
@@ -179,48 +143,6 @@ export interface RequiredPreIntegrationCheck {
   source: Citation;
 }
 
-/** One reviewed, deterministic inventory-driven graph addition. */
-export interface GraphExpansionEnvelope {
-  schemaVersion: 1;
-  id: string;
-  input: {
-    producerItemId: string;
-    role: string;
-    schema: "factory.repository-inventory/v1";
-  };
-  selectors: string[];
-  workShape: "migration" | "cross-cutting-fix";
-  selection:
-    | { kind: "all-regular-files" }
-    | { kind: "classified"; included: string[]; excluded: string[] };
-  batching: { maxFilesPerChild: number };
-  limits: { maxChildren: number; maxIterations: 1 };
-  resources: string[];
-  eligibleProfileIds: string[];
-  dependencies: string[];
-  integrationBarrierItemIds: string[];
-  empty: "settle-without-children";
-  /** Reviewed ordinary-work shape, never a separately executable item. */
-  template: WorkItem;
-}
-
-export interface DeclaredWorkCondition {
-  schemaVersion: 1;
-  id: string;
-  input: {
-    producerItemId: string;
-    role: string;
-    schema: "factory.repository-inventory/v1";
-  };
-  predicate:
-    | { kind: "inventory-empty" }
-    | {
-        kind: "has-classification";
-        classification: string;
-        otherClassifications: string[];
-      };
-}
-
 /** The graph one planning round produces. */
 export interface Draft {
   base: string;
@@ -231,10 +153,6 @@ export interface Draft {
   requiredPreIntegrationChecks?: RequiredPreIntegrationCheck[];
   /** Cited-source exit items the plan leaves out; absent means none. */
   sourceExclusions?: SourceExclusion[];
-  /** Literal predicates over structured observations. */
-  conditions?: DeclaredWorkCondition[];
-  /** Reviewed inventory-driven additions. */
-  expansions?: GraphExpansionEnvelope[];
 }
 
 /** The accepted plan; currentPlan (plan.ts) reads it. */
@@ -344,6 +262,4 @@ export interface PlanningFacts {
   playbook: string;
   /** The operator's media.localAssetRoots: the only places a local source asset may come from. */
   localAssetRoots: readonly string[];
-  /** The ceiling on every discovery allowance the plan declares. */
-  discoveryLimits: DiscoveryLimits;
 }

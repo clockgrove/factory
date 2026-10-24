@@ -383,7 +383,7 @@ test("an item's question holds only that item and its dependents", async () => {
   });
   const asked = new Date().toISOString();
   // a holds; b is unrelated; c depends on a; d is unrelated and asks too
-  // (a discovery item with no specification holds).
+  // (an item of a kind this build doesn't run holds).
   seed(inst, 61, "holding", {
     holds: [
       {
@@ -399,10 +399,10 @@ test("an item's question holds only that item and its dependents", async () => {
       check: {},
       plan: {
         items: [
-          item("a", "discovery"),
+          item("a", "unknown"),
           item("b", "aggregate"),
           item("c", "aggregate", ["a"]),
-          item("d", "discovery"),
+          item("d", "unknown"),
         ],
       },
     },

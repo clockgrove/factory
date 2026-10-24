@@ -8,7 +8,6 @@ import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
-import type { DiscoveryResult } from "./discovery.js";
 import type { RepairContext } from "./prompt.js";
 import type { WorkerSpend } from "./worker.js";
 
@@ -79,8 +78,6 @@ export interface ItemFacts {
     by: string;
     at: string;
   };
-  /** A discovery item's complete result (work/discovery.ts): its dependents, conditions and expansions read it. */
-  discovery: DiscoveryResult;
   /** The criteria and commands the operator retired at this item's refusals (planning/plan.ts reads them). */
   retired: Retirement[];
   /**

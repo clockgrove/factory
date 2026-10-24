@@ -1,8 +1,7 @@
 // The plan's steps end to end: dependencies, predecessors, the build,
-// QA and discovery, and approval of a non-writer's Objective.
+// QA, and approval of a non-writer's Objective.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { join } from "node:path";
@@ -169,7 +168,7 @@ test("a state file that can't be read now is read again, not marked unreadable",
   await stopped(service);
 });
 
-test("a plan's steps run in order, a dependent waits for its dependency's merge, read-only QA validates the default branch, and discovery observes the base", async () => {
+test("a plan's steps run in order, a dependent waits for its dependency's merge, and read-only QA validates the default branch", async () => {
   const inst = installation();
   // GitHub is down: each step that runs reaches its first GitHub or Git
   // read and waits there, which shows which step the engine chose.
@@ -290,9 +289,6 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   git(baseline.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
   git(baseline.root, "clone", "--quiet", "origin.git", "work");
   const work = join(baseline.root, "work");
-  mkdirSync(join(work, "src", "b"), { recursive: true });
-  writeFileSync(join(work, "src", "a.ts"), "a\n");
-  writeFileSync(join(work, "src", "b", "c.ts"), "c\n");
   writeFileSync(join(work, "README.md"), "r\n");
   git(work, "add", ".");
   git(work, "commit", "--quiet", "-m", "planned");
@@ -334,193 +330,6 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
     ["replan", "retry", "cancel"],
   );
   assert.equal(cli(baseline, "cancel", "53").code, 0);
-  await stopped(service);
-
-  // Discovery observes the planned base with no model call and settles,
-  // keeping its result for dependents; semantic discovery of nothing needs
-  // no call either; past its allowance it holds with the evidence. A
-  // conditional item off its branch settles as skipped with the evidence,
-  // and its dependent runs; one whose condition can't be read asks. An
-  // expansion's producer settles it: one child per directory batch joins
-  // the plan and runs, and its barrier waits; over its child allowance,
-  // the producer asks instead.
-  const sha = (text) => createHash("sha256").update(text).digest("hex");
-  const discovery = (id, mode, selectors, maxEntries = 10) => ({
-    id,
-    kind: "discovery",
-    ownedPaths: [],
-    dependencies: [],
-    validation: [],
-    discovery: {
-      mode,
-      selectors,
-      schema: "factory.repository-inventory/v1",
-      role: `${id}-files`,
-      completeness: "complete",
-      allowance: { maxEntries, maxBytes: 1024, maxAttempts: 1 },
-    },
-  });
-  const envelope = (id, producer, maxChildren) => ({
-    schemaVersion: 1,
-    id,
-    input: {
-      producerItemId: producer,
-      role: `${producer}-files`,
-      schema: "factory.repository-inventory/v1",
-    },
-    selectors: ["src/"],
-    workShape: "migration",
-    selection: { kind: "all-regular-files" },
-    batching: { maxFilesPerChild: 5 },
-    limits: { maxChildren, maxIterations: 1 },
-    resources: [],
-    eligibleProfileIds: [],
-    dependencies: [],
-    integrationBarrierItemIds: ["g"],
-    empty: "settle-without-children",
-    template: {
-      id: `${id}-template`,
-      title: "Migrate",
-      ownedPaths: ["src/"],
-      dependencies: [],
-      validation: [],
-      brief: "Migrate the file.",
-    },
-  });
-  seed(baseline, 54, "building", {
-    done: {
-      check: {},
-      plan: {
-        base: planned,
-        items: [
-          discovery("d", "inventory", ["src/"]),
-          discovery("o", "inventory", ["src/"]),
-          {
-            id: "g",
-            kind: "aggregate",
-            ownedPaths: [],
-            dependencies: [],
-            validation: [],
-            children: [],
-          },
-          discovery("s", "semantic", ["none/"]),
-          discovery("e", "inventory", ["src/"], 1),
-          {
-            id: "k",
-            ownedPaths: ["src/k.ts"],
-            dependencies: ["d"],
-            condition: { conditionId: "src-empty", when: true },
-          },
-          { ...discovery("f", "inventory", ["src/"]), dependencies: ["k"] },
-          {
-            id: "u",
-            ownedPaths: ["src/u.ts"],
-            dependencies: ["d"],
-            condition: { conditionId: "unread", when: false },
-          },
-        ],
-        conditions: [
-          {
-            schemaVersion: 1,
-            id: "src-empty",
-            input: {
-              producerItemId: "d",
-              role: "d-files",
-              schema: "factory.repository-inventory/v1",
-            },
-            predicate: { kind: "inventory-empty" },
-          },
-          {
-            schemaVersion: 1,
-            id: "unread",
-            input: {
-              producerItemId: "d",
-              role: "other-files",
-              schema: "factory.repository-inventory/v1",
-            },
-            predicate: { kind: "inventory-empty" },
-          },
-        ],
-        expansions: [envelope("x", "d", 2), envelope("y", "o", 1)],
-        coverage: [],
-      },
-    },
-    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
-  });
-  service = serve(baseline);
-  const expandedIds = () =>
-    (
-      stateOf(baseline, 54).done["item:d:merge"]?.expansions?.[0]?.children ??
-      []
-    ).map((child) => child.id);
-  await until(
-    () =>
-      stateOf(baseline, 54).done["item:d:merge"] &&
-      stateOf(baseline, 54).done["item:s:merge"] &&
-      stateOf(baseline, 54).done["item:f:merge"] &&
-      stateOf(baseline, 54).holds.length === 3 &&
-      expandedIds().every(
-        (id) => stateOf(baseline, 54).retries[`item:${id}:work`],
-      ),
-    "d, s, k and f settle, x's children run, e, u and o ask",
-    30_000,
-  );
-  const observed = stateOf(baseline, 54);
-  const kept = observed.kept["item:d:discovery"];
-  assert.deepEqual(
-    [kept.commit, kept.role, kept.mode, kept.selectors],
-    [planned, "d-files", "inventory", ["src/"]],
-  );
-  assert.deepEqual(
-    kept.entries.map((entry) => [entry.path, entry.mode, entry.contentRef]),
-    [
-      ["src/a.ts", "100644", { sha256: sha("a\n"), bytes: 2 }],
-      ["src/b/c.ts", "100644", { sha256: sha("c\n"), bytes: 2 }],
-    ],
-  );
-  assert.equal(
-    kept.entries[0].blobSha,
-    git(work, "rev-parse", `${planned}:src/a.ts`),
-  );
-  assert.deepEqual(observed.kept["item:s:discovery"].entries, []);
-  const skipped = observed.done["item:k:merge"];
-  assert.equal(skipped.settled, "skipped");
-  assert.deepEqual(
-    [skipped.condition.conditionId, skipped.condition.value],
-    ["src-empty", false],
-  );
-  assert.match(skipped.condition.evidence, /listed 2 files: src\/a\.ts/);
-  assert.equal(observed.done["item:k:work"], undefined);
-  const unread = observed.holds.find((hold) => hold.step === "item:u:work");
-  assert.match(unread.question, /no such kept result/);
-  assert.deepEqual(
-    unread.options.map((option) => option.answer),
-    ["replan", "retry", "cancel"],
-  );
-  // One child per directory, with ids that hash the commit and the batch.
-  const [expanded] = observed.done["item:d:merge"].expansions;
-  assert.deepEqual(
-    expanded.children.map((child) => child.paths),
-    [["src/a.ts"], ["src/b/c.ts"]],
-  );
-  assert.equal(expanded.commit, planned);
-  for (const child of expanded.children) {
-    assert.match(child.id, /^x-[0-9a-f]{12}$/);
-    assert.ok(observed.retries[`item:${child.id}:work`], child.id);
-  }
-  assert.equal(observed.done["item:g:merge"], undefined);
-  const over = observed.holds.find((hold) => hold.step === "item:o:merge");
-  assert.match(over.question, /over its allowance of 1 children/);
-  assert.deepEqual(
-    over.options.map((option) => option.answer),
-    ["replan", "cancel"],
-  );
-  const allowance = observed.holds.find((hold) => hold.step === "item:e:work");
-  assert.match(allowance.question, /2 files of 4 bytes/);
-  assert.deepEqual(
-    allowance.options.map((option) => option.answer),
-    ["replan", "retry", "cancel"],
-  );
   await stopped(service);
 });
 

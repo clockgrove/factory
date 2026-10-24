@@ -30,11 +30,7 @@ import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import type { Answer, ObjectiveState } from "../state.js";
 import { oneLine } from "../text.js";
-import {
-  adaptiveGraph,
-  adaptiveWorkflow,
-  declarationProblems,
-} from "../validate.js";
+import { declarationProblems } from "../validate.js";
 import { fact, facts as keptFacts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
@@ -157,11 +153,6 @@ export interface ObjectiveInputs {
    * accepted plan all use these, whatever the configuration says later.
    */
   reviewArtifacts: ReviewArtifactSelector[];
-  /**
-   * planning.adaptiveGraph when the Objective was admitted: every plan
-   * round uses this, so a config change can't split them.
-   */
-  adaptiveGraph?: true;
   /** The done predecessors' accepted results, checked to be on `base` (planning/predecessors.ts). */
   predecessors?: PredecessorEvidence[];
 }
@@ -426,24 +417,8 @@ function planRoundStep(
       const profiles = offeredProfiles(config);
       const wire = {
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
-        adaptive: adaptiveGraph(
-          inputs.shown.blocks,
-          inputs.adaptiveGraph === true,
-        ),
         ...(profiles ? { profiles } : {}),
       };
-      // An enabled section still plans, with its context and memory but
-      // without the graph kinds; say so once per generation.
-      if (
-        n === 1 &&
-        adaptiveWorkflow(inputs.shown.blocks).enabled &&
-        inputs.adaptiveGraph !== true
-      )
-        context.log({
-          event: "adaptive-graph-off",
-          message:
-            "Adaptive workflow is enabled, but planning.adaptiveGraph is off: the planner isn't offered discovery items, work conditions or expansions",
-        });
       const cited = revising
         ? await citedSections(previous!.draft, fixes, facts, files)
         : [];
@@ -477,7 +452,6 @@ function planRoundStep(
         citedSections: cited,
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
-        adaptive: wire.adaptive,
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
         ...(lookups ? { lookups } : {}),
@@ -1262,9 +1236,8 @@ export async function readObjective(
  * The Objective checks on what GitHub shows of it at `inputs.base`: its
  * sections, its declarations (Package manager update, Quality checkpoint,
  * Workspace package additions, Adaptive workflow; checked here once,
- * trusted afterwards), its commands and local executables. Sets
- * `inputs.adaptiveGraph`. The check step and
- * `factory propose` (proposals.ts) both use it.
+ * trusted afterwards), its commands and local executables. The check step
+ * and `factory propose` (proposals.ts) both use it.
  */
 export async function objectiveProblems(
   config: CoreConfig,
@@ -1274,7 +1247,6 @@ export async function objectiveProblems(
   const { shown } = inputs;
   const { problems } = checkObjective(shown.blocks);
   problems.push(...declarationProblems(shown.blocks));
-  if (config.planning.adaptiveGraph) inputs.adaptiveGraph = true;
   if (!problems.length)
     problems.push(
       ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {
@@ -1373,7 +1345,6 @@ export async function planningFacts(
     ciOnlyCommands: config.finalValidation.ciOnlyCommands,
     extraCommands: allowedCommands(state),
     localAssetRoots: config.media.localAssetRoots,
-    discoveryLimits: config.planning.discoveryLimits,
     // No playbook in the target reads as empty. Knowledge adds the pinned
     // Dream playbook and, for Adaptive workflow, planning context and memory.
     playbook: await planningKnowledge({

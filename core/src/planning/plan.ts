@@ -3,7 +3,6 @@ import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
-import { withExpansions } from "./expansion.js";
 import { coverageCriterion } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
 import type { Plan, Retirement, WorkItem } from "./types.js";
@@ -13,14 +12,8 @@ import type { Plan, Retirement, WorkItem } from "./types.js";
  * `state.done.plan`; an accepted amendment saves its plan under its own key.
  * Everything else reads the plan the Objective runs now through
  * `currentPlan`, and what it was planned from through `acceptedInputs`.
- * Settled expansion envelopes join it as a derived layer (expansion.ts
- * withExpansions): their children run like any Work Item. Only amendments,
- * which keep every envelope whose producer started, read the saved plan
- * without that layer (`acceptedPlan`).
  * The operator's retirements (`retire <n>`) are kept apart, by the step
  * whose refusal they answer, and `currentPlan` returns them in `retired`.
- * A conditional Work Item's declared condition is read here too
- * (`conditionVerdict`), from its producer's kept discovery result.
  */
 
 /** When the plan was accepted, for the order of owned-path waits (service.ts). */
@@ -86,13 +79,12 @@ export function decisionsOf(state: ObjectiveState): CriterionDecision[] {
 }
 
 /**
- * The plan the Objective runs now, with its settled expansions' children
- * and the criteria and commands the operator retired from it.
+ * The plan the Objective runs now, with the criteria and commands the
+ * operator retired from it.
  */
 export function currentPlan(state: ObjectiveState): Plan | undefined {
-  const saved = acceptedPlan(state);
-  if (!saved) return undefined;
-  const plan = withExpansions(state, saved);
+  const plan = acceptedPlan(state);
+  if (!plan) return undefined;
   const accepted = state.kept[ACCEPTED_AT];
   const retired = [
     ...itemsWith(state, "retired").flatMap(
@@ -132,10 +124,7 @@ export function profilesLacking(
       : {};
   const plan = currentPlan(state);
   const used = new Set(
-    [
-      ...(plan?.items ?? []),
-      ...(plan?.expansions ?? []).map((envelope) => envelope.template),
-    ].flatMap((item) =>
+    (plan?.items ?? []).flatMap((item) =>
       item.executionProfile ? [item.executionProfile.id] : [],
     ),
   );
@@ -268,82 +257,4 @@ export function generationInputs(
 /** The Objective as the accepted generation read it: its text, base and selectors. */
 export function acceptedInputs(state: ObjectiveState): ObjectiveInputs {
   return generationInputs(state, position(state).g);
-}
-
-/** A conditional Work Item's declared condition, evaluated over its producer's kept result. */
-export interface ConditionVerdict {
-  conditionId: string;
-  /** The branch the item runs on. */
-  when: boolean;
-  /** The condition's value: the item runs only when it equals `when`. */
-  value: boolean;
-  /** What the value was read from, for the skip record, final review and the report. */
-  evidence: string;
-}
-
-/** The first few paths of a list, for evidence. */
-const someOf = (paths: readonly string[]) =>
-  paths.length
-    ? `: ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? `, and ${paths.length - 5} more` : ""}`
-    : "";
-
-/**
- * Item `item`'s declared condition over its producer's kept discovery
- * result (work/facts.ts `discovery`): deterministic, with no model call.
- * Undefined for unconditional work; a string when it can't be evaluated
- * (no kept result for the declared producer and role, or a classification
- * missing or outside the condition's reviewed labels): an unknown fact
- * never counts as false. The item depends directly on the producer, so it
- * is read only once the producer has settled.
- */
-export function conditionVerdict(
-  state: ObjectiveState,
-  item: WorkItem,
-): ConditionVerdict | string | undefined {
-  if (!item.condition) return undefined;
-  const { conditionId, when } = item.condition;
-  const condition = currentPlan(state)?.conditions?.find(
-    (entry) => entry.id === conditionId,
-  );
-  if (!condition)
-    return `Work Item ${item.id} selects condition ${conditionId}, which the plan doesn't declare.`;
-  const { producerItemId, role, schema } = condition.input;
-  const result = fact(state, "discovery", producerItemId);
-  if (
-    !result ||
-    result.producerItemId !== producerItemId ||
-    result.role !== role ||
-    result.schema !== schema
-  )
-    return `Condition ${conditionId} reads discovery role ${JSON.stringify(role)} from ${producerItemId}, which has no such kept result.`;
-  const at = `discovery ${producerItemId} (role ${JSON.stringify(role)}) at ${result.commit.slice(0, 12)}`;
-  const { predicate } = condition;
-  if (predicate.kind === "inventory-empty") {
-    const value = result.entries.length === 0;
-    return {
-      conditionId,
-      when,
-      value,
-      evidence: `Condition ${conditionId} (inventory-empty) is ${value}: ${at} listed ${result.entries.length} files${someOf(result.entries.map((entry) => entry.path))}.`,
-    };
-  }
-  const labels = [predicate.classification, ...predicate.otherClassifications];
-  const unknown = result.entries.filter(
-    (entry) =>
-      result.mode !== "semantic" ||
-      entry.classification === undefined ||
-      !labels.includes(entry.classification),
-  );
-  if (unknown.length)
-    return `Condition ${conditionId} (has-classification ${JSON.stringify(predicate.classification)}) can't be read: ${at} has ${unknown.length} files with no classification from ${JSON.stringify(labels)}${someOf(unknown.map((entry) => `${entry.path} (${entry.classification ?? "unclassified"})`))}. A missing label is never a negative finding.`;
-  const matched = result.entries
-    .filter((entry) => entry.classification === predicate.classification)
-    .map((entry) => entry.path);
-  const value = matched.length > 0;
-  return {
-    conditionId,
-    when,
-    value,
-    evidence: `Condition ${conditionId} (has-classification ${JSON.stringify(predicate.classification)}) is ${value}: ${at} classified ${matched.length} of ${result.entries.length} files so${someOf(matched)}.`,
-  };
 }

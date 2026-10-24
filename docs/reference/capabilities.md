@@ -11,7 +11,7 @@ A capability is a module that plugs into one of these seams:
 | `Planner`          | plan, plan review, result and final review, repair diagnosis, Dream, propose | Codex, Claude and Copilot; a review is a call in the `reviewer` role (providers/planner.ts)     |
 | `Worker`           | the work step                                                                | Codex, Claude, Copilot local; OpenAI Agents, Claude Managed Agents (parked: not live-qualified) |
 | `Delivery`         | publish, ci, merge                                                           | regular PRs, native linear stacks, LFS assets                                                   |
-| `Planning options` | the plan step                                                                | discovery, adaptive workflow, quality checkpoint, package-manager update, amendments            |
+| `Planning options` | the plan step                                                                | adaptive workflow, quality checkpoint, package-manager update, amendments                       |
 | `Knowledge`        | plan and work prompts, and review                                            | curated playbook, repository memory, Dream proposals, peers' notes                              |
 | `Observers`        | the run log                                                                  | diagnostics, accounting, scorecard, capture export                                              |
 

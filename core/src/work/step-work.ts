@@ -44,7 +44,6 @@ import {
 } from "../worktree.js";
 import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
-import { discoveryInputs } from "./discovery.js";
 import { fact, facts } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult, rereviewOf } from "./refused.js";
@@ -373,7 +372,6 @@ export async function workStep(
           }
         : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
-      discoveryInputs: discoveryInputs(state, item),
       ...(memory ? { memory } : {}),
       ...(instructions ? { profileInstructions: instructions } : {}),
       signal,

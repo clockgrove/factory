@@ -14,7 +14,6 @@ import { roleMemory } from "../knowledge/index.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
-import { expansionsOf } from "../planning/expansion.js";
 import { coverageCriterion } from "../planning/graph.js";
 import {
   acceptedInputs,
@@ -56,7 +55,7 @@ import {
   pinnedSources,
 } from "./shared.js";
 import { RERUN, RERUN_CLEANUP } from "./step-deliver.js";
-import { type QaResult, skippedItems } from "./step-qa.js";
+import type { QaResult } from "./step-qa.js";
 import {
   criterionDecisions,
   criterionOffers,
@@ -348,13 +347,6 @@ export function finalReviewStep(deps: BuildDeps): Step {
         ],
         ...(decided.earlier ? { earlier: decided.earlier } : {}),
         qa,
-        skipped: skippedItems(state, plan).map(({ item, condition }) => ({
-          itemId: item.id,
-          ...condition,
-        })),
-        expansions: expansionsOf(state, plan).flatMap(({ expanded }) =>
-          expanded ? [expanded] : [],
-        ),
         signal,
         log: context.log,
       });
@@ -440,16 +432,7 @@ export function reportStep(deps: BuildDeps): Step {
       }
       const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
-      const skipped = new Map(
-        skippedItems(state, plan).map(({ item, condition }) => [
-          item.id,
-          condition,
-        ]),
-      );
       const lines = plan.items.map((item) => {
-        const condition = skipped.get(item.id);
-        if (condition)
-          return `- **${item.id}** ${item.title} — skipped: it runs only when condition ${condition.conditionId} is ${condition.when}. ${condition.evidence}`;
         const published = state.done[stepKey(item.id, "publish")] as
           | PublishResult
           | undefined;
@@ -460,10 +443,6 @@ export function reportStep(deps: BuildDeps): Step {
             : undefined;
         return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
       });
-      for (const { envelope, expanded } of expansionsOf(state, plan))
-        lines.push(
-          `- Expansion **${envelope.id}** from ${envelope.input.producerItemId}: ${expanded!.children.length} children${expanded!.children.length ? ` (${expanded!.children.map((child) => child.id).join(", ")})` : ""}. ${expanded!.evidence}`,
-        );
       const repairs = Object.values(state.repairs ?? {}).reduce(
         (sum, r) => sum + r.count,
         0,

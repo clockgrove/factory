@@ -38,7 +38,7 @@ jobs:
       - run: npm run test:core
 
   # The single required check for main; it passes only when every job above
-  # passes, including offline installation in the integration suite.
+  # passes, including offline installation in the CI tests.
   package-gate:
     if: always()
     needs: [checks, core]

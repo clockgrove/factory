@@ -242,6 +242,6 @@ Managed execution uses the same contracts but remains separate from claims of li
 
 ## Checks and releases
 
-CI builds Factory and runs a small real integration suite over Git, processes, disk, scanner and the offline packed CLI. It uses no fake providers or model responses. Real provider/GitHub acceptance belongs to the approved milestone's substantive outcomes.
+CI builds Factory and runs a small real integration suite over Git, processes, disk, scanner and the offline packed CLI. It uses no fake providers or model responses. Real provider and GitHub acceptance belongs to the integration tests ([integration/](../integration/README.md)), which run on demand.
 
 The [release procedure](RELEASING.md) verifies synchronized versions, exact artifacts and provenance, and protects immutable release tags. Issues, pull requests, Git history and GitHub release notes record changes; this file is not a fix log.

@@ -59,13 +59,13 @@ npm run notices:check
 npm run test:core
 ```
 
-`npm run test:core` builds Factory and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target.
+`npm run test:core` builds Factory and runs its CI tests against real temporary Git repositories, processes and files, including the packed CLI installed offline. They use no mocks and no GitHub, need no provider credentials, and take about 3 minutes.
 
-The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
+The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one CI-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 
 `npm run lint` uses Biome. `npm run format` applies formatting. Commits do not install hooks or re-stage files; CI enforces the checks.
 
-For an affected integration check after the batch, build and run its file directly:
+For an affected CI test after the batch, build and run its file directly:
 
 ```sh
 npm run build:core
@@ -73,6 +73,18 @@ node --test core/test/holds.test.mjs
 ```
 
 Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the complete small suite.
+
+### Integration tests
+
+[Integration tests](integration/README.md) run real Objectives with real providers against the scratch repository `clockgrove/factory-drill`, and never run in CI. They crash the service at every crash point, cut the network and stop models mid-turn. Run them on demand, as bounded groups:
+
+```sh
+npm run build:core
+npm run integration -- --dry-run          # groups, expected minutes and preconditions
+npm run integration -- --only queue
+```
+
+A plan expected to take over 60 minutes needs the maintainer's approval, then `--approved-long`.
 
 ### Recovery end-to-end test
 

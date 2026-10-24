@@ -109,6 +109,6 @@ These hold for every run (the design gives each one a test):
 
 ## Done
 
-Factory is done when every requirement above has been shown working by real runs on the scratch drill repository. That includes refusing a second machine on the same Project, and the drill: kill Factory at every crash point, cut the network, and stop a model mid-turn. Each run must finish with no duplicate effect and every question answerable.
+Factory is done when every requirement above has been shown working by real runs on the scratch drill repository. That includes refusing a second machine on the same Project, and the [integration tests](../integration/README.md): kill Factory at every crash point, cut the network, and stop a model mid-turn. Each run must finish with no duplicate effect and every question answerable.
 
 Only then is Factory pointed at real targets such as Clockgrove. Real targets add requirements to this page; they aren't where Factory gets validated.

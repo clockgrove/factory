@@ -39,7 +39,7 @@ No mocks, fake services, fake providers or scripted responses.
 
 - **Crash points.** Product code calls `crashPoint("<step>:<moment>")` at each step boundary, before and after each outside effect and after each save. When `FACTORY_CRASH_AT` names that point, the process sends itself SIGKILL. It is a no-op otherwise. `FACTORY_COMMENT_LIMIT` (tests only, off by default; 1,000 to 65,000 characters) lowers the comment size limit, so a small plan's data goes in continuation comments and the `plan:data:*` points are reached.
 - **CI** runs the real `factory serve` on real Git repositories and files for everything that needs no GitHub or model: state saves, step order, restart at every crash point, request files, cancel, deadlines, log rotation.
-- **Drill.** At each milestone, a small real Objective runs on a scratch GitHub repository with real providers. The drill kills the service at every crash point and restarts it. It also cuts the network for a minute and stops a model mid-turn. It passes when the Objective finishes with no duplicate PR, comment or merge, and every hold had an answer that worked.
+- **Integration tests** ([integration/](../integration/README.md)) run on demand, never in CI. Real Objectives run on a scratch GitHub repository with real providers. They kill the service at every crash point and restart it, cut the network for a minute and stop a model mid-turn. They pass when every Objective finishes with no duplicate PR, comment or merge, and every hold had an answer that worked.
 
 ## Topics
 

@@ -59,7 +59,8 @@
     "notices:check": "node scripts/generate-notices.mjs --check",
     "build:core": "tsc -p core/tsconfig.json",
     "prepack": "npm run build:core",
-    "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs"
+    "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs",
+    "integration": "integration/run-suite.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",

@@ -6,13 +6,14 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignoreUnknown": true
+    "ignoreUnknown": true,
+    "includes": ["**", "!integration/fixtures", "!integration/objectives"]
   },
   "formatter": {
     "indentStyle": "space"
   },
   "linter": {
-    "includes": ["src/**/*.ts", "core/src/**/*.ts"],
+    "includes": ["src/**/*.ts", "core/src/**/*.ts", "integration/**/*.mjs"],
     "rules": {
       "preset": "recommended",
       "complexity": {

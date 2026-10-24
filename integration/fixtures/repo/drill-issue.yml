@@ -1,0 +1,21 @@
+name: drill-issue
+# Drill helper: files an issue as github-actions[bot], a non-writer author,
+# for the Factory author-hold drill (integration tests, stability group).
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        required: true
+      body:
+        required: true
+permissions:
+  issues: write
+jobs:
+  file:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ inputs.title }}
+          BODY: ${{ inputs.body }}
+        run: gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"

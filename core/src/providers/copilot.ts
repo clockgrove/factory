@@ -599,7 +599,7 @@ export class CopilotPlanner implements Planner {
 
   private once(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
-    return loggedCall("copilot", call, choice, async (record) => {
+    return loggedCall("copilot", call, choice, async (record, live) => {
       const started = Date.now();
       const images = callImages(call);
       const turn = copilotTurn(call.conversation, call.prompt, choice.model);
@@ -631,6 +631,11 @@ export class CopilotPlanner implements Planner {
               type: event.type,
               ms: Date.now() - started,
             });
+            // The main agent's turns and context; a sub-agent's carry its agentId.
+            if (event.type === "assistant.turn_start" && !event.agentId)
+              live.turn();
+            if (event.type === "session.usage_info" && !event.agentId)
+              live.context(event.data.currentTokens, event.data.tokenLimit);
           },
         });
         record.session = result.session;

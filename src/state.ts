@@ -27,7 +27,7 @@ import type { QueueMode, RefusalCode } from "./requests.js";
  * `factory reset` rebuilds it from GitHub (reset.ts), with no open
  * question.
  */
-const STATE_VERSION = 6;
+const STATE_VERSION = 7;
 
 export type ObjectiveStatus =
   | "checking"

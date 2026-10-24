@@ -19,7 +19,6 @@ const config = {
       building: "Building",
       holding: "Needs you",
       done: "Done",
-      failed: "Failed",
       cancelled: "Cancelled",
     },
   },

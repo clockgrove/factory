@@ -21,7 +21,7 @@ export const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 export const REPO = "drill/target";
 
 export function installation() {
-  const stateDir = mkdtempSync(join(tmpdir(), "factory-core-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "factory-test-"));
   const root = join(stateDir, REPO.replace("/", "__"));
   const env = {
     ...process.env,

@@ -601,7 +601,7 @@ export async function originRefusal(
  * operator's configuration and credentials, once `originProblem` finds
  * origin still bound to `repository`; otherwise a GitRefusal that names
  * the fix, so the step holds instead of reaching the wrong place. Every
- * remote Git call in core goes through here.
+ * remote Git call goes through here.
  */
 export async function remoteGit(
   checkout: string,

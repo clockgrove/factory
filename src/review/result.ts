@@ -1456,9 +1456,8 @@ const INPUT_GUIDANCE =
   "Worker inputs: the Controller input receipt lists every file Factory gave the worker read-only (Objective source assets, including private local files and GitHub attachments, and dependencies' selected media), each with the sha256 and size Factory recorded when it fetched it. Where an input has a reviewCopy, inputs/ holds Factory's digest-checked copy of those exact bytes: judge a criterion about using, quoting or matching an input against that copy and the receipt. Never ask the operator to supply or confirm an input's bytes when the receipt has them.";
 
 /**
- * The result-review instructions: product logic kept verbatim from the old
- * reviewer, trimmed to what the core supplies: no receipts, bindings or
- * historical references. Instructions
+ * The result-review instructions, limited to the evidence result review gets
+ * (no receipts, bindings or historical references). Instructions
  * and evidence that don't depend on the candidate come first, so reviews of
  * one item's candidates share a provider-cache prefix.
  */

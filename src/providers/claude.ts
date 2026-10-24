@@ -455,7 +455,7 @@ export function claudeEnvironment(
       ...CLAUDE_NETWORK_ENVIRONMENT,
     ]),
     ...login,
-    CLAUDE_AGENT_SDK_CLIENT_APP: "clockgrove-factory/core",
+    CLAUDE_AGENT_SDK_CLIENT_APP: "clockgrove-factory",
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens),
     DISABLE_TELEMETRY: "1",
   };

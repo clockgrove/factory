@@ -114,7 +114,8 @@ export class RunLog {
   write(issue: number, event: Record<string, unknown>): void {
     const file = this.file(issue);
     if (!file) return;
-    if (file.seq === 0) this.append(file, { event: "run-header", ...build() });
+    if (file.seq === 0)
+      this.append(file, { event: "run-header", ...runningBuild() });
     const body = (event as { [CAPTURE]?: CaptureBody })[CAPTURE];
     const id = body && this.capture.enabled && this.captured(issue, body);
     if (body && this.capture.enabled && !id) file.failed += 1;
@@ -285,7 +286,7 @@ let built: Build | undefined;
  * package.json above this module) and a sha256 over the build's own
  * JavaScript files (paths and bytes, in path order).
  */
-function build(): Build {
+export function runningBuild(): Build {
   if (built) return built;
   const root = dirname(fileURLToPath(import.meta.url));
   let factoryVersion: string | null = null;

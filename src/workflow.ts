@@ -48,9 +48,8 @@ const MINUTE = 60_000;
 
 /**
  * The Objective workflow: predecessors → check → plan → build → final →
- * report, then cleanup after cancel. Steps are ported onto the core slice by slice; a
- * step that isn't ported yet holds with an honest question, so an Objective
- * on this build always has an answer that works. `deps` is absent when
+ * report, then cleanup after cancel. A step this build can't run holds with
+ * an honest question, so an Objective always has an answer that works. `deps` is absent when
  * Factory has no configuration.
  *
  * An amendment of the accepted plan (planning/amendments.ts), and a

@@ -79,7 +79,7 @@ gh stack merge --yes             # queue every layer; run again if layers drop o
 
 A file that most changes must edit turns every pair of parallel changes into a conflict. Keep none:
 
-- **No status documents or changelogs in the repository.** Progress lives in issues: a gap the work still owes is an issue (during a rewrite, labelled `cutover-gap`), and a milestone gate is "no such issue open". Release notes record changes.
+- **No status documents or changelogs in the repository.** Progress lives in issues: a gap the work still owes is an issue, and a milestone gate is "no such issue open". Release notes record changes.
 - **One topic, one file.** The design is split by topic under `docs/reference/`, and a change edits only the topics it changes.
 - **One unit, one module.** A CLI command is `src/commands/<name>.ts` (its options, help, check and implementation), a phase's step is its own module under `src/work/`, and the service tests are split by area in `test/` with shared setup in `helpers.mjs`. Add a file rather than grow a shared one.
 - **Lists that every change adds to stay sorted,** such as the `RefusalCode` union. Two additions then land in different places instead of both appending at the end.

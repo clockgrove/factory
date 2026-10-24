@@ -3,7 +3,7 @@ import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
 
 /**
- * Plan data as the core stores it: plain JSON in the state file. The plan
+ * Plan data as Factory stores it: plain JSON in the state file. The plan
  * step saves the accepted plan, which currentPlan (plan.ts) reads; each
  * round's draft is kept in that round's `done` result. Base is immutable,
  * so sources are cited by path and heading and read again from the base

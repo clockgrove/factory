@@ -114,7 +114,7 @@ q_reorder() {
       gh_order "$x" 0; sleep 60
       local py; py=$(st phase "$y")
       if [[ $py =~ ^(planning|building|finishing|done|hold:) ]] && ! q_started "$x"; then record queue.reorder-after-start $g PASS "X moved ahead (0) after Y started: Y $py, X not started" "$t0"
-      # A held Objective whose holds stop every step takes no slot (CORE.md, Several at once), so X may start then.
+      # A held Objective whose holds stop every step takes no slot (docs/reference/queue.md, Several at once), so X may start then.
       elif [[ $py == hold:* ]]; then record queue.reorder-after-start $g UNREACHABLE "Y held at ${py#hold:} (a held Objective takes no slot, so X may start); X started=$(st started "$x" 'plan:*')" "$t0"
       else record queue.reorder-after-start $g FAIL "after moving X ahead: Y $py, X started=$(st started "$x" 'plan:*')" "$t0"; fi
     else record queue.reorder-after-start $g UNREACHABLE "Y wasn't admitted first" "$t0"; fi

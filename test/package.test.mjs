@@ -1,5 +1,5 @@
 // The release tarball, packed and installed offline as the README says:
-// it ships the core and its assets, and the installed CLI is the core's.
+// it ships the CLI and its assets, and the installed CLI is the packed one.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -14,7 +14,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 // Packing and installing a 170 MB tarball takes about a minute.
-test("the packed tarball installs offline and runs the core's CLI", {
+test("the packed tarball installs offline and runs its own CLI", {
   timeout: 300_000,
 }, () => {
   const root = mkdtempSync(join(tmpdir(), "factory-package-"));
@@ -90,7 +90,7 @@ test("the packed tarball installs offline and runs the core's CLI", {
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /^ {2}setup /m);
 
-    // The installed core finds its own package.json: a target loads, and
+    // The installed CLI finds its own package.json: a target loads, and
     // Factory's own repository is refused.
     const checkout = join(root, "target");
     mkdirSync(checkout);

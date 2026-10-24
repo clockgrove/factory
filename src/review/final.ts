@@ -192,9 +192,9 @@ function finalCriteria(plan: Plan, objective: readonly string[]): string[] {
 }
 
 /**
- * The final-review instructions: the old objective-review prompt, trimmed to
- * what the core supplies (no receipts, bindings, retained bodies or Work Item
- * findings). They don't depend on the Objective, so every
+ * The final-review instructions, limited to the evidence final review gets
+ * (no receipts, bindings, retained bodies or Work Item findings). They don't
+ * depend on the Objective, so every
  * final review shares a provider-cache prefix.
  */
 const FINAL_INSTRUCTIONS = [

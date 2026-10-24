@@ -21,7 +21,7 @@ export interface Allowances {
 
 export type AllowanceName = keyof Allowances;
 
-/** The old Factory's caps for repairs; four planning rounds, as the core plans. */
+/** The default repair caps; four planning rounds. */
 export const DEFAULT_ALLOWANCES: Allowances = {
   planningRevisions: 4,
   implementationRepairs: 6,

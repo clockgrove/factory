@@ -9,8 +9,18 @@ import { hostCapacity } from "./capacity.js";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { eventLine, redactDeep } from "./display.js";
 import { DEFAULT_LIMITS, type EngineLimits, hostLimits } from "./engine.js";
+import { GitRefusal } from "./git.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
+import {
+  type Holder,
+  type HolderRecord,
+  HolderRefusal,
+  holderChanged,
+  holderText,
+  releaseHolder,
+  takeHolder,
+} from "./holder.js";
 import { applyDream } from "./knowledge/dream.js";
 import { knowledgeObserver } from "./knowledge/index.js";
 import {
@@ -120,7 +130,12 @@ function envLimits(): EngineLimits {
 export async function serveInstallation(
   repository: string,
   paths: Paths,
-  options: { provider?: string; drainMs: number },
+  options: {
+    provider?: string;
+    drainMs: number;
+    /** Take the repository from the installation that holds it (holder.ts). */
+    takeOver?: boolean;
+  },
 ): Promise<number> {
   const limits = envLimits();
   let sync: GitHubSync | undefined;
@@ -179,28 +194,121 @@ export async function serveInstallation(
     hostLimits.configure(
       hostCapacity(loaded.execution, loaded.queue.maxActiveObjectives),
     );
-  return await serve({
-    paths,
-    workflow,
-    ...(loaded ? {} : { unconfigured: configPath(repository) }),
-    ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
-    ...(sync ? { sync, reset: true } : {}),
-    ...(log ? { log } : {}),
-    ...(frozen ? { frozen } : {}),
-    ...(freeze ? { freeze } : {}),
-    ...(loaded?.queue.objectiveDeadlineSeconds
-      ? { deadlineSeconds: loaded.queue.objectiveDeadlineSeconds }
-      : {}),
-    ...(loaded ? { observer: knowledgeObserver, dream: applyDream } : {}),
-    ...(process.env.FACTORY_TICK_MS
-      ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
-      : {}),
-    drainMs: options.drainMs,
-    limits: {
-      ...limits,
-      ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
-    },
-  });
+  const serveWith = () =>
+    serve({
+      paths,
+      workflow,
+      ...(loaded ? {} : { unconfigured: configPath(repository) }),
+      ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
+      ...(sync ? { sync, reset: true } : {}),
+      ...(log ? { log } : {}),
+      ...(frozen ? { frozen } : {}),
+      ...(freeze ? { freeze } : {}),
+      ...(loaded?.queue.objectiveDeadlineSeconds
+        ? { deadlineSeconds: loaded.queue.objectiveDeadlineSeconds }
+        : {}),
+      ...(loaded ? { observer: knowledgeObserver, dream: applyDream } : {}),
+      ...(process.env.FACTORY_TICK_MS
+        ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
+        : {}),
+      drainMs: options.drainMs,
+      limits: {
+        ...limits,
+        ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
+      },
+    });
+  if (!loaded) return await serveWith();
+  const context = {
+    checkout: loaded.checkout,
+    repository: loaded.repository,
+    root: paths.root,
+  };
+  const holder = await holderFor(context, options.takeOver ?? false);
+  if (!holder) return 0;
+  if (holder.replaced)
+    process.stderr.write(
+      `factory: took ${loaded.repository} over from ${holderText(holder.replaced)}\n`,
+    );
+  // Checked every queue poll: another installation that took over stops
+  // this one before its next effects, the way SIGTERM does.
+  let lost = false;
+  let taker: HolderRecord | undefined;
+  const watch = setInterval(() => {
+    holderChanged(context, holder).then(
+      (changed) => {
+        if (!changed || lost) return;
+        lost = true;
+        taker = changed.record;
+        process.kill(process.pid, "SIGTERM");
+      },
+      () => undefined,
+    );
+  }, loaded.queue.pollSeconds * 1000);
+  let code: number;
+  try {
+    code = await serveWith();
+  } finally {
+    clearInterval(watch);
+  }
+  if (lost)
+    throw new ConfigurationError(
+      `Another installation took ${loaded.repository} over${taker ? `: ${holderText(taker)}` : ""}, so this one stopped. To serve from here again, stop that one, then start this one.`,
+    );
+  // A clean stop frees the repository; a service that didn't start (one
+  // already ran here) leaves it to that service.
+  if (code === 0)
+    await releaseHolder(context, holder).catch((error: unknown) =>
+      process.stderr.write(
+        `factory: couldn't free ${loaded.repository} (${errorMessage(error)}); starting this installation again resumes it, and another one takes over with --take-over\n`,
+      ),
+    );
+  return code;
+}
+
+/**
+ * Take the repository for this installation (holder.ts) before anything
+ * reaches GitHub: transient Git failures wait and retry (rule 5) until
+ * SIGTERM or SIGINT stops the wait (undefined). Another holder, a ruleset
+ * that refuses the record, or an origin that doesn't name the repository is
+ * a ConfigurationError that names the fix.
+ */
+async function holderFor(
+  context: { checkout: string; repository: string; root: string },
+  takeOver: boolean,
+): Promise<Holder | undefined> {
+  let stopped = false;
+  let wake = (): void => undefined;
+  const stop = (): void => {
+    stopped = true;
+    wake();
+  };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+  try {
+    for (let wait = 2000; !stopped; wait = Math.min(wait * 2, 60_000)) {
+      try {
+        return await takeHolder(context, takeOver);
+      } catch (error) {
+        if (error instanceof HolderRefusal)
+          throw new ConfigurationError(error.message);
+        if (error instanceof GitRefusal)
+          throw new ConfigurationError(
+            `Can't check which installation serves ${context.repository}: ${error.message}`,
+          );
+        process.stderr.write(
+          `factory: waiting to check which installation serves ${context.repository} (${errorMessage(error).split("\n")[0]}); retrying in ${wait / 1000} s\n`,
+        );
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          setTimeout(resolve, wait);
+        });
+      }
+    }
+    return undefined;
+  } finally {
+    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop);
+  }
 }
 
 export interface FollowOptions {

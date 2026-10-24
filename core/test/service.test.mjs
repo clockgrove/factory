@@ -555,3 +555,68 @@ test("concurrent defaultHead calls in one checkout all see the moved default bra
       /Point origin's fetch and push URLs/.test(error.fix),
   );
 });
+
+test("one installation serves a repository: another is refused, a restart resumes, --take-over stops the old one and a clean stop frees it", async () => {
+  const api = `http://127.0.0.1:${await closedPort()}`;
+  const first = installation();
+  configured(first, api);
+  // A second installation of the same repository, on the same origin.
+  const second = installation();
+  const bare = join(first.root, "origin.git");
+  mkdirSync(second.root, { recursive: true });
+  const git = (...args) => {
+    const result = spawnSync("git", args, { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git("clone", "--quiet", bare, join(second.root, "checkout"));
+  githubOrigin(join(second.root, "checkout"), bare);
+  configured(second, api);
+  const record = () =>
+    git(
+      "--git-dir",
+      bare,
+      "for-each-ref",
+      "--format=%(objectname)",
+      "refs/factory/holder",
+    );
+  const named = () =>
+    JSON.parse(git("--git-dir", bare, "log", "-1", "--format=%B", record()));
+
+  let serving = serve(first);
+  await until(() => record(), "the first installation takes the repository");
+  const taken = record();
+  const refused = await serve(second).exit;
+  assert.equal(refused.code, 78, refused.stderr);
+  assert.match(
+    refused.stderr,
+    /is served by another installation: .*--take-over/,
+  );
+  assert.equal(record(), taken, "a refused installation changes nothing");
+
+  // A crash keeps the record; the same installation resumes on it.
+  serving.child.kill("SIGKILL");
+  await serving.exit;
+  serving = serve(first);
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  assert.equal(serving.child.exitCode, null, "the restart serves");
+  assert.equal(record(), taken);
+
+  // A deliberate take-over: the running holder stops at its next check.
+  const taker = serve(second, undefined, [], ["--take-over"]);
+  await until(() => record() && record() !== taken, "the take-over");
+  const holder = named();
+  const lost = await serving.exit;
+  assert.equal(lost.code, 78, lost.stderr);
+  assert.match(
+    lost.stderr,
+    new RegExp(`took drill/target over: .*${holder.installation}`),
+  );
+
+  // A clean stop frees the repository for anyone.
+  assert.equal((await stopped(taker)).code, 0);
+  assert.equal(record(), "");
+  const again = serve(first);
+  await until(() => record(), "the first installation takes it again");
+  await stopped(again);
+});

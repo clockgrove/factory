@@ -481,7 +481,6 @@ test("an item's question holds only that item and its dependents", async () => {
 
 test("an Objective question from an item step stops every item, once", async () => {
   const inst = installation();
-  configured(inst, `http://127.0.0.1:${await closedPort()}`);
   // A real checkout whose local Git configuration runs a program: Factory
   // refuses to run Git in it, which is about the checkout, not one item.
   const git = (...args) =>
@@ -510,6 +509,7 @@ test("an Objective question from an item step stops every item, once", async () 
   git("-C", checkout, "push", "--quiet", "origin", "HEAD:main");
   githubOrigin(checkout, origin);
   git("-C", checkout, "config", "filter.evil.clean", "cat");
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
   const item = (id, kind) => ({
     id,
     ...(kind ? { kind, children: [] } : {}),

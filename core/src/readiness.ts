@@ -6,6 +6,7 @@
  * fix. Logins are checked by presence: account access, billing and
  * entitlements are first known when a provider is called.
  */
+
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -13,6 +14,8 @@ import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
 import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
+import { currentHolder, holderText } from "./holder.js";
+import { installationPaths } from "./paths.js";
 import { networkToolOfCommand } from "./planning/facts.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { executable, sandboxStatus } from "./sandbox.js";
@@ -450,7 +453,43 @@ async function repositoryChecks(
       fix: "Check the GitHub CLI login's access, then repeat",
     });
   }
+  checks.push(await holderCheck(config));
   return checks;
+}
+
+/** Which installation serves the repository (holder.ts): one at a time. */
+async function holderCheck(config: CoreConfig): Promise<ReadinessCheck> {
+  const context = {
+    checkout: config.checkout,
+    repository: config.repository,
+    root: installationPaths(config.repository).root,
+  };
+  try {
+    const holder = await currentHolder(context);
+    if (!holder)
+      return ok(
+        "installation",
+        `No installation serves ${config.repository} yet; this one takes it when it starts`,
+      );
+    if (holder.mine)
+      return ok(
+        "installation",
+        `This installation serves ${config.repository} (since ${holder.record.since})`,
+      );
+    return {
+      name: "installation",
+      status: "warn",
+      detail: `${config.repository} is served by another installation: ${holderText(holder.record)}, so this one is refused when it starts`,
+      fix: `Stop that installation first; if it is stopped for good, take over with factory serve --repo ${config.repository} --take-over`,
+    };
+  } catch (error) {
+    return {
+      name: "installation",
+      status: "warn",
+      detail: `Can't read which installation serves ${config.repository}: ${errorMessage(error).split("\n")[0]}`,
+      fix: "Check the checkout's origin and the GitHub login, then repeat",
+    };
+  }
 }
 
 function validationEnvironment(

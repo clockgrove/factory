@@ -17,7 +17,7 @@ import {
 // a clean restart, must end cancelled and cleaned up, with the request
 // applied once and no stray files.
 // Crash points around GitHub effects: the hold, reply, note, reminder,
-// cancel and live status comments, the Work Item issues (create, edit, links, live
+// cancel and live status comments, the holder record, the Work Item issues (create, edit, links, live
 // comment, reopen, close, priority labels, card), the Objective's role
 // label and type, the role labels' create, the Status write, the plan, report and cancel comments, the
 // issue close, the PR close, the branch delete, a re-queue's move of the
@@ -127,6 +127,12 @@ const GITHUB_CRASH_POINTS = [
   "split:done-comment:after",
   "split:close:before",
   "split:close:after",
+  "holder:take:before",
+  "holder:take:after",
+  "holder:takeover:before",
+  "holder:takeover:after",
+  "holder:release:before",
+  "holder:release:after",
 ];
 for (const point of GITHUB_CRASH_POINTS)
   test(`crash at ${point}, restart, finish once`, {

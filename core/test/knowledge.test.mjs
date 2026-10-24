@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { githubOrigin } from "./helpers.mjs";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = "drill/target";
@@ -30,6 +31,16 @@ function installation() {
   const checkout = join(dir, "checkout");
   mkdirSync(checkout);
   spawnSync("git", ["init", "-q", checkout]);
+  spawnSync("git", ["init", "-q", "--bare", join(dir, "origin.git")]);
+  spawnSync("git", [
+    "-C",
+    checkout,
+    "remote",
+    "add",
+    "origin",
+    join(dir, "origin.git"),
+  ]);
+  githubOrigin(checkout, join(dir, "origin.git"), REPO);
   const config = join(dir, "factory.json");
   writeFileSync(
     config,

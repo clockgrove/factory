@@ -8,8 +8,8 @@ import type { Args, Command } from "./shared.js";
 
 export const spec: Command = {
   args: "",
-  flags: { provider: "value" },
-  help: "Run the service (the only writer of state); new Objectives use --provider NAME, else defaultProvider",
+  flags: { provider: "value", "take-over": "switch" },
+  help: "Run the service (the only writer of state); new Objectives use --provider NAME, else defaultProvider. One installation serves a repository: another one is refused, naming it; --take-over takes the repository from an installation that is stopped for good",
   run: ({ repository, paths, args }) => serveCommand(repository, paths, args),
 };
 
@@ -29,6 +29,7 @@ async function serveCommand(
       ...(args.flags.provider !== undefined
         ? { provider: args.flags.provider }
         : {}),
+      takeOver: args.flags["take-over"] !== undefined,
     });
   } catch (error) {
     if (!(error instanceof ConfigurationError)) throw error;

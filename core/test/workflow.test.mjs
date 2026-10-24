@@ -638,7 +638,7 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   // An Objective made only of QA qualifies the bytes it was planned on:
   // once the default branch has moved, it holds with replan and retry.
   const baseline = installation();
-  configured(baseline, `http://127.0.0.1:${await closedPort()}`);
+  mkdirSync(baseline.root, { recursive: true });
   const git = (cwd, ...args) => {
     const result = spawnSync(
       "git",
@@ -665,6 +665,7 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
     join(baseline.root, "checkout"),
     join(baseline.root, "origin.git"),
   );
+  configured(baseline, `http://127.0.0.1:${await closedPort()}`);
   seed(baseline, 53, "building", {
     done: {
       check: {},

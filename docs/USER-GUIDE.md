@@ -33,7 +33,8 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    - the tools on the PATH;
    - each provider's SDK and login;
    - GitHub access and push;
-   - merge commits, required checks, and a recommendation to require branches to be up to date.
+   - merge commits, required checks, and a recommendation to require branches to be up to date;
+   - which installation serves the repository, if any.
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
 
@@ -343,6 +344,18 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Playbook.** A curated playbook (`.factory/playbook.md` in the target, read at the base) goes into planning and work prompts.
 - **Repository memory.** When `planning.context` turns memory on, Factory records what each finished Objective learned. For an Objective with an Adaptive workflow, it shows the relevant records, as advisory data, to planning, workers and reviews.
 - **Dream.** `factory dream --preview` proposes a playbook from settled Objectives. `--file PATH --approve SHA256` or `--reject SHA256` decides it, and `--show` shows the playbook in force.
+
+## One installation per repository
+
+One installation serves a repository at a time, on one machine. Factory records which one in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
+
+To move to another machine, stop the first installation (a clean stop frees the repository), then start the second. If the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
+
+```sh
+factory serve --repo OWNER/NAME --take-over
+```
+
+Use it only for an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default).
 
 ## Upgrade
 

@@ -46,10 +46,10 @@ after(() => {
 });
 
 /** Start `factory serve`. Resolves with its exit when it ends. */
-export function serve(inst, crashAt, nodeArgs = []) {
+export function serve(inst, crashAt, nodeArgs = [], serveArgs = []) {
   const env = { ...inst.env };
   if (crashAt) env.FACTORY_CRASH_AT = crashAt;
-  const args = [...nodeArgs, CLI, "serve", "--repo", REPO];
+  const args = [...nodeArgs, CLI, "serve", "--repo", REPO, ...serveArgs];
   const child = spawn(process.execPath, args, {
     env,
     stdio: ["ignore", "ignore", "pipe"],
@@ -173,6 +173,20 @@ export function seed(inst, issue, status = "checking", fields = {}) {
 export function configured(inst, api, env = {}, fields = {}) {
   const config = join(inst.root, "config.json");
   mkdirSync(inst.root, { recursive: true });
+  // A checkout bound to github.com/REPO, served by a bare repository here,
+  // so the service can take the repository (holder.ts) with no GitHub.
+  const checkout = join(inst.root, "checkout");
+  if (!fields.checkout && !existsSync(checkout)) {
+    const bare = join(inst.root, "origin.git");
+    for (const args of [
+      ["init", "--quiet", "--bare", bare],
+      ["clone", "--quiet", bare, checkout],
+    ]) {
+      const result = spawnSync("git", args, { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    githubOrigin(checkout, bare);
+  }
   writeFileSync(
     config,
     JSON.stringify({
@@ -199,7 +213,11 @@ export function githubOrigin(checkout, bare, repository = REPO) {
   for (const args of [
     ["remote", "set-url", "origin", `ssh://git@github.com/${repository}.git`],
     ["config", "ssh.variant", "simple"],
-    ["config", "core.sshCommand", `sh -c 'exec git upload-pack "$0"' ${bare}`],
+    [
+      "config",
+      "core.sshCommand",
+      `sh -c 'case "$2" in git-receive-pack*) exec git receive-pack "$0";; *) exec git upload-pack "$0";; esac' ${bare}`,
+    ],
   ]) {
     const result = spawnSync("git", ["-C", checkout, ...args], {
       encoding: "utf8",

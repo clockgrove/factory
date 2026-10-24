@@ -405,7 +405,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           network: online,
           readOnlyFiles: linked.map((file) => file.path),
           ...(limit ? { outputLimit: limit } : {}),
-          onOutput: (_stream, text) => whole.append(text),
+          onOutput: (stream, text) => whole.append(text, stream),
           signal: input.signal,
           timeoutMs: input.commandTimeoutMs,
         });

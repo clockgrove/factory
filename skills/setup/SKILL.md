@@ -42,7 +42,7 @@ factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FI
 
 - **Create:** the first run creates the configuration (mode 0600). A repeat with the same options changes nothing (`changed: []`).
 - **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
-- **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
+- **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
 
 ## Check the result
 
@@ -54,6 +54,7 @@ Decide on the JSON, never the prose.
   - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, provider logins, GitHub access, merge commits and required checks.
   - Give the operator one checklist of every `blocked` item with its fix. Then repeat the same command.
 - `status: "refused"` (exit 1): nothing was saved. `problems` says why: a bad value, or a binding conflict.
+- **Installation:** a `warn` named `installation` means another installation serves the repository, and this one's service is refused when it starts. Ask the operator to stop that one (`factory setup --repo OWNER/NAME --stop` on its machine, or stop its `factory serve`). Only if it is gone for good, because its machine is gone or its state was wiped, and the operator says so: run `factory serve --repo OWNER/NAME --take-over` once in the foreground, stop it once it serves, then run `factory setup --repo OWNER/NAME --background`, since the background service can't take over. The new installation has no state for the Objectives the old one ran: `factory reset N` rebuilds each from GitHub, when the operator asks.
 - **Branch protection:** a `warn` here recommends "require branches to be up to date". Factory never changes repository settings; that's the operator's call.
 - **Capacity:** `capacity` compares the configured slots and memory with the host. It is advice only; keep the operator's limits unless they ask to change them.
 
@@ -61,7 +62,7 @@ For `--background`, the report's `status` is:
 
 - `running`: the unit is active and the service holds its lock;
 - `starting`: started, but not serving yet; check with `factory setup --check`;
-- `blocked`: nothing started; read `problems`, and `setup` when present.
+- `blocked`: nothing started; read `problems`, and `setup` when present. A service refused because another installation serves the repository is the `installation` warn above.
 
 The report also has `warnings`, such as lingering off, which means the service stops at logout.
 
@@ -79,4 +80,4 @@ An idle service with an empty queue makes no model calls.
 
 ## Queue work
 
-The operator queues an Objective by setting its card's `Factory` field to Queued; `factory run N` does the same and follows it. Only queue Objectives the operator named. Day-to-day operation is the `director` skill.
+The operator queues an Objective by setting its card's `Factory` field to Queued, or by asking to run it: `factory run N` queues it and follows it. Only queue Objectives the operator named. Day-to-day operation is the `director` skill.

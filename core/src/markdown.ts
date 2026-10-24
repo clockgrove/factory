@@ -105,3 +105,21 @@ export function inert(text: string): string {
 export function mark(issue: number, kind: string, id: string): string {
   return `<!-- factory:${issue}:${kind}:${id} -->`;
 }
+
+/**
+ * The run and accepted plan a pull request body or the plan comment
+ * belongs to (state.ts `runOf`, planning/plan.ts `ACCEPTED_AT`): `factory
+ * reset` restores only what names the run and plan it rebuilds (reset.ts).
+ */
+export function runMarks(run: string, plan: string): string {
+  return `<!-- factory-run:${run} --><!-- factory-plan:${plan} -->`;
+}
+
+/** The run and plan `runMarks` wrote at the end of `text`, if it ends with them. */
+export function readRunMarks(
+  text: string,
+): { run: string; plan: string } | undefined {
+  const found =
+    /<!-- factory-run:(\S+) --><!-- factory-plan:(\S+) -->\s*$/.exec(text);
+  return found ? { run: found[1]!, plan: found[2]! } : undefined;
+}

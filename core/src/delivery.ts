@@ -42,7 +42,7 @@ import {
   Unreadable,
 } from "./github.js";
 import { redact } from "./log.js";
-import { inert, prose } from "./markdown.js";
+import { inert, prose, runMarks } from "./markdown.js";
 import { lfsObjectsHoldingSecrets, lfsPushIfPointers } from "./media.js";
 import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
@@ -184,8 +184,12 @@ export interface PublishInput {
    * (`itemBranch(issue, predecessor)`) for a layer above it.
    */
   baseBranch?: string;
-  /** The Objective's run (state.ts runOf), marked in the PR body for `factory reset`. */
-  run?: string;
+  /**
+   * The Objective's run (state.ts runOf) and accepted plan
+   * (planning/plan.ts ACCEPTED_AT), marked in the PR body for `factory
+   * reset` (markdown.ts `runMarks`).
+   */
+  run?: { run: string; plan: string };
   /** The Work Item's issue (tracking.ts), once it exists: the PR body closes it on merge. */
   itemIssue?: number;
 }
@@ -684,7 +688,7 @@ async function pullRequestBody(
   parts.push(
     `Candidate commit: ${code(input.commit)}\n\nCandidate tree: ${code(input.tree)}`,
     pullMarker(input.issue, input.item.id),
-    ...(input.run ? [`<!-- factory-run:${input.run} -->`] : []),
+    ...(input.run ? [runMarks(input.run.run, input.run.plan)] : []),
   );
   return parts.join("\n\n");
 }

@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
+import { isObject } from "./checked.js";
 import { displayTime, redactDeep } from "./display.js";
 import { type LogEvent, logFiles, readNew } from "./log.js";
 import { code, prose } from "./markdown.js";
 import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
+import type { Retirement } from "./planning/types.js";
+import type { CriterionDecision } from "./review/result.js";
 import { answerForm, type ObjectiveState } from "./state.js";
 import type { ObjectiveView } from "./status.js";
 
@@ -13,7 +16,9 @@ import type { ObjectiveView } from "./status.js";
  * `factory status` model (status.ts statusOf), redacted, plus what the run
  * log adds: model calls so far and each running Work Item's latest
  * `worker-activity` event. github-sync.ts writes it in the background;
- * nothing here can stop a step.
+ * nothing here can stop a step. Its last line is the run's record
+ * (`StatusRecord`): what `factory reset` rebuilds and GitHub holds nowhere
+ * else.
  */
 
 /** At most one edit per Objective this often. */
@@ -41,6 +46,19 @@ export interface ProgressInput {
   }[];
   /** When this run was admitted. */
   startedAt?: string;
+  /** The run's record, written as data at the end (`StatusRecord`). */
+  record?: StatusRecord;
+}
+
+/**
+ * The operator's criterion decisions (`accept <n>`, `refuse <n>`) and
+ * final validation command retirements (`retire-command <n>`) under the plan accepted
+ * now (planning/plan.ts `decisionsOf`, `currentPlan`): the status comment
+ * carries them as data, so `factory reset` rebuilds them (reset.ts).
+ */
+export interface StatusRecord {
+  decisions: CriterionDecision[];
+  retired: Retirement[];
 }
 
 /** What the comment includes: `questions` is `progress.includeQuestions`. */
@@ -142,11 +160,84 @@ export function statusComment(
   now: number,
 ): { body: string; hash: string } {
   const shown = redactDeep(input, secrets);
-  const stable = render(shown, options, now, false);
+  const record = shown.record ? recordLine(shown.record) : "";
+  const stable = render(shown, options, now, false, record.length);
   return {
-    body: `${marker}\n${render(shown, options, now, true)}`,
-    hash: createHash("sha256").update(stable).digest("hex"),
+    body: `${marker}\n${render(shown, options, now, true, record.length)}${record}`,
+    hash: createHash("sha256")
+      .update(stable + record)
+      .digest("hex"),
   };
+}
+
+const RECORD_OPEN = "\n\n<!-- factory-record:";
+const RECORD_CLOSE = " -->";
+/** The record's most JSON: past it, the oldest entries are left out. */
+const RECORD_LIMIT = 16_000;
+
+/**
+ * The record as the comment's last line: JSON in a hidden comment, with
+ * `<` and `>` escaped so no text in it can close the comment early. The
+ * newest entries are kept when it is too long.
+ */
+function recordLine(record: StatusRecord): string {
+  const decisions = [...record.decisions];
+  const retired = [...record.retired];
+  for (;;) {
+    const json = JSON.stringify({ decisions, retired })
+      .replace(/</g, "\\u003c")
+      .replace(/>/g, "\\u003e");
+    if (json.length <= RECORD_LIMIT || (!decisions.length && !retired.length))
+      return `${RECORD_OPEN}${json}${RECORD_CLOSE}`;
+    const oldest =
+      !retired.length ||
+      (decisions.length && decisions[0]!.at <= retired[0]!.at)
+        ? decisions
+        : retired;
+    oldest.shift();
+  }
+}
+
+/**
+ * The record a status comment's body ends with, checked: undefined when
+ * it has none or it isn't the shape Factory writes. Anyone who can edit
+ * the comment can change it, so it is data, never authority.
+ */
+export function statusRecord(body: string): StatusRecord | undefined {
+  const at = body.lastIndexOf(RECORD_OPEN);
+  if (at < 0 || !body.endsWith(RECORD_CLOSE)) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(
+      body.slice(at + RECORD_OPEN.length, -RECORD_CLOSE.length),
+    );
+  } catch {
+    return undefined;
+  }
+  if (!isObject(value)) return undefined;
+  const strings = (entry: unknown, required: string[], optional: string[]) =>
+    isObject(entry) &&
+    required.every((key) => typeof entry[key] === "string") &&
+    optional.every(
+      (key) => entry[key] === undefined || typeof entry[key] === "string",
+    );
+  const { decisions, retired } = value;
+  return Array.isArray(decisions) &&
+    Array.isArray(retired) &&
+    decisions.every(
+      (entry) =>
+        strings(
+          entry,
+          ["criterion", "reason", "by", "at", "tree", "holdId", "plan"],
+          ["itemId"],
+        ) &&
+        (entry.outcome === "accept" || entry.outcome === "refuse"),
+    ) &&
+    retired.every((entry) =>
+      strings(entry, ["command", "reason", "by", "at", "holdId", "plan"], []),
+    )
+    ? { decisions, retired }
+    : undefined;
 }
 
 function render(
@@ -154,6 +245,8 @@ function render(
   options: ProgressOptions,
   now: number,
   full: boolean,
+  /** Room the record takes after the body. */
+  reserved: number,
 ): string {
   const { view } = input;
   const more = (left: number, what: string) =>
@@ -266,7 +359,7 @@ function render(
       : []),
   ];
   // Whole lines up to the limit, then where the rest is, then the details.
-  const room = MAX_BODY - details.join("\n").length - 200;
+  const room = MAX_BODY - details.join("\n").length - reserved - 200;
   let size = 0;
   const kept: string[] = [];
   for (const line of lines) {

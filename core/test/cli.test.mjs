@@ -290,7 +290,10 @@ test("the run log: tail, follow, and status reads its end", async () => {
   watching.stdout.on("data", (chunk) => {
     view += chunk;
   });
-  await until(() => /#54 - \S+(?: #\d+)? (hold|cancelled|done)/.test(view), "the rows");
+  await until(
+    () => /#54 - \S+(?: #\d+)? (hold|cancelled|done)/.test(view),
+    "the rows",
+  );
   const run = readdirSync(join(inst.logs, "54")).sort().at(-1);
   // Item a's validation failed 3 minutes ago; b's worker went quiet 20
   // minutes ago without reporting its context.

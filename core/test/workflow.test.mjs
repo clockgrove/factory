@@ -19,10 +19,12 @@ import {
   configured,
   githubOrigin,
   installation,
+  item,
   offered,
   refusal,
   seed,
   serve,
+  silentServer,
   stateOf,
   status,
   stopped,
@@ -670,5 +672,166 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
     stateOf(inst, 71).holds[0].question,
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
+  await stopped(service);
+});
+
+test("overlapping owned paths take turns while busy, after an amendment, until the earlier Objective finishes; amendments plan meanwhile", async () => {
+  const inst = installation();
+  // GitHub never answers, so a step that reads it stays running. One
+  // planning revision: #74's accepted amendment spent it, so a second
+  // amendment's planning asks before any planner runs.
+  configured(
+    inst,
+    `http://127.0.0.1:${await silentServer()}`,
+    {},
+    { autonomy: { allowances: { planningRevisions: 1 } } },
+  );
+  const at = new Date().toISOString();
+  const seeded = new Date(Date.parse(at) - 60_000).toISOString();
+  // #73 owns src/: its one item merged, and its final validation asks.
+  seed(inst, 73, "holding", {
+    done: {
+      check: {},
+      plan: {
+        items: [item("a", { ownedPaths: ["src/"] })],
+        coverage: [],
+        finalCommands: [],
+      },
+      "item:a:merge": { mergeSha: "a".repeat(40) },
+    },
+    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
+    holds: [
+      {
+        id: `final@${at}`,
+        step: "final",
+        question: "Final validation failed.",
+        options: offered("retry", "cancel"),
+        askedAt: at,
+      },
+    ],
+  });
+  // #74's plan, accepted later, owned only lib/; an accepted amendment
+  // added r, which owns src/r.ts. Paused, its interrupted ci on p resumes,
+  // so it is busy.
+  const accepted = "2026-01-02T00:00:00.000Z";
+  const plan = { items: [item("p", { ownedPaths: ["lib/p.ts"] })] };
+  seed(inst, 74, "building", {
+    control: { mode: "paused", by: "kirk", at },
+    done: {
+      check: {},
+      plan,
+      "item:p:work": {},
+      "item:p:validate": {},
+      "item:p:review": {},
+      "item:p:publish": { pr: 7, head: "b".repeat(40), merged: false },
+      "amend:x": {
+        plan: {
+          items: [...plan.items, item("r", { ownedPaths: ["src/r.ts"] })],
+        },
+      },
+    },
+    kept: {
+      "plan:acceptedAt": accepted,
+      "amend:x:proposal": {
+        id: "x",
+        actor: "kirk",
+        at: accepted,
+        plan: accepted,
+        discovery: {
+          scope: "in-scope",
+          reason: "r is needed",
+          evidence: [],
+          ownership: ["src/r.ts"],
+          acceptance: [],
+          dependencies: [],
+        },
+      },
+    },
+    attempts: { "item:p:ci": { startedAt: at, run: "dead" } },
+    // r's work retried a minute ago and is due: the wait stops it.
+    retries: {
+      "item:r:work": {
+        count: 0,
+        attempts: 1,
+        since: seeded,
+        nextAt: at,
+        lastError: "seeded",
+      },
+    },
+  });
+  const tried = () => {
+    const state = stateOf(inst, 74);
+    return [
+      ...Object.keys(state.attempts),
+      ...Object.entries(state.retries)
+        .filter(([, retry]) => retry.lastError !== "seeded")
+        .map(([key]) => key),
+      ...state.holds.map((hold) => hold.step),
+    ];
+  };
+  const service = serve(inst);
+  await until(
+    () => stateOf(inst, 74).attempts["item:p:ci"]?.run !== "dead",
+    "p's ci resumes",
+  );
+  assert.equal(cli(inst, "resume", "74").code, 0);
+  await until(() => !stateOf(inst, 74).control, "#74 resumed");
+  // Busy, with #73 in final validation: r waits its turn.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.deepEqual(tried(), ["item:p:ci"]);
+  const waitsOn = () =>
+    status(inst).objectives.find((each) => each.issue === 74).waitsOn;
+  assert.deepEqual(waitsOn(), { paths: 73 });
+  // Planning never waits: a proposed amendment's step starts meanwhile.
+  const file = join(inst.root, "amendment.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      scope: "in-scope",
+      reason: "p needs a helper",
+      evidence: ["lib/p.ts calls lib/helper.ts, which no item owns"],
+      ownership: ["lib/helper.ts"],
+      acceptance: ["lib/helper.ts exports help"],
+      dependencies: [],
+    }),
+  );
+  assert.equal(cli(inst, "propose-amendment", "74", "--file", file).code, 0);
+  const [id] = Object.keys(stateOf(inst, 74).kept)
+    .map((key) => /^amend:(.+):proposal$/.exec(key)?.[1])
+    .filter((each) => each && each !== "x");
+  const asked = async (step) => {
+    await until(
+      () => stateOf(inst, 74).holds.some((hold) => hold.step === step),
+      `${step} asks`,
+    );
+    assert.deepEqual(waitsOn(), { paths: 73 });
+    return stateOf(inst, 74).holds.find((hold) => hold.step === step).id;
+  };
+  let question = await asked(`amend:${id}:plan`);
+  assert.equal(
+    cli(inst, "answer", "74", "refuse", "--question", question).code,
+    0,
+  );
+  question = await asked(`amend:${id}:continue`);
+  assert.equal(
+    cli(inst, "answer", "74", "continue", "--question", question).code,
+    0,
+  );
+  await until(
+    () => stateOf(inst, 74).done[`amend:${id}:continue`],
+    "the refused amendment settles",
+  );
+  // r still waits its turn.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.ok(!tried().some((key) => key.startsWith("item:r:")), tried());
+  assert.deepEqual(waitsOn(), { paths: 73 });
+  // Once #73 has finished, r builds, and its retry clock doesn't count
+  // the wait, nor again the amendment's questions asked during it.
+  assert.equal(cli(inst, "cancel", "73").code, 0);
+  await until(() => tried().includes("item:r:work"), "r's work starts");
+  const since = Date.parse(stateOf(inst, 74).retries["item:r:work"].since);
+  assert.ok(since > Date.parse(seeded), "the wait is not counted");
+  assert.ok(since <= Date.now() - 60_000, "no time is counted twice");
+  assert.equal(cli(inst, "cancel", "74").code, 0);
   await stopped(service);
 });

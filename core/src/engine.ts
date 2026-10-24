@@ -545,8 +545,8 @@ const REVALIDATE = "revalidate";
  * set by the question's step): `adopt` freezes only that one.
  */
 export const ADOPTS = "config:adopts";
-const REPLAN = "replan";
-const FRESH = "fresh";
+export const REPLAN = "replan";
+export const FRESH = "fresh";
 /** The most bytes an answer's text carries, however it came (a GitHub comment's limit). */
 export const MAX_ANSWER_TEXT = 65_536;
 
@@ -579,6 +579,8 @@ export class ObjectiveRunner {
   private pending?: Promise<void>;
   /** Effects outside the state, run only once the change is saved. */
   private afterSave: (() => void)[] = [];
+  /** The service's wait (`waitOn`): since when, and the steps it stops. */
+  private imposed?: { since: number; stops: (key: string) => boolean };
 
   constructor(
     public state: ObjectiveState,
@@ -1684,35 +1686,74 @@ export class ObjectiveRunner {
    * the time of the steps it stopped: a step can't run while a question
    * that stops it is open, so its wait clocks (`since`, a granted wait)
    * pause from when it was due, or the question was asked if later, until
-   * now, or until another open question that stops it too was asked, if
-   * earlier (that one's close pauses the rest). Only steps the question
-   * stopped pause: an item's question leaves other items' clocks running.
-   * Budgets and the status note count only time a step could run.
+   * now, or until another open question that stops it too was asked, or
+   * the service's wait (`waitOn`) began, if earlier (that one's end pauses
+   * the rest). Only steps the question stopped pause: an item's question
+   * leaves other items' clocks running, and a step with an open attempt
+   * was running, not stopped. Budgets and the status note count only time
+   * a step could run.
    * A human gate's `since` stays: its reminder (github-sync note) is keyed
    * to the original start, so moving it would post the reminder again,
    * and its question is timed from it (a granted `wait` puts it off).
    */
   private close(hold: Hold): void {
+    this.state.holds = this.state.holds.filter((open) => open !== hold);
+    this.pause(
+      Date.parse(hold.askedAt),
+      (key) => key !== hold.step && this.stops(hold, key),
+    );
+  }
+
+  /**
+   * The service imposes a wait (service.ts: another Objective's owned
+   * paths) on the steps `stops` names, from the first call until `waited`.
+   * It is timed in memory, so a restart counts the wait before it.
+   */
+  waitOn(stops: (key: string) => boolean): void {
+    this.imposed ??= { since: this.now().getTime(), stops };
+  }
+
+  /**
+   * The service's wait has ended: the steps it stopped pause their wait
+   * clocks for it, as a closed question's do.
+   */
+  waited(): void {
+    const imposed = this.imposed;
+    if (!imposed) return;
+    this.imposed = undefined;
+    this.transact(() => this.pause(imposed.since, imposed.stops));
+  }
+
+  /** Whether an open question or the service's wait stops step `key`. */
+  blocked(key: string): boolean {
+    return this.heldBy(key) !== undefined || !!this.imposed?.stops(key);
+  }
+
+  /**
+   * Pause the wait clocks of the `stopped` steps (but a human gate's, and
+   * one with an open attempt) from `from`, or when each was due if later,
+   * until now, or until an open question or the service's wait that stops
+   * it too began, if earlier.
+   */
+  private pause(from: number, stopped: (key: string) => boolean): void {
     const now = this.now().getTime();
-    const rest = this.state.holds.filter((open) => open !== hold);
     for (const [key, retry] of Object.entries(this.state.retries)) {
-      if (key === hold.step || retry.wait?.kind === "gate") continue;
-      if (!this.stops(hold, key)) continue;
+      if (retry.wait?.kind === "gate" || this.state.attempts[key]) continue;
+      if (!stopped(key)) continue;
       const until = Math.min(
         now,
-        ...rest
+        ...this.state.holds
           .filter((open) => this.stops(open, key))
           .map((open) => Date.parse(open.askedAt)),
+        ...(this.imposed?.stops(key) ? [this.imposed.since] : []),
       );
-      const paused =
-        until - Math.max(Date.parse(hold.askedAt), Date.parse(retry.nextAt));
+      const paused = until - Math.max(from, Date.parse(retry.nextAt));
       if (!(paused > 0)) continue;
       const later = (at: string) =>
         new Date(Date.parse(at) + paused).toISOString();
       retry.since = later(retry.since);
       if (retry.grantedUntil) retry.grantedUntil = later(retry.grantedUntil);
     }
-    this.state.holds = rest;
   }
 
   /**

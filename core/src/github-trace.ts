@@ -146,23 +146,23 @@ export function statusCategory(
   return status >= 500 ? "server" : "client";
 }
 
-/** Keep one request of the current scope for its `github-request` event. */
+/** Keep one request of the current scope for its `github-request` event; the kept record, none past MAX_NOTED. */
 export function note(
   counted: Transport,
   request: Omit<NotedRequest, "route"> & { path: string },
   response: Response | undefined,
-): void {
+): NotedRequest | undefined {
   counted.requests ??= [];
   if (counted.requests.length >= MAX_NOTED) {
     counted.unnoted = (counted.unnoted ?? 0) + 1;
-    return;
+    return undefined;
   }
   const { path, ...rest } = request;
   const header = (name: string) => response?.headers.get(name) ?? undefined;
   const retryAfter = Number(header("retry-after"));
   const reset = Number(header("x-ratelimit-reset"));
   const requestId = header("x-github-request-id");
-  counted.requests.push({
+  const noted: NotedRequest = {
     ...rest,
     route: routeOf(path),
     ...(requestId ? { requestId: requestId.slice(0, 80) } : {}),
@@ -170,7 +170,9 @@ export function note(
     ...(reset > 0 && (rest.rateLimited || response?.status === 429)
       ? { rateLimitReset: new Date(reset * 1000).toISOString() }
       : {}),
-  });
+  };
+  counted.requests.push(noted);
+  return noted;
 }
 
 /** A scope's traced requests as `github-request` events, its unnoted count as one more. */

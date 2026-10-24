@@ -992,7 +992,7 @@ async function judge(
       kind: "retry",
       reason: gate ? `Waiting on ${gate}` : waiting,
       afterMs: CI_POLL_MS,
-      ...(gate ? { wait: { kind: "gate", gate } } : {}),
+      ...(gate ? { wait: { kind: "gate", gate, human: true } } : {}),
       ...(settle ? { holdAfter: settle } : {}),
     };
   }
@@ -1247,6 +1247,7 @@ async function unregisteredChecks(
           wait: {
             kind: "gate",
             gate: `an environment approval for Actions workflow runs on PR #${pr}`,
+            human: true,
           },
         }
       : {

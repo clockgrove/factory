@@ -105,6 +105,11 @@ export interface Hold {
   shownAt?: string;
   /** The comment shows the short form `/factory <answer>` (it was the one open question). */
   shortForm?: boolean;
+  /**
+   * A human gate's question: its step keeps polling while it is open, and
+   * it closes by itself once the step no longer waits on the gate.
+   */
+  polls?: true;
 }
 
 /**
@@ -152,8 +157,12 @@ export type Wait =
   | { kind: "error" }
   /** A limit that resets at `at` (unknown when absent), from `provider` when a model provider set it. */
   | { kind: "reset"; at?: string; provider?: string }
-  /** A person outside Factory: an environment approval, a required review. */
-  | { kind: "gate"; gate: string };
+  /**
+   * Something outside Factory: a person (`human`: an environment approval,
+   * a required review), or another Objective (a predecessor, a split's
+   * children). Only a person's gate asks after a while.
+   */
+  | { kind: "gate"; gate: string; human?: true };
 
 export interface Retry {
   /** Consecutive escaped errors and missed deadlines; any other outcome resets it. */

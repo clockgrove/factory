@@ -1,3 +1,4 @@
+import { itemBranch } from "./delivery.js";
 import {
   CANCEL_CLEANUP,
   errored,
@@ -28,6 +29,7 @@ import {
 import { PlannerError, providerOutcome } from "./providers/planner.js";
 import type { Answer, ObjectiveState, ObjectiveStatus } from "./state.js";
 import { errorMessage } from "./text.js";
+import { fact } from "./work/facts.js";
 import { splitSteps, waitingOnChildren } from "./work/split.js";
 import {
   type BuildDeps,
@@ -39,6 +41,7 @@ import {
   freshOutcome,
   layersBelow,
   overrunOffers,
+  type PublishResult,
   RERUN,
   RERUN_CLEANUP,
   replanOutcome,
@@ -109,6 +112,28 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
 
     outcomeOf: (error, step) =>
       errorOutcome(error, deps?.config.repository ?? "", step.redo),
+
+    // Saved within GitHub's lag window: the PRs and pushes it records may
+    // not show yet (github.ts `GitHub.made`).
+    resumed: (state) => {
+      if (!deps) return;
+      const at = Date.parse(state.updatedAt);
+      const repository = `/repos/${deps.config.repository}`;
+      for (const [key, result] of Object.entries(state.done)) {
+        const item = /^item:([^:]+):publish$/.exec(key)?.[1];
+        const published = result as Partial<PublishResult> | undefined;
+        if (!item || typeof published?.pr !== "number") continue;
+        deps.github.made(`${repository}/pulls/${published.pr}`, at);
+        deps.github.made(`${repository}/issues/${published.pr}`, at);
+      }
+      for (const key of Object.keys(state.kept)) {
+        const item = /^item:([^:]+):/.exec(key)?.[1];
+        const pushed = item ? fact(state, "pushed", item) : undefined;
+        if (!item || !Array.isArray(pushed) || !pushed.length) continue;
+        deps.github.made(pushed.at(-1)!, at);
+        deps.github.made(itemBranch(state.issue, item), at);
+      }
+    },
 
     replannable: (state, key) =>
       currentPlan(state)

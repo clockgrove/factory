@@ -506,29 +506,41 @@ export class GitHub {
   }
 
   /**
-   * Factory just made `what`: an API path (a created issue, PR or comment;
-   * what is under it counts too), or a pushed branch or commit (any path
-   * that names it). For FRESH_MS after, a 403 or 404 there is GitHub's lag,
-   * a TransientError, never a missing permission or resource.
+   * Factory made `what` at `at` (now, or a saved time on a restart): an API
+   * path (a created issue, PR or comment; what is under it counts too), or
+   * a pushed branch or commit (a path naming it as a whole segment, or as
+   * one side of a compare). For FRESH_MS after, a 403 or 404 there is
+   * GitHub's lag, a TransientError, never a missing permission or resource.
    */
-  made(what: string): void {
+  made(what: string, at = Date.now()): void {
     const now = Date.now();
-    for (const [mark, at] of this.fresh)
-      if (now - at >= FRESH_MS) this.fresh.delete(mark);
-    this.fresh.set(what, now);
+    for (const [mark, when] of this.fresh)
+      if (now - when >= FRESH_MS) this.fresh.delete(mark);
+    if (now - at < FRESH_MS)
+      this.fresh.set(what, Math.max(at, this.fresh.get(what) ?? at));
   }
 
   /** Whether `path` is under, or names, something Factory made within FRESH_MS. */
   private isFresh(path: string): boolean {
     const now = Date.now();
-    const asked = path.toLowerCase();
+    let decoded = path;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      // Not encoded: compared as it is.
+    }
+    const asked = decoded.toLowerCase().split("?")[0]!;
     for (const [mark, at] of this.fresh) {
       if (now - at >= FRESH_MS) continue;
       const made = mark.toLowerCase();
-      const under =
-        asked.startsWith(made) &&
-        ["", "/", "?"].includes(asked[made.length] ?? "");
-      if (made.startsWith("/") ? under : asked.includes(made)) return true;
+      if (made.startsWith("/")) {
+        if (asked === made || asked.startsWith(`${made}/`)) return true;
+        continue;
+      }
+      const named = new RegExp(
+        `(?:^|/|\\.\\.\\.)${made.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|/|\\.\\.\\.)`,
+      );
+      if (named.test(asked)) return true;
     }
     return false;
   }

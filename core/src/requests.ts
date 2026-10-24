@@ -83,7 +83,7 @@ export type QueueMode = "running" | "paused" | "draining";
 export type RefusalCode =
   /** `propose-amendment` or `decline-discovery` wasn't taken: the message names each problem and what would pass. */
   | "amendment_refused"
-  /** `run` names a cancelled Objective whose cleanup hasn't settled yet: run it again once it has, or `factory reset N`. */
+  /** `run` names a finished Objective whose last step (cancel's cleanup, or a done run's ending step) hasn't settled yet: run it again once it has, or `factory reset N`. */
   | "cleanup_running"
   /** `run --deadline` passed before the Objective was admitted: run again with a new deadline. */
   | "deadline_passed"
@@ -204,7 +204,7 @@ export type Pending =
   | { file: string; id: string; stored: StoredRequest; problem?: undefined }
   | { file: string; id: string; stored?: undefined; problem: string };
 
-/** Pending requests, oldest first. */
+/** Pending requests, oldest first. A file that can't be read now (EIO, EACCES) is left for the next tick. */
 export function pendingRequests(dir: string): Pending[] {
   let names: string[];
   try {
@@ -215,19 +215,27 @@ export function pendingRequests(dir: string): Pending[] {
   return names
     .filter((name) => name.endsWith(".json") && !name.startsWith("."))
     .sort()
-    .map((name): Pending => {
+    .flatMap((name): Pending[] => {
       const file = join(dir, name);
       const id = name.slice(0, -".json".length);
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        return [];
+      }
       let value: unknown;
       try {
-        value = JSON.parse(readFileSync(file, "utf8"));
+        value = JSON.parse(text);
       } catch (error) {
-        return { file, id, problem: `it doesn't parse: ${String(error)}` };
+        return [{ file, id, problem: `it doesn't parse: ${String(error)}` }];
       }
       const problem = requestProblem(value, id);
-      return problem
-        ? { file, id, problem }
-        : { file, id, stored: value as StoredRequest };
+      return [
+        problem
+          ? { file, id, problem }
+          : { file, id, stored: value as StoredRequest },
+      ];
     });
 }
 

@@ -16,11 +16,12 @@ import {
   until,
 } from "./helpers.mjs";
 
-test("a cleanup that keeps failing settles after five tries, naming what it left; a run before then is refused", async () => {
+test("a cleanup that keeps failing settles after five tries and the wait budget, naming what it left; a run before then is refused", async () => {
   const inst = installation();
   // GitHub can't be reached, so every cleanup attempt fails.
   configured(inst, `http://127.0.0.1:${await closedPort()}`, {
     FACTORY_BACKOFF_MS: "300",
+    FACTORY_WAIT_MS: "2000",
   });
   seed(inst, 13);
   const service = serve(inst);

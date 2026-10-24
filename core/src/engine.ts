@@ -74,6 +74,8 @@ export type Outcome =
       keep?: Record<string, unknown>;
       /** A repair the question's evidence blames on another Work Item: it counts against no allowance (as a repair's `free`). */
       free?: { target: string; repair: number };
+      /** A human gate's question: the step polls on while it is open (`Hold.polls`). */
+      polls?: true;
     }
   /**
    * The whole state is replaced (`factory reset`'s rebuild step, reset.ts):
@@ -250,7 +252,7 @@ export function objectiveWide<T extends Outcome>(outcome: T): T {
 /** The step that cleans up after cancel (work/finish.ts `cancelCleanupStep`). */
 export const CANCEL_CLEANUP = "cancel:cleanup";
 
-/** Failures in a row after which cleanup after the end settles, leaving what it couldn't do. */
+/** Failures in a row (over at least `maxWaitMs`) after which cleanup after the end settles, leaving what it couldn't do. */
 export const MAX_CLEANUP_FAILURES = 5;
 
 /**
@@ -289,8 +291,9 @@ export interface Step {
   readonly resource?: HostResource;
   /**
    * Cleanup after the end (cancel's): it never asks. Any outcome but
-   * `done` retries in the background with the usual backoff, up to
-   * MAX_CLEANUP_FAILURES; then it is done with what it left (`Left`).
+   * `done` retries in the background with the usual backoff, until
+   * MAX_CLEANUP_FAILURES over at least `maxWaitMs`; then it is done with
+   * what it left (`Left`).
    */
   readonly neverAsks?: true;
   /**
@@ -314,6 +317,8 @@ export interface Workflow {
    * holds (docs/reference/steps.md#Waits). Absent, or undefined: an error (`errored`).
    */
   outcomeOf?(error: unknown, step: Step): Outcome | undefined;
+  /** The service read this state from disk (a restart): what it made just before may still lag on GitHub. */
+  resumed?(state: ObjectiveState): void;
   /**
    * Whether `replan` can answer a question of step `key`: the engine then
    * offers it on the step's failures, and applies `replan` itself.
@@ -600,10 +605,13 @@ export class ObjectiveRunner {
    * The open question that stops `key`: the Objective's, or one on the
    * step's Work Item or on a native-stack layer below it (`upstream`).
    * An item's dependents aren't runnable until it merges, so they wait
-   * with it too.
+   * with it too. A human gate's question doesn't stop its own step, which
+   * polls on (`Hold.polls`).
    */
   heldBy(key: string): Hold | undefined {
-    return this.state.holds.find((hold) => this.stops(hold, key));
+    return this.state.holds.find(
+      (hold) => !(hold.polls && hold.step === key) && this.stops(hold, key),
+    );
   }
 
   /** Whether an open question stops step `key`. */
@@ -648,27 +656,39 @@ export class ObjectiveRunner {
   }
 
   /**
-   * Run `change` against the state and save it. If anything throws, the
-   * in-memory state goes back to what is on disk, so memory never claims
-   * what a save didn't keep.
+   * Run `change` against the state and save it. If the change or the save
+   * throws, the in-memory state goes back to what is on disk, so memory
+   * never claims what a save didn't keep. Effects after the save run once
+   * it is saved; one that throws is logged.
    */
   transact<T>(change: () => T): T {
     if (this.stopped)
       throw new Error(`#${this.state.issue}'s run was replaced`);
     const before = structuredClone(this.state);
     this.afterSave = [];
+    let result: T;
     try {
-      const result = change();
+      result = change();
       this.save();
-      const effects = this.afterSave;
-      this.afterSave = [];
-      for (const effect of effects) effect();
-      return result;
     } catch (error) {
       this.state = before;
       this.afterSave = [];
       throw error;
     }
+    // Saved: the change stands whatever an effect after it does, so a
+    // failed effect is logged, never thrown as if nothing changed.
+    const effects = this.afterSave;
+    this.afterSave = [];
+    for (const effect of effects)
+      try {
+        effect();
+      } catch (error) {
+        this.log.write(this.state.issue, {
+          event: "after-save-failed",
+          error: String(error),
+        });
+      }
+    return result;
   }
 
   /**
@@ -958,6 +978,13 @@ export class ObjectiveRunner {
     const state = this.state;
     const now = this.now();
     delete state.attempts[key];
+    // A human gate's question closes by itself once its step no longer
+    // waits on a human gate: the gate cleared, or something else came.
+    if (!(outcome.kind === "retry" && outcome.wait?.kind === "gate"))
+      for (const polled of state.holds.filter(
+        (open) => open.polls && open.step === key,
+      ))
+        this.close(polled);
     // Saved with the outcome, so a death right after still counts as progress.
     state.finishedRun = this.run.id;
     if ("keep" in outcome && outcome.keep) {
@@ -969,22 +996,32 @@ export class ObjectiveRunner {
     }
     if (neverAsks && outcome.kind !== "done") {
       // Cleanup after the end never asks and never blocks: it retries in
-      // the background with the usual backoff, and settles after
-      // MAX_CLEANUP_FAILURES, recording what it left (`Left`), so the
-      // Objective settles and can be queued again.
+      // the background with the usual backoff (until a rate limit's reset,
+      // when one says), and settles only after MAX_CLEANUP_FAILURES and
+      // `maxWaitMs` since its first failure, recording what it left
+      // (`Left`), so the Objective settles and can be queued again. A
+      // short outage or a rate limit never settles it.
       const previous = state.retries[key];
       const attempts = (previous?.attempts ?? 0) + 1;
+      const since = previous?.since ?? now.toISOString();
       const backoff = Math.min(
         this.limits.baseBackoffMs * 2 ** (attempts - 1),
         this.limits.maxBackoffMs,
       );
+      const resetAt =
+        outcome.kind === "retry" && outcome.wait?.kind === "reset"
+          ? Date.parse(outcome.wait.at ?? "")
+          : Number.NaN;
       const lastError =
         "reason" in outcome
           ? outcome.reason
           : "question" in outcome
             ? outcome.question
             : outcome.finding;
-      if (attempts >= MAX_CLEANUP_FAILURES) {
+      if (
+        attempts >= MAX_CLEANUP_FAILURES &&
+        now.getTime() - Date.parse(since) >= this.limits.maxWaitMs
+      ) {
         const left: Left = { left: lastError, failures: attempts };
         state.done[key] = left;
         delete state.retries[key];
@@ -999,9 +1036,17 @@ export class ObjectiveRunner {
       state.retries[key] = {
         count: (previous?.count ?? 0) + 1,
         attempts,
-        since: previous?.since ?? now.toISOString(),
-        nextAt: new Date(now.getTime() + backoff).toISOString(),
+        since,
+        nextAt: new Date(
+          Math.max(
+            now.getTime() + backoff,
+            Number.isFinite(resetAt) ? resetAt : 0,
+          ),
+        ).toISOString(),
         lastError,
+        ...(outcome.kind === "retry" && outcome.wait
+          ? { wait: outcome.wait }
+          : {}),
       };
       return;
     }
@@ -1150,20 +1195,33 @@ export class ObjectiveRunner {
       // A human gate (an approval, a required review) isn't Factory's to
       // time out: the display shows it, a reminder follows after
       // `remindAfterMs`, and as long again after that it asks, so the
-      // wait shows as needing a person.
+      // wait shows as needing a person. The step polls on meanwhile, and
+      // the question closes once the gate clears (`Hold.polls`). Another
+      // Objective's gate (a predecessor, a split's children) never asks.
       const waited = now - Date.parse(since);
-      if (!granted && waited >= 2 * this.limits.remindAfterMs)
-        question = hold(
-          `Step ${key} has been waiting on ${wait.gate} since ${since}, for more than ${hours(waited)}. Factory carries on by itself once that is done.\n\n\`${WAIT}\` keeps waiting for another ${hours(this.limits.remindAfterMs)}, then asks again; or cancel.`,
-          [
-            {
-              answer: WAIT,
-              family: "wait",
-              consequence: `Keeps waiting for another ${hours(this.limits.remindAfterMs)}, then asks again.`,
-            },
-            "cancel",
-          ],
-        );
+      const asking = state.holds.some(
+        (open) => open.polls && open.step === key,
+      );
+      if (
+        wait.human &&
+        !granted &&
+        !asking &&
+        waited >= 2 * this.limits.remindAfterMs
+      )
+        question = {
+          ...hold(
+            `Step ${key} has been waiting on ${wait.gate} since ${since}, for more than ${hours(waited)}. Factory carries on by itself once that is done.\n\n\`${WAIT}\` keeps waiting for another ${hours(this.limits.remindAfterMs)}, then asks again; or cancel.`,
+            [
+              {
+                answer: WAIT,
+                family: "wait",
+                consequence: `Keeps waiting for another ${hours(this.limits.remindAfterMs)}, then asks again.`,
+              },
+              "cancel",
+            ],
+          ),
+          polls: true,
+        };
     } else if (!granted && now - Date.parse(since) >= this.limits.maxWaitMs)
       question = hold(
         `Step ${key} has been retrying since ${since}, for more than ${hours(this.limits.maxWaitMs)}. It began with: ${(previous?.cause ?? outcome.reason).slice(0, 500)}\n\nLast error: ${outcome.reason.slice(0, 500)}\n\n\`${WAIT}\` keeps retrying for another ${hours(this.limits.maxWaitMs)}; \`retry\` tries again now; or cancel.`,
@@ -1382,6 +1440,7 @@ export class ObjectiveRunner {
         ),
         cause,
         askedAt: now,
+        ...(asked.polls ? { polls: true as const } : {}),
       },
     ];
     state.status = "holding";

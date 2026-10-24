@@ -9,7 +9,7 @@ import {
   type StepContext,
 } from "../engine.js";
 import { defaultHead } from "../git.js";
-import { GitHubError, issueGone } from "../github.js";
+import { GitHubError, issueGone, TransientError } from "../github.js";
 import { roleMemory } from "../knowledge/index.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
@@ -501,6 +501,8 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
     run: async ({ state, signal, log }): Promise<Outcome> => {
       const issue = state.issue;
       const left: string[] = [];
+      /** The latest rate-limit reset a part met: the retry waits for it. */
+      let resetAt = 0;
       /** Run one part; a failure is noted as left, unless the attempt was aborted. */
       const part = async (what: string, effect: () => Promise<unknown>) => {
         try {
@@ -508,6 +510,12 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
           return true;
         } catch (error) {
           if (signal.aborted) throw error;
+          if (
+            error instanceof TransientError &&
+            error.limited &&
+            error.retryAfterMs !== undefined
+          )
+            resetAt = Math.max(resetAt, Date.now() + error.retryAfterMs);
           left.push(`${what} (${errorMessage(error).slice(0, 300)})`);
           return false;
         }
@@ -560,9 +568,14 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
       await part(`the work files of #${issue}`, () =>
         removeWorkFiles(issue, deps, signal),
       );
-      return left.length
-        ? { kind: "retry", reason: `Left: ${left.join("; ")}` }
-        : { kind: "done" };
+      if (!left.length) return { kind: "done" };
+      return {
+        kind: "retry",
+        reason: `Left: ${left.join("; ")}`,
+        ...(resetAt
+          ? { wait: { kind: "reset", at: new Date(resetAt).toISOString() } }
+          : {}),
+      };
     },
   };
 }

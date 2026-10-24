@@ -634,6 +634,8 @@ export class CodexWorker implements Worker {
           : this.model.serviceTier === "standard"
             ? "default"
             : undefined;
+      // The tier asked for; Codex's default when none.
+      record.serviceTier = this.model.serviceTier ?? null;
       const codex = new Codex({
         codexPathOverride: home.launcher,
         env: home.env,

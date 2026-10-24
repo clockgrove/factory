@@ -310,7 +310,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
       );
     let text = "";
 
-    const usage = { input: 0, output: 0, cached: 0 };
+    const usage = { input: 0, output: 0, cached: 0, cacheWrite: 0 };
     let reasoning: number | null = null;
     const calls = new Tallies();
     const tools = new NativeTools();
@@ -434,6 +434,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
             usage.input += event.data.inputTokens ?? 0;
             usage.output += event.data.outputTokens ?? 0;
             usage.cached += event.data.cacheReadTokens ?? 0;
+            usage.cacheWrite += event.data.cacheWriteTokens ?? 0;
             if (event.data.reasoningTokens !== undefined)
               reasoning = (reasoning ?? 0) + event.data.reasoningTokens;
             turn.record.tokens = tokens({ ...usage, reasoning });

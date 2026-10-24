@@ -14,6 +14,7 @@ import {
   emptyUsage,
   itemOfEvent,
   num,
+  originalText,
   phaseOf,
   type RunChoice,
   readCapture,
@@ -135,7 +136,8 @@ export function captures(
     write(`${rowText(row)}\n`);
     if (body.request !== undefined) write(`request:\n${body.request}\n`);
     if (body.response !== undefined) write(`response:\n${body.response}\n`);
-    if (body.truncated) write("(cut to capture.maxBytesPerCall)\n");
+    if (body.truncated)
+      write(`(cut to capture.maxBytesPerCall${originalText(body.original)})\n`);
     return undefined;
   }
   if (options.json) {
@@ -245,7 +247,14 @@ export interface ToolStats {
   ms: number;
 }
 
-const CATEGORIES = ["input", "output", "cached", "reasoning", "total"] as const;
+const CATEGORIES = [
+  "input",
+  "output",
+  "cached",
+  "cacheWrite",
+  "reasoning",
+  "total",
+] as const;
 
 export interface CallGroup {
   key: Partial<Record<AnalysisField, string>>;
@@ -470,7 +479,14 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
   return {
     key,
     usage: emptyUsage(),
-    tokenCalls: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+    tokenCalls: {
+      input: 0,
+      output: 0,
+      cached: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      total: 0,
+    },
     cache: {
       pairedCalls: 0,
       eligibleCalls: 0,

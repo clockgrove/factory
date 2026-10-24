@@ -1283,7 +1283,7 @@ export class ClaudeWorker implements Worker {
     let spentUsd = 0;
     let queryUsd = 0;
     // Tokens likewise: the queries a credential retry ended, and the running one.
-    let spentTokens = tokens({ input: 0, output: 0, cached: 0 });
+    let spentTokens = tokens({ input: 0, output: 0, cached: 0, cacheWrite: 0 });
     let queryTokens = spentTokens;
     // The provider's own usage, summed over queries like the tokens.
     let spentUsage: Record<string, unknown> | undefined;

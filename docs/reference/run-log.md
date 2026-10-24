@@ -38,6 +38,7 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
     "input": 993817,
     "output": 2974,
     "cached": 936192,
+    "cacheWrite": 0,
     "reasoning": 752,
     "total": 996791
   },
@@ -55,15 +56,16 @@ Every model call writes one `model-usage` event when it ends, whatever its outco
 
 - `role`: `planner`, `reviewer`, `worker` or `dream`. A planner-seam call also has `phase` (`plan`, `graph-review`, `result-review`, `objective-review`, `diagnosis`, `dream`, `propose`) and `tools` (it could read a tree); a worker has `item`.
 - `outcome`: a planner call's `done`, `retry`, `hold`, `fail` or `error` (with `error`); a worker's result kind (`finished`, `retry`, `hold`) or `error`. `ms` is the call's wall time. A hedged second call (planner.ts HedgedPlanner) logs its own event with `hedge: 1`.
-- `tokens`: `input` includes `cached`; `output` includes `reasoning`; `total` is input plus output, or the provider's own total when it reports no split (managed workers). Claude and Copilot report no reasoning count; a Claude worker sums its queries, credential retries included.
+- `tokens`: `input` includes `cached` (read from the prompt cache) and `cacheWrite` (written to it: Claude's cache creation, Codex's `cache_write_input_tokens`, Copilot's `cacheWriteTokens`, Claude managed's `cache_creation`); `output` includes `reasoning`; `total` is input plus output, or the provider's own total when it reports no split. A managed worker's split comes from its own sessions' counts (Claude managed: input, cache reads and writes, output; OpenAI: input with `input_tokens_details.cached_tokens`, output with `output_tokens_details.reasoning_tokens`), and its `total` is the run's spend, which also holds what a crashed earlier run left, so it can exceed input plus output; with no counts it has the total only. Claude and Copilot report no reasoning count; a Claude worker sums its queries, credential retries included.
 - `tokenSource` (Codex only): `sdk`, from the SDK's `turn.completed`, or `native`, from Codex's session record when the stream ended before it.
 - `costUsd`: list cost when the provider reports it (Claude, Claude managed), else `null`.
+- `serviceTier` (Codex): the tier the call asked for (`fast` or `standard`), `null` for Codex's default.
 - `sdkOperations`: the SDK's own operation items, each item id once across its started, updated and completed events (Codex: command executions, file changes, MCP calls, web searches, to-do lists); `null` where the SDK has no such view (Claude, Copilot, managed).
 - `nativeToolActivity`: the model-visible tool calls by name, each call id once (Codex: from its session record, providers/codex-telemetry.ts; Claude: `tool_use` blocks; Copilot: tool executions); `null` where unseen. One call can run many commands. `nativePartial: true` when the Codex record was past its 8 MiB read bound.
 - `cacheEffectiveness`: this call's `hitRate` (cached over input, 4 places; `null` with no input) and `uncachedInput` (input minus cached); `null` when either count is unknown. Aggregates weight by input; never average hit rates.
 - `callId`: the call's id; a `model-refused` event (or a `diagnosis-rejected` one) with `stage: "semantic"` names it when Factory's checks refused a well-formed answer.
 - `reportedModel`: the model as the provider reported it (Claude's init and messages, Codex's session record, Copilot's usage events, a managed agent's), else `null`.
-- `promptDigest`, `schemaDigest`, `sourceDigest`: sha256 of the prompt, of the answer schema (planner calls) and over the source bodies the call was given (a worker's pinned sources, the Objective's sources for planning and plan review); `null` when there is none. `requestBytes`: prompt, schema and images as sent; `promptComponents`: bytes of `prompt`, `schema`, `images`, and `sections`, the prompt's parts as its builder rendered them (the worker prompt, planning and plan review).
+- `promptDigest`, `schemaDigest`, `sourceDigest`: sha256 of the prompt, of the answer schema (planner calls) and over the source bodies the call was given (a worker's pinned sources, the Objective's sources for planning and plan review); `null` when there is none. `requestBytes`: prompt, schema and images as sent; `responseBytes` and `responseDigest`: the size and sha256 of the call's answer or final message, whether or not capture is on; `promptComponents`: bytes of `prompt`, `schema`, `images`, and `sections`, the prompt's parts as its builder rendered them (the worker prompt, planning and plan review).
 - `stage`: where a failed call failed: `provider` (the default), `parse` (an answer that isn't JSON) or `protocol` (an answer that breaks its schema or contract).
 - `timeToFirstTokenMs`: from the call's start to its first model output, where the SDK streams (not managed agents, which are polled). `sessionTurn` and `sessionMode`: the turn's ordinal in its provider session and `fresh` or `resumed`.
 - `nativeTools`: `rounds` (responses that asked for a tool), `outputs`, `failures` (reported failed), `missingOutputs` and `ms`; with capture on the tool outputs go to the capture file. `imageOutputs`: images the model produced.
@@ -98,7 +100,7 @@ Every Codex call, planner and worker, runs with `RUST_LOG` adding the runtime's 
 
 Off by default. With `"capture": {"enabled": true}` in the configuration, the request and response bodies of each model call go to `logs/<issue>/<run id>.captures/<id>.json`, and the call's `model-usage` event names the file by `capture`. Bodies never enter the run log itself.
 
-- A capture file is `{id, run, request, response, tools, truncated}`: the request is the prompt the call sent (a worker's whole prompt), the response its answer or final message, `tools` the native tool outputs in order (`{name, output}`); a call with no answer has no `response`.
+- A capture file is `{id, run, request, response, tools, truncated, original}`: the request is the prompt the call sent (a worker's whole prompt), the response its answer or final message, `tools` the native tool outputs in order (`{name, output}`); a call with no answer has no `response`. `original` gives the bodies as they were before redaction and the cut: the request's and the response's `bytes` and `sha256`, and the tool outputs' `count` and `bytes`; `--show-captures` and `--content` name them for a cut capture.
 - Each body is redacted (log.ts `redact`, with the configuration's secrets), then cut to half of `capture.maxBytesPerCall` (with tool outputs: two fifths each, and a quarter for the outputs together) (default 8 MiB, at least 1 KiB, at most 256 MiB); `truncated` says a body was cut. Redaction is best effort.
 - Files are `0600` in a `0700` directory and rotate with their run. A capture that can't be written is skipped; the call and its event are unaffected.
 - Capture is operational, never frozen with an Objective: turning it on or off applies from the next service start and changes no run.

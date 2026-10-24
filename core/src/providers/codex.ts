@@ -653,6 +653,8 @@ export class CodexPlanner implements Planner {
           : choice.serviceTier === "standard"
             ? "default"
             : undefined;
+      // The tier asked for; Codex's default when none.
+      record.serviceTier = choice.serviceTier ?? null;
       const callStarted = Date.now();
       const codex = new Codex({
         env: home.env,

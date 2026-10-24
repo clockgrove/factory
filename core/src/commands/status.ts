@@ -16,6 +16,7 @@ import {
   readStatus,
   statusText,
 } from "../status.js";
+import { installedUnitHealth } from "../systemd.js";
 import { errorMessage } from "../text.js";
 import {
   type Args,
@@ -98,7 +99,9 @@ async function status(
     return 0;
   }
   const config = configOf(repository);
+  const unit = installedUnitHealth(paths);
   const view = readStatus(paths, {
+    ...(unit ? { unit } : {}),
     ...(only !== undefined ? { only } : {}),
     live: await serviceLive(paths),
     secrets: config?.secrets ?? [],

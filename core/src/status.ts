@@ -36,7 +36,6 @@ import {
   type QueueControl,
   TERMINAL,
 } from "./state.js";
-import { installedUnitHealth } from "./systemd.js";
 import type { Tracking } from "./tracking.js";
 import { mergeOf } from "./work/merged.js";
 import { objectiveWorkflow } from "./workflow.js";
@@ -182,6 +181,8 @@ export function readStatus(
     live: boolean;
     secrets: readonly string[];
     setup?: SetupView;
+    /** The systemd unit's health: the status command reads it, never a follow loop. */
+    unit?: StatusView["unit"];
   },
 ): StatusView {
   const { only, live } = options;
@@ -209,12 +210,11 @@ export function readStatus(
     );
   }
   const { waits: _waits, ...record } = service;
-  const unit = installedUnitHealth(paths);
   return redactDeep(
     {
       service: live ? "running" : "stopped",
       ...(options.setup ? { setup: options.setup } : {}),
-      ...(unit ? { unit } : {}),
+      ...(options.unit ? { unit: options.unit } : {}),
       ...record,
       queue,
       objectives,

@@ -4,16 +4,16 @@ The one document Factory is built and judged against. [The design](DESIGN.md) sa
 
 ## Goal
 
-A simple, unattended Objective scheduler for an indie developer or a small team, with git on GitHub as its only persistence.
+A simple, unattended Objective scheduler for one developer, with GitHub as the only infrastructure it needs. Team use is a later feature with its own requirements: [Team use](prd/team-use.md).
 
 The operator writes Objectives, queues as many as they like, and checks in from a phone a few times a day. Factory works several of them at once: it plans the work, builds it with coding agents, checks and reviews it, merges it, and reports. It asks only when a person must decide.
 
 ## Users
 
-- **Operators:** the people who run Factory, each on their own machine, through a coding agent. One person, or each member of a small team, on one shared repository and Project.
-- **Teammates without Factory:** they queue Objectives, answer questions and follow progress through GitHub alone.
+- **The operator:** one person who runs Factory on one machine, through a coding agent.
+- **Others with write access** can queue Objectives, answer questions and follow progress through GitHub. Factory still runs on the operator's one machine.
 
-Everyone checks in through chat and GitHub. A phone is enough.
+The operator checks in through chat and GitHub. A phone is enough.
 
 ## Delivery
 
@@ -34,7 +34,7 @@ Several Objectives move through these steps at once.
 
 1. **Queue and concurrency.**
    - Any number of Objectives can be queued. They are taken in Project order.
-   - Several Objectives run at once (3 per host by default), and several Work Items within each, within limits sized to the host.
+   - Several Objectives run at once (3 by default), and several Work Items within each, within limits sized to the machine.
    - Objectives whose owned paths overlap take turns.
 2. **Intake.**
    - An Objective is queued through the Project field and checked once, with the same checks planning uses.
@@ -58,23 +58,24 @@ Several Objectives move through these steps at once.
    - No PR, comment or merge is ever duplicated.
 7. **Questions.**
    - When a person must decide, Factory holds and asks one question with named answers. Every answer works.
-   - Answers come from the CLI on any operator's machine, or from a `/factory <answer>` comment by a user with write access.
+   - Answers come from the CLI, or from a `/factory <answer>` comment by a user with write access.
    - A Work Item's question stops only that item and the items that depend on it.
    - `cancel` always works, at once.
-8. **Team use.**
-   - Several operators run Factory against one repository and Project at once, each on their own machine.
-   - An Objective is worked by one machine at a time. It's claimed through git, never a database.
-   - If a machine stops, its claims lapse after a deadline, and another operator's machine continues those Objectives from the shared state with no duplicate effect.
-   - Each machine acts with its operator's own GitHub and provider logins.
-   - Every operator sees every Objective's status.
+8. **Single player.**
+   - Factory runs on one machine for a repository and its Project.
+   - A second machine or installation that tries to serve the same repository or Project is refused. It does nothing on GitHub, and its message names the machine that holds the repository.
+   - The check uses GitHub only.
+   - Moving to another machine is a deliberate handoff: stop the first machine, then set up the second.
 9. **Storage.**
-   - **Shared, in git on GitHub:** each Objective's state, plan, questions and answers, and claims, plus the repository memory and the playbook. Any operator's machine can continue any Objective, and every machine works from the same memory.
-   - **Local to each machine:** configuration, credentials and logins, the working clone, and run logs and captures, which are diagnostics only.
-   - Losing a machine loses only its local diagnostics.
+   - **In git on GitHub:**
+     - the plans, questions and answers, PRs and reports, which are enough to rebuild any Objective on another machine;
+     - repository memory and the playbook, so they survive losing the machine.
+   - **Local to the machine:** configuration, credentials and logins, the working clone, the current Objective state, and run logs and captures, which are diagnostics only.
+   - Losing the machine loses only its diagnostics. `factory reset` rebuilds each Objective from GitHub.
 10. **Visibility.**
     - A phone check-in is enough to know what was delivered, what's running, what's blocked and what needs an answer.
     - Status shows in the CLI (`factory status`), a live status comment on the issue, one issue per Work Item, and the Project field.
-    - `factory log`, `diagnostics` and model-call export show the detail of runs on that machine.
+    - `factory log`, `diagnostics` and model-call export show the detail.
 11. **Recovery.**
     - Killing Factory at any point and restarting it continues the work, with no duplicate effect.
     - Every wait has a deadline.
@@ -100,7 +101,8 @@ These hold for every run (the design gives each one a test):
 
 ## Not in scope
 
-- A required database or hosted service. An opt-in Postgres store may come later.
+- Team use: several operators or machines on one repository or Project. See [Team use](prd/team-use.md).
+- Any required infrastructure beyond GitHub: no database or hosted service.
 - A dashboard.
 - Embedding Factory as a library in other programs.
 - Backward compatibility, or migrating earlier versions' state.
@@ -109,6 +111,6 @@ These hold for every run (the design gives each one a test):
 
 ## Done
 
-Factory is done when every requirement above has been shown working by real runs on the scratch drill repository. That includes team use: two machines on one Project, with one stopped mid-run. It also includes the drill: kill Factory at every crash point, cut the network, and stop a model mid-turn. Each run must finish with no duplicate effect and every question answerable.
+Factory is done when every requirement above has been shown working by real runs on the scratch drill repository. That includes refusing a second machine on the same Project, and the drill: kill Factory at every crash point, cut the network, and stop a model mid-turn. Each run must finish with no duplicate effect and every question answerable.
 
 Only then is Factory pointed at real targets such as Clockgrove. Real targets add requirements to this page; they aren't where Factory gets validated.

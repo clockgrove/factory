@@ -32,6 +32,7 @@ import type { ReviewConversation } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import {
   addWorktree,
+  changedFiles,
   hostGit,
   hostGitExit,
   worktreePath,
@@ -355,7 +356,10 @@ export async function workStep(
       worktree,
       context.log,
       deps.config.secrets,
-      context.runFile("transcript"),
+      {
+        transcript: context.runFile("transcript"),
+        changes: () => changedFiles(worktree, signal),
+      },
     );
     const { spend, session, ...result } = await worker
       .run({
@@ -376,7 +380,11 @@ export async function workStep(
         ...(spent ? { spend: spent } : {}),
         ...(context.answer ? { answer: context.answer } : {}),
       })
-      .finally(() => activity.close());
+      .finally(async () => {
+        // What the worktree holds at the end, shell edits included.
+        await activity.sample();
+        activity.close();
+      });
     if (conversation)
       context.keep(facts({ workSession: session ?? null }, item.id));
     // A paid worker's spend outlives retries, restarts and repairs.

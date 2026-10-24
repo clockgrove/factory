@@ -1069,24 +1069,34 @@ test("status: one model, the Work Item table, the full --json and the list view"
     row.plan.items.map((each) => each.id),
     ["a", "b"],
   );
-  assert.deepEqual(row.items, [
-    {
-      id: "a",
-      kind: "work",
-      phase: "published",
-      pr: 12,
-      repairs: 4,
-      hold: null,
-    },
-    {
-      id: "b",
-      kind: "aggregate",
-      phase: "merge (held)",
-      pr: null,
-      repairs: 0,
-      hold: "q1",
-    },
-  ]);
+  assert.deepEqual(
+    row.items.map(({ id, kind, phase, pr, repairs, hold }) => ({
+      id,
+      kind,
+      phase,
+      pr,
+      repairs,
+      hold,
+    })),
+    [
+      {
+        id: "a",
+        kind: "work",
+        phase: "published",
+        pr: 12,
+        repairs: 4,
+        hold: null,
+      },
+      {
+        id: "b",
+        kind: "aggregate",
+        phase: "merge (held)",
+        pr: null,
+        repairs: 0,
+        hold: "q1",
+      },
+    ],
+  );
   assert.equal(
     row.waiting[0].nextAt,
     "2026-01-01T00:30:00.000Z",

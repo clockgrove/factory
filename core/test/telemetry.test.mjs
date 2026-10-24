@@ -330,7 +330,7 @@ test("a running planner or reviewer call shows in watch and the live status comm
   });
   await until(
     () =>
-      /#64 a review running for \S+ · reviewer result-review codex gpt-6\.1-sol high for \S+, 3 turns, context 84K\/272K/.test(
+      /#64 a review #1 running for \S+ · reviewer result-review codex gpt-6\.1-sol high for \S+, 3 turns, context 84K\/272K/.test(
         view,
       ),
     "the running call in watch",

@@ -1568,10 +1568,7 @@ export class ObjectiveRunner {
       }
       frozen = { ...current, ...structuredClone(live) };
     }
-    const delivery =
-      frozen &&
-      this.state.frozen &&
-      deliveryChange(this.state.frozen.config, frozen.config);
+    const delivery = frozen && deliveryChange(this.state, frozen.config);
     if (delivery)
       return refused(
         "invalid_answer",

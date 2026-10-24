@@ -147,13 +147,17 @@ function credentialNames(config: CoreConfig): Set<string> {
  * The logins a shell may set that the unit doesn't keep: the service has
  * them only as its credentials (`--credential-file`), or not at all. The
  * Codex and GitHub keys are never kept, so the service logs in with Codex's
- * auth.json and the GitHub CLI.
+ * auth.json and the GitHub CLI's stored login.
  */
 export const unkeptLogins = (config: CoreConfig): string[] => [
   ...credentialNames(config),
   "CODEX_API_KEY",
   "OPENAI_API_KEY",
   "FACTORY_GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
 ];
 
 /**

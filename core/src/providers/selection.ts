@@ -450,6 +450,21 @@ function changed(
             "cancel",
           ],
         );
+      // delivery.kind is the installation's: no provider's configuration
+      // keeps the kind a planned Objective froze.
+      const delivery = now && deliveryChange(state, now.config);
+      if (delivery)
+        return hold(
+          `This Objective's plan is split for delivery.kind "${delivery.was}", which the configuration now sets to "${delivery.now}". To deliver it with "${delivery.now}", cancel it and queue it again. To keep "${delivery.was}", set delivery.kind back, restart the service and answer retry.`,
+          [
+            {
+              answer: "retry",
+              family: "retry",
+              consequence: `Checks the configuration again, once delivery.kind is "${delivery.was}" and the service restarted.`,
+            },
+            "cancel",
+          ],
+        );
       // `switch` stands for one option per configured provider, this one's
       // included (a re-freeze); the engine names them in the question.
       const switching = Object.keys(freezable).some(
@@ -470,19 +485,6 @@ function changed(
           ],
         );
       const keys = frozenChanges(frozen.config, live.config);
-      const delivery = deliveryChange(frozen.config, live.config);
-      if (delivery)
-        return hold(
-          `The configuration changed since this Objective froze it (${frozen.digest.slice(0, 12)}): ${keys.join(", ")}. Its plan is split for delivery.kind "${delivery.was}", so it can't run on "${delivery.now}". To deliver it with "${delivery.now}", cancel it and queue it again. To keep "${delivery.was}", set delivery.kind back, restart the service and answer retry.`,
-          [
-            {
-              answer: "retry",
-              family: "retry",
-              consequence: `Checks the configuration again, once delivery.kind is "${delivery.was}" and the service restarted.`,
-            },
-            "cancel",
-          ],
-        );
       // `adopt` freezes exactly the configuration this question names
       // (engine.ts ADOPTS); a later change asks again.
       return {

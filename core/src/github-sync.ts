@@ -1233,16 +1233,17 @@ export class GitHubSync {
    * A wait shown on the issue: one status note, edited in place, once an
    * unknown transient cause has lasted `noteAfterMs`; one reminder once a
    * human gate (an approval, a required review) has lasted `remindAfterMs`.
-   * Neither for a step an open question stops: it waits on the answer,
-   * and the engine pauses its clocks until it comes. Neither while
-   * progress comments are off.
+   * Neither for a step an open question or a wait on another Objective's
+   * paths stops (engine.ts `blocked`): it waits on that, and the engine
+   * pauses its clocks until it ends. Neither while progress comments are
+   * off.
    */
   private note(runner: ObjectiveRunner, module: GitHubModule): void {
     if (!this.config.progress.enabled) return;
     const now = this.now();
     const issue = runner.state.issue;
     const waits = Object.entries(runner.state.retries)
-      .filter(([step, retry]) => retry.count === 0 && !runner.heldBy(step))
+      .filter(([step, retry]) => retry.count === 0 && !runner.blocked(step))
       .sort(([, a], [, b]) => a.since.localeCompare(b.since));
     const transient = waits.find(
       ([, retry]) =>

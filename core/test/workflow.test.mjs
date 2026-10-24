@@ -687,6 +687,7 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
     { autonomy: { allowances: { planningRevisions: 1 } } },
   );
   const at = new Date().toISOString();
+  const seeded = new Date(Date.parse(at) - 60_000).toISOString();
   // #73 owns src/: its one item merged, and its final validation asks.
   seed(inst, 73, "holding", {
     done: {
@@ -747,11 +748,24 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
       },
     },
     attempts: { "item:p:ci": { startedAt: at, run: "dead" } },
+    // r's work retried a minute ago and is due: the wait stops it.
+    retries: {
+      "item:r:work": {
+        count: 0,
+        attempts: 1,
+        since: seeded,
+        nextAt: at,
+        lastError: "seeded",
+      },
+    },
   });
   const tried = () => {
     const state = stateOf(inst, 74);
     return [
-      ...Object.keys({ ...state.attempts, ...state.retries }),
+      ...Object.keys(state.attempts),
+      ...Object.entries(state.retries)
+        .filter(([, retry]) => retry.lastError !== "seeded")
+        .map(([key]) => key),
       ...state.holds.map((hold) => hold.step),
     ];
   };
@@ -811,9 +825,13 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.ok(!tried().some((key) => key.startsWith("item:r:")), tried());
   assert.deepEqual(waitsOn(), { paths: 73 });
-  // Once #73 has finished, r builds.
+  // Once #73 has finished, r builds, and its retry clock doesn't count
+  // the wait, nor again the amendment's questions asked during it.
   assert.equal(cli(inst, "cancel", "73").code, 0);
   await until(() => tried().includes("item:r:work"), "r's work starts");
+  const since = Date.parse(stateOf(inst, 74).retries["item:r:work"].since);
+  assert.ok(since > Date.parse(seeded), "the wait is not counted");
+  assert.ok(since <= Date.now() - 60_000, "no time is counted twice");
   assert.equal(cli(inst, "cancel", "74").code, 0);
   await stopped(service);
 });

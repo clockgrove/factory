@@ -212,11 +212,6 @@ export async function serve(options: ServeOptions): Promise<number> {
   const waitingForSlot = new Set<number>();
   /** Objectives waiting on an earlier Objective's paths, as of the last tick. */
   const waitingOnPaths = new Map<number, number>();
-  /**
-   * When each run began waiting on paths: once the wait ends, the steps it
-   * stopped pause their wait clocks for it (engine.ts `waited`).
-   */
-  const pathWaits = new WeakMap<ObjectiveRunner, number>();
   /** `factory queue pause|drain|resume`, saved so it survives restarts. */
   let queue = loadQueueControl(paths.root);
   /**
@@ -929,16 +924,15 @@ export async function serve(options: ServeOptions): Promise<number> {
       const owner = TERMINAL.includes(state.status)
         ? undefined
         : pathOwner(runner, ordered);
-      const since = pathWaits.get(runner);
       if (owner !== undefined) {
         waitingOnPaths.set(state.issue, owner);
-        if (since === undefined) pathWaits.set(runner, Date.now());
+        const stops = (key: string) => pathWaitStops(runner.state, key);
+        runner.waitOn(stops);
         const operator = allow;
-        allow = (key) => operator(key) && !pathWaitStops(runner.state, key);
-      } else if (since !== undefined) {
-        pathWaits.delete(runner);
+        allow = (key) => operator(key) && !stops(key);
+      } else {
         try {
-          runner.waited(since, (key) => pathWaitStops(runner.state, key));
+          runner.waited();
         } catch (error) {
           log.write(state.issue, {
             event: "tick-failed",

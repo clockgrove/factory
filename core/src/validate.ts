@@ -379,25 +379,32 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       const limit = capture ? outputLimit(selectors, command) : undefined;
       // The whole output, as it arrives: what the run keeps of a failure.
       const whole = input.runFile(`validation-${index}`);
-      const run = await runSandboxed(command, {
-        cwd: worktree,
-        home: install ? await made("factory-install-home-") : home,
-        temporary,
-        env: {
-          ...validationEnvironment(credentials),
-          // Factory fetches by SHA and never moves the checkout's
-          // remote-tracking branches, so base-relative checks use this (#1664).
-          FACTORY_BASE_SHA: plan.base,
-        },
-        config: input.sandbox,
-        packageInstall: install,
-        network: online,
-        readOnlyFiles: linked.map((file) => file.path),
-        ...(limit ? { outputLimit: limit } : {}),
-        onOutput: (_stream, text) => whole.append(text),
-        signal: input.signal,
-        timeoutMs: input.commandTimeoutMs,
-      });
+      let run: Awaited<ReturnType<typeof runSandboxed>>;
+      try {
+        run = await runSandboxed(command, {
+          cwd: worktree,
+          home: install ? await made("factory-install-home-") : home,
+          temporary,
+          env: {
+            ...validationEnvironment(credentials),
+            // Factory fetches by SHA and never moves the checkout's
+            // remote-tracking branches, so base-relative checks use this (#1664).
+            FACTORY_BASE_SHA: plan.base,
+          },
+          config: input.sandbox,
+          packageInstall: install,
+          network: online,
+          readOnlyFiles: linked.map((file) => file.path),
+          ...(limit ? { outputLimit: limit } : {}),
+          onOutput: (_stream, text) => whole.append(text),
+          signal: input.signal,
+          timeoutMs: input.commandTimeoutMs,
+        });
+      } catch (error) {
+        // Cancelled or past its deadline: nothing names its output.
+        whole.remove();
+        throw error;
+      }
       whole.close();
       if (run.kind === "fault") whole.remove();
       if (run.kind === "fault")

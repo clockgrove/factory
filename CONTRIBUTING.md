@@ -8,7 +8,7 @@ This guide is for developers adding features or fixing bugs in Factory itself. T
 
 ## Development setup
 
-Use Linux x64, Node.js 22.12 or later, npm, Git, and Git LFS. Node.js 24 matches CI. The source-development tools require a newer Node.js minimum than the published runtime package, which supports Node.js 22.0 or later.
+Use Linux x64, Node.js 22.13 or later, npm, Git, and Git LFS. Node.js 24 matches CI.
 
 Fork or clone the repository, create a branch, and install its dependencies:
 
@@ -145,7 +145,7 @@ Preserve these boundaries:
 
 ### Plan checks
 
-When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. A new plan check must put its facts in the planner request, refuse with the allowed alternatives or the exact fix, and be registered in `PLAN_CHECKS`; see [the plan checks](docs/PLANNING.md#plan-checks).
+When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. A new plan check must put its facts in the planner request, refuse with the allowed alternatives or the exact fix, and run from `checkPlan` in `core/src/planning/checks.ts`; see [the plan checks](docs/PLANNING.md#plan-checks).
 
 ## Contributing versus using Factory
 

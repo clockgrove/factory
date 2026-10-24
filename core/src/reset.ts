@@ -38,6 +38,7 @@ import {
   type Frozen,
   newObjective,
   type ObjectiveState,
+  planProblem,
   TERMINAL,
 } from "./state.js";
 import { fact, facts } from "./work/facts.js";
@@ -979,33 +980,16 @@ function planOf(
 
 /**
  * Whether `value` has the plan's shape where the rebuild and its checks
- * read it, so an edited plan is refused here rather than throwing later.
+ * read it, so an edited plan is refused here rather than throwing later:
+ * a saved plan's shape (state.ts `planProblem`), and its base, planning
+ * decisions and each obligation's source, proof and environment.
  */
 function planShaped(value: unknown): value is Plan {
-  const strings = (list: unknown) =>
-    Array.isArray(list) && list.every((entry) => typeof entry === "string");
-  const objects = (list: unknown) =>
-    Array.isArray(list) && list.every((entry) => isObject(entry));
+  if (planProblem(value) !== undefined || !isObject(value)) return false;
   return (
-    isObject(value) &&
     typeof value.base === "string" &&
-    Array.isArray(value.items) &&
-    value.items.every(
-      (item) =>
-        isObject(item) &&
-        typeof item.id === "string" &&
-        typeof item.title === "string" &&
-        strings(item.ownedPaths) &&
-        strings(item.dependencies) &&
-        strings(item.acceptance) &&
-        objects(item.validation),
-    ) &&
-    strings(value.finalCommands) &&
-    Array.isArray(value.coverage) &&
-    value.coverage.every(
+    (value.coverage as Record<string, unknown>[]).every(
       (entry) =>
-        isObject(entry) &&
-        typeof entry.itemId === "string" &&
         isObject(entry.source) &&
         isObject(entry.proof) &&
         isObject(entry.environment),
@@ -1019,6 +1003,8 @@ function planShaped(value: unknown): value is Plan {
         ) &&
         (entry.text === undefined || typeof entry.text === "string"),
     ) &&
-    (value.retired === undefined || objects(value.retired))
+    (value.retired === undefined ||
+      (Array.isArray(value.retired) &&
+        value.retired.every((entry) => isObject(entry))))
   );
 }

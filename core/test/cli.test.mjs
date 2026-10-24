@@ -24,6 +24,7 @@ import {
   installation,
   item,
   offered,
+  plan,
   REPO,
   refusal,
   retirement,
@@ -965,8 +966,7 @@ test("status: one model, the Work Item table, the full --json and the list view"
   seed(inst, 55, "holding", {
     done: {
       check: {},
-      plan: {
-        items: [item("a"), item("b", { kind: "aggregate" })],
+      plan: plan([item("a"), item("b", { kind: "aggregate" })], {
         coverage: [
           {
             source: {
@@ -978,7 +978,7 @@ test("status: one model, the Work Item table, the full --json and the list view"
             proof: { kind: "final-review" },
           },
         ],
-      },
+      }),
       "item:a:validate": { tree: "t1" },
       "item:a:publish": { pr: 12, head: "h1", merged: false },
     },
@@ -1151,7 +1151,7 @@ for (const point of ["reset:recorded", "engine:rebuild:started"])
     const control = { mode: "paused", by: "op", at: new Date().toISOString() };
     seed(inst, 56, "building", {
       control,
-      done: { check: {}, plan: { items: [] } },
+      done: { check: {}, plan: plan() },
     });
     const before = stateOf(inst, 56);
     // Sent while stopped: the reset applies before any step of #56 starts.

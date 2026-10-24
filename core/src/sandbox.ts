@@ -173,7 +173,9 @@ function privatePaths(
     join(state, "factory"),
     join(state, "clockgrove-factory"),
     ...(source.FACTORY_STATE_DIR ? [source.FACTORY_STATE_DIR] : []),
-    ...(source.FACTORY_CONFIG ? [dirname(source.FACTORY_CONFIG)] : []),
+    // A custom configuration may sit beside the target clone. Seal the
+    // file; the containment check also refuses any mount that includes it.
+    ...(source.FACTORY_CONFIG ? [source.FACTORY_CONFIG] : []),
     ...(linked && sealCommonGit ? [linked.common] : []),
   ].map(real);
   return {

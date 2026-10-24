@@ -1186,7 +1186,7 @@ export class ObjectiveRunner {
       // `remindAfterMs`, and as long again after that it asks, so the
       // wait shows as needing a person. The step polls on meanwhile, and
       // the question closes once the gate clears (`Hold.polls`). Another
-      // Objective's gate (a predecessor, a split's children) never asks.
+      // Objective's gate (a predecessor) never asks.
       const waited = now - Date.parse(since);
       const asking = state.holds.some(
         (open) => open.polls && open.step === key,

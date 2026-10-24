@@ -762,6 +762,17 @@ export function applyRevision(
 ): { answer?: unknown; findings: Finding[]; invalidShape?: true } {
   const wire = contract(facts, options);
   try {
+    // A declaration replaces the plan: edits beside it are discarded unread,
+    // so a broken one can't lose it.
+    const declared =
+      change && typeof change === "object" && !Array.isArray(change)
+        ? (change as ObjectValue).cannotPlan
+        : null;
+    if (declared !== null && declared !== undefined)
+      return {
+        answer: { ...object(current, "current plan"), cannotPlan: declared },
+        findings: [],
+      };
     return { answer: revise(wire, current, change), findings: [] };
   } catch (error) {
     return {
@@ -930,7 +941,7 @@ export function decodePlan(
         reason.length > 4096 ||
         change.length > 4096
       )
-        throw new Refusal(
+        throw new Shape(
           "A cannotPlan answer must state its reason and change, each in at most 4096 characters",
         );
       return {
@@ -950,7 +961,7 @@ export function decodePlan(
         !asked.question.trim() ||
         asked.question.length > 4096
       )
-        throw new Refusal(
+        throw new Shape(
           "A required decision must state its question in at most 4096 characters",
         );
       return {

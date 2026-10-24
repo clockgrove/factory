@@ -1080,13 +1080,13 @@ test("a planner's can't-be-planned answer holds once with replan and cancel, and
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
   // The round the plan step saves for that answer (planning/steps.ts).
   const reason =
-    "Acceptance asks for a Windows build; the constraints allow Linux only.";
+    "Acceptance requires changing src/config.ts; the constraints forbid touching src/, and nothing outside it can change the behaviour.";
   seed(inst, 71, "planning", {
     done: {
       predecessors: { predecessors: [], ignored: [] },
       check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
       "plan:1:1": {
-        cannot: { reason, change: "Drop the Windows criterion." },
+        cannot: { reason, change: "Allow changes under src/." },
       },
     },
   });
@@ -1101,7 +1101,7 @@ test("a planner's can't-be-planned answer holds once with replan and cancel, and
   const [held] = state.holds;
   assert.equal(held.step, "decide:1:1");
   assert.ok(held.question.includes(reason));
-  assert.match(held.question, /What would have to change: Drop the Windows/);
+  assert.match(held.question, /What would have to change: Allow changes/);
   assert.deepEqual(
     held.options.map((option) => option.answer),
     ["replan", "answer", "cancel"],

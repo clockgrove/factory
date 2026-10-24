@@ -53,7 +53,7 @@ Provider options need `--provider NAME`. They add the provider or change it:
 - Claude worker settings: `--claude-model`, `--claude-effort`, `--claude-max-turns`, `--claude-tools`, `--claude-allowed-tools`, `--claude-permission-mode` and `--claude-setting-sources`.
 - Copilot worker settings: `--copilot-model`, `--copilot-effort`, `--copilot-tools` and `--copilot-timeout-seconds` (`worker.idleSeconds`, how long a turn may be silent).
 
-Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
+Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers, `sandbox.required: false` (see [Security](security.md#security)), `reviewArtifacts` (see [Review artifacts](capabilities.md#review-artifacts)) and `media.localAssetRoots` are written by hand.
 
 `planning.context` is written by hand too, and every key is optional. It sets what every Objective's planning context, repository memory and planner lookups may read:
 

@@ -49,4 +49,4 @@ An Objective issue can be blocked by other Objective issues through GitHub's nat
 - **Cycle.** A cycle of open blocked-by links through the Objective holds, naming it, with `retry` (after removing a link), `ignore N <reason>` and `cancel`.
 - **Evidence.** Once every predecessor is done or ignored, each done one's accepted result (its title as accepted, the commit final validation and review passed on, its tree, its final commands, and each Work Item's PR and merge commit) is saved as the step's result. The check (and a replan's re-read) checks it against Git: the commit must exist with that tree, and it and every merge must be on the base planning reads; otherwise it holds with `retry` and `cancel`. Planning, plan review and amendments get it as the native prerequisites.
 
-A replan after acceptance runs the step again. A state checked before this step existed doesn't.
+A replan after acceptance runs the step again.

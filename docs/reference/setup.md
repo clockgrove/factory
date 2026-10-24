@@ -53,7 +53,7 @@ Provider options need `--provider NAME`. They add the provider or change it:
 - Claude worker settings: `--claude-model`, `--claude-effort`, `--claude-max-turns`, `--claude-tools`, `--claude-allowed-tools`, `--claude-permission-mode` and `--claude-setting-sources`.
 - Copilot worker settings: `--copilot-model`, `--copilot-effort`, `--copilot-tools` and `--copilot-timeout-seconds` (`worker.idleSeconds`, how long a turn may be silent).
 
-Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers and `sandbox.required: false` are written by hand.
+Tool and source lists are comma-separated. A worker option for another worker kind is refused. Managed workers, `sandbox.required: false` (see [Security](security.md#security)), `reviewArtifacts` (see [Review artifacts](capabilities.md#review-artifacts)) and `media.localAssetRoots` are written by hand.
 
 `planning.context` is written by hand too, and every key is optional. It sets what every Objective's planning context, repository memory and planner lookups may read:
 
@@ -65,7 +65,7 @@ Tool and source lists are comma-separated. A worker option for another worker ki
 
 The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.
 
-- **`--background`:** setup as above. Only once its status is `configured` does it write the unit and enable and start it, then wait up to 30 s for the service to take its lock.
+- **`--background`:** setup as above, checked as the service will run (setup.ts `setup`): its readiness counts the credentials the unit will load and leaves out the logins the unit doesn't keep from the setup shell (systemd.ts `unkeptLogins`): `CODEX_API_KEY`, `OPENAI_API_KEY`, `FACTORY_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` and the credential names below. So the service's Codex login is `codex login`'s auth.json and its GitHub login is the one `gh auth login` stored. Only once its status is `configured` does it write the unit and enable and start it, then wait up to 30 s for the service to take its lock.
   - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations, Copilot endpoint settings (`COPILOT_API_URL`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`) and proxies.
   - It restarts on failure, except on exit 2 (usage) and 78 (a configuration that doesn't load).
   - `KillMode=mixed`: the service stops at its next tick, and then its children are killed.
@@ -92,10 +92,10 @@ From an earlier version of Factory to this one: start clean, with no compatibili
 
 1. **Stop the old service** (`systemctl --user disable --now <old unit>`). Close or cancel the Objectives it was running.
 2. **Delete the old state and configuration**, after copying anything you still need from the old configuration by hand (paths such as `sandbox.readOnlyPaths`). An unknown key is refused by name, so a copied old configuration won't load.
-3. **Install this release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
+3. **Install this release** (README#Install). `factory help` lists every command.
 4. **Prepare the target:**
    - a clone that only Factory uses;
-   - the Project fields `Factory` (single select, with the seven options) and `Factory order` (number);
+   - the Project fields `Factory` (single select, with the six options) and `Factory order` (number);
    - removal of the old control card and metadata field, which nothing reads now.
 5. **Set up** (see [Setup](#setup)):
    - `factory setup --repo OWNER/NAME --checkout … --project-id …` with your limits, delivery, sandbox and final commands, until it reports `configured`;

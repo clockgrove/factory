@@ -1,488 +1,652 @@
-import { existsSync, realpathSync } from "node:fs";
-import { availableParallelism, totalmem } from "node:os";
+/**
+ * `factory setup`: write the installation's configuration from options,
+ * check it loads, and check the target it binds. Each option names one
+ * configuration key; loadConfig checks the values, so setup never
+ * duplicates a rule. Repeating the same command changes nothing. The
+ * keys that bind the installation to its target (checkout and the queue's
+ * Project fields) are never changed by setup: a different value is a
+ * conflict, refused before anything is written.
+ */
 import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-} from "node:path";
-import { fileURLToPath } from "node:url";
-import { option, options } from "./cli-flags.js";
-import { composeIntake } from "./application.js";
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import {
-  githubProgressSettings,
-  githubProjectStatusSettings,
-  hostSchedulingDefaults,
-  readConfig,
-  readConfigFile,
-  resolveCapacity,
-} from "./config.js";
-import { requestControl } from "./coordinator-control.js";
-import { redactDiagnosticDetail } from "./diagnostics.js";
-import { sharedGitHubClient } from "./github-client.js";
-import { addProvider, writeConfiguration } from "./install.js";
+  type CapacityRecommendation,
+  capacityRecommendation,
+  hostCapacity,
+} from "./capacity.js";
+import { isObject } from "./checked.js";
+import { configPath, loadConfig } from "./config.js";
+import { originRefusal } from "./git.js";
+import { GitHub } from "./github.js";
+import { lockHeld } from "./lock.js";
+import { installationPaths } from "./paths.js";
+import { PLANNERS, WORKERS } from "./providers/config.js";
+import { defaultModels } from "./providers/selection.js";
+import { projectProblems } from "./queue.js";
+import { type Readiness, readiness } from "./readiness.js";
 import {
-  type IntakeAuthorization,
-  queuePollSeconds,
-  readIntake,
-} from "./intake.js";
-import { requiredProviderCredentials } from "./provider-credentials.js";
-import { checkReadiness } from "./readiness.js";
-import { configurationCommand } from "./status-summary.js";
-import { supervise, supervisorHost } from "./supervision.js";
-import { validationEnvironmentReport } from "./validation-environment.js";
+  boundCredentials,
+  credentialFiles,
+  hostProblem,
+  install,
+  type ServiceState,
+  serviceState,
+  stop,
+  uninstall,
+  unitHealth,
+  unkeptLogins,
+} from "./systemd.js";
+import { errorMessage } from "./text.js";
 
-const cli = () =>
-  realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
-function withinCheckout(checkout: string, path: string): boolean {
-  let existing = resolve(path);
-  const suffix: string[] = [];
-  while (!existsSync(existing)) {
-    suffix.unshift(basename(existing));
-    existing = dirname(existing);
-  }
-  const location = relative(
-    realpathSync(checkout),
-    join(realpathSync(existing), ...suffix),
-  );
-  return location === "" || (!location.startsWith("../") && location !== "..");
+/** How an option's value becomes the key's: loadConfig checks the result. */
+type Read = "text" | "number" | "list" | "names" | "env";
+
+interface Option {
+  /** The key, dotted, from the configuration (or the provider's) root. */
+  key: string;
+  read: Read;
+  /** A key that binds the target: refused when it would change. */
+  binding?: true;
 }
-/** One guided outcome, composed from existing installation and lifecycle boundaries. */
-export async function setupTarget(
-  args: string[],
-  configPath: string,
-): Promise<Record<string, unknown>> {
-  const background = args.includes("--background"),
-    configOnly = args.includes("--config-only");
-  const repeatedArgs = args.filter(
-    (_, index) => args[index] !== "--config" && args[index - 1] !== "--config",
-  );
-  const safeToRepeat =
-    [...args, configPath].every(
-      (value) => redactDiagnosticDetail(value) === value,
-    ) &&
-    options(args, "credential-file").every((binding) => {
-      const separator = binding.indexOf("=");
-      return (
-        /^[A-Z_][A-Z0-9_]*$/.test(binding.slice(0, separator)) &&
-        isAbsolute(binding.slice(separator + 1))
-      );
-    }) &&
-    !args.some(
-      (value, index) => value === "--credential-file" && !args[index + 1],
-    );
-  const verification = safeToRepeat
-    ? configurationCommand(
-        `factory setup ${repeatedArgs.map((value) => `'${redactDiagnosticDetail(value).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
-        redactDiagnosticDetail(configPath),
-      )
-    : null;
-  const verificationNote = verification
-    ? null
-    : "Correct malformed or sensitive setup arguments. Supply credentials only as NAME=ABSOLUTE_PRIVATE_FILE, never as credential values, then repeat the original approved setup invocation.";
-  const result: Record<string, unknown> = {
-    status: "blocked",
-    mode: background ? "background" : "config-only",
-    config: resolve(configPath),
-    artifact: cli(),
-    completed: [],
-  };
-  const completed = result.completed as string[];
-  let stage = "intent";
-  try {
-    if (background === configOnly)
-      throw new Error(
-        "setup requires exactly one of --background or --config-only",
-      );
-    stage = "configuration";
-    if (!existsSync(configPath)) {
-      const checkout = option(args, "checkout");
-      if (
-        checkout &&
-        existsSync(checkout) &&
-        (withinCheckout(checkout, configPath) ||
-          withinCheckout(checkout, cli()))
-      )
-        throw new Error(
-          "Setup configuration and retained package must be outside the target checkout",
-        );
-      writeConfiguration(args, configPath);
-      completed.push("configuration-created");
-    } else if (
-      option(args, "provider") !== undefined &&
-      !readConfigFile(configPath).providers[option(args, "provider")!]
-    ) {
-      addProvider(args, configPath);
-      completed.push("provider-added");
-    }
-    // The service runs the default provider; config-only setup verifies the one named.
-    const { defaultProvider } = readConfigFile(configPath);
-    const provider = option(args, "provider") ?? defaultProvider;
-    if (background && provider !== defaultProvider)
-      throw new Error(
-        `The background service runs defaultProvider ${defaultProvider}; change defaultProvider to switch the service's provider`,
-      );
-    const config = readConfig(configPath, provider);
-    result.provider = provider;
-    result.repository = config.repository;
-    result.requirements = {
-      providerCredentials: requiredProviderCredentials(config),
-      workerSecrets: (config.autonomy?.requiredEnvironment ?? []).map(
-        (name) => ({
-          name,
-          presence: process.env[name] ? "present" : "missing",
-          allowed: config.policy.allowedSecretNames.includes(name),
-        }),
-      ),
-      accountAccess: "not verified",
-      workerSecretSource:
-        "setup process environment; service worker environment not verified",
-      guidance:
-        "Keep credential values in the configured private files or controller environment, never in chat. Presence does not verify account access, billing, environment readiness or deployment approval.",
-    };
-    result.validationEnvironment = validationEnvironmentReport(config);
-    const progress = githubProgressSettings(config);
-    const projectStatus = githubProjectStatusSettings(config);
-    result.githubPresentation = {
-      progressComments: progress
-        ? `on${progress.explicit ? "" : " (default)"}: Factory comments on ${config.repository}'s Objective and Work Item issues when they change`
-        : "off",
-      projectStatus: !projectStatus
-        ? "off"
-        : projectStatus.kind === "explicit"
-          ? "on: the configured Project Status field"
-          : "on (default): the queue Project's Status field, options matched by name",
-      optOut:
-        'Set githubManagement.progress or githubManagement.projectStatus to {"enabled": false}; neither binds started Objectives.',
-    };
-    const host = {
-      cpus: availableParallelism(),
-      memoryBytes: totalmem(),
-    };
-    result.capacity = {
-      ...resolveCapacity(config),
-      ...(config.execution.concurrency === undefined
-        ? {
-            sizedFromHost: {
-              cpus: host.cpus,
-              memoryMiB: Math.floor(host.memoryBytes / 1024 ** 2),
-            },
-          }
-        : {}),
-    };
-    if (config.execution.kind === "local")
-      result.capacityRecommendation = {
-        host: {
-          cpus: host.cpus,
-          memoryMiB: Math.floor(host.memoryBytes / 1024 ** 2),
-        },
-        ...hostSchedulingDefaults(host),
-        configuredLimitsPreserved: true,
-        detail:
-          "Local host capacity only: coding, validation and review reserve different resources. Explicit concurrency and scheduling overrides remain in force. A larger provider or spending allowance needs operator authorization; existing Objectives retain their recorded limits.",
-      };
-    if (
-      withinCheckout(config.checkout, configPath) ||
-      withinCheckout(config.checkout, cli())
-    )
-      throw new Error(
-        "Setup configuration and retained package must be outside the target checkout",
-      );
-    const harness =
-      config.execution.kind === "local" ? config.execution.harness : undefined;
-    const choices: Record<string, unknown> = {
-      repository: config.repository,
-      checkout: config.checkout,
-      concurrency: config.execution.concurrency,
-      delivery: config.delivery.kind,
-      network: config.policy.network,
-      planning: config.planning.kind,
-      "planning-transport":
-        config.planning.kind === "codex-sdk"
-          ? (config.planning.codex?.transport ?? "exec")
-          : undefined,
-      "planning-model": config.planning.planner.model,
-      "planning-reasoning": config.planning.planner.reasoningEffort,
-      "review-model": config.planning.reviewer.model,
-      "review-reasoning": config.planning.reviewer.reasoningEffort,
-      harness: harness?.kind,
-      "worker-model": harness && "model" in harness ? harness.model : undefined,
-      "worker-reasoning":
-        harness && "reasoningEffort" in harness
-          ? harness.reasoningEffort
-          : undefined,
-    };
-    for (const [name, value] of Object.entries(choices)) {
-      const supplied = option(args, name);
-      if (supplied !== undefined && supplied !== String(value))
-        throw new Error(
-          `Existing configuration differs from --${name}; preserve the binding and use a separately reviewed configuration change`,
-        );
-    }
-    completed.push("configuration-verified");
-    if (!background) {
-      result.status = "configured";
-      result.detail =
-        "Configuration-only setup completed; background operation was not selected";
-      return result;
-    }
-    stage = "host-readiness";
-    result.host = supervisorHost();
-    if (!supervisorHost().supported)
-      throw new Error(
-        "A running Linux systemd user manager is required for background setup",
-      );
-    completed.push("host-ready");
-    stage = "service-binding";
-    let service = (await supervise("status", configPath)) as {
-      registered: boolean;
-      active: string;
-      enabled: string;
-      readiness: string;
-      binding?: {
-        cli: string;
-        config: string;
-        credentials?: { name: string; file: string }[];
-      };
-      bindingHealth?: { diagnostics: { code: string; action: string }[] };
-    };
-    if (
-      service.registered &&
-      service.binding?.config !== realpathSync(configPath)
-    )
-      throw new Error(
-        "The existing service is bound to a different configuration; inspect it with `factory status`, then `factory supervisor uninstall` before setting up this one",
-      );
-    // Supplied bindings replace an existing service's; otherwise reuse them.
-    const suppliedFiles = options(args, "credential-file");
-    const credentialFiles = suppliedFiles.length
-      ? suppliedFiles
-      : (service.binding?.credentials ?? []).map(
-          ({ name, file }) => `${name}=${file}`,
-        );
-    stage = "queue-binding";
-    if (!config.queue?.project)
-      throw new Error(
-        "Background setup requires queue.project with the existing Project, TEXT metadata field, NUMBER order field and control card. Configure the intended bindings, then repeat setup.",
-      );
-    if (config.gitPersistence?.scope !== "private-history")
-      throw new Error(
-        "Background setup requires an explicitly configured private-history Git checkpoint destination for approval and ownership receipts.",
-      );
-    let intake = await readIntake(config);
-    stage = "execution-readiness";
-    const proof = await checkReadiness(config, {
-      credentialFiles,
-      outsideDirectory: option(args, "outside-directory"),
-    });
-    result.readiness = proof.document;
-    if (!proof.ready) throw new Error(`${proof.detail} Fix: ${proof.fix}`);
-    completed.push("execution-readiness-checked");
-    stage = "github-readiness";
-    const observed = await sharedGitHubClient.request<unknown>(
-      "GET",
-      `repos/${config.repository}/issues?state=all&per_page=1`,
-    );
-    if (!Array.isArray(observed))
-      throw new Error(
-        "Authenticated GitHub issue observation is unavailable for the configured target",
-      );
-    completed.push("github-readable");
-    stage = "queue-binding";
-    if (!intake?.watch) {
-      await composeIntake(config).watchIntake();
-      intake = await readIntake(config);
-    }
-    if (!intake)
-      throw new Error("Complete Project queue observation is unavailable");
-    result.queue = {
-      watch: intake.watch,
-      mode: intake.mode,
-      pollSeconds: queuePollSeconds(config),
-      queued: intake.objectives.filter((id) => !intake!.dequeued.includes(id)),
-      idleReason: intake.objectives.length
-        ? "queued Objectives"
-        : "the queue is empty; add Objectives with `factory queue add N`",
-    };
-    if (intake.mode !== "running")
-      throw new Error(
-        "The queue is paused or draining; inspect `factory queue list`, then `factory queue resume` when safe",
-      );
-    completed.push("queue-bound");
-    stage = "service-registration";
-    if (service.registered && service.binding?.cli !== cli()) {
-      const upgraded = (await supervise("upgrade", configPath, {
-        cli: cli(),
-      })) as { resumeRequired?: boolean };
-      completed.push("artifact-upgraded");
-      if (upgraded.resumeRequired)
-        throw new Error(
-          "Artifact upgraded with state retained; nonterminal work requires `factory queue resume` when safe before setup can complete",
-        );
-    } else {
-      await supervise("install", configPath, { credentialFiles });
-      completed.push("service-registered");
-    }
-    stage = "service-start";
-    const observationAfter = Date.now();
-    const start = (await supervise("start", configPath)) as {
-      readiness: string;
-    };
-    completed.push("service-start-requested");
-    stage = "service-verification";
-    if (start.readiness === "starting") {
-      result.status = "starting";
-      result.service = start;
-      result.readinessCheck = configurationCommand(
-        "factory supervisor check",
-        redactDiagnosticDetail(configPath),
-      );
-      result.detail = `Service start requested; exact owner readiness is pending. Inspect \`${result.readinessCheck}\`; preserve the running service and retained state.`;
-      return result;
-    }
-    service = (await supervise("status", configPath)) as typeof service;
-    result.service = service;
-    if (service.readiness === "starting") {
-      result.status = "starting";
-      result.readinessCheck = configurationCommand(
-        "factory supervisor check",
-        redactDiagnosticDetail(configPath),
-      );
-      result.detail = `Service startup remains pending; inspect \`${result.readinessCheck}\` before completing setup verification.`;
-      return result;
-    }
-    if (
-      start.readiness !== "owned-ready" ||
-      service.readiness !== "owned-ready" ||
-      service.active !== "active" ||
-      service.enabled !== "enabled"
-    )
-      throw new Error(
-        "Background setup did not establish an active enabled service with a responsive exact owner",
-      );
-    completed.push("exact-owner-verified");
-    stage = "service-observation";
-    const deadline = Date.now() + 15_000;
-    let serviceObservation: IntakeAuthorization["observation"];
-    while (Date.now() < deadline) {
-      const current = await requestControl(config.repository, {
-        objective: 0,
-        action: "status",
-      });
-      if (!current.handled)
-        throw new Error(
-          "Service owner disappeared before authenticated observation",
-        );
-      const record = current.result as IntakeAuthorization & {
-        activeObjective?: number;
-      };
-      const observedAt = Date.parse(record.observation?.at ?? "");
-      if (
-        Number.isFinite(observedAt) &&
-        (observedAt >= observationAfter || record.activeObjective)
-      ) {
-        if (record.observation?.error)
-          throw new Error(
-            `Service GitHub observation is unavailable: ${record.observation.error}`,
-          );
-        serviceObservation = record.observation;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    if (!serviceObservation)
-      throw new Error(
-        "Service has not established a successful authenticated observation; inspect `factory queue list`",
-      );
-    result.observation = serviceObservation;
-    completed.push("service-observation-verified");
-    result.status = "ready";
-    result.detail =
-      "Background service verified; it runs only Objectives added with `factory queue add N`";
-    return result;
-  } catch (error) {
-    result.blocked = {
-      stage,
-      detail: redactDiagnosticDetail(
-        error instanceof Error ? error.message : String(error),
-      ),
-      continuation: verification
-        ? `Preserve completed stages and retained state. Resolve the stated prerequisite, then repeat ${verification}.`
-        : verificationNote,
-    };
-    return result;
-  } finally {
-    const stages = [
-      [
-        "intent",
-        "Select configuration only or explicitly consent to a background service.",
-      ],
-      [
-        "configuration",
-        "Bind the trusted repository/checkout and keep configuration, state and installed CLI outside the target.",
-      ],
-      [
-        "host-readiness",
-        "Background operation requires a running Linux systemd user manager.",
-      ],
-      [
-        "service-binding",
-        "Preserve the existing service/configuration binding; inspect factory status before changing it.",
-      ],
-      [
-        "execution-readiness",
-        "Supply configured private credentials/login and a usable worker sandbox; readiness details name the observed check and fix.",
-      ],
-      [
-        "github-readiness",
-        "Authenticate gh for the target; setup verifies issue-read access, not deployment or administrative authority.",
-      ],
-      [
-        "queue-binding",
-        "Only explicitly queued Objectives are authorized; inspect factory queue list and resolve any pause before resuming.",
-      ],
-      [
-        "service-registration",
-        "Register or upgrade the installed artifact through supported supervisor operations.",
-      ],
-      [
-        "service-start",
-        "Start the service only with background consent and preserve existing Objective limits.",
-      ],
-      [
-        "service-verification",
-        "Verify the active enabled service and responsive exact owner.",
-      ],
-      [
-        "service-observation",
-        "Verify a fresh authenticated GitHub observation; no Objective or provider call is required.",
-      ],
-    ];
-    const reached = stages.findIndex(([name]) => name === stage);
 
-    result.prerequisites = stages.map(([name, guidance], index) => ({
-      stage: name,
-      status:
-        !background && index > 1
-          ? "not-requested"
-          : result.status === "starting"
-            ? index < reached
-              ? "complete"
-              : index === reached
-                ? "starting"
-                : "not-checked"
-            : result.status !== "blocked" || index < reached
-              ? "complete"
-              : index === reached
-                ? "blocked"
-                : "not-checked",
-      guidance,
-      verification,
-      ...(verificationNote ? { verificationNote } : {}),
-    }));
-    result.independentWork =
-      "This handoff admits no Objective. Configuration-only starts nothing; starting or blocked setup does not establish a verified ready service. Already admitted work retains its own ownership, readiness and limits.";
+/** Installation-wide options. `list` and `env` options repeat. */
+const CONFIG_OPTIONS: Record<string, Option> = {
+  checkout: { key: "checkout", read: "text", binding: true },
+  "project-id": { key: "queue.projectId", read: "text", binding: true },
+  field: { key: "queue.field", read: "text", binding: true },
+  "order-field": { key: "queue.orderField", read: "text", binding: true },
+  "poll-seconds": { key: "queue.pollSeconds", read: "number" },
+  "max-active": { key: "queue.maxActiveObjectives", read: "number" },
+  concurrency: { key: "execution.concurrency", read: "number" },
+  workers: { key: "execution.workers", read: "number" },
+  validations: { key: "execution.validations", read: "number" },
+  planners: { key: "execution.planners", read: "number" },
+  "memory-mib": { key: "execution.memoryMiB", read: "number" },
+  "worker-mib": { key: "execution.reservations.worker", read: "number" },
+  "validation-mib": {
+    key: "execution.reservations.validation",
+    read: "number",
+  },
+  "planner-mib": { key: "execution.reservations.planner", read: "number" },
+  "planning-revisions": {
+    key: "autonomy.allowances.planningRevisions",
+    read: "number",
+  },
+  "implementation-repairs": {
+    key: "autonomy.allowances.implementationRepairs",
+    read: "number",
+  },
+  "per-path-repairs": { key: "autonomy.allowances.perPath", read: "number" },
+  "result-rereviews": {
+    key: "autonomy.allowances.resultRereviews",
+    read: "number",
+  },
+  "required-env": { key: "autonomy.requiredEnvironment", read: "list" },
+  delivery: { key: "delivery.kind", read: "text" },
+  "sandbox-network": { key: "sandbox.network", read: "text" },
+  "package-store": { key: "sandbox.packageStore", read: "text" },
+  "read-only-path": { key: "sandbox.readOnlyPaths", read: "list" },
+  "sandbox-env": { key: "sandbox.environment", read: "env" },
+  "required-command": { key: "finalValidation.requiredCommands", read: "list" },
+  "ci-only-command": { key: "finalValidation.ciOnlyCommands", read: "list" },
+  "allowed-secret": { key: "policy.allowedSecretNames", read: "list" },
+};
+
+/**
+ * One provider's options, under providers.NAME. A `<kind>-` option sets
+ * that worker kind's settings and is refused for another kind. `names`
+ * take a comma-separated list.
+ */
+const PROVIDER_OPTIONS: Record<string, Option> = {
+  "planner-model": { key: "models.planner.model", read: "text" },
+  "planner-effort": { key: "models.planner.effort", read: "text" },
+  "reviewer-model": { key: "models.reviewer.model", read: "text" },
+  "reviewer-effort": { key: "models.reviewer.effort", read: "text" },
+  "codex-network": { key: "worker.network", read: "text" },
+  "codex-model": { key: "worker.model", read: "text" },
+  "codex-effort": { key: "worker.effort", read: "text" },
+  "codex-service-tier": { key: "worker.serviceTier", read: "text" },
+  "claude-model": { key: "worker.model", read: "text" },
+  "claude-effort": { key: "worker.effort", read: "text" },
+  "claude-max-turns": { key: "worker.maxTurns", read: "number" },
+  "claude-tools": { key: "worker.tools", read: "names" },
+  "claude-allowed-tools": { key: "worker.allowedTools", read: "names" },
+  "claude-permission-mode": { key: "worker.permissionMode", read: "text" },
+  "claude-setting-sources": { key: "worker.settingSources", read: "names" },
+  "copilot-model": { key: "worker.model", read: "text" },
+  "copilot-effort": { key: "worker.effort", read: "text" },
+  "copilot-tools": { key: "worker.tools", read: "names" },
+  "copilot-timeout-seconds": { key: "worker.idleSeconds", read: "number" },
+};
+
+/** Worker kinds setup can write: the managed ones need settings by hand. */
+const SETUP_WORKERS = ["codex", "claude", "copilot"];
+
+/** The settings a managed worker needs, which setup doesn't take. */
+const MANAGED_FIELDS: Record<string, string> = {
+  "openai-agents": '"model", "effort", "containerSize", "apiKeyEnv"',
+  "claude-managed-agents":
+    '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
+};
+
+/** Setup's options for the command table, by kind (commands/shared.ts `FlagKind`). */
+export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
+  "config-only": "switch",
+  background: "switch",
+  check: "switch",
+  stop: "switch",
+  uninstall: "switch",
+  "credential-file": "list",
+  provider: "value",
+  planner: "value",
+  worker: "value",
+  default: "switch",
+  json: "switch",
+  ...Object.fromEntries(
+    Object.entries({ ...CONFIG_OPTIONS, ...PROVIDER_OPTIONS }).map(
+      ([flag, { read }]) => [
+        flag,
+        read === "list" || read === "env" ? "list" : "value",
+      ],
+    ),
+  ),
+};
+
+/** A refusal before anything is written: the command line is wrong. */
+export class SetupUsage extends Error {}
+
+export interface SetupReport {
+  /**
+   * `configured`: saved, it loads, and the target and host are ready.
+   * `blocked`: saved and it loads, but the target isn't ready (`problems`
+   * names what) or a readiness check is blocked (it names its fix).
+   * `refused`: nothing saved (`problems` names why).
+   */
+  status: "configured" | "blocked" | "refused";
+  config: string;
+  created: boolean;
+  /** The keys this run changed; empty when the command was repeated. */
+  changed: string[];
+  defaultProvider?: string;
+  problems: string[];
+  /** The readiness checklist, once the configuration loads (readiness.ts). */
+  readiness?: Readiness;
+  /** How the configured capacity fits this host (capacity.ts), once it loads. */
+  capacity?: CapacityRecommendation;
+}
+
+/** Equal as JSON, whatever the order of object keys. */
+function same(a: unknown, b: unknown): boolean {
+  const sorted = (value: unknown): unknown =>
+    isObject(value)
+      ? Object.fromEntries(
+          Object.keys(value)
+            .sort()
+            .map((key) => [key, sorted(value[key])]),
+        )
+      : Array.isArray(value)
+        ? value.map(sorted)
+        : value;
+  return JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
+}
+
+/** The value at a dotted key, or undefined. */
+function get(root: Record<string, unknown>, key: string): unknown {
+  let at: unknown = root;
+  for (const part of key.split(".")) at = isObject(at) ? at[part] : undefined;
+  return at;
+}
+
+/** Set a dotted key, creating the objects on the way. */
+function put(root: Record<string, unknown>, key: string, value: unknown): void {
+  const parts = key.split(".");
+  const last = parts.pop()!;
+  let at = root;
+  for (const part of parts) {
+    if (!isObject(at[part])) at[part] = {};
+    at = at[part] as Record<string, unknown>;
   }
+  at[last] = value;
+}
+
+/** A whole number as a number; anything else as given, for loadConfig to name. */
+const number = (value: string) => (/^\d+$/.test(value) ? Number(value) : value);
+
+function optionValue(read: Read, given: string[]): unknown {
+  const last = given[given.length - 1]!;
+  switch (read) {
+    case "text":
+      return last;
+    case "number":
+      return number(last);
+    case "list":
+      return given;
+    case "names":
+      return last
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean);
+    case "env": {
+      const environment: Record<string, string> = {};
+      for (const entry of given) {
+        const at = entry.indexOf("=");
+        if (at < 1)
+          throw new SetupUsage(
+            `--sandbox-env takes NAME=VALUE; ${JSON.stringify(entry)} has no name`,
+          );
+        environment[entry.slice(0, at)] = entry.slice(at + 1);
+      }
+      return environment;
+    }
+  }
+}
+
+/**
+ * Write the configuration the options name, check it loads (restoring the
+ * file when it doesn't), then check the checkout's origin and the queue's
+ * Project fields. `values` holds each option given, every value of a
+ * repeated one in order.
+ */
+export async function setup(
+  repository: string,
+  values: Record<string, string[]>,
+  /**
+   * For `--background`: the credentials the service will load, by name.
+   * The checks then run as the service will, with them and without the
+   * logins its unit doesn't keep from this shell.
+   */
+  service?: readonly string[],
+): Promise<SetupReport> {
+  const path = configPath(repository);
+  const created = !existsSync(path);
+  let original = "";
+  let raw: Record<string, unknown> = { repository };
+  if (!created) {
+    try {
+      original = readFileSync(path, "utf8");
+      const parsed: unknown = JSON.parse(original);
+      if (!isObject(parsed)) throw new Error("it is not a JSON object");
+      raw = parsed;
+    } catch (error) {
+      return refused(path, false, `Can't read ${path}: ${errorMessage(error)}`);
+    }
+  } else
+    for (const flag of ["checkout", "project-id"])
+      if (!values[flag])
+        throw new SetupUsage(
+          `${path} doesn't exist yet: give --checkout PATH and --project-id PVT_... to create it`,
+        );
+  const changed: string[] = [];
+  const set = (key: string, value: unknown, root = raw, prefix = "") => {
+    if (same(get(root, key), value)) return;
+    put(root, key, value);
+    changed.push(prefix + key);
+  };
+  // A binding compares with the value in effect, its default included;
+  // a file that doesn't load has no value in effect to keep.
+  let effective: Record<string, unknown> = raw;
+  if (!created)
+    try {
+      effective = { ...loadConfig(repository) };
+    } catch (error) {
+      const bindings = Object.keys(CONFIG_OPTIONS).filter(
+        (flag) => CONFIG_OPTIONS[flag]!.binding && values[flag],
+      );
+      if (bindings.length)
+        return refused(
+          path,
+          false,
+          `--${bindings.join(", --")} can't be checked against a configuration that doesn't load; fix it first: ${errorMessage(error)}`,
+        );
+    }
+  const conflicts: string[] = [];
+  for (const [flag, option] of Object.entries(CONFIG_OPTIONS)) {
+    const given = values[flag];
+    if (!given) continue;
+    const value = optionValue(option.read, given);
+    const current = get(option.binding ? effective : raw, option.key);
+    if (
+      option.binding &&
+      !created &&
+      current !== undefined &&
+      current !== value
+    )
+      conflicts.push(
+        `--${flag} ${value} conflicts with ${option.key} ${JSON.stringify(current)}: setup never moves an installation to another target; edit ${path} by hand once no Objective is running`,
+      );
+    else set(option.key, value);
+  }
+  if (conflicts.length) return refused(path, created, ...conflicts);
+  providerOptions(raw, values, path, set);
+  if (!created && !changed.length) {
+    const problems = loads(repository);
+    if (problems) return refused(path, false, problems);
+  } else {
+    const save = (body: string) => {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      const temporary = `${path}.${process.pid}.tmp`;
+      writeFileSync(temporary, body, { mode: 0o600 });
+      renameSync(temporary, path);
+    };
+    save(`${JSON.stringify(raw, null, 2)}\n`);
+    const problems = loads(repository);
+    if (problems) {
+      if (created) rmSync(path, { force: true });
+      else save(original);
+      return refused(path, created, problems);
+    }
+  }
+  const config = loadConfig(repository);
+  const problems: string[] = [];
+  if (!existsSync(config.checkout))
+    problems.push(
+      `The checkout ${config.checkout} doesn't exist: clone ${repository} there`,
+    );
+  else {
+    const refusal = await originRefusal(config.checkout, repository);
+    if (refusal) problems.push(refusal.message);
+  }
+  if (service)
+    for (const name of unkeptLogins(config)) delete process.env[name];
+  const github = new GitHub(repository, process.env.FACTORY_GITHUB_API);
+  try {
+    problems.push(...(await projectProblems(github, config)));
+  } catch (error) {
+    problems.push(`Can't read the queue's Project: ${errorMessage(error)}`);
+  }
+  const ready = await readiness(config, github, service);
+  return {
+    status: problems.length || !ready.ready ? "blocked" : "configured",
+    config: path,
+    created,
+    changed,
+    defaultProvider: config.defaultProvider,
+    problems,
+    readiness: ready,
+    capacity: capacityRecommendation(
+      hostCapacity(config.execution, config.queue.maxActiveObjectives),
+    ),
+  };
+}
+
+function refused(
+  path: string,
+  created: boolean,
+  ...problems: string[]
+): SetupReport {
+  return { status: "refused", config: path, created, changed: [], problems };
+}
+
+/** loadConfig's problems, or undefined when the configuration loads. */
+function loads(repository: string): string | undefined {
+  try {
+    loadConfig(repository);
+    return undefined;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+/**
+ * `--provider NAME` and its options: add the provider or change its
+ * planner, worker and their settings. The first provider, or `--default`,
+ * becomes defaultProvider. A provider's model choices belong to its
+ * planner kind, and a worker's settings to its kind, so changing a kind
+ * drops them.
+ */
+function providerOptions(
+  raw: Record<string, unknown>,
+  values: Record<string, string[]>,
+  path: string,
+  set: (
+    key: string,
+    value: unknown,
+    root?: Record<string, unknown>,
+    prefix?: string,
+  ) => void,
+): void {
+  const name = values.provider?.at(-1);
+  const given = Object.keys(PROVIDER_OPTIONS).filter((flag) => values[flag]);
+  for (const flag of ["planner", "worker", "default"])
+    if (values[flag]) given.push(flag);
+  if (!name) {
+    if (given.length)
+      throw new SetupUsage(
+        `--${given[0]} sets one provider: name it with --provider NAME`,
+      );
+    return;
+  }
+  const planner = values.planner?.at(-1);
+  const worker = values.worker?.at(-1);
+  if (planner && !(PLANNERS as readonly string[]).includes(planner))
+    throw new SetupUsage(`--planner is one of ${PLANNERS.join(", ")}`);
+  if (worker && !SETUP_WORKERS.includes(worker))
+    throw new SetupUsage(
+      (WORKERS as readonly string[]).includes(worker)
+        ? `a ${worker} worker needs settings setup doesn't take: write providers.${name}.worker = { "kind": "${worker}", ${MANAGED_FIELDS[worker]} } in ${path} by hand`
+        : `--worker is one of ${SETUP_WORKERS.join(", ")}`,
+    );
+  // Without providers the configuration has one: codex, the default.
+  if (!isObject(raw.providers))
+    raw.providers = { codex: { planner: "codex", worker: { kind: "codex" } } };
+  const providers = raw.providers as Record<string, unknown>;
+  // Keep the effective default (the first provider) unless --default moves it.
+  if (raw.defaultProvider === undefined)
+    set("defaultProvider", Object.keys(providers)[0] ?? name);
+  const prefix = `providers.${name}.`;
+  if (!isObject(providers[name])) providers[name] = {};
+  const provider = providers[name] as Record<string, unknown>;
+  const kind = planner ?? (provider.planner as string | undefined) ?? "codex";
+  // An absent planner is codex, as loadConfig reads it.
+  if ((provider.planner ?? "codex") !== kind)
+    set("models", undefined, provider, prefix);
+  set("planner", kind, provider, prefix);
+  const current = isObject(provider.worker)
+    ? (provider.worker.kind as string)
+    : undefined;
+  const workerKind = worker ?? current ?? kind;
+  if (workerKind !== current)
+    set("worker", { kind: workerKind }, provider, prefix);
+  // A model choice names both model and effort: one given alone keeps the
+  // other from the choice in effect, the planner kind's default if none.
+  for (const role of ["planner", "reviewer"] as const) {
+    const model = values[`${role}-model`]?.at(-1);
+    const effort = values[`${role}-effort`]?.at(-1);
+    if (model === undefined && effort === undefined) continue;
+    const choice = get(provider, `models.${role}`);
+    set(
+      `models.${role}`,
+      {
+        ...(isObject(choice) ? choice : defaultModels(kind)[role]),
+        ...(model !== undefined && { model }),
+        ...(effort !== undefined && { effort }),
+      },
+      provider,
+      prefix,
+    );
+  }
+  for (const flag of Object.keys(PROVIDER_OPTIONS)) {
+    const value = values[flag];
+    const option = PROVIDER_OPTIONS[flag]!;
+    if (!value || option.key.startsWith("models.")) continue;
+    const owner = flag.split("-")[0]!;
+    if (SETUP_WORKERS.includes(owner) && owner !== workerKind)
+      throw new SetupUsage(
+        `--${flag} sets a ${owner} worker, and providers.${name}'s worker is ${workerKind}; add --worker ${owner} to change it`,
+      );
+    set(option.key, optionValue(option.read, value), provider, prefix);
+  }
+  if (values.default) set("defaultProvider", name);
+}
+
+/** Setup's service modes; without one, setup writes and checks the configuration only. */
+export const SERVICE_MODES = [
+  "background",
+  "check",
+  "stop",
+  "uninstall",
+] as const;
+export type ServiceMode = (typeof SERVICE_MODES)[number];
+
+export interface ServiceReport {
+  mode: ServiceMode;
+  /**
+   * `running`: the unit is active and the service holds its lock.
+   * `starting`: started, and not serving yet. `blocked`: nothing started
+   * (`problems` names why). `stopped`, `removed`; or for `--check`, the
+   * unit's state.
+   */
+  status: string;
+  service?: ServiceState;
+  /** `--background`'s configuration step. */
+  setup?: SetupReport;
+  problems: string[];
+  /** Not blockers: lingering off, a service still starting. */
+  warnings: string[];
+}
+
+/** How long `--background` waits for the service to take its lock. */
+const START_WAIT_MS = 30_000;
+
+/**
+ * `--background`: setup as without it, then, once the configuration and
+ * target are ready, install and start the systemd user service and wait
+ * for it to serve. `--check`, `--stop` and `--uninstall` act on the
+ * service alone.
+ */
+export async function serviceSetup(
+  repository: string,
+  mode: ServiceMode,
+  values: Record<string, string[]>,
+): Promise<ServiceReport> {
+  const others = Object.keys(values).filter(
+    (flag) => flag !== mode && flag !== "json" && flag !== "repo",
+  );
+  if (mode !== "background" && others.length)
+    throw new SetupUsage(
+      `--${mode} takes no other option; drop --${others.join(", --")}`,
+    );
+  if (others.includes("config-only"))
+    throw new SetupUsage("give --config-only or --background, not both");
+  const paths = installationPaths(repository);
+  const report: ServiceReport = {
+    mode,
+    status: "blocked",
+    problems: [],
+    warnings: [],
+  };
+  const serving = () => lockHeld(paths.lockName);
+  if (mode === "check") {
+    const service = serviceState(repository, paths, await serving());
+    return {
+      ...report,
+      status: !service.installed
+        ? "not-installed"
+        : service.active === "active" && service.serving
+          ? "running"
+          : service.active,
+      service,
+      warnings: lingerWarning(service),
+    };
+  }
+  if (mode === "stop" || mode === "uninstall") {
+    const problem = hostProblem();
+    if (problem) return { ...report, problems: [problem] };
+    if (mode === "stop") stop(paths);
+    else uninstall(paths);
+    return {
+      ...report,
+      status: mode === "stop" ? "stopped" : "removed",
+      service: serviceState(repository, paths, await serving()),
+    };
+  }
+  const { "credential-file": given, ...rest } = values;
+  // Given bindings replace the unit's; otherwise its own are checked again.
+  const bindings =
+    given ?? boundCredentials(paths).map(({ name, file }) => `${name}=${file}`);
+  report.setup = await setup(
+    repository,
+    rest,
+    bindings.map((binding) => binding.slice(0, binding.indexOf("="))),
+  );
+  if (report.setup.status !== "configured")
+    return {
+      ...report,
+      problems: [
+        "The service wasn't started: setup is not configured (see setup)",
+      ],
+    };
+  const host = hostProblem();
+  if (host) return { ...report, problems: [host] };
+  try {
+    const credentials = credentialFiles(bindings, loadConfig(repository));
+    const before = serviceState(repository, paths, await serving());
+    if (before.serving && before.active !== "active")
+      return {
+        ...report,
+        service: before,
+        problems: [
+          "A `factory serve` for this installation already runs outside the background service; stop it, then repeat",
+        ],
+      };
+    // The service reads its configuration and credentials once, at start.
+    install(
+      repository,
+      paths,
+      credentials,
+      report.setup.changed.length > 0 || given !== undefined,
+    );
+  } catch (error) {
+    return { ...report, problems: [errorMessage(error)] };
+  }
+  const deadline = Date.now() + START_WAIT_MS;
+  let health = unitHealth(paths);
+  while (!(await serving()) && Date.now() < deadline) {
+    health = unitHealth(paths);
+    // A restart since this start means the service died.
+    if (health.active === "failed" || health.restarts > 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const service = serviceState(repository, paths, await serving());
+  if (!service.serving && (health.active === "failed" || health.restarts > 0))
+    return {
+      ...report,
+      service,
+      problems: [
+        `The service exited after it started (unit ${health.active}, ${health.restarts} restarts); read journalctl --user -u ${service.unit}, fix the cause, then repeat`,
+      ],
+    };
+  const warnings = lingerWarning(service);
+  if (!service.serving)
+    warnings.push(
+      `The service hasn't started serving yet (unit ${service.active}); check with factory setup --check, and read journalctl --user -u ${service.unit}`,
+    );
+  return {
+    ...report,
+    status: service.serving ? "running" : "starting",
+    service,
+    warnings,
+  };
+}
+
+function lingerWarning(service: ServiceState): string[] {
+  return [
+    ...(service.installed && service.linger === "no"
+      ? [
+          "Lingering is off, so the service stops when you log out; `loginctl enable-linger` keeps it running",
+        ]
+      : []),
+    ...(service.installed && !service.current
+      ? [
+          "The unit runs another Factory or environment than this one (an upgrade?); repeat factory setup --background to update and restart it",
+        ]
+      : []),
+  ];
 }

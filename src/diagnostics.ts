@@ -1,2971 +1,1023 @@
-import { childDispositions } from "./objective-split.js";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID } from "node:crypto";
+/**
+ * `factory diagnostics ISSUE`: what an Objective's run(s) did, from the run
+ * log alone. The timeline (steps, holds and answers, repairs, waits, model
+ * calls, worker activity) with times relative to the run's start; `--logs
+ * ITEM` one Work Item's events in detail; `--summary` the totals per role
+ * and phase, repairs, holds, the critical path and the slowest steps. Each
+ * run file is streamed in chunks, so a large log costs time, not memory.
+ * Every event is redacted as it is read. It never writes anything.
+ */
+import { join } from "node:path";
+import { displayTime, duration, redactDeep } from "./display.js";
+import { itemOf } from "./engine.js";
 import {
-  appendFileSync,
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
-import { fileURLToPath } from "node:url";
-import { readAccountingRecords, retainModelAccounting } from "./accounting.js";
-import { replacementRefusal } from "./amendment-admission.js";
-import { PLANNING_REVISION_GRANT } from "./compiler/recovery.js";
-import {
-  type CapturePolicy,
-  CaptureWriter,
-  type InteractionMetadata,
-  readInteractionMetadata,
-} from "./capture.js";
-import { objectiveComplete } from "./completion.js";
-import { type Capacity, liveCapacity, stateRoot } from "./config.js";
-import type {
-  ModelInvocationObservation,
-  ModelInvocationPhase,
-  ModelInvocationUsage,
-} from "./contracts.js";
-import { linearDeliveryUnits } from "./delivery/plan.js";
-import { faultDetail, faultOf, type Wait } from "./fault.js";
-import type { GitHubTransportObservation } from "./github-client.js";
-import type { GitHubProgressProjection } from "./github-progress-state.js";
-import { graphDigest, retiredValidation } from "./graph-amendments.js";
-import { workerIdentity } from "./item-steps.js";
-import { FACTORY_VERSION } from "./package-metadata.js";
-import {
-  derivePrerequisiteGuidance,
-  type PrerequisiteGuidanceContext,
-} from "./prerequisite-guidance.js";
-import { objectiveCandidate } from "./qa.js";
-import {
-  attemptOrigin,
-  consumption,
-  failureDigest,
-  implementationRepairable,
-  remaining,
-  repairScopes,
-} from "./repair-policy.js";
-import {
-  pendingItemBlocker,
-  type SchedulingObservation,
-  schedulingObservations,
-} from "./scheduler.js";
-import type {
-  ContinuationState,
-  CoordinatorDisposition,
-  FactoryState,
-  PreparationState,
-  WorkState,
-} from "./state.js";
-import {
-  answeredQuestionDigest,
-  isPreparationState,
-  observedStackNumber,
-  openAmendmentQuestion,
-  openPlanningQuestion,
-  openReviewDecision,
-  reviewDecisionAnswerable,
-  planningRevisionGrantable,
-  projectionStarted,
-} from "./state.js";
-import type { PreState } from "./state-store.js";
-import {
-  type PendingDecisionView,
-  type PlanningStepView,
-  planningRefusal,
-  planningRounds,
-  type StatusView,
-  shortPlanDigest,
-  summarizeStatus,
-} from "./status-summary.js";
-import {
-  currentObservedOperationAttemptId,
-  outageOf,
-  StepPaused,
-  type StepScope,
-  type StepState,
-  waitOf,
-  withObservedOperation,
-  withStepObserver,
-} from "./step.js";
-import {
-  isCodexUsageIdentity,
-  normalizeCodexTokenUsage,
-  normalizeTokenUsage,
-  tokenCategories,
-} from "./usage.js";
+  completeLines,
+  type LogEvent,
+  logFiles,
+  parseLines,
+  readFrom,
+  readRunFile,
+  runOfFile,
+  sizeOf,
+  untilInterrupted,
+} from "./log.js";
+import { captureFile, readContained } from "./paths.js";
+import { oneLine } from "./text.js";
 
-/** A scope's structured wait and failing step, redacted for status. */
-function waitStatus(
-  state: StepState,
-  wait: Wait | undefined,
-  scope: StepScope,
-  secrets: string[],
-) {
-  const outage = outageOf(state, scope);
-  return {
-    wait: wait
-      ? {
-          ...wait,
-          detail: redactDiagnosticDetail(wait.detail, secrets),
-          ...(wait.fix
-            ? { fix: redactDiagnosticDetail(wait.fix, secrets) }
-            : {}),
-        }
-      : null,
-    outage: outage
-      ? {
-          step: outage.step,
-          since: outage.since,
-          tries: outage.tries,
-          last: redactDiagnosticDetail(faultDetail(outage.last), secrets),
-          ...(outage.retryAt && { retryAt: outage.retryAt }),
-          escalated: outage.escalated,
-        }
-      : null,
-  };
+/** Which runs: the latest (default), one by id, or all. */
+export type RunChoice =
+  | { kind: "latest" }
+  | { kind: "run"; id: string }
+  | { kind: "all" };
+
+export interface DiagnosticsOptions {
+  logs: string;
+  issue: number;
+  runs: RunChoice;
+  /** `--logs ITEM`: only this Work Item's events, in detail. */
+  item?: string;
+  summary?: boolean;
+  follow?: boolean;
+  /** With `item`: print each model call's captured request and response, not only its capture file. */
+  captures?: boolean;
+  json?: boolean;
+  secrets: readonly string[];
 }
 
-export interface DiagnosticEvent {
-  workerUsage?: import("./contracts.js").WorkerUsageObservation;
-  capture?: InteractionMetadata;
-  eventId: string;
-  observerSessionId?: string;
-  observerSequence?: number;
-  operationAttemptId?: string;
-  parentOperationAttemptId?: string;
-  /** A producer-observed formal command/worker failure within its paired parent. */
-  formalFailure?: true;
-  formalAttempt?: {
-    scope: string;
-    phase: string;
-    terminal: boolean;
-    status: "started" | "completed" | "pending-poll" | "failed" | "paused";
-    faultClass?: string;
-  };
+/** One timeline line. `event` is the redacted log event it came from. */
+export interface Entry {
   at: string;
-  repository: string;
-  objective: number;
-  runId?: string;
-  itemId?: string;
-  attemptId?: string;
-  operation: string;
-  outcome: "started" | "completed" | "waiting" | "failed" | "observed";
-  durationMs?: number;
-  /** Safe, bounded identities only. A future exporter may copy this field. */
-  metadata?: Record<string, string | number | boolean>;
-  transport?: GitHubTransportObservation;
-  /** Private local detail. Never send this to a remote exporter by default. */
-  detail?: string;
+  run: string;
+  /** Since the run's first event. */
+  elapsedMs: number;
+  kind:
+    | "admitted"
+    | "step-start"
+    | "step-end"
+    | "wait"
+    | "repair"
+    | "hold"
+    | "answer"
+    | "request"
+    | "diagnosis"
+    | "validation"
+    | "model"
+    | "activity"
+    | "cancelled"
+    | "transcript"
+    | "event";
+  step?: string;
+  item?: string;
+  text: string;
+  event: LogEvent;
 }
 
-interface ObserverSession {
-  id: string;
-  repository: string;
-  objective: number;
-  configDigest: string;
-  sequence: number;
-  writeFailures: number;
-  lostObservations: number;
-  closed: boolean;
-}
-const observerSessions = new AsyncLocalStorage<ObserverSession>();
+/** Bytes read per chunk; a line longer than the cap is skipped. */
+const CHUNK = 1024 * 1024;
+const MAX_LINE = 16 * 1024 * 1024;
+/** Text cut in timeline lines. */
+const TEXT = 200;
+/** Steps the summary lists as slowest. */
+const SLOWEST = 10;
 
-/** Actual installed producer bytes; the caller separately authenticates its package. */
-function observerSourceDigest(): string {
-  const hash = createHash("sha256");
-  for (const path of [
-    "diagnostics.js",
-    "step.js",
-    "runner.js",
-    "runner/execution.js",
-    "runner/projection.js",
-    "runner/planning.js",
-    "qa-execution.js",
-    "item-worker.js",
-    "item-steps.js",
-    "execution/checkpoint.js",
-    "execution/local.js",
-    "compiler/observation.js",
-    "compiler/model.js",
-    "result-review.js",
-    "runner/finalization.js",
-    "compiler/planning.js",
-  ]) {
-    const contents = readFileSync(
-      fileURLToPath(new URL(path, import.meta.url)),
-    );
-    hash.update(JSON.stringify([path, contents.length])).update(contents);
-  }
-  return hash.digest("hex");
+/** The run files `choice` names, oldest first; [] when the run isn't there. */
+export function chosenFiles(
+  logs: string,
+  issue: number,
+  choice: RunChoice,
+): string[] {
+  const files = logFiles(logs, issue);
+  if (choice.kind === "all") return files;
+  if (choice.kind === "run")
+    return files.filter((file) => runOfFile(file) === choice.id);
+  return files.slice(-1);
 }
 
-/** One controller observation scope, not another continuation ledger. */
-export async function withDiagnosticSession<T>(
-  emitter: DiagnosticEmitter,
-  configDigest: string,
-  task: () => Promise<T>,
-  lifecycleOutcome: (result: T) => string | { outcome: string; runId?: string },
-  errorLifecycleOutcome?: (error: unknown) => string,
-): Promise<T> {
-  const session: ObserverSession = {
-    id: randomUUID(),
-    repository: emitter.repositoryIdentity,
-    objective: emitter.objectiveIdentity,
-    configDigest,
-    sequence: 0,
-    writeFailures: 0,
-    lostObservations: 0,
-    closed: false,
-  };
-  return observerSessions.run(session, () =>
-    withStepObserver(
-      (observation) => {
-        try {
-          const { outcome, terminal, scope, phase, faultClass, ...context } =
-            observation;
-          emitter.emit({
-            ...context,
-            operation: "formal-step-attempt",
-            outcome:
-              outcome === "pending-poll" || outcome === "paused"
-                ? "waiting"
-                : outcome,
-            formalAttempt: {
-              scope,
-              phase,
-              terminal,
-              status: outcome,
-              ...(faultClass && { faultClass }),
-            },
-          });
-        } catch {
-          session.lostObservations++;
-        }
-      },
-      async () => {
-        let sourceDigest: string | undefined;
-        try {
-          sourceDigest = observerSourceDigest();
-        } catch {
-          session.lostObservations++;
-        }
-        emitter.emit({
-          operation: "observer-session",
-          outcome: "started",
-          metadata: {
-            configDigest,
-            ...(sourceDigest && { observerSourceDigest: sourceDigest }),
-          },
-        });
-        let outcome = "failed";
-        let runId: string | undefined;
-        try {
-          const result = await task();
-          try {
-            const disposition = lifecycleOutcome(result);
-            outcome =
-              typeof disposition === "string"
-                ? disposition
-                : disposition.outcome;
-            if (typeof disposition !== "string") runId = disposition.runId;
-          } catch {
-            session.lostObservations++;
-            outcome = "unknown";
-          }
-          return result;
-        } catch (error) {
-          try {
-            outcome = errorLifecycleOutcome?.(error) ?? "failed";
-          } catch {
-            session.lostObservations++;
-            outcome = "unknown";
-          }
-          throw error;
-        } finally {
-          session.closed = true;
-          emitter.emit({
-            operation: "observer-session",
-            outcome: "completed",
-            ...(runId && { runId }),
-            metadata: {
-              configDigest,
-              ...(sourceDigest && { observerSourceDigest: sourceDigest }),
-              lifecycleOutcome: outcome,
-              emittedEvents: session.sequence + 1,
-              writeFailures: session.writeFailures,
-              lostObservations: session.lostObservations,
-            },
-          });
-        }
-      },
-    ),
-  );
-}
-
-/** Optional checkpoint observations inherit the actual active diagnostic owner. */
-export function checkpointDiagnosticEmitter(
-  repository: string,
-  secrets: string[],
-): DiagnosticEmitter | undefined {
-  const session = observerSessions.getStore();
-  if (session && (session.repository !== repository || session.closed))
-    return undefined;
-  return new DiagnosticEmitter(
-    repository,
-    session?.objective ?? 0,
-    secrets,
-    undefined,
-    session?.configDigest,
-  );
-}
-
-export function redactDiagnosticDetail(
-  value: string,
-  secrets: string[] = [],
-): string {
-  let result = value
-    .replace(
-      /\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{8,}\b/g,
-      "[REDACTED]",
-    )
-    .replace(/(Authorization:\s*Bearer\s+)\S+/gi, "$1[REDACTED]");
-  for (const secret of secrets)
-    for (const line of secret.split(/\r?\n/))
-      if (line.length) result = result.split(line).join("[REDACTED]");
-  return result;
-}
-
-/** Project private coordinator error strings without changing the snapshot. */
-function redactCoordinatorDisposition(
-  coordinator: CoordinatorDisposition | undefined,
-  secrets: string[] = [],
-): CoordinatorDisposition | undefined {
-  return coordinator
-    ? {
-        ...coordinator,
-        ...(coordinator.cancelError
-          ? {
-              cancelError: redactDiagnosticDetail(
-                coordinator.cancelError,
-                secrets,
-              ),
-            }
-          : {}),
-        ...(coordinator.waitReason
-          ? {
-              waitReason: redactDiagnosticDetail(
-                coordinator.waitReason,
-                secrets,
-              ),
-            }
-          : {}),
+/**
+ * Read `file` from byte `from` in chunks, passing each complete event to
+ * `visit`; returns the offset after the last complete line, where a follow
+ * carries on.
+ */
+export function streamFile(
+  file: string,
+  from: number,
+  visit: (event: LogEvent) => void,
+): number {
+  const size = sizeOf(file);
+  let position = from;
+  let done = from;
+  let rest = Buffer.alloc(0);
+  let skipping = false;
+  while (position < size) {
+    const chunk = readFrom(file, position, Math.min(size, position + CHUNK));
+    if (!chunk.length) break;
+    position += chunk.length;
+    let bytes = rest.length ? Buffer.concat([rest, chunk]) : chunk;
+    if (skipping) {
+      // Inside an overlong line: drop it through its newline.
+      const end = bytes.indexOf(10);
+      if (end < 0) {
+        done += bytes.length;
+        rest = Buffer.alloc(0);
+        continue;
       }
-    : undefined;
+      done += end + 1;
+      bytes = bytes.subarray(end + 1);
+      skipping = false;
+    }
+    const complete = completeLines(bytes);
+    for (const event of parseLines(complete.toString("utf8"))) visit(event);
+    done += complete.length;
+    rest = Buffer.from(bytes.subarray(complete.length));
+    if (rest.length > MAX_LINE) {
+      done += rest.length;
+      rest = Buffer.alloc(0);
+      skipping = true;
+    }
+  }
+  return done;
 }
 
-/** Keep only a suffix that could become a secret when the next chunk arrives. */
-function safeStreamingPrefixLength(value: string, secrets: string[]): number {
-  let hold = 0;
-  const candidates = [
-    ...secrets.flatMap((secret) => secret.split(/\r?\n/)).filter(Boolean),
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "ghr_",
-    "github_pat_",
-    "sk-",
-    "Authorization:",
-  ];
-  for (const candidate of candidates)
-    for (let length = 1; length < candidate.length; length++)
-      if (
-        value.toLowerCase().endsWith(candidate.slice(0, length).toLowerCase())
-      )
-        hold = Math.max(hold, length);
-  for (const prefix of [
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "ghr_",
-    "github_pat_",
-    "sk-",
-  ]) {
-    const index = value.lastIndexOf(prefix);
-    if (
-      index >= 0 &&
-      /^[A-Za-z0-9_-]*$/.test(value.slice(index + prefix.length))
-    )
-      hold = Math.max(hold, value.length - index);
-  }
-  const bearer = value.match(/Authorization:\s*Bearer\s+\S*$/i);
-  if (bearer) hold = Math.max(hold, bearer[0].length);
-  const partialBearer = value.match(
-    /Authorization:\s*(?:B(?:e(?:a(?:r(?:e(?:r)?)?)?)?)?)?$/i,
-  );
-  if (partialBearer) hold = Math.max(hold, partialBearer[0].length);
-  return value.length - hold;
+/** Stream `file` from `from` like streamFile, each event redacted and marked with its run. */
+export function readRun(
+  file: string,
+  from: number,
+  secrets: readonly string[],
+  visit: (event: LogEvent) => void,
+): number {
+  const run = runOfFile(file);
+  return streamFile(file, from, (event) => {
+    const shown = redactDeep(event, secrets);
+    shown.run = run;
+    visit(shown);
+  });
 }
 
-export function diagnosticPath(repository: string, objective: number): string {
-  return join(
-    stateRoot(repository),
-    "objectives",
-    String(objective),
-    "diagnostics.ndjson",
-  );
-}
-
-export class DiagnosticEmitter {
-  private streamBuffers = new Map<string, string>();
-  private captureWriters = new Map<string, CaptureWriter>();
-  private captureBudgets = new Map<string, { retained: number }>();
-  constructor(
-    private repository: string,
-    private objective: number,
-    private secrets: string[] = [],
-    private capturePolicy?: CapturePolicy,
-    private configDigest?: string,
-  ) {}
-
-  get repositoryIdentity(): string {
-    return this.repository;
+/** Print the diagnostics `options` asks for to `write`; with follow, until interrupted. */
+export async function diagnostics(
+  options: DiagnosticsOptions,
+  write: (text: string) => void,
+): Promise<void> {
+  const files = chosenFiles(options.logs, options.issue, options.runs);
+  const read = (file: string, from: number, visit: (e: LogEvent) => void) =>
+    readRun(file, from, options.secrets, visit);
+  if (options.summary) {
+    const summary = new Summary(options.issue);
+    for (const file of files) read(file, 0, (event) => summary.add(event));
+    const report = summary.report();
+    write(options.json ? `${JSON.stringify(report)}\n` : summaryText(report));
+    return;
   }
-  get objectiveIdentity(): number {
-    return this.objective;
-  }
-
-  get accountingConfigDigest(): string | undefined {
-    return this.configDigest;
-  }
-
-  scheduling(args: {
-    runId: string;
-    itemId: string;
-    facts: SchedulingObservation;
-    blocker?: { kind: string; detail: string; blockedBy?: string };
-    providerAvailableSlots: number | "unknown";
-    codingReservations: number;
-  }): void {
-    const metadata = Object.fromEntries(
-      Object.entries(args.facts).map(([key, value]) => [
-        key,
-        value ?? "unknown",
-      ]),
-    ) as Record<string, string | number | boolean>;
-    this.emit({
-      runId: args.runId,
-      itemId: args.itemId,
-      operation: "scheduling-admission",
-      outcome: args.blocker ? "waiting" : "observed",
-      metadata: {
-        ...metadata,
-        blockerKind: args.blocker?.kind ?? "admitted",
-        ...(args.blocker?.blockedBy
-          ? { blockedBy: args.blocker.blockedBy }
-          : {}),
-        providerAvailableSlots: args.providerAvailableSlots,
-        codingReservations: args.codingReservations,
-      },
-      detail: args.blocker?.detail,
-    });
-  }
-
-  emit(
-    event: Omit<DiagnosticEvent, "eventId" | "at" | "repository" | "objective">,
-  ): void {
-    const session = observerSessions.getStore();
-    const matched =
-      session?.repository === this.repository &&
-      session.objective === this.objective;
-    if (session && !matched) session.lostObservations++;
-    if (
-      matched &&
-      this.configDigest !== undefined &&
-      this.configDigest !== session.configDigest
-    )
-      session.lostObservations++;
-    if (matched && session.closed && event.operation !== "observer-session")
-      session.lostObservations++;
-    if (
-      matched &&
-      [
-        event.operationAttemptId,
-        event.parentOperationAttemptId,
-        event.formalAttempt?.scope,
-        event.formalAttempt?.phase,
-        event.formalAttempt?.faultClass,
-      ].some(
-        (value) =>
-          value !== undefined &&
-          (typeof value !== "string" || value.length > 1024),
-      )
-    ) {
-      session.lostObservations++;
+  const timeline = new Timeline(options.item);
+  let lastRun: string | undefined;
+  let captured = false;
+  const print = (entry: Entry) => {
+    const capture =
+      options.item === undefined
+        ? undefined
+        : captureOf(options, entry, Boolean(options.captures));
+    if (capture) captured = true;
+    // A failed command's whole output, in its attempt file.
+    const output =
+      options.item !== undefined &&
+      entry.kind === "validation" &&
+      typeof entry.event.output === "string"
+        ? join(options.logs, entry.event.output)
+        : undefined;
+    if (options.json) {
+      write(
+        `${JSON.stringify({ ...entry, ...(capture ? { capture } : {}), ...(output ? { outputPath: output } : {}) })}\n`,
+      );
       return;
     }
-    const path = diagnosticPath(this.repository, this.objective);
-    const value: DiagnosticEvent = {
-      eventId: randomUUID(),
-      at: new Date().toISOString(),
-      repository: this.repository,
-      objective: this.objective,
-      ...event,
-      ...(event.formalFailure && !event.parentOperationAttemptId
-        ? {
-            parentOperationAttemptId: currentObservedOperationAttemptId(),
-          }
-        : {}),
-      ...(matched
-        ? {
-            observerSessionId: session.id,
-            observerSequence: ++session.sequence,
-          }
-        : {}),
-      metadata: {
-        ...event.metadata,
-        factoryVersion: FACTORY_VERSION,
-        ...(this.configDigest ? { configDigest: this.configDigest } : {}),
-      },
-      detail:
-        event.detail === undefined
-          ? undefined
-          : redactDiagnosticDetail(event.detail, this.secrets),
-    };
-    try {
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      // Refuse links. Logs are observations; a write failure cannot change lifecycle.
-      const fd = openSync(
-        path,
-        constants.O_WRONLY |
-          constants.O_APPEND |
-          constants.O_CREAT |
-          constants.O_NOFOLLOW,
-        0o600,
-      );
-      try {
-        if ((fstatSync(fd).mode & 0o077) !== 0)
-          throw new Error("diagnostic log permissions are too broad");
-        appendFileSync(fd, `${JSON.stringify(value)}\n`);
-      } finally {
-        closeSync(fd);
-      }
-    } catch {
-      if (matched) session.writeFailures++;
-      try {
-        process.stderr.write("Factory diagnostics unavailable\n");
-      } catch {
-        // A warning sink cannot replace the caller's outcome or private error.
-      }
+    if (entry.run !== lastRun) {
+      lastRun = entry.run;
+      const start = new Date(Date.parse(entry.at) - entry.elapsedMs);
+      write(`Run ${entry.run} · started ${displayTime(start.toISOString())}\n`);
     }
-  }
-
-  emitStream(
-    event: Omit<
-      DiagnosticEvent,
-      "eventId" | "at" | "repository" | "objective" | "detail"
-    >,
-    chunk: string,
-    final = false,
-  ): void {
-    const key = JSON.stringify(event);
-    const pending = (this.streamBuffers.get(key) ?? "") + chunk;
-    const cut = final
-      ? pending.length
-      : safeStreamingPrefixLength(pending, this.secrets);
-    if (cut) this.emit({ ...event, detail: pending.slice(0, cut) });
-    if (final) this.streamBuffers.delete(key);
-    else this.streamBuffers.set(key, pending.slice(cut));
-  }
-
-  modelObserver(context: {
-    scopeId: string;
-    runId?: string;
-    itemId?: string;
-    attemptId?: string;
-  }): import("./contracts.js").ModelInvocationObserver {
-    return this.guardModelObserver((observation) => {
-      if (!context.itemId)
-        noteModelActivity(`${this.repository}#${this.objective}`, observation);
-      retainModelAccounting(
-        {
-          repository: this.repository,
-          objective: this.objective,
-          runId: context.runId ?? null,
-          itemId: context.itemId ?? null,
-          attemptId: context.attemptId ?? null,
-          configDigest: this.configDigest ?? null,
-          scopeId: context.scopeId,
-        },
-        observation,
+    const text =
+      options.item === undefined
+        ? entry.text
+        : withDetail(entry.text, entry.event);
+    write(`${relative(entry.elapsedMs)}  ${text}\n`);
+    if (output) write(`        whole output: ${output}\n`);
+    if (!capture) return;
+    write(`        capture: ${capture.path}\n`);
+    if (capture.request !== undefined)
+      write(`        request:\n${capture.request}\n`);
+    if (capture.response !== undefined)
+      write(`        response:\n${capture.response}\n`);
+    if (capture.truncated)
+      write(
+        `        (cut to capture.maxBytesPerCall${originalText(capture.original)})\n`,
       );
-      const { scopeId, ...diagnosticContext } = context;
-      const captureKey = `${observation.invocationId}:${observation.providerAttempt ?? "unknown"}`;
-      const operationAttemptId = `model/${captureKey}`;
-      const parentOperationAttemptId = currentObservedOperationAttemptId();
-      const formal = { scope: scopeId, phase: observation.phase };
-      let writer = this.captureWriters.get(captureKey);
-      if (!writer && observation.providerAttempt !== undefined) {
-        const budget = this.captureBudgets.get(observation.invocationId) ?? {
-          retained: 0,
-        };
-        this.captureBudgets.set(observation.invocationId, budget);
-        writer = new CaptureWriter(
-          {
-            repository: this.repository,
-            objective: this.objective,
-            ...context,
-            invocationId: observation.invocationId,
-            providerAttempt: observation.providerAttempt,
-            phase: observation.phase,
-            adapter: observation.adapter ?? "not-exposed",
-            configured: {
-              provider: observation.provider ?? "not-exposed",
-              model: observation.model ?? "not-exposed",
-              reasoningEffort: observation.reasoningEffort,
-              ...(observation.serviceTier && {
-                serviceTier: observation.serviceTier,
-              }),
-            },
-            configDigest: this.configDigest,
-          },
-          this.capturePolicy,
-          this.secrets,
-          (capture) =>
-            this.emit({
-              ...diagnosticContext,
-              operation: "model-capture",
-              outcome: "observed",
-              capture,
-            }),
-          budget,
-        );
-        this.captureWriters.set(captureKey, writer);
-      }
-      if (observation.capture)
-        writer?.record(observation.capture.event, observation.capture.content);
-      const semantic = observation.capture?.event.outcome;
-      if (semantic?.stage === "semantic" && semantic.status !== "pass")
-        this.emit({
-          ...diagnosticContext,
-          operation: "model-semantic-outcome",
-          operationAttemptId,
-          parentOperationAttemptId,
-          formalAttempt: {
-            ...formal,
-            status: "failed",
-            terminal: false,
-            faultClass: `semantic-${semantic.status}`,
-          },
-          outcome: "failed",
-          metadata: {
-            invocationId: observation.invocationId,
-            providerAttempt: observation.providerAttempt ?? "unknown",
-            semanticStatus: semantic.status,
-          },
-        });
-      // A capture-only evaluation, or a provider heartbeat that only shows
-      // liveness, is not another provider progress observation.
-      if (observation.type === "progress" && !observation.providerEvent) return;
-      if (
-        observation.type === "completed" ||
-        observation.type === "failed" ||
-        observation.type === "response-invalid"
-      ) {
-        const stage =
-          observation.type === "response-invalid"
-            ? observation.failureClass === "structured-output-parse"
-              ? "parse"
-              : observation.failureClass === "review-protocol"
-                ? "protocol"
-                : "semantic"
-            : "provider";
-        writer?.record({
-          kind: "outcome",
-          durationMs: observation.durationMs,
-          providerSessionId: observation.providerThreadId,
-          outcome: {
-            stage,
-            status:
-              observation.type === "response-invalid"
-                ? "invalid"
-                : observation.type,
-            failureClass: observation.failureClass,
-          },
-          ...(observation.usage && {
-            usage: {
-              scope: "invocation-cumulative",
-              terminal: true,
-              completeness: observation.usageAvailable
-                ? "available-categories"
-                : "unavailable",
-              normalized: observation.usage,
-              deduplicationKey: captureKey,
-            },
-          }),
-        });
-      }
-
-      const metadata: Record<string, string | number | boolean> = {
-        scopeId,
-        invocationId: observation.invocationId,
-        phase: observation.phase,
-        ordinal: observation.ordinal,
-        observationType: observation.type,
-      };
-      for (const [key, value] of Object.entries({
-        providerAttempt: observation.providerAttempt,
-        providerMaxAttempts: observation.providerMaxAttempts,
-        retryDelayMs: observation.retryDelayMs,
-        provider: observation.provider,
-        model: observation.model,
-        reasoningEffort: observation.reasoningEffort,
-        serviceTier: observation.serviceTier,
-        reportedServiceTier: observation.reportedServiceTier,
-        providerThreadId: observation.providerThreadId,
-        promptBytes: observation.promptBytes,
-        promptDigest: observation.promptDigest,
-        schemaBytes: observation.schemaBytes,
-        schemaDigest: observation.schemaDigest,
-        sourcePacketBytes: observation.sourcePacketBytes,
-        sourcePacketDigest: observation.sourcePacketDigest,
-        responseBytes: observation.responseBytes,
-        responseDigest: observation.responseDigest,
-        providerEvent: observation.providerEvent,
-        providerItemId: observation.providerItemId,
-        providerItemType: observation.providerItemType,
-        tool: observation.tool,
-        usageAvailable: observation.usageAvailable,
-        turns: observation.turns,
-        toolCalls: observation.toolCalls,
-        liveInputTokens: observation.liveInputTokens,
-        liveCachedInputTokens: observation.liveCachedInputTokens,
-        liveOutputTokens: observation.liveOutputTokens,
-        failureClass: observation.failureClass,
-        failureField: observation.failureField,
-        failureReason: observation.failureReason,
-        failureSource: observation.failureSource,
-        ...(observation.usage ?? {}),
-      }))
-        if (["string", "number", "boolean"].includes(typeof value))
-          metadata[key] = value as string | number | boolean;
-      const detailLimit = 4096;
-      const redactedDetail =
-        observation.detail === undefined
-          ? undefined
-          : redactDiagnosticDetail(observation.detail, this.secrets);
-      if ((redactedDetail?.length ?? 0) > detailLimit)
-        metadata.detailTruncated = true;
-      this.emit({
-        ...diagnosticContext,
-        ...(observation.type === "started" ||
-        observation.type === "completed" ||
-        observation.type === "failed" ||
-        observation.type === "response-invalid"
-          ? {
-              operationAttemptId,
-              parentOperationAttemptId,
-              formalAttempt: {
-                ...formal,
-                terminal:
-                  observation.type === "completed" ||
-                  observation.type === "failed" ||
-                  (observation.type === "response-invalid" &&
-                    observation.failureClass === "structured-output-parse"),
-                status:
-                  observation.type === "response-invalid"
-                    ? "failed"
-                    : observation.type,
-                ...(observation.failureClass && {
-                  faultClass: observation.failureClass,
-                }),
-              },
-            }
-          : {}),
-        operation: "model-invocation",
-        outcome:
-          observation.type === "started"
-            ? "started"
-            : observation.type === "completed"
-              ? "completed"
-              : observation.type === "failed" ||
-                  observation.type === "response-invalid"
-                ? "failed"
-                : "observed",
-        durationMs: observation.durationMs,
-        metadata,
-        detail: redactedDetail?.slice(0, detailLimit),
-      });
-    });
-  }
-
-  private guardModelObserver(
-    observer: (observation: ModelInvocationObservation) => void,
-  ): import("./contracts.js").ModelInvocationObserver {
-    const guarded: import("./contracts.js").ModelInvocationObserver = (
-      observation,
-    ) => {
-      const unavailable = () => {
-        const session = observerSessions.getStore();
-        if (session) session.lostObservations++;
-        try {
-          process.stderr.write("Factory model diagnostics unavailable\n");
-        } catch {
-          // Diagnostic and warning sink failures cannot reject provider work.
-        }
-      };
-      try {
-        void Promise.resolve(observer(observation)).catch(unavailable);
-      } catch {
-        unavailable();
-      }
-    };
-    guarded.nativeBoundaryTelemetry =
-      this.capturePolicy?.nativeBoundaryTelemetry === true;
-    return guarded;
-  }
-
-  async span<T>(
-    context: Pick<
-      DiagnosticEvent,
-      "operation" | "runId" | "itemId" | "attemptId" | "metadata"
-    >,
-    task: () => Promise<T>,
-    completedMetadata?: (
-      result: T,
-    ) => Record<string, string | number | boolean>,
-    errorOutcome?: (error: unknown) => "waiting" | "failed" | "handed-off",
-  ): Promise<T> {
-    const started = Date.now();
-    const startedCpu = process.cpuUsage();
-    const operationAttemptId = randomUUID();
-    const parentOperationAttemptId = currentObservedOperationAttemptId();
-    const formalAttempt = {
-      scope: context.itemId ? `item/${context.itemId}` : "objective",
-      phase: context.operation,
-    };
-    this.emit({
-      ...context,
-      operationAttemptId,
-      parentOperationAttemptId,
-      formalAttempt: { ...formalAttempt, terminal: false, status: "started" },
-      outcome: "started",
-    });
-    try {
-      const result = await withObservedOperation(operationAttemptId, task);
-      let metadata = context.metadata;
-      try {
-        metadata = { ...metadata, ...completedMetadata?.(result) };
-      } catch (error) {
-        const session = observerSessions.getStore();
-        if (session) session.lostObservations++;
-        process.stderr.write(
-          `Factory diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-      }
-      const cpu = process.cpuUsage(startedCpu);
-      this.emit({
-        ...context,
-        operationAttemptId,
-        parentOperationAttemptId,
-        formalAttempt: {
-          ...formalAttempt,
-          terminal: true,
-          status: "completed",
-        },
-        outcome: "completed",
-        durationMs: Date.now() - started,
-        metadata: {
-          ...metadata,
-          parentCpuUserUs: cpu.user,
-          parentCpuSystemUs: cpu.system,
-          parentCpuScope: "process-wide-interval",
-          childCpu: "unavailable",
-        },
-      });
-      return result;
-    } catch (error) {
-      let disposition: "waiting" | "failed" | "handed-off" = "failed";
-      try {
-        disposition = errorOutcome?.(error) ?? "failed";
-      } catch {
-        const session = observerSessions.getStore();
-        if (session) session.lostObservations++;
-      }
-      const outcome = disposition === "handed-off" ? "waiting" : disposition;
-      const cpu = process.cpuUsage(startedCpu);
-      this.emit({
-        ...context,
-        operationAttemptId,
-        parentOperationAttemptId,
-        formalAttempt: {
-          ...formalAttempt,
-          terminal: true,
-          status:
-            outcome === "waiting" ||
-            error instanceof StepPaused ||
-            ["decision", "config", "cancelled"].includes(faultOf(error).kind)
-              ? "paused"
-              : "failed",
-          ...(disposition !== "handed-off" && {
-            faultClass: faultOf(error).kind,
-          }),
-        },
-        outcome,
-        durationMs: Date.now() - started,
-        metadata: {
-          ...context.metadata,
-          parentCpuUserUs: cpu.user,
-          parentCpuSystemUs: cpu.system,
-          parentCpuScope: "process-wide-interval",
-          childCpu: "unavailable",
-          ...(disposition === "handed-off" && {
-            controllerDisposition: disposition,
-          }),
-        },
-        detail: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-  }
-}
-
-export interface ModelInvocationAggregate {
-  invocationCount: number;
-  completedCount: number;
-  failedCount: number;
-  activeCount: number;
-  usageAvailableCount: number;
-  usageUnavailableCount: number;
-  tokenTotals: Partial<ModelInvocationUsage>;
-  tokenAvailability: Partial<Record<keyof ModelInvocationUsage, number>>;
-  /** Paired categories from the same selected invocation snapshot, including observed zeros. */
-  inputCacheUsage: {
-    inputTokens: number | null;
-    cachedInputTokens: number | null;
-    contributingInvocations: number;
-    terminalCounterInvocations: number;
   };
-  cacheReadRatio: {
-    numeratorCachedInputTokens: number;
-    denominatorInputTokens: number;
-    value: number;
-  } | null;
-  lastProgressAt?: string;
-}
-
-export interface ModelInvocationSummary {
-  scope: "planning-and-review-model-invocations";
-  objective: ModelInvocationAggregate;
-  byPhase: Partial<Record<ModelInvocationPhase, ModelInvocationAggregate>>;
-  byScope: Record<string, ModelInvocationAggregate>;
-}
-
-type ModelEvent = Pick<
-  DiagnosticEvent,
-  "at" | "operation" | "metadata" | "runId" | "attemptId"
->;
-
-/** Derive observational totals without treating absent provider usage as zero. */
-function summarizeModelInvocations(
-  events: Array<ModelEvent | Record<string, unknown>>,
-): ModelInvocationSummary {
-  const invocations = new Map<
-    string,
-    {
-      phase: ModelInvocationPhase;
-      scopeId: string;
-      events: ModelEvent[];
+  const captureNote = () => {
+    if (options.item !== undefined && !captured && !options.json)
+      write(
+        `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (docs/reference/run-log.md#Content capture).\n`,
+      );
+  };
+  // `--logs ITEM`: each worker attempt's transcript, after the attempt ends.
+  const transcripts = new Map<string, LogEvent>();
+  const printTranscript = (entry: Entry, opened: LogEvent) => {
+    const file = String(opened.file);
+    const read = readRunFile(options.logs, file, options.secrets);
+    const records = read ? transcriptRecords(read.text) : [];
+    const path = join(options.logs, file);
+    if (options.json) {
+      write(
+        `${JSON.stringify({ ...entry, kind: "transcript", text: `transcript ${String(opened.attemptId)}`, transcript: { file, path, available: Boolean(read), cut: read?.cut ?? false, records } })}\n`,
+      );
+      return;
     }
-  >();
-  for (const rawEvent of events) {
-    const event = rawEvent as ModelEvent;
-    if (event.operation !== "model-invocation") continue;
-    const invocationId = event.metadata?.invocationId;
-    const phase = event.metadata?.phase;
-    const scopeId = event.metadata?.scopeId;
+    write(
+      `        transcript of ${String(opened.attemptId)}: ${read ? `${count(records.length)} records${read.cut ? ", its middle rotated away" : ""}` : "gone (rotated away with its run, or never written)"} · ${path}\n`,
+    );
+    for (const record of records)
+      write(`          ${transcriptLine(record)}\n`);
+  };
+  const visit = (event: LogEvent) => {
     if (
-      typeof invocationId !== "string" ||
-      ![
-        "propose",
-        "dream",
-        "compile",
-        "diagnosis",
-        "graph-review",
-        "result-review",
-        "objective-review",
-      ].includes(String(phase)) ||
-      typeof scopeId !== "string"
-    )
-      continue;
-    const providerAttempt =
-      typeof event.metadata?.providerAttempt === "number"
-        ? event.metadata.providerAttempt
-        : "unknown";
-    const invocationKey = JSON.stringify([
-      event.runId ?? null,
-      event.attemptId ?? null,
-      invocationId,
-      providerAttempt,
-    ]);
-    const entry = invocations.get(invocationKey) ?? {
-      phase: phase as ModelInvocationPhase,
-      scopeId,
-      events: [],
-    };
-    entry.events.push(event);
-    invocations.set(invocationKey, entry);
-  }
-  const all = [...invocations.values()];
-  const aggregate = (selected: typeof all): ModelInvocationAggregate => {
-    const totals: Partial<ModelInvocationUsage> = {};
-    const availability: Partial<Record<keyof ModelInvocationUsage, number>> =
-      {};
-    let completedCount = 0;
-    let failedCount = 0;
-    let usageAvailableCount = 0;
-    let usageUnavailableCount = 0;
-    let cacheRatioInputTokens = 0;
-    let cacheRatioCachedInputTokens = 0;
-    let cacheRatioInvocationCount = 0;
-    let terminalCacheCounterCount = 0;
-    let lastProgressAt: string | undefined;
-    for (const invocation of selected) {
-      const observations = invocation.events.map(
-        (event) => event.metadata?.observationType,
-      );
-      const failed = observations.some(
-        (type) => type === "failed" || type === "response-invalid",
-      );
-      const completed = observations.includes("completed");
-      if (failed) failedCount += 1;
-      else if (completed) completedCount += 1;
-      for (const event of invocation.events)
-        if (
-          event.metadata?.observationType === "progress" &&
-          (!lastProgressAt || event.at > lastProgressAt)
-        )
-          lastProgressAt = event.at;
-      if (!failed && !completed) continue;
-      const usageEvent = [...invocation.events]
-        .reverse()
-        .find((event) => event.metadata?.usageAvailable === true);
-      if (!usageEvent) {
-        usageUnavailableCount += 1;
-        continue;
-      }
-      const metadata = usageEvent.metadata;
-      const usage =
-        isCodexUsageIdentity(metadata?.provider) ||
-        isCodexUsageIdentity(metadata?.adapter)
-          ? normalizeCodexTokenUsage(metadata)
-          : normalizeTokenUsage(metadata);
-      if (!Object.keys(usage).length) {
-        usageUnavailableCount += 1;
-        continue;
-      }
-      usageAvailableCount += 1;
-      const inputTokens = usage.inputTokens;
-      const cachedInputTokens = usage.cachedInputTokens;
-      if (
-        typeof inputTokens === "number" &&
-        typeof cachedInputTokens === "number" &&
-        Number.isSafeInteger(inputTokens) &&
-        inputTokens >= 0 &&
-        Number.isSafeInteger(cachedInputTokens) &&
-        cachedInputTokens >= 0 &&
-        cachedInputTokens <= inputTokens
-      ) {
-        cacheRatioInputTokens += inputTokens;
-        cacheRatioCachedInputTokens += cachedInputTokens;
-        cacheRatioInvocationCount += 1;
-        if (
-          ["completed", "failed", "response-invalid"].includes(
-            String(usageEvent.metadata?.observationType),
-          )
-        )
-          terminalCacheCounterCount++;
-      }
-      for (const key of [
-        "inputTokens",
-        "cachedInputTokens",
-        "cacheWriteInputTokens",
-        "outputTokens",
-        "reasoningOutputTokens",
-        "totalTokens",
-      ] as const) {
-        const value = usage[key];
-        if (typeof value !== "number") continue;
-        totals[key] = (totals[key] ?? 0) + value;
-        availability[key] = (availability[key] ?? 0) + 1;
-      }
-    }
-    return {
-      invocationCount: selected.length,
-      completedCount,
-      failedCount,
-      activeCount: selected.length - completedCount - failedCount,
-      usageAvailableCount,
-      usageUnavailableCount,
-      tokenTotals: totals,
-      tokenAvailability: availability,
-      inputCacheUsage: {
-        inputTokens: cacheRatioInvocationCount ? cacheRatioInputTokens : null,
-        cachedInputTokens: cacheRatioInvocationCount
-          ? cacheRatioCachedInputTokens
-          : null,
-        contributingInvocations: cacheRatioInvocationCount,
-        terminalCounterInvocations: terminalCacheCounterCount,
-      },
-      cacheReadRatio:
-        cacheRatioInvocationCount > 0 && cacheRatioInputTokens > 0
-          ? {
-              numeratorCachedInputTokens: cacheRatioCachedInputTokens,
-              denominatorInputTokens: cacheRatioInputTokens,
-              value: cacheRatioCachedInputTokens / cacheRatioInputTokens,
-            }
-          : null,
-      ...(lastProgressAt ? { lastProgressAt } : {}),
-    };
-  };
-  const phases: ModelInvocationPhase[] = [
-    "propose",
-    "dream",
-    "compile",
-    "diagnosis",
-    "graph-review",
-    "result-review",
-    "objective-review",
-  ];
-  return {
-    scope: "planning-and-review-model-invocations",
-    objective: aggregate(all),
-    byPhase: Object.fromEntries(
-      phases.flatMap((phase) => {
-        const selected = all.filter((entry) => entry.phase === phase);
-        return selected.length ? [[phase, aggregate(selected)]] : [];
-      }),
-    ),
-    byScope: Object.fromEntries(
-      [...new Set(all.map((entry) => entry.scopeId))].map((scopeId) => [
-        scopeId,
-        aggregate(all.filter((entry) => entry.scopeId === scopeId)),
-      ]),
-    ),
-  };
-}
-
-/** Summary-only telemetry: never read evidence or reconstruct execution state. */
-export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
-  const model = summarizeModelInvocations(events);
-  const workerEvents: ModelEvent[] = [];
-  const observedAttempts = new Set<string>();
-  const knownAttempts = new Set<string>();
-  const identities = new Map<
-    string,
-    {
-      attemptId: string;
-      invocationId: string;
-      providerAttempt: number;
-      profileId?: string;
-      adapter?: string;
-      model?: string;
-      reasoningEffort?: string;
-      runId?: string;
-      itemId?: string;
-    }
-  >();
-  for (const event of events) {
-    if (
-      ["harness", "recorded-work-attempt"].includes(String(event.operation)) &&
+      options.item !== undefined &&
+      event.event === "transcript" &&
+      event.item === options.item &&
       typeof event.attemptId === "string"
     )
-      knownAttempts.add(event.attemptId);
-    if (
-      event.operation !== "worker-usage" ||
-      typeof event.attemptId !== "string"
-    )
-      continue;
-    const value = event.workerUsage;
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const observation = value as Record<string, unknown>;
-    if (
-      observation.role !== "worker" ||
-      observation.phase !== "implementation" ||
-      typeof observation.invocationId !== "string" ||
-      !observation.invocationId ||
-      typeof observation.providerAttempt !== "number" ||
-      !Number.isSafeInteger(observation.providerAttempt) ||
-      observation.providerAttempt < 1 ||
-      !["started", "progress", "completed", "failed"].includes(
-        String(observation.type),
-      )
-    )
-      continue;
-    const key = JSON.stringify([
-      event.attemptId,
-      observation.invocationId,
-      observation.providerAttempt,
-    ]);
-    const usage =
-      isCodexUsageIdentity(observation.adapter) ||
-      isCodexUsageIdentity(observation.provider)
-        ? normalizeCodexTokenUsage(observation.usage)
-        : normalizeTokenUsage(observation.usage);
-    observedAttempts.add(event.attemptId);
-    identities.set(key, {
-      attemptId: event.attemptId,
-      invocationId: observation.invocationId,
-      providerAttempt: observation.providerAttempt,
-      ...Object.fromEntries(
-        [
-          "profileId",
-          "provider",
-          "adapter",
-          "model",
-          "reasoningEffort",
-        ].flatMap((key) =>
-          typeof observation[key] === "string" ? [[key, observation[key]]] : [],
-        ),
-      ),
-      ...(typeof event.runId === "string" ? { runId: event.runId } : {}),
-      ...(typeof event.workItemId === "string"
-        ? { itemId: event.workItemId }
-        : {}),
-    });
-    workerEvents.push({
-      at: String(event.at ?? ""),
-      operation: "model-invocation",
-      metadata: {
-        invocationId: key,
-        providerAttempt: 1,
-        phase: "compile",
-        scopeId: key,
-        observationType: String(observation.type),
-        usageAvailable: Object.keys(usage).length > 0,
-        ...usage,
-      },
-    });
-  }
-  // Reuse only the observational counter aggregation, not model phase semantics.
-  const workers = summarizeModelInvocations(workerEvents);
-  const unobservedAttemptCount = [...knownAttempts].filter(
-    (id) => !observedAttempts.has(id),
-  ).length;
-  const combine = (
-    left: ModelInvocationAggregate,
-    right: ModelInvocationAggregate,
-  ): ModelInvocationAggregate => {
-    const tokenTotals: ModelInvocationUsage = {};
-    const tokenAvailability: Partial<
-      Record<keyof ModelInvocationUsage, number>
-    > = {};
-    for (const key of tokenCategories) {
-      if (
-        left.tokenTotals[key] !== undefined ||
-        right.tokenTotals[key] !== undefined
-      )
-        tokenTotals[key] =
-          (left.tokenTotals[key] ?? 0) + (right.tokenTotals[key] ?? 0);
-      if (
-        left.tokenAvailability[key] !== undefined ||
-        right.tokenAvailability[key] !== undefined
-      )
-        tokenAvailability[key] =
-          (left.tokenAvailability[key] ?? 0) +
-          (right.tokenAvailability[key] ?? 0);
+      transcripts.set(event.attemptId, event);
+    for (const entry of timeline.add(event)) {
+      print(entry);
+      const attempt = str(entry.event.attemptId);
+      const opened = attempt ? transcripts.get(attempt) : undefined;
+      if (entry.event.event === "outcome" && attempt && opened) {
+        transcripts.delete(attempt);
+        printTranscript(entry, opened);
+      }
     }
-    const numerator =
-      (left.cacheReadRatio?.numeratorCachedInputTokens ?? 0) +
-      (right.cacheReadRatio?.numeratorCachedInputTokens ?? 0);
-    const denominator =
-      (left.cacheReadRatio?.denominatorInputTokens ?? 0) +
-      (right.cacheReadRatio?.denominatorInputTokens ?? 0);
-    return {
-      invocationCount: left.invocationCount + right.invocationCount,
-      completedCount: left.completedCount + right.completedCount,
-      failedCount: left.failedCount + right.failedCount,
-      activeCount: left.activeCount + right.activeCount,
-      usageAvailableCount: left.usageAvailableCount + right.usageAvailableCount,
-      usageUnavailableCount:
-        left.usageUnavailableCount + right.usageUnavailableCount,
-      tokenTotals,
-      tokenAvailability,
-      inputCacheUsage: {
-        inputTokens:
-          left.inputCacheUsage.inputTokens === null &&
-          right.inputCacheUsage.inputTokens === null
-            ? null
-            : (left.inputCacheUsage.inputTokens ?? 0) +
-              (right.inputCacheUsage.inputTokens ?? 0),
-        cachedInputTokens:
-          left.inputCacheUsage.cachedInputTokens === null &&
-          right.inputCacheUsage.cachedInputTokens === null
-            ? null
-            : (left.inputCacheUsage.cachedInputTokens ?? 0) +
-              (right.inputCacheUsage.cachedInputTokens ?? 0),
-        contributingInvocations:
-          left.inputCacheUsage.contributingInvocations +
-          right.inputCacheUsage.contributingInvocations,
-        terminalCounterInvocations:
-          left.inputCacheUsage.terminalCounterInvocations +
-          right.inputCacheUsage.terminalCounterInvocations,
-      },
-      cacheReadRatio:
-        denominator > 0
-          ? {
-              numeratorCachedInputTokens: numerator,
-              denominatorInputTokens: denominator,
-              value: numerator / denominator,
-            }
-          : null,
-    };
   };
-  const coverage = (aggregate: ModelInvocationAggregate, unobserved = 0) => ({
-    unobservedAttemptCount: unobserved,
-    byCategory: Object.fromEntries(
-      tokenCategories.map((key) => {
-        const supplied = aggregate.tokenAvailability[key] ?? 0;
-        const terminal = aggregate.completedCount + aggregate.failedCount;
-        return [
-          key,
-          supplied === 0
-            ? "unavailable"
-            : supplied === terminal &&
-                aggregate.activeCount === 0 &&
-                unobserved === 0
-              ? "available"
-              : "partial",
-        ];
-      }),
-    ),
+  const offsets = new Map<string, number>();
+  for (const file of files) offsets.set(file, read(file, 0, visit));
+  if (!options.json && !files.length)
+    write(`No run log for #${options.issue} yet.\n`);
+  if (!options.follow) {
+    // Steps still running when the log ends: their activity so far.
+    for (const entry of timeline.running()) print(entry);
+    // And the transcripts of attempts still running, as far as written.
+    for (const opened of transcripts.values())
+      printTranscript(
+        {
+          at: opened.at,
+          run: String(opened.run),
+          elapsedMs: 0,
+          kind: "transcript",
+          text: "",
+          event: opened,
+        },
+        opened,
+      );
+    captureNote();
+    return;
+  }
+  captureNote();
+  await untilInterrupted(() => {
+    // The latest run, or all: a run that starts meanwhile is followed too.
+    if (options.runs.kind !== "run") {
+      const newest = [...offsets.keys()].sort().at(-1);
+      for (const file of logFiles(options.logs, options.issue))
+        if (!offsets.has(file) && (!newest || file > newest))
+          offsets.set(file, 0);
+    }
+    for (const [file, from] of [...offsets].sort())
+      offsets.set(file, read(file, from, visit));
   });
-  const combined = combine(model.objective, workers.objective);
-  return {
-    ...model,
-    modelUsage: {
-      scope: model.scope,
-      ...model.objective,
-      coverage: coverage(model.objective),
-    },
-    workerUsage: {
-      scope: "worker-implementation-invocations",
-      role: "worker",
-      phase: "implementation",
-      ...workers.objective,
-      coverage: coverage(workers.objective, unobservedAttemptCount),
-      byInvocation: Object.fromEntries(
-        Object.entries(workers.byScope).map(([key, aggregate]) => [
-          key,
-          {
-            ...identities.get(key),
-            ...aggregate,
-            coverage: coverage(aggregate),
-          },
-        ]),
-      ),
-    },
-    combinedUsage: {
-      scope: "observed-model-and-worker-invocations",
-      ...combined,
-      coverage: coverage(combined, unobservedAttemptCount),
-    },
-  };
 }
 
-export function readDiagnosticMetadata(
-  repository: string,
-  objective: number,
-): Omit<DiagnosticEvent, "detail">[] {
-  const path = diagnosticPath(repository, objective);
-  if (!existsSync(path)) return [];
-  const events: Omit<DiagnosticEvent, "detail">[] = [];
-  for (const { detail: _detail, ...event } of privateRecords(path))
-    events.push(event as Omit<DiagnosticEvent, "detail">);
-  return events;
-}
-
-export function readDiagnostics(
-  repository: string,
-  objective: number,
-): DiagnosticEvent[] {
-  const path = diagnosticPath(repository, objective);
-  if (!existsSync(path)) return [];
-  return completeLines(readPrivateFile(path)).map(
-    (line) => JSON.parse(line) as DiagnosticEvent,
-  );
-}
-
-/** Validate the caller's authenticated, complete session selection; never infer it. */
-export function summarizeFormalHistory(
-  events: DiagnosticEvent[],
-  expected: {
-    repository: string;
-    objective: number;
-    configDigest: string;
-    observerSourceDigest: string;
-    sessionIds: string[];
-  },
-) {
-  const reasons = new Set<string>();
-  const sessions = new Map<string, DiagnosticEvent[]>();
-  const attempts = new Map<string, DiagnosticEvent[]>();
-  const failures = new Set<string>();
-  const required = new Set(expected.sessionIds);
-  if (!required.size || required.size !== expected.sessionIds.length)
-    reasons.add("missing-or-duplicate-expected-sessions");
-  if (
-    !/^[a-f0-9]{64}$/.test(expected.configDigest) ||
-    !/^[a-f0-9]{64}$/.test(expected.observerSourceDigest)
-  )
-    reasons.add("missing-expected-source-or-config-binding");
-  for (const event of events) {
-    if (
-      event.repository !== expected.repository ||
-      event.objective !== expected.objective
-    )
-      reasons.add("unexpected-objective");
-    const id = event.observerSessionId;
-    if (!id || !required.has(id)) {
-      reasons.add("unselected-or-unobserved-session");
-      continue;
+/** A model call's capture file, and with `bodies` its redacted request and response; undefined when the call has none. */
+function captureOf(
+  options: DiagnosticsOptions,
+  entry: Entry,
+  bodies: boolean,
+):
+  | {
+      path: string;
+      request?: string;
+      response?: string;
+      truncated?: boolean;
+      original?: Record<string, unknown>;
     }
-    const rows = sessions.get(id) ?? [];
-    rows.push(event);
-    sessions.set(id, rows);
-    if (event.formalAttempt) {
-      const formal = event.formalAttempt;
-      if (
-        typeof formal.scope !== "string" ||
-        !formal.scope.length ||
-        formal.scope.length > 1024 ||
-        typeof formal.phase !== "string" ||
-        !formal.phase.length ||
-        formal.phase.length > 1024 ||
-        typeof formal.terminal !== "boolean" ||
-        !["started", "completed", "pending-poll", "failed", "paused"].includes(
-          formal.status,
-        ) ||
-        (["completed", "pending-poll", "paused"].includes(formal.status) &&
-          !formal.terminal)
-      )
-        reasons.add("invalid-formal-observation");
-      if (!event.operationAttemptId) {
-        reasons.add("missing-attempt-identity");
-        continue;
-      }
-      const rows = attempts.get(event.operationAttemptId) ?? [];
-      rows.push(event);
-      attempts.set(event.operationAttemptId, rows);
-      if (event.formalAttempt.status === "failed")
-        failures.add(event.operationAttemptId);
-    }
-    if (event.formalFailure) {
-      if (event.formalFailure !== true || event.outcome !== "failed")
-        reasons.add("invalid-formal-failure");
-      if (!event.parentOperationAttemptId)
-        reasons.add("missing-formal-failure-parent");
-      else failures.add(event.parentOperationAttemptId);
+  | undefined {
+  const id = entry.event.capture;
+  const file =
+    entry.kind === "model" && typeof id === "string"
+      ? captureFile(options.issue, entry.run, id)
+      : undefined;
+  if (!file) return undefined;
+  const path = join(options.logs, file);
+  if (!bodies) return { path };
+  const body = readCapture(options.logs, file, options.secrets);
+  return body ? { path, ...body } : { path };
+}
+
+/** A transcript's records: its complete JSON lines, a torn or cut one skipped. */
+function transcriptRecords(text: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try {
+      records.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // Cut where the middle rotated away.
     }
   }
-  for (const id of required) {
-    const rows = sessions.get(id) ?? [];
-    const start = rows[0];
-    const close = rows.at(-1);
-    if (
-      !start ||
-      start.operation !== "observer-session" ||
-      start.outcome !== "started" ||
-      !close ||
-      close.operation !== "observer-session" ||
-      close.outcome !== "completed" ||
-      rows.filter((row) => row.operation === "observer-session").length !== 2
-    )
-      reasons.add("missing-or-unclosed-session");
-    for (const [index, row] of rows.entries())
-      if (
-        !Number.isSafeInteger(row.observerSequence) ||
-        row.observerSequence !== index + 1
-      )
-        reasons.add("observation-sequence-gap");
-    for (const row of [start, close])
-      if (
-        row?.metadata?.configDigest !== expected.configDigest ||
-        row?.metadata?.observerSourceDigest !== expected.observerSourceDigest
-      )
-        reasons.add("source-or-config-binding-mismatch");
-    if (
-      close?.metadata?.emittedEvents !== rows.length ||
-      close?.metadata?.writeFailures !== 0 ||
-      close?.metadata?.lostObservations !== 0
-    )
-      reasons.add("lost-or-unproved-observations");
-    if (typeof close?.metadata?.lifecycleOutcome !== "string")
-      reasons.add("missing-lifecycle-outcome");
-  }
-  for (const rows of attempts.values()) {
-    const start = rows.filter((row) => row.formalAttempt?.status === "started");
-    const terminal = rows.filter((row) => row.formalAttempt?.terminal);
-    if (
-      start.length !== 1 ||
-      terminal.length !== 1 ||
-      rows[0] !== start[0] ||
-      start[0]?.formalAttempt?.terminal ||
-      terminal[0]?.formalAttempt?.status === "started"
-    )
-      reasons.add("unmatched-formal-attempt");
-    for (const row of rows) {
-      if (
-        row.observerSessionId !== start[0]?.observerSessionId ||
-        row.formalAttempt?.scope !== start[0]?.formalAttempt?.scope ||
-        row.formalAttempt?.phase !== start[0]?.formalAttempt?.phase ||
-        row.parentOperationAttemptId !== start[0]?.parentOperationAttemptId
-      )
-        reasons.add("attempt-binding-mismatch");
-      if (
-        row.parentOperationAttemptId &&
-        !attempts.has(row.parentOperationAttemptId)
-      )
-        reasons.add("missing-parent-attempt");
-      if (row.parentOperationAttemptId) {
-        const parent = attempts.get(row.parentOperationAttemptId) ?? [];
-        const parentStart = parent.find(
-          (entry) => entry.formalAttempt?.status === "started",
-        );
-        const parentTerminal = parent.find(
-          (entry) => entry.formalAttempt?.terminal,
-        );
-        if (
-          parentStart?.observerSessionId !== row.observerSessionId ||
-          (parentStart?.observerSequence ?? Infinity) >=
-            (start[0]?.observerSequence ?? 0) ||
-          (parentTerminal?.observerSequence ?? 0) <=
-            (row.observerSequence ?? Infinity)
-        )
-          reasons.add("invalid-parent-attempt-order");
-      }
-    }
-  }
-  for (const event of events)
-    if (
-      event.formalFailure &&
-      event.parentOperationAttemptId &&
-      !attempts.has(event.parentOperationAttemptId)
-    )
-      reasons.add("missing-formal-failure-parent");
-  if (!attempts.size) reasons.add("no-formal-attempts-observed");
-  return {
-    scope: "observed-formal-history" as const,
-    completeness: reasons.size ? ("unknown" as const) : ("complete" as const),
-    reasons: [...reasons],
-    sessionIds: [...sessions.keys()],
-    attemptedOperations: attempts.size,
-    failedOperationAttemptIds: [...failures],
-    hasFailedAttempt: failures.size ? true : reasons.size ? null : false,
-    observedPhases: [
-      ...new Set(
-        [...attempts.values()].map((rows) => rows[0]!.formalAttempt!.phase),
-      ),
-    ],
-    lifecycleOutcomes: [...sessions.values()].map(
-      (rows) => rows.at(-1)?.metadata?.lifecycleOutcome ?? null,
-    ),
-    // This does not prove expected DAG coverage, terminal acceptance or billing.
-  };
+  return records;
 }
 
-function completeLines(value: string): string[] {
-  const lines = value.split("\n");
-  if (lines.at(-1) !== "") lines.pop();
-  return lines.filter(Boolean);
-}
-
-function readPrivateFile(path: string): string {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0)
-      throw new Error(
-        "Private diagnostic file is not a restricted regular file",
-      );
-    return readFileSync(fd, "utf8");
-  } finally {
-    closeSync(fd);
+/** One transcript record as a line: what the worker did, or the provider's event as it came. */
+function transcriptLine(record: Record<string, unknown>): string {
+  const at =
+    typeof record.at === "string"
+      ? displayTime(record.at).slice(11)
+      : "--:--:--";
+  const activity = record.activity as Record<string, unknown> | undefined;
+  if (!activity) return `${at} output ${JSON.stringify(record.output)}`;
+  switch (activity.kind) {
+    case "tool":
+      return `${at} tool ${String(activity.tool)} ${String(activity.phase)}${typeof activity.target === "string" ? `: ${oneLine(activity.target, 2_000)}` : ""}`;
+    case "edit":
+      return `${at} edit ${String(activity.path)}`;
+    case "command":
+      return `${at} $ ${oneLine(String(activity.command), 2_000)}`;
+    case "command-failed":
+      return `${at} command failed`;
+    case "context":
+      return `${at} context ${String(activity.tokens)} tokens${typeof activity.window === "number" ? ` of ${activity.window}` : ""}`;
+    default:
+      return `${at} ${String(activity.kind)}`;
   }
 }
 
-export function readWorkerOutput(
-  repository: string,
-  attemptId: string,
-): string {
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-      attemptId,
-    )
-  )
-    throw new Error("Invalid worker attempt ID");
-  const path = join(stateRoot(repository), "harness", `${attemptId}.log`);
-  if (!existsSync(path))
-    throw new Error("Worker output unavailable for this attempt");
-  return readPrivateFile(path);
-}
-
-export function readAgentTimeline(
-  repository: string,
-  objective: number,
-  state?: FactoryState,
-): Record<string, unknown>[] {
-  const events: Record<string, unknown>[] = readDiagnostics(
-    repository,
-    objective,
-  ).map((event) => ({ ...event }));
-  const root = join(stateRoot(repository), "harness");
-  if (existsSync(root)) {
-    const itemByAttempt = new Map<string, string>(
-      events
-        .filter(
-          (event) =>
-            typeof event.attemptId === "string" &&
-            typeof event.itemId === "string",
-        )
-        .map((event) => [event.attemptId as string, event.itemId as string]),
-    );
-    const runByAttempt = new Map<string, string>(
-      events
-        .filter(
-          (event) =>
-            typeof event.attemptId === "string" &&
-            typeof event.runId === "string",
-        )
-        .map((event) => [event.attemptId as string, event.runId as string]),
-    );
-    for (const [id, work] of Object.entries(state?.work ?? {}))
-      if (work.attempt) {
-        itemByAttempt.set(work.attempt, id);
-        if (state?.runId) runByAttempt.set(work.attempt, state.runId);
-      }
-    for (const name of readdirSync(root).filter((name) =>
-      /^[0-9a-f-]{36}(?:-[1-9]\d*)?\.progress\.ndjson$/.test(name),
-    )) {
-      const path = join(root, name);
-      const attemptId = name.slice(0, 36);
-      if (!itemByAttempt.has(attemptId)) continue;
-      for (const line of completeLines(readPrivateFile(path))) {
-        const event = JSON.parse(line) as Record<string, unknown>;
-        events.push({
-          ...event,
-          repository,
-          objective,
-          runId: runByAttempt.get(attemptId),
-          workItemId: itemByAttempt.get(attemptId),
-          attemptId,
-        });
-      }
-    }
-  }
-  return events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
-}
-
-/** Parse every complete record, retaining at most the current record text. */
-export function* privateRecords(
-  path: string,
-  requireTerminated = false,
-): Generator<Record<string, unknown>> {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0)
-      throw new Error(
-        "Private diagnostic file is not a restricted regular file",
-      );
-    const buffer = Buffer.alloc(64 * 1024);
-    const decoder = new StringDecoder("utf8");
-    let pending = "";
-    for (;;) {
-      const bytes = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytes === 0) break;
-      pending += decoder.write(buffer.subarray(0, bytes));
-      let start = 0;
-      for (;;) {
-        const end = pending.indexOf("\n", start);
-        if (end < 0) break;
-        const line = pending.slice(start, end);
-        if (line) yield { ...JSON.parse(line) } as Record<string, unknown>;
-        start = end + 1;
-      }
-      pending = pending.slice(start);
-    }
-    if (requireTerminated && (pending + decoder.end()).length)
-      throw new Error(
-        "Direct observation capture has an unterminated final record",
-      );
-    // Historical readers, like completeLines, ignore the final unterminated record.
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function usageEvent(
-  event: Record<string, unknown>,
-): Record<string, unknown> | undefined {
-  const { at, operation, attemptId, runId } = event;
-  const workItemId = event.workItemId ?? event.itemId;
-  if (operation === "harness") return { at, operation, attemptId };
-  if (operation === "model-invocation") {
-    const metadata = event.metadata as DiagnosticEvent["metadata"];
-    return {
-      at,
-      operation,
-      attemptId,
-      runId,
-      metadata:
-        metadata &&
-        Object.fromEntries(
-          [
-            "invocationId",
-            "providerAttempt",
-            "phase",
-            "scopeId",
-            "observationType",
-            "usageAvailable",
-            "provider",
-            "adapter",
-            "model",
-            "reasoningEffort",
-            ...tokenCategories,
-          ].map((key) => [key, metadata[key]]),
-        ),
-    };
-  }
-  if (operation !== "worker-usage") return;
-  const value = event.workerUsage;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const observation = value as Record<string, unknown>;
-  return {
-    at,
-    operation,
-    attemptId,
-    runId,
-    workItemId,
-    workerUsage: {
-      type: observation.type,
-      role: observation.role,
-      phase: observation.phase,
-      invocationId: observation.invocationId,
-      providerAttempt: observation.providerAttempt,
-      ...Object.fromEntries(
-        [
-          "profileId",
-          "provider",
-          "adapter",
-          "model",
-          "reasoningEffort",
-        ].flatMap((key) =>
-          typeof observation[key] === "string" ? [[key, observation[key]]] : [],
-        ),
-      ),
-      usage: normalizeTokenUsage(observation.usage),
-    },
-  };
-}
-
-/** Typed original observations; optional diagnostic replicas cannot overwrite them. */
-function durableUsageEvents(
-  repository: string,
-  objective: number,
-): Record<string, unknown>[] {
-  const records = readAccountingRecords(repository, objective);
-  const events: Record<string, unknown>[] = [];
-  for (const record of records) {
-    const owner = {
-      at: record.at,
-      runId: record.binding.runId ?? undefined,
-      attemptId: record.binding.attemptId ?? undefined,
-      workItemId: record.binding.itemId ?? undefined,
-    };
-    if (record.kind === "model") {
-      const value = record.observation;
-      events.push({
-        ...owner,
-        operation: "model-invocation",
-        metadata: {
-          ...value,
-          scopeId: record.binding.scopeId,
-          observationType: value.type,
-          ...value.usage,
-        },
-      });
-    } else if (record.kind === "worker") {
-      events.push({
-        ...owner,
-        operation: "worker-usage",
-        workerUsage: record.observation,
-      });
-    } else {
-      const capture = record.capture;
-      if (capture.phase !== "implementation" || !record.binding.attemptId)
-        continue;
-      // Native per-response/thread/descendant counters have their own scopes.
-      // Only an adapter's invocation-cumulative receipt contributes worker totals.
-      if (
-        capture.kind !== "request" &&
-        capture.usage?.scope !== "invocation-cumulative" &&
-        capture.kind !== "outcome"
-      )
-        continue;
-      const type =
-        capture.kind === "request"
-          ? "started"
-          : capture.outcome?.stage === "provider"
-            ? capture.outcome.status === "failed"
-              ? "failed"
-              : capture.outcome.status === "completed"
-                ? "completed"
-                : "progress"
-            : capture.usage?.terminal
-              ? "completed"
-              : "progress";
-      events.push({
-        ...owner,
-        operation: "worker-usage",
-        workerUsage: {
-          type,
-          role: "worker",
-          phase: "implementation",
-          invocationId: capture.invocationId,
-          providerAttempt: capture.providerAttempt,
-          adapter: capture.adapter,
-          provider: capture.configured.provider,
-          model: capture.reportedModel ?? capture.configured.model,
-          reasoningEffort: capture.configured.reasoningEffort,
-          ...(capture.usage?.scope === "invocation-cumulative" && {
-            usage: capture.usage.normalized,
-          }),
-        },
-      });
-    }
-  }
-  return events;
-}
-function usageIdentity(event: Record<string, unknown>): string | undefined {
-  const body =
-    event.operation === "model-invocation" ? event.metadata : event.workerUsage;
-  if (!body || typeof body !== "object") return;
-  const value = body as Record<string, unknown>;
-  return JSON.stringify([
-    event.operation,
-    event.runId ?? null,
-    event.attemptId ?? null,
-    value.invocationId,
-    value.providerAttempt ?? null,
-  ]);
-}
-
-/** Summary input only: stream private files without retaining command detail. */
-export function readUsageSummaryEvents(
-  repository: string,
-  objective: number,
-  state?: FactoryState,
-): Record<string, unknown>[] {
-  const events: Record<string, unknown>[] = [];
-  const itemByAttempt = new Map<string, string>();
-  const runByAttempt = new Map<string, string>();
-  const path = diagnosticPath(repository, objective);
-  if (existsSync(path))
-    for (const event of privateRecords(path)) {
-      // Match timeline correlation from all controller records, in file order.
-      if (typeof event.attemptId === "string") {
-        if (typeof event.itemId === "string")
-          itemByAttempt.set(event.attemptId, event.itemId);
-        if (typeof event.runId === "string")
-          runByAttempt.set(event.attemptId, event.runId);
-      }
-      const selected = usageEvent(event);
-      if (selected) events.push(selected);
-    }
-  for (const [id, work] of Object.entries(state?.work ?? {}))
-    if (work.attempt) {
-      // Existing snapshot proves a recorded owner, never its billed token total.
-      events.push({
-        operation: "recorded-work-attempt",
-        attemptId: work.attempt,
-        runId: state?.runId,
-        workItemId: id,
-        at: work.startedAt ?? "",
-      });
-      itemByAttempt.set(work.attempt, id);
-      if (state?.runId) runByAttempt.set(work.attempt, state.runId);
-    }
-  const root = join(stateRoot(repository), "harness");
-  if (existsSync(root))
-    for (const name of readdirSync(root).filter((name) =>
-      /^[0-9a-f-]{36}(?:-[1-9]\d*)?\.progress\.ndjson$/.test(name),
-    )) {
-      const attemptId = name.slice(0, 36);
-      if (!itemByAttempt.has(attemptId)) continue;
-      for (const event of privateRecords(join(root, name))) {
-        const selected = usageEvent({
-          ...event,
-          attemptId,
-          runId: runByAttempt.get(attemptId),
-          workItemId: itemByAttempt.get(attemptId),
-        });
-        if (selected) events.push(selected);
-      }
-    }
-  const durable = durableUsageEvents(repository, objective);
-  const originals = new Set(
-    durable.map(usageIdentity).filter((value) => value !== undefined),
-  );
-  const combined = [
-    ...events.filter((event) => {
-      const key = usageIdentity(event);
-      return key === undefined || !originals.has(key);
-    }),
-    ...durable,
-  ];
-  // Worker summaries omit adapter identity without an execution binding. Use only retained
-  // matching invocation/attempt capture metadata; never infer the provider from a model name.
-  const adapters = new Map<string, Set<string>>();
-  for (const capture of readInteractionMetadata(repository, objective)) {
-    const key = JSON.stringify([capture.invocationId, capture.providerAttempt]);
-    const values = adapters.get(key) ?? new Set<string>();
-    values.add(capture.adapter);
-    adapters.set(key, values);
-  }
-  for (const event of combined) {
-    const observation = event.workerUsage as
-      | Record<string, unknown>
+/** `; the request was 12,345 bytes (sha256 ab12…), the response …`: a cut capture's originals. */
+export function originalText(original?: Record<string, unknown>): string {
+  const part = (name: string) => {
+    const body = original?.[name] as
+      | { bytes?: unknown; sha256?: unknown }
       | undefined;
-    if (!observation || observation.adapter !== undefined) continue;
-    const values = adapters.get(
-      JSON.stringify([observation.invocationId, observation.providerAttempt]),
+    return typeof body?.bytes === "number" && typeof body.sha256 === "string"
+      ? `the ${name} was ${count(body.bytes)} bytes (sha256 ${body.sha256.slice(0, 12)}…)`
+      : undefined;
+  };
+  const parts = [part("request"), part("response")].filter(Boolean);
+  return parts.length ? `; ${parts.join(", ")}` : "";
+}
+
+/** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */
+const CAPTURE_READ_MAX = 768 * 1024 * 1024;
+
+/**
+ * A capture file's bodies (`file` under `logs`, from paths.ts captureFile),
+ * read without following links; undefined when it was rotated away or
+ * can't be read. Stored redacted and cut to capture.maxBytesPerCall, and
+ * redacted again here with today's secrets.
+ */
+export function readCapture(
+  logs: string,
+  file: string,
+  secrets: readonly string[],
+):
+  | {
+      request?: string;
+      response?: string;
+      truncated?: true;
+      /** The bodies' sizes and digests before redaction and the cut. */
+      original?: Record<string, unknown>;
+    }
+  | undefined {
+  try {
+    const body = redactDeep(
+      JSON.parse(
+        readContained(logs, file, CAPTURE_READ_MAX, true).toString("utf8"),
+      ) as Record<string, unknown>,
+      secrets,
     );
-    if (values?.size === 1) observation.adapter = [...values][0];
-  }
-  return combined.sort((a, b) => String(a.at).localeCompare(String(b.at)));
-}
-
-/**
- * The sizing scheduling uses now: the worker ceiling and the per-phase reservations, and whether
- * the host or the configuration chose each. Host-sized values follow the current host.
- */
-export function capacityView(capacity: Capacity) {
-  const live = liveCapacity(capacity);
-  return {
-    concurrency: live.concurrency,
-    concurrencySource: capacity.hostSized?.concurrency
-      ? ("host" as const)
-      : ("config" as const),
-    schedulingSource: live.scheduling
-      ? capacity.hostSized?.scheduling
-        ? ("host" as const)
-        : ("config" as const)
-      : null,
-    scheduling: live.scheduling ?? null,
-  };
-}
-
-function projectTracking(
-  projection:
-    | import("./github-project-state.js").GitHubProjectStatusProjection
-    | undefined,
-) {
-  if (!projection) return null;
-  const last = projection.requests.at(-1);
-  const returned = [...projection.requests]
-    .reverse()
-    .find((request) => request.response);
-  return {
-    retainedUpdates: projection.requests.length,
-    unknownUpdate: Boolean(last && !last.response && !last.notSent),
-    lastReturnedOption: returned?.response?.optionId ?? null,
-    lastObservedOption:
-      last?.laterObservation?.optionId ?? projection.observed?.optionId ?? null,
-    observedAt:
-      last?.laterObservation?.observedAt ??
-      projection.observed?.observedAt ??
-      returned?.response?.observedAt ??
-      null,
-    failure: projection.failure ?? null,
-  };
-}
-
-function progressStatus(projection: GitHubProgressProjection | undefined) {
-  if (!projection) return null;
-  const last = projection.requests.at(-1);
-  const observed = [...projection.requests]
-    .reverse()
-    .find((request) => request.comment);
-  return {
-    snapshots: projection.requests.length,
-    lastObservedAt: observed?.observedAt ?? null,
-    lastComment: observed?.comment?.id ?? null,
-    failure: projection.failure ?? null,
-    unresolved: Boolean(last && !last.comment),
-  };
-}
-
-function workItemTracking(tracking: FactoryState["workItemTracking"]) {
-  const entries = Object.entries(tracking ?? {});
-  if (!entries.length) return null;
-  return {
-    items: entries.length,
-    comments: entries.reduce(
-      (sum, [, entry]) =>
-        sum +
-        (entry.progress?.requests.filter((request) => request.comment).length ??
-          0),
-      0,
-    ),
-    failures: entries.flatMap(([item, entry]) => [
-      ...(entry.progress?.failure
-        ? [
-            {
-              item,
-              stream: "progress" as const,
-              failure: entry.progress.failure,
-            },
-          ]
-        : []),
-      ...(entry.projectStatus?.failure
-        ? [
-            {
-              item,
-              stream: "project" as const,
-              failure: entry.projectStatus.failure,
-            },
-          ]
-        : []),
-    ]),
-  };
-}
-
-/** Local status observes the existing snapshot, never opaque adapter receipts. */
-function sessionStatus(
-  sessions: FactoryState["agentSessions"],
-  secrets: string[],
-) {
-  return Object.values(sessions ?? {}).map((session) => ({
-    identity: redactDiagnosticDetail(session.identity, secrets),
-    adapter: redactDiagnosticDetail(session.adapter, secrets),
-    role: session.scope.role,
-    itemId:
-      session.scope.role === "implementation" ||
-      session.scope.role === "result-review"
-        ? session.scope.itemId
-        : null,
-    turn: session.turn,
-    turnKind: session.turn === 1 ? "first" : "continued",
-    nativeSessionMode: "unavailable",
-    status: session.status,
-    currentTurn: session.currentTurn
-      ? {
-          invocationId: session.currentTurn.invocationId,
-          requestDigest: session.currentTurn.requestDigest,
-          graphDigest: session.currentTurn.graphDigest ?? null,
-          candidateDigest: session.currentTurn.candidateDigest ?? null,
-          evidenceDigest: session.currentTurn.evidenceDigest ?? null,
-          schemaDigest: session.currentTurn.schemaDigest ?? null,
-          dispatch: session.currentTurn.dispatch,
-          terminal: session.currentTurn.terminal ?? null,
-          resources: session.currentTurn.resources,
-        }
-      : null,
-  }));
-}
-
-function guidedStatus<T extends StatusView & { repository?: string }>(
-  state: ContinuationState | undefined,
-  view: T,
-  secrets: string[],
-  context: PrerequisiteGuidanceContext,
-) {
-  const prerequisiteGuidance = derivePrerequisiteGuidance(
-    state,
-    { ...view, ...summarizeStatus(view) },
-    (text) => redactDiagnosticDetail(text, secrets),
-    context,
-  );
-  const summary = summarizeStatus({ ...view, prerequisiteGuidance });
-  return {
-    ...summary,
-    nextAction: summary.nextAction ? { ...summary.nextAction } : null,
-    ...view,
-    prerequisiteGuidance,
-  };
-}
-
-export function statusDocument(
-  state: FactoryState | undefined,
-  repository: string,
-  objective: number,
-  delivery: "regular" | "native-stack",
-  secrets: string[] = [],
-  concurrency?: number,
-  runActive: boolean | null = null,
-  preState?: PreState,
-  installationConfigDigest?: string,
-  guidanceContext: PrerequisiteGuidanceContext = {},
-) {
-  if (!state) {
-    const view = {
-      repository,
-      objective,
-      state: "not-started" as const,
-      work: [],
-      ...(preState
-        ? {
-            runActive,
-            ...waitStatus(
-              preState as StepState,
-              preState.wait,
-              "objective",
-              secrets,
-            ),
-          }
-        : {}),
-    };
-    return guidedStatus(state, view, secrets, guidanceContext);
-  }
-  const unitByItem = new Map(
-    linearDeliveryUnits(state.graph).flatMap((unit) =>
-      unit.items.map((item) => [item.id, unit.id] as const),
-    ),
-  );
-  const pendingDecision = (
-    pending: FactoryState["finalAcceptancePending"],
-  ): (PendingDecisionView & Record<string, unknown>) | null =>
-    pending
-      ? {
-          ...(pending.more?.length
-            ? {
-                more: pending.more.map(
-                  (other) =>
-                    pendingDecision(other) as NonNullable<
-                      ReturnType<typeof pendingDecision>
-                    >,
-                ),
-              }
-            : {}),
-          criterion: redactDiagnosticDetail(pending.criterion, secrets),
-          treeSha: pending.treeSha,
-          source: pending.source,
-          question: redactDiagnosticDetail(pending.question, secrets),
-          detail: redactDiagnosticDetail(pending.detail, secrets),
-          reviewFinding: pending.reviewFinding
-            ? Object.fromEntries(
-                Object.entries(pending.reviewFinding).map(([key, value]) => [
-                  key,
-                  redactDiagnosticDetail(value, secrets),
-                ]),
-              )
-            : null,
-        }
-      : null;
-  const activeCount = Object.values(state.work).filter(
-    (item) =>
-      item.phaseReservation === "coding" ||
-      (!item.phaseReservation &&
-        item.status === "running" &&
-        item.step === "execute"),
-  ).length;
-  const configuredSlots =
-    concurrency === undefined
-      ? undefined
-      : Math.max(0, concurrency - activeCount);
-  const scheduling = schedulingObservations(state.graph, state.work);
-  const owned = new Set(
-    state.graph.items
-      .filter((item) =>
-        ["running", "published", "waiting"].includes(
-          state.work[item.id]?.status ?? "",
-        ),
-      )
-      .map((item) => item.id),
-  );
-  const settled = new Set(
-    state.expansionHistory?.map((entry) => entry.envelopeId),
-  );
-  const work = state.graph.items.map((item) => {
-    const current = state.work[item.id]!;
-    // A code only; a step's or the scheduler's wait is on `wait`.
-    let blockedReason: string | undefined =
-      current.requestedPhase &&
-      waitOf(state, { item: item.id })?.kind === "capacity"
-        ? "capacity"
-        : undefined;
-    let eligible = false;
-    let schedulingBlocker: ReturnType<typeof pendingItemBlocker>;
-    if (current.status === "pending") {
-      schedulingBlocker = pendingItemBlocker(
-        state.graph,
-        state.work,
-        item,
-        new Set(
-          [...owned].filter(
-            (id) =>
-              !(
-                delivery === "native-stack" &&
-                state.work[id]?.status === "published" &&
-                unitByItem.get(id) === unitByItem.get(item.id)
-              ),
-          ),
-        ),
-        settled,
-        (id) =>
-          state.work[id]?.status === "done" ||
-          (delivery === "native-stack" &&
-            state.work[id]?.status === "published" &&
-            unitByItem.get(id) === unitByItem.get(item.id)),
-      );
-      eligible = !schedulingBlocker;
-      blockedReason = schedulingBlocker
-        ? `${schedulingBlocker.kind}${schedulingBlocker.blockedBy ? `:${schedulingBlocker.blockedBy}` : ""}`
-        : item.kind !== "qa" &&
-            item.kind !== "aggregate" &&
-            !(
-              item.kind === "discovery" && item.discovery?.mode === "inventory"
-            ) &&
-            configuredSlots === 0
-          ? "capacity"
-          : blockedReason;
-    } else if (current.status === "waiting")
-      blockedReason =
-        current.step === "approve-result"
-          ? "acceptance-decision"
-          : "asset-selection";
     return {
-      id: item.id,
-      issue: state.issueByItemId[item.id],
-      status: current.status,
-      step: current.step ?? null,
-      phaseReservation: current.phaseReservation ?? null,
-      requestedPhase: current.requestedPhase ?? null,
-      priority: item.priority ?? 0,
-      scheduling: {
-        ...scheduling.get(item.id),
-        estimatedDurationMs: item.scheduling?.estimatedDurationMs ?? null,
-        estimateReason: item.scheduling
-          ? redactDiagnosticDetail(item.scheduling.reason, secrets)
-          : null,
-        blocker: schedulingBlocker
-          ? {
-              ...schedulingBlocker,
-              detail: redactDiagnosticDetail(schedulingBlocker.detail, secrets),
-            }
-          : null,
-        providerAvailableSlots: null,
-      },
-      eligible,
-      // Provider capacity is not persisted in the state snapshot.
-      ready: current.status === "pending" && !blockedReason ? null : false,
-      blockedReason: blockedReason ?? null,
-      attemptId: current.attempt ?? null,
-      attemptNumber: attemptOrigin(current)?.number ?? null,
-      attemptKind: attemptOrigin(current)?.kind ?? null,
-      ...(item.executionBinding
-        ? {
-            assignedExecution: item.executionBinding,
-            actualExecution:
-              (
-                current.execution?.data as
-                  | { executionBinding?: unknown }
-                  | undefined
-              )?.executionBinding ?? null,
-          }
+      ...(typeof body.request === "string" ? { request: body.request } : {}),
+      ...(typeof body.response === "string" ? { response: body.response } : {}),
+      ...(body.truncated === true ? { truncated: true as const } : {}),
+      ...(body.original && typeof body.original === "object"
+        ? { original: body.original as Record<string, unknown> }
         : {}),
-      providerProgress:
-        current.attempt &&
-        existsSync(
-          join(
-            stateRoot(repository),
-            "harness",
-            `${workerIdentity(current)}.progress.ndjson`,
-          ),
-        )
-          ? "streamed"
-          : "unavailable",
-      baseSha: current.baseSha ?? null,
-      treeSha: current.treeSha ?? null,
-      headSha: current.changeRef ?? null,
-      pullRequest: current.pullRequest ?? null,
-      stack: state.stackNumbers?.[unitByItem.get(item.id) ?? ""] ?? null,
-      candidateAssetSets: current.assets?.map((set) => set.id) ?? [],
-      assetSets:
-        current.assets?.map((set) => ({
-          id: set.id,
-          members: set.members.map((member) => ({
-            role: member.role,
-            destination: member.destination,
-            digest: member.ref.digest,
-          })),
-        })) ?? [],
-      selectedAssetSet: current.selectedAssetSet ?? null,
-      acceptancePending: pendingDecision(current.acceptancePending),
-      // The first controller run of this tree failed; its one rerun passed (#1595).
-      flakyValidation: current.validation?.flakyRerun
-        ? (() => {
-            const failed =
-              current.validation.flakyRerun.evidence?.commands.find(
-                (receipt) => !receipt.passed,
-              );
-            return {
-              command: failed
-                ? redactDiagnosticDetail(failed.command, secrets)
-                : null,
-              exitCode: failed?.exitCode ?? null,
-            };
-          })()
-        : null,
-      lastError: current.error
-        ? redactDiagnosticDetail(current.error, secrets)
-        : null,
-      ...waitStatus(state, current.wait, { item: item.id }, secrets),
-      authentication: current.authentication
-        ? {
-            provider: redactDiagnosticDetail(
-              current.authentication.provider,
-              secrets,
-            ),
-            command: redactDiagnosticDetail(
-              current.authentication.command,
-              secrets,
-            ),
-          }
-        : null,
     };
-  });
-  const view = {
-    repository,
-    objective,
-    runActive,
-    agentSessions: sessionStatus(state.agentSessions, secrets),
-    githubProgress: progressStatus(state.githubProgress),
-    githubProjectTracking: projectTracking(state.githubProjectStatus),
-    githubWorkItemTracking: workItemTracking(state.workItemTracking),
-    // The Objective was started under another configuration: the run refuses
-    // it (see runObjective), so no retry continues it.
-    ...(installationConfigDigest !== undefined &&
-    state.configDigest !== installationConfigDigest
-      ? { configurationChanged: true as const }
-      : {}),
-    // Cancel is refused once final acceptance is sealed; the run reconciles.
-    sealed: Boolean(state.finalAcceptance),
-    state: state.cancelledAt
-      ? ("cancelled" as const)
-      : state.error
-        ? ("failed" as const)
-        : state.finalAcceptancePending
-          ? ("waiting" as const)
-          : objectiveComplete(state)
-            ? ("complete" as const)
-            : ("active" as const),
-    runId: state.runId,
-    coordinator:
-      redactCoordinatorDisposition(state.coordinator, secrets) ?? null,
-    graphDigest: graphDigest(state.graph),
-    graphRevisionCount: state.graphRevisions?.length ?? 1,
-    retiredValidation: retiredValidation(state).map((entry) => ({
-      ...entry,
-      command: redactDiagnosticDetail(entry.command, secrets),
-      reason: redactDiagnosticDetail(entry.reason, secrets),
-    })),
-    pendingAmendment: state.pendingAmendment
-      ? {
-          id: state.pendingAmendment.id,
-          phase: state.pendingAmendment.phase,
-          worker: state.pendingAmendment.proposal.worker?.itemId ?? null,
-          expectedGraphDigest:
-            state.pendingAmendment.proposal.expectedGraphDigest,
-          failureDigest: state.pendingAmendment.error
-            ? failureDigest(state.pendingAmendment.error)
-            : null,
-          error: state.pendingAmendment.error
-            ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
-            : null,
-          // The planner's unanswered question about it (#1296).
-          question: (() => {
-            const open = openAmendmentQuestion(state);
-            return open ? redactDiagnosticDetail(open.question, secrets) : null;
-          })(),
-          questionDigest: answeredQuestionDigest(state),
-          // Why `factory propose-amendment` would refuse a replacement of a
-          // rejected amendment (the checks submitAmendment applies); null when
-          // it fits. Status names it only then; otherwise `factory cancel`.
-          replacementRefusal:
-            state.pendingAmendment.phase === "rejected"
-              ? (replacementRefusal(state) ?? null)
-              : null,
-        }
-      : null,
-    allowanceConsumption: consumption(state),
-    allowanceRemaining: remaining(
-      state,
-      [
-        ...new Set(
-          Object.keys(state.work).flatMap((id) => repairScopes(state, id)),
-        ),
-      ].sort(),
-    ),
-    charges: state.charges ?? {},
-    repairs: Object.fromEntries(
-      Object.entries(state.work)
-        .filter(([, work]) => work.recovery)
-        .map(([id, work]) => [
-          id,
-          {
-            phase: work.recovery?.phase ?? null,
-            failureClass: work.recovery?.failure?.classification ?? null,
-            failureDigest: work.recovery?.failure?.digest ?? null,
-            failureEvent: work.recovery?.failure?.event ?? null,
-            blamedPredecessor:
-              work.recovery?.failure?.predecessor?.item ?? null,
-            blamedPath: work.recovery?.failure?.predecessor?.path ?? null,
-            blamedGraphDigest:
-              work.recovery?.failure?.predecessor?.graphDigest ?? null,
-            // Whether `factory repair` would be accepted for the failure
-            // event: implementation repair is enabled and an allowance fits
-            // (an event already charged does). Status names `factory repair`
-            // only then; otherwise `factory retry`.
-            repairable: work.recovery?.failure?.event
-              ? implementationRepairable(
-                  state,
-                  work.recovery.failure.event,
-                  repairScopes(state, id),
-                )
-              : null,
-            continuation: work.recovery?.failure?.continuation ?? null,
-            unfinishedEdits: work.recovery?.failure?.unfinishedEdits ?? null,
-            priorAttempts: work.recovery?.history?.length ?? 0,
-            nextDecision: work.recovery?.failure?.decision
-              ? redactDiagnosticDetail(work.recovery.failure.decision, secrets)
-              : null,
-          },
-        ]),
-    ),
-    configuredSlots: configuredSlots ?? null,
-    capacity: capacityView(state.capacity),
-    baseSha: state.baseSha,
-    integratedSha: state.integratedSha ?? null,
-    candidate: objectiveCandidate(state) ?? null,
-    finalValidation: state.finalValidation?.passed ?? false,
-    finalAcceptance: state.finalAcceptance ?? null,
-    finalAcceptancePending: pendingDecision(state.finalAcceptancePending),
-    objectiveClosure: state.objectiveClosure ?? null,
-    lastError: state.error
-      ? redactDiagnosticDetail(state.error, secrets)
-      : null,
-    ...waitStatus(state, state.wait, "objective", secrets),
-    work,
-  };
-  return guidedStatus(state, view, secrets, guidanceContext);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `+4:05`, `+1:02:03`: a time since the run's start. */
+export function relative(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = String(seconds % 60).padStart(2, "0");
+  return h
+    ? `+${h}:${String(m).padStart(2, "0")}:${s}`
+    : `+${String(m).padStart(2, "0")}:${s}`;
+}
+
+export const str = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
+export const num = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+export const count = (n: number) => n.toLocaleString("en-US");
+
+/** `item:a:work` is `work`; an Objective step is its key. */
+export function phaseOf(step: string): string {
+  return itemOf(step) ? step.split(":").slice(2).join(":") : step;
+}
+
+/** The Work Item an event is about: its own, its step's, or an answer's question's. */
+export function itemOfEvent(event: LogEvent): string | undefined {
+  const step = str(event.step);
+  const request = event.request as Record<string, unknown> | undefined;
+  const question = str(request?.question);
+  return (
+    str(event.item) ??
+    (step ? itemOf(step) : undefined) ??
+    (question ? itemOf(question) : undefined)
+  );
+}
+
+/** A model call in a few words: `worker codex gpt-6 high · finished · 81 s · 996,791 tokens (936,192 cached) · $0.12`. */
+function modelText(event: LogEvent): string {
+  const tokens = event.tokens as Record<string, number | null> | null;
+  const total = tokens?.total;
+  const cached = tokens?.cached;
+  const cost = num(event.costUsd);
+  const ms = num(event.ms);
+  return [
+    [
+      "model",
+      str(event.role) ?? "?",
+      str(event.phase),
+      str(event.provider),
+      str(event.model),
+      str(event.effort),
+      event.hedge ? "(hedge)" : undefined,
+    ]
+      .filter(Boolean)
+      .join(" "),
+    str(event.outcome),
+    ms === undefined ? undefined : duration(ms),
+    typeof total === "number"
+      ? `${count(total)} tokens${typeof cached === "number" && cached ? ` (${count(cached)} cached)` : ""}`
+      : "tokens unknown",
+    cost === undefined ? undefined : `$${cost.toFixed(2)}`,
+    str(event.error) ? oneLine(String(event.error), TEXT) : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+interface Activity {
+  turns: number;
+  toolsStarted: number;
+  edits: number;
+  commands: number;
+  commandsFailed: number;
+  tools: Set<string>;
+  paths: Set<string>;
+  command?: string;
+}
+
+function activityText(item: string, activity: Activity): string {
+  const parts = [`activity ${item}: ${activity.turns} turns`];
+  if (activity.toolsStarted)
+    parts.push(
+      `${activity.toolsStarted} tools${activity.tools.size ? ` (${[...activity.tools].slice(0, 8).join(", ")})` : ""}`,
+    );
+  if (activity.edits)
+    parts.push(
+      `${activity.edits} edits${activity.paths.size ? ` (${[...activity.paths].slice(0, 8).join(", ")})` : ""}`,
+    );
+  if (activity.commands) parts.push(`${activity.commands} commands`);
+  if (activity.commandsFailed) parts.push(`${activity.commandsFailed} failed`);
+  if (activity.command) parts.push(`last $ ${activity.command}`);
+  return parts.join(" · ");
 }
 
 /**
- * The latest Objective-level model call (planning or Objective review) in
- * this controller process: liveness telemetry for the live status comment
- * only. It is never persisted and never recovery input.
+ * Turns log events into timeline entries. Without an item it keeps the
+ * events a timeline needs and folds worker activity into one summary per
+ * step; with one, it keeps every event of that item, each in detail.
  */
-export interface ModelActivity {
-  phase: string;
-  /** The phase's invocation ordinal in its scope: 1 is the first revision. */
-  ordinal: number;
-  startedAt: number;
-  /** Any provider observation, heartbeats included. */
-  lastEventAt: number;
-  /** The current provider attempt's model turns and tool calls so far. */
-  turns?: number;
-  toolCalls?: number;
-  /** Input tokens streamed so far while the call runs. */
-  liveInputTokens?: number;
-  /** Set when the call returned or failed; a provider retry clears it. */
-  endedAt?: number;
-  outcome?: "returned" | "failed";
-  /** The failed call's recorded class, such as a provider capacity failure. */
-  failureClass?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-}
-const modelActivities = new Map<
-  string,
-  ModelActivity & { invocationId: string }
->();
+class Timeline {
+  private readonly starts = new Map<string, string>();
+  private readonly runStart = new Map<string, number>();
+  private readonly holds = new Map<string, string>();
+  /** Each running step's activity so far, and its latest event. */
+  private readonly activity = new Map<
+    string,
+    { activity: Activity; event: LogEvent }
+  >();
 
-function noteModelActivity(
-  key: string,
-  observation: import("./contracts.js").ModelInvocationObservation,
-): void {
-  const now = Date.now();
-  let current = modelActivities.get(key);
-  if (current?.invocationId !== observation.invocationId) {
-    current = {
-      invocationId: observation.invocationId,
-      phase: observation.phase,
-      ordinal: observation.ordinal,
-      startedAt: now,
-      lastEventAt: now,
+  constructor(private readonly item?: string) {}
+
+  /** The activity of steps still running: printed when the log ends before them. */
+  running(): Entry[] {
+    return [...this.activity.values()].map(({ activity, event }) =>
+      this.entry(
+        event,
+        "activity",
+        `${activityText(itemOfEvent(event) ?? "-", activity)} · still running`,
+      ),
+    );
+  }
+
+  private entry(event: LogEvent, kind: Entry["kind"], text: string): Entry {
+    const run = String(event.run);
+    const step = str(event.step);
+    const item = itemOfEvent(event);
+    return {
+      at: event.at,
+      run,
+      elapsedMs: Date.parse(event.at) - this.runStart.get(run)!,
+      kind,
+      ...(step ? { step } : {}),
+      ...(item ? { item } : {}),
+      text,
+      event,
     };
-    modelActivities.set(key, current);
   }
-  current.lastEventAt = now;
-  // A provider retry counts its own turns again.
-  if (observation.type === "started") {
-    delete current.turns;
-    delete current.toolCalls;
-    delete current.liveInputTokens;
+
+  add(event: LogEvent): Entry[] {
+    const run = String(event.run);
+    if (!this.runStart.has(run)) this.runStart.set(run, Date.parse(event.at));
+    const item = itemOfEvent(event);
+    if (this.item !== undefined && item !== this.item) return [];
+    const step = str(event.step);
+    const entry = (kind: Entry["kind"], text: string) =>
+      this.entry(event, kind, text);
+    const since = (key: string) => {
+      const start = step ? this.starts.get(`${run} ${key}`) : undefined;
+      return start ? duration(Date.parse(event.at) - Date.parse(start)) : "?";
+    };
+    switch (event.event) {
+      case "admitted":
+        return [
+          entry(
+            "admitted",
+            `admitted${event.again ? " again" : ""}${event.provider ? ` on ${String(event.provider)}` : ""}`,
+          ),
+        ];
+      case "start":
+        if (!step) return [];
+        this.starts.set(`${run} ${step}`, event.at);
+        return [entry("step-start", `${step} started`)];
+      case "outcome": {
+        if (!step) return [];
+        const outcome = String(event.outcome ?? "ended");
+        const reason = str(event.reason);
+        const took = since(step);
+        this.starts.delete(`${run} ${step}`);
+        const done: Entry[] = [];
+        const running = this.activity.get(`${run} ${step}`);
+        if (running) {
+          this.activity.delete(`${run} ${step}`);
+          done.push(
+            entry("activity", activityText(item ?? "-", running.activity)),
+          );
+        }
+        if (outcome === "retry" && event.progress)
+          done.push(entry("step-end", `${step} continues after ${took}`));
+        else if (outcome === "retry")
+          done.push(
+            entry(
+              "wait",
+              `${step} waits after ${took}${reason ? `: ${oneLine(reason, TEXT)}` : ""}`,
+            ),
+          );
+        else if (outcome === "repair")
+          done.push(
+            entry(
+              "repair",
+              `${step} repair${event.target ? ` of ${String(event.target)}` : ""} after ${took}${event.finding ? `: ${oneLine(String(event.finding), TEXT)}` : ""}`,
+            ),
+          );
+        else
+          done.push(
+            entry(
+              "step-end",
+              `${step} ${outcome} after ${took}${reason ? `: ${oneLine(reason, TEXT)}` : ""}`,
+            ),
+          );
+        return done;
+      }
+      case "hold": {
+        const id = str(event.id);
+        if (id) this.holds.set(id, event.at);
+        return [
+          entry(
+            "hold",
+            `${step ?? "objective"} asks${event.cause === "failure" ? " (failure)" : ""}: ${oneLine(String(event.question ?? ""), TEXT)}`,
+          ),
+        ];
+      }
+      case "request": {
+        const request = (event.request ?? {}) as Record<string, unknown>;
+        const by = str(event.by) ?? str(request.by);
+        const code = str(event.code);
+        if (request.kind === "answer") {
+          const question = str(request.question);
+          const asked = question ? this.holds.get(question) : undefined;
+          return [
+            entry(
+              "answer",
+              `answer ${String(request.answer)}${request.arg ? ` ${String(request.arg)}` : ""}${by ? ` by ${by}` : ""}${code ? ` refused (${code})` : asked ? ` after ${duration(Date.parse(event.at) - Date.parse(asked))}` : ""}${question ? ` to ${question}` : ""}`,
+            ),
+          ];
+        }
+        return [
+          entry(
+            "request",
+            `${String(request.kind ?? "request")}${by ? ` by ${by}` : ""}${code ? ` refused (${code})` : ""}`,
+          ),
+        ];
+      }
+      case "media-auto-selected":
+        return [
+          entry(
+            "answer",
+            `${step ?? "select"} selected set ${String(event.set)} without asking: the only candidate${Array.isArray(event.bound) && event.bound.length ? `, bound to ${event.bound.join(", ")}` : ""}`,
+          ),
+        ];
+      case "diagnosis":
+        return [
+          entry(
+            "diagnosis",
+            `diagnosis: ${String(event.decision)}${event.path ? ` ${String(event.path)}` : ""}${event.predecessor ? ` blames ${String(event.predecessor)}` : ""}`,
+          ),
+        ];
+      case "validation-result": {
+        const ms = num(event.durationMs);
+        return [
+          entry(
+            "validation",
+            `validation ${event.passed ? "passed" : `failed (exit ${String(event.exitCode)})`}${ms === undefined ? "" : ` in ${duration(ms)}`}: ${oneLine(String(event.command ?? ""), TEXT)}`,
+          ),
+        ];
+      }
+      case "model-usage":
+        return [entry("model", modelText(event))];
+      case "worker-activity": {
+        if (this.item !== undefined)
+          return [entry("activity", activityText(item ?? "-", fold(event)))];
+        if (!step) return [];
+        const key = `${run} ${step}`;
+        this.activity.set(key, {
+          activity: fold(event, this.activity.get(key)?.activity),
+          event,
+        });
+        return [];
+      }
+      case "cancelled":
+        return [
+          entry(
+            "cancelled",
+            `cancelled${event.by ? ` by ${String(event.by)}` : ""}`,
+          ),
+        ];
+      default:
+        return this.item === undefined
+          ? []
+          : [entry("event", String(event.event ?? "event"))];
+    }
   }
-  if (observation.turns !== undefined) current.turns = observation.turns;
-  if (observation.toolCalls !== undefined)
-    current.toolCalls = observation.toolCalls;
-  if (observation.liveInputTokens !== undefined)
-    current.liveInputTokens = observation.liveInputTokens;
-  if (["completed", "failed", "response-invalid"].includes(observation.type)) {
-    current.endedAt = now;
-    current.outcome = observation.type === "completed" ? "returned" : "failed";
-    if (current.outcome === "failed" && observation.failureClass)
-      current.failureClass = observation.failureClass;
-    else delete current.failureClass;
-  } else {
-    delete current.endedAt;
-    delete current.outcome;
-    delete current.failureClass;
-  }
-  if (observation.usage?.inputTokens !== undefined)
-    current.inputTokens = observation.usage.inputTokens;
-  if (observation.usage?.outputTokens !== undefined)
-    current.outputTokens = observation.usage.outputTokens;
 }
 
-export function objectiveModelActivity(
-  repository: string,
-  objective: number,
-): ModelActivity | undefined {
-  const current = modelActivities.get(`${repository}#${objective}`);
-  if (!current) return undefined;
-  const { invocationId: _id, ...activity } = current;
+/** One `worker-activity` event added to a step's activity. */
+function fold(event: LogEvent, into?: Activity): Activity {
+  const activity = into ?? {
+    turns: 0,
+    toolsStarted: 0,
+    edits: 0,
+    commands: 0,
+    commandsFailed: 0,
+    tools: new Set<string>(),
+    paths: new Set<string>(),
+  };
+  const counts = (event.counts ?? {}) as Record<string, unknown>;
+  activity.turns += num(counts.turns) ?? 0;
+  activity.toolsStarted += num(counts.toolsStarted) ?? 0;
+  activity.edits += num(counts.edits) ?? 0;
+  activity.commands += num(counts.commands) ?? 0;
+  activity.commandsFailed += num(counts.commandsFailed) ?? 0;
+  if (Array.isArray(event.tools))
+    for (const tool of event.tools) activity.tools.add(String(tool));
+  if (Array.isArray(event.paths))
+    for (const path of event.paths) activity.paths.add(String(path));
+  if (typeof event.command === "string") activity.command = event.command;
   return activity;
 }
 
-/** The planner call now or last made, and projection's issue count: structured facts only. */
-function planningStepView(
-  preparation: PreparationState,
-  redact: (value: string | undefined) => string | null,
-): PlanningStepView {
-  const recovery = preparation.planningRecovery;
-  const plan = preparation.plan;
-  const refused = plan ? null : planningRefusal(recovery?.history.at(-1));
-  return {
-    call: plan
-      ? null
-      : (recovery?.invocation?.phase ??
-        recovery?.invocations?.at(-1)?.phase ??
-        null),
-    revision: recovery?.history.length ?? 0,
-    rounds: plan ? [] : planningRounds(recovery),
-    refused: refused && {
-      ...refused,
-      detail: redact(refused.detail ?? undefined),
-    },
-    issues:
-      plan && preparation.coordinator.phase === "projection"
-        ? {
-            created: Object.keys(preparation.issueByItemId).length,
-            total: plan.graph.items.length,
-          }
-        : null,
-  };
+/** `--logs ITEM`: the line, then the event's other fields. */
+function withDetail(text: string, event: LogEvent): string {
+  const { at: _at, run: _run, step: _step, event: _kind, ...rest } = event;
+  return Object.keys(rest).length ? `${text} ${JSON.stringify(rest)}` : text;
 }
 
-/** A split parent's children, each with its own current disposition. */
-function splitStatus(
-  preparation: PreparationState,
-  redact: (value: string | undefined) => string | null,
-) {
-  const split = preparation.split;
-  if (!split) return null;
-  const dispositions = childDispositions(preparation.repository, split);
-  return {
-    enqueuedAt: split.enqueuedAt ?? null,
-    closedAt: split.closedAt ?? null,
-    children: split.children.map((child) => ({
-      key: child.key,
-      title: redact(child.title),
-      issue: split.issues[child.key] ?? null,
-      dependsOn: child.dependsOn.map((key) => split.issues[key] ?? null),
-      disposition: dispositions[child.key]!,
-    })),
+/** Model calls, their tokens, cost and time, summed. Unknown counts are counted, not taken as 0. */
+export interface Usage {
+  calls: number;
+  ms: number;
+  tokens: {
+    input: number;
+    output: number;
+    cached: number;
+    cacheWrite: number;
+    reasoning: number;
+    total: number;
   };
+  /** Calls that reported no total. */
+  tokensUnknown: number;
+  /** Null when no call reported a cost. */
+  costUsd: number | null;
+  costUnknown: number;
 }
 
-/** Status of an Objective still planning; no executable graph exists yet. */
-function preparationStatusDocument(
-  preparation: PreparationState,
-  secrets: string[] = [],
-  runActive: boolean | null = null,
-  installationConfigDigest?: string,
-  guidanceContext: PrerequisiteGuidanceContext = {},
-) {
-  const redact = (value: string | undefined) =>
-    value ? redactDiagnosticDetail(value, secrets) : null;
-  const review = preparation.plan?.review;
-  const question = review?.failure?.question ?? review?.findings?.[0]?.question;
-  const view = {
-    repository: preparation.repository,
-    objective: preparation.objective,
-    runId: preparation.runId,
-    runActive,
-    agentSessions: sessionStatus(preparation.agentSessions, secrets),
-    githubProgress: progressStatus(preparation.githubProgress),
-    githubProjectTracking: projectTracking(preparation.githubProjectStatus),
-    // Planned under another configuration: the run refuses it (see runObjective).
-    ...(installationConfigDigest !== undefined &&
-    preparation.configDigest !== installationConfigDigest
-      ? { configurationChanged: true as const }
-      : {}),
-    // A run found the plan's other inputs changed and refused (see runObjective).
-    ...(preparation.changedSincePlanning
-      ? { changedSincePlanning: true as const }
-      : {}),
-    state: "preparing" as const,
-    coordinator:
-      redactCoordinatorDisposition(preparation.coordinator, secrets) ?? null,
-    planned: Boolean(preparation.plan),
-    planReview: review?.status
-      ? {
-          status: review.status,
-          acceptable: review.acceptable !== false,
-          question: redact(question),
-          findings: review.findings.map((finding) => ({
-            detail: redact(finding.detail),
-            question: redact(finding.question),
-            evidence:
-              "evidence" in finding
-                ? finding.evidence.map((entry) => ({
-                    ...entry,
-                    path: redact(entry.path),
-                  }))
-                : [
-                    {
-                      path: redact(finding.source),
-                      quote: redact(finding.quote),
-                    },
-                  ],
-          })),
-          failure: review.failure
-            ? {
-                detail: redact(review.failure.detail),
-                question: redact(review.failure.question),
-              }
-            : null,
-          digest: shortPlanDigest(preparation.plan!),
+/** One step attempt: started, and ended (or not, by the end of its run). */
+export interface StepSpan {
+  step: string;
+  run: string;
+  startedAt: string;
+  endedAt: string;
+  ms: number;
+  /** The outcome, or `unfinished` when its run's log ends first. */
+  outcome: string;
+}
+
+export interface HoldSpan {
+  id: string;
+  step?: string;
+  item?: string;
+  cause?: string;
+  askedAt: string;
+  answeredAt?: string;
+  answer?: string;
+  by?: string;
+  /** Asked to answered; absent while it is open (or was closed without an answer). */
+  waitMs?: number;
+}
+
+export interface SummaryReport {
+  issue: number;
+  runs: string[];
+  from?: string;
+  to?: string;
+  wallMs: number;
+  roles: Record<string, Usage>;
+  phases: Record<string, Usage & { steps: number; stepMs: number }>;
+  repairs: Record<string, number>;
+  holds: HoldSpan[];
+  holdWaitMs: number;
+  /** Walking back from the step that ended last, each time to the step that ended last before it started. */
+  criticalPath: StepSpan[];
+  criticalPathMs: number;
+  slowest: StepSpan[];
+}
+
+export const emptyUsage = (): Usage => ({
+  calls: 0,
+  ms: 0,
+  tokens: {
+    input: 0,
+    output: 0,
+    cached: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    total: 0,
+  },
+  tokensUnknown: 0,
+  costUsd: null,
+  costUnknown: 0,
+});
+
+/** Folds events into the summary; it keeps one record per step attempt and hold, never the events. */
+class Summary {
+  private readonly runs: string[] = [];
+  private from?: string;
+  private to?: string;
+  private readonly roles: SummaryReport["roles"] = {};
+  private readonly phases: SummaryReport["phases"] = {};
+  private readonly repairs: Record<string, number> = {};
+  private readonly holds = new Map<string, HoldSpan>();
+  private readonly open = new Map<string, LogEvent>();
+  private readonly spans: StepSpan[] = [];
+  /** The last event of each run: where its unfinished steps stop. */
+  private readonly lastAt = new Map<string, string>();
+
+  constructor(private readonly issue: number) {}
+
+  add(event: LogEvent): void {
+    const run = String(event.run);
+    if (!this.lastAt.has(run)) this.runs.push(run);
+    this.lastAt.set(run, event.at);
+    this.from ??= event.at;
+    this.to = event.at;
+    const step = str(event.step);
+    switch (event.event) {
+      case "start":
+        if (step) this.open.set(`${run} ${step}`, event);
+        break;
+      case "outcome": {
+        if (!step) break;
+        const start = this.open.get(`${run} ${step}`);
+        this.open.delete(`${run} ${step}`);
+        if (start) this.span(step, run, start.at, event.at, event.outcome);
+        if (event.outcome === "repair") {
+          const target = str(event.target) ?? step;
+          const item = itemOf(target) ?? "objective";
+          this.repairs[item] = (this.repairs[item] ?? 0) + 1;
         }
-      : null,
-    planningStopped:
-      !preparation.plan && preparation.planningRecovery?.phase === "stopped",
-    planningQuestion: Boolean(openPlanningQuestion(preparation)),
-    planReviewQuestions: reviewDecisionAnswerable(preparation)?.count ?? 0,
-    questionDigest: answeredQuestionDigest(preparation),
-    // An older plan without its retained draft: an answer cannot revise it.
-    ...(openReviewDecision(preparation) &&
-    !reviewDecisionAnswerable(preparation)
-      ? { planReviewDraftMissing: true as const }
-      : {}),
-    planningRevisionGrant: planningRevisionGrantable(preparation)
-      ? PLANNING_REVISION_GRANT
-      : null,
-    planningStep: planningStepView(preparation, redact),
-    issueByItemId: preparation.issueByItemId,
-    projectionStarted: projectionStarted(preparation),
-    split: splitStatus(preparation, redact),
-    cancelledAt: preparation.cancelledAt ?? null,
-    error: redact(preparation.error),
-    waitReason: redact(preparation.coordinator.waitReason),
-    ...waitStatus(preparation, preparation.wait, "objective", secrets),
-  };
-  return guidedStatus(preparation, view, secrets, guidanceContext);
-}
-
-/** The status document for whichever continuation snapshot exists. */
-export function continuationStatusDocument(
-  continuation: ContinuationState | undefined,
-  repository: string,
-  objective: number,
-  delivery: "regular" | "native-stack",
-  secrets: string[] = [],
-  concurrency?: number,
-  runActive: boolean | null = null,
-  preState?: PreState,
-  installationConfigDigest?: string,
-  guidanceContext: PrerequisiteGuidanceContext = {},
-) {
-  return isPreparationState(continuation)
-    ? preparationStatusDocument(
-        continuation,
-        secrets,
-        runActive,
-        installationConfigDigest,
-        guidanceContext,
-      )
-    : statusDocument(
-        continuation,
-        repository,
-        objective,
-        delivery,
-        secrets,
-        concurrency,
-        runActive,
-        preState,
-        installationConfigDigest,
-        guidanceContext,
-      );
-}
-
-/** Observe snapshot changes after saving; the snapshot alone controls continuation. */
-export class StateDiagnostics {
-  private previous = new Map<string, WorkState>();
-  private previousReadiness = new Map<string, string>();
-  private previousStacks = new Map<string, number>();
-  private previousFinal = false;
-  private previousFinalPending?: string | null;
-  private previousIntegrated?: string;
-  constructor(
-    private emitter: DiagnosticEmitter,
-    private state: FactoryState,
-    private delivery: "regular" | "native-stack",
-    private concurrency: number,
-  ) {}
-
-  observe(): void {
-    for (const [id, work] of Object.entries(this.state.work)) {
-      const before = this.previous.get(id);
-      if (
-        work.acceptancePending &&
-        before?.acceptancePending?.treeSha !== work.acceptancePending.treeSha
-      ) {
-        this.emitter.emit({
-          runId: this.state.runId,
-          itemId: id,
-          attemptId: work.attempt,
-          operation: "acceptance-pending",
-          outcome: before ? "waiting" : "observed",
-          metadata: { treeSha: work.acceptancePending.treeSha },
-          detail: JSON.stringify({
-            question: work.acceptancePending.question,
-            detail: work.acceptancePending.detail,
-            reviewFinding: work.acceptancePending.reviewFinding ?? null,
-          }),
-        });
+        break;
       }
-      if (
-        before?.execution?.identity !== work.execution?.identity &&
-        (before?.execution || work.execution)
-      ) {
-        this.emitter.emit({
-          runId: this.state.runId,
-          itemId: id,
-          attemptId: work.attempt,
-          operation: "harness",
-          outcome: !before
-            ? "observed"
-            : work.execution
-              ? "started"
-              : "completed",
-          durationMs:
-            before?.execution && !work.execution && work.startedAt
-              ? Math.max(0, Date.now() - Date.parse(work.startedAt))
-              : undefined,
-          metadata: {
-            ...(() => {
-              const assigned = this.state.graph.items.find(
-                (item) => item.id === id,
-              )?.executionBinding;
-              const actual = (
-                (work.execution ?? before?.execution)?.data as
-                  | {
-                      executionBinding?: {
-                        id: string;
-                        adapter: string;
-                        model?: string;
-                        reasoningEffort?: string;
-                        digest: string;
-                      };
-                    }
-                  | undefined
-              )?.executionBinding;
-              return {
-                ...(assigned
-                  ? {
-                      assignedProfile: assigned.id,
-                      assignedAdapter: assigned.adapter,
-                      profileDigest: assigned.digest,
-                    }
-                  : {}),
-                ...(actual
-                  ? {
-                      actualProfile: actual.id,
-                      actualAdapter: actual.adapter,
-                      ...(actual.model ? { actualModel: actual.model } : {}),
-                      ...(actual.reasoningEffort
-                        ? { actualReasoningEffort: actual.reasoningEffort }
-                        : {}),
-                    }
-                  : {}),
-              };
-            })(),
-            provider:
-              work.execution?.provider ??
-              before?.execution?.provider ??
-              "unknown",
-          },
-        });
+      case "model-usage": {
+        const role = str(event.role) ?? "unknown";
+        const phase = str(event.phase) ?? (step ? phaseOf(step) : role);
+        this.roles[role] ??= emptyUsage();
+        addUsage(this.roles[role], event);
+        addUsage(this.phase(phase), event);
+        break;
       }
-      if (
-        !before ||
-        before.status !== work.status ||
-        before.step !== work.step ||
-        before.pullRequest !== work.pullRequest ||
-        before.githubClosure !== work.githubClosure
-      ) {
-        const outcome = !before
-          ? "observed"
-          : work.status === "failed" || work.status === "cancelled"
-            ? "failed"
-            : work.status === "waiting"
-              ? "waiting"
-              : work.status === "done"
-                ? "completed"
-                : work.status === "pending"
-                  ? "observed"
-                  : "started";
-        const operation =
-          before?.githubClosure !== work.githubClosure &&
-          work.githubClosure === "complete"
-            ? "github-closure"
-            : (work.step ??
-              (work.pullRequest && work.status === "done"
-                ? "merge"
-                : work.status));
-        this.emitter.emit({
-          runId: this.state.runId,
-          itemId: id,
-          attemptId: work.attempt,
-          operation,
-          outcome,
-          durationMs:
-            work.completedAt && work.startedAt
-              ? Math.max(
-                  0,
-                  Date.parse(work.completedAt) - Date.parse(work.startedAt),
-                )
-              : undefined,
-          metadata: {
-            ...(this.state.issueByItemId[id]
-              ? { issue: this.state.issueByItemId[id] }
-              : {}),
-            ...(work.pullRequest ? { pullRequest: work.pullRequest } : {}),
-            ...(work.baseSha ? { baseSha: work.baseSha } : {}),
-            ...(work.treeSha ? { treeSha: work.treeSha } : {}),
-          },
-          detail: work.error,
+      case "hold": {
+        const id = str(event.id);
+        if (!id) break;
+        const item = step ? itemOf(step) : undefined;
+        this.holds.set(id, {
+          id,
+          ...(step ? { step } : {}),
+          ...(item ? { item } : {}),
+          ...(str(event.cause) ? { cause: String(event.cause) } : {}),
+          askedAt: event.at,
         });
+        break;
       }
-      this.previous.set(id, { ...work });
-    }
-    const finalPending = this.state.finalAcceptancePending?.treeSha ?? null;
-    if (finalPending && finalPending !== this.previousFinalPending)
-      this.emitter.emit({
-        runId: this.state.runId,
-        operation: "objective-acceptance-pending",
-        outcome:
-          this.previousFinalPending === undefined ? "observed" : "waiting",
-        metadata: { treeSha: finalPending },
-        detail: this.state.finalAcceptancePending
-          ? JSON.stringify({
-              question: this.state.finalAcceptancePending.question,
-              detail: this.state.finalAcceptancePending.detail,
-              reviewFinding:
-                this.state.finalAcceptancePending.reviewFinding ?? null,
-            })
-          : undefined,
-      });
-    this.previousFinalPending = finalPending;
-    const view = statusDocument(
-      this.state,
-      this.state.repository,
-      this.state.objective,
-      this.delivery,
-      [],
-      this.concurrency,
-    );
-    for (const item of view.work) {
-      const reason =
-        item.status === "pending"
-          ? (item.blockedReason ?? "eligible-provider-unknown")
-          : "inactive";
-      if (
-        reason !== this.previousReadiness.get(item.id) &&
-        item.status === "pending"
-      )
-        this.emitter.emit({
-          runId: this.state.runId,
-          itemId: item.id,
-          operation: "scheduling",
-          outcome: item.blockedReason ? "waiting" : "observed",
-          metadata: { reason },
-        });
-      this.previousReadiness.set(item.id, reason);
-    }
-    for (const [unit, receipt] of Object.entries(
-      this.state.stackNumbers ?? {},
-    )) {
-      const number = observedStackNumber(receipt);
-      if (number === undefined) continue;
-      if (this.previousStacks.get(unit) !== number) {
-        this.emitter.emit({
-          runId: this.state.runId,
-          operation: "github-stack",
-          outcome: "completed",
-          metadata: { unit, stack: number },
-        });
-        this.previousStacks.set(unit, number);
+      case "request": {
+        const request = (event.request ?? {}) as Record<string, unknown>;
+        const hold = this.holds.get(str(request.question) ?? "");
+        if (request.kind !== "answer" || !hold || event.code) break;
+        if (hold.answeredAt) break;
+        hold.answeredAt = event.at;
+        hold.answer = String(request.answer);
+        const by = str(event.by);
+        if (by) hold.by = by;
+        hold.waitMs = Date.parse(event.at) - Date.parse(hold.askedAt);
+        break;
       }
-    }
-    if (
-      this.state.integratedSha !== this.previousIntegrated &&
-      this.state.integratedSha
-    ) {
-      this.emitter.emit({
-        runId: this.state.runId,
-        operation: "integrated-head",
-        outcome: "completed",
-        metadata: { headSha: this.state.integratedSha },
-      });
-      this.previousIntegrated = this.state.integratedSha;
-    }
-    if (objectiveComplete(this.state) && !this.previousFinal) {
-      this.emitter.emit({
-        runId: this.state.runId,
-        operation: "objective-finalization",
-        outcome: "completed",
-        metadata: {
-          candidateCommitSha: objectiveCandidate(this.state)!.commitSha,
-          candidateBasis: objectiveCandidate(this.state)!.basis,
-          ...(this.state.integratedSha
-            ? { integratedSha: this.state.integratedSha }
-            : {}),
-        },
-      });
-      this.previousFinal = true;
     }
   }
+
+  private phase(name: string) {
+    const phase = this.phases[name] ?? { ...emptyUsage(), steps: 0, stepMs: 0 };
+    this.phases[name] = phase;
+    return phase;
+  }
+
+  private span(
+    step: string,
+    run: string,
+    startedAt: string,
+    endedAt: string,
+    outcome: unknown,
+  ): void {
+    const ms = Math.max(0, Date.parse(endedAt) - Date.parse(startedAt));
+    this.spans.push({
+      step,
+      run,
+      startedAt,
+      endedAt,
+      ms,
+      outcome: String(outcome),
+    });
+    const phase = this.phase(phaseOf(step));
+    phase.steps += 1;
+    phase.stepMs += ms;
+  }
+
+  report(): SummaryReport {
+    // A step whose run's log ends before its outcome: unfinished at that end.
+    for (const [key, start] of this.open) {
+      const run = key.slice(0, key.indexOf(" "));
+      const step = String(start.step);
+      this.span(step, run, start.at, this.lastAt.get(run)!, "unfinished");
+    }
+    this.open.clear();
+    const holds = [...this.holds.values()];
+    const path = criticalPath(this.spans);
+    return {
+      issue: this.issue,
+      runs: this.runs,
+      ...(this.from ? { from: this.from, to: this.to } : {}),
+      wallMs:
+        this.from && this.to ? Date.parse(this.to) - Date.parse(this.from) : 0,
+      roles: this.roles,
+      phases: this.phases,
+      repairs: this.repairs,
+      holds,
+      holdWaitMs: holds.reduce((sum, hold) => sum + (hold.waitMs ?? 0), 0),
+      criticalPath: path,
+      criticalPathMs: path.reduce((sum, span) => sum + span.ms, 0),
+      slowest: [...this.spans].sort((a, b) => b.ms - a.ms).slice(0, SLOWEST),
+    };
+  }
+}
+
+export function addUsage(usage: Usage, event: LogEvent): void {
+  usage.calls += 1;
+  usage.ms += num(event.ms) ?? 0;
+  const tokens = (event.tokens ?? {}) as Record<string, unknown>;
+  for (const name of Object.keys(usage.tokens) as (keyof Usage["tokens"])[])
+    usage.tokens[name] += num(tokens[name]) ?? 0;
+  if (num(tokens.total) === undefined) usage.tokensUnknown += 1;
+  const cost = num(event.costUsd);
+  if (cost === undefined) usage.costUnknown += 1;
+  else usage.costUsd = (usage.costUsd ?? 0) + cost;
+}
+
+/**
+ * The observed critical path. The log has no dependency edges, so it walks
+ * back from the step that ended last, each time to the step that ended
+ * last at or before the current one started.
+ */
+function criticalPath(spans: StepSpan[]): StepSpan[] {
+  const byEnd = [...spans].sort((a, b) => a.endedAt.localeCompare(b.endedAt));
+  const path: StepSpan[] = [];
+  let current = byEnd.at(-1);
+  let index = byEnd.length - 1;
+  while (current) {
+    path.unshift(current);
+    const startedAt = current.startedAt;
+    while (index >= 0 && byEnd[index]!.endedAt > startedAt) index--;
+    current = index >= 0 ? byEnd[index] : undefined;
+    index--;
+  }
+  return path;
+}
+
+export function usageText(usage: Usage): string {
+  const t = usage.tokens;
+  return [
+    `${usage.calls} calls`,
+    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, cache writes ${count(t.cacheWrite)}, out ${count(t.output)}, reasoning ${count(t.reasoning)})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
+    usage.costUsd === null
+      ? "cost unknown"
+      : `$${usage.costUsd.toFixed(2)}${usage.costUnknown ? ` (+${usage.costUnknown} calls unknown)` : ""}`,
+    `model time ${duration(usage.ms)}`,
+  ].join(" · ");
+}
+
+function spanText(span: StepSpan): string {
+  return `${span.step} ${span.outcome} · ${duration(span.ms)} · started ${displayTime(span.startedAt)}`;
+}
+
+/** The summary for people. */
+export function summaryText(report: SummaryReport): string {
+  const lines = [
+    `Diagnostics summary #${report.issue} · ${report.runs.length} run${report.runs.length === 1 ? "" : "s"}${report.from ? ` · ${displayTime(report.from)} to ${displayTime(report.to!)} (${duration(report.wallMs)})` : ""}`,
+  ];
+  if (!report.runs.length) return `${lines[0]}\nNo run log yet.\n`;
+  const section = (title: string, rows: string[]) => {
+    lines.push("", title, ...(rows.length ? rows : ["  none"]));
+  };
+  section(
+    "By role:",
+    Object.entries(report.roles).map(
+      ([role, usage]) => `  ${role}: ${usageText(usage)}`,
+    ),
+  );
+  section(
+    "By phase:",
+    Object.entries(report.phases).map(
+      ([phase, usage]) =>
+        `  ${phase}: ${usage.steps} steps, ${duration(usage.stepMs)} wall${usage.calls ? ` · ${usageText(usage)}` : ""}`,
+    ),
+  );
+  section(
+    "Repairs:",
+    Object.entries(report.repairs).map(([item, n]) => `  ${item}: ${n}`),
+  );
+  section(
+    `Holds (answered after ${duration(report.holdWaitMs)} in all):`,
+    report.holds.map(
+      (hold) =>
+        `  ${hold.step ?? "objective"}${hold.cause === "failure" ? " (failure)" : ""} asked ${displayTime(hold.askedAt)} · ${hold.answeredAt ? `${hold.answer} by ${hold.by ?? "?"} after ${duration(hold.waitMs ?? 0)}` : "no answer logged"}`,
+    ),
+  );
+  section(
+    `Critical path (${duration(report.criticalPathMs)} of steps; walking back from the last step to end):`,
+    report.criticalPath.map((span) => `  ${spanText(span)}`),
+  );
+  section(
+    "Slowest steps:",
+    report.slowest.map((span) => `  ${spanText(span)}`),
+  );
+  return `${lines.join("\n")}\n`;
 }

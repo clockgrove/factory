@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/land-prep.sh [--no-push]: in a PR's worktree, rebase onto
-# origin/main, run the full core gate, and push only if every step passed
+# origin/main, run the full gate, and push only if every step passed
 # (docs/LANDING.md#before-you-push). Any failure stops
 # with a non-zero exit before the push (set -euo pipefail: no step's
 # failure is hidden by a pipe or a `;`).
@@ -30,12 +30,12 @@ ahead=$(git rev-list --count origin/main..HEAD)
 log=$(mktemp /tmp/land-prep.XXXXXX)
 trap 'rm -f "$log"' EXIT
 step() { echo "land-prep: $1"; shift; if ! "$@" >"$log" 2>&1; then echo "land-prep: FAILED: $*" >&2; tail -40 "$log" >&2; exit 1; fi; }
-step build npm run build:core
-step check npx biome check core
+step build npm run build
+step check npx biome check src test
 step lint npm run lint
 step format npm run format:check
 step notices npm run notices:check
-step tests npm run test:core
+step tests npm test
 grep -E "^ℹ (pass|fail)" "$log" || true
 if git grep -n -e '^<<<<<<<' -e '^>>>>>>>' -- . >/dev/null; then echo "land-prep: conflict markers left" >&2; exit 1; fi
 if [ "$push" = 1 ]; then

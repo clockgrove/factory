@@ -20,7 +20,7 @@ cd "$BUILD"
 # pasta maps the caller to uid 0 and Factory refuses to plan as root: a nested
 # user namespace maps back to the host uid for serve only.
 unshare --user --map-user="$HOST_UID" --map-group="$HOST_GID" \
-  env ${EXTRA_ENV:-} node core/dist/cli.js serve --repo "$REPO" ${SERVE_ARGS:-} >"$CTL/out.log" 2>&1 &
+  env ${EXTRA_ENV:-} node dist/cli.js serve --repo "$REPO" ${SERVE_ARGS:-} >"$CTL/out.log" 2>&1 &
 pid=$!
 echo $pid >"$CTL/pid"
 log "serve pid $pid started; default route: $(ip route show default)"

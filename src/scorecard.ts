@@ -1,345 +1,246 @@
-import { isExecutionState } from "./state.js";
+/**
+ * `factory diagnostics --scorecard FILE`: Factory's runs against
+ * codex-direct baselines (the same task done directly with `codex exec
+ * --json`), for a delivery batch or a comparison. The selection FILE names
+ * the packets; Factory packets are read from the run log and the
+ * Objective's state, codex-direct packets from the private `codex exec
+ * --json` streams the selection names. It reports per packet, per scope
+ * and route, and per pair of packets with the same `pairId` (one per
+ * route): wall time, time to acceptance, tokens per category, cache
+ * effectiveness, cost, model calls, repairs, holds and first-try success.
+ *
+ * Run-log retention rotates old runs away (log.ts `rotateLogs`): each
+ * Factory Objective reports `N of M runs available`, and a missing run makes
+ * its counts partial, never silently complete. Read-only: it writes nothing
+ * and calls no provider. Every string is redacted on the way out.
+ */
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { analyzeInteractions } from "./analysis.js";
-import {
-  type InteractionMetadata,
-  readInteractionMetadata,
-} from "./capture.js";
-import { objectiveComplete } from "./completion.js";
-import {
-  privateRecords,
-  readDiagnosticMetadata,
-  readUsageSummaryEvents,
-  summarizeDiagnosticUsage,
-} from "./diagnostics.js";
-import { formatDuration, summarizeEfficiency } from "./efficiency.js";
-import { validPromptSections } from "./prompt-bytes.js";
-import { readContinuation } from "./state-store.js";
-import {
-  codexTokenUsage,
-  normalizeCodexTokenUsage,
-  normalizeTokenUsage,
-  tokenCategories,
-} from "./usage.js";
+import { StringDecoder } from "node:string_decoder";
+import { num, readRun, str } from "./diagnostics.js";
+import { displayTime, duration, redactDeep } from "./display.js";
+import { type LogEvent, logFiles, rotatedRuns, runOfFile } from "./log.js";
+import { acceptedInputs } from "./planning/plan.js";
+import { findState } from "./state.js";
+
+/** A selection or Objective the scorecard can't read; `code` is the CLI's refusal. */
+export class ScorecardError extends Error {
+  constructor(
+    readonly code: "usage" | "no_factory_state",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const fail = (message: string): never => {
+  throw new ScorecardError("usage", message);
+};
 
 type Outcome = "accepted" | "failed" | "unfinished";
 type Route = "factory" | "codex-direct";
-type Category = (typeof tokenCategories)[number];
-type Counter = {
+const CATEGORIES = ["input", "output", "cached", "reasoning", "total"] as const;
+type Category = (typeof CATEGORIES)[number];
+
+/** A sum and how much of it was reported: every call, some, or none. */
+export interface Counter {
   known: number | null;
   availability: "available" | "partial" | "unavailable";
-};
-type Tokens = Record<Category, Counter>;
-type NativeInputCacheObservation = {
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  observedInputTokens: number | null;
-  contributingResponses: number;
-  observedResponses: number;
-  measuredInvocations: number;
-  completeInputInvocations: number;
-  completeCacheInvocations: number;
-};
-type InputCacheObservation = {
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  contributingInvocations: number;
-  terminalCounterInvocations: number;
-  eligibleInvocations: number;
-  unobservedWorkerAttempts: number;
-  nativeResponseCache?: NativeInputCacheObservation;
-};
+}
+export type Tokens = Record<Category, Counter>;
 
-function nativeInputCache(
-  scopes: ReturnType<
-    typeof analyzeInteractions
-  >["invocations"][number]["native"][],
-): NativeInputCacheObservation {
-  const measured = scopes.filter(
-    (scope) => scope.responseUsage.categories.inputTokens?.observedResponses,
-  );
-  const sum = (values: (number | null | undefined)[]) =>
-    values.some((value) => value !== null && value !== undefined)
-      ? values.reduce<number>((total, value) => total + (value ?? 0), 0)
-      : null;
-  return {
-    inputTokens: sum(
-      measured.map((scope) => scope.responseUsage.cache.inputTokens),
-    ),
-    cachedInputTokens: sum(
-      measured.map((scope) => scope.responseUsage.cache.cachedInputTokens),
-    ),
-    observedInputTokens: sum(
-      measured.map(
-        (scope) => scope.responseUsage.categories.inputTokens?.total,
-      ),
-    ),
-    contributingResponses: measured.reduce(
-      (total, scope) => total + scope.responseUsage.cache.contributingResponses,
-      0,
-    ),
-    observedResponses: measured.reduce(
-      (total, scope) => total + scope.responseUsage.cache.observedResponses,
-      0,
-    ),
-    measuredInvocations: measured.length,
-    completeInputInvocations: measured.filter(
-      (scope) =>
-        scope.responseUsage.categories.inputTokens?.coverage === "available",
-    ).length,
-    completeCacheInvocations: measured.filter(
-      (scope) => scope.responseUsage.cache.coverage === "available",
-    ).length,
+/** Cached over input, from the calls that report both; never an average of rates. */
+export interface CacheEffectiveness {
+  input: number | null;
+  cached: number | null;
+  uncachedInput: number | null;
+  hitRate: number | null;
+  pairedCalls: number;
+  eligibleCalls: number;
+  availability: Counter["availability"];
+}
+
+/** Which of an Objective's runs the run log still has. */
+export interface RunCoverage {
+  available: number;
+  total: number;
+  /** Runs rotated away (log.ts `rotatedRuns`). */
+  rotated: string[];
+}
+
+/** A finite selection: reporting input, never execution authority. */
+interface Selection {
+  schemaVersion: 1;
+  window: { startedAt: string; endedAt: string };
+  comparison?: {
+    planReference?: string;
+    practicalImprovementCriterion?: string;
+    limitations?: string[];
+  };
+  packets: Packet[];
+}
+
+interface DirectSessionSelection {
+  path: string;
+  sessionId: string;
+  /** `thread.started` appears on resume too; freshness comes from launch evidence. */
+  freshThread: true;
+  freshThreadReference: string;
+  startedAt: string;
+  endedAt: string;
+  outcome: "completed" | "failed" | "cancelled" | "unfinished";
+  role: "setup" | "authoring" | "implementation" | "review" | "recovery";
+  cliVersion: string;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+  configDigest: string;
+}
+
+interface Packet {
+  id: string;
+  task: string;
+  route: Route;
+  pairId?: string;
+  scope: "adopter" | "factory-development";
+  /** The externally observed whole workflow, human setup and authoring included. */
+  workflow?: { startedAt: string; endedAt: string };
+  factoryObjectives?: number[];
+  codexSessions?: DirectSessionSelection[];
+  bindings: {
+    sourceDigest: string;
+    baseCommit: string;
+    resultCommit?: string;
+    resultTree?: string;
+    acceptanceReference: string;
+    environmentReference: string;
+  };
+  acceptance: { outcome: Outcome; at?: string };
+  observations?: Partial<Record<(typeof OBSERVATIONS)[number], number>> & {
+    postDeliveryWindowEndedAt?: string;
   };
 }
 
-function summarizeNativeInputCache(observations: InputCacheObservation[]) {
-  const eligibleInvocations = observations.reduce(
-    (total, observation) => total + observation.eligibleInvocations,
-    0,
-  );
-  const scopes = observations.flatMap((observation) =>
-    observation.nativeResponseCache ? [observation.nativeResponseCache] : [],
-  );
-  const counts = (
-    key:
-      | "contributingResponses"
-      | "observedResponses"
-      | "measuredInvocations"
-      | "completeInputInvocations"
-      | "completeCacheInvocations",
-  ) => scopes.reduce((total, scope) => total + scope[key], 0);
-  const sum = (
-    key: "inputTokens" | "cachedInputTokens" | "observedInputTokens",
-  ) => {
-    const supplied = scopes.filter((scope) => scope[key] !== null);
-    const total = supplied.reduce((total, scope) => total + scope[key]!, 0);
-    if (!Number.isSafeInteger(total))
-      throw new Error("Native cache accounting exceeds safe integer range");
-    return supplied.length ? total : null;
-  };
-  const inputTokens = sum("inputTokens");
-  const cachedInputTokens = sum("cachedInputTokens");
-  const observedInputTokens = sum("observedInputTokens");
-  const measuredInvocations = counts("measuredInvocations");
-  const completeInputInvocations = counts("completeInputInvocations");
-  const completeCacheInvocations = counts("completeCacheInvocations");
-  const attemptsObserved = observations.every(
-    (observation) => observation.unobservedWorkerAttempts === 0,
-  );
-  const inputComplete =
-    eligibleInvocations > 0 &&
-    attemptsObserved &&
-    completeInputInvocations === eligibleInvocations;
-  const cacheComplete =
-    inputComplete && completeCacheInvocations === eligibleInvocations;
-  return {
-    source: "native-disjoint-response-counter-pairs" as const,
-    scope: "selected-root-invocation-responses" as const,
-    inputTokens,
-    cachedInputTokens,
-    observedInputTokens,
-    reportedInputMinusCachedTokens:
-      inputTokens !== null && cachedInputTokens !== null
-        ? inputTokens - cachedInputTokens
-        : null,
-    weightedHitRate:
-      inputTokens && cachedInputTokens !== null
-        ? cachedInputTokens / inputTokens
-        : null,
-    contributingResponses: counts("contributingResponses"),
-    observedResponses: counts("observedResponses"),
-    measuredInvocations,
-    eligibleInvocations,
-    completeInputInvocations,
-    completeCacheInvocations,
-    availability:
-      cachedInputTokens === null
-        ? ("unavailable" as const)
-        : cacheComplete
-          ? ("available" as const)
-          : ("partial" as const),
-    wholeObservedCachedInputTokens: cacheComplete ? cachedInputTokens : null,
-    wholeObservedHitRate:
-      cacheComplete && observedInputTokens && cachedInputTokens !== null
-        ? cachedInputTokens / observedInputTokens
-        : null,
-    knownCachedInputLowerBoundShare:
-      inputComplete && observedInputTokens && cachedInputTokens !== null
-        ? cachedInputTokens / observedInputTokens
-        : null,
-    upstreamCategoryAndBillingCoverage: "unknown" as const,
-  };
-}
-
-/** Weight only matched counters. Dividing unrelated partial totals can invent cache hits. */
-function summarizeInputCache(observations: InputCacheObservation[]) {
-  const contributingInvocations = observations.reduce(
-    (sum, observation) => sum + observation.contributingInvocations,
-    0,
-  );
-  const eligibleInvocations = observations.reduce(
-    (sum, observation) => sum + observation.eligibleInvocations,
-    0,
-  );
-  const terminalCounterInvocations = observations.reduce(
-    (sum, observation) => sum + observation.terminalCounterInvocations,
-    0,
-  );
-  const unobservedWorkerAttempts = observations.reduce(
-    (sum, observation) => sum + observation.unobservedWorkerAttempts,
-    0,
-  );
-  const sum = (key: "inputTokens" | "cachedInputTokens") => {
-    if (!contributingInvocations) return null;
-    const total = observations.reduce(
-      (total, observation) => total + (observation[key] ?? 0),
-      0,
-    );
-    if (!Number.isSafeInteger(total))
-      throw new Error("Cache accounting exceeds safe integer range");
-    return total;
-  };
-  const inputTokens = sum("inputTokens");
-  const cachedInputTokens = sum("cachedInputTokens");
-  return {
-    inputTokens,
-    cachedInputTokens,
-    reportedInputMinusCachedTokens:
-      inputTokens !== null && cachedInputTokens !== null
-        ? inputTokens - cachedInputTokens
-        : null,
-    measurement: "reported-counter-pairs" as const,
-    upstreamCategoryAndBillingCoverage: "unknown" as const,
-    nativeResponseCache: summarizeNativeInputCache(observations),
-    weightedHitRate:
-      inputTokens && cachedInputTokens !== null
-        ? cachedInputTokens / inputTokens
-        : null,
-    contributingInvocations,
-    terminalCounterInvocations,
-    eligibleInvocations,
-    unobservedWorkerAttempts,
-    availability:
-      contributingInvocations === 0
-        ? "unavailable"
-        : terminalCounterInvocations === eligibleInvocations &&
-            unobservedWorkerAttempts === 0
-          ? "available"
-          : "partial",
-  };
-}
-const observationFields = [
+const OBSERVATIONS = [
   "operatorEffortMs",
   "interventions",
   "scopeRedirections",
   "outOfScopeChanges",
   "rework",
   "postDeliveryCorrections",
-  "postDeliveryWindowEndedAt",
+] as const;
+const ROLES = [
+  "setup",
+  "authoring",
+  "implementation",
+  "review",
+  "recovery",
 ] as const;
 
-/** A finite observation selection, never continuation state or execution authority. */
-interface ScorecardSelection {
-  schemaVersion: 1;
-  window: { startedAt: string; endedAt: string };
-  comparison?: {
-    planReference: string;
-    practicalImprovementCriterion: string;
-    limitations: string[];
-  };
-  packets: {
-    id: string;
-    task: string;
-    route: Route;
-    pairId?: string;
-    scope: "adopter" | "factory-development";
-    /** Externally observed whole workflow, including human setup/authoring without captures. */
-    workflow?: { startedAt: string; endedAt: string };
-    factoryObjectives?: number[];
-    codexSessions?: {
-      path: string;
-      /** Optional bounded private metadata from the same owned native thread. */
-      nativeCapturePath?: string;
-      sessionId: string;
-      /** thread.started also appears on resume; freshness must be verified from launch evidence. */
-      freshThread: true;
-      freshThreadReference: string;
-      startedAt: string;
-      endedAt: string;
-      outcome: "completed" | "failed" | "cancelled" | "unfinished";
-      role: "setup" | "authoring" | "implementation" | "review" | "recovery";
-      cliVersion: string;
-      provider: string;
-      model: string;
-      reasoningEffort: string;
-      configDigest: string;
-    }[];
-    bindings: {
-      sourceDigest: string;
-      baseCommit: string;
-      resultCommit?: string;
-      resultTree?: string;
-      acceptanceReference: string;
-      /** Tools, network, host resources and route differences verified by the assessor. */
-      environmentReference: string;
-    };
-    acceptance: { outcome: Outcome; at?: string };
-    observations?: {
-      operatorEffortMs?: number;
-      interventions?: number;
-      scopeRedirections?: number;
-      outOfScopeChanges?: number;
-      rework?: number;
-      postDeliveryCorrections?: number;
-      postDeliveryWindowEndedAt?: string;
-    };
-  }[];
-}
-
-const digest = (value: string | Uint8Array) =>
-  createHash("sha256").update(value).digest("hex");
-const timestamp = (at: string) => {
-  const time = typeof at === "string" ? Date.parse(at) : NaN;
-  if (!Number.isFinite(time))
-    throw new Error("Scorecard requires valid timestamps");
-  return time;
+const time = (at: unknown): number => {
+  const ms = typeof at === "string" ? Date.parse(at) : Number.NaN;
+  return Number.isFinite(ms)
+    ? ms
+    : fail(`The scorecard needs ISO timestamps; not ${String(at)}`);
 };
 const present = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
-function counters(
-  totals: Partial<Record<Category, number>>,
-  coverage: Record<string, string>,
-): Tokens {
-  return Object.fromEntries(
-    tokenCategories.map((key) => [
-      key,
-      {
-        known: totals[key] ?? null,
-        availability: coverage[key] ?? "unavailable",
-      },
-    ]),
-  ) as Tokens;
+const digest = (value: string) =>
+  createHash("sha256").update(value).digest("hex");
+
+// --- counters ---------------------------------------------------------------
+
+/** Accumulates calls' token counts per category, and the calls reporting both input and cached. */
+class Tally {
+  calls = 0;
+  private readonly sums = Object.fromEntries(
+    CATEGORIES.map((c) => [c, { sum: 0, reported: 0 }]),
+  ) as Record<Category, { sum: number; reported: number }>;
+  private paired = { calls: 0, input: 0, cached: 0 };
+
+  add(counts: Partial<Record<Category, number | null>>): void {
+    this.calls += 1;
+    for (const category of CATEGORIES) {
+      const value = counts[category];
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      this.sums[category].sum += value;
+      this.sums[category].reported += 1;
+    }
+    const { input, cached } = counts;
+    if (typeof input === "number" && typeof cached === "number") {
+      this.paired.calls += 1;
+      this.paired.input += input;
+      this.paired.cached += cached;
+    }
+  }
+
+  /** `complete`: no call is missing (no rotated run, a finished stream). */
+  tokens(complete: boolean): Tokens {
+    return Object.fromEntries(
+      CATEGORIES.map((category) => {
+        const { sum, reported } = this.sums[category];
+        return [
+          category,
+          {
+            known: reported ? sum : null,
+            availability: !reported
+              ? "unavailable"
+              : complete && reported === this.calls
+                ? "available"
+                : "partial",
+          },
+        ];
+      }),
+    ) as Tokens;
+  }
+
+  cache(complete: boolean): CacheEffectiveness {
+    return cacheOf(this.paired, this.calls, complete);
+  }
 }
-function sumTokens(selected: Tokens[]): Tokens {
+
+function cacheOf(
+  paired: { calls: number; input: number; cached: number },
+  eligible: number,
+  complete: boolean,
+): CacheEffectiveness {
+  const some = paired.calls > 0;
+  return {
+    input: some ? paired.input : null,
+    cached: some ? paired.cached : null,
+    uncachedInput: some ? paired.input - paired.cached : null,
+    hitRate:
+      some && paired.input > 0
+        ? Math.round((paired.cached / paired.input) * 10_000) / 10_000
+        : null,
+    pairedCalls: paired.calls,
+    eligibleCalls: eligible,
+    availability: !some
+      ? "unavailable"
+      : complete && paired.calls === eligible
+        ? "available"
+        : "partial",
+  };
+}
+
+/** Sums of counters: available only when every part is. */
+function sumTokens(parts: Tokens[]): Tokens {
   return Object.fromEntries(
-    tokenCategories.map((key) => {
-      const values = selected.map((tokens) => tokens[key]);
-      const supplied = values.filter((counter) => counter.known !== null);
-      const known = supplied.reduce((sum, counter) => sum + counter.known!, 0);
-      if (!Number.isSafeInteger(known))
-        throw new Error("Scorecard token total exceeds safe integer range");
+    CATEGORIES.map((category) => {
+      const counters = parts.map((part) => part[category]);
+      const known = counters.filter((counter) => counter.known !== null);
       return [
-        key,
+        category,
         {
-          known: supplied.length ? known : null,
+          known: known.length
+            ? known.reduce((sum, counter) => sum + counter.known!, 0)
+            : null,
           availability:
-            values.length &&
-            values.every((counter) => counter.availability === "available")
+            counters.length &&
+            counters.every((counter) => counter.availability === "available")
               ? "available"
-              : supplied.length
+              : known.length
                 ? "partial"
                 : "unavailable",
         },
@@ -348,645 +249,524 @@ function sumTokens(selected: Tokens[]): Tokens {
   ) as Tokens;
 }
 
-/** Observations derive from original receipts; the current configuration is never historical proof. */
-export function factoryObjectiveSummary(
-  repository: string,
-  objective: number,
-  now: number,
-) {
-  const state = readContinuation(repository, objective);
-  const executing = isExecutionState(state) ? state : undefined;
-  const events = readDiagnosticMetadata(repository, objective).filter(
-    (event) => !event.capture,
+function sumCache(parts: CacheEffectiveness[]): CacheEffectiveness {
+  const paired = { calls: 0, input: 0, cached: 0 };
+  let eligible = 0;
+  for (const part of parts) {
+    eligible += part.eligibleCalls;
+    paired.calls += part.pairedCalls;
+    paired.input += part.input ?? 0;
+    paired.cached += part.cached ?? 0;
+  }
+  return cacheOf(
+    paired,
+    eligible,
+    parts.every((part) => part.availability !== "partial"),
   );
-  const usage = readUsageSummaryEvents(repository, objective, executing);
-  const accounting = summarizeDiagnosticUsage(usage);
-  const captures = readInteractionMetadata(repository, objective);
-  const analyzed = analyzeInteractions(captures, [], {});
-  const cacheOf = (
-    aggregate:
-      | typeof accounting.modelUsage
-      | typeof accounting.workerUsage
-      | typeof accounting.combinedUsage
-      | NonNullable<typeof accounting.byPhase.compile>,
-    unobservedWorkerAttempts = 0,
-    invocations = analyzed.invocations,
-  ) =>
-    summarizeInputCache([
-      {
-        ...aggregate.inputCacheUsage,
-        eligibleInvocations: aggregate.invocationCount,
-        unobservedWorkerAttempts,
-        nativeResponseCache: nativeInputCache(
-          invocations.map((invocation) => invocation.native),
-        ),
-      },
-    ]);
-  const cacheEffectiveness = cacheOf(
-    accounting.combinedUsage,
-    accounting.combinedUsage.coverage.unobservedAttemptCount,
-  );
-  const tokens = counters(
-    accounting.combinedUsage.tokenTotals,
-    accounting.combinedUsage.coverage.byCategory,
-  );
-  const efficiency = summarizeEfficiency(events, usage, accounting, now);
-  const identities = analyzed.invocations.map(
-    (invocation) => invocation.identity,
-  );
-  const prompts = identities.flatMap((identity) =>
-    typeof identity.promptDigest === "string" ? [identity.promptDigest] : [],
-  );
-  const outcome: Outcome =
-    executing && objectiveComplete(executing)
-      ? "accepted"
-      : state?.cancelledAt
-        ? "failed"
-        : "unfinished";
-  const failedDelivery = events.filter(
-    (event) =>
-      ["deliver", "published", "github-publication", "github-merge"].includes(
-        event.operation,
-      ) && event.outcome === "failed",
-  ).length;
+}
+
+/** A sum of nullable values: null when none is known, with whether all were. */
+function known(values: (number | null)[]): {
+  known: number | null;
+  complete: boolean;
+} {
+  const some = values.filter((value): value is number => value !== null);
   return {
-    objective,
-    outcome,
-    bindings: {
-      runId: state?.runId ?? null,
-      observedRunIds: [
-        ...new Set(
-          events.flatMap((event) => (event.runId ? [event.runId] : [])),
-        ),
-      ],
-      baseCommit: state?.baseSha ?? null,
-      objectiveBodyDigest: state?.objectiveBodyDigest ?? null,
-      configDigest: state?.configDigest ?? null,
-      sourceDigests: [
-        ...new Set(
-          captures.flatMap((record) =>
-            record.sourceDigest ? [record.sourceDigest] : [],
-          ),
-        ),
-      ],
-      factoryVersions: [
-        ...new Set([
-          ...captures.map((record) => record.factoryVersion),
-          ...events.flatMap((event) =>
-            typeof event.metadata?.factoryVersion === "string"
-              ? [event.metadata.factoryVersion]
-              : [],
-          ),
-        ]),
-      ],
-      invocations: identities,
-      providerSessionIds: [
-        ...new Set(
-          captures.flatMap((record) =>
-            record.providerSessionId ? [record.providerSessionId] : [],
-          ),
-        ),
-      ],
-      resultCommit: executing?.finalAcceptance?.commit ?? null,
-      resultTree: executing?.finalAcceptance?.tree ?? null,
-      sealedAt: executing?.finalAcceptance?.sealedAt ?? null,
-      acceptanceEvidenceDigest:
-        executing?.finalAcceptance?.evidenceDigest ?? null,
-    },
-    efficiency,
-    accounting,
-    nativeTelemetry: analyzed.invocations.map((invocation) => ({
-      phase: invocation.identity.phase,
-      invocationId: invocation.identity.invocationId,
-      providerAttempt: invocation.identity.providerAttempt,
-      native: invocation.native,
-      nativeToolActivity: invocation.nativeToolActivity,
-      promptComponents: invocation.promptComponents,
-    })),
-    cacheEffectiveness,
-    cacheByRole: {
-      worker: cacheOf(
-        accounting.workerUsage,
-        accounting.workerUsage.coverage.unobservedAttemptCount,
-        analyzed.invocations.filter(
-          (invocation) => invocation.identity.phase === "implementation",
-        ),
-      ),
-      plannerAndReviewers: cacheOf(
-        accounting.modelUsage,
-        0,
-        analyzed.invocations.filter(
-          (invocation) => invocation.identity.phase !== "implementation",
-        ),
-      ),
-    },
-    cacheByPhase: Object.fromEntries(
-      Object.entries(accounting.byPhase).map(([phase, aggregate]) => [
-        phase,
-        cacheOf(
-          aggregate,
-          0,
-          analyzed.invocations.filter(
-            (invocation) => invocation.identity.phase === phase,
-          ),
-        ),
-      ]),
-    ),
-    failedDelivery,
-    contextRepetition: {
-      invocationsWithPromptDigest: prompts.length,
-      repeatedExactPromptDigests: [...new Set(prompts)].filter(
-        (value) => prompts.filter((prompt) => prompt === value).length > 1,
-      ).length,
-      /** Digests identify repeated exact prompts, not all shared context. */
-      coverage: "recorded-prompt-digests-only",
-    },
-    operatorEffortMs: null,
-    tokens,
-    receiptDigest: digest(
-      JSON.stringify({
-        events,
-        usage,
-        captures,
-        bindings: state
-          ? {
-              runId: state.runId,
-              base: state.baseSha,
-              config: state.configDigest,
-              seal: executing?.finalAcceptance ?? null,
-            }
-          : null,
-      }),
-    ),
+    known: some.length ? some.reduce((sum, value) => sum + value, 0) : null,
+    complete: values.every((value) => value !== null),
   };
 }
 
-/** Optional analytical capture metadata; never a second source of parent token totals. */
-function directNativeCapture(
-  session: NonNullable<
-    ScorecardSelection["packets"][number]["codexSessions"]
-  >[number],
-) {
-  const path = session.nativeCapturePath!;
-  if (!isAbsolute(path))
-    throw new Error("Native capture metadata path must be absolute");
-  const fd = openSync(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+// --- Factory Objectives -----------------------------------------------------
+
+export interface FactoryObjective {
+  objective: number;
+  outcome: Outcome;
+  /** `N of M runs available`: rotated runs leave every count partial. */
+  runs: RunCoverage;
+  startedAt: string | null;
+  endedAt: string | null;
+  wallMs: number | null;
+  acceptedAt: string | null;
+  bindings: {
+    admission: string | null;
+    observedRuns: string[];
+    provider: string | null;
+    configDigest: string | null;
+    baseCommit: string | null;
+    resultCommit: string | null;
+    resultTree: string | null;
+    providerSessionIds: string[];
+    /** From each observed run's `run-header` (log.ts): the Factory version and build digest it ran. */
+    factoryVersions: string[];
+    sourceDigests: string[];
+    /** Distinct `promptDigest`s of the model calls, sorted. */
+    promptDigests: string[];
+  };
+  /**
+   * The providers' own usage views (`providerUsage`): calls that reported
+   * one, and Codex child threads' usage (`descendants`), summed; never
+   * added to `tokens`.
+   */
+  nativeUsage: {
+    reportedCalls: number;
+    descendants: Record<
+      "threads" | "input" | "cached" | "output" | "reasoning" | "total",
+      number
+    > | null;
+  };
+  modelCalls: number;
+  failedModelCalls: number;
+  workerCalls: number;
+  modelMs: number;
+  tokens: Tokens;
+  costUsd: Counter;
+  cacheEffectiveness: CacheEffectiveness;
+  cacheByRole: Record<string, CacheEffectiveness>;
+  cacheByPhase: Record<string, CacheEffectiveness>;
+  /** From the state: they survive rotation. */
+  repairs: number;
+  holds: number;
+  /** Asked to answered, summed; elapsed waits, not operator attention. */
+  holdWaitMs: number;
+  /** Null when not observed, or when a run is missing. */
+  firstTryPlanning: boolean | null;
+  firstTryDelivery: boolean | null;
+}
+
+interface ReadOptions {
+  logs: string;
+  objectives: string;
+  secrets: readonly string[];
+}
+
+/** The planning steps: a generation's rounds and its decision. */
+const PLANNING = /^(plan|review|decide):\d+:\d+$/;
+
+/** One Objective's latest admission, from its state and the runs since it was admitted. */
+export function factoryObjective(
+  read: ReadOptions,
+  objective: number,
+): FactoryObjective {
+  const loaded = findState(read.objectives, objective);
+  if (!loaded)
+    throw new ScorecardError(
+      "no_factory_state",
+      `Factory has no state for #${objective}.`,
+    );
+  if (loaded.kind !== "ok")
+    throw new ScorecardError(
+      "no_factory_state",
+      `#${objective}'s state is unreadable: ${loaded.error}`,
+    );
+  const { state } = loaded;
+  const admitted = state.startedAt;
+  const since = (at: string) => !admitted || at >= admitted;
+  const events: LogEvent[] = [];
+  const observed: string[] = [];
+  const versions = new Set<string>();
+  const builds = new Set<string>();
+  for (const file of logFiles(read.logs, objective)) {
+    const before = events.length;
+    let header: LogEvent | undefined;
+    readRun(file, 0, read.secrets, (event) => {
+      // A run's header can predate the admission it ran: kept per run.
+      if (event.event === "run-header") header = event;
+      else if (since(event.at)) events.push(event);
+    });
+    if (events.length === before) continue;
+    observed.push(runOfFile(file));
+    const version = str(header?.factoryVersion);
+    const build = str(header?.sourceDigest);
+    if (version) versions.add(version);
+    if (build) builds.add(build);
+  }
+  const rotated = rotatedRuns(read.logs, objective)
+    .filter((run) => since(run.lastAt))
+    .map((run) => run.run);
+  const runs = {
+    available: observed.length,
+    total: observed.length + rotated.length,
+    rotated,
+  };
+  const complete = rotated.length === 0 && observed.length > 0;
+
+  const all = new Tally();
+  const byRole = new Map<string, Tally>();
+  const byPhase = new Map<string, Tally>();
+  const tallyOf = (map: Map<string, Tally>, key: string) => {
+    const tally = map.get(key) ?? new Tally();
+    map.set(key, tally);
+    return tally;
+  };
+  const sessions = new Set<string>();
+  const prompts = new Set<string>();
+  let nativeCalls = 0;
+  let descendants: FactoryObjective["nativeUsage"]["descendants"] = null;
+  const asked = new Map<string, string>();
+  let failedModelCalls = 0;
+  let workerCalls = 0;
+  let modelMs = 0;
+  let cost = 0;
+  let costed = 0;
+  let holds = 0;
+  let holdWaitMs = 0;
+  const planRounds = new Set<string>();
+  let planningSetback = false;
+  let deliverySetback = false;
+  for (const event of events) {
+    const step = str(event.step) ?? "";
+    switch (event.event) {
+      case "model-usage": {
+        const tokens = (event.tokens ?? {}) as Record<string, unknown>;
+        const counts = Object.fromEntries(
+          CATEGORIES.map((c) => [c, num(tokens[c]) ?? null]),
+        );
+        const role = str(event.role) ?? "unknown";
+        all.add(counts);
+        tallyOf(
+          byRole,
+          role === "worker" ? "worker" : "plannerAndReviewers",
+        ).add(counts);
+        tallyOf(byPhase, str(event.phase) ?? role).add(counts);
+        if (role === "worker" && !num(event.hedge)) workerCalls += 1;
+        modelMs += num(event.ms) ?? 0;
+        const usd = num(event.costUsd);
+        if (usd !== undefined) {
+          cost += usd;
+          costed += 1;
+        }
+        if (["error", "fail"].includes(String(event.outcome))) {
+          failedModelCalls += 1;
+          if (PLANNING.test(step)) planningSetback = true;
+          else deliverySetback = true;
+        }
+        for (const id of [event.thread, event.session])
+          if (present(id)) sessions.add(id);
+        const prompt = str(event.promptDigest);
+        if (prompt) prompts.add(prompt);
+        const native = event.providerUsage as
+          | { descendants?: Record<string, unknown> }
+          | undefined;
+        if (native && typeof native === "object") {
+          nativeCalls += 1;
+          if (native.descendants && typeof native.descendants === "object") {
+            descendants ??= {
+              threads: 0,
+              input: 0,
+              cached: 0,
+              output: 0,
+              reasoning: 0,
+              total: 0,
+            };
+            for (const key of Object.keys(
+              descendants,
+            ) as (keyof typeof descendants)[])
+              descendants[key] += num(native.descendants[key]) ?? 0;
+          }
+        }
+        break;
+      }
+
+      case "start":
+        if (/^plan:\d+:\d+$/.test(step)) planRounds.add(step);
+        break;
+      case "outcome": {
+        // A continuation is progress, not a setback.
+        const setback = event.outcome !== "done" && event.progress !== true;
+        if (!setback) break;
+        if (PLANNING.test(step)) planningSetback = true;
+        else deliverySetback = true;
+        break;
+      }
+      case "hold": {
+        holds += 1;
+        const id = str(event.id);
+        if (id) asked.set(id, event.at);
+        if (PLANNING.test(step)) planningSetback = true;
+        else deliverySetback = true;
+        break;
+      }
+      case "request": {
+        const request = (event.request ?? {}) as Record<string, unknown>;
+        const at = asked.get(str(request.question) ?? "");
+        if (request.kind !== "answer" || at === undefined || event.code) break;
+        asked.delete(String(request.question));
+        holdWaitMs += Math.max(0, time(event.at) - time(at));
+        break;
+      }
+    }
+  }
+
+  const outcome: Outcome =
+    state.status === "done"
+      ? "accepted"
+      : state.status === "cancelled"
+        ? "failed"
+        : "unfinished";
+  const final = state.done.final as
+    | { commit?: string; tree?: string }
+    | undefined;
+  let baseCommit: string | null = null;
+  try {
+    if (state.done.check) baseCommit = acceptedInputs(state).base ?? null;
+  } catch {
+    // A generation without its inputs: the base stays unknown.
+  }
+  const startedAt = admitted ?? events[0]?.at ?? null;
+  const endedAt = state.ended?.at ?? events.at(-1)?.at ?? null;
+  const repairs = Object.values(state.repairs ?? {}).reduce(
+    (sum, repair) => sum + repair.count,
+    0,
   );
+  const cacheMap = (map: Map<string, Tally>) =>
+    Object.fromEntries(
+      [...map].map(([key, tally]) => [key, tally.cache(complete)]),
+    );
+  return {
+    objective,
+    outcome,
+    runs,
+    startedAt,
+    endedAt,
+    wallMs: startedAt && endedAt ? time(endedAt) - time(startedAt) : null,
+    acceptedAt: outcome === "accepted" ? (state.ended?.at ?? null) : null,
+    bindings: {
+      admission: admitted ?? null,
+      observedRuns: observed,
+      provider: state.frozen?.provider ?? null,
+      configDigest: state.frozen?.digest ?? null,
+      baseCommit,
+      resultCommit: final?.commit ?? null,
+      resultTree: final?.tree ?? null,
+      providerSessionIds: [...sessions],
+      factoryVersions: [...versions],
+      sourceDigests: [...builds],
+      promptDigests: [...prompts].sort(),
+    },
+    nativeUsage: { reportedCalls: nativeCalls, descendants },
+    modelCalls: all.calls,
+    failedModelCalls,
+    workerCalls,
+    modelMs,
+    tokens: all.tokens(complete),
+    costUsd: {
+      known: costed ? cost : null,
+      availability: !costed
+        ? "unavailable"
+        : complete && costed === all.calls
+          ? "available"
+          : "partial",
+    },
+    cacheEffectiveness: all.cache(complete),
+    cacheByRole: cacheMap(byRole),
+    cacheByPhase: cacheMap(byPhase),
+    repairs,
+    holds,
+    holdWaitMs,
+    firstTryPlanning:
+      complete && planRounds.size
+        ? planRounds.size === 1 && !planningSetback
+        : null,
+    firstTryDelivery:
+      complete && outcome === "accepted" && workerCalls > 0
+        ? repairs === 0 && !deliverySetback
+        : null,
+  };
+}
+
+// --- codex-direct sessions --------------------------------------------------
+
+/** The most a `codex exec --json` stream may be. */
+const STREAM_MAX = 256 * 1024 * 1024;
+
+/** A private file's complete JSON records: 0600, owned, not a link, newline-terminated. */
+function* privateRecords(path: string): Generator<Record<string, unknown>> {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    return fail(`Can't open the codex-direct stream ${path}: ${error}`);
+  }
   try {
     const stat = fstatSync(fd);
     if (
       !stat.isFile() ||
-      stat.uid !== process.getuid?.() ||
-      stat.nlink !== 1 ||
       (stat.mode & 0o077) !== 0 ||
-      stat.size > 8 * 1024 * 1024
+      stat.uid !== process.getuid?.() ||
+      stat.size > STREAM_MAX
     )
-      throw new Error(
-        "Native capture metadata must be a bounded private regular file",
+      fail(
+        `The codex-direct stream ${path} must be your own private (0600) regular file of at most 256 MiB`,
       );
-    const buffer = Buffer.alloc(stat.size);
-    let bytes = 0;
-    while (bytes < buffer.length) {
-      const read = readSync(fd, buffer, bytes, buffer.length - bytes, bytes);
-      if (!read) break;
-      bytes += read;
-    }
-    const after = fstatSync(fd);
-    const text = buffer.subarray(0, bytes).toString("utf8");
-    if (
-      bytes !== stat.size ||
-      after.size !== stat.size ||
-      after.mtimeMs !== stat.mtimeMs ||
-      !text.endsWith("\n")
-    )
-      throw new Error(
-        "Native capture metadata is incomplete or changed during selection",
-      );
-    const rows = text
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    if (!rows.length || rows.length > 8192)
-      throw new Error("Native capture metadata exceeds its record bound");
-    const owned = new Map<string, string>();
-    for (const row of rows) {
-      const child = row.nativeDescendant;
-      if (child?.childSessionId === session.sessionId)
-        throw new Error("Selected native root cannot be its own descendant");
-      if (child?.relation !== "authenticated-owned-home") continue;
-      if (
-        row.providerEvent !== "codex.native-descendant-coverage" ||
-        !/^[0-9a-f-]{36}$/.test(String(child.childSessionId)) ||
-        !/^[0-9a-f-]{36}$/.test(String(child.parentSessionId)) ||
-        child.childSessionId === child.parentSessionId ||
-        row.providerSessionId !== child.parentSessionId ||
-        (owned.has(child.childSessionId) &&
-          owned.get(child.childSessionId) !== child.parentSessionId)
-      )
-        throw new Error(
-          "Native child capture has an invalid owned-home relationship",
-        );
-      owned.set(child.childSessionId, child.parentSessionId);
-    }
-    const family = new Set([session.sessionId]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const [child, parent] of owned)
-        if (family.has(parent) && !family.has(child)) {
-          family.add(child);
-          changed = true;
-        }
-    }
-    for (const row of rows) {
-      const root = row.providerSessionId === session.sessionId;
-      const relatedChild =
-        family.has(row.providerSessionId) &&
-        row.nativeOwnership?.rootSessionId === session.sessionId &&
-        row.nativeOwnership?.parentSessionId ===
-          owned.get(row.providerSessionId);
-      // Owned-home coverage observations name the child's parent, including at
-      // nested depths. The producer emits no child-content ownership on these
-      // relationship-only records; never extend that exemption to usage/content.
-      const ownedRelationship =
-        row.kind === "interaction" &&
-        row.providerEvent === "codex.native-descendant-coverage" &&
-        row.nativeDescendant?.relation === "authenticated-owned-home" &&
-        row.providerSessionId === row.nativeDescendant.parentSessionId &&
-        family.has(row.providerSessionId) &&
-        family.has(row.nativeDescendant.childSessionId) &&
-        owned.get(row.nativeDescendant.childSessionId) ===
-          row.providerSessionId &&
-        row.nativeOwnership === undefined &&
-        row.usage === undefined &&
-        row.visible === undefined &&
-        row.nativeRollout === undefined;
-      if (
-        row.schemaVersion !== 1 ||
-        !/^[0-9a-f-]{36}$/.test(String(row.recordId)) ||
-        row.invocationId !== session.sessionId ||
-        (!root && !relatedChild && !ownedRelationship) ||
-        (root && row.nativeOwnership !== undefined) ||
-        row.providerAttempt !== 1 ||
-        !["request", "interaction", "usage"].includes(row.kind) ||
-        !row.content ||
-        typeof row.content !== "object" ||
-        !row.configured ||
-        row.configured.provider !== session.provider ||
-        row.configured.model !== session.model ||
-        row.configured.reasoningEffort !== session.reasoningEffort ||
-        row.configDigest !== session.configDigest ||
-        (row.kind !== "request" &&
-          (typeof row.providerEvent !== "string" ||
-            !row.providerEvent.startsWith("codex.native-")))
-      )
-        throw new Error(
-          "Native capture metadata does not bind to the selected native CLI thread/configuration",
-        );
-      if (
-        row.usage &&
-        (row.usage.scope !== "provider-call" ||
-          !row.usage.normalized ||
-          typeof row.usage.deduplicationKey !== "string" ||
-          !row.usage.deduplicationKey.startsWith(row.providerSessionId + ":"))
-      )
-        throw new Error("Native capture usage has an invalid response binding");
-      if (
-        row.usage &&
-        (!present(row.providerMessageId) ||
-          row.usage.deduplicationKey !==
-            `${row.providerSessionId}:${row.providerMessageId}`)
-      )
-        throw new Error(
-          "Native capture usage does not identify its observed response",
-        );
-      if (
-        !Number.isSafeInteger(row.sequence) ||
-        row.sequence < 1 ||
-        !Number.isFinite(Date.parse(row.at)) ||
-        !present(row.repository) ||
-        !Number.isSafeInteger(row.objective) ||
-        row.objective < 1 ||
-        !present(row.adapter) ||
-        row.coverage !== "boundary"
-      )
-        throw new Error(
-          "Native capture metadata has invalid observation identity",
-        );
-      if (
-        row.visible &&
-        (row.visible.source !== "owned-codex-rollout" ||
-          ![row.visible.textBytes, row.visible.serializedBytes].every(
-            (value) => Number.isSafeInteger(value) && value >= 0,
-          ) ||
-          !/^[0-9a-f]{64}$/.test(String(row.visible.digest)) ||
-          typeof row.visible.contextSnapshot !== "boolean")
-      )
-        throw new Error("Native visible-byte metadata is malformed");
-      if (
-        row.nativeRollout &&
-        (!["available", "partial", "unavailable"].includes(
-          row.nativeRollout.status,
-        ) ||
-          (row.nativeRollout.toolMetadata !== undefined &&
-            !["available", "partial"].includes(
-              row.nativeRollout.toolMetadata,
-            )) ||
-          ![
-            "readBytes",
-            "totalBytes",
-            "observedCompletedResponses",
-            "duplicateResponseRecords",
-            "conflictingResponseRecords",
-          ].every(
-            (key) =>
-              row.nativeRollout[key] === null ||
-              (Number.isSafeInteger(row.nativeRollout[key]) &&
-                row.nativeRollout[key] >= 0),
-          ) ||
-          row.nativeRollout.completeRequestCount !== "unavailable" ||
-          row.nativeRollout.fullProviderWireAndUpstreamDetails !==
-            "unavailable" ||
-          row.nativeRollout.endpointCompleteness !== "unavailable" ||
-          !["inheritedHistory", "childHistory"].every(
-            (key) =>
-              row.nativeRollout[key] === null ||
-              typeof row.nativeRollout[key] === "boolean",
-          ))
-      )
-        throw new Error("Native rollout coverage metadata is malformed");
-      if (
-        row.nativeRollout &&
-        row.nativeRollout.cliVersion !== null &&
-        row.nativeRollout.cliVersion !== session.cliVersion
-      )
-        throw new Error(
-          "Native rollout CLI version differs from the declared observation",
-        );
-      for (const key of ["latestThreadUsage", "latestTokenCountUsage"]) {
-        if (!row.nativeRollout?.[key]) continue;
-        const parsed = normalizeTokenUsage(row.nativeRollout[key]);
-        if (
-          Object.keys(parsed).length !==
-          Object.keys(row.nativeRollout[key]).length
-        )
-          throw new Error("Native cumulative usage contains invalid counters");
-        row.nativeRollout[key] = normalizeCodexTokenUsage(parsed);
+    const buffer = Buffer.alloc(64 * 1024);
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    for (;;) {
+      const bytes = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytes === 0) break;
+      pending += decoder.write(buffer.subarray(0, bytes));
+      let start = 0;
+      for (let end = pending.indexOf("\n"); end >= 0; ) {
+        const line = pending.slice(start, end);
+        if (line.trim())
+          try {
+            yield JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            fail(
+              `The codex-direct stream ${path} has a record that isn't JSON`,
+            );
+          }
+        start = end + 1;
+        end = pending.indexOf("\n", start);
       }
-      if (row.nativeRollout)
-        row.nativeRollout = Object.fromEntries(
-          [
-            "cliVersion",
-            "status",
-            "toolMetadata",
-            "readBytes",
-            "totalBytes",
-            "observedCompletedResponses",
-            "duplicateResponseRecords",
-            "conflictingResponseRecords",
-            "inheritedHistory",
-            "childHistory",
-            "completeRequestCount",
-            "fullProviderWireAndUpstreamDetails",
-            "endpointCompleteness",
-            "latestThreadUsage",
-            "latestTokenCountUsage",
-          ].map((key) => [key, row.nativeRollout[key]]),
-        );
-      if (row.promptComponents) {
-        const components = row.promptComponents;
-        if (
-          !Number.isSafeInteger(components.renderedPromptBytes) ||
-          components.renderedPromptBytes < 0 ||
-          components.rolePreambleTaskSplit !== "unavailable" ||
-          !["schemaBytes", "evidenceBytes", "exportedEvidenceFileBytes"].every(
-            (key) =>
-              components[key] === undefined ||
-              (Number.isSafeInteger(components[key]) && components[key] >= 0),
-          )
-        )
-          throw new Error("Native prompt component metadata is malformed");
-        row.promptComponents = {
-          renderedPromptBytes: components.renderedPromptBytes,
-          schemaBytes: components.schemaBytes,
-          evidenceBytes: components.evidenceBytes,
-          exportedEvidenceFileBytes: components.exportedEvidenceFileBytes,
-          ...(validPromptSections(
-            components.sections,
-            components.renderedPromptBytes,
-          )
-            ? { sections: components.sections }
-            : {}),
-          rolePreambleTaskSplit: "unavailable",
-        };
-      }
-      if (row.usage) {
-        const parsed = normalizeTokenUsage(row.usage.normalized);
-        if (
-          Object.keys(parsed).length !==
-          Object.keys(row.usage.normalized).length
-        )
-          throw new Error("Native response usage contains invalid counters");
-        row.usage.normalized = normalizeCodexTokenUsage(parsed);
-      }
+      pending = pending.slice(start);
     }
-    const analyzed = analyzeInteractions(rows as InteractionMetadata[], [], {});
-    if (analyzed.invocations.length !== 1)
-      throw new Error("Native capture metadata contains unrelated invocations");
-    return {
-      observationDigest: digest(buffer.subarray(0, bytes)),
-      native: analyzed.invocations[0]!.native,
-      nativeToolActivity: analyzed.invocations[0]!.nativeToolActivity,
-      promptComponents: analyzed.invocations[0]!.promptComponents,
-    };
+    if ((pending + decoder.end()).trim())
+      fail(`The codex-direct stream ${path} ends in an unterminated record`);
   } finally {
     closeSync(fd);
   }
 }
 
-/** Fresh native `codex exec --json`: completed usage is thread-cumulative, not a turn delta. */
-function directSession(
-  session: NonNullable<
-    ScorecardSelection["packets"][number]["codexSessions"]
-  >[number],
-) {
+/**
+ * Codex's usage counts, the way the old scorecard read them: all-zero
+ * usage (none arrived) is unknown, and so is a zero cached or reasoning
+ * count, which Codex fills in when the detail is missing.
+ */
+function codexCounts(usage: unknown): Partial<Record<Category, number>> {
+  if (!usage || typeof usage !== "object") return {};
+  const u = usage as Record<string, unknown>;
+  const counts: Partial<Record<Category, number>> = {};
+  const set = (category: Category, value: unknown) => {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      counts[category] = value;
+  };
+  set("input", u.input_tokens);
+  set("cached", u.cached_input_tokens);
+  set("output", u.output_tokens);
+  set("reasoning", u.reasoning_output_tokens);
+  if (!Object.values(counts).some((value) => value > 0)) return {};
+  if (counts.cached === 0) delete counts.cached;
+  if (counts.reasoning === 0) delete counts.reasoning;
+  if (counts.input !== undefined && counts.output !== undefined)
+    counts.total = counts.input + counts.output;
+  return counts;
+}
+
+export interface DirectSession
+  extends Omit<DirectSessionSelection, "path" | "freshThread"> {
+  observationDigest: string;
+  turns: { completed: number; failed: number; unfinished: number };
+  usageScope: "thread-cumulative";
+  tokens: Tokens;
+  cacheEffectiveness: CacheEffectiveness;
+  wallMs: number;
+}
+
+/** A fresh `codex exec --json` stream: the latest `turn.completed` usage is the thread's total, counted once. */
+function directSession(session: DirectSessionSelection): DirectSession {
   if (!isAbsolute(session.path))
-    throw new Error("Codex observation path must be absolute");
+    fail(`A codex-direct stream path must be absolute; not ${session.path}`);
   if (session.freshThread !== true || !present(session.freshThreadReference))
-    throw new Error(
-      "Native Codex accounting requires externally verified fresh-thread launch evidence; resumed or unknown starting counters are unsupported",
+    fail(
+      `Session ${session.sessionId} needs freshThread: true and a freshThreadReference: resumed or unknown starting counters can't be counted`,
     );
+  const hash = createHash("sha256");
   const threads = new Set<unknown>();
-  let threadStarts = 0;
-  const receiptHash = createHash("sha256");
+  let starts = 0;
   let open = false;
   let completed = 0;
   let failed = 0;
-  let latestUsage: ReturnType<typeof codexTokenUsage> = {};
-  let lastOutcome: "completed" | "failed" | undefined;
-  for (const row of privateRecords(session.path, true)) {
-    // Canonical complete-record digest; never retain private messages/tool output.
-    receiptHash.update(JSON.stringify(row) + "\n");
+  let last: "completed" | "failed" | undefined;
+  let usage: Partial<Record<Category, number>> = {};
+  for (const row of privateRecords(session.path)) {
+    // A digest of the complete records; no message or tool output is kept.
+    hash.update(`${JSON.stringify(row)}\n`);
     if (row.type === "thread.started") {
-      threadStarts++;
+      starts += 1;
       threads.add(row.thread_id);
     }
     if (row.type === "turn.started") {
       if (open)
-        throw new Error(
-          "Codex stream has overlapping or missing turn outcomes",
-        );
+        fail(`Session ${session.sessionId} starts a turn before one ended`);
       open = true;
     }
     if (row.type !== "turn.completed" && row.type !== "turn.failed") continue;
     if (!open)
-      throw new Error(
-        "Codex stream repeats an outcome or is missing its turn start",
-      );
+      fail(`Session ${session.sessionId} ends a turn it never started`);
     open = false;
-    if (row.type === "turn.completed") completed++;
-    else failed++;
-    lastOutcome = row.type === "turn.completed" ? "completed" : "failed";
-    // The producer reports total_token_usage for the thread. Keep its latest complete
-    // snapshot once, including absent categories; a prior snapshot cannot fill them in.
-    if (row.type === "turn.completed") latestUsage = codexTokenUsage(row.usage);
+    if (row.type === "turn.completed") {
+      completed += 1;
+      last = "completed";
+      // Thread-cumulative: the latest snapshot replaces, never adds.
+      usage = codexCounts(row.usage);
+    } else {
+      failed += 1;
+      last = "failed";
+    }
   }
-  if (
-    threadStarts !== 1 ||
-    threads.size !== 1 ||
-    !threads.has(session.sessionId)
-  )
-    throw new Error(
-      "Codex observation does not match its selected session identity",
+  if (starts !== 1 || threads.size !== 1 || !threads.has(session.sessionId))
+    fail(
+      `The stream ${session.path} is not one fresh thread ${session.sessionId}`,
     );
-  if (
-    session.outcome === "completed" &&
-    (open || failed > 0 || completed === 0)
-  )
-    throw new Error(
-      "Completed Codex session lacks a matching successful terminal stream",
+  if (session.outcome === "completed" && (open || failed || !completed))
+    fail(
+      `Session ${session.sessionId} is selected as completed, but its stream has no clean successful end`,
     );
   const incomplete =
     open ||
-    lastOutcome !== "completed" ||
+    last !== "completed" ||
     ["unfinished", "cancelled"].includes(session.outcome);
-  const paired =
-    latestUsage.inputTokens !== undefined &&
-    latestUsage.cachedInputTokens !== undefined &&
-    Number.isSafeInteger(latestUsage.inputTokens) &&
-    latestUsage.inputTokens >= 0 &&
-    Number.isSafeInteger(latestUsage.cachedInputTokens) &&
-    latestUsage.cachedInputTokens >= 0 &&
-    latestUsage.cachedInputTokens <= latestUsage.inputTokens;
-  const nativeTelemetry = session.nativeCapturePath
-    ? directNativeCapture(session)
-    : null;
-  const delegationObserved = nativeTelemetry
-    ? nativeTelemetry.native.descendants.children.length > 0 ||
-      nativeTelemetry.native.rollout?.childHistory === true
-    : null;
+  const tally = new Tally();
+  tally.add(usage);
+  const { path: _path, freshThread: _fresh, ...rest } = session;
   return {
-    ...session,
-    path: undefined,
-    nativeCapturePath: undefined,
-    nativeTelemetry,
-    observationDigest: receiptHash.digest("hex"),
+    ...rest,
+    observationDigest: hash.digest("hex"),
     turns: { completed, failed, unfinished: open ? 1 : 0 },
-    usageScope: "parent-thread-cumulative" as const,
-    descendantAccounting: {
-      observedChildren:
-        nativeTelemetry?.native.descendants.children.length ?? null,
-      delegationObserved,
-      coverage: nativeTelemetry?.native.descendants.coverage ?? "unavailable",
-      parentUsageIncludesChildren: "unknown" as const,
-      childCountersAddedToParentTotals: false,
-      parentNativeVersusSdkCounter: Object.fromEntries(
-        tokenCategories.map((key) => {
-          const native = nativeTelemetry?.native.responseUsage.categories[key];
-          return [
-            key,
-            {
-              observation:
-                latestUsage[key] !== undefined &&
-                native?.total !== null &&
-                native?.total !== undefined
-                  ? native.total === latestUsage[key]
-                    ? "matches"
-                    : "differs"
-                  : "unavailable",
-              nativeResponseCoverage: native?.coverage ?? "unavailable",
-            },
-          ];
-        }),
-      ),
-    },
-    tokens: counters(
-      latestUsage,
-      Object.fromEntries(
-        tokenCategories.map((key) => [
-          key,
-          latestUsage[key] === undefined
-            ? "unavailable"
-            : incomplete || delegationObserved === true
-              ? "partial"
-              : "available",
-        ]),
-      ),
-    ),
-    cacheEffectiveness: summarizeInputCache([
-      {
-        inputTokens: paired ? latestUsage.inputTokens! : null,
-        cachedInputTokens: paired ? latestUsage.cachedInputTokens! : null,
-        contributingInvocations: paired ? 1 : 0,
-        terminalCounterInvocations: paired && !incomplete ? 1 : 0,
-        eligibleInvocations: 1,
-        unobservedWorkerAttempts: 0,
-        nativeResponseCache: nativeInputCache(
-          nativeTelemetry ? [nativeTelemetry.native] : [],
-        ),
-      },
-    ]),
-    wallMs: timestamp(session.endedAt) - timestamp(session.startedAt),
-    provenance:
-      "Native Codex CLI cumulative receipts; fresh-thread launch, configuration and timing externally verified" as const,
+    usageScope: "thread-cumulative",
+    tokens: tally.tokens(!incomplete),
+    cacheEffectiveness: tally.cache(!incomplete),
+    wallMs: time(session.endedAt) - time(session.startedAt),
   };
 }
 
-/** No implicit file discovery: the owner declares every attempted Objective/session and overhead. */
-export function summarizeScorecard(
-  repository: string,
-  selection: ScorecardSelection,
-) {
+// --- the scorecard ----------------------------------------------------------
+
+export interface Delta {
+  factory: number;
+  direct: number;
+  absolute: number;
+  percent: number | null;
+}
+
+/** Validate the selection, read every packet, and compare. Throws ScorecardError. */
+export function scorecard(read: ReadOptions, selection: Selection) {
   if (
     selection?.schemaVersion !== 1 ||
     !Array.isArray(selection.packets) ||
     !selection.packets.length
   )
-    throw new Error(
-      "Scorecard requires schemaVersion 1 and a nonempty packets selection",
+    fail(
+      "The scorecard selection needs schemaVersion 1 and a nonempty packets list",
     );
-  const start = timestamp(selection.window?.startedAt);
-  const end = timestamp(selection.window?.endedAt);
-  if (end <= start)
-    throw new Error("Scorecard window must have a positive duration");
+  const start = time(selection.window?.startedAt);
+  const end = time(selection.window?.endedAt);
+  if (end <= start) fail("The scorecard window must have a positive duration");
   const seen = new Set<string>();
   const claim = (key: string) => {
-    if (seen.has(key)) throw new Error(`Duplicate scorecard selection: ${key}`);
+    if (seen.has(key)) fail(`The selection names ${key} twice`);
     seen.add(key);
   };
-  const inside = (first: string, last: string) => {
-    if (
-      timestamp(first) < start ||
-      timestamp(last) > end ||
-      timestamp(last) < timestamp(first)
-    )
-      throw new Error(
-        "Select whole observations contained in the scorecard window",
-      );
+  const inside = (first: string, last: string, what: string) => {
+    if (time(first) < start || time(last) > end || time(last) < time(first))
+      fail(`${what} is not whole inside the scorecard window`);
   };
+
   const packets = selection.packets.map((packet) => {
+    if (!packet || typeof packet !== "object")
+      fail("Each scorecard packet must be an object");
     if (
       ![
         packet.id,
@@ -1000,48 +780,56 @@ export function summarizeScorecard(
       !["adopter", "factory-development"].includes(packet.scope) ||
       !["accepted", "failed", "unfinished"].includes(packet.acceptance?.outcome)
     )
-      throw new Error(
-        "Scorecard packet requires task, route, scope, exact bindings and acceptance references",
+      fail(
+        `Packet ${packet?.id ?? "?"} needs id, task, route, scope, acceptance.outcome and bindings (sourceDigest, baseCommit, acceptanceReference, environmentReference)`,
       );
-    claim(`packet:${packet.id}`);
-    for (const [key, value] of Object.entries(packet.observations ?? {})) {
-      if (
-        !observationFields.includes(key as (typeof observationFields)[number])
-      )
-        throw new Error(`Unknown operator observation ${key}`);
-      if (key === "postDeliveryWindowEndedAt") timestamp(String(value));
+    claim(`packet ${packet.id}`);
+    const observations = packet.observations ?? {};
+    for (const [key, value] of Object.entries(observations)) {
+      if (key === "postDeliveryWindowEndedAt") time(value);
+      else if (!OBSERVATIONS.includes(key as (typeof OBSERVATIONS)[number]))
+        fail(`Packet ${packet.id}: unknown observation ${key}`);
       else if (!Number.isSafeInteger(value) || Number(value) < 0)
-        throw new Error(`Invalid operator observation ${key}`);
+        fail(`Packet ${packet.id}: ${key} must be a whole number`);
     }
     if (
-      packet.observations?.postDeliveryCorrections !== undefined &&
-      !packet.observations.postDeliveryWindowEndedAt
+      observations.postDeliveryCorrections !== undefined &&
+      !observations.postDeliveryWindowEndedAt
     )
-      throw new Error(
-        "Post-delivery corrections require a declared observation window end",
+      fail(
+        `Packet ${packet.id}: postDeliveryCorrections needs postDeliveryWindowEndedAt`,
       );
+    if (
+      packet.route === "factory"
+        ? !packet.factoryObjectives?.length || packet.codexSessions?.length
+        : !packet.codexSessions?.length || packet.factoryObjectives?.length
+    )
+      fail(
+        `Packet ${packet.id}: a factory packet selects factoryObjectives, a codex-direct packet codexSessions`,
+      );
+
     const factory = (packet.factoryObjectives ?? []).map((objective) => {
-      if (
-        packet.route !== "factory" ||
-        !Number.isSafeInteger(objective) ||
-        objective <= 0
-      )
-        throw new Error("Invalid Factory Objective selection");
-      claim(`objective:${objective}`);
-      const report = factoryObjectiveSummary(repository, objective, end);
-      if (report.efficiency.startedAt && report.efficiency.endedAt)
-        inside(report.efficiency.startedAt, report.efficiency.endedAt);
+      if (!Number.isSafeInteger(objective) || objective <= 0)
+        fail(`Packet ${packet.id}: ${objective} is not an issue number`);
+      claim(`Objective #${objective}`);
+      const report = factoryObjective(read, objective);
+      if (report.startedAt && report.endedAt)
+        inside(report.startedAt, report.endedAt, `#${objective}'s run`);
       if (
         report.bindings.baseCommit &&
         report.bindings.baseCommit !== packet.bindings.baseCommit
       )
-        throw new Error("Selected Factory base differs from packet binding");
+        fail(
+          `Packet ${packet.id}: #${objective} ran on base ${report.bindings.baseCommit}, not the bound ${packet.bindings.baseCommit}`,
+        );
       return report;
     });
     const direct = (packet.codexSessions ?? []).map((session) => {
+      if (!session || typeof session !== "object")
+        fail(`Packet ${packet.id}: each codex session must be an object`);
       if (
-        !present(session.sessionId) ||
         ![
+          session.sessionId,
           session.cliVersion,
           session.provider,
           session.model,
@@ -1051,35 +839,31 @@ export function summarizeScorecard(
         !["completed", "failed", "cancelled", "unfinished"].includes(
           session.outcome,
         ) ||
-        ![
-          "setup",
-          "authoring",
-          "implementation",
-          "review",
-          "recovery",
-        ].includes(session.role)
+        !ROLES.includes(session.role)
       )
-        throw new Error(
-          "Codex selection requires session, configuration, role and outcome",
+        fail(
+          `Packet ${packet.id}: each codex session needs sessionId, cliVersion, provider, model, reasoningEffort, configDigest, outcome and role`,
         );
-      // Fresh thread totals are selected once globally; resumed threads are unsupported.
-      claim(`codex-file:${session.path}`);
-      claim(`codex-thread:${session.sessionId}`);
-      inside(session.startedAt, session.endedAt);
+      if ("nativeCapturePath" in session)
+        fail(
+          `Packet ${packet.id}: nativeCapturePath is not read any more; the old capture metadata format is gone`,
+        );
+      claim(`codex stream ${session.path}`);
+      claim(`codex thread ${session.sessionId}`);
+      inside(
+        session.startedAt,
+        session.endedAt,
+        `Session ${session.sessionId}`,
+      );
       const observed = directSession(session);
-      claim(`codex-receipt:${observed.observationDigest}`);
+      claim(`codex receipt ${observed.observationDigest}`);
       return observed;
     });
-    if (
-      packet.route === "factory"
-        ? !factory.length
-        : factory.length || !direct.length
-    )
-      throw new Error(
-        "Select Factory Objectives or direct Codex sessions for the packet route",
-      );
+
     const accepted = factory.filter((report) => report.outcome === "accepted");
-    const outcome =
+    if (accepted.length > 1)
+      fail(`Packet ${packet.id} has more than one accepted Objective`);
+    const outcome: Outcome =
       packet.route === "factory"
         ? accepted.length
           ? "accepted"
@@ -1087,13 +871,9 @@ export function summarizeScorecard(
             ? "failed"
             : "unfinished"
         : packet.acceptance.outcome;
-    if (packet.route === "factory" && outcome !== packet.acceptance.outcome)
-      throw new Error(
-        "Manifest acceptance differs from Factory's recorded completion",
-      );
-    if (accepted.length > 1)
-      throw new Error(
-        "A packet cannot contain multiple accepted Factory Objectives",
+    if (outcome !== packet.acceptance.outcome)
+      fail(
+        `Packet ${packet.id} says ${packet.acceptance.outcome}, but Factory's state says ${outcome}`,
       );
     const result = accepted[0];
     if (
@@ -1103,80 +883,62 @@ export function summarizeScorecard(
         (packet.bindings.resultTree &&
           packet.bindings.resultTree !== result.bindings.resultTree))
     )
-      throw new Error("Factory result differs from packet binding");
+      fail(`Packet ${packet.id}: Factory's result differs from its bindings`);
     const acceptedAt =
       outcome === "accepted"
-        ? (result?.bindings.sealedAt ?? packet.acceptance.at ?? null)
+        ? (result?.acceptedAt ?? packet.acceptance.at ?? null)
         : null;
-    if (
-      outcome === "accepted" &&
-      (!acceptedAt ||
-        !(result?.bindings.resultCommit ?? packet.bindings.resultCommit) ||
-        !(result?.bindings.resultTree ?? packet.bindings.resultTree))
-    )
-      throw new Error(
-        "Accepted packet requires result commit/tree and acceptance time",
+    const resultCommit =
+      result?.bindings.resultCommit ?? packet.bindings.resultCommit ?? null;
+    const resultTree =
+      result?.bindings.resultTree ?? packet.bindings.resultTree ?? null;
+    if (outcome === "accepted" && (!acceptedAt || !resultCommit || !resultTree))
+      fail(
+        `Packet ${packet.id} is accepted, so it needs acceptance.at and bindings.resultCommit and resultTree`,
       );
-    if (acceptedAt) inside(selection.window.startedAt, acceptedAt);
-    const first =
-      [
-        ...factory.flatMap((report) =>
-          report.efficiency.startedAt ? [report.efficiency.startedAt] : [],
-        ),
-        ...direct.map((session) => session.startedAt),
-      ].sort((a, b) => timestamp(a) - timestamp(b))[0] ?? null;
-    const last =
-      [
-        ...factory.flatMap((report) =>
-          report.efficiency.endedAt ? [report.efficiency.endedAt] : [],
-        ),
-        ...direct.map((session) => session.endedAt),
-      ]
-        .sort((a, b) => timestamp(a) - timestamp(b))
-        .at(-1) ?? null;
-    if (acceptedAt && first && timestamp(acceptedAt) < timestamp(first))
-      throw new Error("Acceptance precedes the selected work");
+    if (acceptedAt)
+      inside(selection.window.startedAt, acceptedAt, "Acceptance");
+    const times = [
+      ...factory.flatMap((report) =>
+        report.startedAt && report.endedAt
+          ? [report.startedAt, report.endedAt]
+          : [],
+      ),
+      ...direct.flatMap((session) => [session.startedAt, session.endedAt]),
+    ].sort((a, b) => time(a) - time(b));
+    const first = times[0] ?? null;
+    const last = times.at(-1) ?? null;
+    if (acceptedAt && first && time(acceptedAt) < time(first))
+      fail(`Packet ${packet.id} is accepted before its work started`);
     if (packet.workflow) {
-      inside(packet.workflow.startedAt, packet.workflow.endedAt);
-      const workflowStart = timestamp(packet.workflow.startedAt);
-      const workflowEnd = timestamp(packet.workflow.endedAt);
+      const { startedAt, endedAt } = packet.workflow;
+      inside(startedAt, endedAt, `Packet ${packet.id}'s workflow`);
       if (
-        (first && workflowStart > timestamp(first)) ||
-        (last && workflowEnd < timestamp(last)) ||
+        (first && time(startedAt) > time(first)) ||
+        (last && time(endedAt) < time(last)) ||
         (acceptedAt &&
-          (workflowStart > timestamp(acceptedAt) ||
-            workflowEnd < timestamp(acceptedAt)))
+          (time(startedAt) > time(acceptedAt) ||
+            time(endedAt) < time(acceptedAt)))
       )
-        throw new Error(
-          "Workflow bounds must contain every selected receipt and acceptance",
+        fail(
+          `Packet ${packet.id}: the workflow bounds must contain every selected run, session and the acceptance`,
         );
     }
     if (
-      packet.observations?.postDeliveryWindowEndedAt &&
+      observations.postDeliveryWindowEndedAt &&
       (!acceptedAt ||
-        timestamp(packet.observations.postDeliveryWindowEndedAt) <
-          timestamp(acceptedAt))
+        time(observations.postDeliveryWindowEndedAt) < time(acceptedAt))
     )
-      throw new Error(
-        "Post-delivery observation window must end after acceptance",
+      fail(
+        `Packet ${packet.id}: the post-delivery window must end after acceptance`,
       );
-    const attempts = factory.reduce(
-      (sum, report) => sum + report.efficiency.attempts.worker,
-      0,
-    );
-    const planning = factory.reduce(
-      (sum, report) => sum + report.efficiency.attempts.planningRuns,
-      0,
-    );
-    const failures = factory.reduce(
-      (sum, report) =>
-        sum +
-        report.efficiency.attempts.failedWorker +
-        report.efficiency.attempts.failedPlanningRuns +
-        report.efficiency.attempts.failedModelCalls +
-        report.failedDelivery,
-      0,
-    );
+    const runs = {
+      available: factory.reduce(
+        (sum, report) => sum + report.runs.available,
+        0,
+      ),
+      total: factory.reduce((sum, report) => sum + report.runs.total, 0),
+    };
     return {
       id: packet.id,
       task: packet.task,
@@ -1186,80 +948,70 @@ export function summarizeScorecard(
       outcome,
       acceptanceProvenance:
         packet.route === "factory"
-          ? "Factory completion snapshot"
+          ? "Factory's Objective state"
           : "external substantive assessment",
-      bindings: {
-        ...packet.bindings,
-        resultCommit:
-          result?.bindings.resultCommit ?? packet.bindings.resultCommit ?? null,
-        resultTree:
-          result?.bindings.resultTree ?? packet.bindings.resultTree ?? null,
-      },
+      bindings: { ...packet.bindings, resultCommit, resultTree },
       acceptedAt,
       capturedStartedAt: first,
       capturedEndedAt: last,
-      capturedWallMs: first && last ? timestamp(last) - timestamp(first) : null,
+      capturedWallMs: first && last ? time(last) - time(first) : null,
       workflow: packet.workflow ?? null,
-      totalTimingProvenance: packet.workflow
-        ? "externally observed whole workflow"
-        : null,
+      /** Only externally observed whole-workflow bounds give total time. */
       wallMs: packet.workflow
-        ? timestamp(packet.workflow.endedAt) -
-          timestamp(packet.workflow.startedAt)
+        ? time(packet.workflow.endedAt) - time(packet.workflow.startedAt)
         : null,
       timeToAcceptedMs:
         acceptedAt && packet.workflow
-          ? timestamp(acceptedAt) - timestamp(packet.workflow.startedAt)
+          ? time(acceptedAt) - time(packet.workflow.startedAt)
           : null,
+      runs: packet.route === "factory" ? runs : null,
       filings: packet.route === "factory" ? factory.length : null,
       refiles: packet.route === "factory" ? factory.length - 1 : null,
       implementationAttempts:
         packet.route === "factory"
-          ? attempts
+          ? factory.reduce((sum, report) => sum + report.workerCalls, 0)
           : direct.filter((session) => session.role === "implementation")
               .length,
+      repairs:
+        packet.route === "factory"
+          ? factory.reduce((sum, report) => sum + report.repairs, 0)
+          : null,
       firstTryPlanning:
-        packet.route === "factory" && planning > 0
-          ? planning === 1 &&
-            !factory.some(
-              (report) =>
-                report.efficiency.attempts.failedPlanningRuns ||
-                report.accounting.byPhase.compile?.failedCount ||
-                report.accounting.byPhase["graph-review"]?.failedCount,
-            )
+        packet.route === "factory" &&
+        factory.every((report) => report.firstTryPlanning !== null)
+          ? factory.length === 1 && factory[0]!.firstTryPlanning
           : null,
       firstTryDelivery:
-        packet.route === "factory" && outcome === "accepted" && attempts > 0
-          ? factory.length === 1 &&
-            failures === 0 &&
-            !factory.some(
-              (report) =>
-                report.efficiency.attempts.retries ||
-                report.efficiency.attempts.operatorRetries,
-            )
+        packet.route === "factory" && outcome === "accepted"
+          ? factory.length === 1
+            ? factory[0]!.firstTryDelivery
+            : factory.every((report) => report.runs.rotated.length === 0)
+              ? false
+              : null
           : null,
-      operatorWaitMs: factory.length
-        ? factory.reduce(
-            (sum, report) => sum + report.efficiency.operatorWaitMs,
-            0,
-          )
+      holds: factory.length
+        ? factory.reduce((sum, report) => sum + report.holds, 0)
         : null,
-      humanStops: factory.length
-        ? factory.reduce((sum, report) => sum + report.efficiency.humanStops, 0)
+      holdWaitMs: factory.length
+        ? factory.reduce((sum, report) => sum + report.holdWaitMs, 0)
         : null,
       observations: Object.fromEntries(
-        observationFields.map((key) => [
+        [...OBSERVATIONS, "postDeliveryWindowEndedAt" as const].map((key) => [
           key,
-          packet.observations?.[
-            key as keyof NonNullable<typeof packet.observations>
-          ] ?? null,
+          observations[key] ?? null,
         ]),
-      ),
+      ) as Record<(typeof OBSERVATIONS)[number], number | null> & {
+        postDeliveryWindowEndedAt: string | null;
+      },
       tokens: sumTokens([
         ...factory.map((report) => report.tokens),
         ...direct.map((session) => session.tokens),
       ]),
-      cacheEffectiveness: summarizeInputCache([
+      costUsd:
+        packet.route === "factory"
+          ? known(factory.map((report) => report.costUsd.known))
+          : { known: null, complete: false },
+      cacheEffectiveness: sumCache([
         ...factory.map((report) => report.cacheEffectiveness),
         ...direct.map((session) => session.cacheEffectiveness),
       ]),
@@ -1271,11 +1023,9 @@ export function summarizeScorecard(
           ]),
         ].map((role) => [
           role,
-          summarizeInputCache([
+          sumCache([
             ...factory.flatMap((report) =>
-              role in report.cacheByRole
-                ? [report.cacheByRole[role as keyof typeof report.cacheByRole]]
-                : [],
+              report.cacheByRole[role] ? [report.cacheByRole[role]] : [],
             ),
             ...direct
               .filter((session) => session.role === role)
@@ -1287,19 +1037,20 @@ export function summarizeScorecard(
       direct,
     };
   });
-  const factorySessionIds = new Set(
+
+  const factorySessions = new Set(
     packets.flatMap((packet) =>
       packet.factory.flatMap((report) => report.bindings.providerSessionIds),
     ),
   );
-  if (
-    packets.some((packet) =>
-      packet.direct.some((session) => factorySessionIds.has(session.sessionId)),
-    )
-  )
-    throw new Error(
-      "Codex observation overlaps a session already accounted by Factory in the selection",
-    );
+  for (const packet of packets)
+    for (const session of packet.direct)
+      if (factorySessions.has(session.sessionId))
+        fail(
+          `Session ${session.sessionId} is one of Factory's own calls in this selection`,
+        );
+
+  const hours = (end - start) / 3_600_000;
   const batches = (["adopter", "factory-development"] as const).flatMap(
     (scope) =>
       (["factory", "codex-direct"] as const).flatMap((route) => {
@@ -1311,18 +1062,10 @@ export function summarizeScorecard(
           (packet) => packet.outcome === "accepted",
         ).length;
         const tokens = sumTokens(selected.map((packet) => packet.tokens));
-        const known = (key: "wallMs" | "operatorWaitMs") => {
-          const values = selected.map((packet) => packet[key]);
-          return {
-            known: values.some((value) => value !== null)
-              ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0)
-              : null,
-            complete: values.every((value) => value !== null),
-          };
-        };
-        const effort = selected.map(
-          (packet) => packet.observations.operatorEffortMs as number | null,
-        );
+        const tried = (key: "firstTryPlanning" | "firstTryDelivery") => ({
+          passed: selected.filter((packet) => packet[key] === true).length,
+          observed: selected.filter((packet) => packet[key] !== null).length,
+        });
         return [
           {
             scope,
@@ -1334,37 +1077,36 @@ export function summarizeScorecard(
             unfinished: selected.filter(
               (packet) => packet.outcome === "unfinished",
             ).length,
-            acceptedPerWindowHour: accepted / ((end - start) / 3_600_000),
-            windowElapsedMs: end - start,
-            summedPacketWallMs: known("wallMs"),
-            summedPacketOperatorWaitMs: known("operatorWaitMs"),
-            operatorEffortMs: {
-              known: effort.some((value) => value !== null)
-                ? effort.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+            runs:
+              route === "factory"
+                ? {
+                    available: selected.reduce(
+                      (sum, packet) => sum + (packet.runs?.available ?? 0),
+                      0,
+                    ),
+                    total: selected.reduce(
+                      (sum, packet) => sum + (packet.runs?.total ?? 0),
+                      0,
+                    ),
+                  }
                 : null,
-              complete: effort.every((value) => value !== null),
-            },
-            firstTryPlanning: {
-              passed: selected.filter(
-                (packet) => packet.firstTryPlanning === true,
-              ).length,
-              observed: selected.filter(
-                (packet) => packet.firstTryPlanning !== null,
-              ).length,
-            },
-            firstTryDelivery: {
-              passed: selected.filter(
-                (packet) => packet.firstTryDelivery === true,
-              ).length,
-              observed: selected.filter(
-                (packet) => packet.firstTryDelivery !== null,
-              ).length,
-            },
+            acceptedPerWindowHour: accepted / hours,
+            windowElapsedMs: end - start,
+            summedPacketWallMs: known(selected.map((packet) => packet.wallMs)),
+            summedHoldWaitMs: known(
+              selected.map((packet) => packet.holdWaitMs),
+            ),
+            operatorEffortMs: known(
+              selected.map((packet) => packet.observations.operatorEffortMs),
+            ),
+            repairs: known(selected.map((packet) => packet.repairs)),
+            firstTryPlanning: tried("firstTryPlanning"),
+            firstTryDelivery: tried("firstTryDelivery"),
             abandonedAttemptTokens: sumTokens(
               selected.flatMap((packet) => [
                 ...packet.factory
-                  .filter((attempt) => attempt.outcome === "failed")
-                  .map((attempt) => attempt.tokens),
+                  .filter((report) => report.outcome === "failed")
+                  .map((report) => report.tokens),
                 ...packet.direct
                   .filter((session) =>
                     ["failed", "cancelled"].includes(session.outcome),
@@ -1373,32 +1115,19 @@ export function summarizeScorecard(
               ]),
             ),
             tokens,
-            cacheEffectiveness: summarizeInputCache(
+            costUsd: known(selected.map((packet) => packet.costUsd.known)),
+            cacheEffectiveness: sumCache(
               selected.map((packet) => packet.cacheEffectiveness),
             ),
-            cacheByRole: Object.fromEntries(
-              [
-                ...new Set(
-                  selected.flatMap((packet) => Object.keys(packet.cacheByRole)),
-                ),
-              ].map((role) => [
-                role,
-                summarizeInputCache(
-                  selected.flatMap((packet) =>
-                    packet.cacheByRole[role] ? [packet.cacheByRole[role]!] : [],
-                  ),
-                ),
-              ]),
-            ),
             tokensPerAcceptedPacket: Object.fromEntries(
-              tokenCategories.map((key) => [
-                key,
+              CATEGORIES.map((category) => [
+                category,
                 {
                   known:
-                    accepted && tokens[key].known !== null
-                      ? tokens[key].known! / accepted
+                    accepted && tokens[category].known !== null
+                      ? tokens[category].known! / accepted
                       : null,
-                  availability: tokens[key].availability,
+                  availability: tokens[category].availability,
                 },
               ]),
             ),
@@ -1406,10 +1135,21 @@ export function summarizeScorecard(
         ];
       }),
   );
+
+  const delta = (left: number | null, right: number | null): Delta | null =>
+    left === null || right === null
+      ? null
+      : {
+          factory: left,
+          direct: right,
+          absolute: left - right,
+          percent:
+            right === 0
+              ? null
+              : Math.round(((left - right) / right) * 10_000) / 100,
+        };
   const pairs = [
-    ...new Set(
-      packets.flatMap((packet) => (packet.pairId ? [packet.pairId] : [])),
-    ),
+    ...new Set(packets.flatMap((packet) => packet.pairId ?? [])),
   ].map((id) => {
     const selected = packets.filter((packet) => packet.pairId === id);
     const factory = selected.find((packet) => packet.route === "factory");
@@ -1419,12 +1159,12 @@ export function summarizeScorecard(
       !selection.comparison?.planReference ||
       !selection.comparison.practicalImprovementCriterion
     )
-      reasons.push("No precommitted comparison plan and practical criterion");
+      reasons.push("no precommitted comparison plan and practical criterion");
     if (selected.length !== 2 || !factory || !direct)
-      reasons.push("Pair requires one packet from each route");
+      reasons.push("a pair needs one packet from each route");
     if (factory && direct) {
       if ([factory, direct].some((packet) => packet.outcome !== "accepted"))
-        reasons.push("Both routes must pass substantive acceptance");
+        reasons.push("both routes must pass substantive acceptance");
       if (
         factory.task !== direct.task ||
         factory.scope !== direct.scope ||
@@ -1433,19 +1173,12 @@ export function summarizeScorecard(
         factory.bindings.environmentReference !==
           direct.bindings.environmentReference
       )
+        reasons.push("task, source, base or environment assessment differs");
+      if (factory.runs && factory.runs.available < factory.runs.total)
         reasons.push(
-          "Task, source, baseline or environment assessment differs",
+          `Factory's run log has ${factory.runs.available} of ${factory.runs.total} runs`,
         );
     }
-    const delta = (left: number | null, right: number | null) =>
-      left === null || right === null
-        ? null
-        : {
-            factory: left,
-            direct: right,
-            absolute: left - right,
-            percent: right === 0 ? null : ((left - right) / right) * 100,
-          };
     return {
       id,
       comparable: reasons.length === 0,
@@ -1458,92 +1191,132 @@ export function summarizeScorecard(
                 factory.timeToAcceptedMs,
                 direct.timeToAcceptedMs,
               ),
+              capturedWallMs: delta(
+                factory.capturedWallMs,
+                direct.capturedWallMs,
+              ),
               operatorEffortMs: delta(
-                factory.observations.operatorEffortMs as number | null,
-                direct.observations.operatorEffortMs as number | null,
+                factory.observations.operatorEffortMs,
+                direct.observations.operatorEffortMs,
+              ),
+              implementationAttempts: delta(
+                factory.implementationAttempts,
+                direct.implementationAttempts,
               ),
               tokens: Object.fromEntries(
-                tokenCategories.map((key) => [
-                  key,
-                  factory.tokens[key].availability === "available" &&
-                  direct.tokens[key].availability === "available"
-                    ? delta(factory.tokens[key].known, direct.tokens[key].known)
+                CATEGORIES.map((category) => [
+                  category,
+                  factory.tokens[category].availability === "available" &&
+                  direct.tokens[category].availability === "available"
+                    ? delta(
+                        factory.tokens[category].known,
+                        direct.tokens[category].known,
+                      )
                     : null,
                 ]),
               ),
             },
     };
   });
-  return {
-    schemaVersion: 1,
-    repository,
-    selectionDigest: digest(JSON.stringify(selection)),
-    window: selection.window,
-    comparison: selection.comparison ?? null,
-    packets,
-    batches,
-    pairs,
-    limitations: [
-      "Selected observations only; the selection owner must include all failed/cancelled attempts and setup, authoring, review and recovery overhead.",
-      "Total wall/time-to-acceptance requires externally observed whole-workflow bounds. Captured receipt timing alone omits uncaptured human setup/authoring and cannot prove total acceleration.",
-      "Operator waits are elapsed waits, not attention. External effort, redirection and correction observations are not inferred from silence.",
-      "Cached input and reasoning output are subset counters; categories are separate and never summed into token cost.",
-      "Cache hit rate weights paired input/cache counters from the same invocation snapshot; partial coverage describes the contributing subset, not all input. It does not prove prefix attribution, billed cost or caller/coordinator usage.",
-      "Batch packet wall/wait sums describe packet effort envelopes, not elapsed time; parallel packet intervals overlap. Window elapsed is reported separately.",
-      "Codex cached-input, cache-write and reasoning zero counters can be synthesized upstream; normalized zeros stay unknown. Positive native counts are reported measurements with unknown upstream category and billing coverage. Input-minus-cache is a residual within reported input, not proof of actual uncached work.",
-      "Source/config identities and acceptance receipts are retained for assessment; their presence alone does not prove equivalent quality or environments.",
-      "No acceleration verdict is inferred from a small sample or incomplete dimensions; apply the predeclared criterion to independently assessed evidence.",
-    ],
+
+  const runs = {
+    available: packets.reduce((sum, p) => sum + (p.runs?.available ?? 0), 0),
+    total: packets.reduce((sum, p) => sum + (p.runs?.total ?? 0), 0),
   };
+  return redactDeep(
+    {
+      schemaVersion: 1 as const,
+      selectionDigest: digest(JSON.stringify(selection)),
+      window: selection.window,
+      comparison: selection.comparison ?? null,
+      /** Factory runs the run log still has, of all the selected Objectives' runs. */
+      runs,
+      packets,
+      batches,
+      pairs,
+      limitations: [
+        "Selected observations only: the selection must include every failed or cancelled attempt and the setup, authoring, review and recovery work around it.",
+        "Total time and time to acceptance need externally observed workflow bounds; captured timing alone omits uncaptured human work.",
+        "Hold waits are elapsed time, not operator attention; effort, redirections and corrections come only from external observations.",
+        "Cached input is part of input and reasoning part of output; categories are never added into a cost.",
+        "Cache hit rates weight cached over input of the calls that report both; partial coverage describes those calls only, not billed cost.",
+        "Summed packet times overlap when packets ran in parallel; the window's elapsed time is reported apart.",
+        "Codex zero cached or reasoning counts can be filled in upstream, so a direct session's zero stays unknown.",
+        "Run-log retention rotates old runs away: an Objective with fewer runs available than it had reports partial counts and no first-try verdict, and its pair is not comparable.",
+        "No verdict from a small sample or incomplete dimensions: apply the predeclared criterion to independently assessed evidence.",
+      ],
+    },
+    read.secrets,
+  );
 }
 
-export function renderScorecard(
-  report: ReturnType<typeof summarizeScorecard>,
-): string {
+export type Scorecard = ReturnType<typeof scorecard>;
+
+// --- text -------------------------------------------------------------------
+
+const percent = (rate: number | null) =>
+  rate === null ? "unknown" : `${(rate * 100).toFixed(1)}%`;
+const counter = (c: { known: number | null }) =>
+  c.known === null ? "unknown" : c.known.toLocaleString("en-US");
+
+function cacheLine(label: string, cache: CacheEffectiveness): string {
+  return `  ${label}: ${percent(cache.hitRate)} cached of input (${counter({ known: cache.cached })}/${counter({ known: cache.input })}; ${cache.pairedCalls}/${cache.eligibleCalls} calls, ${cache.availability})`;
+}
+
+const runsText = (runs: { available: number; total: number }) =>
+  `${runs.available} of ${runs.total} runs available${runs.available < runs.total ? ` (${runs.total - runs.available} rotated away by run-log retention; counts are partial)` : ""}`;
+
+/** The scorecard for people; `--json` has every binding, role, phase and pair delta. */
+export function scorecardText(report: Scorecard): string {
   const lines = [
-    `Scorecard: ${report.window.startedAt} to ${report.window.endedAt}`,
+    `Scorecard ${displayTime(report.window.startedAt)} to ${displayTime(report.window.endedAt)}`,
   ];
-  const cacheLine = (
-    label: string,
-    cache: ReturnType<typeof summarizeInputCache>,
-  ) => {
-    const native = cache.nativeResponseCache;
-    const percentage = (value: number | null) =>
-      value === null ? "unknown" : `${(value * 100).toFixed(1)}%`;
-    return (
-      `  ${label}: ${percentage(cache.weightedHitRate)} reported invocation cached/input (${cache.cachedInputTokens ?? "unknown"}/${cache.inputTokens ?? "unknown"}); reported input minus cached ${cache.reportedInputMinusCachedTokens ?? "unknown"} (outer receipts ${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""}; upstream detail/billing unknown)\n` +
-      `    native response counters: ${native.availability}; ${native.contributingResponses}/${native.observedResponses} cache-paired responses, ${percentage(native.weightedHitRate)} paired cached/input (${native.cachedInputTokens ?? "unknown"}/${native.inputTokens ?? "unknown"}); whole observed rate ${percentage(native.wholeObservedHitRate)}, known-cache lower bound ${percentage(native.knownCachedInputLowerBoundShare)}`
-    );
-  };
+  if (report.runs.total) lines.push(`Factory: ${runsText(report.runs)}`);
   for (const batch of report.batches) {
     lines.push(
-      `\n${batch.scope} / ${batch.route}: ${batch.accepted} accepted, ${batch.failed} failed, ${batch.unfinished} unfinished (${batch.packets} packets)`,
+      "",
+      `${batch.scope} / ${batch.route}: ${batch.accepted} accepted, ${batch.failed} failed, ${batch.unfinished} unfinished (${batch.packets} packets)${batch.runs ? ` · ${runsText(batch.runs)}` : ""}`,
     );
-    for (const key of [
-      "inputTokens",
-      "cachedInputTokens",
-      "outputTokens",
-      "reasoningOutputTokens",
-    ] as const) {
-      const counter = batch.tokens[key];
+    for (const category of CATEGORIES)
       lines.push(
-        `  ${key}: ${counter.known ?? "unknown"} (${counter.availability})`,
+        `  ${category} tokens: ${counter(batch.tokens[category])} (${batch.tokens[category].availability})`,
       );
-    }
-    lines.push(cacheLine("Weighted cache counters", batch.cacheEffectiveness));
-    for (const [role, cache] of Object.entries(batch.cacheByRole))
-      lines.push(cacheLine(role, cache));
+    if (batch.route === "factory")
+      lines.push(
+        `  cost: ${batch.costUsd.known === null ? "unknown" : `$${batch.costUsd.known.toFixed(2)}${batch.costUsd.complete ? "" : " (partial)"}`} · repairs: ${counter(batch.repairs)} · first-try planning ${batch.firstTryPlanning.passed}/${batch.firstTryPlanning.observed}, delivery ${batch.firstTryDelivery.passed}/${batch.firstTryDelivery.observed}`,
+      );
+    lines.push(cacheLine("cache", batch.cacheEffectiveness));
   }
-  for (const packet of report.packets)
+  lines.push("");
+  for (const packet of report.packets) {
     lines.push(
-      `\n${packet.id}: ${packet.outcome}; time to acceptance ${packet.timeToAcceptedMs === null ? "unavailable" : formatDuration(packet.timeToAcceptedMs)}; operator effort ${packet.observations.operatorEffortMs === null ? "unavailable" : formatDuration(packet.observations.operatorEffortMs as number)}`,
+      `${packet.id} (${packet.route}): ${packet.outcome}; time to acceptance ${packet.timeToAcceptedMs === null ? "unavailable" : duration(packet.timeToAcceptedMs)}; captured ${packet.capturedWallMs === null ? "unavailable" : duration(packet.capturedWallMs)}; operator effort ${packet.observations.operatorEffortMs === null ? "unavailable" : duration(packet.observations.operatorEffortMs)}`,
     );
-  for (const pair of report.pairs)
+    for (const report of packet.factory)
+      lines.push(
+        `  #${report.objective}: ${report.outcome} · ${runsText(report.runs)} · ${report.modelCalls} model calls · ${report.repairs} repairs · ${report.holds} holds · Factory ${report.bindings.factoryVersions.join(", ") || "unknown"} · ${report.bindings.promptDigests.length} distinct prompts${report.nativeUsage.descendants ? ` · child threads ${report.nativeUsage.descendants.threads} (${counter({ known: report.nativeUsage.descendants.total })} tokens)` : ""}`,
+      );
+  }
+  for (const pair of report.pairs) {
     lines.push(
-      `\nPair ${pair.id}: ${pair.comparable ? "comparable; metric deltas in JSON" : pair.reasons.join("; ")}`,
+      "",
+      `Pair ${pair.id}: ${pair.comparable ? "comparable" : `not comparable: ${pair.reasons.join("; ")}`}`,
     );
+    if (!pair.deltas) continue;
+    const show = (label: string, d: Delta | null, ms = false) =>
+      lines.push(
+        `  ${label}: ${d === null ? "unavailable" : `Factory ${ms ? duration(d.factory) : counter({ known: d.factory })} vs direct ${ms ? duration(d.direct) : counter({ known: d.direct })} (${d.percent === null ? "n/a" : `${d.percent > 0 ? "+" : ""}${d.percent}%`})`}`,
+      );
+    show("time to acceptance", pair.deltas.timeToAcceptedMs, true);
+    show("captured wall time", pair.deltas.capturedWallMs, true);
+    show("operator effort", pair.deltas.operatorEffortMs, true);
+    show("implementation attempts", pair.deltas.implementationAttempts);
+    for (const category of CATEGORIES)
+      show(`${category} tokens`, pair.deltas.tokens[category] ?? null);
+  }
   lines.push(
-    "\nSelection and external observations require independent assessment. Known token subtotals include selected failed work; unavailable accounting stays unknown. Use --json for bindings, role/stage accounting and per-metric pair deltas.",
+    "",
+    "The selection and its external observations need independent assessment; unknown counts stay unknown. --json has the bindings, roles, phases and per-metric pair deltas.",
   );
   return `${lines.join("\n")}\n`;
 }

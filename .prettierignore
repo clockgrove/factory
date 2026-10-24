@@ -1,6 +1,5 @@
 package-lock.json
 THIRD_PARTY_NOTICES.md
-test/fixtures/pnpm-12-lockfile.yaml
 # Objective templates and scratch-repository files are test data, kept byte for byte.
 integration/objectives/
 integration/fixtures/

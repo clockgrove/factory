@@ -6,9 +6,9 @@
     "rootDir": "src",
     "outDir": "dist",
     "strict": true,
-    "declaration": true,
     "skipLibCheck": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }

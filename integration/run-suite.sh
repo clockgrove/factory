@@ -82,7 +82,7 @@ if [ -n "$DRY" ]; then
   echo; budget
   rm -rf "$RUN_DIR"; exit 0
 fi
-[ -f "$BUILD/core/dist/cli.js" ] || { echo "no CLI at $BUILD/core/dist/cli.js (npm run build:core)" >&2; exit 2; }
+[ -f "$BUILD/dist/cli.js" ] || { echo "no CLI at $BUILD/dist/cli.js (npm run build)" >&2; exit 2; }
 
 # Every remote call shares the run's deadline, including commands in bash
 # predicates. Leave time for the final report even when an API stops replying.

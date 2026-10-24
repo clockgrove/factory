@@ -14,11 +14,11 @@ Factory turns a GitHub issue (an Objective) into a reviewed plan of Work Items, 
 You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), and the GitHub CLI logged in. See the [README](../README.md#requirements) for the full list and installation.
 
 1. **A clone for Factory.** Clone the target repository to a directory only Factory uses. Its origin must name the repository: Factory checks it before every fetch and push.
-2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, and a number field `Factory order`. Factory never creates them.
+2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`. Factory never creates them.
 
    ```sh
    gh project field-create NUMBER --owner OWNER --name Factory --data-type SINGLE_SELECT \
-     --single-select-options "Queued,Planning,Building,Needs you,Done,Failed,Cancelled"
+     --single-select-options "Queued,Planning,Building,Needs you,Done,Cancelled"
    gh project field-create NUMBER --owner OWNER --name "Factory order" --data-type NUMBER
    ```
 
@@ -55,7 +55,7 @@ A provider pairs a **planner** (it plans and reviews) with a **worker** (it writ
 
 | Kind      | Planner | Worker | Login                                                                                                        |
 | --------- | ------- | ------ | ------------------------------------------------------------------------------------------------------------ |
-| `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY`                                                         |
+| `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY` for a foreground `factory serve`                        |
 | `claude`  | yes     | yes    | `claude auth login`, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`; needs the optional Claude Agent SDK |
 | `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK (see below)                  |
 
@@ -65,13 +65,13 @@ factory setup --repo OWNER/NAME --provider claude --planner claude --worker clau
 factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer-effort high --default
 ```
 
-- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys from the environment or as `--credential-file NAME=FILE`.
+- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys only as `--credential-file NAME=FILE`.
 - **Model choices.** `models.planner` and `models.reviewer` each name a model and an effort. `models.reviewEffort` sets one review phase's effort: `graph-review`, `result-review` or `objective-review`. The other phases run on `models.planner`.
 - **What runs is what's configured.** A Copilot planner or worker served another model holds with `switch NAME`. So does a Claude worker whose answer comes from another model than its configured full id (an alias such as `opus` isn't compared) or that starts at another effort. A Claude worker that starts in another permission mode or directory holds before any tool runs.
 - **One provider per Objective.** An Objective runs on the provider it was admitted with. It never falls back to another one, and a missing login holds with the fix.
 - **Usage limits.** When a provider hits its usage limit, the hold offers `wait` and `switch NAME`, which moves the Objective to another configured provider.
 - **Choosing at start:** `factory run N --provider NAME` picks the provider for one Objective; `factory serve --provider NAME` picks it for all new work.
-- **Configuration changes.** A change to the configuration holds a running Objective once, with `adopt` (continue on the new configuration), `switch NAME` and `cancel`. Host settings (limits, sandbox caps, the queue) change without asking.
+- **Configuration changes.** A change to the configuration holds a running Objective once, with `adopt` (continue on the new configuration), `switch NAME` and `cancel`. Once an Objective has a plan, a change to `delivery.kind` can't be adopted: cancel the Objective and queue it again, or set it back, restart and answer `retry`. Host settings (limits, sandbox caps, the queue) change without asking.
 - **Managed workers.** The OpenAI Agents and Claude Managed Agents workers are in the code but **parked**: they aren't live-qualified, so don't configure them yet.
 
 ## Write an Objective
@@ -216,7 +216,7 @@ factory propose --file /abs/draft.json --approve SHA256 --enqueue --repo OWNER/N
 
 ### Several Objectives at once
 
-Up to `queue.maxActiveObjectives` Objectives (default 3) run at once, in queue order. An Objective builds only when no earlier unfinished Objective owns an overlapping path; planning never waits.
+Up to `queue.maxActiveObjectives` Objectives (default 3) run at once, in queue order. An Objective builds only when no unfinished Objective that came to own an overlapping path first still owns it; planning never waits.
 
 Host-wide limits apply across all Objectives:
 
@@ -232,9 +232,12 @@ Host-wide limits apply across all Objectives:
 ```sh
 factory status [N] [--json] [--all]      # the service, the queue, each Objective's phase, Work Items, holds and next command
 factory log N [--tail 100] [--follow]    # the run log
-factory watch [N]                        # live: each Work Item's step and its worker's last actions
+factory watch [N] [--once] [--json]      # live: each Work Item's step, PR, worker's last actions and running calls
 factory queue list                       # the Project's queued, candidate and inert cards, with why
+factory diagnostics N [--summary | --logs ITEM | --captures | --analyze | --gantt]
 ```
+
+`factory log` shows the run log's events as they are. `factory diagnostics` reads the same log and explains it: a timeline of steps, waits, repairs, holds and model calls; `--summary` gives the totals, the critical path and the slowest steps; `--logs ITEM` one Work Item in detail; `--captures` the captured model calls; `--analyze` time, tokens and outcomes per phase or another field; `--gantt` each Work Item's steps over time. Use it to find out why a run was slow, costly or kept repairing.
 
 On GitHub, each Objective has a live status comment, each Work Item has its issue and pull request, and the final report closes the issue. Decide from `--json` fields and exit codes, never from message text.
 
@@ -266,6 +269,8 @@ Common answers:
 - `answer` with text: your decision, sent back to the planner or worker.
 - `more`: grant more repairs or rounds.
 - `replan`, and `revalidate` (check a refused result again, unchanged).
+- `approve`: plan an issue whose author has no write access, or run the plan as it is when plan review asks you a question.
+- `replace` with a correction, `continue` and `refuse` (an amendment; see [Amend a plan](#amend-a-plan)).
 - `accept N` and `refuse N` with a reason: decide one review criterion on this exact result.
 - `wait` and `switch NAME` (provider limits).
 - `adopt` (a configuration change).
@@ -288,7 +293,15 @@ How much an Objective may correct itself before asking. These are frozen with it
 | `perPath`                       | 3       | repairs of one step (one Work Item's work, say)               |
 | `resultRereviews`               | 1       | `revalidate` answers                                          |
 
-Running out holds with `more`, `replan` and `cancel`.
+Running out holds with `more`, `replan` and `cancel`. An amendment past `planningRevisions` holds with `more` (allow as many again and plan it), `refuse` (reject it) and `cancel`.
+
+## Amend a plan
+
+An accepted plan can grow while it runs. An amendment revises the plan for work it lacks, passes the plan checks and a new independent plan review, and, once accepted, is the plan from then on, posted as the plan comment. Each one uses a planning revision (see [Allowances](#allowances)). One amendment is planned at a time, and no other step starts while it is pending.
+
+- **You propose one** with `factory propose-amendment N --file /absolute/amendment.json`. The file is a JSON object with `scope` (`"in-scope"`), `reason`, and lists of strings: `evidence`, `ownership` (the paths the work needs), `acceptance` (observable outcomes) and `dependencies` (known Work Item ids; may be empty). The service checks it and refuses with `amendment_refused`, naming each problem.
+- **A worker proposes one** when its work turns out to need more: it writes `.factory-discovery.json` (the same fields) in its worktree, and an in-scope one is proposed at once while the item waits for the outcome. To go on without it, run `factory decline-discovery N --item ITEM --reason TEXT` while it is pending: the item carries on with its result as collected, and the revision stays spent. A backlog discovery is only logged.
+- **A rejected amendment** holds with `replace <correction>` (plan it again with your correction, reviewed again, using another revision), `continue` (run the plan without it) and `cancel`.
 
 ## Stopping and recovery
 
@@ -302,34 +315,48 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
 - **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.
-- **A new machine.** `factory reset N` needs no local state: it rebuilds the Objective from GitHub alone. A delivered one comes back done. One still building checks its plan again and sends it through plan review before any work runs; merged Work Items stay merged and open PRs are reused. Repair counts start again, and open questions are asked again ([State](reference/state.md#state)).
+- **A new machine.** `factory reset N` needs no local state: it rebuilds the Objective from GitHub alone. A delivered one comes back done. One still building checks its plan again and sends it through plan review before any work runs; merged Work Items stay merged and open PRs are reused. Repair counts and the Objective deadline start again, and open questions are asked again ([State](reference/state.md#state)).
 - **Never edit Factory's files.** Don't edit or delete files under the state directory: the service is their only writer, and a hand edit breaks its crash recovery.
 
 ## Sandbox and security
 
 - **The sandbox.** Every command a worker causes (validation, setup and probes) runs in bubblewrap: a read-only host, a private HOME and /tmp, no host credentials or sockets, and no network. The exception is the dependency install, which reaches the network when `sandbox.network` is `package-install`. A Codex worker's own shell runs in Codex's sandbox under the same limits, with network `off` or `host`.
+- **Opting out.** `sandbox.required: false`, written by hand in the configuration, is your explicit choice to run without the sandbox on a host without bubblewrap: validation commands (a Work Item's validation, final validation, QA and a Claude or Copilot worker's Validate) then run unsandboxed with your file access, and setup warns. The same setting lets Factory run as root, except a Claude worker's own shell, which never runs without the sandbox or as root. Leave it unset unless the host can't have bubblewrap.
 - **Credentials stay with the service.** Workers never see them. Only the variables in `policy.allowedSecretNames` reach a worker, and their values are redacted from everything Factory writes.
 - **Checked before every push.** Every blob a result adds is searched for those secret values. A match pushes nothing and holds.
 - **GitHub input.** Factory reads an issue as GitHub renders it, never its raw Markdown. A `/factory` comment counts only from someone with write access. An issue author without write access must be approved once.
 - **Branch protection.** Factory merges only through the API, under your branch rules, with merge commits. Setup recommends requiring branches to be up to date.
 
+## Media and delivery
+
+- **Delivery kind.** `delivery.kind` in the configuration picks how Work Items reach the default branch: `regular` (the default) delivers each as its own PR, merged with a merge commit; `native-stack` delivers each linear chain of the plan as one GitHub native stack, merged at once with one merge commit. See [Delivery](reference/delivery.md#delivery).
+- **Media Work Items.** When an Objective asks for files to be made (images, audio, other assets), the planner can plan a media Work Item. Its worker stages candidate sets, each a complete set of the files the item must deliver. Which set is delivered is decided as [Answer questions](#answer-questions) says. The chosen set is committed at its destinations on the item's PR.
+- **Source assets.** A media item can read input files: a file tracked in the repository; a GitHub attachment, whose URL is in the Objective (one uploaded to the issue, or under the repository's `assets/`); or a local file, by its absolute path in the Objective, from a directory listed in `media.localAssetRoots` (written by hand; empty by default, so local files are off). The worker gets read-only copies, and reviews see their digests.
+- **Git LFS.** Selected media is committed through Git LFS, so the target's `.gitattributes` must route every destination through a `filter=lfs` rule (for example `assets/** filter=lfs diff=lfs merge=lfs -text`). See [Delivery](reference/delivery.md#delivery) for what happens when one doesn't.
+- **Review evidence.** To give review screenshots or text output from validation commands, write `reviewArtifacts` selectors by hand ([Review artifacts](reference/capabilities.md#review-artifacts)).
+
 ## Repository knowledge
 
-- **Playbook.** A curated playbook (`.factory/playbook.md` in the target, read at the base) goes into planning and work prompts.
+- **Playbook.** A curated playbook (`.factory/playbook.md` in the target, read at the base) goes into planning and plan review.
 - **Repository memory.** Factory records what each finished Objective learned, and shows the relevant records, as advisory data, to planning, workers and reviews of every Objective. The planner may also look up memory, files and tracked paths before it plans. `planning.context.memory: false` turns memory off for the installation; the lookups stay.
-- **Dream.** `factory dream --preview` proposes a playbook from settled Objectives. `--file PATH --approve SHA256` or `--reject SHA256` decides it, and `--show` shows the playbook in force.
+- **Dream.** `factory dream` proposes a playbook from settled Objectives; `--preview` only shows the input it would read. `--file PATH --approve SHA256` or `--reject SHA256` decides a proposal, and `--show` shows the playbook in force.
 
 ## One installation per repository
 
 One installation serves a repository at a time, on one machine. Factory records which one in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
 
-To move to another machine, stop the first installation (a clean stop frees the repository), then start the second. If the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
+To move to another machine:
 
-```sh
-factory serve --repo OWNER/NAME --take-over
-```
+1. Stop the first installation. A clean stop frees the repository.
+2. Start the second. Only if the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
 
-Use it only for an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
+   ```sh
+   factory serve --repo OWNER/NAME --take-over
+   ```
+
+3. On the new machine, run `factory reset N` for each Objective that was in flight (see A new machine in [Stopping and recovery](#stopping-and-recovery)). The new installation has no state for them, so until then it doesn't run them or answer their questions; `factory queue list` lists them as inert with that command.
+
+Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
 
 ## Upgrade
 

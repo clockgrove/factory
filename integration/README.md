@@ -2,18 +2,18 @@
 
 Factory has two kinds of tests:
 
-- **CI tests** (`npm run test:core`, `core/test/`) are quick. They run the real `factory serve` on real Git repositories, processes and files, with no mocks and no GitHub.
+- **CI tests** (`npm test`, `test/`) are quick. They run the real `factory serve` on real Git repositories, processes and files, with no mocks and no GitHub.
 - **Integration tests** (this directory) run real Objectives with real providers against scratch GitHub repositories, on demand, never in CI. They cover what needs real GitHub and real models to prove: delivery end to end, the queue, holds, sampled crash points, one installation per repository, a network cut and a killed model.
 
 ## Run
 
 ```sh
-npm run build:core                                   # the suite runs core/dist/cli.js
+npm run build                                   # the suite runs dist/cli.js
 npm run integration -- --dry-run                     # every case, what it checks, its expected minutes and the budget
 npm run integration                                  # the main suite
 npm run integration -- --suite edge                  # the edge suite: PRD requirements no main case covers
 npm run integration -- --only claude,queue           # some cases
-npm run integration -- --build ../other-checkout     # test another build (its core/dist/cli.js)
+npm run integration -- --build ../other-checkout     # test another build (its dist/cli.js)
 ```
 
 `--dry-run` is the one list of cases. Each case runs its own Objectives; every case of a suite starts at once and they run concurrently.

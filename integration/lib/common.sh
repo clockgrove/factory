@@ -59,20 +59,20 @@ PY
 cfg_get() { python3 -c 'import json,sys;c=json.load(open(sys.argv[1]));v=eval(sys.argv[2],{"c":c});print(v if isinstance(v,str) else json.dumps(v))' "$CUR_CFG" "$1"; }
 
 # ---------- CLI ----------
-cli() { (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node core/dist/cli.js "$@" --repo "$REPO"); }
+cli() { (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node dist/cli.js "$@" --repo "$REPO"); }
 cli_t() {
   local s=$1 remaining=$(( STOP_AT - $(now) )); shift
   [ "$remaining" -gt 0 ] || return 124
   [ "$s" -le "$remaining" ] || s=$remaining
-  (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" timeout --kill-after=2 "$s" node core/dist/cli.js "$@" --repo "$REPO")
+  (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" timeout --kill-after=2 "$s" node dist/cli.js "$@" --repo "$REPO")
 }
 cli_help() {
   local f="$RUN_DIR/cli-help"
-  [ -s "$f" ] || (cd "$BUILD" && { node core/dist/cli.js help 2>&1; node core/dist/cli.js 2>&1; }) >"$f"
+  [ -s "$f" ] || (cd "$BUILD" && { node dist/cli.js help 2>&1; node dist/cli.js 2>&1; }) >"$f"
   cat "$f"
 }
 cli_has() { cli_help | grep -qE "^\s+$1( |$)"; }
-build_has_token() { grep -rqsF -- "$1" "$BUILD/core/dist"; }
+build_has_token() { grep -rqsF -- "$1" "$BUILD/dist"; }
 build_has_env() { build_has_token "$1"; }
 
 # ---------- build features ----------

@@ -30,7 +30,7 @@ serve_up() {
     [ -n "$hp" ] && echo "$hp" >"$d/hostpid"
   else
     (cd "$BUILD" && setsid env "${envs[@]}" bash -c \
-      'node core/dist/cli.js serve --repo "$1" $3 >"$2/out.log" 2>&1 & echo $! >"$2/pid"; wait $!; echo $? >"$2/exit"' \
+      'node dist/cli.js serve --repo "$1" $3 >"$2/out.log" 2>&1 & echo $! >"$2/pid"; wait $!; echo $? >"$2/exit"' \
       _ "$REPO" "$d" "$args" </dev/null >/dev/null 2>&1 &)
   fi
   local pf="$d/pid"; [[ $opts == *" netns "* ]] && pf="$d/hostpid"

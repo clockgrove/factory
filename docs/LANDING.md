@@ -71,7 +71,7 @@ gh stack merge --yes             # queue every layer; run again if layers drop o
 
 ## Before you push
 
-`scripts/land-prep.sh` gates a pull request's branch and pushes it only if every step passed. It refuses on `main`, with uncommitted changes, on a rebase conflict, on a branch with no commits of its own, and on a stacked branch (use `gh stack` there). It also refuses when it can't read the branch's pull request base, rather than guess `main`. It rebases onto `origin/main`, then runs what CI runs (build, Biome, lint, format, notices and `test:core`), and pushes with `--force-with-lease`. Pass `--no-push` to gate only.
+`scripts/land-prep.sh` gates a pull request's branch and pushes it only if every step passed. It refuses on `main`, with uncommitted changes, on a rebase conflict, on a branch with no commits of its own, and on a stacked branch (use `gh stack` there). It also refuses when it can't read the branch's pull request base, rather than guess `main`. It rebases onto `origin/main`, then runs what CI runs (build, Biome, lint, format, notices and `npm test`), and pushes with `--force-with-lease`. Pass `--no-push` to gate only.
 
 **Why:** chaining the steps by hand (`git rebase … | tail && git push`) hides a failed step's exit code. That once pushed a conflicted rebase and a format failure.
 
@@ -79,15 +79,15 @@ gh stack merge --yes             # queue every layer; run again if layers drop o
 
 A file that most changes must edit turns every pair of parallel changes into a conflict. Keep none:
 
-- **No status documents or changelogs in the repository.** Progress lives in issues: a gap the work still owes is an issue (during a rewrite, labelled `cutover-gap`), and a milestone gate is "no such issue open". Release notes record changes.
+- **No status documents or changelogs in the repository.** Progress lives in issues: a gap the work still owes is an issue, and a milestone gate is "no such issue open". Release notes record changes.
 - **One topic, one file.** The design is split by topic under `docs/reference/`, and a change edits only the topics it changes.
-- **One unit, one module.** A CLI command is `core/src/commands/<name>.ts` (its options, help, check and implementation), a phase's step is its own module under `core/src/work/`, and the service tests are split by area in `core/test/` with shared setup in `helpers.mjs`. Add a file rather than grow a shared one.
+- **One unit, one module.** A CLI command is `src/commands/<name>.ts` (its options, help, check and implementation), a phase's step is its own module under `src/work/`, and the service tests are split by area in `test/` with shared setup in `helpers.mjs`. Add a file rather than grow a shared one.
 - **Lists that every change adds to stay sorted,** such as the `RefusalCode` union. Two additions then land in different places instead of both appending at the end.
 
 Find hot files at each checkpoint, and split whichever one is at the top:
 
 ```sh
-git log --since="1 week ago" --name-only --format= -- core docs | sort | uniq -c | sort -rn | head
+git log --since="1 week ago" --name-only --format= -- src test docs | sort | uniq -c | sort -rn | head
 ```
 
 ## Large refactors
@@ -104,7 +104,7 @@ Splitting a hot file or moving code between modules is a refactor stack.
 ```sh
 git worktree add --detach /tmp/before COMMIT_BELOW
 git worktree add --detach /tmp/after LAYER_COMMIT
-node scripts/split-proof.mjs /tmp/before /tmp/after core/src/cli.ts core/src/commands/
+node scripts/split-proof.mjs /tmp/before /tmp/after src/cli.ts src/commands/
 ```
 
 `scripts/split-proof.mjs` compares the paths before and after:

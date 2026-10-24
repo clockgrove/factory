@@ -21,10 +21,10 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "factory": "./core/dist/cli.js"
+    "factory": "./dist/cli.js"
   },
   "files": [
-    "core/dist",
+    "dist",
     "skills",
     "assets",
     "docs/USER-GUIDE.md",
@@ -54,12 +54,10 @@
     "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
-    "test": "npm run test:core",
+    "test": "npm run build && node --test --test-timeout=120000 test/*.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check",
-    "build:core": "tsc -p core/tsconfig.json",
-    "prepack": "npm run build:core",
-    "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs",
+    "prepack": "npm run build",
     "integration": "integration/run-suite.sh"
   },
   "devDependencies": {
@@ -72,7 +70,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.129.0",
-    "@octokit/core": "^7.0.8",
     "@openai/codex-sdk": "0.160.0",
     "@secretlint/node": "13.0.5",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.5",
@@ -84,7 +81,6 @@
     "yaml": "2.9.0"
   },
   "bundleDependencies": [
-    "@octokit/core",
     "@openai/codex-sdk",
     "@secretlint/node",
     "@secretlint/secretlint-rule-preset-recommend",

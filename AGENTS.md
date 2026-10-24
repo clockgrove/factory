@@ -2,7 +2,7 @@
 
 These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout.
 
-[The requirements](docs/PRD.md) say what Factory must do and when it is done; [the design](docs/DESIGN.md) says how. Factory is being rebuilt against them. Until cutover, the old tree under `src/` is frozen: no fixes or features there; it is deleted at cutover. [The architecture](docs/ARCHITECTURE.md) and [the lifecycle](docs/LIFECYCLE.md) describe the old tree and are replaced at cutover.
+[The requirements](docs/PRD.md) say what Factory must do and when it is done; [the design](docs/DESIGN.md) says how.
 
 ## Stability rules
 
@@ -27,7 +27,7 @@ A change that needs a new kind of hold, lock, owner, archive, background loop or
 - CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
 - Finish the product outcome with meaningful affected tests, independent review and green CI. A milestone also needs its integration tests (see Testing). Stop when the behavior works and the required checks pass.
 - **Land through the merge queue, in stacks.** Enqueue with `gh pr merge --auto --squash N`, never merge directly. Changes that build on each other are one `gh stack`, landed with `gh stack merge --yes`. Push with `scripts/land-prep.sh`. Settings, commands and the reasons are in [Landing changes](docs/LANDING.md).
-- **No hot files.** No status documents or changelogs in the repository: a capability Factory still lacks is one GitHub issue labelled `cutover-gap`, and cutover waits until none is open. One topic, one file: the design is split under `docs/reference/`; a CLI command is `core/src/commands/<name>.ts`, a phase's step is its own module under `core/src/work/`, and the service tests are split by area in `core/test/`. Add a file rather than grow a shared one. How a module does its job belongs in its own header comment, not the spec.
+- **No hot files.** No status documents or changelogs in the repository: a capability Factory still lacks is one GitHub issue. One topic, one file: the design is split under `docs/reference/`; a CLI command is `src/commands/<name>.ts`, a phase's step is its own module under `src/work/`, and the service tests are split by area in `test/`. Add a file rather than grow a shared one. How a module does its job belongs in its own header comment, not the spec.
 - **Refactors are proven.** Generate a split with a script, and prove each layer a pure move with `scripts/split-proof.mjs` ([Large refactors](docs/LANDING.md#large-refactors)).
 - Issues and pull requests record scope, decisions and results. Follow the issue metadata rules below, existing Project status and applicable relationships. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or new label taxonomy.
 - Follow [the release procedure](docs/RELEASING.md) and the release issue’s actual exits. Do not invent additional release gates. GitHub release notes record changes.
@@ -63,7 +63,7 @@ No mocks, fake services, fake providers or scripted responses.
 
 - Tests use real Git repositories, processes and files, and the real `factory serve`.
 - **CI tests** are quick: no mocks and no GitHub, and they may spawn processes. The full CI run takes about 3 minutes; keep it there.
-- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered: a local one in `core/test/crash.test.mjs`; the integration tests sample the GitHub writes that could duplicate or orphan an effect.
+- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered: a local one in `test/crash.test.mjs`; the integration tests sample the GitHub writes that could duplicate or orphan an effect.
 - **Integration tests** ([integration/](integration/README.md)) are thorough and run on demand, never in CI, against scratch repositories with real providers. They kill the service at sampled crash points, cut the network and stop a model mid-turn. A suite runs all its cases at once and stops itself within 60 minutes. A milestone passes only if the main suite finishes with no duplicate effect and every hold had a working answer.
 - Don't add unit tests of private helpers or provider/profile matrices.
 

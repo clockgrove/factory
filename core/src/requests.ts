@@ -114,8 +114,6 @@ export type RefusalCode =
   | "reset_in_progress"
   /** The command writes what only the running service writes (the knowledge store): start `factory serve`. */
   | "service_not_running"
-  /** A service already serves this installation (it holds the lock), or this process serves one already (library.ts serveFactory). */
-  | "service_running"
   /** The answer names a question that is no longer open: it changed, or it was answered. */
   | "stale_question"
   /** The Objective's state can't be read: answer reset or cancel. */

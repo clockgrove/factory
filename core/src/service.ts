@@ -93,14 +93,11 @@ export interface ServeOptions {
    * requests only, and says so in its log and in `status`.
    */
   unconfigured?: string;
-  /** Stops the service like SIGTERM: a host serving in its own process (library.ts serveFactory). */
-  signal?: AbortSignal;
   /**
-   * The longest a stop waits for its drain (`factory serve`: the process
-   * exits right after, which ends what is still in flight). Absent, it
-   * waits until the drain ends (library.ts serveFactory).
+   * The longest a stop waits for its drain: the process exits right
+   * after, which ends what is still in flight.
    */
-  drainMs?: number;
+  drainMs: number;
 }
 
 /**
@@ -1046,8 +1043,6 @@ export async function serve(options: ServeOptions): Promise<number> {
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   process.on("unhandledRejection", stray);
-  if (options.signal?.aborted) stop();
-  options.signal?.addEventListener("abort", stop, { once: true });
   try {
     const housekeeping = (): void => {
       try {
@@ -1087,15 +1082,12 @@ export async function serve(options: ServeOptions): Promise<number> {
     ]).then(() => true);
     const { drainMs } = options;
     let timer: NodeJS.Timeout | undefined;
-    const ended =
-      drainMs === undefined
-        ? await drained
-        : await Promise.race([
-            drained,
-            new Promise<false>((resolve) => {
-              timer = setTimeout(() => resolve(false), drainMs);
-            }),
-          ]);
+    const ended = await Promise.race([
+      drained,
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), drainMs);
+      }),
+    ]);
     clearTimeout(timer);
     // Stopped runners never save again; what still runs ends with the
     // process, which exits right after.
@@ -1113,7 +1105,6 @@ export async function serve(options: ServeOptions): Promise<number> {
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
     process.off("unhandledRejection", stray);
-    options.signal?.removeEventListener("abort", stop);
   }
 }
 

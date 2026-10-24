@@ -1131,8 +1131,8 @@ const LIMITATIONS = [
   "Filters on role, provider, model, effort, outcome, tokenSource and hedge select model calls only; run, item and phase also select steps.",
 ];
 
-/** The analysis views over the chosen runs (library.ts analyzeInteractions). */
-export function analysisReport(options: AnalyzeOptions): AnalysisReport {
+/** The analysis views over the chosen runs. */
+function analysisReport(options: AnalyzeOptions): AnalysisReport {
   const analysis = new Analysis(options);
   readChosen(options, (event) => analysis.add(event));
   return analysis.report();
@@ -1220,7 +1220,7 @@ function groupText(group: CallGroup, indent: string): string[] {
 }
 
 /** The analysis for people. */
-export function analysisText(report: AnalysisReport): string {
+function analysisText(report: AnalysisReport): string {
   const lines = [
     `Diagnostics analysis #${report.issue} · ${report.runs.length} run${report.runs.length === 1 ? "" : "s"}${report.from ? ` · ${displayTime(report.from)} to ${displayTime(report.to!)} (${duration(report.wallMs)})` : ""}`,
   ];

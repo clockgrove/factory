@@ -20,7 +20,6 @@ import {
   text,
   whole,
 } from "../checked.js";
-import { hostKindProblems, isHostKind } from "../kinds.js";
 import type { ClaudeWorkerConfig } from "./claude-worker.js";
 import type { CodexEffort } from "./codex.js";
 import {
@@ -215,8 +214,7 @@ function providerConfig(
     value,
     path,
     {
-      planner: (entry: unknown, at: string, found: string[]) =>
-        isHostKind(entry) ? entry : oneOf(PLANNERS, "codex")(entry, at, found),
+      planner: oneOf(PLANNERS, "codex"),
       models: (entry: unknown) => entry,
       worker: (entry: unknown) => entry,
     },
@@ -238,14 +236,6 @@ function providerConfig(
     `${path}.worker`,
     problems,
   );
-  if (isHostKind(planner))
-    hostKindProblems(
-      planner,
-      "planner",
-      `${path}.planner`,
-      { models },
-      problems,
-    );
   if (!worker || problems.length !== before) return undefined;
   return {
     planner,
@@ -373,15 +363,6 @@ function workerConfig(
   problems: string[],
 ): WorkerConfig | undefined {
   const kind = isObject(value) ? value.kind : undefined;
-  // A registered kind's settings are its own (kinds.ts).
-  if (isObject(value) && isHostKind(kind)) {
-    const { kind: _, ...settings } = value;
-    const before = problems.length;
-    hostKindProblems(kind, "worker", path, { worker: settings }, problems);
-    return problems.length === before
-      ? ({ kind, ...settings } as unknown as WorkerConfig)
-      : undefined;
-  }
   if (!WORKERS.includes(kind as WorkerKind)) {
     problems.push(
       isObject(value)

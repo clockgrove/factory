@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -112,60 +111,6 @@ test("the packed tarball installs offline and runs the core's CLI", {
     assert.equal(loads.status, 0, loads.stderr);
     assert.ok(JSON.parse(loads.stdout).recommendation, loads.stderr);
 
-    // The library: a host program imports the installed package, registers
-    // a kind the configuration names, and reads the run log's analysis.
-    // Only a process that registered the kind serves it.
-    writeFileSync(
-      env.FACTORY_CONFIG,
-      JSON.stringify({
-        repository: "example/target",
-        checkout,
-        queue: { projectId: "PVT_x" },
-        providers: {
-          host: {
-            planner: "host:echo",
-            models: {
-              planner: { model: "echo-1", effort: "none" },
-              reviewer: { model: "echo-1", effort: "none" },
-            },
-            worker: { kind: "host:echo", greeting: "hi" },
-          },
-        },
-      }),
-    );
-    const host = join(prefix, "host.mjs");
-    copyFileSync(join(import.meta.dirname, "host-program.mjs"), host);
-    const ran = spawnSync(
-      process.execPath,
-      [host, join(installed, "core", "dist", "log.js"), "example/target"],
-      {
-        encoding: "utf8",
-        // The served runs reach no GitHub: every call fails at once.
-        env: {
-          ...env,
-          FACTORY_GITHUB_API: "http://127.0.0.1:9",
-          FACTORY_GITHUB_TOKEN: "unused",
-          FACTORY_TICK_MS: "50",
-        },
-        timeout: 60_000,
-      },
-    );
-    assert.equal(ran.status, 0, ran.stderr);
-    assert.deepEqual(JSON.parse(ran.stdout), {
-      answer: { echo: "hello" },
-      worked: "hi",
-      call: ["host:echo", "done"],
-      content: { request: "hello", response: "echoed" },
-      grouped: [[{ provider: "host:echo" }, 1]],
-      served: ["service_running", 0, 0],
-      ended: ["run-end", "log-health"],
-    });
-    const served = spawnSync(cli, ["serve", "--repo", "example/target"], {
-      encoding: "utf8",
-      env,
-    });
-    assert.equal(served.status, 78, served.stderr);
-    assert.match(served.stderr, /hasn't registered providers\.host: host:echo/);
     rmSync(env.FACTORY_CONFIG);
     const own = spawnSync(
       cli,

@@ -41,7 +41,7 @@ export function validRepository(repository: string): boolean {
 }
 
 /** The installation's directory, created by neither this nor a reader. */
-export function installationDir(repository: string): string {
+function installationDir(repository: string): string {
   if (!validRepository(repository))
     throw new Error(
       `${JSON.stringify(repository)} is not a repository: give OWNER/NAME`,

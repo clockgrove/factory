@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { COMMANDS } from "./commands/index.js";
 import { type Args, type FlagKind, usage } from "./commands/shared.js";
 import { Refusal } from "./host.js";
@@ -57,13 +55,8 @@ message, and exit 1. Wrong usage exits 2. Times show in the host's zone, or
 in FACTORY_DISPLAY_TIMEZONE.
 `;
 
-/**
- * Run one command line in this process, as the `factory` binary does,
- * and resolve with its exit code; a refusal throws Refusal. A host program
- * runs commands that build its registered kinds (dream, propose) this way
- * (library.ts).
- */
-export async function main(argv: string[]): Promise<number> {
+/** Run one command line and resolve with its exit code; a refusal throws Refusal. */
+async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
   const command = args.positional[0];
   if (!command || command === "help") {
@@ -156,29 +149,18 @@ function misplaced(name: string, command: string | undefined): string {
   return `Unknown option --${name} for factory ${command ?? "(no command)"}; see factory help`;
 }
 
-// The `factory` binary; imported by the library, it only exports main.
-const entry = (): boolean => {
-  try {
-    return (
-      realpathSync(process.argv[1] ?? "") === fileURLToPath(import.meta.url)
-    );
-  } catch {
-    return false;
-  }
-};
-if (entry())
-  main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
-    (error: unknown) => {
-      if (error instanceof Refusal) {
-        process.stderr.write(
-          `${JSON.stringify({ kind: "lifecycle-refusal", code: error.code })}\nfactory: ${error.message}\n`,
-        );
-        process.exit(error.code === "usage" ? 2 : 1);
-      }
+main(process.argv.slice(2)).then(
+  (code) => process.exit(code),
+  (error: unknown) => {
+    if (error instanceof Refusal) {
       process.stderr.write(
-        `factory: ${error instanceof Error ? error.stack : String(error)}\n`,
+        `${JSON.stringify({ kind: "lifecycle-refusal", code: error.code })}\nfactory: ${error.message}\n`,
       );
-      process.exit(1);
-    },
-  );
+      process.exit(error.code === "usage" ? 2 : 1);
+    }
+    process.stderr.write(
+      `factory: ${error instanceof Error ? error.stack : String(error)}\n`,
+    );
+    process.exit(1);
+  },
+);

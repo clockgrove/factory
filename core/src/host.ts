@@ -1,8 +1,7 @@
 /**
- * Serving an installation and following a run, shared by the CLI
- * (`factory serve`, `factory run`) and the library (library.ts
- * serveFactory, runFactory). The service is the only writer of Factory
- * state: following a run only writes a request and reads.
+ * Serving an installation and following a run (`factory serve`,
+ * `factory run`). The service is the only writer of Factory state:
+ * following a run only writes a request and reads.
  */
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -12,7 +11,6 @@ import { eventLine, redactDeep } from "./display.js";
 import { DEFAULT_LIMITS, type EngineLimits, hostLimits } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
-import { unregisteredKinds } from "./kinds.js";
 import { applyDream } from "./knowledge/dream.js";
 import { knowledgeObserver } from "./knowledge/index.js";
 import {
@@ -113,17 +111,16 @@ function envLimits(): EngineLimits {
 }
 
 /**
- * Serve the installation in this process until SIGTERM, SIGINT or
- * `signal`: `factory serve`. New Objectives freeze `provider`, else
- * defaultProvider. A configuration that doesn't load, or names a host
- * kind this process hasn't registered (kinds.ts), throws
+ * Serve the installation in this process until SIGTERM or SIGINT:
+ * `factory serve`. New Objectives freeze `provider`, else
+ * defaultProvider. A configuration that doesn't load throws
  * ConfigurationError before anything runs; a second service is refused
  * by the installation lock.
  */
 export async function serveInstallation(
   repository: string,
   paths: Paths,
-  options: { provider?: string; signal?: AbortSignal; drainMs?: number } = {},
+  options: { provider?: string; drainMs: number },
 ): Promise<number> {
   const limits = envLimits();
   let sync: GitHubSync | undefined;
@@ -139,11 +136,6 @@ export async function serveInstallation(
     } catch (error) {
       throw new ConfigurationError(errorMessage(error));
     }
-    const missing = unregisteredKinds(config.providers);
-    if (missing.length)
-      throw new ConfigurationError(
-        `This process hasn't registered ${missing.join(", ")}: serve the installation from the host program that registers ${missing.length === 1 ? "it" : "them"} (serveFactory).`,
-      );
     loaded = config;
     configureKnowledge(knowledge(config, paths));
     const name = providerNamed(config, options.provider);
@@ -203,8 +195,7 @@ export async function serveInstallation(
     ...(process.env.FACTORY_TICK_MS
       ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
       : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.drainMs !== undefined ? { drainMs: options.drainMs } : {}),
+    drainMs: options.drainMs,
     limits: {
       ...limits,
       ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),

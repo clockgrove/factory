@@ -14,9 +14,10 @@
  * accident, and the one that took over is told at its next check.
  */
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
 import { gitEnvironment, remoteGit } from "./git.js";
@@ -54,18 +55,43 @@ interface Read {
   record?: HolderRecord;
 }
 
-/** This installation: its machine and its state directory. */
-export function installationId(root: string): string {
-  let machine: string;
+/**
+ * This installation: a random id its state directory keeps (created at its
+ * first start; `create` false reads it only), mixed with the machine's id
+ * when it has a real one. A copied or wiped state directory, or the same
+ * image on two machines, is never mistaken for this installation.
+ */
+export function installationId(
+  root: string,
+  create = true,
+): string | undefined {
+  const file = join(root, "installation-id");
+  let random: string;
   try {
-    machine = readFileSync("/etc/machine-id", "utf8").trim();
+    random = readFileSync(file, "utf8").trim();
   } catch {
-    machine = hostname();
+    if (!create) return undefined;
+    random = randomBytes(16).toString("hex");
+    try {
+      writeFileSync(file, `${random}\n`, { flag: "wx", mode: 0o600 });
+    } catch {
+      random = readFileSync(file, "utf8").trim();
+    }
   }
+  const machine = /^[0-9a-f]{32}$/.exec(machineId())?.[0] ?? "";
   return createHash("sha256")
-    .update(`${machine}\0${root}`)
+    .update(`${machine}\0${random}`)
     .digest("hex")
     .slice(0, 24);
+}
+
+/** /etc/machine-id, or "" when the machine has none. */
+function machineId(): string {
+  try {
+    return readFileSync("/etc/machine-id", "utf8").trim();
+  } catch {
+    return "";
+  }
 }
 
 /** The holder as people read it: `user@host since TIME`. */
@@ -113,10 +139,20 @@ async function local(context: Context, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/** The record's commit in `ls-remote` output: the line that names exactly HOLDER_REF. */
+function listedSha(listed: string): string | undefined {
+  for (const line of listed.split("\n")) {
+    const [sha, name] = line.split("\t");
+    if (name === HOLDER_REF) return sha;
+  }
+  return undefined;
+}
+
 /** The holder record on origin, read with `ls-remote` (no REST call). */
 async function readHolder(context: Context): Promise<Read> {
-  const listed = await remote(context, ["ls-remote", "origin", HOLDER_REF]);
-  const sha = listed.split(/\s/)[0];
+  const sha = listedSha(
+    await remote(context, ["ls-remote", "origin", HOLDER_REF]),
+  );
   if (!sha) return {};
   await remote(context, [
     "fetch",
@@ -149,7 +185,7 @@ async function leasePush(
 ): Promise<void> {
   await remote(context, [
     "push",
-    "--quiet",
+    "--porcelain",
     "--no-verify",
     `--force-with-lease=${HOLDER_REF}:${expected ?? ""}`,
     "origin",
@@ -158,18 +194,30 @@ async function leasePush(
 }
 
 /**
- * A push that failed. Git exits 1 when it refused a ref and 128 when it
- * couldn't talk to origin; the latter is transient and rethrown, so the
- * caller retries. For a refused ref: if the record moved, another
- * installation won the race, and the caller reads it again; if it didn't,
- * GitHub refused the push itself (a ruleset), which no retry fixes.
+ * Whether a failed push refused the record itself: `--porcelain` prints a
+ * `!` status line for each refused ref, and none when Git couldn't finish
+ * talking to origin.
+ */
+function refusedRecord(error: unknown): boolean {
+  const output = String((error as { stdout?: unknown }).stdout ?? "");
+  return output.split("\n").some((line) => {
+    const [flag, refs] = line.split("\t");
+    return flag === "!" && refs?.endsWith(`:${HOLDER_REF}`) === true;
+  });
+}
+
+/**
+ * A push that failed. One that didn't refuse the record is transient and
+ * rethrown, so the caller retries. For a refused record: if it moved,
+ * another installation won the race, and the caller reads it again; if it
+ * didn't, GitHub refused the push itself (a ruleset), which no retry fixes.
  */
 async function lostRace(
   context: Context,
   expected: string | undefined,
   error: unknown,
 ): Promise<boolean> {
-  if ((error as { code?: unknown }).code !== 1) throw error;
+  if (!refusedRecord(error)) throw error;
   const now = await readHolder(context);
   if (now.sha !== expected) return true;
   throw new HolderRefusal(
@@ -187,7 +235,7 @@ export async function takeHolder(
   context: Context,
   takeOver: boolean,
 ): Promise<Holder> {
-  const installation = installationId(context.root);
+  const installation = installationId(context.root)!;
   for (;;) {
     const { sha, record } = await readHolder(context);
     if (sha && record?.installation === installation) return { sha };
@@ -232,7 +280,10 @@ export async function currentHolder(
 ): Promise<{ record: HolderRecord; mine: boolean } | undefined> {
   const { record } = await readHolder(context);
   return record
-    ? { record, mine: record.installation === installationId(context.root) }
+    ? {
+        record,
+        mine: record.installation === installationId(context.root, false),
+      }
     : undefined;
 }
 
@@ -246,7 +297,7 @@ export async function holderChanged(
   holder: Holder,
 ): Promise<{ record?: HolderRecord } | undefined> {
   const listed = await remote(context, ["ls-remote", "origin", HOLDER_REF]);
-  if (listed.split(/\s/)[0] === holder.sha) return undefined;
+  if (listedSha(listed) === holder.sha) return undefined;
   const { record } = await readHolder(context);
   return record ? { record } : {};
 }

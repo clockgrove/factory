@@ -230,30 +230,51 @@ export async function serveInstallation(
       `factory: took ${loaded.repository} over from ${holderText(holder.replaced)}\n`,
     );
   // Checked every queue poll: another installation that took over stops
-  // this one before its next effects, the way SIGTERM does.
-  let lost = false;
+  // this one before its next effects, the way SIGTERM does. So does a
+  // record that can't be checked for UNCHECKED_POLLS polls in a row: Git
+  // can fail while REST works, and a take-over must not go unseen. It
+  // exits with a code systemd restarts on, and the restart waits until it
+  // can confirm the record again.
+  let serving = true;
+  let stop: "lost" | "unchecked" | undefined;
   let taker: HolderRecord | undefined;
+  let failures = 0;
+  const end = (why: "lost" | "unchecked"): void => {
+    if (!serving || stop) return;
+    stop = why;
+    // Serve's own handler, if it is still listening; never Node's default.
+    process.emit("SIGTERM", "SIGTERM");
+  };
   const watch = setInterval(() => {
     holderChanged(context, holder).then(
       (changed) => {
-        if (!changed || lost) return;
-        lost = true;
+        failures = 0;
+        if (!changed) return;
         taker = changed.record;
-        process.kill(process.pid, "SIGTERM");
+        end("lost");
       },
-      () => undefined,
+      () => {
+        if (++failures >= UNCHECKED_POLLS) end("unchecked");
+      },
     );
   }, loaded.queue.pollSeconds * 1000);
   let code: number;
   try {
     code = await serveWith();
   } finally {
+    serving = false;
     clearInterval(watch);
   }
-  if (lost)
+  if (stop === "lost")
     throw new ConfigurationError(
       `Another installation took ${loaded.repository} over${taker ? `: ${holderText(taker)}` : ""}, so this one stopped. To serve from here again, stop that one, then start this one.`,
     );
+  if (stop === "unchecked") {
+    process.stderr.write(
+      `factory: couldn't check which installation serves ${loaded.repository} for ${UNCHECKED_POLLS} queue polls in a row, so this one stopped; it keeps the repository, and starting it again resumes once Git reaches origin\n`,
+    );
+    return UNCHECKED_EXIT;
+  }
   // A clean stop frees the repository; a service that didn't start (one
   // already ran here) leaves it to that service.
   if (code === 0)
@@ -264,6 +285,11 @@ export async function serveInstallation(
     );
   return code;
 }
+
+/** Failed record checks in a row after which the service stops (holder.ts). */
+const UNCHECKED_POLLS = 10;
+/** Exit code for that stop: systemd restarts on it (EX_TEMPFAIL). */
+const UNCHECKED_EXIT = 75;
 
 /**
  * Take the repository for this installation (holder.ts) before anything
@@ -287,7 +313,10 @@ async function holderFor(
   try {
     for (let wait = 2000; !stopped; wait = Math.min(wait * 2, 60_000)) {
       try {
-        return await takeHolder(context, takeOver);
+        const holder = await takeHolder(context, takeOver);
+        // A stop that came during a slow Git call: the record is kept, and
+        // starting again resumes it.
+        return stopped ? undefined : holder;
       } catch (error) {
         if (error instanceof HolderRefusal)
           throw new ConfigurationError(error.message);

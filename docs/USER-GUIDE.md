@@ -355,7 +355,7 @@ To move to another machine, stop the first installation (a clean stop frees the 
 factory serve --repo OWNER/NAME --take-over
 ```
 
-Use it only for an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default).
+Use it only for an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
 
 ## Upgrade
 

@@ -46,7 +46,7 @@ CONFIG=${CONFIG:-$HOME/.config/factory/$(echo "$REPO" | tr 'A-Z' 'a-z' | sed 's#
 ROOT="$STATE/$(echo "$REPO" | tr 'A-Z' 'a-z' | sed 's#/#__#')"
 export LOCAL_ONLY NO_MODEL KEEP ALLOW_REPO_CHANGES
 
-[ -f "$BUILD/core/dist/cli.js" ] || { echo "no CLI at $BUILD/core/dist/cli.js (build it with npm run build:core)" >&2; exit 2; }
+[ -f "$BUILD/dist/cli.js" ] || { echo "no CLI at $BUILD/dist/cli.js (build it with npm run build)" >&2; exit 2; }
 if [ -f "$CONFIG" ]; then
   cfg_repo=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("repository",""))' "$CONFIG")
   [ "${cfg_repo,,}" = "${REPO,,}" ] || { echo "config $CONFIG is for '$cfg_repo', not $REPO" >&2; exit 2; }

@@ -2,7 +2,7 @@
 
 Factory has two kinds of tests:
 
-- **CI tests** (`npm run test:core`, `core/test/`) are quick. They run the real `factory serve` on real Git repositories, processes and files, with no mocks and no GitHub. The full CI run takes about 3 minutes.
+- **CI tests** (`npm test`, `test/`) are quick. They run the real `factory serve` on real Git repositories, processes and files, with no mocks and no GitHub. The full CI run takes about 3 minutes.
 - **Integration tests** (this directory) are thorough and run on demand. They run real Objectives with real providers against the scratch GitHub repository `clockgrove/factory-drill` and its Project. They kill the service at its crash points, cut the network, stop a model mid-turn and change GitHub under it. They never run in CI.
 
 Integration tests run as bounded groups. Each group states its expected duration, and a plan over 60 minutes needs the maintainer's approval.
@@ -10,7 +10,7 @@ Integration tests run as bounded groups. Each group states its expected duration
 ## Run
 
 ```sh
-npm run build:core                              # the suite runs core/dist/cli.js
+npm run build                              # the suite runs dist/cli.js
 npm run integration -- --dry-run                # the plan, durations and preconditions; starts nothing
 npm run integration -- --only queue             # one group
 npm run integration -- --only plan,netcut --approved-long    # over 60 min: maintainer approval first
@@ -22,7 +22,7 @@ The plan lists each group with its expected minutes and a total. A real run whos
 **Options:**
 
 - `--only a,b` and `--skip a,b` select groups, in suite order.
-- `--build DIR` picks the Factory checkout to test. Its CLI is `DIR/core/dist/cli.js`. Default: this repository.
+- `--build DIR` picks the Factory checkout to test. Its CLI is `DIR/dist/cli.js`. Default: this repository.
 - `--state DIR` picks `FACTORY_STATE_DIR`. Default: `integration/.runs/state`.
 - `--config FILE` picks the Factory configuration for the drill repository. Default: Factory's own, `~/.config/factory/<owner>__<name>.json`. The suite copies it into the run directory and points `FACTORY_CONFIG` at the copy; groups edit their own copy of that. The source file is never written.
 - `--repo OWNER/NAME` picks the scratch repository. Default: `clockgrove/factory-drill`.
@@ -71,7 +71,7 @@ No group needs an API key: providers use their subscription logins.
 
 ### Crash points
 
-`lib/crashpoints.mjs` enumerates a build's crash points from its `crashPoint()` call sites, read from `core/src` with the TypeScript parser. A name built from a parameter (`${point}:before`) is resolved through every call that passes it. The local `CRASH_POINTS` list comes from `core/test/crash.test.mjs`; every other site is a GitHub-side point, except the families other groups drive (step boundaries `engine:*`, state saves, knowledge, dream and managed provider sessions). So a new crash point is covered here with no list to update. A point with no scenario reports UNREACHABLE.
+`lib/crashpoints.mjs` enumerates a build's crash points from its `crashPoint()` call sites, read from `src` with the TypeScript parser. A name built from a parameter (`${point}:before`) is resolved through every call that passes it. The local `CRASH_POINTS` list comes from `test/crash.test.mjs`; every other site is a GitHub-side point, except the families other groups drive (step boundaries `engine:*`, state saves, knowledge, dream and managed provider sessions). So a new crash point is covered here with no list to update. A point with no scenario reports UNREACHABLE.
 
 ```sh
 node integration/lib/crashpoints.mjs . lists     # LIST<TAB>POINT<TAB>yes|no

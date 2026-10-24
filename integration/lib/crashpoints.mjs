@@ -4,7 +4,7 @@
 //   node crashpoints.mjs BUILD lists        one line per point: LIST<TAB>POINT<TAB>yes|no
 //   node crashpoints.mjs BUILD check P...   one line per point: POINT<TAB>yes|no
 //
-// The sites are read from the build's source (BUILD/core/src) with the
+// The sites are read from the build's source (BUILD/src) with the
 // TypeScript parser. A site whose name is a template over a parameter
 // (`${point}:before` in ensureComment) is resolved through every call of that
 // function, so `ensureComment(..., "sync:ask")` gives sync:ask:before and
@@ -13,7 +13,7 @@
 //
 // LIST is CRASH_POINTS or GITHUB:
 // - CRASH_POINTS is the local list CI crashes at, read from
-//   core/test/crash.test.mjs. Its yes|no says whether a site produces it.
+//   test/crash.test.mjs. Its yes|no says whether a site produces it.
 // - GITHUB is every other site, minus the families that other groups drive
 //   on their own (see LOCAL below). Every GITHUB point has a site, so it is
 //   always "yes".
@@ -63,7 +63,7 @@ function files(dir, out = []) {
   return out;
 }
 
-const sources = files(join(build, "core", "src")).map((path) =>
+const sources = files(join(build, "src")).map((path) =>
   ts.createSourceFile(
     path,
     readFileSync(path, "utf8"),
@@ -72,7 +72,7 @@ const sources = files(join(build, "core", "src")).map((path) =>
   ),
 );
 if (!sources.length) {
-  console.error(`crashpoints.mjs: no TypeScript under ${build}/core/src`);
+  console.error(`crashpoints.mjs: no TypeScript under ${build}/src`);
   process.exit(2);
 }
 
@@ -225,7 +225,7 @@ const hasSite = (point) => {
 function localList() {
   let text;
   try {
-    text = readFileSync(join(build, "core", "test", "crash.test.mjs"), "utf8");
+    text = readFileSync(join(build, "test", "crash.test.mjs"), "utf8");
   } catch {
     return [];
   }

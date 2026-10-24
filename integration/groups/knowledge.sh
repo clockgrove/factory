@@ -48,7 +48,7 @@ k_dream() {
   if [ -n "$spt" ]; then serve_stop; serve_start "$spt" || { K_EXIT=98; return; }; sleep 3
   else serve_alive || { serve_start || { K_EXIT=98; return; }; sleep 3; }; fi
   (cd "$BUILD" && env FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" ${cpt:+FACTORY_CRASH_AT=$cpt} \
-    timeout 900 node core/dist/cli.js dream "$@" --repo "$REPO" >"$RUN_DIR/dream.out" 2>"$RUN_DIR/dream.err"; exit $?)
+    timeout 900 node dist/cli.js dream "$@" --repo "$REPO" >"$RUN_DIR/dream.out" 2>"$RUN_DIR/dream.err"; exit $?)
   K_EXIT=$?
   if [ -n "$spt" ]; then
     local i; for i in $(seq 1 60); do [ -s "$SERVE_DIR/exit" ] && break; sleep 1; done
@@ -191,7 +191,7 @@ knowledge_model() {
 }
 
 k_hook() { # ISSUE [PLAYBOOK]
-  (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node "$SUITE/lib/plan-hook.mjs" "$BUILD/core/dist" "$REPO" "$1" "$(cfg_get 'c["checkout"]')" "$ROOT" "${2:-}" 2>&1)
+  (cd "$BUILD" && FACTORY_STATE_DIR="$STATE" FACTORY_CONFIG="$CUR_CFG" node "$SUITE/lib/plan-hook.mjs" "$BUILD/dist" "$REPO" "$1" "$(cfg_get 'c["checkout"]')" "$ROOT" "${2:-}" 2>&1)
 }
 k_approve_new() { # -> new version, or empty
   local out f; k_dream ""; out=$(kout); f=$(jget file <<<"$out")

@@ -133,7 +133,7 @@ const MANAGED_FIELDS: Record<string, string> = {
     '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
 };
 
-/** Setup's options for the command table, by kind (cli.ts `FlagKind`). */
+/** Setup's options for the command table, by kind (commands/shared.ts `FlagKind`). */
 export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   "config-only": "switch",
   background: "switch",

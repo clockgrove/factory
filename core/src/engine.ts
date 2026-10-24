@@ -1120,6 +1120,7 @@ export class ObjectiveRunner {
         };
         repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
+        repair.from = key;
         state.repairs[outcome.target] = repair;
         if (outcome.conflict) countConflict(state, outcome.target);
         markFree(state, outcome.free);

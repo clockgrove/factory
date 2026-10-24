@@ -137,6 +137,10 @@ export function targetOf(fields: Record<string, unknown>): { target?: string } {
 
 /** At most one `worker-activity` event per Work Item per this long. */
 export const ACTIVITY_INTERVAL_MS = 5_000;
+/** How often a running worker's worktree is sampled for its changed files. */
+const CHANGES_INTERVAL_MS = 30_000;
+/** Changed files a `worker-activity` event lists; `count` has them all. */
+const LISTED_CHANGES = 20;
 const LISTED = 8;
 const COMMAND_CHARS = 200;
 const NAME_CHARS = 120;
@@ -158,6 +162,8 @@ interface ActivityWindow {
   command?: string;
   /** The last context report in this interval. */
   context?: { tokens: number; window?: number };
+  /** The worktree's changed files, when a sample found them changed since the last report. */
+  changed?: { count: number; files: string[] };
 }
 
 const emptyWindow = (): ActivityWindow => ({
@@ -194,16 +200,61 @@ export class ActivityLog {
   private lastAt = 0;
   private timer: NodeJS.Timeout | undefined;
   private closed = false;
+  private readonly transcript?: RunFile;
+  private readonly changes?: () => Promise<string[]>;
+  private readonly intervalMs: number;
+  private readonly sampler: NodeJS.Timeout | undefined;
+  private sampling: Promise<void> | undefined;
+  /** The changed files last reported, sorted. */
+  private reported: string[] = [];
 
   constructor(
     private readonly item: string,
     private readonly worktree: string,
     private readonly log: (event: Record<string, unknown>) => void,
     private readonly secrets: readonly string[],
-    private readonly transcript?: RunFile,
-    private readonly intervalMs = ACTIVITY_INTERVAL_MS,
+    options: {
+      /** The attempt's transcript (docs/reference/run-log.md#Attempt files). */
+      transcript?: RunFile;
+      /** The worktree's changed files, sampled every CHANGES_INTERVAL_MS: shell edits too. */
+      changes?: () => Promise<string[]>;
+      intervalMs?: number;
+    } = {},
   ) {
-    if (transcript) log({ event: "transcript", item, file: transcript.file });
+    this.transcript = options.transcript;
+    this.changes = options.changes;
+    this.intervalMs = options.intervalMs ?? ACTIVITY_INTERVAL_MS;
+    if (this.transcript)
+      log({ event: "transcript", item, file: this.transcript.file });
+    if (this.changes) {
+      this.sampler = setInterval(() => void this.sample(), CHANGES_INTERVAL_MS);
+      this.sampler.unref();
+    }
+  }
+
+  /** Sample the worktree's changed files now; a set that differs from the last report goes out with the next event. */
+  sample(): Promise<void> {
+    if (!this.changes || this.closed) return Promise.resolve();
+    this.sampling ??= this.changes()
+      .then((files) => {
+        const sorted = [...files].sort();
+        if (sorted.join("\0") === this.reported.join("\0")) return;
+        this.reported = sorted;
+        this.window.changed = {
+          count: sorted.length,
+          files: sorted
+            .slice(0, LISTED_CHANGES)
+            .map((file) => this.clean(file, NAME_CHARS)),
+        };
+        this.due();
+      })
+      .catch(() => {
+        // The worktree is busy or gone: the next sample tries again.
+      })
+      .finally(() => {
+        this.sampling = undefined;
+      });
+    return this.sampling;
   }
 
   readonly output = (event: unknown): void => {
@@ -267,6 +318,11 @@ export class ActivityLog {
         window.counts.compactions += 1;
         break;
     }
+    this.due();
+  };
+
+  /** Something to report: written at once after a quiet interval, else coalesced. */
+  private due(): void {
     this.pending = true;
     if (this.timer) return;
     const wait = this.lastAt + this.intervalMs - Date.now();
@@ -275,10 +331,11 @@ export class ActivityLog {
       this.timer = setTimeout(() => this.flush(), wait);
       this.timer.unref();
     }
-  };
+  }
 
   /** Write what is pending and stop: the run ended. */
   close(): void {
+    clearInterval(this.sampler);
     this.flush();
     this.closed = true;
     this.transcript?.close();
@@ -288,7 +345,8 @@ export class ActivityLog {
     clearTimeout(this.timer);
     this.timer = undefined;
     if (!this.pending) return;
-    const { counts, tools, targets, paths, command, context } = this.window;
+    const { counts, tools, targets, paths, command, context, changed } =
+      this.window;
     this.log({
       event: "worker-activity",
       item: this.item,
@@ -298,6 +356,7 @@ export class ActivityLog {
       paths,
       ...(command !== undefined ? { command } : {}),
       ...(context ? { context } : {}),
+      ...(changed ? { changed } : {}),
     });
     this.window = emptyWindow();
     this.pending = false;

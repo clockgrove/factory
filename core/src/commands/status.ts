@@ -97,10 +97,22 @@ async function status(
     );
     return 0;
   }
+  const config = configOf(repository);
   const view = readStatus(paths, {
     ...(only !== undefined ? { only } : {}),
     live: await serviceLive(paths),
-    secrets: configOf(repository)?.secrets ?? [],
+    secrets: config?.secrets ?? [],
+    ...(config
+      ? {
+          setup: {
+            defaultProvider: config.defaultProvider,
+            sandbox: {
+              required: config.sandbox.required,
+              network: config.sandbox.network,
+            },
+          },
+        }
+      : {}),
   });
   process.stdout.write(
     args.flags.json !== undefined

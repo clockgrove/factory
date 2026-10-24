@@ -137,6 +137,13 @@ export async function publishStep(
   if (result.kind === "empty" || result.kind === "repair")
     return repairOutcome(item, "publish", result.finding, context.state, place);
   if (result.kind !== "published") return result;
+  // What watch and diagnostics name the item's PR by.
+  context.log({
+    event: "published",
+    item: item.id,
+    pr: result.pr,
+    head: result.head,
+  });
   const done: PublishResult = {
     pr: result.pr,
     head: result.head,

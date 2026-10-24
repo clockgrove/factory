@@ -28,6 +28,7 @@ import {
 } from "../dist/providers/usage.js";
 import { validateTree } from "../dist/validate.js";
 import { ActivityLog } from "../dist/work/worker.js";
+import { changedFiles } from "../dist/worktree.js";
 import {
   CLI,
   children,
@@ -39,6 +40,7 @@ import {
   REPO,
   seed,
   serve,
+  status,
   stopped,
   until,
 } from "./helpers.mjs";
@@ -67,7 +69,7 @@ test("a worker attempt's transcript is kept redacted and bounded beside the run 
     worktree,
     (event) => log.write(61, { ...step, ...event }),
     [SECRET],
-    log.runFile(61, "item:a:work#1.transcript"),
+    { transcript: log.runFile(61, "item:a:work#1.transcript") },
   );
   activity.report({
     kind: "tool",
@@ -508,5 +510,252 @@ test("a model call's answer is sized and digested with capture off; a cut captur
     new RegExp(
       `\\(cut to capture\\.maxBytesPerCall; the request was 4,005 bytes \\(sha256 ${sha(prompt).slice(0, 12)}…\\), the response was 3,012 bytes \\(sha256 ${sha(answer).slice(0, 12)}…\\)\\)`,
     ),
+  );
+});
+
+test("watch --once and --json show each row's attempt, PR, tool targets and the worktree's changed files, shell edits included; log --tail reads long lines", async () => {
+  const inst = installation();
+  const tree = mkdtempSync(join(tmpdir(), "factory-tree-"));
+  git(tree, "init", "--quiet");
+  writeFileSync(join(tree, "a.ts"), "a\n");
+  git(tree, "add", "a.ts");
+  git(
+    tree,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    "base",
+  );
+  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-6");
+  const step = { step: "item:a:work", attemptId: "item:a:work#3" };
+  log.write(68, { ...step, event: "start" });
+  const activity = new ActivityLog(
+    "a",
+    tree,
+    (event) => log.write(68, { ...step, ...event }),
+    [],
+    { changes: () => changedFiles(tree, AbortSignal.timeout(30_000)) },
+  );
+  activity.report({
+    kind: "tool",
+    phase: "started",
+    tool: "shell",
+    target: "sed -i s/a/b/ a.ts",
+  });
+  // A shell command's edits: no edit tool reported them.
+  writeFileSync(join(tree, "a.ts"), "b\n");
+  writeFileSync(join(tree, "generated.ts"), "g\n");
+  await activity.sample();
+  activity.close();
+  log.write(68, {
+    step: "item:a:publish",
+    event: "published",
+    item: "a",
+    pr: 7,
+    head: "h",
+  });
+  const [row] = cli(inst, "watch", "68", "--once", "--json")
+    .out.trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(row.attempt, 3);
+  assert.equal(row.pr, 7);
+  assert.deepEqual(row.changed, { count: 2, files: ["a.ts", "generated.ts"] });
+  assert.deepEqual(row.targets, [
+    { tool: "shell", target: "sed -i s/a/b/ a.ts" },
+  ]);
+  const text = cli(inst, "watch", "68", "--once");
+  assert.equal(text.code, 0, text.err);
+  assert.match(text.out, /^#68 a work #3 running for \S+ · PR #7 · /);
+  assert.match(text.out, /last tools: shell sed -i s\/a\/b\/ a\.ts/);
+  assert.match(
+    text.out,
+    /2 files changed in the worktree \(a\.ts, generated\.ts\)/,
+  );
+  // 30 events of 5 KiB each: more than the old fixed read of the file's end held.
+  for (let i = 0; i < 30; i++)
+    log.write(68, {
+      event: "model-usage",
+      n: i,
+      providerUsage: { pad: "x".repeat(5_000) },
+    });
+  const tail = cli(inst, "log", "68", "--tail", "20", "--json")
+    .out.trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(tail.length, 20);
+  assert.equal(tail.at(-1).n, 29);
+});
+
+test("status --json details each Work Item's attempt, commits, last error, repair class and blocker, with the service's setup; analyze groups by attempt and call and breaks tokens down by model and child thread", () => {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  seed(inst, 69, "building", {
+    done: {
+      check: {},
+      plan: { items: [item("a"), item("b", { dependencies: ["a"] })] },
+      "item:a:work": {
+        base: "b0",
+        commit: "c1",
+        tree: "t1",
+        notes: [],
+        sets: [],
+      },
+      "item:a:validate": { tree: "t2", commands: [] },
+    },
+    retries: {
+      "item:a:review": {
+        count: 1,
+        attempts: 1,
+        since: "2026-01-01T00:00:00.000Z",
+        nextAt: "2099-01-01T00:00:00.000Z",
+        lastError: "GitHub GET /repos: 502",
+      },
+    },
+    repairs: {
+      "item:a:work": {
+        count: 1,
+        findings: ["npm test failed"],
+        from: "item:a:validate",
+      },
+    },
+    stepRuns: { "item:a:review": { n: 2 } },
+  });
+  const [objective] = status(inst).objectives;
+  const [a, b] = objective.items;
+  assert.deepEqual(
+    {
+      attempt: a.attempt,
+      base: a.base,
+      tree: a.tree,
+      head: a.head,
+      lastError: a.lastError,
+      repair: a.repair,
+      blocker: a.blocker,
+    },
+    {
+      attempt: { id: "item:a:review#2", n: 2 },
+      base: "b0",
+      tree: "t2",
+      head: "c1",
+      lastError: "GitHub GET /repos: 502",
+      repair: {
+        target: "item:a:work",
+        class: "validate",
+        finding: "npm test failed",
+      },
+      blocker: null,
+    },
+  );
+  assert.equal(b.blocker, "waits for a to merge");
+  const shown = cli(inst, "status");
+  assert.match(
+    shown.out,
+    /Provider: codex \(the default\) · sandbox (required|optional), network (off|package-install)/,
+  );
+  // Analysis: one Claude call with a sub-agent model, one Codex call with child threads.
+  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-7");
+  log.write(69, {
+    step: "item:a:review",
+    attemptId: "item:a:review#1",
+    event: "model-usage",
+    callId: "k1",
+    role: "reviewer",
+    provider: "claude",
+    model: "claude-opus",
+    tokens: {
+      input: 150,
+      output: 20,
+      cached: 30,
+      cacheWrite: 20,
+      reasoning: null,
+      total: 170,
+    },
+    providerUsage: {
+      modelUsage: {
+        "claude-opus": {
+          inputTokens: 80,
+          outputTokens: 15,
+          cacheReadInputTokens: 30,
+          cacheCreationInputTokens: 20,
+          costUSD: 0.5,
+        },
+        "claude-haiku": { inputTokens: 20, outputTokens: 5, costUSD: 0.01 },
+      },
+    },
+  });
+  log.write(69, {
+    step: "item:a:work",
+    attemptId: "item:a:work#1",
+    event: "model-usage",
+    callId: "k2",
+    role: "worker",
+    provider: "codex",
+    model: "gpt-6.1-sol",
+    reportedModel: "gpt-6.1-sol",
+    tokens: {
+      input: 1000,
+      output: 100,
+      cached: 900,
+      cacheWrite: 0,
+      reasoning: 10,
+      total: 1100,
+    },
+    providerUsage: {
+      descendants: {
+        threads: 2,
+        input: 400,
+        cached: 300,
+        output: 40,
+        reasoning: 4,
+        total: 440,
+      },
+    },
+  });
+  const analysis = JSON.parse(
+    cli(
+      inst,
+      "diagnostics",
+      "69",
+      "--analyze",
+      "--json",
+      "--group-by",
+      "attemptId",
+    ).out,
+  );
+  assert.deepEqual(analysis.groups.map((group) => group.key.attemptId).sort(), [
+    "item:a:review#1",
+    "item:a:work#1",
+  ]);
+  assert.deepEqual(analysis.calls.models["claude-haiku"], {
+    calls: 1,
+    input: 20,
+    output: 5,
+    cached: 0,
+    cacheWrite: 0,
+    costUsd: 0.01,
+  });
+  assert.equal(analysis.calls.models["claude-opus"].input, 130);
+  assert.equal(analysis.calls.models["gpt-6.1-sol"].input, 1000);
+  assert.equal(analysis.calls.descendants.threads, 2);
+  const filtered = JSON.parse(
+    cli(
+      inst,
+      "diagnostics",
+      "69",
+      "--analyze",
+      "--json",
+      "--filter",
+      "callId=k2",
+    ).out,
+  );
+  assert.equal(filtered.calls.usage.calls, 1);
+  assert.match(
+    cli(inst, "diagnostics", "69", "--analyze").out,
+    /Codex child threads: 2 in 1 calls · 440 tokens/,
   );
 });

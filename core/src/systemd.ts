@@ -312,6 +312,13 @@ export function unitHealth(paths: Paths): { active: string; restarts: number } {
   };
 }
 
+/** The unit's health when this installation has one; undefined without (no systemctl run). */
+export function installedUnitHealth(
+  paths: Paths,
+): { active: string; restarts: number } | undefined {
+  return ours(paths) ? unitHealth(paths) : undefined;
+}
+
 /** What `--check` reports. `serving` comes from the caller, which probes the lock. */
 export function serviceState(
   repository: string,

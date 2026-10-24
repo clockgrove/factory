@@ -235,7 +235,13 @@ export interface ObjectiveState {
    */
   repairs: Record<
     string,
-    { count: number; findings: string[]; free?: number[] }
+    {
+      count: number;
+      findings: string[];
+      free?: number[];
+      /** The step whose failure sent the latest repair: its class, for status. */
+      from?: string;
+    }
   >;
   /** Steps that finished, with their saved results. */
   done: Record<string, unknown>;

@@ -191,10 +191,20 @@ export const ANALYSIS_FIELDS = [
   "stage",
   "sessionMode",
   "currency",
+  "attemptId",
+  "callId",
+  "promptDigest",
+  "schemaDigest",
+  "sourceDigest",
 ] as const;
 export type AnalysisField = (typeof ANALYSIS_FIELDS)[number];
 /** The fields a step attempt has too: other filters select model calls only. */
-const STEP_FIELDS: readonly AnalysisField[] = ["run", "item", "phase"];
+const STEP_FIELDS: readonly AnalysisField[] = [
+  "run",
+  "item",
+  "phase",
+  "attemptId",
+];
 
 export interface AnalyzeOptions extends AnalysisRead {
   groupBy: AnalysisField[];
@@ -299,6 +309,32 @@ export interface CallGroup {
     streamRetries: number;
     retryDelayMs: number;
     completionLost: number;
+  };
+  /**
+   * Tokens and cost by model as the providers break them down (Claude's
+   * and Copilot's per-model usage, sub-agents included), else by the
+   * call's reported model, else its configured one.
+   */
+  models: Record<
+    string,
+    {
+      calls: number;
+      input: number;
+      output: number;
+      cached: number;
+      cacheWrite: number;
+      costUsd: number;
+    }
+  >;
+  /** Codex child threads (`providerUsage.descendants`), summed: their own view, never in `usage`. */
+  descendants: {
+    calls: number;
+    threads: number;
+    input: number;
+    cached: number;
+    output: number;
+    reasoning: number;
+    total: number;
   };
   /** Calls with the provider's own usage breakdown (`providerUsage`). */
   providerUsageCalls: number;
@@ -529,6 +565,16 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
       retryDelayMs: 0,
       completionLost: 0,
     },
+    models: {},
+    descendants: {
+      calls: 0,
+      threads: 0,
+      input: 0,
+      cached: 0,
+      output: 0,
+      reasoning: 0,
+      total: 0,
+    },
     providerUsageCalls: 0,
     currencies: {},
     efficiency: {
@@ -650,6 +696,39 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
   if (event.providerUsage && typeof event.providerUsage === "object")
     group.providerUsageCalls += 1;
   bump(group.currencies, str(event.currency) ?? "unknown");
+  for (const [model, row] of modelBreakdown(event)) {
+    group.models[model] ??= {
+      calls: 0,
+      input: 0,
+      output: 0,
+      cached: 0,
+      cacheWrite: 0,
+      costUsd: 0,
+    };
+    const sum = group.models[model];
+    sum.calls += 1;
+    sum.input += row.input;
+    sum.output += row.output;
+    sum.cached += row.cached;
+    sum.cacheWrite += row.cacheWrite;
+    sum.costUsd += row.costUsd;
+  }
+  const descendants = (
+    event.providerUsage as { descendants?: Record<string, unknown> } | null
+  )?.descendants;
+  if (descendants && typeof descendants === "object") {
+    const d = group.descendants;
+    d.calls += 1;
+    for (const key of [
+      "threads",
+      "input",
+      "cached",
+      "output",
+      "reasoning",
+      "total",
+    ] as const)
+      d[key] += num(descendants[key]) ?? 0;
+  }
   const boundary = event.codexBoundary as Record<string, unknown> | undefined;
   if (boundary && typeof boundary === "object") {
     const b = group.codexBoundary;
@@ -666,6 +745,73 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
     b.retryDelayMs += num(boundary.retryDelayMs) ?? 0;
     if (boundary.completionLost === true) b.completionLost += 1;
   }
+}
+
+/**
+ * A call's tokens and cost by model: Claude's `modelUsage`, Copilot's
+ * per-model usage, else the whole call under its reported (or configured)
+ * model. Input includes cache reads and writes, as in `tokens`.
+ */
+function modelBreakdown(event: LogEvent): [
+  string,
+  {
+    input: number;
+    output: number;
+    cached: number;
+    cacheWrite: number;
+    costUsd: number;
+  },
+][] {
+  const usage = (event.providerUsage ?? {}) as Record<string, unknown>;
+  const n = (value: unknown) => num(value) ?? 0;
+  const claude = usage.modelUsage as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  if (claude && typeof claude === "object" && Object.keys(claude).length)
+    return Object.entries(claude).map(([model, counts]) => {
+      const read = n(counts.cacheReadInputTokens);
+      const written = n(counts.cacheCreationInputTokens);
+      return [
+        model,
+        {
+          input: n(counts.inputTokens) + read + written,
+          output: n(counts.outputTokens),
+          cached: read,
+          cacheWrite: written,
+          costUsd: n(counts.costUSD),
+        },
+      ];
+    });
+  if (event.provider === "copilot") {
+    const models = Object.entries(usage).filter(
+      ([, counts]) =>
+        counts && typeof counts === "object" && "responses" in counts,
+    ) as [string, Record<string, unknown>][];
+    if (models.length)
+      return models.map(([model, counts]) => [
+        model,
+        {
+          input: n(counts.inputTokens),
+          output: n(counts.outputTokens),
+          cached: n(counts.cacheReadTokens),
+          cacheWrite: n(counts.cacheWriteTokens),
+          costUsd: 0,
+        },
+      ]);
+  }
+  const tokens = (event.tokens ?? {}) as Record<string, unknown>;
+  return [
+    [
+      str(event.reportedModel) ?? str(event.model) ?? "unknown",
+      {
+        input: n(tokens.input),
+        output: n(tokens.output),
+        cached: n(tokens.cached),
+        cacheWrite: n(tokens.cacheWrite),
+        costUsd: n(event.costUsd),
+      },
+    ],
+  ];
 }
 
 function settle(group: CallGroup, rates: Rates): CallGroup {
@@ -800,7 +946,7 @@ class Analysis {
     };
   }
 
-  /** A step-level event passes the run, item and phase filters. */
+  /** A step-level event passes the run, item, phase and attempt filters. */
   private stepPasses(event: LogEvent): boolean {
     for (const field of STEP_FIELDS) {
       const expected = this.options.filters[field];
@@ -811,9 +957,11 @@ class Analysis {
           ? String(event.run)
           : field === "item"
             ? (itemOfEvent(event) ?? "null")
-            : step
-              ? phaseOf(step)
-              : "null";
+            : field === "attemptId"
+              ? (str(event.attemptId) ?? "null")
+              : step
+                ? phaseOf(step)
+                : "null";
       if (value !== expected) return false;
     }
     return true;
@@ -1264,6 +1412,21 @@ function groupText(group: CallGroup, indent: string): string[] {
       : []),
     `${indent}sessions: ${tally(group.sessions)}${group.maxSessionTurn > 1 ? ` · up to turn ${group.maxSessionTurn}` : ""}${group.firstToken.meanMs === null ? "" : ` · first token after ${duration(group.firstToken.meanMs)} on average (${group.firstToken.reportedCalls} calls)`}${group.imageOutputs.total ? ` · ${group.imageOutputs.total} images out` : ""} · provider usage in ${group.providerUsageCalls}/${group.usage.calls} calls · cost currency: ${tally(group.currencies)}`,
     `${indent}SDK operations: ${toolText(group.sdkOperations)}`,
+    `${indent}by model: ${
+      Object.entries(group.models)
+        .sort((a, b) => b[1].input + b[1].output - (a[1].input + a[1].output))
+        .slice(0, 8)
+        .map(
+          ([model, m]) =>
+            `${model} ${m.calls} calls, ${count(m.input)} in (${count(m.cached)} cached, ${count(m.cacheWrite)} cache writes), ${count(m.output)} out${m.costUsd ? `, $${m.costUsd.toFixed(2)}` : ""}`,
+        )
+        .join("; ") || "none"
+    }`,
+    ...(group.descendants.calls
+      ? [
+          `${indent}Codex child threads: ${group.descendants.threads} in ${group.descendants.calls} calls · ${count(group.descendants.total)} tokens (${count(group.descendants.input)} in, ${count(group.descendants.cached)} cached, ${count(group.descendants.output)} out, ${count(group.descendants.reasoning)} reasoning), not in the totals`,
+        ]
+      : []),
     ...(group.codexBoundary.reportedCalls
       ? [
           `${indent}Codex boundary: observed in ${group.codexBoundary.observedCalls}/${group.codexBoundary.reportedCalls} calls · ${count(group.codexBoundary.requests)} requests (${group.codexBoundary.failedRequests} failed) · ${count(group.codexBoundary.responsesCompleted)} responses completed (${group.codexBoundary.zeroOutputResponses} with no output) · retries ${group.codexBoundary.httpRetries} HTTP, ${group.codexBoundary.streamRetries} stream (${duration(group.codexBoundary.retryDelayMs)} delay) · ${group.codexBoundary.streamFailures} stream failures · ${group.codexBoundary.completionLost} lost completions`,

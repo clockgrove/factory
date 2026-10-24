@@ -227,7 +227,7 @@ Host-wide limits apply across all Objectives:
 ```sh
 factory status [N] [--json] [--all]      # the service, the queue, each Objective's phase, Work Items, holds and next command
 factory log N [--tail 100] [--follow]    # the run log
-factory watch [N]                        # live: each Work Item's step and its worker's last actions
+factory watch [N] [--once] [--json]      # live: each Work Item's step, PR, worker's last actions and running calls
 factory queue list                       # the Project's queued, candidate and inert cards, with why
 ```
 

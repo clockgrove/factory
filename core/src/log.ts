@@ -635,8 +635,9 @@ export function logFiles(dir: string, issue: number): string[] {
 /**
  * The Objective's last `tail` events across its run logs, in time order,
  * and the byte offset each file was read to (the end of its last complete
- * line), so a follow carries on exactly there. Only the end of each file
- * is read, so the cost doesn't grow with history.
+ * line), so a follow carries on exactly there. Files are read back from
+ * their end only as far as the events wanted, so the cost follows `tail`,
+ * not history.
  */
 export function readLog(
   dir: string,
@@ -645,21 +646,48 @@ export function readLog(
 ): { events: LogEvent[]; ends: Map<string, number> } {
   const events: LogEvent[] = [];
   const ends = new Map<string, number>();
-  const bytes = Math.max(64 * 1024, tail * 2048);
-  for (const file of logFiles(dir, issue)) {
-    const size = sizeOf(file);
-    const start = Math.max(0, size - bytes);
-    const complete = completeLines(readFrom(file, start, size));
-    ends.set(file, start + complete.length);
-    events.push(
-      ...ofRun(file, parseLines(complete.toString("utf8"), start > 0)),
-    );
+  // Newest run first: each file is read back from its end, a chunk at a
+  // time, until it has the events still wanted or is read whole, so lines
+  // of any length count and an older run is read only when needed.
+  let wanted = tail;
+  for (const file of logFiles(dir, issue).reverse()) {
+    const end = lastLineEnd(file);
+    ends.set(file, end);
+    if (wanted <= 0) continue;
+    let found: LogEvent[] = [];
+    for (let chunk = TAIL_CHUNK; ; chunk *= 2) {
+      const start = Math.max(0, end - chunk);
+      found = parseLines(
+        readFrom(file, start, end).toString("utf8"),
+        start > 0,
+      );
+      if (found.length >= wanted || start === 0 || chunk >= TAIL_MAX) break;
+    }
+    found = found.slice(-wanted);
+    wanted -= found.length;
+    events.push(...ofRun(file, found));
   }
   return {
     events: events.sort((a, b) => a.at.localeCompare(b.at)).slice(-tail),
     ends,
   };
 }
+
+/** The offset after the file's last complete line: where a follow carries on. */
+function lastLineEnd(file: string): number {
+  const size = sizeOf(file);
+  for (let to = size; to > 0; to -= TAIL_CHUNK) {
+    const from = Math.max(0, to - TAIL_CHUNK);
+    const newline = readFrom(file, from, to).lastIndexOf(10);
+    if (newline >= 0) return from + newline + 1;
+  }
+  return 0;
+}
+
+/** `readLog`'s first read back from a file's end, doubled until it holds the events wanted. */
+const TAIL_CHUNK = 64 * 1024;
+/** The most `readLog` reads of one file. */
+const TAIL_MAX = 256 * 1024 * 1024;
 
 /**
  * The new complete lines of the Objective's run files since `offsets` (a

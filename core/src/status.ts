@@ -36,6 +36,7 @@ import {
   type QueueControl,
   TERMINAL,
 } from "./state.js";
+import { installedUnitHealth } from "./systemd.js";
 import type { Tracking } from "./tracking.js";
 import { mergeOf } from "./work/merged.js";
 import { objectiveWorkflow } from "./workflow.js";
@@ -57,6 +58,22 @@ export interface ItemRow {
   repairs: number;
   /** The id of the open question that stops it. */
   hold: string | null;
+  /** Its step attempt running now, else the latest one started: id (`<step>#<n>`), number and, when running, its start. */
+  attempt: { id: string; n: number; startedAt?: string } | null;
+  /** The commit its work started from, its result's tree and its head commit (the candidate), once known. */
+  base: string | null;
+  tree: string | null;
+  head: string | null;
+  /** A waiting step's last error. */
+  lastError: string | null;
+  /**
+   * Its latest repair: the step repaired, the failure class (the phase of
+   * the step whose failure sent it back, such as `validate`, `review` or
+   * `ci`; null when not recorded) and the finding's first 300 characters.
+   */
+  repair: { target: string; class: string | null; finding: string } | null;
+  /** What a pending Work Item waits on, in a few words. */
+  blocker: string | null;
 }
 
 export interface ObjectiveView {
@@ -84,6 +101,8 @@ export interface ObjectiveView {
   }[];
   /** Waiting for a slot, or for an earlier Objective that owns overlapping paths. */
   waitsOn: { slot: true } | { paths: number } | null;
+  /** What Factory gave up showing on GitHub for this run, after GitHub kept refusing it; absent when nothing. */
+  github?: { statusComment: "given-up" | "ok"; tracking: "given-up" | "ok" };
   /** Steps started and not finished. */
   running: string[];
   /** Work Items whose validation failed once and passed on its one rerun. */
@@ -131,9 +150,19 @@ export interface ServiceView {
   waits: Record<string, { slot: true } | { paths: number }>;
 }
 
+/** The installation's setup as status shows it: the default provider and the sandbox. */
+export interface SetupView {
+  defaultProvider: string;
+  sandbox: { required: boolean; network: string };
+}
+
 /** The whole status: `--json` prints it as it is, the text renders it. */
 export interface StatusView {
   service: "running" | "stopped";
+  /** From the configuration, when there is one. */
+  setup?: SetupView;
+  /** The installation's systemd user unit, when it has one (systemd.ts unitHealth). */
+  unit?: { active: string; restarts: number };
   crashLoop?: ServiceView["crashLoop"];
   problem?: string;
   intake?: string;
@@ -148,7 +177,12 @@ export interface StatusView {
  */
 export function readStatus(
   paths: Paths,
-  options: { only?: number; live: boolean; secrets: readonly string[] },
+  options: {
+    only?: number;
+    live: boolean;
+    secrets: readonly string[];
+    setup?: SetupView;
+  },
 ): StatusView {
   const { only, live } = options;
   const service = live ? serviceRecord(paths) : { waits: {} };
@@ -175,8 +209,16 @@ export function readStatus(
     );
   }
   const { waits: _waits, ...record } = service;
+  const unit = installedUnitHealth(paths);
   return redactDeep(
-    { service: live ? "running" : "stopped", ...record, queue, objectives },
+    {
+      service: live ? "running" : "stopped",
+      ...(options.setup ? { setup: options.setup } : {}),
+      ...(unit ? { unit } : {}),
+      ...record,
+      queue,
+      objectives,
+    },
     options.secrets,
   );
 }
@@ -327,6 +369,7 @@ export function statusOf(
     "string"
       ? { cleanupLeft: (state.done[CANCEL_CLEANUP] as Left).left }
       : {}),
+    ...githubHealth(state),
     nextAction: { command: null, reason: "" },
     lastEvent,
   };
@@ -368,6 +411,19 @@ export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
     const published = state.done[`item:${item.id}:publish`] as
       | { pr?: number }
       | undefined;
+    const work = state.done[`item:${item.id}:work`] as
+      | { base?: string; commit?: string; tree?: string }
+      | undefined;
+    const validated = state.done[`item:${item.id}:validate`] as
+      | { tree?: string }
+      | undefined;
+    const latest = running ?? hold?.step ?? waiting ?? done.at(-1);
+    const n = latest ? state.stepRuns?.[latest]?.n : undefined;
+    const repairs = Object.entries(state.repairs ?? {}).filter(([key]) =>
+      own(key),
+    );
+    const repaired = repairs.at(-1);
+    const pending = !running && !hold && !waiting && !done.length;
     return {
       id: item.id,
       kind: item.kind ?? "work",
@@ -383,12 +439,61 @@ export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
                 ? (DONE_AS[phase(done.at(-1)!)] ?? phase(done.at(-1)!))
                 : "pending",
       pr: published?.pr ?? null,
-      repairs: Object.entries(state.repairs ?? {})
-        .filter(([key]) => own(key))
-        .reduce((sum, [, repair]) => sum + repair.count, 0),
+      repairs: repairs.reduce((sum, [, repair]) => sum + repair.count, 0),
       hold: hold?.id ?? null,
+      attempt:
+        latest && n
+          ? {
+              id: state.attempts[latest]?.id ?? `${latest}#${n}`,
+              n,
+              ...(running
+                ? { startedAt: state.attempts[running]!.startedAt }
+                : {}),
+            }
+          : null,
+      base: work?.base ?? null,
+      tree: validated?.tree ?? work?.tree ?? null,
+      head: work?.commit ?? null,
+      lastError: waiting ? (state.retries[waiting]?.lastError ?? null) : null,
+      repair: repaired
+        ? {
+            target: repaired[0],
+            class: repaired[1].from ? phase(repaired[1].from) : null,
+            finding: (repaired[1].findings.at(-1) ?? "").slice(0, 300),
+          }
+        : null,
+      blocker: pending ? blockerOf(state, plan, item.id) : null,
     };
   });
+}
+
+/** What GitHub shows of this run that Factory gave up on for the run (github-sync.ts `givenUp`); absent when none. */
+function githubHealth(state: ObjectiveState): {
+  github?: { statusComment: "given-up" | "ok"; tracking: "given-up" | "ok" };
+} {
+  const module = state.modules.github as
+    | { statusGivenUp?: boolean; trackingGivenUp?: boolean }
+    | undefined;
+  if (!module?.statusGivenUp && !module?.trackingGivenUp) return {};
+  return {
+    github: {
+      statusComment: module.statusGivenUp ? "given-up" : "ok",
+      tracking: module.trackingGivenUp ? "given-up" : "ok",
+    },
+  };
+}
+
+/** Why a Work Item that hasn't started waits: unmerged dependencies, a question, the operator, or a slot. */
+function blockerOf(state: ObjectiveState, plan: Plan, id: string): string {
+  const item = plan.items.find((candidate) => candidate.id === id);
+  const unmerged = (item?.dependencies ?? []).filter(
+    (dependency) => !mergeOf(state, dependency),
+  );
+  if (unmerged.length) return `waits for ${unmerged.join(", ")} to merge`;
+  if (state.holds.some((open) => !open.item))
+    return "an Objective question stops it";
+  if (state.control) return `the Objective is ${state.control.mode}`;
+  return "waits for a free slot";
 }
 
 /** Validation reruns that passed: the rerun's tree is the validated tree. */
@@ -538,6 +643,14 @@ export function statusText(
   options: { list: boolean; all: boolean },
 ): string {
   const lines = [`Service: ${view.service}`];
+  if (view.setup)
+    lines.push(
+      `  Provider: ${view.setup.defaultProvider} (the default) · sandbox ${view.setup.sandbox.required ? "required" : "optional"}, network ${view.setup.sandbox.network}`,
+    );
+  if (view.unit)
+    lines.push(
+      `  Unit: ${view.unit.active}${view.unit.restarts ? `, ${view.unit.restarts} automatic restart${view.unit.restarts === 1 ? "" : "s"}` : ""}`,
+    );
   if (view.problem)
     lines.push(`  Problem: ${view.problem}. GitHub effects are paused.`);
   if (view.intake) lines.push(`  Intake: ${view.intake}.`);
@@ -576,6 +689,10 @@ function objectiveText(row: ObjectiveView): string[] {
       : `  Next: ${row.nextAction.reason}`,
   ];
   if (row.cleanupLeft) lines.push(`  Cleanup left: ${row.cleanupLeft}`);
+  if (row.github)
+    lines.push(
+      `  GitHub: ${[row.github.statusComment === "given-up" ? "the live status comment" : undefined, row.github.tracking === "given-up" ? "Work Item issue tracking" : undefined].filter(Boolean).join(" and ")} given up for this run after GitHub kept refusing it; factory status and the run log still show it`,
+    );
   if (row.deadline)
     lines.push(
       `  Deadline: ${displayTime(row.deadline.at)} (${row.deadline.leftSeconds ? `${duration(row.deadline.leftSeconds * 1000)} left` : "passed: Factory cancels it"})`,

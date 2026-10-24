@@ -270,6 +270,8 @@ Common answers:
 
 The options a hold offers are the only ones that apply.
 
+When the planner finds that no plan can meet the Objective as written (it contradicts itself, needs something the repository lacks, or its constraints rule the outcome out), planning asks one question with the planner's reason and what would have to change. Edit the issue and answer `replan`, `answer` with guidance for another round, or `cancel`. Factory plans no further round on its own, and the planner's answer counts as a round against `planningRevisions`.
+
 ### Allowances
 
 How much an Objective may correct itself before asking. These are frozen with its configuration.

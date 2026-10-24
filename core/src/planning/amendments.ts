@@ -956,6 +956,19 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if (!revised.answer) return reject(revised.findings);
       const decoded = decodePlan(revised.answer, facts, wire);
       if (decoded.invalidShape) return invalid(decoded.findings);
+      if (decoded.cannot) {
+        context.log({
+          event: "planner-cannot-plan",
+          amendment: proposal.id,
+          ...decoded.cannot,
+        });
+        return reject([
+          {
+            source: "check",
+            message: `The planner says it can't be planned: ${decoded.cannot.reason} What would have to change: ${decoded.cannot.change}`,
+          },
+        ]);
+      }
       if (decoded.question)
         return hold(
           `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; \`refuse\` rejects the amendment.`,

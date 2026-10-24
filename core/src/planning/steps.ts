@@ -84,6 +84,7 @@ import type {
 } from "./types.js";
 import {
   applyRevision,
+  type CannotPlan,
   controllerGuarantees,
   decodePlan,
   planChoices,
@@ -167,6 +168,8 @@ interface PlanRound {
   draft?: Draft;
   findings?: Finding[];
   question?: string;
+  /** The planner declared the Objective can't be planned as written: no plan to review or revise. */
+  cannot?: CannotPlan;
   /** The operator answered `replan` to a problem with the Objective. */
   replan?: true;
 }
@@ -506,6 +509,14 @@ function planRoundStep(
       const decoded = decodePlan(full, facts, wire);
       if (decoded.invalidShape)
         return refusedAnswer(context.log, answer, decoded.findings);
+      if (decoded.cannot) {
+        context.log({ event: "planner-cannot-plan", ...decoded.cannot });
+        // No plan to revise: a round after it answers in full.
+        return done({
+          ...(g > 1 && n === 1 ? { inputs } : {}),
+          cannot: decoded.cannot,
+        } satisfies PlanRound);
+      }
       const round: PlanRound = {
         ...(g > 1 && n === 1 ? { inputs } : {}),
         answer: full,
@@ -959,6 +970,11 @@ function questionFor(
     offers,
   });
   const ASK = ask(spent);
+  if (planned.cannot)
+    return question(
+      `The planner says this Objective can't be planned as written:\n\n${planned.cannot.reason}\n\nWhat would have to change: ${planned.cannot.change}\n\nEdit the issue, then \`replan\` plans again from it. \`answer <guidance>\` sends your guidance to the planner for another round.`,
+      ["replan", answering(spent), "cancel"],
+    );
   if (planned.question)
     return question(
       `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,

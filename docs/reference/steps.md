@@ -14,6 +14,8 @@ for each active Objective (up to queue.maxActiveObjectives):
     run each step with its deadline → outcome → save state → log
 ```
 
+One Objective's part of a tick (its deadline, scheduling, steps, sync, observation and retirement) runs under its own guard (service.ts `guarded`): a throw there is logged as `objective-error` and leaves that Objective alone for the rest of the tick, never the others. Ten such ticks in a row set it aside as unreadable, with `reset` and `cancel` (see One version in [State](state.md)).
+
 The steps:
 
 ```text

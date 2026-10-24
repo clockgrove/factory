@@ -21,6 +21,7 @@ import {
   installation,
   item,
   offered,
+  plan,
   refusal,
   seed,
   serve,
@@ -80,7 +81,7 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
         shown: readShown(SHOWN_95, { sources: false }),
         title: "Parser",
       },
-      plan: { items: [{ id: "a", title: "Parse", ownedPaths: ["src/"] }] },
+      plan: plan([item("a", { title: "Parse", ownedPaths: ["src/"] })]),
       "item:a:publish": { pr: 7 },
       "item:a:merge": { mergeSha: "a".repeat(40) },
       final: { commit: "b".repeat(40), tree: "c".repeat(40), commands: [] },
@@ -175,22 +176,14 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   // GitHub is down: each step that runs reaches its first GitHub or Git
   // read and waits there, which shows which step the engine chose.
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  const plan = {
-    items: [
-      { id: "a", ownedPaths: ["src/a.ts"], dependencies: [] },
-      { id: "b", ownedPaths: ["src/b.ts"], dependencies: ["a"] },
-      // Read-only QA has no worker: its first step validates.
-      {
-        id: "q",
-        kind: "qa",
-        ownedPaths: [],
-        dependencies: ["a"],
-        validation: [],
-      },
-    ],
-  };
+  const ordered = plan([
+    item("a", { ownedPaths: ["src/a.ts"] }),
+    item("b", { ownedPaths: ["src/b.ts"], dependencies: ["a"] }),
+    // Read-only QA has no worker: its first step validates.
+    item("q", { kind: "qa", dependencies: ["a"] }),
+  ]);
   const fields = (done) => ({
-    done: { check: {}, plan, ...done },
+    done: { check: {}, plan: ordered, ...done },
     kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
   });
   const tried = (state) =>
@@ -261,11 +254,7 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
     ],
   });
   const third = stateOf(inst, 52);
-  third.done.plan.items.push({
-    id: "c",
-    ownedPaths: ["src/c.ts"],
-    dependencies: [],
-  });
+  third.done.plan.items.push(item("c", { ownedPaths: ["src/c.ts"] }));
   writeFileSync(join(inst.objectives, "52.json"), JSON.stringify(third));
   service = serve(inst);
   await until(() => stateOf(inst, 52).retries["item:c:work"], "c's work runs");
@@ -306,19 +295,7 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   seed(baseline, 53, "building", {
     done: {
       check: {},
-      plan: {
-        base: planned,
-        items: [
-          {
-            id: "q",
-            kind: "qa",
-            ownedPaths: [],
-            dependencies: [],
-            validation: [],
-          },
-        ],
-        coverage: [],
-      },
+      plan: plan([item("q", { kind: "qa" })], { base: planned }),
     },
     kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
   });
@@ -396,31 +373,26 @@ test("an Objective with no final command still gets QA on the default branch: fi
         ),
         title: "Parser",
       },
-      plan: {
-        base,
-        // b, listed first, depends on a: a's commands run first.
-        items: [
-          {
-            id: "b",
+      plan: plan(
+        [
+          // b, listed first, depends on a: a's commands run first.
+          item("b", {
             ownedPaths: ["b.txt"],
             dependencies: ["a"],
             validation: ["node gen.mjs", "node check.mjs", "node b.mjs"].map(
               (command) => ({ command, provenance: "base-observed" }),
             ),
-          },
-          {
-            id: "a",
+          }),
+          item("a", {
             ownedPaths: ["parser.txt"],
-            dependencies: [],
             validation: ["node check.mjs", "node leak.mjs"].map((command) => ({
               command,
               provenance: "base-observed",
             })),
-          },
+          }),
         ],
-        coverage: [],
-        finalCommands: [],
-      },
+        { base },
+      ),
       "item:a:work": {},
       "item:a:validate": {},
       "item:a:review": {},
@@ -692,11 +664,7 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   seed(inst, 73, "holding", {
     done: {
       check: {},
-      plan: {
-        items: [item("a", { ownedPaths: ["src/"] })],
-        coverage: [],
-        finalCommands: [],
-      },
+      plan: plan([item("a", { ownedPaths: ["src/"] })]),
       "item:a:merge": { mergeSha: "a".repeat(40) },
     },
     kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
@@ -714,20 +682,18 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   // added r, which owns src/r.ts. Paused, its interrupted ci on p resumes,
   // so it is busy.
   const accepted = "2026-01-02T00:00:00.000Z";
-  const plan = { items: [item("p", { ownedPaths: ["lib/p.ts"] })] };
+  const p = item("p", { ownedPaths: ["lib/p.ts"] });
   seed(inst, 74, "building", {
     control: { mode: "paused", by: "kirk", at },
     done: {
       check: {},
-      plan,
+      plan: plan([p]),
       "item:p:work": {},
       "item:p:validate": {},
       "item:p:review": {},
       "item:p:publish": { pr: 7, head: "b".repeat(40), merged: false },
       "amend:x": {
-        plan: {
-          items: [...plan.items, item("r", { ownedPaths: ["src/r.ts"] })],
-        },
+        plan: plan([p, item("r", { ownedPaths: ["src/r.ts"] })]),
       },
     },
     kept: {

@@ -54,7 +54,9 @@ async function queueCommand(
   const github = new GitHub(config.repository, process.env.FACTORY_GITHUB_API);
   const { items, truncated, skipped } = await readCards(github, config);
   const control = loadQueueControl(paths.root);
-  const queuedOption = config.queue.options.queued;
+  const { options } = config.queue;
+  const queuedOption = options.queued;
+  const running = [options.planning, options.building, options.holding];
   const queued: { issue: number; order: number | null; status: string }[] = [];
   const candidates: {
     issue: number;
@@ -76,6 +78,13 @@ async function queueCommand(
         issue: card.issue,
         option: card.option,
         reason: `Its state can't be read (${loaded.error}): factory reset ${card.issue}, or cancel.`,
+      });
+    else if (!state && card.option && running.includes(card.option))
+      // Only a run writes these, so its state is on another machine or lost.
+      inert.push({
+        issue: card.issue,
+        option: card.option,
+        reason: `It shows ${card.option}, but this installation has no state for it: factory reset ${card.issue} rebuilds it from GitHub.`,
       });
     else if (card.option !== queuedOption) {
       if (!state || finished)

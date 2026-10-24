@@ -15,6 +15,7 @@ import {
   installation,
   item,
   offered,
+  plan,
   refusal,
   seed,
   serve,
@@ -127,13 +128,9 @@ test("switch moves an Objective held on a usage limit to the named provider", as
     ],
     done: {
       check: {},
-      plan: {
-        items: ["a", "b"].map((item) => ({
-          id: item,
-          ownedPaths: [`src/${item}.ts`],
-          dependencies: [],
-        })),
-      },
+      plan: plan(
+        ["a", "b"].map((id) => item(id, { ownedPaths: [`src/${id}.ts`] })),
+      ),
     },
     retries: { "item:a:work": limited, "item:b:work": limited },
   });
@@ -235,6 +232,92 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   await stopped(service);
 });
 
+test("a changed delivery.kind is taken before a plan; after it, no answer offers it and a switch to it is refused", async () => {
+  const inst = installation();
+  const providers = {
+    codex: { planner: "codex", worker: { kind: "codex" } },
+    claude: { planner: "claude", worker: { kind: "claude" } },
+  };
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    { providers, defaultProvider: "codex" },
+  );
+  // 47 is still checking; 48 and 49 have a plan, and 48 a question, asked
+  // before the restart, that offers a switch.
+  seed(inst, 47);
+  seed(inst, 49, "checking", { done: { check: {}, plan: plan([item("a")]) } });
+  const now = new Date().toISOString();
+  const id = `item:a:work@${now}`;
+  seed(inst, 48, "holding", {
+    holds: [
+      {
+        id,
+        step: "item:a:work",
+        question: "Codex usage limit: weekly.",
+        options: offered("wait", "switch", "cancel").map((option) =>
+          option.answer === "switch" ? { ...option, arg: "claude" } : option,
+        ),
+        askedAt: now,
+      },
+    ],
+    done: { check: {}, plan: plan([item("a")]) },
+  });
+  const before = stateOf(inst, 48).frozen;
+  // Native stacks on, and the frozen provider gone.
+  const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+  config.delivery = { kind: "native-stack" };
+  config.providers = { claude: providers.claude };
+  config.defaultProvider = "claude";
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  const service = serve(inst);
+  const asked = (issue) =>
+    stateOf(inst, issue).holds.find((open) => open.step === "config");
+  await until(() => asked(47) && asked(49), "the questions");
+  const planned = asked(49);
+  assert.deepEqual(
+    planned.options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
+  assert.match(
+    planned.question,
+    /plan is split for delivery\.kind "regular", which the configuration now sets to "native-stack"\. To deliver it with "native-stack", cancel it and queue it again\./,
+  );
+  const switched = cli(
+    inst,
+    "answer",
+    "48",
+    "switch",
+    "claude",
+    "--question",
+    id,
+  );
+  assert.equal(switched.code, 1);
+  assert.equal(refusal(switched), "invalid_answer");
+  assert.match(
+    switched.err,
+    /`switch claude` would deliver this Objective with delivery\.kind "native-stack", but its plan is split for "regular"/,
+  );
+  assert.deepEqual(stateOf(inst, 48).frozen, before);
+  // With no plan yet, a switch takes the new kind.
+  const unplanned = asked(47);
+  assert.ok(
+    unplanned.options.some(
+      (option) => option.answer === "switch" && option.arg === "claude",
+    ),
+  );
+  assert.equal(
+    cli(inst, "answer", "47", "switch", "claude", "--question", unplanned.id)
+      .code,
+    0,
+  );
+  assert.equal(stateOf(inst, 47).frozen.config.delivery.kind, "native-stack");
+  for (const issue of ["47", "48", "49"])
+    assert.equal(cli(inst, "cancel", issue).code, 0);
+  await stopped(service);
+});
+
 test("an execution profile frozen at admission is kept through a config change; a removed one holds with retry", async () => {
   const inst = installation();
   const providers = {
@@ -256,18 +339,14 @@ test("an execution profile frozen at admission is kept through a config change; 
     { providers, defaultProvider: "codex", execution: { profiles } },
   );
   // Its plan runs an item on the profile.
-  const plan = {
-    items: [
-      {
-        id: "a",
-        title: "Item a",
-        ownedPaths: ["src/"],
-        executionProfile: { id: "careful", reason: "delicate" },
-      },
-    ],
-  };
+  const profiled = plan([
+    item("a", {
+      ownedPaths: ["src/"],
+      executionProfile: { id: "careful", reason: "delicate" },
+    }),
+  ]);
   seed(inst, 46, "checking", {
-    done: { plan, predecessors: { predecessors: [], ignored: [] } },
+    done: { plan: profiled, predecessors: { predecessors: [], ignored: [] } },
   });
   const admitted = stateOf(inst, 46).frozen;
   const careful = () =>
@@ -335,9 +414,7 @@ test("an execution profile frozen at admission is kept through a config change; 
 
 test("a held Objective and one waiting on its paths don't stall the queue", async () => {
   const inst = installation();
-  const plan = (paths) => ({
-    items: [{ id: "a", ownedPaths: paths, dependencies: [] }],
-  });
+  const owning = (paths) => plan([item("a", { ownedPaths: paths })]);
   const asked = new Date().toISOString();
   // #32 holds while it owns src/; #31 owns src/x.ts and its plan was
   // accepted later (a replan), so the lower issue waits for #32.
@@ -352,11 +429,11 @@ test("a held Objective and one waiting on its paths don't stall the queue", asyn
         askedAt: asked,
       },
     ],
-    done: { check: {}, plan: plan(["src/"]) },
+    done: { check: {}, plan: owning(["src/"]) },
     kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
   });
   seed(inst, 31, "building", {
-    done: { check: {}, plan: plan(["src/x.ts"]) },
+    done: { check: {}, plan: owning(["src/x.ts"]) },
     kept: { "plan:acceptedAt": "2026-01-02T00:00:00.000Z" },
   });
   // #33 is checked and needs the only slot (no configuration: one at a time).
@@ -374,13 +451,12 @@ test("a held Objective and one waiting on its paths don't stall the queue", asyn
 test("an item's question holds only that item and its dependents", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  const item = (id, kind, dependencies = []) => ({
-    id,
-    kind,
-    ownedPaths: [],
-    dependencies,
-    ...(kind === "aggregate" ? { children: [] } : {}),
-  });
+  const node = (id, kind, dependencies = []) =>
+    item(id, {
+      kind,
+      dependencies,
+      ...(kind === "aggregate" ? { children: [] } : {}),
+    });
   const asked = new Date().toISOString();
   // a holds; b is unrelated; c depends on a; d is unrelated and asks too:
   // its kept base is missing from the checkout, so its work keeps failing.
@@ -398,14 +474,12 @@ test("an item's question holds only that item and its dependents", async () => {
     ],
     done: {
       check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
-      plan: {
-        items: [
-          item("a", "work"),
-          item("b", "aggregate"),
-          item("c", "aggregate", ["a"]),
-          item("d", "work"),
-        ],
-      },
+      plan: plan([
+        node("a", "work"),
+        node("b", "aggregate"),
+        node("c", "aggregate", ["a"]),
+        node("d", "work"),
+      ]),
     },
   });
   let service = serve(inst);
@@ -512,12 +586,7 @@ test("an Objective question from an item step stops every item, once", async () 
   githubOrigin(checkout, origin);
   git("-C", checkout, "config", "filter.evil.clean", "cat");
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  const item = (id, kind) => ({
-    id,
-    ...(kind ? { kind, children: [] } : {}),
-    ownedPaths: [],
-    dependencies: [],
-  });
+  const node = (id, kind) => item(id, kind ? { kind, children: [] } : {});
   const asked = new Date().toISOString();
   seed(inst, 62, "holding", {
     holds: [
@@ -531,7 +600,7 @@ test("an Objective question from an item step stops every item, once", async () 
     ],
     done: {
       check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
-      plan: { items: [item("a"), item("e"), item("c", "aggregate")] },
+      plan: plan([node("a"), node("e"), node("c", "aggregate")]),
     },
   });
   const service = serve(inst);
@@ -1005,13 +1074,9 @@ test("an open question pauses other steps' wait clocks", async () => {
     ],
     done: {
       check: {},
-      plan: {
-        items: ["a", "b"].map((item) => ({
-          id: item,
-          ownedPaths: [`src/${item}.ts`],
-          dependencies: [],
-        })),
-      },
+      plan: plan(
+        ["a", "b"].map((id) => item(id, { ownedPaths: [`src/${id}.ts`] })),
+      ),
       ...Object.fromEntries(
         ["a", "b"].flatMap((item) =>
           ["work", "validate", "review"].map((phase) => [
@@ -1056,7 +1121,7 @@ test("a wait on a human gate takes no slot", async () => {
   const later = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   // #41 started first and waits on a review; #42 needs the only slot.
   seed(inst, 41, "building", {
-    done: { check: {}, plan: { items: [] } },
+    done: { check: {}, plan: plan() },
     retries: {
       build: {
         count: 0,

@@ -93,7 +93,7 @@ export class PlannerError extends Error {
    * What a `hold` stops (engine.ts HoldScope). A provider failure that
    * holds is about its login, billing, quota or model, its package or
    * setup, or the host: installation-, account- or provider-wide, so it is
-   * the Objective's, asked once for every item (DESIGN.md#Holds and answers).
+   * the Objective's, asked once for every item (docs/reference/holds.md#Holds and answers).
    * Only a cause that is one Work Item's own (its files, its review images,
    * its session's budget) is `item`.
    */
@@ -102,7 +102,7 @@ export class PlannerError extends Error {
     readonly outcome: "retry" | "hold" | "fail",
     reason: string,
     /**
-     * For `retry`: a usage limit and its reset (DESIGN.md#Waits), or an
+     * For `retry`: a usage limit and its reset (docs/reference/steps.md#Waits), or an
      * error (an idle model), which holds after three.
      */
     readonly wait?: Wait,

@@ -327,7 +327,7 @@ export interface ProviderRoute {
 
 /**
  * Route each Objective to the provider it froze. It runs only while the
- * configuration is as it froze it (DESIGN.md#Frozen configuration);
+ * configuration is as it froze it (docs/reference/state.md#Frozen configuration);
  * otherwise it holds once, naming the changed keys. A finished Objective
  * has no steps, and `cancel` always works.
  */

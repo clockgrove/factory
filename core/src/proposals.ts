@@ -15,7 +15,7 @@
  * - Approve: the file's SHA-256 must match, its fields are checked again,
  *   and each issue is created once: found first by its marker on its
  *   body's first line, among the issues Factory's login opened since the
- *   draft was made (DESIGN.md#Idempotence). Once every issue exists, each
+ *   draft was made (docs/reference/steps.md#Idempotence). Once every issue exists, each
  *   dependency becomes a blocked-by link, read before it is added. The CLI
  *   keeps no state of its own.
  */
@@ -101,7 +101,7 @@ const FIELDS = ["key", "title", "goal", ...LISTS];
 const KEY = /^[a-z][a-z0-9-]{0,63}$/;
 /** GitHub's bound on an issue title. */
 const TITLE_LIMIT = 256;
-/** Planning's elapsed bound (DESIGN.md#Deadlines). */
+/** Planning's elapsed bound (docs/reference/steps.md#Deadlines). */
 const DEADLINE_MS = 45 * 60_000;
 /** What the roadmap sections may add to the prompt, in all. */
 const SOURCE_BYTES = 256 * 1024;

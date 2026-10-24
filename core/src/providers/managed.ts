@@ -381,7 +381,7 @@ function statusFailure(
       `${what} refused the request (${status}); check the managed worker settings, then answer retry`,
     );
   if (status === 429) {
-    // A rate limit that names its reset waits until then (DESIGN.md#Waits);
+    // A rate limit that names its reset waits until then (docs/reference/steps.md#Waits);
     // without one it is an unknown transient cause and backs off.
     const at = retryAt(retryAfter);
     return new PlannerError(

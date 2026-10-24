@@ -17,7 +17,7 @@ import {
 import { fact, facts } from "./work/facts.js";
 
 /**
- * `factory reset N` (DESIGN.md#State). The service saves a resetting record
+ * `factory reset N` (docs/reference/state.md#State). The service saves a resetting record
  * at once (`resetRecord`); its one step, `rebuild`, reads GitHub and
  * replaces the record with the rebuilt state. The engine gives that step
  * its deadline, its retries and its questions like any other, cancel

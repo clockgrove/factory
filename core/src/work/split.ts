@@ -27,7 +27,7 @@ import { findState, type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { type BuildDeps, objectiveEdited } from "./steps.js";
 
 /**
- * A split delivers through child Objectives (DESIGN.md#Child Objectives).
+ * A split delivers through child Objectives (docs/reference/queue.md#Child Objectives).
  * Once the plan that splits is accepted:
  *
  * `build:split` creates one Objective issue per child, in plan order, from

@@ -43,7 +43,7 @@ export type Outcome =
       keep?: Record<string, unknown>;
     }
   /**
-   * Try again: a wait, classed by `wait` (DESIGN.md#Waits); an `error`
+   * Try again: a wait, classed by `wait` (docs/reference/steps.md#Waits); an `error`
    * (`errored`) counts toward `maxErrors`. `afterMs` sets when it comes
    * back, else the backoff does. `progress`: the step kept what it did
    * (`keep`) and goes on at once (a continuation, such as collecting
@@ -131,7 +131,7 @@ export interface HoldAfter {
 }
 
 /**
- * What a question stops (DESIGN.md#Holds and answers). `item`: a Work Item
+ * What a question stops (docs/reference/holds.md#Holds and answers). `item`: a Work Item
  * step's question stops that item and the items that depend on it; any
  * other step's stops the Objective. `objective`: the cause is the whole
  * Objective's (its issue, the repository, the host, a provider account),
@@ -295,7 +295,7 @@ export interface Workflow {
   /**
    * An error that escaped `step` as its outcome: the one map from
    * failures (GitHub's, a provider's, Git's, the host's) to waits and
-   * holds (DESIGN.md#Waits). Absent, or undefined: an error (`errored`).
+   * holds (docs/reference/steps.md#Waits). Absent, or undefined: an error (`errored`).
    */
   outcomeOf?(error: unknown, step: Step): Outcome | undefined;
   /**
@@ -1034,7 +1034,7 @@ export class ObjectiveRunner {
 
   /**
    * A retry: an error counts toward `maxErrors`; a wait is classed by its
-   * cause (DESIGN.md#Waits). The error count covers one run of consecutive
+   * cause (docs/reference/steps.md#Waits). The error count covers one run of consecutive
    * errors: any other outcome ends it. `since`, `cause`, the backoff and a
    * granted `wait` cover one run of one class (a reset, a gate, or an
    * unknown cause, which errors share): a new class starts them again, so

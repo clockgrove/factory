@@ -69,7 +69,7 @@ export function installationPaths(repository: string): Paths {
 /** A capture id: what `RunLog` names a capture file by (a UUID). */
 export const CAPTURE_ID = /^[\w-]{1,128}$/;
 
-/** A run's capture directory under the logs directory: `<issue>/<run id>.captures` (DESIGN.md#Content capture). */
+/** A run's capture directory under the logs directory: `<issue>/<run id>.captures` (docs/reference/run-log.md#Content capture). */
 export function captureDir(issue: number, run: string): string {
   return `${issue}/${run}.captures`;
 }

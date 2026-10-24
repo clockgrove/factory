@@ -1,0 +1,118 @@
+# Steps
+
+Part of [the design](../DESIGN.md).
+
+## Steps
+
+The service loop:
+
+```text
+every second:   apply request files
+every 30 s:     read the queue (on failure, keep the last good view)
+for each active Objective (up to queue.maxActiveObjectives):
+    pick the next runnable steps (up to execution.concurrency at once)
+    run each step with its deadline → outcome → save state → log
+```
+
+The steps:
+
+```text
+predecessors → check → per planning round g:n: plan:g:n → review:g:n → decide:g:n [hold: plan question?]
+  → plan (accept, post the plan comment) → build:units
+  (a split: build:split creates and links the child Objectives → build:split:queue queues them
+   → build:split:children waits for them, then closes the parent → done)
+  → while an amendment is pending: amend:<id>:plan → amend:<id>:review → amend:<id> (accept, post the plan comment)
+  → per Work Item, in dependency order:
+      item:<id>:work → select (media items) → validate → review → publish (push, PR) → ci → merge
+  → final (final validation) → final-review → report → done
+```
+
+Other steps: `cancel:cleanup` after cancel, `rerun:cleanup` before a re-run, `config` when the frozen configuration no longer matches, and `rebuild` for `factory reset`.
+
+Every step returns exactly one outcome:
+
+| Outcome                 | Meaning                                                                                            | What Factory does                                                                                              |
+| ----------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `done(data)`            | The step finished.                                                                                 | Save the data and move on.                                                                                     |
+| `retry(reason, after?)` | A wait classed by its cause, an error among them (see [Waits](#waits)).                            | Back off (30 s doubling to 15 min, or the reset time) and run the step again.                                  |
+| `repair(finding)`       | The work is wrong: validation, review or CI failed.                                                | Run the item's work step again with the finding, within the [allowances](state.md#allowances).                 |
+| `hold(question)`        | Only a person can decide (cause `question`), or the step can't succeed as it is (cause `failure`). | Post the question on the issue, set Status to "Needs you", and wait (see [Holds](holds.md#holds-and-answers)). |
+| `replace(build)`        | Only `factory reset`'s `rebuild` step: the state rebuilt from GitHub.                              | Stop the old record's steps and save the rebuilt state whole.                                                  |
+
+A failure is a hold with the cause `failure`: errors in a row, an allowance spent, a crash-loop suspect, a call too large for the model, or a result the step can't produce. Where the workflow can plan again (a planning round before acceptance; a Work Item, final, final review or report step after it), the engine adds `replan` to its answers.
+
+A step that kept its progress and goes on at once (captured media to collect, a staged repair, one rerun of a flaky command, an approval or an accepted edit) returns `retry` with `progress`: that is not a wait, so it ends the step's run of retries and no status note or wait clock counts it. A repair consumes the answer of the step that returned it, so the step never acts on that answer again. Past a repair allowance, the step that would repair asks before it runs again (see [Allowances](state.md#allowances)).
+
+`replan` is the workflow's, never a step's: the engine applies it from one place (`Workflow.replan`) instead of running the step that asked. Before the plan is accepted it records the operator's decision on the planning round, and a new planning generation re-reads the issue. After acceptance it forgets the plan and the build and checks the Objective again (a repair of `check` whose cleared steps' repair history goes with them). A replan never counts against a repair allowance, `check`'s included, and the answer is spent once applied.
+
+An exception that escapes a step is classified in one place (workflow.ts `errorOutcome`, the workflow's `outcomeOf`, which the engine calls when a step throws): a full disk and the checkout's Git refusal (an origin that no longer names the target) hold for the whole Objective; a planning or review call too large for the model is a failure hold for the whole Objective, with `replan` (`refuse` for an amendment), `retry` and `cancel`; a provider's other classified failures (providers/planner.ts `providerOutcome`) and GitHub's answers (github.ts `githubOutcome`) map as [Waits](#waits) says; anything else is an error, as are a missed deadline, an idle model and an invalid model answer. After three errors in a row on the same step, it becomes a failure hold: the error, plus `retry` and `cancel` (and `replan` where the workflow can plan again). Cleanup after cancel never asks (the step flag `neverAsks`): any outcome but done, a Git refusal included, retries in the background. A step can't crash the service, block another Objective, or leave an Objective without an answer that works.
+
+### Interrupted steps
+
+A step the service's death cut off (a crash, an OOM kill, a reboot) is not that step's error. Each saved attempt names the service run that started it, and after a restart the step runs again at once, with no backoff and no error count, cleanup after cancel included. Crash-loop protection is the service's:
+
+- **Crash loop.** `service.json` keeps one list of the latest deaths (`deaths`, at most 20; a clean stop empties it). Each death records how long that run lived after resuming its steps, the steps running when it died, and whether it finished any step. The crash streak is the trailing deaths that lived less than 10 min. From the third start in a streak (two deaths), interrupted steps resume after 30 s, doubling to 30 min; other steps run as usual. `factory status` shows the deaths in a row and the resume time. A clean stop ends the streak.
+- **A step that kills the service.** The last three deaths are the evidence: the steps running at each (the open attempts that run started), and whether that run finished any step (its heartbeat count, or an Objective's state saved with a step's outcome naming that run, so a death right after a step still counts). When steps finished in the runs between them, every step that was running at all three holds, each with its own question: "The service died 3 times in a row while step … ran", with `retry` and `cancel` (a second question in the same scope is saved and asked after the first). So a crash streak ends in questions within three deaths however many steps keep being interrupted together. The evidence is then spent (each death is marked `spent`), so another hold needs three more deaths. Cleanup after cancel never holds; the crash loop's delay covers it.
+
+### Waits
+
+Any other retry is a wait. Waiting more than a few hours is never right, so a wait is classed by its cause, not by how long it has gone on:
+
+| Cause                            | Examples                                                                                                                                                                                                                | What Factory does                                                                                                                                                                                                                                                                                            |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Fatal until a person acts        | An expired or invalid gh or provider login; GitHub 401 or a 403 refusal; a missing repository or issue (404); a full disk; a required check with no run or status 15 min after the push; a workflow that didn't trigger | Hold at once, with a question naming the fix.                                                                                                                                                                                                                                                                |
+| A known reset time               | A GitHub rate limit; a provider usage limit that reports its reset                                                                                                                                                      | Wait until the reset when it is at most 3 h away. Further away or unknown (a weekly limit): hold with `wait` (keep waiting until it resets), `switch NAME` (run this Objective on another configured provider, which becomes its frozen provider; plain `switch` when there is only one other) and `cancel`. |
+| A human gate Factory doesn't own | An environment approval; a review the branch requires; a predecessor Objective (see [Predecessors](queue.md#predecessors))                                                                                              | Wait with no deadline. Status shows "waiting on" the gate, and one reminder comment follows after 24 h.                                                                                                                                                                                                      |
+| An unknown transient cause       | The network down; 5xx or an outage at GitHub or the provider; 409, 410, 422 or a GraphQL error from GitHub; CI queued or running                                                                                        | Retry with backoff. After 1 h, post one status note on the issue (edited in place). After 3 h, hold with a question naming the cause and the last error: `wait` (another 3 h), `retry` and `cancel`.                                                                                                         |
+
+A problem on the host counts as fatal when it is certain (disk, login) and as transient otherwise. Times are wall-clock times saved in the state, so a restart doesn't reset a budget, and the question comes only after the step ran again and still had to wait.
+
+- **An open question pauses the clocks of the steps it stops.** While a question is open, no step it stops starts (see [Holds](holds.md#holds-and-answers) for its scope), so their waits don't count; other items' clocks run on. When the question closes, each waiting step it stopped moves its wait start and any granted `wait` forward by the time it was due but blocked, up to when another open question that also stops it was asked (that one's close moves the rest), so overlapping questions never count the same time twice. A human gate's start stays: it never times out, and its one reminder is keyed to that start. No status note or gate reminder is posted for a step an open question stops. A step that asks while a question covering its scope is open doesn't wait past the answer: its retry comes due at once, so it runs again right after the answer and asks then, even when its own wait (a reset hours away) would end later.
+
+- **One budget per class.** A step's wait start, first cause, backoff and any granted `wait` belong to one run of one class: a reset, a gate, or an unknown cause (errors count as unknown). When the class changes, they start again, so eight hours on a review never spend the transient budget. The error count covers one run of consecutive errors; any other outcome resets it.
+- **Only a real rate limit is a reset.** A 429, or a 403 rate limit, waits for its reset. A 5xx is an unknown transient even when it carries rate-limit headers; its `retry-after` only sets the backoff. A reset at or before now (a skewed clock) still waits at least the normal backoff.
+- **Required checks before gates.** A required check with no run or status counts as pending whatever GitHub's readiness says, and it holds 15 min after the push. A review the branch requires is a gate only once every required check is there.
+- **Deadlines of a wait are the engine's.** A step that waits on something GitHub may not show yet (a merge it made, a PR state) retries with a question for later; the engine asks it once the run of retries has gone on 2 min. A required check that never registers is asked about the same way, 15 min from the push (or from when Factory began waiting, when GitHub doesn't say). A module never reads the engine's retry records.
+
+### Idempotence
+
+Every step is safe to run again. Before it does anything with an outside effect, it looks for that effect on GitHub:
+
+| Effect          | How the step finds it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Branch          | Fixed name: `factory/<issue>/<item>`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| PR              | Open or merged PR whose head is that branch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Merge           | That PR's merged state.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Comment         | A hidden marker, `<!-- factory:<issue>:<kind>:<id> -->`, in a comment by Factory's own login (anyone else's marked comment is ignored). An existing comment is edited, not posted again. The report's marker and the live status comment's name the run (`report:<run>`, `status:<run>`, the run being its admission time, state.ts `runOf`), so a later run of the same issue posts its own report and status and checks for edits again. A plan too large for one comment continues in numbered `plan-data` comments. |
+| Issue close     | The issue's state.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Work Item issue | The marker on its body's first line, on an issue by Factory's own login: looked up among the Objective's sub-issues and, only while a creation isn't recorded in state (`creating` is saved, with its time, before the create), Factory's `factory:work-item` issues updated since that creation began.                                                                                                                                                                                                                 |
+| Issue link      | The issue's sub-issues or blocked-by links, read before one is added.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Branch delete   | The branch's absence. After its PR merges (a native stack's layers once the whole unit merged), and on cancel, a branch is deleted only when Factory made every commit it has beyond the default branch (GitHub's update-branch merges from the item's base count, a stack layer's predecessor branch included), by a push with a lease on the head it read.                                                                                                                                                            |
+| Project field   | Read before each write, and written only over the option Factory last saw or wrote (see [Queue](queue.md#queue)); it is a display.                                                                                                                                                                                                                                                                                                                                                                                      |
+
+So an effect whose result was lost is never "unknown". The next run of the step finds it on GitHub and carries on.
+
+A model call has no outside effect. If the process dies mid-call, the call runs again, fresh: a retained conversation whose turn was cut off is never continued (see [Retained conversations](run-log.md#retained-conversations)). A worker's worktree is kept and reused on the base the item kept, so a repeated work step continues from its files. A worktree from an attempt that never kept its base (it died before its outcome) is reset onto the base the rerun picks.
+
+A step's kept facts (`state.kept`) outlive repairs. Every read and write goes through one typed helper (work/facts.ts `fact` and `facts`), which builds the keys (`item:<id>:<name>`, or an Objective step's own name) and types the values. A step forgets one by keeping `null`, and the engine then removes it, so a reader never sees `null`. A replan after acceptance forgets them all.
+
+### Deadlines
+
+| Wait                   | Deadline                                           | At the deadline        |
+| ---------------------- | -------------------------------------------------- | ---------------------- |
+| GitHub request         | 60 s                                               | retry                  |
+| Plan, plan review      | 45 min each, 15 min idle                           | retry; hold after 3    |
+| Worker turn            | 2 h total, 15 min idle (Copilot: `idleSeconds`)    | retry; hold after 3    |
+| Worker's own Validate  | silent up to the item's validation deadline        | retry; hold after 3    |
+| One validation command | `validation.commandTimeoutSeconds` (30 min)        | repair                 |
+| Validation step        | its commands × the command timeout, + 15 min       | retry; hold after 3    |
+| Final validation       | its commands × the command timeout, + 30 min       | retry; hold after 3    |
+| Result or final review | 45 min, 15 min idle                                | retry; hold after 3    |
+| CI on a PR             | a needed check registers within 15 min of the push | hold                   |
+| CI queued or running   | 3 h of transient waiting (see [Waits](#waits))     | hold with `wait`       |
+| Hold                   | none: it waits for a person                        | nothing yet (slice 5B) |
+| Objective              | `queue.objectiveDeadlineSeconds` from admission    | cancel                 |
+
+The Objective deadline is optional (no default) and absolute: admission saves it in the state as a time (`deadline`), so a restart, a reset or a later configuration never moves it (`factory run N --deadline` sets its own time in place of the default). On every tick, for every Objective, whatever it waits on (a question, a pause, a human gate, a slot), the engine checks it (engine.ts `expire`), except while a split parent only waits for its child Objectives (`build:split:children`, `Workflow.deadlineExempt`): they run on their own, each with its own deadline; past it, it cancels through the normal cancel, recording `ended.by: "deadline"`, so cleanup runs; a restart past it cancels at once. Status shows the deadline and the time left, and a question asked within its last hour says when it falls. Crash points `engine:deadline:before-cancel` and `engine:deadline:cancelled` bracket the save.
+
+Step deadlines are fixed in the code, with two configured bounds: `validation.commandTimeoutSeconds` (default 1800) limits each validation command and sets the validation deadlines above, so a plan with many commands never outlasts its step, and a Copilot provider's `worker.idleSeconds` (default 900) is its worker's idle bound. A managed worker's `timeoutSeconds` (default 3600, at most 6000) fits inside the worker deadline. Idle bounds are the adapter's: 15 min for Codex planning and workers (5 min for a Codex review at medium effort or lower), 2 or 5 min by effort for a Claude call, and 45 min while a model's tool runs; a Claude or Copilot worker's running Validate or shell command may be silent for the item's whole validation deadline, if longer, still inside the 2 h turn. The only reminders after 24 h are a human gate's (see [Waits](#waits)) and an open question's (see [Holds](holds.md#holds-and-answers)). The engine's limits take shorter test timings from the environment (`FACTORY_DEADLINE_MS`, `FACTORY_WAIT_MS`, `FACTORY_NOTE_MS`, `FACTORY_REMIND_MS`, `FACTORY_BACKOFF_MS`).

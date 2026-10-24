@@ -35,7 +35,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    - GitHub access and push;
    - merge commits, required checks, and a recommendation to require branches to be up to date.
 
-   Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [DESIGN.md#Setup](DESIGN.md#setup).
+   Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
 
 4. **Run the service.** Either run `factory serve --repo OWNER/NAME` in a terminal you keep open, or install it as a systemd user service:
 
@@ -44,7 +44,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    factory setup --repo OWNER/NAME --check
    ```
 
-   The service restarts if it fails. `loginctl enable-linger` keeps it running after you log out. `--stop` stops and disables it, and `--uninstall` removes the unit (the configuration and state stay). After installing a new release, run `--background` again. See [DESIGN.md#Background service](DESIGN.md#background-service).
+   The service restarts if it fails. `loginctl enable-linger` keeps it running after you log out. `--stop` stops and disables it, and `--uninstall` removes the unit (the configuration and state stay). After installing a new release, run `--background` again. See [reference/setup.md#Background service](reference/setup.md#background-service).
 
 State lives in `~/.local/state/factory/OWNER__NAME/` (or `FACTORY_STATE_DIR`). The configuration, the state and the clone stay separate, and Factory refuses a configuration or state directory inside the clone.
 
@@ -76,7 +76,7 @@ An Objective is a GitHub issue that states a goal and its observable outcomes. S
 
 Factory reads the issue as GitHub renders it, not its raw Markdown. What you see on the issue page is what counts: headings are sections, list items are bullets, and inline code is a command, path or pin. Hidden content (HTML comments, alt text) never reaches a check or a model.
 
-Queue an Objective by setting its card's Factory field to the queued option on the Project, or with `factory run N`. When the service first sees it, it checks the Objective before planning (see [Check at queue time](DESIGN.md#check-at-queue-time)). A failed check is a hold that names each problem and its fix: edit the issue, then answer `recheck`. An issue written by someone without write access first asks you to approve it, and asks again after any edit. An edit after planning has read the issue asks whether to `replan` from the new text or `continue` with the current plan.
+Queue an Objective by setting its card's Factory field to the queued option on the Project, or with `factory run N`. When the service first sees it, it checks the Objective before planning (see [Check at queue time](reference/queue.md#check-at-queue-time)). A failed check is a hold that names each problem and its fix: edit the issue, then answer `recheck`. An issue written by someone without write access first asks you to approve it, and asks again after any edit. An edit after planning has read the issue asks whether to `replan` from the new text or `continue` with the current plan.
 
 ### Objective format
 

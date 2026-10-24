@@ -2,7 +2,7 @@
  * Regular PR delivery for one Work Item: push its result to its fixed
  * branch, find or open its PR, wait for CI on the exact head, bring the
  * branch up to date, and merge with a merge commit. Every effect is found
- * on GitHub before it is made (DESIGN.md#Idempotence), so a step that runs
+ * on GitHub before it is made (docs/reference/steps.md#Idempotence), so a step that runs
  * again carries on from whatever the last run left. Each function returns
  * data the item steps return as their outcome; GitHub's and Git's
  * failures escape to the engine, which maps them in one place (workflow.ts
@@ -55,7 +55,7 @@ const GITHUB_LAG_MS = 2 * MINUTE;
 /**
  * How long a newly pushed head may show no run or status of a check it
  * needs before Factory asks: a check that never registers, or a workflow
- * that didn't trigger, needs a person (DESIGN.md#Waits).
+ * that didn't trigger, needs a person (docs/reference/steps.md#Waits).
  */
 const CHECK_SETTLE_MS = 15 * MINUTE;
 const CI_POLL_MS = 20_000;
@@ -722,7 +722,7 @@ export type CiResult =
  * re-ran, with a needed check that never registered, or with no checks at
  * all, is a question (#1640). Checks queued or running are a transient
  * wait; an environment approval or a required review is a human gate the
- * engine waits on without a deadline (DESIGN.md#Waits).
+ * engine waits on without a deadline (docs/reference/steps.md#Waits).
  */
 export async function observeCi(
   context: DeliveryContext,

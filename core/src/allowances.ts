@@ -1,5 +1,5 @@
 /**
- * Autonomy allowances (DESIGN.md#Allowances): how much an Objective may
+ * Autonomy allowances (docs/reference/state.md#Allowances): how much an Objective may
  * correct itself before Factory asks. Each comes from the configuration the
  * Objective froze (`autonomy.allowances`), plus what the operator granted
  * with `more`. Running out holds with the cause `failure`, and `more`

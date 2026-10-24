@@ -211,7 +211,7 @@ function sessionFailure(
           `Restore the Copilot plan or billing for the service's login, then answer retry (${shown})`,
         )
       : // A spent premium-request quota resets at a time Copilot doesn't
-        // say: Factory asks whether to wait or switch (DESIGN.md#Waits).
+        // say: Factory asks whether to wait or switch (docs/reference/steps.md#Waits).
         new PlannerError("retry", `Copilot quota: ${shown}`, {
           kind: "reset",
           provider: "copilot",

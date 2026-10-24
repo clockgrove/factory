@@ -36,6 +36,7 @@
     "assets",
     "docs/USER-GUIDE.md",
     "docs/DESIGN.md",
+    "docs/reference",
     "docs/templates",
     ".codex-plugin",
     ".claude-plugin/plugin.json",

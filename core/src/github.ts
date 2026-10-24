@@ -101,7 +101,7 @@ export function issueGone(error: unknown): error is GitHubError {
 const TIMEOUT_MS = 60_000;
 
 /**
- * A GitHub failure as a step outcome (DESIGN.md#Waits): only what a person
+ * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
  * must fix holds, at once: a rejected login (401), a refusal (403, or a
  * 404 of anything but an issue; rate limits are TransientErrors) naming
  * the permission the call needs (`needing`), and a missing issue (404).

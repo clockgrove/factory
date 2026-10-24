@@ -72,7 +72,7 @@ npm run build
 node --import ./test/isolate-env.mjs --test test/git-registry-lock.test.mjs
 ```
 
-Keep coverage within the [coverage rules](AGENTS.md#coverage-and-model-contracts); CI runs the complete small suite.
+Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the complete small suite.
 
 ### Recovery end-to-end test
 

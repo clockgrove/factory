@@ -74,7 +74,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       if (state.status === "done") return [];
       if (deps && state.kept?.[RERUN]) return [rerunCleanupStep(deps)];
       // The predecessors come first, so the check reads a base that has
-      // their work (DESIGN.md#Predecessors); a state checked without the
+      // their work (docs/reference/queue.md#Predecessors); a state checked without the
       // step never runs it.
       if (!state.done.check)
         return deps && !state.done[PREDECESSORS]
@@ -151,7 +151,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
 }
 
 /**
- * An error that escaped a step as its outcome (DESIGN.md#Waits), the one
+ * An error that escaped a step as its outcome (docs/reference/steps.md#Waits), the one
  * place errors are classified: a full disk, and a Git refusal (the
  * checkout's configuration, or an origin that no longer names the
  * target), hold for the whole Objective; a provider's classified failure

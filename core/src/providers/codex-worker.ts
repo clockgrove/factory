@@ -144,7 +144,9 @@ const PROXY = /^(?:HTTPS?|NO|ALL)_PROXY$/i;
  * nothing when the shell has no network; with network, each URL (one
  * without a scheme read as http://) without its user name and password (a
  * URL that doesn't parse is left out), so the shell never holds a proxy
- * credential. OPENAI_API_KEY and CODEX_API_KEY are always excluded.
+ * credential. OPENAI_API_KEY and CODEX_API_KEY are always excluded, and
+ * so is RUST_LOG, which is Codex's own (codex.ts codexStderr) unless
+ * sandbox.environment sets it.
  */
 function shellPolicy(
   source: NodeJS.ProcessEnv,
@@ -154,7 +156,7 @@ function shellPolicy(
 ): string {
   const set: string[] = [];
   // Codex's own API keys stay with Codex, whatever its default excludes are.
-  const exclude: string[] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
+  const exclude: string[] = ["OPENAI_API_KEY", "CODEX_API_KEY", "RUST_LOG"];
   for (const [name, value] of Object.entries(source)) {
     if (!PROXY.test(name) || value === undefined) continue;
     if (!network) {

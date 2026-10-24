@@ -1228,7 +1228,7 @@ function amendAcceptStep(
       };
       // Crash points `amend:post:*` (and `amend:data:*` for a plan
       // posted in parts); the marker makes a rerun edit, never repeat.
-      await postPlan(deps, state.issue, plan, signal, {
+      await postPlan(deps, state, plan, signal, {
         point: "amend",
         note: `Amended by ${code(proposal.id)} (${prose(proposal.actor)}): ${prose(proposal.discovery.reason)}`,
       });

@@ -1,3 +1,4 @@
+import type { ProfileWorker } from "../providers/selection.js";
 import { errorMessage } from "../text.js";
 import {
   coverageCriterion,
@@ -39,8 +40,13 @@ type ObjectValue = Record<string, unknown>;
 
 /** Options the facts don't carry. */
 export interface WireOptions {
-  /** Execution profiles the planner chooses from, by id, with what each is for. */
-  profiles?: { id: string; description?: string; selectionHints?: string[] }[];
+  /** Execution profiles the planner chooses from, by id, with what each is for and its worker's model, tools and network. */
+  profiles?: {
+    id: string;
+    description?: string;
+    selectionHints?: string[];
+    worker?: ProfileWorker;
+  }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
 }

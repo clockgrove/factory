@@ -35,6 +35,7 @@ import {
   unqueueIssue,
 } from "./queue.js";
 import { type RequestResult, refused, writeRequest } from "./requests.js";
+import { resetting, statusRecordOf } from "./reset.js";
 import type {
   Hold,
   ObjectiveState,
@@ -82,8 +83,7 @@ export interface GitHubModule {
   writing?: string;
   /**
    * When the card was set to queued for this run, by GitHub's clock: a
-   * stale read after a dequeue never admits the issue again (`withdrawnAt`),
-   * and `reset` tells this run's plan comment from an earlier run's.
+   * stale read after a dequeue never admits the issue again (`withdrawnAt`).
    */
   queuedAt?: string;
   /** An unreadable state's question comment exists (open holds keep theirs: `Hold.shownAt`). */
@@ -991,7 +991,8 @@ export class GitHubSync {
       return;
     }
     const given = (state.modules.github as GitHubModule).statusGivenUp;
-    if (!this.config.progress.enabled || given) return;
+    // A resetting record shows nothing: its rebuild reads the run's comment.
+    if (!this.config.progress.enabled || given || resetting(state)) return;
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;
@@ -1021,6 +1022,7 @@ export class GitHubSync {
             ...this.tally.read(issue, state.startedAt ?? ""),
             decisions: decisionsOf(state),
             ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+            record: statusRecordOf(state),
           },
           this.config.secrets,
           { questions: this.config.progress.includeQuestions },

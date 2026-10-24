@@ -44,8 +44,10 @@ export interface CodexBoundary {
   firstOutputMs?: number;
   /**
    * The call ended without its turn completing, with no stream failure
-   * reported, and with a request whose response never completed: a lost
-   * `response.completed`, the stall a hedge works around.
+   * reported, and with a request (that didn't fail at the transport)
+   * whose response never completed: a lost `response.completed`, the
+   * stall a hedge works around. A call cancelled mid-response shows the
+   * same.
    */
   completionLost: boolean;
 }
@@ -77,7 +79,7 @@ export class CodexStderr {
     unlogged: number;
     ordinary: string;
   } {
-    const text = tail(this.file, this.from);
+    const { text, skipped } = tail(this.file, this.from);
     const boundary: CodexBoundary = {
       coverage: "unavailable",
       requests: 0,
@@ -174,15 +176,12 @@ export class CodexStderr {
           break;
       }
     }
-    boundary.coverage = unread
-      ? "incomplete"
-      : parsed
-        ? "observed"
-        : "unavailable";
+    boundary.coverage =
+      unread || skipped ? "incomplete" : parsed ? "observed" : "unavailable";
     boundary.completionLost =
       !completed &&
       boundary.streamFailures === 0 &&
-      boundary.requests > boundary.responsesCompleted;
+      boundary.requests - boundary.failedRequests > boundary.responsesCompleted;
     return {
       boundary,
       retries,
@@ -257,19 +256,20 @@ function sizeOf(file: string): number {
   }
 }
 
-/** The file's text from `from`, its last READ_MAX bytes at most; empty when unreadable. */
-function tail(file: string, from: number): string {
+/** The file's text from `from`, its last READ_MAX bytes at most (`skipped`: more came before them); empty when unreadable. */
+function tail(file: string, from: number): { text: string; skipped: boolean } {
   const size = sizeOf(file);
   const start = Math.max(from, size - READ_MAX);
-  if (size <= start) return "";
+  const skipped = start > from;
+  if (size <= start) return { text: "", skipped };
   let fd: number | undefined;
   try {
     fd = openSync(file, "r");
     const buffer = Buffer.alloc(size - start);
     const read = readSync(fd, buffer, 0, buffer.length, start);
-    return buffer.subarray(0, read).toString("utf8");
+    return { text: buffer.subarray(0, read).toString("utf8"), skipped };
   } catch {
-    return "";
+    return { text: "", skipped };
   } finally {
     if (fd !== undefined) closeSync(fd);
   }

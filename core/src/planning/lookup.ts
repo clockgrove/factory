@@ -13,7 +13,11 @@
 import type { CoreConfig } from "../config.js";
 import type { Outcome, Step } from "../engine.js";
 import { memoryLookup } from "../knowledge/index.js";
-import { admitted, type PlanningContext } from "../knowledge/settings.js";
+import {
+  admitted,
+  type PlanningContext,
+  selectorText,
+} from "../knowledge/settings.js";
 import { redact } from "../log.js";
 import { validPath } from "../objective.js";
 import { type ShownObjective, shownDigest } from "../shown.js";
@@ -108,7 +112,7 @@ export function plannerLookups(
   const label = (r: number, i: number) => `lookup ${r}.${i}`;
   return {
     data: {
-      selectors,
+      selectors: selectorText(selectors),
       memory: context.memory,
       roundsLeft,
       requestsPerRound: bounds.maxRequestsPerRound,

@@ -61,7 +61,7 @@
     "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
-    "test": "npm run build && node --import ./test/isolate-env.mjs --test --test-timeout=300000 test/*.test.mjs",
+    "test": "npm run test:core",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check",
     "build:core": "tsc -p core/tsconfig.json",

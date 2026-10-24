@@ -59,7 +59,7 @@ npm run notices:check
 npm run test:core
 ```
 
-`npm run test:core` builds Factory and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target. `npm test` runs the old implementation's suite until it is removed.
+`npm run test:core` builds Factory and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target.
 
 The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 
@@ -68,8 +68,8 @@ The [Quality workflow](.github/workflows/quality.yml) runs lint, format and noti
 For an affected integration check after the batch, build and run its file directly:
 
 ```sh
-npm run build
-node --import ./test/isolate-env.mjs --test test/git-registry-lock.test.mjs
+npm run build:core
+node --test core/test/holds.test.mjs
 ```
 
 Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the complete small suite.

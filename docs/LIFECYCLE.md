@@ -1,6 +1,6 @@
 # Objective lifecycle
 
-This page defines how operator commands behave in each Objective state. `test/lifecycle-conformance.test.mjs` checks it, and #1714 tracks the redesign.
+This page defines how operator commands behave in each Objective state in the old tree. #1714 tracks the redesign.
 
 ## Invariants
 

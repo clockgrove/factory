@@ -1,6 +1,6 @@
 import { overrun, resultRereviews } from "../allowances.js";
 import { hold, type Outcome, type StepContext } from "../engine.js";
-import { amendmentAllowance, amendmentLedger } from "../planning/amendments.js";
+import { revisionsLeft } from "../planning/amendments.js";
 import { currentPlan } from "../planning/plan.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import {
@@ -340,8 +340,8 @@ export function freed(asked: Outcome, target: string, repair: number): Outcome {
 /**
  * A blamed predecessor that already merged: no repair of this item can fix
  * it, and a repair never reopens merged work, so the item asks with the
- * evidence. `amend` (while a planning revision is left, and until an
- * amendment for this repair was rejected) proposes a follow-up Work Item
+ * evidence. `amend` (until an amendment for this repair was rejected;
+ * past the allowance, its planning asks for `more`) proposes a follow-up Work Item
  * after the predecessor (`blameAmendment`); `replan` plans the remaining
  * work again from the default branch, which holds the predecessor's
  * result. `note` says why `amend` isn't offered.
@@ -353,14 +353,13 @@ export function mergedBlame(
   correction: Correction,
   note?: string,
 ): Outcome {
-  const amendable =
-    note === undefined &&
-    amendmentAllowance(state) > amendmentLedger(state).used;
+  const amendable = note === undefined;
+  const left = revisionsLeft(state);
   const pr = (
     state.done[stepKey(predecessor, "publish")] as { pr?: number } | undefined
   )?.pr;
   return hold(
-    `Work Item ${item.id}'s failure comes from Work Item ${predecessor}'s merged result${pr ? ` (#${pr})` : ""}, not its own work, so repairing ${item.id} can't fix it.\n\nEvidence (${correction.path}): ${correction.diagnosis}\n\nWhat ${predecessor} needs: ${correction.correction}${note ? `\n\n${note}` : ""}\n\nAnswer ${amendable ? `\`amend\` to have the planner add a Work Item after ${predecessor} that makes this correction (reviewed independently; it uses a planning revision, and ${item.id} runs again on the amended plan with no repair charged), ` : ""}\`replan\` to plan the remaining work again from the default branch, \`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, or cancel.`,
+    `Work Item ${item.id}'s failure comes from Work Item ${predecessor}'s merged result${pr ? ` (#${pr})` : ""}, not its own work, so repairing ${item.id} can't fix it.\n\nEvidence (${correction.path}): ${correction.diagnosis}\n\nWhat ${predecessor} needs: ${correction.correction}${note ? `\n\n${note}` : ""}\n\nAnswer ${amendable ? `\`amend\` to have the planner add a Work Item after ${predecessor} that makes this correction (reviewed independently; it uses a planning revision${left > 0 ? "" : ", and none is left, so its planning asks for `more` first"}, and ${item.id} runs again on the amended plan with no repair charged), ` : ""}\`replan\` to plan the remaining work again from the default branch, \`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, or cancel.`,
     [
       ...(amendable ? [AMEND] : []),
       "replan",

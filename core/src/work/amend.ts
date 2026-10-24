@@ -2,7 +2,6 @@ import { failure, type Outcome, type StepContext } from "../engine.js";
 import { code } from "../markdown.js";
 import {
   type AmendmentProposal,
-  amendmentAllowance,
   amendmentStatus,
   discoveryText,
   itemAttempt,
@@ -44,7 +43,7 @@ export function propose(
   keep: Record<string, unknown>,
   ask: (problems: string) => Outcome,
 ): Outcome {
-  const problems = proposalProblems(proposal, state, amendmentAllowance(state));
+  const problems = proposalProblems(proposal, state);
   if (problems.length) return withKeep(ask(problems.join("; ")), keep);
   // The amendment runs before every other step (workflow.ts); this step
   // runs again once it settles.
@@ -104,7 +103,7 @@ export function amendedAttempt(
  * (`amendedAttempt`); rejected and continued past, or declined by the
  * operator (`factory decline-discovery`, planning/amendments.ts
  * `declineDiscovery`), it carries on with the result as collected. Only a
- * proposal intake refuses (no planning revision left) asks, offering
+ * proposal intake refuses (`proposalProblems`) asks, offering
  * `decline-discovery <reason>`. A backlog discovery is only logged: it is
  * for later Objectives. Undefined: collection goes on.
  */

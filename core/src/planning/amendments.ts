@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { allowances } from "../allowances.js";
+import { grant } from "../allowances.js";
 import { isObject } from "../checked.js";
 import {
   errored,
@@ -17,9 +17,11 @@ import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
 import { forgetting, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
+  type AmendmentGrant,
   acceptedInputs,
   acceptedPlan,
   currentPlan,
+  grantsKey,
   amendmentKey as KEY,
   proposalKey,
   proposalsOf,
@@ -79,9 +81,9 @@ import {
  * - Every coverage obligation and source exclusion stays accounted for, and
  *   a started native stack keeps its layers.
  * - Every proposal is charged once, when it is taken in, against
- *   `autonomy.allowances.planningRevisions`; a rejection or a replacement
- *   never refunds it, and widening an item leaves its spent repairs as they
- *   are. A replan accepts a new plan, which starts a new allowance.
+ *   `autonomy.allowances.planningRevisions`; past it, its planning asks
+ *   for `more` first. A rejection or a replacement never refunds it, and
+ *   widening an item leaves its spent repairs as they are. A replan accepts a new plan, which starts a new allowance.
  * - A rejected amendment is replaced only by a proposal whose seven
  *   discovery fields (scope, reason, evidence, ownership, acceptance,
  *   dependencies, worker) deep-equal the rejected one, with a new diagnosis
@@ -244,13 +246,13 @@ export function amendmentLedger(state: ObjectiveState): AmendmentLedger {
 
 /**
  * Check a proposal where it enters (rule 7): its shape, the amendment in
- * flight, the allowance, and a replacement's binding to the rejection.
+ * flight, and a replacement's binding to the rejection. The allowance is
+ * checked when it is planned (`allowanceOutcome`), which asks for `more`.
  * Every problem says what would pass.
  */
 export function proposalProblems(
   value: unknown,
   state: ObjectiveState,
-  allowance: number,
 ): string[] {
   const proposal = value as AmendmentProposal | null;
   if (!proposal || typeof proposal !== "object")
@@ -293,10 +295,6 @@ export function proposalProblems(
   )
     problems.push(
       `The worker's discovery comes from an earlier attempt of ${proposal.worker.itemId} or an item the plan doesn't have; only its current attempt (${plan?.items.some((item) => item.id === proposal.worker!.itemId) ? itemAttempt(state, proposal.worker.itemId) : "none"}) may propose`,
-    );
-  if (ledger.used >= allowance)
-    problems.push(
-      `This Objective has no planning revision left for an amendment (autonomy.allowances.planningRevisions, shared with the plan's own revision rounds; ${ledger.used} amendment${ledger.used === 1 ? "" : "s"} taken); replan to plan again from the Objective`,
     );
   if (!proposal.replacement) {
     if (ledger.rejected)
@@ -344,16 +342,14 @@ export function proposalProblems(
 }
 
 /**
- * How many proposals the plan accepted now may take: the frozen
- * `planningRevisions` less the revision rounds its own planning spent.
- * The operator's `more` grants to planning never become amendment budget.
+ * The planning revisions left for another amendment: `planningRevisions`
+ * with every `more` granted, less the plan's rounds and the amendments
+ * taken. None left never refuses a proposal: its planning asks for `more`
+ * first (`amendPlanStep`).
  */
-export function amendmentAllowance(state: ObjectiveState): number {
-  const { used } = planningRevisions(state);
-  return Math.max(
-    0,
-    allowances(state).planningRevisions - (used - proposalsOf(state).length),
-  );
+export function revisionsLeft(state: ObjectiveState): number {
+  const { used, allowed } = planningRevisions(state);
+  return allowed - used;
 }
 
 /**
@@ -389,7 +385,7 @@ export function proposeAmendment(
       dependencies: fields.dependencies ?? [],
     } as WorkDiscovery,
   };
-  const problems = proposalProblems(proposal, state, amendmentAllowance(state));
+  const problems = proposalProblems(proposal, state);
   if (!problems.length) state.kept[proposalKey(id)] = proposal;
   return problems;
 }
@@ -823,6 +819,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const { config } = deps;
       const refused = refusal(context.answer);
       if (refused) return refused;
+      const spent = allowanceOutcome(state, proposal, context.answer);
+      if (spent) return spent;
       // Each answer is kept, once per question, before the planner sees
       // it: a later error hold's answer can't overwrite it, and a rerun
       // doesn't add it again.
@@ -1041,6 +1039,60 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
   };
 }
 
+/**
+ * Past `planningRevisions` (this proposal charged), the amendment's
+ * planning asks before the planner runs: `more` grants as much again,
+ * kept once per question (`grantsKey`) with who and when, so a rerun with
+ * the same answer grants nothing more. Undefined: within the allowance.
+ */
+function allowanceOutcome(
+  state: ObjectiveState,
+  proposal: AmendmentProposal,
+  answer: StepContext["answer"],
+): Outcome | undefined {
+  const { used, allowed } = planningRevisions(state);
+  if (used <= allowed) return undefined;
+  const more = grant(state, "planningRevisions");
+  if (answer?.answer === "more") {
+    const grants = (state.kept[grantsKey(proposal.id)] ??
+      []) as AmendmentGrant[];
+    if (!grants.some((entry) => entry.holdId === answer.holdId))
+      return {
+        kind: "retry",
+        reason: `Granted ${more} more planning revisions for amendment ${proposal.id}`,
+        progress: true,
+        keep: {
+          [grantsKey(proposal.id)]: [
+            ...grants,
+            {
+              holdId: answer.holdId,
+              grant: more,
+              by: answer.by,
+              at: answer.at,
+            },
+          ],
+        },
+      };
+  }
+  return hold(
+    `Amendment ${code(proposal.id)} (${proposal.actor}) takes this Objective to ${used} planning revisions (the plan's rounds and its amendments, this one included), past the ${allowed} autonomy.allowances.planningRevisions allows:\n\n${discoveryText(proposal.discovery)}\n\n\`more\` allows ${more} more and plans the amendment; \`refuse\` rejects it, so it can be replaced or the plan runs without it.`,
+    [
+      {
+        answer: "more",
+        family: "retry",
+        consequence: `Allows ${more} more planning revisions and plans the amendment.`,
+      },
+      {
+        answer: "refuse",
+        family: "refuse",
+        consequence:
+          "Rejects the amendment, so it can be replaced or the plan runs without it.",
+      },
+      "cancel",
+    ],
+  );
+}
+
 /** `refuse` (or a `replan` from an earlier hold) rejects the amendment. */
 function refusal(answer: StepContext["answer"]): Outcome | undefined {
   if (answer?.answer !== "refuse" && answer?.answer !== "replan")
@@ -1239,7 +1291,6 @@ function rejectionStep(
     deadlineMs: MINUTE,
     async run({ state, answer }): Promise<Outcome> {
       if (answer?.answer === "continue") return done({});
-      const allowance = amendmentAllowance(state);
       let refused = "";
       if (answer?.answer === "replace") {
         const replacement: AmendmentProposal = {
@@ -1255,7 +1306,7 @@ function rejectionStep(
             correction: (answer.text ?? "").trim(),
           },
         };
-        const problems = proposalProblems(replacement, state, allowance);
+        const problems = proposalProblems(replacement, state);
         if (!problems.length)
           return {
             kind: "retry",
@@ -1265,9 +1316,9 @@ function rejectionStep(
           };
         refused = `\n\nThe replacement wasn't taken: ${problems.join("; ")}`;
       }
-      const left = allowance - amendmentLedger(state).used;
+      const left = revisionsLeft(state);
       return hold(
-        `Amendment ${code(proposal.id)} (${proposal.actor}) was rejected: ${error}\n\n${discoveryText(proposal.discovery)}${refused}\n\n\`replace <correction>\` plans it again with your correction (${left > 0 ? `${left} planning revision${left === 1 ? "" : "s"} left` : "no planning revision left, so it will be refused"}); \`continue\` runs the plan without it.`,
+        `Amendment ${code(proposal.id)} (${proposal.actor}) was rejected: ${error}\n\n${discoveryText(proposal.discovery)}${refused}\n\n\`replace <correction>\` plans it again with your correction (${left > 0 ? `${left} planning revision${left === 1 ? "" : "s"} left` : "no planning revision left, so it asks for `more` first"}); \`continue\` runs the plan without it.`,
         [
           {
             answer: "replace",

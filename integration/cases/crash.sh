@@ -4,7 +4,7 @@
 #   holder   installation C serves; H is refused; H takes over with --take-over and C stops; H's clean stop frees the repository
 #   crash    every serve runs in a network namespace (lib/netns-serve.sh) and is
 #            armed with one point at a time (FACTORY_CRASH_AT); a death starts the
-#            next point. CA (two items) and CB (one) run to done; CQ holds at a
+#            next point. CA (two items), CB and CC (one each) run to done; CQ holds at a
 #            planner question for sync:remind, then is cancelled for sync:cancel
 #            (armed before the cancel is sent). At the end every Objective must
 #            be done or cancelled once, with no duplicate comment, PR or issue.
@@ -40,17 +40,22 @@ c_holder() {
 
 # The lane's Objectives and their hold policies.
 c_tick() {
-  local n; for n in $CA $CB; do [[ $(st phase "$n") == hold:* ]] && HOLD_POLICY="d2 review decide more" auto_answer "$n" >/dev/null; done
+  local n; for n in $CA $CB $CC; do [[ $(st phase "$n") == hold:* ]] && HOLD_POLICY="d2 review decide more" auto_answer "$n" >/dev/null; done
   [[ $(st phase "$CQ") == hold:* ]] && HOLD_POLICY="d2" auto_answer "$CQ" >/dev/null
   c_netcut
+}
+# Whether some lifecycle Objective can still move: not settled, and not held at a question the lane doesn't answer.
+c_can_move() {
+  local n p; for n in $CA $CB $CC; do p=$(st phase "$n"); case $p in done|cancelled|failed) ;; hold:*) [ -n "$(HOLD_POLICY="d2 review decide more" auto_answer "$n" && echo y)" ] && return 0 ;; *) return 0 ;; esac; done
+  return 1
 }
 c_question_open() { [ "$(hold_field "$(st hold "$CQ" 'decide*')" id)" != "" ]; }
 # Cut the network once while CA or CB plans, once while one waits for CI.
 c_netcut() {
   local n
-  if [ -z "$CUT1" ]; then for n in $CA $CB; do
+  if [ -z "$CUT1" ]; then for n in $CA $CB $CC; do
     if started "$n" 'plan*' && [ "$(st status "$n")" = planning ]; then CUT1=$(iso); serve_cut plan; CUT1E=$(iso); return; fi; done; fi
-  if [ -z "$CUT2" ]; then for n in $CA $CB; do
+  if [ -z "$CUT2" ]; then for n in $CA $CB $CC; do
     if [ "$(st events "$n" event=start 'step=item:*:ci')" -gt "$(st events "$n" event=outcome 'step=item:*:ci')" ]; then CUT2=$(iso); serve_cut ci; CUT2E=$(iso); return; fi; done; fi
 }
 # c_arm POINT WINDOW [TRIGGER]: start a serve armed with POINT; 0 when it crashed there.
@@ -70,6 +75,8 @@ c_arm() {
       sleep 5; serve_up "$pt" netns || return 1
     fi
     c_tick
+    # Nothing can reach a lifecycle point: stop waiting for it.
+    [ -n "${LIFECYCLE:-}" ] && ! c_can_move && { log "no lifecycle Objective can move: giving up on $pt"; serve_down; CRASHES=0; return 1; }
     # A remind point is due before CQ's reminder: hand over to it.
     [ -n "${PREEMPT:-}" ] && $PREEMPT && { serve_down; CRASHES=0; return 2; }
     sleep 2
@@ -81,10 +88,12 @@ c_cancel_cq() { cli_t 60 cancel "$CQ" >/dev/null 2>&1; log "#$CQ cancel sent"; }
 
 c_crash() {
   local CASE=crash t0; t0=$(now); declare -gA CH=(); CUT1=""; CUT2=""; CUT1E=""; CUT2E=""; UNEXPECTED=""; REMIND_TRIED=""; RESTARTS=0
-  CRASH_END=$(( STOP_AT - 600 ))
+  CRASH_END=$(( STOP_AT - 1200 ))
   inst C
   CA=$(new_objective chain2 "crash lane two items" ID="$(uid)") || return
   CB=$(new_objective happy "crash lane one item" ID="$(uid)") || return
+  local fn; fn="trimEnd$(uid)"
+  CC=$(new_objective exec "crash lane one item" FN="$fn" SPEC="\`$fn(s)\` removes the spaces at the end of \`s\`: \`$fn(\"ab  \")\` is \`\"ab\"\`.") || return
   CQ=$(new_objective hold "crash lane held" PROVIDER=codex-plan ID="$(uid)") || return
   local pt missed=()
   for pt in $CRASH_LIFECYCLE; do
@@ -94,10 +103,10 @@ c_crash() {
       c_arm sync:remind:before 300 && c_arm sync:remind:after 180
       c_arm sync:cancel:before 180 c_cancel_cq && c_arm sync:cancel:after 180
     fi
-    PREEMPT=c_remind_due c_arm "$pt" 480; local r=$?
+    LIFECYCLE=1 PREEMPT=c_remind_due c_arm "$pt" 300; local r=$?
     if [ $r = 2 ]; then REMIND_TRIED=1; c_arm sync:remind:before 300 && c_arm sync:remind:after 180
       c_arm sync:cancel:before 180 c_cancel_cq && c_arm sync:cancel:after 180
-      c_arm "$pt" 480; r=$?; fi
+      LIFECYCLE=1 c_arm "$pt" 300; r=$?; fi
     [ $r = 0 ] || missed+=("$pt")
     [ "$(now)" -ge "$CRASH_END" ] && break
   done
@@ -106,18 +115,19 @@ c_crash() {
   # Settle: a clean serve until CA and CB are done and CQ is cancelled.
   serve_up "" netns
   cancelled_clean "$CQ" || c_cancel_cq
-  local end=$(( STOP_AT - 180 ))
+  local end=$(( STOP_AT - 600 ))
   while [ "$(now)" -lt "$end" ]; do
     serve_tick; c_tick
-    settled "$CA" && settled "$CB" && cancelled_clean "$CQ" && break
+    settled "$CA" && settled "$CB" && settled "$CC" && cancelled_clean "$CQ" && break
+    c_can_move || { cancelled_clean "$CQ" && break; }
     serve_exited && { log "clean serve exited $(cat "$SERVE_DIR/exit")"; UNEXPECTED="$UNEXPECTED clean:exit$(cat "$SERVE_DIR/exit")"; serve_up "" netns; }
     sleep 5
   done
   sleep 20
   local ok=0 ev=""
-  end_done "$CA" || ok=1; ev="$EVID"; end_done "$CB" || ok=1; ev="$ev | $EVID"
+  end_done "$CA" || ok=1; ev="$EVID"; end_done "$CB" || ok=1; ev="$ev | $EVID"; end_done "$CC" || ok=1; ev="$ev | $EVID"
   end_cancelled "$CQ" || ok=1; ev="$ev | $EVID"
-  local open=""; settled "$CA" || open="$open #$CA"; settled "$CB" || open="$open #$CB"; cancelled_clean "$CQ" || open="$open #$CQ"
+  local open=""; settled "$CA" || open="$open #$CA"; settled "$CB" || open="$open #$CB"; settled "$CC" || open="$open #$CC"; cancelled_clean "$CQ" || open="$open #$CQ"
   local cc rm; cc=$(marker_prefix_count "$(gh_markers "$CQ")" cancelled:); rm=$(marker_prefix_count "$(gh_markers "$CQ")" remind:)
   ev="$ev; CQ cancel comments $cc, reminders $rm${UNEXPECTED:+; unexpected exits:$UNEXPECTED}"
   [ "$cc" = 1 ] && [ "$rm" -le 1 ] || ok=1
@@ -133,27 +143,30 @@ c_crash() {
   local CASE=netcut
   c_cut_check plan "$CUT1" "$CUT1E" "$t0"; c_cut_check ci "$CUT2" "$CUT2E" "$t0"
 }
-# No hold (planner questions aside) on CA or CB from a cut until 3 min after it ended.
+# No hold (planner questions aside) from a cut: none at a step of CA, CB or CC that ran during it, within 3 min of its end.
 c_cut_check() {
   local name=$1 a=$2 b=$3 t0=$4
   [ -n "$a" ] || { record "netcut.$name" UNREACHABLE "no cut ($name): the moment didn't come while a serve ran" "$t0"; return; }
   [ -n "$b" ] || { record "netcut.$name" FAIL "the $name cut started at $a and was never restored" "$t0"; return; }
-  local h; h=$(python3 - "$ROOT" "$a" "$b" $CA $CB <<'PY'
+  local h; h=$(python3 - "$ROOT" "$a" "$b" $CA $CB $CC <<'PY'
 import datetime, glob, json, os, sys
 root, a, b = sys.argv[1:4]
 end = (datetime.datetime.fromisoformat(b.replace("Z", "+00:00")) + datetime.timedelta(minutes=3)).isoformat()[:19]
 n = 0
 for issue in sys.argv[4:]:
-    for f in glob.glob(os.path.join(root, "logs", issue, "*.jsonl")):
+    ev = []
+    for f in sorted(glob.glob(os.path.join(root, "logs", issue, "*.jsonl"))):
         for l in open(f, errors="replace"):
-            try: e = json.loads(l)
+            try: ev.append(json.loads(l))
             except ValueError: continue
-            at = str(e.get("at", ""))[:19]
-            if e.get("event") == "outcome" and e.get("outcome") == "hold" and not str(e.get("step")).startswith("decide") and a[:19] <= at <= end: n += 1
+    ran = {str(e.get("step")) for e in ev if e.get("event") == "start" and str(e.get("at", ""))[:19] <= b[:19]}
+    for e in ev:
+        at = str(e.get("at", ""))[:19]; step = str(e.get("step"))
+        if e.get("event") == "outcome" and e.get("outcome") == "hold" and not step.startswith("decide") and step in ran and a[:19] <= at <= end: n += 1
 print(n)
 PY
 )
-  [ "$h" = 0 ] && settled "$CA" && settled "$CB"; rec_if "netcut.$name" $? "cut $a..$b: holds on #$CA #$CB in the cut and 3 min after: $h; both ended: $(st status "$CA")/$(st status "$CB")" "$t0"
+  [ "$h" = 0 ]; rec_if "netcut.$name" $? "cut $a..$b: holds at steps that ran during it, within 3 min of its end: $h (#$CA $(st status "$CA"), #$CB $(st status "$CB"), #$CC $(st status "$CC"))" "$t0"
 }
 
 lane_c() {

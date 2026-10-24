@@ -10,6 +10,7 @@
 # Results: .runs/results/<PDT timestamp>.md; exit 1 on any FAIL, 3 when it
 # refuses to start (a serve already runs for a scratch repository), 2 on bad usage.
 set -uo pipefail
+{   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""
 M_REPO=clockgrove/factory-drill; C_REPO=clockgrove/factory-drill-2
@@ -40,7 +41,7 @@ CASE_TABLE_main=(
   "crash|C|40|factory-drill-2: one installation at a time (holder.second-refused, take-over, release, restart); sampled crash points armed one at a time across live Objectives: plan:post, deliver:push, deliver:pr-create, deliver:merge, report:comment, report:close, sync:remind and sync:cancel, before and after (crash.*): every Objective done or cancelled once with no duplicate; two 60 s network cuts, no hold (netcut.*)"
 )
 CASE_TABLE_edge=(
-  "reset|E|30|factory-drill: a delivered and a mid-build Objective rebuilt from GitHub by 'factory reset' on a clean state directory: the delivered one stays done with nothing new posted, the mid-build one finishes once (reset.delivered, reset.mid-build)"
+  "reset|E|30|factory-drill: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
   "archived|E|10|factory-drill: 'factory run N' on an issue whose Project card is archived admits it (queue.archived-card)"
 )
 case "$SUITE_NAME" in main|edge) ;; *) echo "unknown suite: $SUITE_NAME (main, edge)" >&2; exit 2 ;; esac
@@ -212,7 +213,10 @@ setup_main() {
   printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
   cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"
   serve_up || return 1
+  serve_ready
 }
+# The serve's own record names its PID: the CLI sees a running service from then on.
+serve_ready() { wait_for 90 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"pid\"))' '$ROOT/service.json' 2>/dev/null)\" = $(serve_pid) ]"; }
 if [ "$SUITE_NAME" = main ]; then setup_main || { log "setup failed"; exit 1; }
 else setup_edge || { log "setup failed"; exit 1; }; fi
 record_setup() { local CASE=suite; record suite.setup PASS "setup took $(( $(date +%s) - SETUP0 )) s" "$SETUP0"; }; record_setup
@@ -246,3 +250,4 @@ while :; do
   sleep 5
 done
 exit 0
+}

@@ -74,33 +74,14 @@ build_has_env() { build_has_token "$1"; }
 # A case names the features it needs; a build without one records the case
 # UNREACHABLE (feature absent), never FAIL.
 declare -gA FEAT_TOKEN=(
-  [holds-v2]=--question
-  [remind]=FACTORY_REMIND_MS
-  [deadline]=FACTORY_DEADLINE_MS
-  [unchecked]=comment-unchecked
-  [rate-reset]=x-ratelimit-reset
-  [switch]=switchTargets
-  [proxy-policy]=shell_environment_policy
-  [run-report]=':report:${run}'
-  [incident]='unreadable:${entry.incident}'
-  [withdrawing]=withdrawing
-  [continuation]='progress: true'
-  [gone-issue]=reply-dropped
-  [repo-moved]=RepositoryMoved
-  [holder]=refs/factory/holder
-  [resent-set]='which the operator sent back'
-  # Still in review when this suite was written (each case skips cleanly without it).
   [isolation]=cleanup-left
-  [request-check]=request-rejected
   [inert]='function inert('
   [protected-paths]=namesPath
   [attachment-scope]='sends its GitHub token only to'
-  [single-set]=autoSelected
-  [adaptive-only]=ADAPTIVE_ONLY
+  [reset-rebuild]=reset:plan
 )
 has_feature() {
   case $1 in
-    reset) cli_has reset ;;
     run) cli_has run ;;
     *) [ -n "${FEAT_TOKEN[$1]:-}" ] && build_has_token "${FEAT_TOKEN[$1]}" ;;
   esac
@@ -250,6 +231,8 @@ settled() { case $(st status "$1") in done|cancelled|failed) return 0 ;; *) retu
 # A cancelled Objective whose cleanup has run.
 cancelled_clean() { [ "$(st status "$1")" = cancelled ] && [ "$(st has "$1" done.cancel:cleanup)" = 1 ]; }
 started() { [ "$(st started "$1" "$2")" = 1 ]; }
+# started_or_answer N GLOB: started, answering N's holds by HOLD_POLICY meanwhile (for wait_for).
+started_or_answer() { started "$1" "$2" && return 0; [[ $(st phase "$1") == hold:* ]] && auto_answer "$1" >/dev/null; return 1; }
 # cancel_wait N: cancel and wait for the cleanup.
 cancel_wait() { cli_t 60 cancel "$1" >/dev/null 2>&1; wait_for "${2:-300}" cancelled_clean "$1"; }
 

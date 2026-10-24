@@ -115,3 +115,32 @@ test("Claude readiness asks the SDK for its login: none is blocked, and so is a 
   assert.match(unreadable.detail, /CLAUDE_CODE_OAUTH_TOKEN is empty/);
   assert.match(unreadable.fix, /--credential-file/);
 });
+
+test("--background checks readiness without the logins its unit doesn't keep: a Codex API key in the shell isn't one", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  // A home with no Codex login and no unit; the key is in the shell only.
+  const home = join(inst.root, "home");
+  mkdirSync(home);
+  inst.env.HOME = home;
+  for (const name of ["CODEX_HOME", "OPENAI_API_KEY", "XDG_CONFIG_HOME"])
+    delete inst.env[name];
+  inst.env.CODEX_API_KEY = "sk-shell-only";
+  const codex = (checks) =>
+    checks.find(
+      (entry) => entry.name === "provider codex: codex planner and worker",
+    );
+  const foreground = JSON.parse(cli(inst, "setup", "--json").out);
+  assert.match(
+    codex(foreground.readiness.checks).detail,
+    /CODEX_API_KEY in the environment/,
+  );
+  const background = JSON.parse(
+    cli(inst, "setup", "--background", "--json").out,
+  );
+  assert.equal(background.status, "blocked");
+  assert.equal(background.service, undefined, "nothing was installed");
+  const check = codex(background.setup.readiness.checks);
+  assert.equal(check.status, "blocked", JSON.stringify(check));
+  assert.match(check.fix, /codex login/);
+});

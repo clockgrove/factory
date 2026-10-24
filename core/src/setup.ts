@@ -41,6 +41,7 @@ import {
   stop,
   uninstall,
   unitHealth,
+  unkeptLogins,
 } from "./systemd.js";
 import { errorMessage } from "./text.js";
 
@@ -256,8 +257,12 @@ function optionValue(read: Read, given: string[]): unknown {
 export async function setup(
   repository: string,
   values: Record<string, string[]>,
-  /** Credentials the background service will load, by name (readiness counts them). */
-  bound: readonly string[] = [],
+  /**
+   * For `--background`: the credentials the service will load, by name.
+   * The checks then run as the service will, with them and without the
+   * logins its unit doesn't keep from this shell.
+   */
+  service?: readonly string[],
 ): Promise<SetupReport> {
   const path = configPath(repository);
   const created = !existsSync(path);
@@ -348,13 +353,15 @@ export async function setup(
     const refusal = await originRefusal(config.checkout, repository);
     if (refusal) problems.push(refusal.message);
   }
+  if (service)
+    for (const name of unkeptLogins(config)) delete process.env[name];
   const github = new GitHub(repository, process.env.FACTORY_GITHUB_API);
   try {
     problems.push(...(await projectProblems(github, config)));
   } catch (error) {
     problems.push(`Can't read the queue's Project: ${errorMessage(error)}`);
   }
-  const ready = await readiness(config, github, bound);
+  const ready = await readiness(config, github, service);
   return {
     status: problems.length || !ready.ready ? "blocked" : "configured",
     config: path,

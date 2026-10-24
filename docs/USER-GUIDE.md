@@ -55,7 +55,7 @@ A provider pairs a **planner** (it plans and reviews) with a **worker** (it writ
 
 | Kind      | Planner | Worker | Login                                                                                                        |
 | --------- | ------- | ------ | ------------------------------------------------------------------------------------------------------------ |
-| `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY`                                                         |
+| `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY` for a foreground `factory serve`                        |
 | `claude`  | yes     | yes    | `claude auth login`, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`; needs the optional Claude Agent SDK |
 | `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK (see below)                  |
 
@@ -65,7 +65,7 @@ factory setup --repo OWNER/NAME --provider claude --planner claude --worker clau
 factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer-effort high --default
 ```
 
-- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys from the environment or as `--credential-file NAME=FILE`.
+- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys only as `--credential-file NAME=FILE`.
 - **Model choices.** `models.planner` and `models.reviewer` each name a model and an effort. `models.reviewEffort` sets one review phase's effort: `graph-review`, `result-review` or `objective-review`. The other phases run on `models.planner`.
 - **What runs is what's configured.** A Copilot planner or worker served another model holds with `switch NAME`. So does a Claude worker whose answer comes from another model than its configured full id (an alias such as `opus` isn't compared) or that starts at another effort. A Claude worker that starts in another permission mode or directory holds before any tool runs.
 - **One provider per Objective.** An Objective runs on the provider it was admitted with. It never falls back to another one, and a missing login holds with the fix.

@@ -97,7 +97,7 @@ export function amendedAttempt(
 
 /**
  * A worker's in-scope `.factory-discovery.json` is proposed at once as
- * amendment `worker-<item>-<attempt>`, as the old Factory did: the item
+ * amendment `worker-<item>-<attempt>`: the item
  * waits for its outcome with no question, and the amendment's independent
  * review judges it. Accepted, the item starts a new attempt
  * (`amendedAttempt`); rejected and continued past, or declined by the

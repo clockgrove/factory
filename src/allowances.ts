@@ -48,8 +48,7 @@ const GRANTED = "allowances:granted";
 /**
  * Mechanical merge-conflict repairs per target (`state.kept`): they count
  * against `perPath`, which bounds a conflict loop, but never against
- * `implementationRepairs`, which counts wrong results, as the old Factory
- * charged only those.
+ * `implementationRepairs`, which counts only wrong results.
  */
 const CONFLICTS = "allowances:conflicts";
 

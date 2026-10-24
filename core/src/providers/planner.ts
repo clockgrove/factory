@@ -44,7 +44,6 @@ export const REVIEW_PHASES = [
   "graph-review",
   "result-review",
   "objective-review",
-  "discovery",
 ] as const satisfies readonly PlannerPhase[];
 export type ReviewPhase = (typeof REVIEW_PHASES)[number];
 

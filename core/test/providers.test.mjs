@@ -58,7 +58,7 @@ test("setup completes a half-given model choice and sets Copilot's idle bound; r
   assert.equal(loaded.status, "refused");
   assert.match(
     loaded.problems.join("\n"),
-    /models\.reviewEffort\.plan is not a setting: plan runs on models\.planner/,
+    /models\.reviewEffort\.plan is not a setting/,
   );
   assert.doesNotMatch(
     loaded.problems.join("\n"),

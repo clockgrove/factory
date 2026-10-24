@@ -23,7 +23,6 @@ import type { ClaudeWorkerConfig } from "./claude-worker.js";
 import type { CodexEffort } from "./codex.js";
 import {
   type ModelChoice,
-  PLANNER_PHASES,
   type PlannerModels,
   REVIEW_PHASES,
 } from "./planner.js";
@@ -281,19 +280,11 @@ function modelsSpec(planner: PlannerKind): Spec {
   return {
     planner: choice,
     reviewer: choice,
-    // A planner phase runs on models.planner, so its effort is refused here.
+    // Only review phases: a planner phase runs on models.planner.
     reviewEffort: optional(
       object(
         Object.fromEntries(
           REVIEW_PHASES.map((phase) => [phase, optional(effort)]),
-        ),
-        Object.fromEntries(
-          PLANNER_PHASES.filter(
-            (phase) => !(REVIEW_PHASES as readonly string[]).includes(phase),
-          ).map((phase) => [
-            phase,
-            `${phase} runs on models.planner: set models.planner.effort; reviewEffort takes ${REVIEW_PHASES.join(", ")}`,
-          ]),
         ),
       ),
     ),

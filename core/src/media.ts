@@ -102,8 +102,6 @@ const MAX_MEMBER_BYTES = 2 * 1024 * MIB;
 /** All members one capture keeps, so a worker can't fill the work directory. */
 const MAX_CAPTURE_BYTES = 8 * 1024 * MIB;
 const MAX_MANIFEST_BYTES = 1 * MIB;
-/** GitHub refuses a pushed file larger than this outside LFS. */
-const GITHUB_FILE_BYTES = 100 * MIB;
 
 /** A media answer: a step maps each kind onto its own outcome. */
 export type MediaOutcome<T> =
@@ -192,8 +190,6 @@ export interface SelectedMember {
   destination: string;
   sha256: string;
   bytes: number;
-  /** Its item lists the role in requiredLfsRoles, so the tree must hold its pointer. */
-  required: boolean;
 }
 
 /**
@@ -1078,10 +1074,11 @@ const MAX_REASON_CHARS = 2000;
 
 /**
  * Write the chosen set at its destinations on top of the work commit, in a
- * fresh worktree, through Git LFS where `.gitattributes` says so, and
- * commit it as `Factory: selected <set> assets`. Checks first that every
- * captured copy still has its digest, that `.gitattributes` routes every
- * requiredLfsRoles destination through LFS, and that no destination exists
+ * fresh worktree, through Git LFS, and commit it as `Factory: selected
+ * <set> assets`. Checks first that every captured copy still has its
+ * digest, that `.gitattributes` routes every destination through LFS (a
+ * repair when the item owns `.gitattributes`, else a hold with `replan`
+ * and `cancel`), and that no destination exists
  * (except a plain tracked repository source of the same bytes that LFS
  * converts); after, that the staged paths are exactly the destinations and
  * each LFS pointer carries the member's sha256 and size.
@@ -1130,52 +1127,24 @@ export async function materializeSelection(input: {
     const filtered = lfsFiltered(
       await git(["check-attr", "-z", "filter", "--", ...destinations]),
     );
-    const uncovered = set.members.filter(
-      (m) =>
-        item.requiredLfsRoles?.includes(m.role) && !filtered.has(m.destination),
-    );
-    // GitHub refuses a push with a plain blob over its file limit; only LFS
-    // can carry such a member.
-    const oversize = set.members.filter(
-      (m) => !filtered.has(m.destination) && m.bytes > GITHUB_FILE_BYTES,
-    );
-    if (oversize.length) {
-      const listed = oversize
-        .map((m) => `${m.destination} (${m.role}, ${m.bytes} bytes)`)
-        .join(", ");
+    // Selected media travels in Git LFS, whatever its format or size.
+    const uncovered = set.members
+      .filter((m) => !filtered.has(m.destination))
+      .map((m) => `${m.destination} (${m.role})`)
+      .join(", ");
+    if (uncovered)
       return ownsPath(".gitattributes", item.ownedPaths)
         ? {
             kind: "repair",
-            finding: `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that .gitattributes doesn't route through Git LFS: ${listed}. Add a filter=lfs rule that covers them.`,
+            finding: `.gitattributes does not route ${uncovered} through Git LFS, and selected media must be stored in LFS. Add a filter=lfs rule that covers them.`,
             keepsSelection: true,
           }
         : hold(
-            `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that the repository's .gitattributes doesn't route through Git LFS: ${listed}. Work Item ${item.id} doesn't own .gitattributes. Answer repair to have the worker make smaller candidates, replan to give an item that rule, or cancel.`,
-            [NEW_CANDIDATES, "replan", "cancel"],
-          );
-    }
-    if (uncovered.length) {
-      const paths = uncovered.map((m) => m.destination).join(", ");
-      return ownsPath(".gitattributes", item.ownedPaths)
-        ? {
-            kind: "repair",
-            finding: `.gitattributes does not route ${paths} through Git LFS, but the roles ${uncovered.map((m) => m.role).join(", ")} must be stored in LFS. Add a filter=lfs rule that covers them.`,
-            keepsSelection: true,
-          }
-        : hold(
-            `The repository's .gitattributes does not route ${paths} through Git LFS, and Work Item ${item.id} must store ${uncovered.map((m) => m.role).join(", ")} there but doesn't own .gitattributes. Answer replan to give an item that rule, or cancel.`,
+            `The repository's .gitattributes does not route ${uncovered} through Git LFS, where selected media must be stored, and Work Item ${item.id} doesn't own .gitattributes. Answer replan to give an item that rule, or cancel.`,
             ["replan", "cancel"],
           );
-    }
     for (const member of set.members) {
-      const placed = await place(
-        directory,
-        input.commit,
-        item,
-        member,
-        filtered,
-        signal,
-      );
+      const placed = await place(directory, input.commit, item, member, signal);
       if (placed) return placed;
     }
     await hostGit(directory, [...LFS, "add", "--", ...destinations], {
@@ -1207,7 +1176,6 @@ export async function materializeSelection(input: {
     ]);
     const commit = (await git(["rev-parse", "HEAD"])).toString("utf8").trim();
     for (const member of set.members) {
-      if (!filtered.has(member.destination)) continue;
       const found = lfsPointer(
         await git(["cat-file", "blob", `${commit}:${member.destination}`]),
       );
@@ -1336,7 +1304,6 @@ async function place(
   commit: string,
   item: WorkItem,
   member: CapturedMember,
-  filtered: ReadonlySet<string>,
   signal: AbortSignal,
 ): Promise<MediaOutcome<never> | undefined> {
   let parent: ReturnType<typeof openParent>;
@@ -1369,8 +1336,6 @@ async function place(
         blob !== undefined &&
         !lfsPointer(blob) &&
         sha256(blob) === member.sha256 &&
-        filtered.has(member.destination) &&
-        Boolean(item.requiredLfsRoles?.includes(member.role)) &&
         (item.sourceAssets ?? []).some(
           (source) =>
             (source.kind ?? "repository") === "repository" &&
@@ -1407,7 +1372,7 @@ function lfsFiltered(output: Buffer): Set<string> {
 /**
  * The selected members a tree is expected to hold: those of the item and
  * its dependency closure (every item when `item` is undefined, for final
- * validation). `required` marks members whose role must be in LFS.
+ * validation). Each must be in the tree as its Git LFS pointer.
  */
 export function validationMembers(
   plan: Plan,
@@ -1428,7 +1393,6 @@ export function validationMembers(
   for (const id of closure) {
     const chosen = selection(id);
     if (!chosen) continue;
-    const roles = byId.get(id)?.requiredLfsRoles ?? [];
     for (const member of chosen.set.members)
       members.push({
         item: id,
@@ -1437,7 +1401,6 @@ export function validationMembers(
         destination: member.destination,
         sha256: member.sha256,
         bytes: member.bytes,
-        required: roles.includes(member.role),
       });
   }
   return members;
@@ -1501,7 +1464,7 @@ const RESERVED_BYTES = 1024 * MIB;
  * command runs, with validationMembers(plan, item, …). done → run the
  * commands; retry (origin unreachable) → retry; hold → hold as the
  * validate step's own. Its holds offer `retry` (validate again), `replan`
- * (a required member's pointer is gone: the step's replan route) and
+ * (a selected member's pointer is gone: the step's replan route) and
  * `cancel`.
  */
 export async function hydrateTree(input: {
@@ -1515,7 +1478,6 @@ export async function hydrateTree(input: {
 }): Promise<Exclude<MediaOutcome<LfsFile[]>, { kind: "repair" }>> {
   const { directory, signal } = input;
   for (const member of input.members) {
-    if (!member.required) continue;
     const blob = await hostGitExit(
       directory,
       ["cat-file", "blob", `HEAD:${member.destination}`],
@@ -1963,7 +1925,7 @@ async function lfsPush(input: {
 
 /**
  * Prove origin serves every selected member at the integrated commit:
- * each destination holds its member's pointer (or plain bytes), and a
+ * each destination holds its member's pointer, and a
  * `git lfs fetch` into an empty store downloads objects with the selected
  * sha256 and size. Missing objects are re-pushed by object id from the
  * local store once (retry with `repushed`), then hold. Returns a text
@@ -1986,7 +1948,6 @@ export async function verifyOriginMedia(input: {
 }): Promise<MediaOutcome<{ summary: string }>> {
   const { checkout, commit, signal } = input;
   if (!input.members.length) return { kind: "done", value: { summary: "" } };
-  const lfs: SelectedMember[] = [];
   for (const member of input.members) {
     const blob = await hostGitExit(
       checkout,
@@ -1994,46 +1955,38 @@ export async function verifyOriginMedia(input: {
       { signal },
     );
     const found = blob.code === 0 ? lfsPointer(blob.stdout) : undefined;
-    if (found?.oid === member.sha256 && found.size === member.bytes)
-      lfs.push(member);
-    else if (
-      blob.code !== 0 ||
-      member.required ||
-      sha256(blob.stdout) !== member.sha256
-    )
+    if (found?.oid !== member.sha256 || found.size !== member.bytes)
       return hold(
-        `${member.destination} at ${commit.slice(0, 12)} is not ${member.item}'s selected ${member.role} (sha256 ${member.sha256}); someone may have changed it after the merge. Restore it on the default branch and answer retry, or cancel.`,
+        `${member.destination} at ${commit.slice(0, 12)} is not the Git LFS pointer of ${member.item}'s selected ${member.role} (sha256 ${member.sha256}); someone may have changed it after the merge. Restore it on the default branch and answer retry, or cancel.`,
       );
   }
   const missing: SelectedMember[] = [];
-  if (lfs.length) {
-    await forceRemove(input.scratch);
-    await mkdir(input.scratch, { recursive: true, mode: 0o700 });
-    try {
-      const fetched = await lfsFetch({
-        checkout,
-        repository: input.repository,
-        commit,
-        paths: lfs.map((m) => m.destination),
-        storage: input.scratch,
-        signal,
-      });
-      if (fetched) return fetched;
-      for (const member of lfs) {
-        const object = join(
-          input.scratch,
-          "objects",
-          member.sha256.slice(0, 2),
-          member.sha256.slice(2, 4),
-          member.sha256,
-        );
-        const held = await digestFile(object).catch(() => undefined);
-        if (held?.sha256 !== member.sha256 || held.bytes !== member.bytes)
-          missing.push(member);
-      }
-    } finally {
-      await forceRemove(input.scratch);
+  await forceRemove(input.scratch);
+  await mkdir(input.scratch, { recursive: true, mode: 0o700 });
+  try {
+    const fetched = await lfsFetch({
+      checkout,
+      repository: input.repository,
+      commit,
+      paths: input.members.map((m) => m.destination),
+      storage: input.scratch,
+      signal,
+    });
+    if (fetched) return fetched;
+    for (const member of input.members) {
+      const object = join(
+        input.scratch,
+        "objects",
+        member.sha256.slice(0, 2),
+        member.sha256.slice(2, 4),
+        member.sha256,
+      );
+      const held = await digestFile(object).catch(() => undefined);
+      if (held?.sha256 !== member.sha256 || held.bytes !== member.bytes)
+        missing.push(member);
     }
+  } finally {
+    await forceRemove(input.scratch);
   }
   if (missing.length) {
     const paths = missing.map((m) => m.destination).join(", ");
@@ -2069,7 +2022,7 @@ export async function verifyOriginMedia(input: {
   return {
     kind: "done",
     value: {
-      summary: `Selected media verified on origin at ${commit.slice(0, 12)}:\n${input.members.map((m) => `- ${m.item} set ${m.set} ${m.role} → ${m.destination}: sha256 ${m.sha256}, ${m.bytes} bytes${lfs.includes(m) ? " (Git LFS)" : ""}`).join("\n")}`,
+      summary: `Selected media verified on origin at ${commit.slice(0, 12)}:\n${input.members.map((m) => `- ${m.item} set ${m.set} ${m.role} → ${m.destination}: sha256 ${m.sha256}, ${m.bytes} bytes (Git LFS)`).join("\n")}`,
     },
   };
 }
@@ -2136,7 +2089,7 @@ const CAPTURE_CHECKS = [
 /** What materializeSelection checks for the selected set before it commits it. */
 const SELECTION_CHECKS = [
   "Every captured copy of the selected set still has its recorded sha256 and byte count",
-  "The target's .gitattributes routes every required LFS role's destination through Git LFS",
+  "The target's .gitattributes routes every destination through Git LFS",
   "No destination already held other content",
   "The selection commit changes exactly the selected destinations, on top of the worker's commit",
   "Each committed Git LFS pointer carries the member's sha256 and byte count",

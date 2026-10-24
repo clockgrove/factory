@@ -503,7 +503,7 @@ function recognizedObjectiveAttachment(value: string): boolean {
   }
 }
 
-/** Output roles, candidate counts, LFS roles and source assets. */
+/** Output roles, candidate counts and source assets. */
 async function mediaFindings(
   items: readonly WorkItem[],
   facts: PlanningFacts,
@@ -522,14 +522,6 @@ async function mediaFindings(
     if (roles.length && (item.minimumAssetSets ?? 0) < 1)
       found(
         `Work Item ${item.id} expects output roles, so minimumAssetSets must be at least 1`,
-        item.id,
-      );
-    const unknown = (item.requiredLfsRoles ?? []).filter(
-      (role) => !roles.includes(role),
-    );
-    if (unknown.length)
-      found(
-        `Work Item ${item.id} requires LFS for ${unknown.join(", ")}, which is not one of its expected output roles (${roles.join(", ") || "none"})`,
         item.id,
       );
     for (const asset of item.sourceAssets ?? []) {

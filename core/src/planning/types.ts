@@ -52,7 +52,6 @@ export interface WorkItem {
   sourceAssets?: SourceAssetBinding[];
   expectedOutputRoles?: string[];
   minimumAssetSets?: number;
-  requiredLfsRoles?: string[];
 }
 
 /**

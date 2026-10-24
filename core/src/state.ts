@@ -676,9 +676,10 @@ const isTexts = (value: unknown): boolean =>
  * Why a saved plan lacks what the service reads on every tick (its items,
  * coverage and final commands); undefined when it has it. The planner's
  * answer was checked where it entered (planning/wire.ts); this checks
- * only that the file still holds a plan.
+ * only that the file, or a plan comment a reset reads (reset.ts
+ * `planShaped`), still holds a plan.
  */
-function planProblem(plan: unknown): string | undefined {
+export function planProblem(plan: unknown): string | undefined {
   if (!isObject(plan)) return " isn't a plan";
   if (!isTexts(plan.finalCommands))
     return ".finalCommands isn't a list of commands";

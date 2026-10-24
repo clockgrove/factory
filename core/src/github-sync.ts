@@ -129,9 +129,11 @@ export interface UncheckedComment {
   nextAt: string;
 }
 
-/** An Objective whose state file can't be read: it holds, with `cancel`. */
+/** An Objective whose state file can't be read: it holds, with `reset` and `cancel`. */
 export interface UnreadableObjective {
   error: string;
+  /** Set aside by the service (service.ts `setAside`): its file reads, so `retry` reads it again too. */
+  setAside?: true;
   /** Which incident: the unreadable file's digest. Its question and answers are this incident's only. */
   incident: string;
   /** Its card and comment cursor, once the sync has seen it on the Project. */
@@ -1437,7 +1439,7 @@ export class GitHubSync {
         const question = await this.github.ensureComment(
           issue,
           marker,
-          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with \`/factory reset\` (recommended) to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).`,
+          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with ${entry.setAside ? "`/factory retry` to read it again and run on, " : ""}\`/factory reset\` (recommended) to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).`,
           "sync:ask",
           signal,
         );

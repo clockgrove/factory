@@ -143,6 +143,11 @@ const observeKey = (state: ObjectiveState): string =>
   `${state.issue}@${runOf(state)}`;
 
 const KEEP_REQUEST_IDS = 50;
+/** The module without its record that an unreadable state's question was asked. */
+const unasked = ({
+  askedUnreadable: _asked,
+  ...github
+}: GitHubModule): GitHubModule => github;
 /** Ticks in a row in which an Objective's work throws before it is set aside as unreadable. */
 const MAX_OBJECTIVE_ERRORS = 10;
 const RESULT_TTL_MS = 60 * 60 * 1000;
@@ -347,17 +352,21 @@ export async function serve(options: ServeOptions): Promise<number> {
    * is that Objective's alone. It is logged (`objective-error`), the
    * Objective is left alone for the rest of the tick, and after
    * MAX_OBJECTIVE_ERRORS ticks in a row it is set aside as unreadable:
-   * its steps stop, and it holds with `reset` and `cancel` like a state
-   * file that can't be read. A restart reads its file again.
+   * its steps stop, and it holds with `retry` (read its file again),
+   * `reset` and `cancel`. A system call's error (a save or read failing
+   * with ENOSPC, EMFILE, EIO) never counts: the save left memory as on
+   * disk (`transact`), and the next tick tries again.
    */
-  const failing = new Map<number, string>();
+  const failing = new Map<number, { error: string; counts: boolean }>();
   /** Per Objective: the ticks in a row in which its work threw. */
   const errors = new Map<number, number>();
   /** Set-aside runs' stops: what replaces the run waits for them. */
   const setAsideStops = new Map<number, Promise<void>>();
   const failed = (issue: number, error: unknown): void => {
     if (failing.has(issue)) return;
-    failing.set(issue, String(error));
+    const counts =
+      typeof (error as { syscall?: unknown })?.syscall !== "string";
+    failing.set(issue, { error: String(error), counts });
     log.write(issue, { event: "objective-error", error: String(error) });
   };
   /** Run `work` for one Objective, unless its work already threw this tick. */
@@ -372,7 +381,8 @@ export async function serve(options: ServeOptions): Promise<number> {
   const countErrors = (): void => {
     for (const issue of [...errors.keys()])
       if (!failing.has(issue)) errors.delete(issue);
-    for (const [issue, error] of failing) {
+    for (const [issue, { error, counts }] of failing) {
+      if (!counts) continue;
       const count = (errors.get(issue) ?? 0) + 1;
       errors.set(issue, count);
       if (count >= MAX_OBJECTIVE_ERRORS) setAside(issue, error);
@@ -387,7 +397,9 @@ export async function serve(options: ServeOptions): Promise<number> {
     unreadable.set(issue, {
       error: problem,
       incident: stateDigest(runner.state),
-      ...(github ? { github: structuredClone(github) } : {}),
+      setAside: true,
+      // This incident's question is asked afresh.
+      ...(github ? { github: unasked(structuredClone(github)) } : {}),
     });
     setAsideStops.set(issue, runner.stop());
     runners.delete(issue);
@@ -630,11 +642,46 @@ export async function serve(options: ServeOptions): Promise<number> {
       return startReset(stored);
     const runner = find(request.issue);
     const broken = unreadable.get(request.issue);
+    if (
+      !runner &&
+      broken?.setAside &&
+      (request.kind === "retry" ||
+        (request.kind === "answer" && request.answer === "retry"))
+    ) {
+      // A set-aside run reads its file again and runs on, once its stopped
+      // steps have ended, with the card and comment cursor its question
+      // moved on.
+      unreadable.delete(request.issue);
+      let reopened: ObjectiveRunner | undefined;
+      try {
+        reopened = find(request.issue);
+      } finally {
+        if (!reopened && !unreadable.has(request.issue))
+          unreadable.set(request.issue, broken);
+      }
+      if (!reopened)
+        return refused(
+          "state_unreadable",
+          `#${request.issue} has unreadable state (${unreadable.get(request.issue)?.error}). Answers: reset, cancel.`,
+        );
+      const stopped = setAsideStops.get(request.issue);
+      setAsideStops.delete(request.issue);
+      if (stopped) reopened.after(stopped);
+      return reopened.transact(() => {
+        if (broken.github)
+          reopened.state.modules.github = unasked(broken.github);
+        reopened.state.appliedRequests = [
+          ...reopened.state.appliedRequests,
+          { id: stored.id, message: "ok" },
+        ].slice(-KEEP_REQUEST_IDS);
+        return { message: "ok" };
+      });
+    }
     if (!runner && broken) {
       if (!isCancel(request))
         return refused(
           "state_unreadable",
-          `#${request.issue} has unreadable state (${broken.error}). Answers: reset, cancel.`,
+          `#${request.issue} has unreadable state (${broken.error}). Answers: ${broken.setAside ? "retry, " : ""}reset, cancel.`,
         );
       // Start over from a fresh cancelled record that replaces the unreadable
       // file; cleanup closes the Objective's PRs and issue, and the sync
@@ -1240,6 +1287,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     );
     const drained = Promise.allSettled([
       ...[...runners.values()].map((runner) => runner.stop()),
+      ...setAsideStops.values(),
       observing.drain(),
       options.sync?.drain(),
     ]).then(() => true);
@@ -1488,7 +1536,8 @@ interface ServiceRecord {
   suspected?: Death["running"];
   /** Set by a clean stop. */
   stopped?: boolean;
-  unreadable: Record<string, string>;
+  /** Objectives set aside as unreadable (`setAside`), with why: `status` shows them so. */
+  setAside: Record<string, string>;
   /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
   problem?: string;
   /** Why queue reads have failed for a while (GitHubSync.intakeProblem); `status` shows it. */
@@ -1603,7 +1652,7 @@ function startRecord(
       ? { resumeAt: new Date(startedAt.getTime() + delay).toISOString() }
       : {}),
     finished: 0,
-    unreadable: {},
+    setAside: {},
   };
 }
 
@@ -1634,8 +1683,10 @@ function writeServiceRecord(
 ): void {
   record.at = new Date().toISOString();
   record.finished = run.finished;
-  record.unreadable = Object.fromEntries(
-    [...unreadable].map(([issue, entry]) => [issue, entry.error]),
+  record.setAside = Object.fromEntries(
+    [...unreadable]
+      .filter(([, entry]) => entry.setAside)
+      .map(([issue, entry]) => [issue, entry.error]),
   );
   if (stopped) record.stopped = true;
   const path = join(root, "service.json");

@@ -165,7 +165,7 @@ test("a state file that can't be read now is read again, not marked unreadable",
     "the Objective runs once readable",
   );
   assert.equal(
-    JSON.parse(readFileSync(join(inst.root, "service.json"))).unreadable[43],
+    JSON.parse(readFileSync(join(inst.root, "service.json"))).setAside[43],
     undefined,
   );
   await stopped(service);

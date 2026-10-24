@@ -57,7 +57,7 @@ A provider pairs a **planner** (it plans and reviews) with a **worker** (it writ
 | --------- | ------- | ------ | ------------------------------------------------------------------------------------------------------------ |
 | `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY`                                                         |
 | `claude`  | yes     | yes    | `claude auth login`, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`; needs the optional Claude Agent SDK |
-| `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK                              |
+| `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK (see below)                  |
 
 ```sh
 factory setup --repo OWNER/NAME --provider claude --planner claude --worker claude \
@@ -65,6 +65,9 @@ factory setup --repo OWNER/NAME --provider claude --planner claude --worker clau
 factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer-effort high --default
 ```
 
+- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys from the environment or as `--credential-file NAME=FILE`.
+- **Model choices.** `models.planner` and `models.reviewer` each name a model and an effort. `models.reviewEffort` sets one review phase's effort: `graph-review`, `result-review` or `objective-review`. The other phases run on `models.planner`.
+- **What runs is what's configured.** A Copilot planner or worker served another model holds with `switch NAME`. So does a Claude worker whose answer comes from another model than its configured full id (an alias such as `opus` isn't compared) or that starts at another effort. A Claude worker that starts in another permission mode or directory holds before any tool runs.
 - **One provider per Objective.** An Objective runs on the provider it was admitted with. It never falls back to another one, and a missing login holds with the fix.
 - **Usage limits.** When a provider hits its usage limit, the hold offers `wait` and `switch NAME`, which moves the Objective to another configured provider.
 - **Choosing at start:** `factory run N --provider NAME` picks the provider for one Objective; `factory serve --provider NAME` picks it for all new work.
@@ -111,7 +114,7 @@ At queue time each final command must be runnable:
 - A command listed in the installation's `finalValidation.ciOnlyCommands` is refused: final validation runs offline, so leave it to CI.
 - Each executable the command starts must be on the service's PATH, and an npm or pnpm it uses must match the `packageManager` pin. Factory never installs tools.
 
-Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well.
+Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well. With no final command, final validation runs each Work Item's own validation commands on the merged default branch instead, each item's list whole in a fresh checkout, so QA runs there either way.
 
 A backticked command in a sentence ("the probe is `node scripts/probe.mjs`") is declared, because you wrote it: the plan may use it as a Work Item check. It is not a final command. If the Objective has no final command at all but backticks a command the base already declares (a `package.json` script, or an own-line command in a Sources file), the check refuses it: make it an Acceptance bullet, or remove the backticks.
 
@@ -204,7 +207,9 @@ factory propose --file /abs/draft.json --approve SHA256 --enqueue --repo OWNER/N
   - wait for CI;
   - merge.
 
-  Then the final validation and final review on the default branch, and a report comment that closes the issue.
+  A read-only QA item has no worker or PR: it validates the default branch once its dependencies have merged, and is reviewed.
+
+  Then QA on the default branch: final validation (the final commands, or each Work Item's own commands when there are none) and final review, and a report comment that closes the issue.
 
 - **No approval step.** A clean, reviewed plan starts at once. Factory asks only when the review finds a decision for you.
 - **Dequeue:** move the card off Queued before planning starts, and the Objective is withdrawn as if never admitted. To run a finished Objective again, set its card to Queued after its final status shows.
@@ -270,6 +275,8 @@ Common answers:
 
 The options a hold offers are the only ones that apply.
 
+When the planner finds that no plan can meet the Objective as written (it contradicts itself, needs something the repository lacks, or its constraints rule the outcome out), planning asks one question with the planner's reason and what would have to change. Edit the issue and answer `replan`, `answer` with guidance for another round, or `cancel`. Factory plans no further round on its own, and the planner's answer counts as a round against `planningRevisions`.
+
 ### Allowances
 
 How much an Objective may correct itself before asking. These are frozen with its configuration.
@@ -295,6 +302,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
 - **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.
+- **A new machine.** `factory reset N` needs no local state: it rebuilds the Objective from GitHub alone. A delivered one comes back done. One still building checks its plan again and sends it through plan review before any work runs; merged Work Items stay merged and open PRs are reused. Repair counts start again, and open questions are asked again ([State](reference/state.md#state)).
 - **Never edit Factory's files.** Don't edit or delete files under the state directory: the service is their only writer, and a hand edit breaks its crash recovery.
 
 ## Sandbox and security

@@ -23,8 +23,8 @@ import type { ClaudeWorkerConfig } from "./claude-worker.js";
 import type { CodexEffort } from "./codex.js";
 import {
   type ModelChoice,
-  PLANNER_PHASES,
   type PlannerModels,
+  REVIEW_PHASES,
 } from "./planner.js";
 
 export const PLANNERS = ["codex", "claude", "copilot"] as const;
@@ -123,6 +123,33 @@ export const CLAUDE_TOOLS = [
   "Grep",
   "Validate",
 ] as const;
+
+/**
+ * The Copilot login's secrets: each read from the environment or, for a
+ * supervised service, its loaded credentials (claude.ts serviceCredential).
+ * They reach only the Copilot runtime (copilot.ts copilotEnvironment).
+ */
+export const COPILOT_SECRETS = [
+  "COPILOT_GITHUB_TOKEN",
+  "COPILOT_PROVIDER_API_KEY",
+  "COPILOT_PROVIDER_BEARER_TOKEN",
+  "GITHUB_COPILOT_API_TOKEN",
+] as const;
+
+/** Redacted from output wherever Copilot is configured: the secrets, and an endpoint that may embed a key. */
+export const COPILOT_REDACTED = [
+  ...COPILOT_SECRETS,
+  "COPILOT_PROVIDER_BASE_URL",
+] as const;
+
+/** A Copilot planner or worker is configured. */
+export function copilotConfigured(
+  providers: Readonly<Record<string, ProviderConfig>>,
+): boolean {
+  return Object.values(providers).some(
+    ({ planner, worker }) => planner === "copilot" || worker.kind === "copilot",
+  );
+}
 
 /** The Copilot worker's tools: the SDK's file tools and Factory's Validate. */
 export const COPILOT_TOOLS = [
@@ -253,10 +280,11 @@ function modelsSpec(planner: PlannerKind): Spec {
   return {
     planner: choice,
     reviewer: choice,
+    // Only review phases: a planner phase runs on models.planner.
     reviewEffort: optional(
       object(
         Object.fromEntries(
-          PLANNER_PHASES.map((phase) => [phase, optional(effort)]),
+          REVIEW_PHASES.map((phase) => [phase, optional(effort)]),
         ),
       ),
     ),

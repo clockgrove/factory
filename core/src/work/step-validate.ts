@@ -76,17 +76,15 @@ export async function validateStep(
         work.validated?.tree === result.tree &&
         JSON.stringify(work.validated.commands) ===
           JSON.stringify(result.commands);
-      const rerun = fact(state, "flaky", item.id);
-      if (sameAsWorker && rerun?.tree !== result.tree && result.failed)
-        return {
-          kind: "retry",
-          reason: `\`${result.failed.command}\` failed on a tree the worker's own validation passed; running it once more.`,
-          progress: true,
-          keep: facts(
-            { flaky: { tree: result.tree, command: result.failed.command } },
-            item.id,
-          ),
-        };
+      const rerun =
+        sameAsWorker &&
+        rerunOnce(
+          result,
+          fact(state, "flaky", item.id),
+          "failed on a tree the worker's own validation passed",
+          (flaky) => facts({ flaky }, item.id),
+        );
+      if (rerun) return rerun;
       // State is saved on every step: it keeps a bounded finding. Output
       // longer than that (up to the raised review-artifact stream bounds)
       // is kept whole in a file for the operator; no model can read it.
@@ -114,4 +112,25 @@ export async function validateStep(
     default:
       return result;
   }
+}
+
+/**
+ * One more run of a failed command before the failure counts, once per
+ * tree: a continuation that keeps the rerun (`keep`), or undefined when
+ * no command failed or this tree has had its rerun.
+ */
+export function rerunOnce(
+  result: { tree: string; failed?: { command: string } },
+  earlier: { tree: string } | undefined,
+  why: string,
+  keep: (rerun: { tree: string; command: string }) => Record<string, unknown>,
+): Outcome | undefined {
+  if (!result.failed || earlier?.tree === result.tree) return undefined;
+  const { command } = result.failed;
+  return {
+    kind: "retry",
+    reason: `\`${command}\` ${why}; running it once more.`,
+    progress: true,
+    keep: keep({ tree: result.tree, command }),
+  };
 }

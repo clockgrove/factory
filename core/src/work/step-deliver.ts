@@ -14,7 +14,7 @@ import {
 } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateSet } from "../media.js";
-import { currentPlan } from "../planning/plan.js";
+import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { DeliveryUnit } from "../planning/units.js";
 import type { RepairFinding } from "../repair.js";
@@ -95,7 +95,7 @@ export async function publishStep(
     ...(republish ? { republish: true } : {}),
     ...(context.answer?.answer === RESET_BRANCH ? { reset: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
-    run: runOf(state),
+    run: { run: runOf(state), plan: state.kept[ACCEPTED_AT] as string },
     ...(itemIssueOf(state, item.id)
       ? { itemIssue: itemIssueOf(state, item.id) }
       : {}),

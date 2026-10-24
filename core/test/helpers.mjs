@@ -312,6 +312,11 @@ export function item(id, fields = {}) {
   };
 }
 
+/** An accepted plan of `items` (each built with item()): nothing else to cover, run or decide. */
+export function plan(items = [], fields = {}) {
+  return { items, coverage: [], finalCommands: [], decisions: [], ...fields };
+}
+
 /** An operator's `retire-command` record, against the plan accepted at `plan`. */
 export function retirement(command, reason, plan = "2026-01-01T00:00:00.000Z") {
   return {

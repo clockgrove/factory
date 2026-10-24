@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CAPTURE_OFF, RunLog, rotateLogs } from "../dist/log.js";
+import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
 import { ActivityLog } from "../dist/work/worker.js";
 import { CLI, cli, installation, REPO } from "./helpers.mjs";
 
@@ -27,6 +27,32 @@ function large(inst, ...args) {
 }
 
 const SECRET = "s3cret-value-for-redaction";
+
+test("an attempt file redacts a secret or token split across a long line's pieces or between two streams' chunks", () => {
+  const inst = installation();
+  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-9", CAPTURE_OFF, [
+    SECRET,
+  ]);
+  const file = log.runFile(63, "item:a:validate#1.validation-0");
+  // Another stream's chunk between a line's halves.
+  file.append(`token ${SECRET.slice(0, 9)}`, "stdout");
+  file.append("stderr line\n", "stderr");
+  file.append(`${SECRET.slice(9)}\n`, "stdout");
+  // Past 64 KiB with no newline, so the line is written in pieces: a
+  // secret, then a token, where a piece would end.
+  const long = "x ".repeat(33 * 1024);
+  file.append(`${long}${SECRET.slice(0, 9)}`, "stdout");
+  file.append(`${SECRET.slice(9)} ${long}ghp_abcd`, "stdout");
+  file.append("efghijkl\n", "stdout");
+  file.close();
+  const text = readRunFile(inst.logs, file.file, []).text;
+  assert.ok(!text.includes(SECRET.slice(9)), "no secret half");
+  assert.ok(!text.includes("efghijkl"), "no token half");
+  assert.equal(
+    text,
+    `stderr line\ntoken [REDACTED]\n${long}[REDACTED] ${long}[REDACTED]\n`,
+  );
+});
 
 test("a worker attempt's transcript is kept redacted and bounded beside the run log, shown by diagnostics --logs, and rotated with its run", () => {
   const inst = installation();

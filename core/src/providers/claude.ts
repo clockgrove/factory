@@ -18,6 +18,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { isRecord } from "../planning/graph.js";
 import type { Wait } from "../state.js";
+import { errorMessage } from "../text.js";
 import { workerEnvironment } from "../worktree.js";
 import type { ClaudeEffort, ClaudePlannerOptions } from "./config.js";
 import {
@@ -459,6 +460,98 @@ export function claudeEnvironment(
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens),
     DISABLE_TELEMETRY: "1",
   };
+}
+
+/** The login probe's bound: it reads local state and may refresh a token. */
+const LOGIN_PROBE_MS = 30_000;
+
+/**
+ * The login the Claude SDK resolves, asked of the SDK itself with no model
+ * call: a keychain, token, profile or third-party login counts, and an
+ * expired one the CLI could not refresh reports none. Like any Claude
+ * client, it may refresh the operator's login and update ~/.claude.json.
+ * `unreadable` when a service credential can't be read; `unchecked` when
+ * the SDK could not answer.
+ */
+export async function claudeLoginProbe(): Promise<
+  | { found: string }
+  | { missing: string; unreadable?: true }
+  | { unchecked: string }
+> {
+  let root: string | undefined;
+  const controller = new AbortController();
+  let release!: () => void;
+  const idle = new Promise<void>((done) => {
+    release = done;
+  });
+  let session: Query | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    root = mkdtempSync(join(tmpdir(), "factory-claude-login-"));
+    const credentials = join(root, "gh");
+    mkdirSync(credentials, { mode: 0o700 });
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    // Streaming input keeps the session open for the control request and
+    // ends it, with no message sent, when the probe finishes.
+    session = query({
+      prompt: {
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            idle.then(() => ({
+              done: true as const,
+              value: undefined,
+            })),
+        }),
+      },
+      options: {
+        abortController: controller,
+        cwd: root,
+        tools: [],
+        mcpServers: {},
+        strictMcpConfig: true,
+        settingSources: [],
+        persistSession: false,
+        env: claudeEnvironment(
+          credentials,
+          DEFAULT_MAX_OUTPUT_TOKENS,
+          serviceLoginEnvironment(),
+        ),
+      },
+    });
+    const account = await Promise.race([
+      session.accountInfo(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`no answer in ${LOGIN_PROBE_MS / 1000}s`)),
+          LOGIN_PROBE_MS,
+        );
+      }),
+    ]);
+    const source = [account.apiKeySource, account.tokenSource].find(
+      (value) => value && value !== "none",
+    );
+    if (source) return { found: `the Claude login from ${source}` };
+    if (account.subscriptionType || account.email)
+      return {
+        found: `the Claude login${account.subscriptionType ? ` (${account.subscriptionType})` : ""}`,
+      };
+    if (account.apiProvider && account.apiProvider !== "firstParty")
+      return { found: `Claude through ${account.apiProvider}` };
+    return { missing: "the Claude SDK found no usable login" };
+  } catch (error) {
+    // A loaded service credential that can't be read is a missing login.
+    if (error instanceof PlannerError)
+      return { missing: error.message, unreadable: true };
+    return {
+      unchecked: `the Claude login could not be checked: ${detail(errorMessage(error))}`,
+    };
+  } finally {
+    clearTimeout(timer);
+    release();
+    session?.close();
+    controller.abort();
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
 }
 
 /**

@@ -29,6 +29,8 @@ import { CAPTURE_OFF, type CaptureSettings } from "./log.js";
 import { stateRoot, within } from "./paths.js";
 import { serviceCredential } from "./providers/claude.js";
 import {
+  COPILOT_REDACTED,
+  copilotConfigured,
   type ExecutionProfile,
   executionProfiles,
   type ProviderConfig,
@@ -425,22 +427,26 @@ export function configPath(repository: string): string {
 const MIN_SECRET_LENGTH = 4;
 
 /**
- * The values of the operator variables workers may see, and of each managed
- * provider's credential (apiKeyEnv, credentialEnv) from the environment or
- * the service's credentials. Only `names` reach a worker's environment;
- * all of them are redacted from output.
+ * The values of the operator variables workers may see, and, from the
+ * environment or the service's credentials, of each managed provider's
+ * credential (apiKeyEnv, credentialEnv) and, with Copilot configured, of
+ * its secrets and endpoint (COPILOT_REDACTED). Only `names` reach a
+ * worker's environment; all of them are redacted from output.
  */
 function secretValues(
   names: readonly string[],
   providers: Record<string, ProviderConfig>,
 ): string[] {
-  const credentials = Object.values(providers).flatMap(({ worker }) =>
-    worker.kind === "openai-agents"
-      ? [worker.apiKeyEnv]
-      : worker.kind === "claude-managed-agents"
-        ? [worker.credentialEnv]
-        : [],
-  );
+  const credentials = [
+    ...Object.values(providers).flatMap(({ worker }) =>
+      worker.kind === "openai-agents"
+        ? [worker.apiKeyEnv]
+        : worker.kind === "claude-managed-agents"
+          ? [worker.credentialEnv]
+          : [],
+    ),
+    ...(copilotConfigured(providers) ? COPILOT_REDACTED : []),
+  ];
   const values = new Set<string>();
   for (const name of names) values.add(process.env[name] ?? "");
   for (const name of credentials) {

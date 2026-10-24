@@ -1074,3 +1074,56 @@ test("a wait on a human gate takes no slot", async () => {
   assert.deepEqual(stateOf(inst, 41).holds, [], "#41 still waits on its gate");
   await stopped(service);
 });
+
+test("a planner's can't-be-planned answer holds once with replan and cancel, and plans no round on its own", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  // The round the plan step saves for that answer (planning/steps.ts).
+  const reason =
+    "Acceptance requires changing src/config.ts; the constraints forbid touching src/, and nothing outside it can change the behaviour.";
+  seed(inst, 71, "planning", {
+    done: {
+      predecessors: { predecessors: [], ignored: [] },
+      check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
+      "plan:1:1": {
+        cannot: { reason, change: "Allow changes under src/." },
+      },
+    },
+  });
+  const service = serve(inst);
+  await until(
+    () => stateOf(inst, 71).holds.length,
+    "the planner's reason asks",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const state = stateOf(inst, 71);
+  assert.equal(state.holds.length, 1);
+  const [held] = state.holds;
+  assert.equal(held.step, "decide:1:1");
+  assert.ok(held.question.includes(reason));
+  assert.match(held.question, /What would have to change: Allow changes/);
+  assert.deepEqual(
+    held.options.map((option) => option.answer),
+    ["replan", "answer", "cancel"],
+  );
+  assert.deepEqual(
+    Object.keys(state.done).filter((key) => /^(plan|review|decide):/.test(key)),
+    ["plan:1:1"],
+    "no review and no next round",
+  );
+  // `replan` starts a new generation, which re-reads the issue first.
+  assert.equal(
+    cli(inst, "answer", "71", "replan", "--question", held.id).code,
+    0,
+  );
+  await until(
+    () => stateOf(inst, 71).retries["plan:2:1"],
+    "the new generation reads the issue",
+  );
+  assert.equal(stateOf(inst, 71).done["decide:1:1"].replan, true);
+  await stopped(service);
+  const log = readdirSync(join(inst.logs, "71"))
+    .map((file) => readFileSync(join(inst.logs, "71", file), "utf8"))
+    .join("");
+  assert.doesNotMatch(log, /"model-usage"/, "no planner call");
+});

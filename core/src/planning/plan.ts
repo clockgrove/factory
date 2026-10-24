@@ -5,7 +5,7 @@ import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
 import { coverageCriterion } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
-import type { Plan, Retirement } from "./types.js";
+import type { Plan, Retirement, WorkItem } from "./types.js";
 
 /*
  * The one reader of the accepted plan. The plan step saves it at
@@ -128,9 +128,68 @@ export function profilesLacking(
   return [...used].filter((id) => !Object.hasOwn(profiles, id)).sort();
 }
 
-/** The final validation commands the operator retired. */
-export function retiredCommands(plan: Plan): Set<string> {
-  return new Set((plan.retired ?? []).map((entry) => entry.command));
+/** The plan's items in dependency order: each after the items it depends on. */
+export function dependencyOrder(plan: Plan): WorkItem[] {
+  const ordered: WorkItem[] = [];
+  const seen = new Set<string>();
+  const visit = (item: WorkItem) => {
+    if (seen.has(item.id)) return;
+    seen.add(item.id);
+    for (const id of item.dependencies) {
+      const dependency = plan.items.find((candidate) => candidate.id === id);
+      if (dependency) visit(dependency);
+    }
+    ordered.push(item);
+  };
+  for (const item of plan.items) visit(item);
+  return ordered;
+}
+
+const retiredOf = (plan: Plan) =>
+  new Set((plan.retired ?? []).map((entry) => entry.command.trim()));
+
+/**
+ * Final validation's Work Item runs, for a plan with no final command
+ * (neither the Objective nor the installation declares one): each Work
+ * Item's own validation commands, intact and in dependency order, less
+ * those the operator retired, so QA runs on the merged default branch
+ * whenever the plan has a command. A list identical to one already listed
+ * is left out. Empty when the plan has final commands.
+ */
+export function fallbackRuns(plan: Plan): WorkItem[] {
+  if (plan.finalCommands.length) return [];
+  const retired = retiredOf(plan);
+  const listed = new Set<string>();
+  return dependencyOrder(plan).flatMap((item) => {
+    if ((item.kind ?? "work") !== "work") return [];
+    const validation = item.validation.filter(
+      (check) => !retired.has(check.command.trim()),
+    );
+    const key = JSON.stringify(validation.map((check) => check.command.trim()));
+    if (!validation.length || listed.has(key)) return [];
+    listed.add(key);
+    return [{ ...item, validation }];
+  });
+}
+
+/**
+ * The checks final validation runs on the merged default branch, less
+ * those the operator retired: the plan's final commands, each once, or,
+ * with none, the commands of its Work Item runs (`fallbackRuns`).
+ */
+export function finalChecks(plan: Plan): string[] {
+  if (!plan.finalCommands.length)
+    return fallbackRuns(plan).flatMap((item) =>
+      item.validation.map((check) => check.command),
+    );
+  const retired = retiredOf(plan);
+  const seen = new Set<string>();
+  return plan.finalCommands.filter((command) => {
+    const key = command.trim();
+    if (retired.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**

@@ -33,8 +33,9 @@ import {
   type WorkerResult,
 } from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
-import { ACTIVE_TOOL_IDLE_MS } from "./claude.js";
+import { ACTIVE_TOOL_IDLE_MS, serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
+import { COPILOT_SECRETS } from "./config.js";
 import {
   callImages,
   detail,
@@ -174,21 +175,39 @@ interface TurnResult {
   session: string;
 }
 
-/** Copilot login values the runtime may see, beside a worker's environment. */
-const COPILOT_LOGIN = ["COPILOT_HOME", "COPILOT_GITHUB_TOKEN"];
+/**
+ * Copilot settings the runtime may see, beside a worker's environment: its
+ * home, a GitHub Enterprise endpoint (`COPILOT_API_URL`), and a custom
+ * model endpoint (`COPILOT_PROVIDER_*`); its secrets are COPILOT_SECRETS.
+ */
+const COPILOT_LOGIN = [
+  "COPILOT_API_URL",
+  "COPILOT_HOME",
+  "COPILOT_PROVIDER_BASE_URL",
+  "COPILOT_PROVIDER_TYPE",
+];
 
 /**
  * The Copilot runtime's environment: a worker's (worktree.ts
  * workerEnvironment, nothing of GitHub, Git or SSH, no API keys, no
- * COPILOT_ALLOW_ALL) plus Copilot's own login: its home, its token, and
+ * COPILOT_ALLOW_ALL) plus Copilot's own login: COPILOT_LOGIN, the
+ * COPILOT_SECRETS from the environment or the service's credentials, and
  * the gh CLI's configuration, which holds the login when Copilot signs in
- * through gh. The model has no shell, so these stay with the runtime.
+ * through gh. The model has no shell, and Validate runs its commands in the sandbox
+ * on validationEnvironment, so these stay with the runtime.
  */
 function copilotEnvironment(): Record<string, string> {
   const gh =
     process.env.GH_CONFIG_DIR ??
     join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "gh");
-  return workerEnvironment(gh, COPILOT_LOGIN);
+  const env = workerEnvironment(gh, COPILOT_LOGIN);
+  // A supervised service has its secrets as loaded credentials; and
+  // workerEnvironment drops every GITHUB_ name, GITHUB_COPILOT_API_TOKEN too.
+  for (const name of COPILOT_SECRETS) {
+    const value = process.env[name] ?? serviceCredential(name);
+    if (value) env[name] = value;
+  }
+  return env;
 }
 
 /** The SDK's built-ins, which name grep `rg`; Validate is Factory's own. */

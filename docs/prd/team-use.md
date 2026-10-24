@@ -28,7 +28,7 @@ A small team shares a repository and its Project, and only one person's machine 
 
 ## Storage
 
-Shared state lives in git on GitHub, so team use needs nothing beyond GitHub: no database and no hosted service. The design has to show that git and GitHub's API can carry the claims and shared state for the supported number of machines, within GitHub's rate limits.
+Shared state lives in git on GitHub, so team use needs nothing beyond GitHub: no hosted database and no hosted service. Memory and the playbook are recorded in git, and each machine keeps its local SQLite store as a search index rebuilt from git. The design has to show that git and GitHub's API can carry the claims and shared state for the supported number of machines, within GitHub's rate limits.
 
 ## Open questions
 
@@ -40,7 +40,7 @@ Shared state lives in git on GitHub, so team use needs nothing beyond GitHub: no
 
 ## Not in scope
 
-- A database, a hosted Factory service or a dashboard.
+- A hosted database, a hosted Factory service or a dashboard.
 - Machines that serve different repositories but share one installation.
 
 ## Done

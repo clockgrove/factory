@@ -66,12 +66,10 @@ Several Objectives move through these steps at once.
    - A second machine or installation that tries to serve the same repository or Project is refused. It does nothing on GitHub, and its message names the machine that holds the repository.
    - The check uses GitHub only.
    - Moving to another machine is a deliberate handoff: stop the first machine, then set up the second.
-9. **Storage.**
-   - **In git on GitHub:**
-     - the plans, questions and answers, PRs and reports, which are enough to rebuild any Objective on another machine;
-     - repository memory and the playbook, so they survive losing the machine.
-   - **Local to the machine:** configuration, credentials and logins, the working clone, the current Objective state, and run logs and captures, which are diagnostics only.
-   - Losing the machine loses only its diagnostics. `factory reset` rebuilds each Objective from GitHub.
+9. **Storage.** No infrastructure beyond GitHub and the machine itself.
+   - **On GitHub:** the plans, questions and answers, PRs and reports, which are enough to rebuild any Objective on another machine with `factory reset`.
+   - **Local to the machine:** configuration, credentials and logins, the working clone, the current Objective state, and run logs and captures (diagnostics only).
+   - **The knowledge store** is also local: repository memory and the playbook, in a SQLite file, searched by every role. Losing the machine loses memory, the playbook and diagnostics, never an Objective.
 10. **Visibility.**
     - A phone check-in is enough to know what was delivered, what's running, what's blocked and what needs an answer.
     - Status shows in the CLI (`factory status`), a live status comment on the issue, one issue per Work Item, and the Project field.

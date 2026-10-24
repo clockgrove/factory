@@ -22,6 +22,7 @@ import {
   configured,
   githubOrigin,
   installation,
+  offered,
   REPO,
   refusal,
   seed,
@@ -341,7 +342,7 @@ test("the one step running at three deaths, with progress between, holds", async
   await stopped(service);
 });
 
-test("an Objective dequeued during its check, or before a re-run's cleanup began, is withdrawn and never plans", async () => {
+test("an Objective dequeued during its check, before a re-run's cleanup began, or while that cleanup holds, is withdrawn and never plans", async () => {
   const inst = installation();
   // Saved by a dequeue while the check ran: the check is done now.
   seed(inst, 71, "planning", { done: { check: true }, withdrawing: true });
@@ -354,6 +355,27 @@ test("an Objective dequeued during its check, or before a re-run's cleanup began
     readFileSync(join(inst.objectives, "72.json")),
   );
   seed(inst, 72, "checking", { kept: { rerun: true }, withdrawing: true });
+  // A re-run's cleanup that held (GitHub refused the reopen), dequeued from
+  // the "Needs you" Factory showed: withdrawn at once, never asked about.
+  seed(inst, 73, "done", { done: { check: true, report: true } });
+  writeFileSync(
+    join(inst.objectives, "finished", "73.json"),
+    readFileSync(join(inst.objectives, "73.json")),
+  );
+  const askedAt = new Date().toISOString();
+  seed(inst, 73, "holding", {
+    kept: { rerun: true },
+    holds: [
+      {
+        id: `rerun:cleanup@${askedAt}`,
+        step: "rerun:cleanup",
+        question: "GitHub refused to reopen the issue.",
+        options: offered("retry", "cancel"),
+        askedAt,
+      },
+    ],
+    withdrawing: true,
+  });
   const service = serve(inst);
   const logs = (issue) =>
     existsSync(join(inst.logs, String(issue)))
@@ -363,7 +385,7 @@ test("an Objective dequeued during its check, or before a re-run's cleanup began
           )
           .join("")
       : "";
-  for (const issue of [71, 72])
+  for (const issue of [71, 72, 73])
     await until(() => logs(issue).includes('"withdrawn"'), "the withdrawal");
   assert.ok(!existsSync(join(inst.objectives, "71.json")));
   assert.ok(!existsSync(join(inst.objectives, "finished", "71.json")));
@@ -375,6 +397,13 @@ test("an Objective dequeued during its check, or before a re-run's cleanup began
     "done",
   );
   assert.ok(!logs(72).includes('"step":'), "no step ran");
+  assert.ok(!existsSync(join(inst.objectives, "73.json")));
+  assert.equal(
+    JSON.parse(readFileSync(join(inst.objectives, "finished", "73.json")))
+      .status,
+    "done",
+  );
+  assert.ok(!logs(73).includes('"step":'), "no step ran");
   await stopped(service);
 });
 

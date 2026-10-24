@@ -99,6 +99,8 @@ export interface GitHubModule {
   status?: { hash: string; shown: ObjectiveStatus; at: string };
   /** This run's live status comment can't be written (a lasting refusal or render failure): it counts as shown. */
   statusGivenUp?: boolean;
+  /** A run being withdrawn: its live status comment shows the final withdrawn line, or it has none. */
+  statusWithdrawn?: boolean;
   /** The Work Item issues as last written (tracking.ts). */
   tracking?: Tracking;
   /** This run's Work Item issues can't be written (the repository refused a list or a create): they count as shown. A refusal on one item's issue is kept on that item (tracking.ts), never here. */
@@ -133,7 +135,8 @@ export interface SyncView {
   admit(issue: number, github: GitHubModule): void;
   /**
    * Withdraw an Objective dequeued before it started: now, or (`pending`)
-   * once its running check or a re-run's cleanup ends; false when it has
+   * once its running check or a re-run's cleanup ends and its status
+   * comment shows the withdrawal (`withdrawShown`); false when it has
    * started.
    */
   withdraw(issue: number): "withdrawn" | "pending" | false;
@@ -163,6 +166,9 @@ const OPTION: Record<ObjectiveStatus, QueueOption | undefined> = {
 
 /** Live status edits per hour, across the installation's Objectives. */
 const STATUS_EDITS_PER_HOUR = 300;
+/** A run withdrawn before planning: its status comment's final body, after the marker. */
+const WITHDRAWN_LINE =
+  "Withdrawn before planning; queue it again to start afresh.";
 /** Status or tracking job failures in a row, other than GitHub's transient errors, before it is given up. */
 const GIVE_UP_AFTER = 3;
 
@@ -501,8 +507,8 @@ export class GitHubSync {
    * last write admits its Objective (a new one is admitted on first sight,
    * so it is checked at once; planning waits for a slot), and a card that
    * changed from what Factory last saw or wrote (`seen`) is someone else's
-   * change: from queued to anything else (another option, cleared, or off
-   * the Project) dequeues an Objective that hasn't started. Every
+   * change: to anything but queued (another option, cleared, or off the
+   * Project) it dequeues an Objective that hasn't started. Every
    * unfinished Objective takes its order from the card, so reordering works
    * until it starts. A card Factory wrote after the read began is skipped:
    * the read is stale for it.
@@ -579,8 +585,10 @@ export class GitHubSync {
   }
 
   /**
-   * Someone else changed the card since Factory last saw or wrote it. From
-   * queued, that dequeues an Objective that hasn't started. A finished
+   * Someone else changed the card since Factory last saw or wrote it. To
+   * anything but queued, that dequeues an Objective that hasn't started
+   * planning (from queued, or from what Factory showed for its check or a
+   * re-run's cleanup, such as "Needs you" for a held one). A finished
    * Objective set to queued is left to intake, which runs it again. Any
    * other change stands: Factory doesn't write over it until the status
    * moves on (`ceded`).
@@ -592,7 +600,6 @@ export class GitHubSync {
   ): "withdrawn" | "requeued" | "ceded" {
     const issue = runner.state.issue;
     const queued = this.config.queue.options.queued;
-    const module = runner.state.modules.github as GitHubModule;
     if (TERMINAL.includes(runner.state.status)) {
       if (option === queued) {
         // The operator's re-queue stands over the final option Factory
@@ -606,7 +613,10 @@ export class GitHubSync {
         this.log.write(issue, { event: "card-changed", option, ceded: final });
         return "requeued";
       }
-    } else if (module.seen === queued && option !== queued) {
+    } else if (option !== queued) {
+      // Not started (its check, or a re-run's cleanup): a change away from
+      // what Factory last saw or wrote dequeues it, so one held there can
+      // be withdrawn. `withdraw` refuses a started Objective.
       const withdrawn = sync.withdraw(issue);
       if (withdrawn === "pending")
         runner.transact(() => {
@@ -849,7 +859,11 @@ export class GitHubSync {
     const { state } = runner;
     const issue = state.issue;
     const given = (state.modules.github as GitHubModule).statusGivenUp;
-    if (!this.config.progress.enabled || state.withdrawing || given) return;
+    if (!this.config.progress.enabled || given) return;
+    if (state.withdrawing) {
+      this.statusWithdrawn(runner);
+      return;
+    }
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;
@@ -924,6 +938,55 @@ export class GitHubSync {
       },
       true,
       (error) => this.givenUp(runner, "status", error),
+    );
+  }
+
+  /**
+   * A run being withdrawn: its live status comment, if one was posted,
+   * is edited to a final line before the state goes, so nothing is left
+   * reading "checking". The marker finds it again after a crash; the
+   * service withdraws once this is shown (`withdrawShown`).
+   */
+  private statusWithdrawn(runner: ObjectiveRunner): void {
+    const { state } = runner;
+    const issue = state.issue;
+    const module = state.modules.github as GitHubModule;
+    if (module.statusWithdrawn || this.jobs.pending(`status:${issue}`)) return;
+    this.background(
+      issue,
+      `status:${issue}`,
+      async (signal) => {
+        const marker = mark(issue, "status", runOf(state));
+        await this.github.editComment(
+          issue,
+          marker,
+          `${marker}\n${WITHDRAWN_LINE}`,
+          "sync:status",
+          signal,
+          module.status ? skewed(module.status.at) : sinceRun(state),
+        );
+        runner.transact(() => {
+          (runner.state.modules.github as GitHubModule).statusWithdrawn = true;
+        });
+      },
+      true,
+      (error) => this.givenUp(runner, "status", error),
+    );
+  }
+
+  /**
+   * Whether a run being withdrawn may go: its status comment shows the
+   * withdrawal, or it has none to show (progress comments off, given up,
+   * or the issue gone).
+   */
+  withdrawShown(state: ObjectiveState): boolean {
+    const module = state.modules.github as GitHubModule | undefined;
+    return (
+      !module ||
+      !this.config.progress.enabled ||
+      module.statusGivenUp === true ||
+      module.statusWithdrawn === true ||
+      this.gone.has(state.issue)
     );
   }
 

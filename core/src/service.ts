@@ -806,13 +806,14 @@ export async function serve(options: ServeOptions): Promise<number> {
       }
       const { state } = runner;
       // Dequeued while its check or a re-run's cleanup ran: it goes once
-      // that ends, and nothing past them starts. A cleanup the service's
-      // death interrupted resumes first; one that holds or errors is never
-      // asked about: the run goes at once.
+      // that ends and its status comment shows the withdrawal, and nothing
+      // past them starts. A cleanup the service's death interrupted resumes
+      // first; one that holds or errors is never asked about: the run goes
+      // at once.
       if (state.withdrawing && !TERMINAL.includes(state.status)) {
         if (!ending(runner)) {
           try {
-            withdrawNow(runner);
+            if (options.sync?.withdrawShown(state) ?? true) withdrawNow(runner);
           } catch (error) {
             log.write(state.issue, {
               event: "withdraw-failed",
@@ -1000,10 +1001,14 @@ export async function serve(options: ServeOptions): Promise<number> {
           started(runner.state)
         )
           return false;
-        // Its check or a re-run's cleanup still runs: it goes once that
-        // ends, and nothing past them starts meanwhile (see tick). A
-        // cleanup not begun never runs: the earlier run's record stands.
-        if (ending(runner)) {
+        // Its check or a re-run's cleanup still runs, or its status comment
+        // doesn't show the withdrawal yet: it goes once that's done, and
+        // nothing past them starts meanwhile (see tick). A cleanup not
+        // begun never runs: the earlier run's record stands.
+        if (
+          ending(runner) ||
+          !(options.sync?.withdrawShown(runner.state) ?? true)
+        ) {
           if (!runner.state.withdrawing)
             runner.transact(() => {
               runner.state.withdrawing = true;

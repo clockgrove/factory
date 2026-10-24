@@ -663,6 +663,33 @@ export class GitHub {
     return written;
   }
 
+  /**
+   * Edit the marked comment if it exists, between the crash points
+   * `<point>:before` and `<point>:after`; never post one. Returns whether
+   * it exists.
+   */
+  async editComment(
+    issue: number,
+    marker: string,
+    body: string,
+    point: string,
+    signal?: AbortSignal,
+    since?: string,
+  ): Promise<boolean> {
+    const existing = await this.markedComment(issue, marker, since, signal);
+    if (!existing) return false;
+    if (existing.body === body) return true;
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "PATCH",
+      `/repos/${this.repository}/issues/comments/${existing.id}`,
+      { body },
+      signal,
+    );
+    crashPoint(`${point}:after`);
+    return true;
+  }
+
   /** Close an issue with a reason, unless it is closed already. */
   async closeIssue(
     issue: number,

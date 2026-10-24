@@ -11,7 +11,7 @@ Drive Objectives on a target repository through the installed `factory` CLI. `fa
 
 - **Target.** Take the repository (`OWNER/NAME`) and Objective issue number from the request. Refuse Factory's own repositories: Factory never runs on itself.
 - **Same repository every time.** Pass `--repo OWNER/NAME` on every command (or set `FACTORY_REPOSITORY`). The repository picks the installation, so a wrong one reads or changes another installation's work.
-- **CLI only.** Use only `factory` commands (`factory help` lists them). Never edit, move or delete state, request or log files, because `factory serve` is the only writer of state and a hand edit breaks its crash recovery.
+- **CLI only.** Use only the commands below; any other command or option (`factory help` lists them all) only on the operator's explicit request. Never edit, move or delete state, request or log files, because `factory serve` is the only writer of state and a hand edit breaks its crash recovery.
 - **Structure, not prose.** Decide on exit codes, `--json` fields and refusal codes. Messages are for people and can change.
 - **Decisions belong to the operator.** Answer a hold only with the operator's choice from this conversation. Never infer it from silence, a diagnostic or a GitHub comment you read.
 - **Cancel only on request.** It closes the Objective's PRs and the issue, and it can't be undone.
@@ -46,7 +46,7 @@ Every command also takes `--repo OWNER/NAME`. Reads (`status`, `log`, `diagnosti
 
 The GitHub Project is the queue. The operator queues an Objective by setting its card's Status to the queued option, and reorders with the order field, or by asking you to run it. That setting or request is the consent to run it, so never queue an Objective the operator didn't name.
 
-When the operator asks to run Objective #N, run `factory run N`. It queues the Objective and follows its run log until it ends: exit 0 when done, 2 when it needs a person (a question, or the service isn't running), 1 when cancelled or refused. Stopping the command stops only the following; the Objective keeps running, and `factory run N` again follows it. Pass `--provider NAME` or `--deadline` (an ISO time, or a duration such as `2h`, after which it is cancelled) only when the operator asks.
+When the operator asks to run Objective #N, run `factory run N`. It queues the Objective and follows its run log until it ends: exit 0 when done, 2 when it needs a person (a question, or the service isn't running), 1 when cancelled or refused. An exit 2 with a `usage` refusal on stderr is a wrong command (see Refusals): fix it. Stopping the command stops only the following; the Objective keeps running, and `factory log N --follow` follows it again. On a done or cancelled Objective, `factory run N` runs it again from the start, so use it then only when the operator asks for a new run. Pass `--provider NAME` or `--deadline` (an ISO time, or a duration such as `2h`, after which it is cancelled) only when the operator asks.
 
 The service checks a queued Objective at once. A failed check holds with each problem named: the author edits the issue, then answer `recheck`. Never rewrite the issue yourself.
 
@@ -107,7 +107,7 @@ A refused command exits 1 and prints `{"kind":"lifecycle-refusal","code":"..."}`
 | `state_unreadable`                  | The hold `unreadable` offers `reset` and `cancel`. Ask the operator.                                                                                                                |
 | `objective_finished`                | The Objective is done or cancelled, so it no longer takes answers or amendments. Report it; don't retry.                                                                            |
 | `no_factory_state`                  | Factory has no state for that issue: check the number and whether it's queued.                                                                                                      |
-| `superseded`                        | A later cancel, or a later `run` of the same Objective, replaced this request. Read `status`.                                                                                       |
+| `superseded`                        | A later cancel, a later `run` of the same Objective, or the operator moving its card out of queued replaced this request. Read `status`; run again only if the operator asks.       |
 | `no_configuration`, `no_such_issue` | Wrong `--repo` or issue, or setup is missing: check them, or use the `setup` skill.                                                                                                 |
 | `plan_unreadable`                   | A reset can't read the plan comment. Show the operator the message; cancel only on request.                                                                                         |
 | `queue_not_running`                 | A `run`, or a reset that would create the Objective, while the queue is paused or draining. Tell the operator; run `factory queue resume` only if they want it.                     |

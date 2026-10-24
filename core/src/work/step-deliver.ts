@@ -472,6 +472,7 @@ export function repairOutcome(
     shown,
     refusesResult = from !== "select" && from !== "publish",
     fresh = false,
+    selection: standsFor,
   }: {
     /** Other facts the repair keeps. */
     keep?: Record<string, unknown>;
@@ -485,6 +486,8 @@ export function repairOutcome(
      * repair context. The layers above move as for any repair.
      */
     fresh?: boolean;
+    /** The select repair keeps this choice (a missing LFS rule): its media is not the finding. */
+    selection?: KeptSelection;
   } = {},
 ): Outcome {
   const kept: RepairFinding =
@@ -508,10 +511,12 @@ export function repairOutcome(
   };
   // The work step forgets a selection whose copies are gone.
   const own =
-    written(keep, "selection", item.id) === null ? undefined : standing(item);
+    standsFor ??
+    (written(keep, "selection", item.id) === null ? undefined : standing(item));
   const media =
-    from === "select" ||
-    (own !== undefined && aboutMedia(item, own.selection.set, text, kept));
+    !standsFor &&
+    (from === "select" ||
+      (own !== undefined && aboutMedia(item, own.selection.set, text, kept)));
   // The result being cleared, when there is one: a repair from `work`
   // itself keeps the facts of the result before it.
   const result = state.done[stepKey(item.id, "work")] as WorkResult | undefined;

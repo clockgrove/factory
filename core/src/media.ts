@@ -41,7 +41,15 @@ import {
   rmSync,
   statfsSync,
 } from "node:fs";
-import { chmod, copyFile, mkdir, open, rm, unlink } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  open,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -99,8 +107,12 @@ const GITHUB_FILE_BYTES = 100 * MIB;
 /** A media answer: a step maps each kind onto its own outcome. */
 export type MediaOutcome<T> =
   | { kind: "done"; value: T }
-  /** The worker's result is wrong; the finding goes back to the work step. */
-  | { kind: "repair"; finding: string }
+  /**
+   * The worker's result is wrong; the finding goes back to the work step.
+   * `keepsSelection`: a select repair that isn't about the chosen set's
+   * content (a missing .gitattributes LFS rule), so the choice stands.
+   */
+  | { kind: "repair"; finding: string; keepsSelection?: true }
   | Held
   /** Transient; `repushed` is set once verifyOriginMedia has re-pushed, for the step to keep. */
   | { kind: "retry"; reason: string; repushed?: true };
@@ -248,7 +260,7 @@ export interface InputsRequest {
   /** Each dependency's select result, when it has one. */
   selection(itemId: string): Selection | undefined;
   /** The item's own selection kept across a repair that isn't about the media; its members are staged read-only. */
-  kept?: Selection;
+  kept?: Pick<Selection, "set" | "bound">;
   /** The service's GitHub token, for attachments; the worker never sees it. */
   githubToken(): Promise<string>;
   signal: AbortSignal;
@@ -1109,7 +1121,8 @@ export async function materializeSelection(input: {
       return ownsPath(".gitattributes", item.ownedPaths)
         ? {
             kind: "repair",
-            finding: `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that .gitattributes doesn't route through Git LFS: ${listed}. Add a filter=lfs rule that covers them, or make them smaller.`,
+            finding: `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that .gitattributes doesn't route through Git LFS: ${listed}. Add a filter=lfs rule that covers them.`,
+            keepsSelection: true,
           }
         : hold(
             `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that the repository's .gitattributes doesn't route through Git LFS: ${listed}. Work Item ${item.id} doesn't own .gitattributes. Answer repair to have the worker make smaller candidates, replan to give an item that rule, or cancel.`,
@@ -1122,6 +1135,7 @@ export async function materializeSelection(input: {
         ? {
             kind: "repair",
             finding: `.gitattributes does not route ${paths} through Git LFS, but the roles ${uncovered.map((m) => m.role).join(", ")} must be stored in LFS. Add a filter=lfs rule that covers them.`,
+            keepsSelection: true,
           }
         : hold(
             `The repository's .gitattributes does not route ${paths} through Git LFS, and Work Item ${item.id} must store ${uncovered.map((m) => m.role).join(", ")} there but doesn't own .gitattributes. Answer replan to give an item that rule, or cancel.`,
@@ -1195,14 +1209,15 @@ export async function materializeSelection(input: {
 
 /**
  * Keep the sets the operator sent back with a select `repair` apart from
- * `candidates/`, which the next capture replaces: copies under
+ * `candidates/`, which the next capture replaces (never rewrites in
+ * place): hard links (copies across devices) under
  * `<directory>/sent-back/<set>/`. A set whose copies are gone is left out.
  */
 export async function keepSentBack(
   directory: string,
   sets: readonly CandidateSet[],
 ): Promise<CandidateSet[]> {
-  const root = join(directory, "sent-back");
+  const root = sentBackDirectory(directory);
   await forceRemove(root);
   const kept: CandidateSet[] = [];
   for (const set of sets) {
@@ -1211,12 +1226,40 @@ export async function keepSentBack(
     for (const member of set.members) {
       const file = join(root, set.id.toLowerCase(), basename(member.file));
       await mkdir(join(file, ".."), { recursive: true, mode: 0o700 });
-      await copyFile(member.file, file);
+      await link(member.file, file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EXDEV" && error.code !== "EPERM") throw error;
+        return copyFile(member.file, file);
+      });
       members.push({ ...member, file });
     }
     kept.push({ ...set, members });
   }
   return kept;
+}
+
+/** Where keepSentBack keeps the sets; the work step removes it once the fact is gone. */
+export function sentBackDirectory(directory: string): string {
+  return join(directory, "sent-back");
+}
+
+/**
+ * The first captured set whose content is a sent-back set's: the operator
+ * already refused it, so offering it again asks the same question.
+ */
+export function resentSet(
+  captured: readonly CandidateSet[],
+  sentBack: readonly CandidateSet[],
+): { set: string; sentBack: string } | undefined {
+  const content = (set: CandidateSet) =>
+    JSON.stringify(
+      set.members.map(({ role, sha256 }) => [role, sha256]).sort(),
+    );
+  const refused = new Map(sentBack.map((set) => [content(set), set.id]));
+  for (const set of captured) {
+    const match = refused.get(content(set));
+    if (match !== undefined) return { set: set.id, sentBack: match };
+  }
+  return undefined;
 }
 
 /** The sent-back sets' members as read-only worker inputs; a set whose copies are gone is left out. */

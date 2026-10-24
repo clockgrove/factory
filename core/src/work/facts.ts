@@ -152,7 +152,8 @@ export interface Finished {
  * and the select step writes the same set on the new work commit.
  */
 export interface KeptSelection {
-  selection: Selection;
+  /** The choice; its commit and tree are the old work commit's, which a repair replaces. */
+  selection: Omit<Selection, "commit" | "tree">;
   sets: CandidateSet[];
 }
 

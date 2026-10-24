@@ -79,7 +79,7 @@ export async function selectStep(
       work.sets,
     );
     return repairOutcome(item, "select", finding, context.state, place, {
-      keep: facts({ sentBack }, item.id),
+      keep: facts({ sentBack: sentBack.length ? sentBack : null }, item.id),
     });
   }
   const made = await materializeSelection({
@@ -91,6 +91,20 @@ export async function selectStep(
     ref: selectionRef(state.issue, item.id),
     signal,
   });
+  // A missing LFS rule isn't about the set: the choice stands for the repair.
+  if (made.kind === "repair" && made.keepsSelection)
+    return repairOutcome(item, "select", made.finding, context.state, place, {
+      selection: {
+        selection: {
+          set: read.set,
+          bound: read.bound,
+          by: decided.by,
+          at: decided.at,
+          ...(read.reason ? { reason: read.reason } : {}),
+        },
+        sets: work.sets,
+      },
+    });
   if (made.kind !== "done")
     return mediaOutcome(item, made, context, place, {}, "select");
   const done: Selection = {

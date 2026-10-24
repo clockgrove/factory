@@ -54,6 +54,8 @@ export interface WorkPromptInput {
   /** The Objective's exact package-manager pin, when it has one. */
   packageManagerUpdate?: string;
   repair?: RepairContext;
+  /** A media item's repair: whether the previous attempt's candidate staging is still in the checkout (set by prepareWorkPrompt). */
+  staging?: boolean;
   /** Native child agents are off for this attempt. */
   childAgents?: "disabled";
   /** Source assets and selected dependency media (media.ts resolveInputs), staged read-only. */
@@ -113,8 +115,17 @@ export async function prepareWorkPrompt(
     return { problem: input.discoveryInputs };
   const delivered = await deliverSources(input);
   if ("problem" in delivered) return delivered;
+  // A capture refusal leaves the staging for the worker to fix; a capture
+  // that kept the sets removed it.
+  const staging =
+    input.repair && needsSelection(input.item)
+      ? await lstat(join(input.worktree, ".factory-assets.json")).then(
+          () => true,
+          () => false,
+        )
+      : undefined;
   const { prompt, sections } = renderWorkPrompt(
-    input,
+    { ...input, ...(staging !== undefined ? { staging } : {}) },
     delivered.sources,
     delivered.assets,
     delivered.peers,
@@ -375,7 +386,7 @@ function attemptBrief(
   let brief = item.brief;
   if (repair) {
     // The kept worktree always holds the refused result's files.
-    brief += `\nThe previous attempt failed. Do not repeat it: ${repair.fromReview && repair.correction ? "the result review refused the findings in the required correction below." : repair.finding}\nThe previous result's files are already in this checkout${needsSelection(item) ? " (its staged candidate sets are not: Factory captured and removed them)" : ""}: this attempt continues from that result: fix exactly what these findings refuse and keep everything else. Fix every finding, then walk every clause of every acceptance entry against its test assertion again, not only the refused ones: a test edit can drop another clause's check.`;
+    brief += `\nThe previous attempt failed. Do not repeat it: ${repair.fromReview && repair.correction ? "the result review refused the findings in the required correction below." : repair.finding}\nThe previous result's files are already in this checkout${input.staging === undefined ? "" : input.staging ? " (its candidate staging, .factory-media/ and .factory-assets.json, too: fix it in place)" : " (but no candidate staging: there is no .factory-media/ or .factory-assets.json)"}: this attempt continues from that result: fix exactly what these findings refuse and keep everything else. Fix every finding, then walk every clause of every acceptance entry against its test assertion again, not only the refused ones: a test edit can drop another clause's check.`;
     if (repair.correction)
       brief += `\nDiagnosed repair: ${repair.correction.diagnosis}\nRequired correction: ${repair.correction.correction}`;
     if (repair.operator)

@@ -9,7 +9,9 @@ import {
   mediaDirectory,
   missingMember,
   needsSelection,
+  resentSet,
   resolveInputs,
+  sentBackDirectory,
   sentBackInputs,
 } from "../media.js";
 import { objectiveText } from "../objective.js";
@@ -80,6 +82,9 @@ export async function workStep(
   const workDir = deps.workDir(state.issue);
   const worktree = worktreePath(workDir, state.issue, item.id);
   const media = mediaDirectory(workDir, item.id);
+  const sentBack = fact(state, "sentBack", item.id);
+  // Its fact is gone (new sets captured, or `fresh`): so are the copies.
+  if (!sentBack) await forceRemove(sentBackDirectory(media));
   // An item builds on the default branch as it is when it starts, which
   // holds every merged dependency; a native-stack layer above the bottom
   // builds on the layer below's current delivered head: the head a merge
@@ -351,10 +356,7 @@ export async function workStep(
       ...(repair ? { repair: repair.context } : {}),
       mediaInputs: [
         ...inputs.value,
-        ...(await sentBackInputs(
-          item.id,
-          fact(state, "sentBack", item.id) ?? [],
-        )),
+        ...(await sentBackInputs(item.id, sentBack ?? [])),
       ],
       ...(own
         ? {
@@ -455,6 +457,18 @@ export async function workStep(
         ...keepAll,
         ...facts({ finished }, item.id),
       });
+    const resent = resentSet(captured.value, sentBack ?? []);
+    if (resent)
+      return mediaOutcome(
+        item,
+        {
+          kind: "repair",
+          finding: `Candidate set ${resent.set} has the content of set ${resent.sentBack}, which the operator sent back. Stage new content for every set.`,
+        },
+        context,
+        place,
+        { ...keepAll, ...facts({ finished }, item.id) },
+      );
     if (captured.value.length)
       return {
         kind: "retry",

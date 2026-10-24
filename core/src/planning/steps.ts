@@ -1069,11 +1069,12 @@ function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
           ? { reviewArtifacts: inputs.reviewArtifacts }
           : {}),
       };
-      await postPlan(deps, state.issue, plan, signal);
+      const acceptedAt = new Date().toISOString();
+      await postPlan(deps, state.issue, plan, acceptedAt, signal);
       return {
         kind: "done",
         result: plan,
-        keep: { [ACCEPTED_AT]: new Date().toISOString() },
+        keep: { [ACCEPTED_AT]: acceptedAt },
       };
     },
   };
@@ -1104,14 +1105,18 @@ const LISTED_ITEMS = 200;
  * Post the plan on the issue, or edit the comments already there. The plan
  * data (what `factory reset` rebuilds from) goes in the plan comment when
  * it fits, else in numbered continuation comments the plan comment names;
- * it is never dropped. An accepted amendment posts its plan the same way,
- * with `note` saying which amendment it is and its own crash points
- * (`point`: `<point>:post:*`, `<point>:data:*`).
+ * it is never dropped. The data carries the plan's acceptance time
+ * (`acceptedAt`, plan.ts ACCEPTED_AT), which an amendment keeps, so a reset
+ * keeps the plan's place in the owned-path order (service.ts `pathOwner`).
+ * An accepted amendment posts its plan the same way, with `note` saying
+ * which amendment it is and its own crash points (`point`:
+ * `<point>:post:*`, `<point>:data:*`).
  */
 export async function postPlan(
   deps: PlanningDeps,
   issue: number,
   plan: Plan,
+  acceptedAt: string,
   signal: AbortSignal,
   { point = "plan", note }: { point?: string; note?: string } = {},
 ): Promise<void> {
@@ -1130,7 +1135,7 @@ export async function postPlan(
       0,
       COMMENT_LIMIT - 200,
     );
-  const json = JSON.stringify(plan);
+  const json = JSON.stringify({ acceptedAt, ...plan });
   const data = (text: string, label: string) =>
     `\n\n<details><summary>${label}</summary>\n\n\`\`\`json\n${text}\n\`\`\`\n</details>`;
   const whole = data(json, "Plan data");

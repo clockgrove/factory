@@ -15,10 +15,12 @@ import {
   type CapacityUse,
   DEFAULT_LIMITS,
   type EngineLimits,
+  FRESH,
   hostLimits,
   itemOf,
   MAX_CLEANUP_FAILURES,
   ObjectiveRunner,
+  REPLAN,
   type ServiceRun,
   type Workflow,
 } from "./engine.js";
@@ -210,6 +212,11 @@ export async function serve(options: ServeOptions): Promise<number> {
   const waitingForSlot = new Set<number>();
   /** Objectives waiting on an earlier Objective's paths, as of the last tick. */
   const waitingOnPaths = new Map<number, number>();
+  /**
+   * When each run began waiting on paths: once the wait ends, the steps it
+   * stopped pause their wait clocks for it (engine.ts `waited`).
+   */
+  const pathWaits = new WeakMap<ObjectiveRunner, number>();
   /** `factory queue pause|drain|resume`, saved so it survives restarts. */
   let queue = loadQueueControl(paths.root);
   /**
@@ -915,15 +922,29 @@ export async function serve(options: ServeOptions): Promise<number> {
       let run = false;
       let allow = allowed(runner, queue);
       // Waiting its turn on another Objective's paths, however busy it is,
-      // it starts no step but an amendment's (planning never waits): those
-      // running finish, and one the service's death interrupted resumes.
+      // it starts no step but an amendment's (planning never waits) and one
+      // answered `replan` or `fresh`, so the answer applies at once (rule
+      // 3): steps running finish, and one the service's death interrupted
+      // resumes. Once the wait ends, the steps it stopped don't count it.
       const owner = TERMINAL.includes(state.status)
         ? undefined
         : pathOwner(runner, ordered);
+      const since = pathWaits.get(runner);
       if (owner !== undefined) {
         waitingOnPaths.set(state.issue, owner);
+        if (since === undefined) pathWaits.set(runner, Date.now());
         const operator = allow;
-        allow = (key) => operator(key) && key.startsWith("amend:");
+        allow = (key) => operator(key) && !pathWaitStops(runner.state, key);
+      } else if (since !== undefined) {
+        pathWaits.delete(runner);
+        try {
+          runner.waited(since, (key) => pathWaitStops(runner.state, key));
+        } catch (error) {
+          log.write(state.issue, {
+            event: "tick-failed",
+            error: String(error),
+          });
+        }
       }
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
       // Paused (the queue or the Objective), drained with nothing left to
@@ -1211,10 +1232,20 @@ function pathOwner(
   if (!mine.length || built(runner.state)) return undefined;
   const at = acceptedAt(runner.state);
   return all.find((other) => {
-    if (other === runner || TERMINAL.includes(other.state.status)) return false;
-    const theirs = ownedPaths(other.state);
+    // A resetting Objective still owns its old plan's paths until the
+    // rebuild replaces them (reset.ts keeps the old state).
+    const state =
+      (other.state.kept?.[RESET] as ResetRecord | undefined)?.old ??
+      other.state;
+    if (
+      other === runner ||
+      TERMINAL.includes(other.state.status) ||
+      TERMINAL.includes(state.status)
+    )
+      return false;
+    const theirs = ownedPaths(state);
     if (!theirs.length) return false;
-    const when = acceptedAt(other.state);
+    const when = acceptedAt(state);
     if (when > at || (when === at && other.state.issue > runner.state.issue))
       return false;
     return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
@@ -1262,6 +1293,15 @@ function control(
       at: stored.at,
     };
   return null;
+}
+
+/**
+ * Whether waiting on paths stops step `key`: every step but an
+ * amendment's, and one whose answer is `replan` or `fresh`.
+ */
+function pathWaitStops(state: ObjectiveState, key: string): boolean {
+  const answer = state.answers[key]?.answer;
+  return !key.startsWith("amend:") && answer !== REPLAN && answer !== FRESH;
 }
 
 function ownedPaths(state: ObjectiveState): string[] {

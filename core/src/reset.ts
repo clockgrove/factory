@@ -1,3 +1,4 @@
+import { isObject } from "./checked.js";
 import type { CoreConfig } from "./config.js";
 import { hold, type Outcome, type Step, type Workflow } from "./engine.js";
 import {
@@ -266,19 +267,22 @@ export async function rebuildState(
     } satisfies GitHubModule;
 
   if (planComment && planAt) {
-    const plan = planOf(issue, planComment.body, marked);
-    if (typeof plan === "string")
+    const found = planOf(issue, planComment.body, marked);
+    if (typeof found === "string")
       return refused(
         "plan_unreadable",
-        `#${issue}'s plan comment can't be read (${plan}).`,
+        `#${issue}'s plan comment can't be read (${found}).`,
       );
+    // The plan's own acceptance time, not the comment's: an amendment
+    // edits the comment and keeps it, and so does the owned-path order.
+    const { plan, acceptedAt } = found;
     state.done.plan = plan;
-    state.kept[ACCEPTED_AT] = planAt;
+    state.kept[ACCEPTED_AT] = acceptedAt;
     // The operator's criterion decisions in the saved state stay: GitHub
     // doesn't hold them. They now decide under the rebuilt plan, still
     // only on the exact tree each was made on.
     for (const entry of (old && decisionsOf(old)) ?? []) {
-      const moved = { ...entry, plan: planAt };
+      const moved = { ...entry, plan: acceptedAt };
       Object.assign(
         state.kept,
         entry.itemId
@@ -308,7 +312,7 @@ export async function rebuildState(
         facts({
           "final:retired": [
             ...(fact(state, "final:retired") ?? []),
-            ...retired.map((entry) => ({ ...entry, plan: planAt })),
+            ...retired.map((entry) => ({ ...entry, plan: acceptedAt })),
           ],
         }),
       );
@@ -399,11 +403,11 @@ const DATA_OPEN = (label: string) =>
 const DATA_CLOSE = "\n```\n</details>";
 
 /**
- * The plan in Factory's own data block (planning/steps.ts postPlan), or
- * joined from the continuation comments the plan comment names; a string
- * says why it can't be read. The data block is the end of the comment:
- * model-written text (titles, decisions) comes before it and can't stand
- * in for it, and the JSON itself holds no raw newline, so it can't close
+ * The plan and its acceptance time in Factory's own data block
+ * (planning/steps.ts postPlan), or joined from the continuation comments
+ * the plan comment names; a string says why it can't be read. The data
+ * block is the end of the comment: model-written text (titles, decisions)
+ * comes before it and can't stand in for it, and the JSON itself holds no raw newline, so it can't close
  * the block early. A continuation comment must be exactly its marker and
  * its block.
  */
@@ -411,7 +415,7 @@ function planOf(
   issue: number,
   body: string,
   marked: (marker: string) => IssueComment | undefined,
-): Plan | string {
+): { plan: Plan; acceptedAt: string } | string {
   let json: string | undefined;
   const parts = new RegExp(
     `\\n\\nPlan data: in the (\\d+) comments marked \`factory:${issue}:plan-data:1\` to \`:(\\d+)\` below; join their JSON in order\\.$`,
@@ -440,14 +444,19 @@ function planOf(
     json = text;
   }
   if (json === undefined) return "it carries no plan data block";
-  let plan: Plan;
+  let data: unknown;
   try {
-    plan = JSON.parse(json) as Plan;
+    data = JSON.parse(json);
   } catch (error) {
     return String(error);
   }
+  if (!isObject(data)) return "its data is not a plan";
+  const { acceptedAt, ...rest } = data;
+  const plan = rest as unknown as Plan;
+  if (typeof acceptedAt !== "string" || Number.isNaN(Date.parse(acceptedAt)))
+    return "its data has no acceptance time";
   const valid =
-    typeof plan?.base === "string" &&
+    typeof plan.base === "string" &&
     Array.isArray(plan.items) &&
     plan.items.every(
       (item) =>
@@ -455,5 +464,5 @@ function planOf(
         Array.isArray(item.ownedPaths) &&
         Array.isArray(item.dependencies),
     );
-  return valid ? plan : "its data is not a plan";
+  return valid ? { plan, acceptedAt } : "its data is not a plan";
 }

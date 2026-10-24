@@ -532,8 +532,8 @@ const REVALIDATE = "revalidate";
  * set by the question's step): `adopt` freezes only that one.
  */
 export const ADOPTS = "config:adopts";
-const REPLAN = "replan";
-const FRESH = "fresh";
+export const REPLAN = "replan";
+export const FRESH = "fresh";
 /** The most bytes an answer's text carries, however it came (a GitHub comment's limit). */
 export const MAX_ANSWER_TEXT = 65_536;
 
@@ -1650,26 +1650,44 @@ export class ObjectiveRunner {
    * and its question is timed from it (a granted `wait` puts it off).
    */
   private close(hold: Hold): void {
+    this.state.holds = this.state.holds.filter((open) => open !== hold);
+    this.pause(
+      Date.parse(hold.askedAt),
+      (key) => key !== hold.step && this.stops(hold, key),
+    );
+  }
+
+  /**
+   * A wait the service imposed has ended (service.ts: another Objective's
+   * owned paths): the steps it stopped pause their wait clocks from
+   * `since`, as a closed question's do.
+   */
+  waited(since: number, stopped: (key: string) => boolean): void {
+    this.transact(() => this.pause(since, stopped));
+  }
+
+  /**
+   * Pause the wait clocks of the `stopped` steps (but a human gate's) from
+   * `from`, or when each was due if later, until now, or until an open
+   * question that stops it too was asked, if earlier.
+   */
+  private pause(from: number, stopped: (key: string) => boolean): void {
     const now = this.now().getTime();
-    const rest = this.state.holds.filter((open) => open !== hold);
     for (const [key, retry] of Object.entries(this.state.retries)) {
-      if (key === hold.step || retry.wait?.kind === "gate") continue;
-      if (!this.stops(hold, key)) continue;
+      if (retry.wait?.kind === "gate" || !stopped(key)) continue;
       const until = Math.min(
         now,
-        ...rest
+        ...this.state.holds
           .filter((open) => this.stops(open, key))
           .map((open) => Date.parse(open.askedAt)),
       );
-      const paused =
-        until - Math.max(Date.parse(hold.askedAt), Date.parse(retry.nextAt));
+      const paused = until - Math.max(from, Date.parse(retry.nextAt));
       if (!(paused > 0)) continue;
       const later = (at: string) =>
         new Date(Date.parse(at) + paused).toISOString();
       retry.since = later(retry.since);
       if (retry.grantedUntil) retry.grantedUntil = later(retry.grantedUntil);
     }
-    this.state.holds = rest;
   }
 
   /**

@@ -35,7 +35,7 @@ import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
+import { currentPlan } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -47,7 +47,7 @@ import {
   removeRequest,
   type StoredRequest,
 } from "./requests.js";
-import { RESET, type ResetRecord, resetRecord } from "./reset.js";
+import { ownedPlan, RESET, type ResetRecord, resetRecord } from "./reset.js";
 import {
   deadlineAt,
   type Frozen,
@@ -1222,33 +1222,32 @@ export async function serve(options: ServeOptions): Promise<number> {
  * current plan's, so an accepted amendment's count from the next tick; the
  * amendment keeps the plan's acceptance time, so the order never reverses.
  * It owns them until it is done or cancelled, through final validation,
- * final review and the report, which judge those files.
+ * final review and the report, which judge those files, and through a
+ * reset (reset.ts `ownedPlan`). An amendment that adds paths a later
+ * Objective's started items touch makes that one wait with those items
+ * unmerged on their branches (docs/reference/queue.md).
  */
 function pathOwner(
   runner: ObjectiveRunner,
   all: readonly ObjectiveRunner[],
 ): number | undefined {
-  const mine = ownedPaths(runner.state);
-  if (!mine.length || built(runner.state)) return undefined;
-  const at = acceptedAt(runner.state);
+  // Only building waits: an Objective with no accepted plan of its own
+  // (planning, resetting, or reviewing a rebuilt plan) never does.
+  const mine = currentPlan(runner.state) && ownedPlan(runner.state);
+  if (!mine || built(runner.state)) return undefined;
+  const paths = mine.plan.items.flatMap((item) => item.ownedPaths);
   return all.find((other) => {
-    // A resetting Objective still owns its old plan's paths until the
-    // rebuild replaces them (reset.ts keeps the old state).
-    const state =
-      (other.state.kept?.[RESET] as ResetRecord | undefined)?.old ??
-      other.state;
+    const theirs = other !== runner && ownedPlan(other.state);
+    if (!theirs) return false;
     if (
-      other === runner ||
-      TERMINAL.includes(other.state.status) ||
-      TERMINAL.includes(state.status)
+      theirs.accepted > mine.accepted ||
+      (theirs.accepted === mine.accepted &&
+        other.state.issue > runner.state.issue)
     )
       return false;
-    const theirs = ownedPaths(state);
-    if (!theirs.length) return false;
-    const when = acceptedAt(state);
-    if (when > at || (when === at && other.state.issue > runner.state.issue))
-      return false;
-    return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
+    return theirs.plan.items.some((item) =>
+      item.ownedPaths.some((b) => paths.some((a) => pathsOverlap(a, b))),
+    );
   })?.state.issue;
 }
 
@@ -1302,15 +1301,6 @@ function control(
 function pathWaitStops(state: ObjectiveState, key: string): boolean {
   const answer = state.answers[key]?.answer;
   return !key.startsWith("amend:") && answer !== REPLAN && answer !== FRESH;
-}
-
-function ownedPaths(state: ObjectiveState): string[] {
-  return (currentPlan(state)?.items ?? []).flatMap((item) => item.ownedPaths);
-}
-
-/** When the Objective's plan was accepted (planning/steps.ts keeps it). */
-function acceptedAt(state: ObjectiveState): string {
-  return (state.kept?.[ACCEPTED_AT] as string | undefined) ?? "";
 }
 
 /**

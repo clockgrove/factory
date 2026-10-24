@@ -675,10 +675,17 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
   await stopped(service);
 });
 
-test("overlapping owned paths take turns while busy, after an amendment, until the earlier Objective finishes", async () => {
+test("overlapping owned paths take turns while busy, after an amendment, until the earlier Objective finishes; amendments plan meanwhile", async () => {
   const inst = installation();
-  // GitHub never answers, so a step that reads it stays running.
-  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  // GitHub never answers, so a step that reads it stays running. One
+  // planning revision: #74's accepted amendment spent it, so a second
+  // amendment's planning asks before any planner runs.
+  configured(
+    inst,
+    `http://127.0.0.1:${await silentServer()}`,
+    {},
+    { autonomy: { allowances: { planningRevisions: 1 } } },
+  );
   const at = new Date().toISOString();
   // #73 owns src/: its one item merged, and its final validation asks.
   seed(inst, 73, "holding", {
@@ -758,8 +765,52 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   // Busy, with #73 in final validation: r waits its turn.
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.deepEqual(tried(), ["item:p:ci"]);
-  const row = status(inst).objectives.find((each) => each.issue === 74);
-  assert.deepEqual(row.waitsOn, { paths: 73 });
+  const waitsOn = () =>
+    status(inst).objectives.find((each) => each.issue === 74).waitsOn;
+  assert.deepEqual(waitsOn(), { paths: 73 });
+  // Planning never waits: a proposed amendment's step starts meanwhile.
+  const file = join(inst.root, "amendment.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      scope: "in-scope",
+      reason: "p needs a helper",
+      evidence: ["lib/p.ts calls lib/helper.ts, which no item owns"],
+      ownership: ["lib/helper.ts"],
+      acceptance: ["lib/helper.ts exports help"],
+      dependencies: [],
+    }),
+  );
+  assert.equal(cli(inst, "propose-amendment", "74", "--file", file).code, 0);
+  const [id] = Object.keys(stateOf(inst, 74).kept)
+    .map((key) => /^amend:(.+):proposal$/.exec(key)?.[1])
+    .filter((each) => each && each !== "x");
+  const asked = async (step) => {
+    await until(
+      () => stateOf(inst, 74).holds.some((hold) => hold.step === step),
+      `${step} asks`,
+    );
+    assert.deepEqual(waitsOn(), { paths: 73 });
+    return stateOf(inst, 74).holds.find((hold) => hold.step === step).id;
+  };
+  let question = await asked(`amend:${id}:plan`);
+  assert.equal(
+    cli(inst, "answer", "74", "refuse", "--question", question).code,
+    0,
+  );
+  question = await asked(`amend:${id}:continue`);
+  assert.equal(
+    cli(inst, "answer", "74", "continue", "--question", question).code,
+    0,
+  );
+  await until(
+    () => stateOf(inst, 74).done[`amend:${id}:continue`],
+    "the refused amendment settles",
+  );
+  // r still waits its turn.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.ok(!tried().some((key) => key.startsWith("item:r:")), tried());
+  assert.deepEqual(waitsOn(), { paths: 73 });
   // Once #73 has finished, r builds.
   assert.equal(cli(inst, "cancel", "73").code, 0);
   await until(() => tried().includes("item:r:work"), "r's work starts");

@@ -54,9 +54,18 @@ Team use needs nothing beyond GitHub: no hosted database and no hosted service. 
 - **Search.** Memory is searched in the local clone with ripgrep, which ships with Codex and Claude Code. There's no index to build: at the supported size (the newest 1,000 episodes), a full scan takes milliseconds. Factory ranks the matches itself (how well they match, how close their paths are, how recent they are) to fill each role's memory budget.
 - **Bounded.** Memory keeps the newest records and drops the oldest. History stays in git and is never read to make progress.
 
+**How machines see changes.** Polling is the only option: webhooks would need a public endpoint on every machine, which is infrastructure.
+
+- Each machine checks the shared branch's tip every 30 seconds, the same cadence as the queue. It uses a conditional request, so an unchanged tip costs nothing against GitHub's rate limit. It fetches only when the tip moved.
+- GitHub itself (issues, comments, Project cards, PRs) is polled the same way, with conditional requests budgeted for the number of machines.
+- **Freshness affects speed, never correctness:**
+  - A claim succeeds only on the tip its machine read, so stale views can't both win.
+  - A machine confirms its claim before each step. If it can't renew a claim, it stops working that Objective before the claim lapses, so a machine that takes over never acts alongside it.
+  - Memory reaches the other machines within one poll interval, which is soon enough for planning and review.
+
 **One storage model.** Once team use ships, single player uses the same git storage, and the local SQLite store goes away.
 
-**To show in the design:** that GitHub's rate limits and git's push contention hold up for the supported number of machines, at the expected rate of writes.
+**To show in the design:** that GitHub's rate limits and git's push contention hold up for the supported number of machines, at the expected rate of writes and polls.
 
 ## Open questions
 

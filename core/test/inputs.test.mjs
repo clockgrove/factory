@@ -163,6 +163,15 @@ test("an Objective whose work keeps throwing is set aside with retry, reset and 
     row(11).holds[0].options.map((option) => option.answer),
     ["retry", "reset", "cancel"],
   );
+  // A set-aside run's cause is usually a code bug: retry after the fix keeps
+  // its local progress, so it's the recommended answer.
+  assert.deepEqual(
+    row(11)
+      .holds[0].options.filter((option) => option.recommended)
+      .map((option) => option.answer),
+    ["retry"],
+  );
+  assert.equal(row(11).nextAction.command, "factory retry 11");
   // Cancel answers it with a cancelled record.
   await until(() => row(13).status === "unreadable", "#13 is set aside");
   assert.equal(cli(inst, "cancel", "13").code, 0);

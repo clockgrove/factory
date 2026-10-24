@@ -255,6 +255,7 @@ export function statusOf(
               ? [
                   {
                     answer: "retry",
+                    recommended: true,
                     family: "retry" as const,
                     consequence:
                       "Reads its state again and runs on, once its stopped steps have ended.",
@@ -263,7 +264,7 @@ export function statusOf(
               : []),
             {
               answer: RESET,
-              recommended: true,
+              recommended: !context.setAside,
               family: "reset",
               consequence:
                 "Rebuilds the state from the plan comment and PRs on GitHub.",
@@ -281,9 +282,11 @@ export function statusOf(
       flakyRerun: [],
       decisions: [],
       nextAction: {
-        command: `factory reset ${issue}`,
+        command: context.setAside
+          ? `factory retry ${issue}`
+          : `factory reset ${issue}`,
         reason: context.setAside
-          ? "The service set it aside: reset rebuilds it from GitHub (or retry, or cancel)."
+          ? "The service set it aside: once the cause is fixed (often an upgrade), retry reads it again and runs on with its local progress (or reset rebuilds it from GitHub, or cancel)."
           : "Its state can't be read: reset rebuilds it from GitHub (or cancel).",
       },
       lastEvent,

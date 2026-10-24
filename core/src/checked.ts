@@ -19,9 +19,6 @@ export type Checked<S extends Spec> = {
   [K in keyof S]: ReturnType<S[K]>;
 };
 
-/** What replaced each retired key, by key. */
-export type Retired = Readonly<Record<string, string>>;
-
 /** `path.key`, or `key` at the top level. */
 const at = (path: string, key: string) => (path ? `${path}.${key}` : key);
 
@@ -37,7 +34,6 @@ export function section<S extends Spec>(
   path: string,
   spec: S,
   problems: string[],
-  retired: Retired = {},
 ): Checked<S> {
   let given: Record<string, unknown> = {};
   if (isObject(value)) given = value;
@@ -45,9 +41,7 @@ export function section<S extends Spec>(
     problems.push(`${path || "the configuration"} must be an object`);
   for (const key of Object.keys(given))
     if (!Object.hasOwn(spec, key))
-      problems.push(
-        `${at(path, key)} is not a setting${Object.hasOwn(retired, key) ? `: ${retired[key]}` : ""}`,
-      );
+      problems.push(`${at(path, key)} is not a setting`);
   const checked: Record<string, unknown> = {};
   for (const [key, check] of Object.entries(spec)) {
     const entry = check(given[key], at(path, key), problems);
@@ -58,9 +52,9 @@ export function section<S extends Spec>(
 
 /** A nested section, as a key's check. */
 export const object =
-  <S extends Spec>(spec: S, retired: Retired = {}): Check<Checked<S>> =>
+  <S extends Spec>(spec: S): Check<Checked<S>> =>
   (value, path, problems) =>
-    section(value, path, spec, problems, retired);
+    section(value, path, spec, problems);
 
 /** Absent stays absent; a given value is checked. */
 export const optional =

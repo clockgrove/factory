@@ -18,7 +18,6 @@ import {
   object,
   oneOf,
   optional,
-  type Retired,
   section,
   strings,
   text,
@@ -456,58 +455,6 @@ function secretValues(
   return [...values].filter((value) => value.length >= MIN_SECRET_LENGTH);
 }
 
-/** What replaced each key an earlier Factory configuration used. */
-const PROVIDERS_HINT = "name the planner and worker under providers.<name>";
-const RETIRED: Record<string, Retired> = {
-  "": {
-    schemaVersion: "the configuration has no schema version; remove it",
-    gitPersistence: "removed: Factory keeps no remote state history",
-    nativeBoundaryTelemetry:
-      "removed: Codex native telemetry is always read into each call's model-usage event",
-    planningContext: "moved to planning.context",
-    githubManagement:
-      "removed: Factory always writes queue.field and progress comments",
-    scheduling: "host limits are execution.workers and execution.validations",
-  },
-  queue: {
-    project:
-      "use queue.projectId, queue.field, queue.orderField and queue.options",
-    orderFieldId: "queue.orderField names the order field",
-    metadataFieldId: "removed: Factory keeps no metadata field",
-    controlItemId: "removed: Factory has no control card",
-    factoryManagedFields:
-      "removed: Factory manages queue.field and queue.orderField",
-  },
-  planning: {
-    provider: PROVIDERS_HINT,
-    models: PROVIDERS_HINT,
-    revisions: "moved to autonomy.allowances.planningRevisions",
-    adaptiveGraph: "the adaptive graph is not part of Factory; remove the key",
-    discoveryLimits: "discovery items are not part of Factory; remove the key",
-    maxExpansionChildren:
-      "the adaptive graph is not part of Factory; remove the key",
-  },
-  execution: {
-    repairs:
-      "replaced by autonomy.allowances.perPath (repairs of one Work Item) and autonomy.allowances.implementationRepairs (the Objective's)",
-    workerProvider: PROVIDERS_HINT,
-    codexNetwork: "use providers.<name>.worker.network",
-    claudeWorker: PROVIDERS_HINT,
-    kind: PROVIDERS_HINT,
-    harness: PROVIDERS_HINT,
-    defaultProfile:
-      "removed: a Work Item without a profile runs on its Objective's provider",
-  },
-  policy: {
-    network: "use providers.<name>.worker.network for a Codex worker",
-  },
-  autonomy: {
-    repairClasses:
-      "replaced: every failure holds with its cause, and your answer decides",
-    repairPolicy: "per-path repairs are autonomy.allowances.perPath",
-  },
-};
-
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Names a worker never receives (worktree.ts), so requiring one checks nothing. */
 const WITHHELD_NAME = /^(GH|GITHUB|GIT|SSH)_/i;
@@ -561,74 +508,59 @@ export function loadConfig(repository: string): CoreConfig {
     {
       repository: text(repository),
       checkout: text(),
-      queue: object(
-        {
-          projectId: text(),
-          field: text("Factory"),
-          orderField: text("Factory order"),
-          options: object(
-            Object.fromEntries(
-              Object.entries(DEFAULT_OPTIONS).map(([name, option]) => [
-                name,
-                text(option),
-              ]),
-            ) as Record<QueueOption, Check<string>>,
-          ),
-          pollSeconds: whole(5, 30),
-          maxActiveObjectives: whole(1, 3),
-          objectiveDeadlineSeconds: optional(whole(60)),
-        },
-        RETIRED.queue,
-      ),
+      queue: object({
+        projectId: text(),
+        field: text("Factory"),
+        orderField: text("Factory order"),
+        options: object(
+          Object.fromEntries(
+            Object.entries(DEFAULT_OPTIONS).map(([name, option]) => [
+              name,
+              text(option),
+            ]),
+          ) as Record<QueueOption, Check<string>>,
+        ),
+        pollSeconds: whole(5, 30),
+        maxActiveObjectives: whole(1, 3),
+        objectiveDeadlineSeconds: optional(whole(60)),
+      }),
       providers: (value) => value,
       defaultProvider: (value) => value,
-      planning: object(
-        {
-          playbook: text(".factory/playbook.md"),
-          context: planningContext,
-        },
-        RETIRED.planning,
-      ),
-      execution: object(
-        {
-          concurrency: whole(1, 8),
-          workers: whole(1, host.workers),
-          validations: whole(1, host.validations),
-          planners: optional(whole(1)),
-          memoryMiB: whole(256, host.budgetMiB),
-          reservations: object(
-            Object.fromEntries(
-              Object.entries(DEFAULT_RESERVATIONS).map(([name, fallback]) => [
-                name,
-                whole(0, fallback),
-              ]),
-            ) as Record<keyof Reservations, Check<number>>,
-          ),
-          profiles: executionProfiles,
-        },
-        RETIRED.execution,
-      ),
-      autonomy: object(
-        {
-          allowances: object(
-            Object.fromEntries(
-              Object.entries(DEFAULT_ALLOWANCES).map(([name, fallback]) => [
-                name,
-                whole(0, fallback),
-              ]),
-            ) as Record<keyof Allowances, Check<number>>,
-          ),
-          requiredEnvironment: environmentNames,
-        },
-        RETIRED.autonomy,
-      ),
-      policy: object(
-        {
-          allowedSecretNames: strings,
-          secretlintConfig: optional(secretlintConfig),
-        },
-        RETIRED.policy,
-      ),
+      planning: object({
+        playbook: text(".factory/playbook.md"),
+        context: planningContext,
+      }),
+      execution: object({
+        concurrency: whole(1, 8),
+        workers: whole(1, host.workers),
+        validations: whole(1, host.validations),
+        planners: optional(whole(1)),
+        memoryMiB: whole(256, host.budgetMiB),
+        reservations: object(
+          Object.fromEntries(
+            Object.entries(DEFAULT_RESERVATIONS).map(([name, fallback]) => [
+              name,
+              whole(0, fallback),
+            ]),
+          ) as Record<keyof Reservations, Check<number>>,
+        ),
+        profiles: executionProfiles,
+      }),
+      autonomy: object({
+        allowances: object(
+          Object.fromEntries(
+            Object.entries(DEFAULT_ALLOWANCES).map(([name, fallback]) => [
+              name,
+              whole(0, fallback),
+            ]),
+          ) as Record<keyof Allowances, Check<number>>,
+        ),
+        requiredEnvironment: environmentNames,
+      }),
+      policy: object({
+        allowedSecretNames: strings,
+        secretlintConfig: optional(secretlintConfig),
+      }),
       validation: object({
         commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
       }),
@@ -654,20 +586,14 @@ export function loadConfig(repository: string): CoreConfig {
           workItem: text("Task"),
         }),
       }),
-      capture: object(
-        {
-          enabled: flag(CAPTURE_OFF.enabled),
-          maxBytesPerCall: whole(
-            1024,
-            CAPTURE_OFF.maxBytesPerCall,
-            256 * 1024 * 1024,
-          ),
-        },
-        {
-          maxBytesPerInvocation: "renamed capture.maxBytesPerCall",
-          retainInRecovery: "removed: Factory keeps no recovery archive",
-        },
-      ),
+      capture: object({
+        enabled: flag(CAPTURE_OFF.enabled),
+        maxBytesPerCall: whole(
+          1024,
+          CAPTURE_OFF.maxBytesPerCall,
+          256 * 1024 * 1024,
+        ),
+      }),
       sessions: object({
         enabled: flag(DEFAULT_SESSIONS.enabled),
         maxTurns: whole(1, DEFAULT_SESSIONS.maxTurns, 100),
@@ -675,7 +601,6 @@ export function loadConfig(repository: string): CoreConfig {
       }),
     },
     problems,
-    RETIRED[""],
   );
   const { providers, defaultProvider } = providersConfig(
     isObject(raw) ? raw : {},

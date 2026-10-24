@@ -109,10 +109,6 @@ export const planningContext: Check<PlanningContext> = (
       memory: flag(true),
     },
     problems,
-    {
-      enabled:
-        "planning context is always on; memory: false turns repository memory off",
-    },
   );
 
 function literalSelector(selector: unknown): boolean {

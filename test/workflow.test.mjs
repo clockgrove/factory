@@ -10,6 +10,7 @@ import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { checkObjective } from "../dist/objective.js";
 import { finalCommands, sectionText } from "../dist/planning/facts.js";
+import { ownedSince } from "../dist/planning/plan.js";
 import { readShown, shownDigest } from "../dist/shown.js";
 import { declarationProblems } from "../dist/validate.js";
 import {
@@ -799,5 +800,122 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   assert.ok(since > Date.parse(seeded), "the wait is not counted");
   assert.ok(since <= Date.now() - 60_000, "no time is counted twice");
   assert.equal(cli(inst, "cancel", "74").code, 0);
+  await stopped(service);
+});
+
+test("an amendment's new paths rank by its acceptance: an earlier Objective waits on a later one that builds them, and a circle of waits is broken", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  const at = new Date().toISOString();
+  const seeded = new Date(Date.parse(at) - 60_000).toISOString();
+  const day = (n) => `2026-01-0${n}T00:00:00.000Z`;
+  // A building Objective whose plan was accepted on `accepted`, and,
+  // with `amended`, an amendment accepted on `since` that made those its
+  // items, stamped as amendAcceptStep stamps them.
+  const building = (issue, accepted, items, amended, since) => {
+    const added = amended
+      ?.flatMap((each) => each.ownedPaths)
+      .filter((path) => !items.some((one) => one.ownedPaths.includes(path)));
+    const amendedPlan =
+      amended &&
+      plan(amended, {
+        ownedSince: ownedSince(amended, since, {
+          plan: plan(items),
+          accepted,
+        }),
+      });
+    seed(inst, issue, "building", {
+      done: {
+        check: {},
+        plan: plan(items),
+        ...(amended ? { "amend:x": { plan: amendedPlan } } : {}),
+      },
+      kept: {
+        "plan:acceptedAt": accepted,
+        ...(amended
+          ? {
+              "amend:x:proposal": {
+                id: "x",
+                actor: "kirk",
+                at: since,
+                plan: accepted,
+                discovery: {
+                  scope: "in-scope",
+                  reason: "more is needed",
+                  evidence: [],
+                  ownership: added,
+                  acceptance: [],
+                  dependencies: [],
+                },
+              },
+            }
+          : {}),
+      },
+      // Its last item's work retried a minute ago and is due.
+      retries: {
+        [`item:${(amended ?? items).at(-1).id}:work`]: {
+          count: 0,
+          attempts: 1,
+          since: seeded,
+          nextAt: at,
+          lastError: "seeded",
+        },
+      },
+    });
+  };
+  // #75's plan (lib/a.ts) was accepted before #76's (src/b.ts, started),
+  // so both built; then #75's amendment added r, which owns src/.
+  const a = item("a", { ownedPaths: ["lib/a.ts"] });
+  building(75, day(1), [a], [a, item("r", { ownedPaths: ["src/"] })], day(3));
+  building(76, day(2), [item("b", { ownedPaths: ["src/b.ts"] })]);
+  // Three Objectives whose waits would close a circle: #83 waits on #82
+  // (y/ since day 3), #82 on #81 (its amendment's x/ since day 4), and
+  // #81 on #83 (its amendment's z/ since day 5): that last one is left out.
+  const a1 = item("a1", { ownedPaths: ["x/a.ts"] });
+  building(81, day(1), [a1], [a1, item("a2", { ownedPaths: ["z/"] })], day(5));
+  const b1 = item("b1", { ownedPaths: ["y/b.ts"] });
+  building(82, day(2), [b1], [b1, item("b2", { ownedPaths: ["x/"] })], day(4));
+  // #77's amendment widened its pending w from web/w.ts (which #78's plan,
+  // accepted later, overlaps) to web/: inside it, web/w.ts keeps #77's
+  // place, so #78 still waits on #77 rather than stopping its build.
+  const v = item("v", { ownedPaths: ["lib/v.ts"] });
+  building(
+    77,
+    day(1),
+    [v, item("w", { ownedPaths: ["web/w.ts"] })],
+    [v, item("w", { ownedPaths: ["web/"] })],
+    day(3),
+  );
+  building(78, day(2), [item("u", { ownedPaths: ["web/w.ts"] })]);
+  building(83, day(3), [item("c1", { ownedPaths: ["y/", "z/c.ts"] })]);
+  const tried = (issue) => {
+    const state = stateOf(inst, issue);
+    return [
+      ...Object.keys(state.attempts),
+      ...Object.entries(state.retries)
+        .filter(([, retry]) => retry.lastError !== "seeded")
+        .map(([key]) => key),
+      ...state.holds.map((hold) => hold.step),
+    ];
+  };
+  const waitsOn = (issue) =>
+    status(inst).objectives.find((each) => each.issue === issue).waitsOn;
+  const service = serve(inst);
+  // #76's started item goes on; #75's r waits on it.
+  await until(() => tried(76).includes("item:b:work"), "b's work starts");
+  await until(() => waitsOn(75)?.paths === 76, "#75 waits on #76");
+  assert.equal(waitsOn(76), null);
+  assert.ok(!tried(75).includes("item:r:work"), tried(75));
+  assert.deepEqual(waitsOn(78), { paths: 77 });
+  assert.equal(waitsOn(77), null);
+  assert.deepEqual(waitsOn(83), { paths: 82 });
+  assert.deepEqual(waitsOn(82), { paths: 81 });
+  assert.equal(waitsOn(81), null);
+  // Once #76 has finished, r builds.
+  assert.equal(cli(inst, "cancel", "76").code, 0);
+  await until(() => tried(75).includes("item:r:work"), "r's work starts");
+  assert.ok(!tried(78).includes("item:u:work"), tried(78));
+  for (const issue of [75, 77, 78, 81, 82, 83])
+    assert.equal(cli(inst, "cancel", String(issue)).code, 0);
   await stopped(service);
 });

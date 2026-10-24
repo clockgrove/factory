@@ -338,8 +338,6 @@ export type QueueOption =
   | "building"
   | "holding"
   | "done"
-  /** No status shows it any more; kept so configurations that name it load. */
-  | "failed"
   | "cancelled";
 
 const DEFAULT_OPTIONS: Record<QueueOption, string> = {
@@ -348,7 +346,6 @@ const DEFAULT_OPTIONS: Record<QueueOption, string> = {
   building: "Building",
   holding: "Needs you",
   done: "Done",
-  failed: "Failed",
   cancelled: "Cancelled",
 };
 

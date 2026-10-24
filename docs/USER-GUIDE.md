@@ -14,11 +14,11 @@ Factory turns a GitHub issue (an Objective) into a reviewed plan of Work Items, 
 You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), and the GitHub CLI logged in. See the [README](../README.md#requirements) for the full list and installation.
 
 1. **A clone for Factory.** Clone the target repository to a directory only Factory uses. Its origin must name the repository: Factory checks it before every fetch and push.
-2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, and a number field `Factory order`. Factory never creates them.
+2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`. Factory never creates them.
 
    ```sh
    gh project field-create NUMBER --owner OWNER --name Factory --data-type SINGLE_SELECT \
-     --single-select-options "Queued,Planning,Building,Needs you,Done,Failed,Cancelled"
+     --single-select-options "Queued,Planning,Building,Needs you,Done,Cancelled"
    gh project field-create NUMBER --owner OWNER --name "Factory order" --data-type NUMBER
    ```
 
@@ -55,7 +55,7 @@ A provider pairs a **planner** (it plans and reviews) with a **worker** (it writ
 
 | Kind      | Planner | Worker | Login                                                                                                        |
 | --------- | ------- | ------ | ------------------------------------------------------------------------------------------------------------ |
-| `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY`                                                         |
+| `codex`   | yes     | yes    | `codex login`, or `CODEX_API_KEY` / `OPENAI_API_KEY` for a foreground `factory serve`                        |
 | `claude`  | yes     | yes    | `claude auth login`, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`; needs the optional Claude Agent SDK |
 | `copilot` | yes     | yes    | the GitHub CLI login, or `COPILOT_GITHUB_TOKEN`; needs the optional Copilot SDK (see below)                  |
 
@@ -65,13 +65,13 @@ factory setup --repo OWNER/NAME --provider claude --planner claude --worker clau
 factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer-effort high --default
 ```
 
-- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys from the environment or as `--credential-file NAME=FILE`.
+- **Copilot endpoints.** The Copilot runtime also gets `COPILOT_API_URL` and `GITHUB_COPILOT_API_TOKEN` (GitHub Enterprise), and `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` and `COPILOT_PROVIDER_BEARER_TOKEN` (your own model endpoint and key). None of them reach the sandboxed commands. The tokens, the keys and `COPILOT_PROVIDER_BASE_URL`, which may embed a key, are redacted from output. The background service takes the endpoint settings from the setup shell, and the tokens and keys only as `--credential-file NAME=FILE`.
 - **Model choices.** `models.planner` and `models.reviewer` each name a model and an effort. `models.reviewEffort` sets one review phase's effort: `graph-review`, `result-review` or `objective-review`. The other phases run on `models.planner`.
 - **What runs is what's configured.** A Copilot planner or worker served another model holds with `switch NAME`. So does a Claude worker whose answer comes from another model than its configured full id (an alias such as `opus` isn't compared) or that starts at another effort. A Claude worker that starts in another permission mode or directory holds before any tool runs.
 - **One provider per Objective.** An Objective runs on the provider it was admitted with. It never falls back to another one, and a missing login holds with the fix.
 - **Usage limits.** When a provider hits its usage limit, the hold offers `wait` and `switch NAME`, which moves the Objective to another configured provider.
 - **Choosing at start:** `factory run N --provider NAME` picks the provider for one Objective; `factory serve --provider NAME` picks it for all new work.
-- **Configuration changes.** A change to the configuration holds a running Objective once, with `adopt` (continue on the new configuration), `switch NAME` and `cancel`. Host settings (limits, sandbox caps, the queue) change without asking.
+- **Configuration changes.** A change to the configuration holds a running Objective once, with `adopt` (continue on the new configuration), `switch NAME` and `cancel`. Once an Objective has a plan, a change to `delivery.kind` can't be adopted: cancel the Objective and queue it again, or set it back, restart and answer `retry`. Host settings (limits, sandbox caps, the queue) change without asking.
 - **Managed workers.** The OpenAI Agents and Claude Managed Agents workers are in the code but **parked**: they aren't live-qualified, so don't configure them yet.
 
 ## Write an Objective
@@ -345,13 +345,18 @@ factory reset N                           # rebuild its state from GitHub: its p
 
 One installation serves a repository at a time, on one machine. Factory records which one in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
 
-To move to another machine, stop the first installation (a clean stop frees the repository), then start the second. If the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
+To move to another machine:
 
-```sh
-factory serve --repo OWNER/NAME --take-over
-```
+1. Stop the first installation. A clean stop frees the repository.
+2. Start the second. Only if the first one can't stop cleanly, because its machine is gone or its state was wiped, take over from the new one:
 
-Use it only for an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
+   ```sh
+   factory serve --repo OWNER/NAME --take-over
+   ```
+
+3. On the new machine, run `factory reset N` for each Objective that was in flight (see A new machine in [Stopping and recovery](#stopping-and-recovery)). The new installation has no state for them, so until then it doesn't run them or answer their questions; `factory queue list` lists them as inert with that command.
+
+Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
 
 ## Upgrade
 

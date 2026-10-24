@@ -1,7 +1,10 @@
 import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
-import { gitEnvironment } from "../git.js";
+import { gitEnvironment, lfsFiltered } from "../git.js";
 import { TransientError } from "../github.js";
 import { markdownLines } from "../markdown.js";
 import {
@@ -106,6 +109,28 @@ export class BaseFiles {
       : {};
   }
 
+  /**
+   * The paths the base's attributes route through Git LFS (`filter=lfs`).
+   * `git check-attr --cached` reads them from a scratch index of the base
+   * tree, so the checkout's own index and files play no part.
+   */
+  async lfsRouted(paths: readonly string[]): Promise<Set<string>> {
+    if (!paths.length) return new Set();
+    const scratch = await mkdtemp(join(tmpdir(), "factory-attributes-"));
+    try {
+      const index = { GIT_INDEX_FILE: join(scratch, "index") };
+      await this.git(["read-tree", this.base], index);
+      return lfsFiltered(
+        await this.git(
+          ["check-attr", "--cached", "-z", "filter", "--", ...paths],
+          index,
+        ),
+      );
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  }
+
   /** The base tree, read once; a failed read is retried on the next call. */
   private entries(): Promise<Map<string, BaseEntry>> {
     if (!this.tree) {
@@ -158,11 +183,14 @@ export class BaseFiles {
     }
   }
 
-  private async git(args: string[]): Promise<Buffer> {
+  private async git(
+    args: string[],
+    env: Record<string, string> = {},
+  ): Promise<Buffer> {
     try {
       const { stdout } = await run("git", ["-C", this.checkout, ...args], {
         encoding: "buffer",
-        env: gitEnvironment(),
+        env: { ...gitEnvironment(), ...env },
         maxBuffer: 64 * 1024 * 1024,
         timeout: GIT_TIMEOUT_MS,
         ...(this.signal ? { signal: this.signal } : {}),
@@ -1020,6 +1048,23 @@ export interface FactsArgs {
   signal?: AbortSignal;
 }
 
+/** The most base Git LFS rules the planner is shown. */
+const MAX_LFS_RULES = 50;
+
+/**
+ * The base's `.gitattributes` lines that route paths through Git LFS, each
+ * as `file: line`: what the media plan check's routing reads.
+ */
+async function lfsRules(files: BaseFiles): Promise<string[]> {
+  const rules: string[] = [];
+  for (const path of await files.paths())
+    if (path === ".gitattributes" || path.endsWith("/.gitattributes"))
+      for (const line of ((await files.text(path)) ?? "").split("\n"))
+        if (line.trim().split(/\s+/).slice(1).includes("filter=lfs"))
+          rules.push(`${path}: ${line.trim()}`);
+  return rules.slice(0, MAX_LFS_RULES);
+}
+
 /**
  * Everything the planner is given, computed once from the base. The check
  * step has already run {@link objectiveCommandProblems} on this body and
@@ -1060,6 +1105,7 @@ export async function buildFacts(
     coverageObligations: coverageObligations(args.shown.blocks),
     playbook: args.playbook ?? "",
     localAssetRoots: args.localAssetRoots ?? [],
+    lfsRules: await lfsRules(files),
   };
   return { facts };
 }

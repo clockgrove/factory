@@ -19,7 +19,7 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
 ## Gather
 
 - **Target:** the repository `OWNER/NAME`, and an absolute path to a clone of it that Factory owns (not the operator's working copy). The clone's origin must name the repository.
-- **Queue:** the GitHub Project node id (`PVT_...`). The Project needs a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, plus a number field `Factory order`. Setup checks them and never creates them; creating them is the operator's step (`gh project field-create`).
+- **Queue:** the GitHub Project node id (`PVT_...`). The Project needs a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, plus a number field `Factory order`. Setup checks them and never creates them; creating them is the operator's step (`gh project field-create`).
 - **Providers:** `codex` is the default (planner and worker). For Claude or Copilot, add a named provider with `--provider NAME --planner KIND --worker KIND`, and `--default` to make it the default. Ask for the models rather than copying another provider's.
 - **Optional:**
   - limits: `--max-active`, `--workers`, `--validations`;
@@ -42,7 +42,8 @@ factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FI
 
 - **Create:** the first run creates the configuration (mode 0600). A repeat with the same options changes nothing (`changed: []`).
 - **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
-- **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
+- **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
+- **Background logins:** the service doesn't keep logins from the setup shell, and `--background` checks readiness without them. Codex needs `codex login` (an API key in the shell doesn't reach the service), GitHub needs `gh auth login`, and a Claude or Copilot token needs `--credential-file`.
 
 ## Check the result
 
@@ -76,6 +77,8 @@ factory setup --repo OWNER/NAME --uninstall  # remove the unit; configuration an
 After installing a new release, run `--background` again: it updates the unit and restarts the service. `--check` reports `service.current: false` until you do.
 
 An idle service with an empty queue makes no model calls.
+
+To move the service to another machine, `--stop` it on the old one, then set up and start it on the new one. Use `factory serve --take-over` only when the old machine is gone or its state was wiped. Then run `factory reset N` on the new machine for each Objective that was in flight: until then the new installation doesn't run them.
 
 ## Queue work
 

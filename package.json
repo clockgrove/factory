@@ -21,10 +21,10 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "factory": "./core/dist/cli.js"
+    "factory": "./dist/cli.js"
   },
   "files": [
-    "core/dist",
+    "dist",
     "skills",
     "assets",
     "docs/USER-GUIDE.md",
@@ -50,16 +50,14 @@
     "x64"
   ],
   "scripts": {
-    "build": "npm run build:core",
+    "build": "tsc -p tsconfig.json",
     "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
-    "test": "npm run test:core",
+    "test": "npm run build && node --test --test-timeout=120000 test/*.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check",
-    "build:core": "tsc -p core/tsconfig.json",
-    "prepack": "npm run build:core",
-    "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs",
+    "prepack": "npm run build",
     "integration": "integration/run-suite.sh"
   },
   "devDependencies": {

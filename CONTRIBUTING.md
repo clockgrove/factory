@@ -29,7 +29,7 @@ Use this to run Factory from `main` before a release, on your own repository or 
 git clone https://github.com/clockgrove/factory.git ~/factory-main
 cd ~/factory-main
 npm ci
-npm run build:core
+npm run build
 npm link          # or the wrapper below
 factory help
 ```
@@ -37,13 +37,13 @@ factory help
 Without `npm link`, write a wrapper on your PATH that runs the build:
 
 ```sh
-printf '#!/bin/sh\nexec node "$HOME/factory-main/core/dist/cli.js" "$@"\n' > ~/.local/bin/factory
+printf '#!/bin/sh\nexec node "$HOME/factory-main/dist/cli.js" "$@"\n' > ~/.local/bin/factory
 chmod +x ~/.local/bin/factory
 ```
 
 Then run the setup skill, or `factory setup`, as the README describes. Rules:
 
-- `npm run build:core` again after every `git pull`; the CLI runs `core/dist/`, not the source.
+- `npm run build` again after every `git pull`; the CLI runs `dist/`, not the source.
 - Keep the checkout in place. The link and the wrapper point at it, and a background service keeps running it.
 - Never use this checkout as the target repository. Factory refuses to run an Objective against its own source.
 - Remove the link with `npm unlink -g @clockgrove/factory`.
@@ -56,10 +56,10 @@ CI runs these checks. Run only an affected command locally when needed:
 npm run lint
 npm run format:check
 npm run notices:check
-npm run test:core
+npm test
 ```
 
-`npm run test:core` builds Factory and runs its CI tests against real temporary Git repositories, processes and files, including the packed CLI installed offline. They use no mocks and no GitHub, need no provider credentials, and take about 3 minutes.
+`npm test` builds Factory and runs its CI tests against real temporary Git repositories, processes and files, including the packed CLI installed offline. They use no mocks and no GitHub, need no provider credentials, and take about 3 minutes.
 
 The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one CI-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 
@@ -68,8 +68,8 @@ The [Quality workflow](.github/workflows/quality.yml) runs lint, format and noti
 For an affected CI test after the batch, build and run its file directly:
 
 ```sh
-npm run build:core
-node --test core/test/holds.test.mjs
+npm run build
+node --test test/holds.test.mjs
 ```
 
 Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the complete small suite.
@@ -79,7 +79,7 @@ Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the comple
 [Integration tests](integration/README.md) run real Objectives with real providers against the scratch repository `clockgrove/factory-drill`, and never run in CI. They crash the service at every crash point, cut the network and stop models mid-turn. Run them on demand, as bounded groups:
 
 ```sh
-npm run build:core
+npm run build
 npm run integration -- --dry-run          # groups, expected minutes and preconditions
 npm run integration -- --only queue
 ```
@@ -100,7 +100,7 @@ Preserve these boundaries:
 
 ### Plan checks
 
-When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. A new plan check must put its facts in the planner request, refuse with the allowed alternatives or the exact fix, and run from `checkPlan` in `core/src/planning/checks.ts`; see [the plan checks](docs/PLANNING.md#plan-checks).
+When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. A new plan check must put its facts in the planner request, refuse with the allowed alternatives or the exact fix, and run from `checkPlan` in `src/planning/checks.ts`; see [the plan checks](docs/PLANNING.md#plan-checks).
 
 ## Contributing versus using Factory
 

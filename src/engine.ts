@@ -11,7 +11,13 @@ import {
 } from "./allowances.js";
 import { crashPoint } from "./crash.js";
 import { displayTime, duration } from "./display.js";
-import type { RunLog } from "./log.js";
+import {
+  callCounts,
+  newTransport,
+  requestEvents,
+  transport,
+} from "./github-trace.js";
+import type { RunFile, RunLog } from "./log.js";
 import { deliveryChange, profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
@@ -274,6 +280,12 @@ export interface StepContext {
   readonly answer?: Answer;
   readonly signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+  /**
+   * A private file of this attempt beside the run log, such as a worker's
+   * transcript or a failed command's whole output (log.ts RunLog.runFile).
+   * Its event names it by `file`.
+   */
+  runFile(kind: string): RunFile;
   /**
    * Facts to keep with whatever outcome this attempt ends in, an error
    * included (`state.kept`, as an outcome's `keep`, which wins on a
@@ -832,6 +844,8 @@ export class ObjectiveRunner {
           attemptId,
           ...event,
         }),
+      runFile: (kind) =>
+        this.log.runFile(this.state.issue, `${attemptId}.${kind}`),
       keep: (facts) => {
         kept = { ...kept, ...facts };
       },
@@ -852,7 +866,14 @@ export class ObjectiveRunner {
         Math.min(step.deadlineMs, this.limits.maxDeadlineMs ?? Infinity),
       );
     });
-    const run = (async () => step.run(context))().catch(
+    // Every GitHub request of the attempt is traced, logged when it settles.
+    const github = newTransport(true);
+    const settled = transport.run(github, async () => step.run(context));
+    void settled.then(
+      () => this.traced(step.key, attemptId, github),
+      () => this.traced(step.key, attemptId, github),
+    );
+    const run = settled.catch(
       (error: unknown): Outcome =>
         this.workflow.outcomeOf?.(error, step) ??
         errored(`error: ${errorMessage(error)}`),
@@ -883,6 +904,26 @@ export class ObjectiveRunner {
           error: String(error),
         });
       }
+    });
+  }
+
+  /** A settled attempt's GitHub requests: one `github-request` each, then their `github-call` counts. */
+  private traced(
+    key: string,
+    attemptId: string,
+    github: ReturnType<typeof newTransport>,
+  ): void {
+    if (!github.calls) return;
+    const issue = this.state.issue;
+    for (const event of requestEvents(key, github))
+      this.log.write(issue, { step: key, attemptId, ...event });
+    this.log.write(issue, {
+      step: key,
+      attemptId,
+      event: "github-call",
+      job: key,
+      runs: 1,
+      ...callCounts(github),
     });
   }
 
@@ -1082,6 +1123,9 @@ export class ObjectiveRunner {
         };
         repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
+        repair.from = key;
+        // Last in key order: the latest repair (status).
+        delete state.repairs[outcome.target];
         state.repairs[outcome.target] = repair;
         if (outcome.conflict) countConflict(state, outcome.target);
         markFree(state, outcome.free);

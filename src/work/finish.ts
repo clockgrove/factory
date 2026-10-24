@@ -242,6 +242,7 @@ async function finalRuns(
       commandTimeoutMs: commandTimeoutMs(deps),
       signal,
       log: context.log,
+      runFile: context.runFile,
       ...fields,
     });
   const merges = objectiveMerges(state, plan).map(({ id, merged }) => ({

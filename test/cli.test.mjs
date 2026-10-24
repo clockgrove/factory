@@ -193,7 +193,7 @@ test("unknown and misplaced options are refused with the fix", () => {
     ],
     [
       ["cancel", "5", "--json"],
-      /--json belongs to factory setup, status, log, diagnostics, export-captures, queue/,
+      /--json belongs to factory setup, status, log, diagnostics, export-captures, watch, queue/,
     ],
     [
       ["status", "--bogus"],
@@ -291,7 +291,10 @@ test("the run log: tail, follow, and status reads its end", async () => {
   watching.stdout.on("data", (chunk) => {
     view += chunk;
   });
-  await until(() => /#54 - \S+ (hold|cancelled|done)/.test(view), "the rows");
+  await until(
+    () => /#54 - \S+(?: #\d+)? (hold|cancelled|done)/.test(view),
+    "the rows",
+  );
   const run = readdirSync(join(inst.logs, "54")).sort().at(-1);
   // Item a's validation failed 3 minutes ago; b's worker went quiet 20
   // minutes ago without reporting its context.
@@ -1069,24 +1072,34 @@ test("status: one model, the Work Item table, the full --json and the list view"
     row.plan.items.map((each) => each.id),
     ["a", "b"],
   );
-  assert.deepEqual(row.items, [
-    {
-      id: "a",
-      kind: "work",
-      phase: "published",
-      pr: 12,
-      repairs: 4,
-      hold: null,
-    },
-    {
-      id: "b",
-      kind: "aggregate",
-      phase: "merge (held)",
-      pr: null,
-      repairs: 0,
-      hold: "q1",
-    },
-  ]);
+  assert.deepEqual(
+    row.items.map(({ id, kind, phase, pr, repairs, hold }) => ({
+      id,
+      kind,
+      phase,
+      pr,
+      repairs,
+      hold,
+    })),
+    [
+      {
+        id: "a",
+        kind: "work",
+        phase: "published",
+        pr: 12,
+        repairs: 4,
+        hold: null,
+      },
+      {
+        id: "b",
+        kind: "aggregate",
+        phase: "merge (held)",
+        pr: null,
+        repairs: 0,
+        hold: "q1",
+      },
+    ],
+  );
   assert.equal(
     row.waiting[0].nextAt,
     "2026-01-01T00:30:00.000Z",

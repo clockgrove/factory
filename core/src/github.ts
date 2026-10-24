@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
+  type NotedRequest,
   networkCategory,
   newTransport,
   note,
@@ -107,6 +108,24 @@ export function issueGone(error: unknown): error is GitHubError {
 }
 
 const TIMEOUT_MS = 60_000;
+
+/**
+ * What `send` measured for each answer it returned, and its trace line
+ * when it noted one: a GraphQL rate limit, found in the body, retags it.
+ */
+const answers = new WeakMap<
+  Response,
+  {
+    answered: {
+      method: string;
+      path: string;
+      status: number;
+      attempt: number;
+      ms: number;
+    };
+    noted: NotedRequest | undefined;
+  }
+>();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
 const FRESH_MS = 2 * 60_000;
 
@@ -1009,17 +1028,12 @@ export class GitHub {
       if (refused.some((e) => e.type === "RATE_LIMITED")) {
         const counted = transport.getStore() ?? this.ambient;
         counted.rateLimited += 1;
+        // One line per answer: the one send() traced becomes the rate-limit.
+        const { answered, noted } = answers.get(response)!;
+        if (noted) counted.requests?.splice(counted.requests.indexOf(noted), 1);
         note(
           counted,
-          {
-            method: "POST",
-            path: "/graphql",
-            status: response.status,
-            attempt: 1,
-            ms: 0,
-            category: "rate-limit",
-            rateLimited: true,
-          },
+          { ...answered, category: "rate-limit", rateLimited: true },
           response,
         );
         const reset = Number(response.headers.get("x-ratelimit-reset"));
@@ -1774,7 +1788,13 @@ export class GitHub {
     const answered = { method, path, status: response.status, attempt, ms };
     if (response.ok) {
       // A re-send that worked is traced too: it was retried.
-      if (refreshed || counted.every) note(counted, answered, response);
+      answers.set(response, {
+        answered,
+        noted:
+          refreshed || counted.every
+            ? note(counted, answered, response)
+            : undefined,
+      });
       return response;
     }
     const text = await response.text().catch(() => "");

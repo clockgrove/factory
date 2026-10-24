@@ -56,7 +56,7 @@ An Objective runs on the configuration it was admitted with. `frozen` holds its 
 
 ### Allowances
 
-How much an Objective may correct itself unattended is `autonomy.allowances` (allowances.ts), frozen with the rest of its configuration. The defaults are:
+How much an Objective may correct itself unattended is `autonomy.allowances` (allowances.ts), frozen with the rest of its configuration. The defaults:
 
 | Allowance               | Default | What it counts                                                                                                       |
 | ----------------------- | ------- | -------------------------------------------------------------------------------------------------------------------- |

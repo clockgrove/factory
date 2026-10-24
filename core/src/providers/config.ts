@@ -273,6 +273,9 @@ function modelsSpec(planner: PlannerKind): Spec {
         Object.fromEntries(
           PLANNER_PHASES.map((phase) => [phase, optional(effort)]),
         ),
+        {
+          discovery: "discovery items are not part of Factory; remove the key",
+        },
       ),
     ),
     ...(planner === "claude" ? { maxOutputTokens: optional(whole(1)) } : {}),

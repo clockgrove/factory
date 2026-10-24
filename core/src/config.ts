@@ -482,6 +482,10 @@ const RETIRED: Record<string, Retired> = {
     provider: PROVIDERS_HINT,
     models: PROVIDERS_HINT,
     revisions: "moved to autonomy.allowances.planningRevisions",
+    adaptiveGraph: "the adaptive graph is not part of Factory; remove the key",
+    discoveryLimits: "discovery items are not part of Factory; remove the key",
+    maxExpansionChildren:
+      "the adaptive graph is not part of Factory; remove the key",
   },
   execution: {
     repairs:

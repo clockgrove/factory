@@ -4,7 +4,7 @@ import { type CandidateSet, needsSelection, type Selection } from "../media.js";
 import { currentPlan } from "../planning/plan.js";
 import { rank, resourceGate, type ScheduleView } from "../planning/schedule.js";
 import type { PlanningDeps } from "../planning/steps.js";
-import { executable, type Plan, type WorkItem } from "../planning/types.js";
+import type { Plan, WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import type {
   ReviewArtifact,
@@ -19,7 +19,7 @@ import { finalReviewStep, finalStep, reportStep } from "./finish.js";
 import { mergeOf } from "./merged.js";
 import { refusedOf, refusedResult } from "./refused.js";
 import { ciStep, mergeStep, publishStep } from "./step-deliver.js";
-import { notYet, settleStep } from "./step-qa.js";
+import { settleStep } from "./step-qa.js";
 import { reviewStep } from "./step-review.js";
 import { selectStep } from "./step-select.js";
 import { validateStep } from "./step-validate.js";
@@ -190,9 +190,6 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
     );
   };
   const next = (item: WorkItem): Step | undefined => {
-    // The planner is offered only executable kinds; a saved plan from
-    // another build may still hold one this build can't run.
-    if (!executable(item.kind)) return notYet(item, `${item.kind} items`);
     const place = layerOf(item.id);
     const phase = phasesOf(item, place).find((p) => !done(item.id, p));
     // The top merges the stack once every layer's checks are ready.

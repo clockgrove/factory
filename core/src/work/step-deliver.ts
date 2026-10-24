@@ -15,7 +15,7 @@ import {
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateSet } from "../media.js";
 import { currentPlan } from "../planning/plan.js";
-import { executable, type WorkItem } from "../planning/types.js";
+import type { WorkItem } from "../planning/types.js";
 import type { DeliveryUnit } from "../planning/units.js";
 import type { RepairFinding } from "../repair.js";
 import { receiptPath } from "../review/result.js";
@@ -595,7 +595,6 @@ export function freshable(state: ObjectiveState, key: string): boolean {
   return (
     !!item &&
     key !== stepKey(item.id, "merge") &&
-    executable(item.kind) &&
     !["aggregate", "qa"].includes(item.kind ?? "") &&
     !mergeOf(state, item.id)
   );

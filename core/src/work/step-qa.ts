@@ -248,16 +248,3 @@ export function settleStep(item: WorkItem): Step {
     },
   };
 }
-
-export function notYet(item: WorkItem, what: string): Step {
-  return {
-    key: stepKey(item.id, "work"),
-    deadlineMs: MINUTE,
-    async run(): Promise<Outcome> {
-      return hold(
-        `Work Item ${item.id} is one of the ${what}, which this Factory build can't run yet.`,
-        ["cancel", "retry", "replan"],
-      );
-    },
-  };
-}

@@ -1,5 +1,5 @@
 # recheck: planner item kinds, hold options, bare answers, the director skill and replan while building.
-#   qa-not-offered     the planner's prompt lists only the kinds this build runs (no qa); no plan item is qa
+#   item-kinds         the planner's prompt lists the work, qa and aggregate kinds; every plan item has one of them
 #   hold-options       status --json holds[].options is structured data: answer/family/consequence, one recommended, needsText on `answer`
 #   bare-answer        a bare `answer` (no text) to a planner question is refused (invalid_answer), by CLI and by comment; the hold stays
 #   skill-options      the director skill, given status --json, offers exactly the hold's options (recommended first) and the bound command
@@ -9,7 +9,7 @@ recheck_needs() { echo "drill repo + Project; default provider (codex) with FACT
 recheck_cost() { echo "~40-70 min; 1 hold Objective to done (2 plannings), 1 Claude call"; }
 recheck_minutes() { echo 70; }
 recheck_plan() {
-  echo "recheck.qa-not-offered  traced planner prompt: 'Item kinds:' has work and aggregate, no qa role; no plan item has kind qa"
+  echo "recheck.item-kinds      traced planner prompt: 'Item kinds:' has work, qa and aggregate roles; every plan item has one of them"
   echo "recheck.hold-options    status --json holds[].options: answer/family/consequence each, exactly one recommended, 'answer' needsText"
   echo "recheck.bare-answer     'answer' without --text refused (exit 1, invalid_answer); '/factory answer --question ID' comment changes nothing"
   echo "recheck.skill-options   claude with skills/director/SKILL.md and the status JSON: choices = options, recommended first, bound command"
@@ -116,15 +116,12 @@ Drill edit while building: the separator is '/'." >/dev/null
 }
 iso_ms() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 
-# qa-not-offered: the traced planner prompt and the accepted plan.
+# item-kinds: the traced planner prompt and the accepted plan.
 rc_qa() {
   local g=recheck n=$1 t0; t0=$(now)
-  # The kinds this build runs (core/dist/planning/types.js EXECUTABLE_KINDS).
-  local kinds; kinds=$(node -e 'import(process.argv[1]).then(m=>console.log((m.EXECUTABLE_KINDS||[]).join(",")))' "$BUILD/core/dist/planning/types.js" 2>/dev/null)
-  local case=recheck.qa-not-offered; [[ ,$kinds, == *,qa,* ]] && case=recheck.qa-offered
-  local r; r=$(python3 - "$RUN_DIR/trace" "$ROOT" "$n" "$kinds" <<'PY'
+  local r; r=$(python3 - "$RUN_DIR/trace" "$ROOT" "$n" <<'PY'
 import json, os, re, sys
-trace, root, n, exe = sys.argv[1:5]; exe = set(exe.split(",")) if exe else {"work", "aggregate"}
+trace, root, n = sys.argv[1:4]; exe = {"work", "qa", "aggregate"}
 lines = set()
 for dp, _, fs in os.walk(trace):
     for f in fs:
@@ -138,13 +135,11 @@ for d in ("objectives", "objectives/finished"):
     except Exception: pass
 items = ((st or {}).get("done", {}).get("plan") or {}).get("items") or []
 kinds = sorted({i.get("kind", "work") for i in items})
-qa_prompt = [l for l in lines if re.search(r"(^|; )qa ", l)]
-want_qa = "qa" in exe
-ok = bool(lines) and all("work" in l and "aggregate" in l for l in lines) and (bool(qa_prompt) == want_qa and len(qa_prompt) in (0, len(lines))) and set(kinds) <= exe and bool(items)
-print(("PASS" if ok else "FAIL") + f" build kinds {sorted(exe)}; prompt kinds lines {len(lines)}: {sorted(lines)[:2]}; plan item kinds {kinds}")
+ok = bool(lines) and all(re.search(r"(^|; )qa ", l) and "work" in l and "aggregate" in l for l in lines) and set(kinds) <= exe and bool(items)
+print(("PASS" if ok else "FAIL") + f" prompt kinds lines {len(lines)}: {sorted(lines)[:2]}; plan item kinds {kinds}")
 PY
 )
-  record $case $g "${r%% *}" "#$n ${r#* }" "$t0"
+  record recheck.item-kinds $g "${r%% *}" "#$n ${r#* }" "$t0"
 }
 
 # skill-options: Claude reads the director skill and the status JSON, and

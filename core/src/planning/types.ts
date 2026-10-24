@@ -26,24 +26,8 @@ export interface SourceAssetBinding {
 /** Every kind a saved plan may hold; graph.ts knows each shape. */
 export type ItemKind = "work" | "qa" | "aggregate";
 
-/**
- * The kinds this build executes (work/steps.ts), and so the only kinds the
- * planner is offered: the wire, the planner prompt and the review rubric
- * read this list. A kind joins it when its executor lands; a saved plan
- * with any other kind holds at that item.
- */
-export const EXECUTABLE_KINDS: readonly ItemKind[] = [
-  "work",
-  "qa",
-  "aggregate",
-];
-
-/** Whether this build executes, and the planner is offered, `kind`. */
-export const executable = (kind: ItemKind = "work"): boolean =>
-  EXECUTABLE_KINDS.includes(kind);
-
 export interface WorkItem {
-  /** Absent means work. See EXECUTABLE_KINDS for the kinds this build runs. */
+  /** Absent means work. */
   kind?: ItemKind;
   /** Hierarchy only; every required child also has an explicit dependency edge. */
   children?: string[];

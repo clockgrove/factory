@@ -382,9 +382,10 @@ test("an item's question holds only that item and its dependents", async () => {
     ...(kind === "aggregate" ? { children: [] } : {}),
   });
   const asked = new Date().toISOString();
-  // a holds; b is unrelated; c depends on a; d is unrelated and asks too
-  // (an item of a kind this build doesn't run holds).
+  // a holds; b is unrelated; c depends on a; d is unrelated and asks too:
+  // its kept base is missing from the checkout, so its work keeps failing.
   seed(inst, 61, "holding", {
+    kept: { "item:a:base": "0".repeat(40), "item:d:base": "0".repeat(40) },
     holds: [
       {
         id: `item:a:work@${asked}`,
@@ -396,13 +397,13 @@ test("an item's question holds only that item and its dependents", async () => {
       },
     ],
     done: {
-      check: {},
+      check: { shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] } },
       plan: {
         items: [
-          item("a", "unknown"),
+          item("a", "work"),
           item("b", "aggregate"),
           item("c", "aggregate", ["a"]),
-          item("d", "unknown"),
+          item("d", "work"),
         ],
       },
     },
@@ -420,6 +421,7 @@ test("an item's question holds only that item and its dependents", async () => {
     both.holds.map((hold) => hold.item),
     ["a", "d"],
   );
+  assert.match(both.holds[1].question, /keeps failing/);
   const held = (state) =>
     [
       ...Object.keys(state.done),

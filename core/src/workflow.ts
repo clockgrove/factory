@@ -1,4 +1,6 @@
+import { itemBranch } from "./delivery.js";
 import {
+  CANCEL_CLEANUP,
   errored,
   hold,
   type Outcome,
@@ -22,21 +24,23 @@ import {
 import { PlannerError, providerOutcome } from "./providers/planner.js";
 import type { Answer, ObjectiveState, ObjectiveStatus } from "./state.js";
 import { errorMessage } from "./text.js";
+import { fact } from "./work/facts.js";
 import {
   type BuildDeps,
   built,
   cancelCleanupStep,
   deliverySteps,
+  diagnoseFirst,
   freshable,
   freshOutcome,
   layersBelow,
   overrunOffers,
+  type PublishResult,
   RERUN,
   RERUN_CLEANUP,
   replanOutcome,
   rerunCleanupStep,
   revalidatable,
-  reviewArtifactSelection,
   unspent,
 } from "./work/steps.js";
 
@@ -66,7 +70,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       if (state.status === "done") return [];
       if (deps && state.kept?.[RERUN]) return [rerunCleanupStep(deps)];
       // The predecessors come first, so the check reads a base that has
-      // their work (CORE.md#Predecessors); a state checked without the
+      // their work (docs/reference/queue.md#Predecessors); a state checked without the
       // step never runs it.
       if (!state.done.check)
         return deps && !state.done[PREDECESSORS]
@@ -94,6 +98,28 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
     outcomeOf: (error, step) =>
       errorOutcome(error, deps?.config.repository ?? "", step.redo),
 
+    // Saved within GitHub's lag window: the PRs and pushes it records may
+    // not show yet (github.ts `GitHub.made`).
+    resumed: (state) => {
+      if (!deps) return;
+      const at = Date.parse(state.updatedAt);
+      const repository = `/repos/${deps.config.repository}`;
+      for (const [key, result] of Object.entries(state.done)) {
+        const item = /^item:([^:]+):publish$/.exec(key)?.[1];
+        const published = result as Partial<PublishResult> | undefined;
+        if (!item || typeof published?.pr !== "number") continue;
+        deps.github.made(`${repository}/pulls/${published.pr}`, at);
+        deps.github.made(`${repository}/issues/${published.pr}`, at);
+      }
+      for (const key of Object.keys(state.kept)) {
+        const item = /^item:([^:]+):/.exec(key)?.[1];
+        const pushed = item ? fact(state, "pushed", item) : undefined;
+        if (!item || !Array.isArray(pushed) || !pushed.length) continue;
+        deps.github.made(pushed.at(-1)!, at);
+        deps.github.made(itemBranch(state.issue, item), at);
+      }
+    },
+
     replannable: (state, key) =>
       currentPlan(state)
         ? /^(item|build):/.test(key) ||
@@ -116,23 +142,17 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
             freshOutcome(state, deps, key, answer),
           // A refused result checked again, unchanged (a result rereview).
           revalidatable,
-          reviewArtifacts: (values: readonly string[]) =>
-            reviewArtifactSelection(values, deps.config.reviewArtifacts),
-          // A retirement answers a repair-allowance question too.
-          overrunOffers: (state: ObjectiveState, key: string) =>
-            overrunOffers(
-              state,
-              key,
-              deps.config.finalValidation.requiredCommands,
-            ),
+          // `accept <n>` answers a repair-allowance question too.
+          overrunOffers,
           unspent,
+          diagnoseFirst,
         }
       : {}),
   };
 }
 
 /**
- * An error that escaped a step as its outcome (CORE.md#Waits), the one
+ * An error that escaped a step as its outcome (docs/reference/steps.md#Waits), the one
  * place errors are classified: a full disk, and a Git refusal (the
  * checkout's configuration, or an origin that no longer names the
  * target), hold for the whole Objective; a provider's classified failure
@@ -215,7 +235,7 @@ function unavailable(key: string): Step {
 }
 
 const cleanup: Step = {
-  key: "cancel:cleanup",
+  key: CANCEL_CLEANUP,
   deadlineMs: 10 * MINUTE,
   neverAsks: true,
   async run(): Promise<Outcome> {

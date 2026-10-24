@@ -17,6 +17,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  unlinkSync,
 } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -388,6 +389,53 @@ export function worktreePath(
   return join(workDir, String(issue), item);
 }
 
+/** `checkout`'s Git directory and common Git directory, absolute. */
+async function gitDirectories(
+  checkout: string,
+  signal?: AbortSignal,
+): Promise<{ gitDir: string; common: string }> {
+  const [gitDir, common] = (
+    await hostGit(
+      checkout,
+      ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+      { signal },
+    )
+  )
+    .toString("utf8")
+    .trim()
+    .split("\n");
+  return { gitDir: gitDir!, common: common! };
+}
+
+/**
+ * The linked worktrees registered under `common`: each admin directory
+ * with the worktree its `gitdir` names (resolved), or undefined for an
+ * incomplete registration.
+ */
+async function registrations(
+  common: string,
+): Promise<{ admin: string; worktree: string | undefined }[]> {
+  let names: string[];
+  try {
+    names = await readdir(join(common, "worktrees"));
+  } catch {
+    return [];
+  }
+  return Promise.all(
+    names.map(async (name) => {
+      const admin = join(common, "worktrees", name);
+      try {
+        const gitdir = (await readFile(join(admin, "gitdir"), "utf8")).trim();
+        if (basename(gitdir) === ".git")
+          return { admin, worktree: realOrSelf(dirname(gitdir)) };
+      } catch {
+        // Not a complete registration.
+      }
+      return { admin, worktree: undefined };
+    }),
+  );
+}
+
 /**
  * The admin directory `checkout` registered for `worktree`: the entry under
  * its common directory's `worktrees/` whose `gitdir` names `worktree/.git`
@@ -399,33 +447,96 @@ async function registeredAdmin(
   worktree: string,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
-  const common = (
-    await hostGit(
-      checkout,
-      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { signal },
-    )
-  )
-    .toString("utf8")
-    .trim();
   const real = realOrSelf(worktree);
-  let names: string[];
-  try {
-    names = await readdir(join(common, "worktrees"));
-  } catch {
-    return undefined;
-  }
-  for (const name of names) {
-    const admin = join(common, "worktrees", name);
-    try {
-      const gitdir = (await readFile(join(admin, "gitdir"), "utf8")).trim();
-      if (basename(gitdir) === ".git" && realOrSelf(dirname(gitdir)) === real)
-        return realpathSync(admin);
-    } catch {
-      // Not a complete registration.
-    }
-  }
+  for (const entry of await registrations(
+    (await gitDirectories(checkout, signal)).common,
+  ))
+    if (entry.worktree === real) return realOrSelf(entry.admin);
   return undefined;
+}
+
+/**
+ * A lock older than this is a dead Git's: every Factory Git that takes a
+ * lock runs under a 5 min timeout and a short SIGTERM grace.
+ */
+const STALE_LOCK_MS = 10 * 60_000;
+/** Young locks already logged as kept, so each is logged once while it lasts. */
+const keptLocks = new Set<string>();
+
+/**
+ * Remove the lock files a killed Git left in `checkout`'s repository, which
+ * no later Git removes, so a retry can run. In the common directory:
+ * `packed-refs.lock`, `shallow.lock`, `config.lock`, reftable's
+ * `tables.list.lock` and every `*.lock` under `refs/`; the checkout's own
+ * `index.lock` and `HEAD.lock`; with `worktree`, its `index.lock` and
+ * `HEAD.lock`. Also the `locked` marker an interrupted `worktree add`
+ * leaves, on `worktree`'s registration and on any registration that never
+ * got its `gitdir` (Factory never locks a worktree; the operator's locked
+ * worktrees are complete and stay locked). A lock goes only when it is
+ * older than STALE_LOCK_MS, checked again just before it is removed, so a
+ * live Git's lock is never taken, whoever started it. Each removal, and
+ * each younger lock kept, is logged once. Every path comes from the
+ * checkout's Git directory, which a worker can't write. Call it before
+ * reusing a worktree and before ref changes in the checkout.
+ */
+export async function clearStaleLocks(
+  checkout: string,
+  options: {
+    worktree?: string;
+    signal?: AbortSignal;
+    log?: (event: Record<string, unknown>) => void;
+  } = {},
+): Promise<void> {
+  const { gitDir, common } = await gitDirectories(checkout, options.signal);
+  const candidates = [
+    ...["packed-refs.lock", "shallow.lock", "config.lock"].map((name) =>
+      join(common, name),
+    ),
+    join(common, "reftable", "tables.list.lock"),
+    join(gitDir, "index.lock"),
+    join(gitDir, "HEAD.lock"),
+  ];
+  try {
+    for (const name of await readdir(join(common, "refs"), {
+      recursive: true,
+    }))
+      if (name.endsWith(".lock")) candidates.push(join(common, "refs", name));
+  } catch {
+    // No refs directory.
+  }
+  const real = options.worktree && realOrSelf(options.worktree);
+  for (const entry of await registrations(common)) {
+    if (entry.worktree === undefined)
+      candidates.push(join(entry.admin, "locked"));
+    else if (entry.worktree === real)
+      candidates.push(
+        ...["index.lock", "HEAD.lock", "locked"].map((name) =>
+          join(entry.admin, name),
+        ),
+      );
+  }
+  for (const path of candidates) {
+    // Checked right before the removal: no await in between.
+    const found = lstatSync(path, { throwIfNoEntry: false });
+    if (!found) {
+      keptLocks.delete(path);
+      continue;
+    }
+    const ageMs = Math.round(Date.now() - found.mtimeMs);
+    if (ageMs <= STALE_LOCK_MS) {
+      if (!keptLocks.has(path))
+        options.log?.({ event: "git-lock-kept", path, ageMs });
+      keptLocks.add(path);
+      continue;
+    }
+    try {
+      unlinkSync(path);
+      options.log?.({ event: "git-lock-removed", path, ageMs });
+    } catch {
+      // Gone meanwhile.
+    }
+    keptLocks.delete(path);
+  }
 }
 
 /**
@@ -436,13 +547,20 @@ async function registeredAdmin(
  * lock; the files are checked out after. Host Git in the worktree is then
  * refused once its `.git` stops naming the registered admin directory, so
  * a step adds (or keeps) the worktree before any other host Git in it.
+ * Stale locks go first (clearStaleLocks, logged to `log`).
  */
 export async function addWorktree(
   checkout: string,
   worktree: string,
   commit: string,
   signal?: AbortSignal,
+  log?: (event: Record<string, unknown>) => void,
 ): Promise<"added" | "kept"> {
+  await clearStaleLocks(checkout, {
+    worktree,
+    ...(signal && { signal }),
+    ...(log && { log }),
+  });
   const kept = await registeredAdmin(checkout, worktree, signal);
   if (kept !== undefined) {
     adminDirectories.set(resolve(worktree), kept);

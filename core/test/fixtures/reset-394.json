@@ -1,0 +1,74 @@
+{
+  "_": "Recorded from a scratch repository's done Objective (#394), names replaced; the plan comment carries the marks and data digest Factory writes now (markdown.ts planMarks), and the PR bodies their run and plan marks (runMarks). The status comment's id and time are kept for the test to write its body.",
+  "run": "2026-10-24T02:35:53.775Z",
+  "accepted": "2026-10-24T02:37:38.204Z",
+  "status": {
+    "id": 6378824641,
+    "created_at": "2026-10-24T02:35:55Z",
+    "updated_at": "2026-10-24T02:50:02Z"
+  },
+  "comments": [
+    {
+      "id": 6378840033,
+      "user": {
+        "login": "factory-app"
+      },
+      "created_at": "2026-10-24T02:37:38Z",
+      "updated_at": "2026-10-24T02:37:38Z",
+      "body": "<!-- factory:394:plan -->\n<!-- factory-run:2026-10-24T02:35:53.775Z --><!-- factory-plan:2026-10-24T02:37:38.204Z --><!-- factory-data:23edcb7dd12889cdb86eac272bbf5f660e1e169f5340be25fc236acd5c8d5872 -->\n**Factory's plan** (2 Work Items, base `20c0eea3b744`)\n\n- **badge-image** Add selectable badge image\n- **badge-helper** Expose the selected badge path (after badge-image)\n\nDecisions:\n- answer: Take your recommended option. (octo)\n\n<details><summary>Plan data</summary>\n\n```json\n{\"base\":\"20c0eea3b74466f0de3d5849ac4f72ac6e50cce6\",\"items\":[{\"kind\":\"work\",\"id\":\"badge-image\",\"title\":\"Add selectable badge image\",\"goal\":\"Deliver the selected single-colour badge PNG with executable image validation.\",\"acceptance\":[\"Offer two complete candidate sets for assets/badgeQvjrv.png that differ only in colour, for operator selection.\",\"The selected assets/badgeQvjrv.png is a valid 32x32 PNG whose decoded pixels all have the same colour.\",\"The selected destination matches the existing PNG Git LFS policy in .gitattributes.\",\"test/badgeQvjrv.test.js verifies the selected PNG's signature, dimensions, uniform colour and applicable Git LFS attributes without depending on src/badgeQvjrv.js.\"],\"nonGoals\":[\"Do not add the JavaScript helper in this item.\",\"Do not change files other than assets/badgeQvjrv.png and test/badgeQvjrv.test.js.\",\"Do not change package metadata, scripts, dependencies, existing assertions or .gitattributes.\",\"Do not commit or validate unselected candidate bytes.\",\"Do not add separate documentation files.\"],\"citations\":[{\"path\":\"OBJECTIVE\"},{\"path\":\"AGENTS.md\"},{\"path\":\".gitattributes\"},{\"path\":\"package.json\"}],\"dependencies\":[],\"ownedPaths\":[\"assets/badgeQvjrv.png\",\"test/badgeQvjrv.test.js\"],\"validation\":[{\"command\":\"npm test\",\"provenance\":\"base-observed\",\"source\":\"package.json\"}],\"brief\":\"Subject to the operator decision, introduce the asset checks in the Objective-named test file now; the dependent item extends it with helper checks. Consumer contract: the selected asset is available at assets/badgeQvjrv.png as a 32x32 single-colour PNG. Keep checks independent of the chosen colour and limited to the delivered selection. Local tests establish image properties and attribute policy; Factory's selected-set materialization, required LFS publication and final hydration receipts establish the corresponding storage and delivery facts.\",\"priority\":1,\"expectedOutputRoles\":[\"badge-image\"],\"minimumAssetSets\":2,\"requiredLfsRoles\":[\"badge-image\"]},{\"kind\":\"work\",\"id\":\"badge-helper\",\"title\":\"Expose the selected badge path\",\"goal\":\"Provide badgePathQvjrv() and verify its returned path against the selected badge.\",\"acceptance\":[\"src/badgeQvjrv.js exports badgePathQvjrv(), which returns exactly \\\"assets/badgeQvjrv.png\\\".\",\"test/badgeQvjrv.test.js verifies the returned value and confirms that its destination exists and starts with the PNG signature.\",\"The predecessor's selected badge image continues to satisfy its image checks when npm test runs with the helper.\"],\"nonGoals\":[\"Do not modify the selected image.\",\"Do not change files other than src/badgeQvjrv.js and test/badgeQvjrv.test.js.\",\"Do not change package metadata, scripts, dependencies or existing assertions unrelated to this addition.\",\"Do not add separate documentation files.\"],\"citations\":[{\"path\":\"OBJECTIVE\"},{\"path\":\"AGENTS.md\"},{\"path\":\"package.json\"}],\"dependencies\":[\"badge-image\"],\"ownedPaths\":[\"src/badgeQvjrv.js\",\"test/badgeQvjrv.test.js\"],\"validation\":[{\"command\":\"npm test\",\"provenance\":\"base-observed\",\"source\":\"package.json\"}],\"brief\":\"Consumer contract: the predecessor supplies the operator-selected 32x32 single-colour PNG at assets/badgeQvjrv.png. Extend its asset checks with the Objective-required helper checks, using node:test and node:assert/strict. Consume the actual selected asset rather than a substitute fixture. The authorized integrated npm test and independent final review provide the final combined check.\"}],\"coverage\":[{\"source\":{\"path\":\"OBJECTIVE\",\"text\":\"`assets/badgeQvjrv.png` is a 32x32 single-colour PNG in Git LFS.\"},\"itemId\":\"badge-image\",\"proof\":{\"kind\":\"final-review\"},\"environment\":{\"kind\":\"local\",\"readiness\":\"available\",\"probe\":\"\",\"preparedBy\":\"\"}},{\"source\":{\"path\":\"OBJECTIVE\",\"text\":\"`badgePathQvjrv()` is `\\\"assets/badgeQvjrv.png\\\"`, and that file exists and starts with the PNG signature.\"},\"itemId\":\"badge-helper\",\"proof\":{\"kind\":\"result-command\",\"validationIndex\":0},\"environment\":{\"kind\":\"local\",\"readiness\":\"available\",\"probe\":\"\",\"preparedBy\":\"\"}},{\"source\":{\"path\":\"OBJECTIVE\",\"text\":\"`npm test`\",\"command\":\"npm test\"},\"itemId\":\"badge-helper\",\"proof\":{\"kind\":\"final-review\"},\"environment\":{\"kind\":\"local\",\"readiness\":\"available\",\"probe\":\"\",\"preparedBy\":\"\"}}],\"requiredPreIntegrationChecks\":[],\"finalCommands\":[\"npm test\"],\"decisions\":[{\"question\":\"The planner needs a decision:\\n\\nMay the first Work Item introduce test/badgeQvjrv.test.js with asset-only checks, and the second extend it with helper checks? Recommended: this preserves the exact three permitted destination files and two-item stack while giving the image item executable proof of dimensions and uniform colour. Keeping the test file exclusively in the second item leaves the first without local executable image proof under the authorized npm test command; that alternative needs additional finite validation-command authority. (criterion: \\\"`assets/badgeQvjrv.png` is a 32x32 single-colour PNG in Git LFS.\\\")\\n\\nAnswer with `answer <your choice>`. If it needs a validation command the Objective doesn't list, `allow <exact command>` authorizes it.\",\"answer\":\"answer\",\"text\":\"Take your recommended option.\",\"by\":\"octo\",\"at\":\"2026-10-24T02:37:15.161Z\"}]}\n```\n</details>"
+    },
+    {
+      "id": 6378938842,
+      "user": {
+        "login": "factory-app"
+      },
+      "created_at": "2026-10-24T02:48:30Z",
+      "updated_at": "2026-10-24T02:48:30Z",
+      "body": "<!-- factory:394:report:2026-10-24T02:35:53.775Z -->\n**Factory finished this Objective.**\n\n- **badge-image** Add selectable badge image — #401 merged as `a8e442453726`\n- **badge-helper** Expose the selected badge path — #402 merged as `a8e442453726`\n\nFinal validation and final review passed on `a8e442453726` (`npm test`). 2 repairs along the way.\n\nSelected media verified on origin at a8e442453726:\n- badge-image set candidate-emerald badge-image → assets/badgeQvjrv.png: sha256 e011dd74f6ad7942e17c28b3d1c538491b53c47cea0de71dc79fae206c08c6e3, 4196 bytes (Git LFS)"
+    }
+  ],
+  "pulls": {
+    "factory/394/badge-image": [
+      {
+        "number": 401,
+        "state": "closed",
+        "created_at": "2026-10-24T02:42:03Z",
+        "merged_at": "2026-10-24T02:47:37Z",
+        "merge_commit_sha": "a8e442453726cbf247804aabf7291a09de1db2ca",
+        "head": {
+          "ref": "factory/394/badge-image",
+          "sha": "33dbbaa663fbfc5b53ea5299803508ef5032f386"
+        },
+        "base": {
+          "ref": "main",
+          "sha": "20c0eea3b74466f0de3d5849ac4f72ac6e50cce6"
+        },
+        "body": "Deliver the selected single-colour badge PNG with executable image validation.\n\nWork Item: <code>badge-image</code> · Objective: [#394](https://github.com/octo/drill/issues/394)\n\nCloses #399.\n\nChanges in this candidate:\n\n- Adds <code>assets/badgeQvjrv.png</code>\n- Adds <code>test/badgeQvjrv.test.js</code>\n\nController validation passed on this candidate:\n\n- <code>npm test</code>\n\nCandidate commit: <code>cd495ecc6ade94026dd158fa22304bb0295f169c</code>\n\nCandidate tree: <code>d60116953072471dda20f915cde855612b78eef8</code>\n\n<!-- factory:394:pr:badge-image -->\n\n<!-- factory-run:2026-10-24T02:35:53.775Z --><!-- factory-plan:2026-10-24T02:37:38.204Z -->",
+        "user": {
+          "login": "factory-app"
+        }
+      }
+    ],
+    "factory/394/badge-helper": [
+      {
+        "number": 402,
+        "state": "closed",
+        "created_at": "2026-10-24T02:46:59Z",
+        "merged_at": "2026-10-24T02:47:38Z",
+        "merge_commit_sha": "a8e442453726cbf247804aabf7291a09de1db2ca",
+        "head": {
+          "ref": "factory/394/badge-helper",
+          "sha": "5474dfb7f0461c23093fdac1b18708b59414a5c3"
+        },
+        "base": {
+          "ref": "factory/394/badge-image",
+          "sha": "33dbbaa663fbfc5b53ea5299803508ef5032f386"
+        },
+        "body": "Provide badgePathQvjrv() and verify its returned path against the selected badge.\n\nWork Item: <code>badge-helper</code> · Objective: [#394](https://github.com/octo/drill/issues/394)\n\nCloses #400.\n\nChanges in this candidate:\n\n- Adds <code>src/badgeQvjrv.js</code>\n- Updates <code>test/badgeQvjrv.test.js</code>\n\nController validation passed on this candidate:\n\n- <code>npm test</code>\n\nCandidate commit: <code>5474dfb7f0461c23093fdac1b18708b59414a5c3</code>\n\nCandidate tree: <code>3a4c54cad91d9e5015c601ad1ca21e293c7f7da3</code>\n\n<!-- factory:394:pr:badge-helper -->\n\n<!-- factory-run:2026-10-24T02:35:53.775Z --><!-- factory-plan:2026-10-24T02:37:38.204Z -->",
+        "user": {
+          "login": "factory-app"
+        }
+      }
+    ]
+  }
+}

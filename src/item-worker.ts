@@ -1,0 +1,470 @@
+/**
+ * The Work Item worker lifecycle both delivery runners share (#600): run the
+ * item's worker to a collected result, and stop it after a failed attempt.
+ */
+
+import { isDeepStrictEqual } from "node:util";
+import { agentSessionContinuation } from "./agent-session.js";
+import {
+  buildAdaptiveContext,
+  retainedAdaptiveDispatchContext,
+} from "./adaptive-context.js";
+import { adaptiveWorkflowEnabled } from "./adaptive-workflow.js";
+import { repositoryConventions } from "./compiler/repository-conventions.js";
+import { resolveWorkItemSources } from "./compiler/sources.js";
+import type { FactoryConfig } from "./config.js";
+import type {
+  ContentStore,
+  ExecutionDriver,
+  ExecutionResult,
+  WorkItem,
+} from "./contracts.js";
+import type { DiagnosticEmitter } from "./diagnostics.js";
+import { workerContext } from "./execution/checkpoint.js";
+import { cancelledFault, decision, StepFault } from "./fault.js";
+import {
+  assertGraphRevisions,
+  graphDigest,
+  recordWorkerDiscovery,
+} from "./graph-amendments.js";
+import { executeItem } from "./item-steps.js";
+import { selectedInputsForItem, validationLfsMembersForItem } from "./media.js";
+import {
+  objectiveKnowledgeView,
+  completeObjectiveKnowledge,
+  publishObjectiveKnowledge,
+} from "./objective-knowledge.js";
+import { packageManagerUpdate } from "./package-manager-update.js";
+import type { PhaseAdmission } from "./phase-admission.js";
+import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
+import {
+  environmentValidationIndices,
+  reusableEnvironmentValidationIndices,
+} from "./qa.js";
+import { preflightItemEnvironment } from "./qa-execution.js";
+import {
+  REVIEW_FINDINGS_ACTOR,
+  retainedFailedResultFor,
+  type WorkRecovery,
+} from "./repair-policy.js";
+import type { FactoryState } from "./state.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
+import {
+  discoveryContextBodies,
+  discoveryContextSelections,
+  selectedDiscoveryInputs,
+} from "./runner/discovery.js";
+
+interface ItemWorker {
+  state: FactoryState;
+  item: WorkItem;
+  driver: ExecutionDriver;
+  save: () => void;
+  cancelled: () => boolean;
+  diagnostics?: DiagnosticEmitter;
+}
+
+/**
+ * The item as the new attempt sees it. A failed earlier attempt's recorded
+ * failure (it carries the worker's final response, when there was one) and an
+ * accepted correction go into the brief, so the worker does not repeat it.
+ */
+function attemptItem(item: WorkItem, recovery?: WorkRecovery): WorkItem {
+  const failure = recovery?.failure;
+  const correction = recovery?.correction;
+  if (!failure && !correction) return item;
+  // A new attempt continues from the refused candidate only when the driver
+  // materializes it and appends retained failed-result context (#1277, #1313).
+  // A review findings correction restates the failure with its structure;
+  // the brief carries those findings once.
+  const restated = correction?.actor === REVIEW_FINDINGS_ACTOR;
+  const previous = failure
+    ? `\nThe previous attempt failed. Do not repeat it: ${restated ? "the result review refused the findings in the required correction below." : failure.detail}\nIf the retained failed-result context below says the previous result's files are already in this checkout, this attempt continues from that result: fix exactly what these findings refuse and keep everything else. Otherwise it starts from a fresh checkout of the base without the previous files: implement the Work Item completely, treating these findings as requirements. Either way, fix every finding, then walk every clause of every acceptance entry against its test assertion again, not only the refused ones: a test edit can drop another clause's check.`
+    : "";
+  const repair = correction
+    ? `\nDiagnosed repair: ${correction.diagnosis}\nRequired correction: ${correction.correction}`
+    : "";
+  return { ...item, brief: `${item.brief}${previous}${repair}` };
+}
+
+/** The normal worker receives planned peers, not their briefs or result receipts. */
+export function workerAttemptItem(
+  state: FactoryState,
+  item: WorkItem,
+  baseSha: string,
+  knowledge?: object,
+): WorkItem {
+  assertGraphRevisions(state);
+  if (
+    state.graph.objective !== state.objective ||
+    state.graph.baseSha !== state.baseSha ||
+    !isDeepStrictEqual(
+      state.graph.items.find((candidate) => candidate.id === item.id),
+      item,
+    )
+  )
+    throw new Error("Worker planned peer context differs from accepted graph");
+  const attempted = attemptItem(item, state.work[item.id]?.recovery);
+  if (knowledge && "adaptiveContext" in knowledge)
+    return {
+      ...attempted,
+      brief: `${attempted.brief}\n\nController selected role context (original source, ownership and acceptance authority remains in the Work Item):\n${JSON.stringify(knowledge.adaptiveContext)}`,
+    };
+  const context = {
+    objective: state.objective,
+    acceptedGraphDigest: graphDigest(state.graph),
+    objectiveBaseCommitSha: state.baseSha,
+    workerExecutionBaseCommitSha: baseSha,
+    currentItemId: item.id,
+    peers: state.graph.items
+      .filter((peer) => peer.id !== item.id)
+      .map((peer) => ({
+        id: peer.id,
+        goal: peer.goal,
+        kind: peer.kind ?? "work",
+        dependencies: peer.dependencies,
+        ownedPaths: peer.ownedPaths,
+      })),
+  };
+  return {
+    ...attempted,
+    brief: `${attempted.brief}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to the graph's declared final validation/review or justified downstream owner. Complete this item's owned tests and documentation against the settled interfaces; their existence does not claim that sibling-dependent checks passed before integration. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.\nController-bound human planning decision context: ${JSON.stringify(acceptedPlanningDecisionContext(state))}${knowledge ? `\nController-bound Objective knowledge view: ${JSON.stringify(knowledge)}` : ""}`,
+  };
+}
+
+/**
+ * Run the item's worker on `baseSha`. The collected result is recorded on the
+ * item (discovery, change ref, tree); the caller decides what happens to the
+ * worker handle and what step follows.
+ */
+export async function runWorker(
+  args: ItemWorker & {
+    config: FactoryConfig;
+    root: string;
+    objective: number;
+    objectiveBody?: string;
+    store: ContentStore;
+    phases: PhaseAdmission;
+    signal?: AbortSignal;
+    pause?: AbortSignal;
+    baseSha: string;
+  },
+): Promise<ExecutionResult> {
+  const { state, item, phases, baseSha } = args;
+  const disableChildAgents =
+    Boolean(state.planningRecovery?.contextLookup?.packet) ||
+    adaptiveWorkflowEnabled(args.objectiveBody ?? "");
+  const work = state.work[item.id]!;
+  if (disableChildAgents && work.execution && !work.adaptiveContextId)
+    throw new StepFault(
+      decision(
+        "The retained adaptive worker lacks its original dispatch packet. Preserve its ownership and reconcile or cancel through the supported lifecycle before continuation.",
+        "No replacement context, attempt, provider call or worker cancellation was admitted.",
+      ),
+    );
+  if (disableChildAgents && args.driver.childAgents !== "disabled")
+    throw new Error(
+      "Worker driver cannot enforce the adaptive native child-agent prohibition; no provider call was made",
+    );
+  const adaptive = Boolean(state.planningRecovery?.contextLookup?.packet);
+  if (adaptive && (!work.attempt || work.executionBaseSha !== baseSha))
+    throw new StepFault(
+      decision(
+        "Adaptive dispatch lacks its recorded exact attempt and execution base. Restore the admitted binding through supported recovery before continuing.",
+        "The original ownership and accounting remain unchanged; no new dispatch context was selected.",
+      ),
+    );
+  // Dispatch context binds the exact source bytes, re-derived at the graph base.
+  const sources = item.inputSources
+    ? resolveWorkItemSources(item.inputSources, {
+        checkout: args.config.checkout,
+        baseSha: state.baseSha,
+        objectiveBody: args.objectiveBody,
+      })
+    : undefined;
+  let context: Awaited<ReturnType<typeof retainedAdaptiveDispatchContext>>;
+  if (adaptive) {
+    try {
+      context = await retainedAdaptiveDispatchContext({
+        state,
+        item,
+        baseSha,
+        store: args.store,
+        sources,
+      });
+    } catch (error) {
+      throw new StepFault(
+        decision(
+          "The original dispatch context cannot be authenticated. Restore its exact retained bytes and binding, or use supported reconciliation or cancellation before continuing.",
+          "The original packet pointer, worker handle, attempt and accounting are preserved; no live context was reselected.",
+        ),
+        { cause: error },
+      );
+    }
+  }
+  // A retried or repaired wrong result continues from its refused candidate,
+  // unless the operator asked for a fresh base (#1313).
+  const retained = retainedFailedResultFor(work.recovery, work.attempt);
+  const readinessIndices = environmentValidationIndices(state.graph, item.id);
+  if (readinessIndices.length && args.driver.freshCheckoutReadiness !== true)
+    throw new Error(
+      "Worker driver cannot authenticate readiness in its actual fresh environment; source decision required",
+    );
+  if (!work.execution) {
+    await phases.reserve(item.id, "validation");
+    await preflightItemEnvironment({
+      config: args.config,
+      root: args.root,
+      state,
+      objectiveBody: args.objectiveBody,
+      item,
+      store: args.store,
+      baseSha,
+      diagnostics: args.diagnostics,
+    });
+  }
+  // A reattached worker keeps the coding slot it holds while it runs remotely.
+  if (work.phaseReservation !== "coding")
+    await phases.reserve(item.id, "coding");
+  let discoveryInputs: Awaited<ReturnType<typeof selectedDiscoveryInputs>> = [];
+  if (!context) {
+    discoveryInputs = await selectedDiscoveryInputs({
+      state,
+      item,
+      checkout: args.config.checkout,
+      store: args.store,
+    });
+    const discoverySelections = discoveryContextSelections(discoveryInputs);
+    const discoveryBodies = discoveryContextBodies(discoveryInputs);
+    const knowledge = adaptive
+      ? await completeObjectiveKnowledge({
+          state,
+          item,
+          checkout: args.config.checkout,
+          baseSha,
+          store: args.store,
+          suppliedDigests: [
+            ...discoveryBodies.map((body) => body.ref.digest),
+            ...(item.inputSources ?? []).map((source) => source.sha256),
+          ],
+        })
+      : undefined;
+    context = await buildAdaptiveContext({
+      state,
+      role: "dispatch",
+      item,
+      baseSha,
+      checkout: args.config.checkout,
+      store: args.store,
+      config: args.config,
+      sources,
+      suppliedBodies: [
+        ...discoveryBodies,
+        ...(knowledge?.suppliedBodies ?? []),
+      ],
+      required: { knowledge: knowledge?.view ?? {}, discoveryInputs },
+      requiredSelections: [
+        ...discoverySelections,
+        ...(knowledge?.selections ?? []),
+      ],
+      save: args.save,
+    });
+  }
+  if (context && work.adaptiveContextId !== context.packet.id) {
+    work.adaptiveContextId = context.packet.id;
+    args.save();
+  }
+  const attemptedItem = workerAttemptItem(
+    state,
+    item,
+    baseSha,
+    context
+      ? { adaptiveContext: context.payload }
+      : {
+          knowledge: objectiveKnowledgeView(
+            state,
+            item,
+            args.config.checkout,
+            baseSha,
+          ),
+          discoveryInputs,
+        },
+  );
+  const session = args.driver.sessionCapabilities?.resumeRoles.includes(
+    "implementation",
+  )
+    ? agentSessionContinuation(state, "implementation", item.id, args.save)
+    : undefined;
+  if (work.recovery?.correction && !retained)
+    attemptedItem.brief += work.recovery.freshBase
+      ? "\nThe operator asked for a fresh base: this attempt starts from the accepted base without any earlier result's files."
+      : "\nNo earlier refused committed result applies to this repair (the earlier failures left no committed candidate, or the approach changed): this attempt starts from the accepted base without earlier files.";
+  else if (
+    work.recovery?.correction &&
+    args.driver.retainedFailedResultContext !== true
+  )
+    attemptedItem.brief +=
+      "\nRetained failed committed-result context is unavailable for this repair through this execution driver; no prior source availability is implied.";
+  const result = await executeItem({
+    state,
+    item,
+    driver: args.driver,
+    save: args.save,
+    signal: args.signal,
+    pause: args.pause,
+    cancelled: args.cancelled,
+    diagnostics: args.diagnostics,
+    ...(session ? { session } : {}),
+    request: (attemptId) => ({
+      ...(context ? { adaptiveContext: context.packet } : {}),
+      ...(disableChildAgents ? { childAgents: "disabled" as const } : {}),
+      ...(session
+        ? {
+            session: {
+              scope: session.scope,
+              identity: session.identity,
+              ...(session.retained ? { retained: session.retained } : {}),
+            },
+          }
+        : {}),
+      captureContext: {
+        configDigest: state.configDigest,
+        objective: args.objective,
+        runId: state.runId,
+        attemptId: work.attempt,
+      },
+      item: attemptedItem,
+      handoffPeers: state.graph.items
+        .filter((peer) => peer.id !== item.id)
+        .map(({ id, title }) => ({ id, title })),
+      ...(retained && args.driver.retainedFailedResultContext === true
+        ? { retainedFailedResult: retained }
+        : {}),
+      baseSha,
+      sourceBaseSha: state.baseSha,
+      conventions: repositoryConventions(args.config.checkout, baseSha),
+      attemptId,
+      objectiveBody: args.objectiveBody,
+      selectedAssets: selectedInputsForItem(state, item),
+      ...(item.validation.length && {
+        validationLfsMembers: validationLfsMembersForItem(
+          state,
+          item,
+          args.config.checkout,
+          baseSha,
+        ),
+      }),
+      ...(readinessIndices.length
+        ? {
+            environmentReadiness: {
+              validationIndices: readinessIndices,
+              reusableValidationIndices: reusableEnvironmentValidationIndices(
+                state.graph,
+                item.id,
+              ),
+              acceptedBaseSha: state.baseSha,
+              lfsMembers: validationLfsMembersForItem(
+                state,
+                item,
+                args.config.checkout,
+                baseSha,
+              ),
+              workspacePackageAdditions: workspacePackageAdditions(
+                args.objectiveBody ?? "",
+              ),
+              ...(packageManagerUpdate(args.objectiveBody ?? "")
+                ? {
+                    packageManagerUpdate: packageManagerUpdate(
+                      args.objectiveBody ?? "",
+                    ),
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    }),
+  });
+  phases.release(item.id);
+  if (result.collection)
+    args.diagnostics?.emit({
+      runId: state.runId,
+      itemId: item.id,
+      attemptId: work.attempt,
+      operation: "collection-ignored-links",
+      outcome: "completed",
+      metadata: {
+        observation: "original-worktree-scan",
+        acceptedIgnoredLinkCount: result.collection.acceptedIgnoredLinks.length,
+        treeSha: result.treeSha,
+        headSha: result.changeRef,
+      },
+      detail: JSON.stringify(result.collection),
+    });
+  if (args.signal?.aborted || args.cancelled()) throw cancelledFault();
+  // The collected result is recorded once.
+  recordWorkerDiscovery(state, item.id, result.discovery);
+  work.changeRef = result.changeRef;
+  work.treeSha = result.treeSha;
+  // Factory's Validate tool passed the commands it was given on exactly the
+  // tree collection returned: a controller failure of this tree is run once
+  // more before it stands (#1595).
+  const validated = (
+    result.evidence as { validation?: Record<string, unknown> } | undefined
+  )?.validation;
+  if (
+    validated?.kind === "factory-validation" &&
+    validated.version === 1 &&
+    validated.finalTreeValidated === true &&
+    validated.finalTree === result.treeSha &&
+    attemptedItem.validation.length
+  )
+    work.validationRerun = {
+      treeSha: result.treeSha,
+      commands: attemptedItem.validation.map((check) => check.command),
+    };
+  else delete work.validationRerun;
+  await publishObjectiveKnowledge(state, item, result, args.store);
+  args.save();
+  return result;
+}
+
+/** Stop the item's own worker after its attempt failed, so a retry never runs beside it. */
+export async function stopWorker(args: ItemWorker): Promise<void> {
+  const { state, item } = args;
+  const work = state.work[item.id]!;
+  if (!work.execution) return;
+  try {
+    const session = args.driver.sessionCapabilities?.resumeRoles.includes(
+      "implementation",
+    )
+      ? agentSessionContinuation(state, "implementation", item.id, args.save)
+      : undefined;
+    const context = workerContext(
+      work,
+      args.save,
+      args.cancelled,
+      args.diagnostics,
+      {
+        runId: state.runId,
+        itemId: item.id,
+        repository: state.repository,
+        objective: state.objective,
+        configDigest: state.configDigest,
+      },
+    );
+    if (session) context.checkpointSession = (ref) => session.checkpoint(ref);
+    const stoppedIdentity = work.execution.identity;
+    await args.driver.cancel(structuredClone(work.execution), context);
+    // Successful cancellation proves owned cessation, but an unfinished turn
+    // supplies no resumable conversation. Preserve any ready receipt the driver settled.
+    if (
+      session?.retained?.status === "in-flight" &&
+      session.retained.executionIdentity === stoppedIdentity
+    )
+      session.checkpoint({ ...session.retained, status: "unavailable" });
+    delete work.execution;
+  } catch {
+    // Left recorded: the next attempt starts only once the driver confirmed
+    // the worker stopped.
+  }
+}

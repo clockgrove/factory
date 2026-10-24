@@ -8,6 +8,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { HoldScope } from "../engine.js";
 import { redact } from "../log.js";
 import type { WorkItem } from "../planning/types.js";
+import type { Conversation, Session } from "../providers/session.js";
+import type { PromptFacts } from "../providers/usage.js";
 import type { Answer, HoldOption, Wait } from "../state.js";
 
 /**
@@ -29,6 +31,8 @@ export interface WorkerInput {
   worktree: string;
   /** The complete worker prompt (work/prompt.ts). */
   prompt: string;
+  /** The prompt's parts and pinned sources (providers/usage.ts PromptFacts). */
+  facts?: PromptFacts;
   item: WorkItem;
   /** The item's validation commands, run through the sandbox by Validate. */
   commands: string[];
@@ -45,6 +49,11 @@ export interface WorkerInput {
   spend?: WorkerSpend;
   /** The answer to this step's last hold, such as `more`. */
   answer?: Answer;
+  /**
+   * The item's worker conversation (providers/session.ts): a repair may
+   * continue it with only its delta. `prompt` is still the whole request.
+   */
+  conversation?: Conversation;
 }
 
 export type WorkerResult = (
@@ -68,6 +77,8 @@ export type WorkerResult = (
 ) & {
   /** The Work Item's spend after this run, kept in state. */
   spend?: WorkerSpend;
+  /** The conversation to keep after a finished run; absent: none to continue. */
+  session?: Session;
 };
 
 export interface Worker {
@@ -85,7 +96,14 @@ export type WorkerActivity =
   | { kind: "command"; command: string }
   /** A command ended with a non-zero exit, a signal or its time limit. */
   | { kind: "command-failed" }
-  | { kind: "turn" };
+  | { kind: "turn" }
+  /**
+   * The tokens in the worker's context at its last model request, and the
+   * model's window when the provider says. Only providers that report it.
+   */
+  | { kind: "context"; tokens: number; window?: number }
+  /** The provider compacted the worker's conversation. */
+  | { kind: "compaction" };
 
 /** At most one `worker-activity` event per Work Item per this long. */
 export const ACTIVITY_INTERVAL_MS = 5_000;
@@ -101,10 +119,13 @@ interface ActivityWindow {
     commands: number;
     commandsFailed: number;
     turns: number;
+    compactions: number;
   };
   tools: string[];
   paths: string[];
   command?: string;
+  /** The last context report in this interval. */
+  context?: { tokens: number; window?: number };
 }
 
 const emptyWindow = (): ActivityWindow => ({
@@ -115,6 +136,7 @@ const emptyWindow = (): ActivityWindow => ({
     commands: 0,
     commandsFailed: 0,
     turns: 0,
+    compactions: 0,
   },
   tools: [],
   paths: [],
@@ -123,7 +145,7 @@ const emptyWindow = (): ActivityWindow => ({
 /**
  * A worker run's activity into the run log: the first report after a
  * quiet interval is written at once, and later ones are coalesced into
- * one `worker-activity` event per interval (CORE.md#Run log), so a busy
+ * one `worker-activity` event per interval (docs/reference/run-log.md#Run log), so a busy
  * worker can't balloon the log. Every string is redacted and truncated.
  */
 export class ActivityLog {
@@ -169,6 +191,21 @@ export class ActivityLog {
       case "turn":
         window.counts.turns += 1;
         break;
+      case "context":
+        if (!(Number.isSafeInteger(activity.tokens) && activity.tokens >= 0))
+          return;
+        window.context = {
+          tokens: activity.tokens,
+          ...(typeof activity.window === "number" &&
+          Number.isSafeInteger(activity.window) &&
+          activity.window > 0
+            ? { window: activity.window }
+            : {}),
+        };
+        break;
+      case "compaction":
+        window.counts.compactions += 1;
+        break;
     }
     this.pending = true;
     if (this.timer) return;
@@ -190,7 +227,7 @@ export class ActivityLog {
     clearTimeout(this.timer);
     this.timer = undefined;
     if (!this.pending) return;
-    const { counts, tools, paths, command } = this.window;
+    const { counts, tools, paths, command, context } = this.window;
     this.log({
       event: "worker-activity",
       item: this.item,
@@ -198,6 +235,7 @@ export class ActivityLog {
       tools,
       paths,
       ...(command !== undefined ? { command } : {}),
+      ...(context ? { context } : {}),
     });
     this.window = emptyWindow();
     this.pending = false;

@@ -41,7 +41,15 @@ import {
   rmSync,
   statfsSync,
 } from "node:fs";
-import { chmod, copyFile, mkdir, open, rm, unlink } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  open,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -78,6 +86,7 @@ import {
 } from "./work/collect.js";
 import {
   addWorktree,
+  clearStaleLocks,
   hasGitlink,
   hostGit,
   hostGitExit,
@@ -99,8 +108,12 @@ const GITHUB_FILE_BYTES = 100 * MIB;
 /** A media answer: a step maps each kind onto its own outcome. */
 export type MediaOutcome<T> =
   | { kind: "done"; value: T }
-  /** The worker's result is wrong; the finding goes back to the work step. */
-  | { kind: "repair"; finding: string }
+  /**
+   * The worker's result is wrong; the finding goes back to the work step.
+   * `keepsSelection`: a select repair that isn't about the chosen set's
+   * content (a missing .gitattributes LFS rule), so the choice stands.
+   */
+  | { kind: "repair"; finding: string; keepsSelection?: true }
   | Held
   /** Transient; `repushed` is set once verifyOriginMedia has re-pushed, for the step to keep. */
   | { kind: "retry"; reason: string; repushed?: true };
@@ -151,8 +164,8 @@ export interface Selection {
 
 /** A file a worker gets read-only under `.factory-inputs/assets`. */
 export interface MediaInput {
-  /** An Objective source asset, or a dependency's selected member. */
-  origin: "source" | "selected";
+  /** An Objective source asset, a dependency's selected member, or a member of a set the operator sent back. */
+  origin: "source" | "selected" | "sent-back";
   role: string;
   mediaType: string;
   sha256: string;
@@ -248,7 +261,7 @@ export interface InputsRequest {
   /** Each dependency's select result, when it has one. */
   selection(itemId: string): Selection | undefined;
   /** The item's own selection kept across a repair that isn't about the media; its members are staged read-only. */
-  kept?: Selection;
+  kept?: Pick<Selection, "set" | "bound">;
   /** The service's GitHub token, for attachments; the worker never sees it. */
   githubToken(): Promise<string>;
   signal: AbortSignal;
@@ -266,7 +279,8 @@ export interface InputsRequest {
  * Step: call before prepareWorkPrompt on every attempt. done → pass on;
  * retry → retry; hold → hold. Its holds carry `retry` (run the work step
  * again), `replan` (the work step's replan route) and `cancel`; a source
- * attachment over its byte bound holds with `replan` and `cancel` only.
+ * attachment over its byte bound, or of another repository, holds with
+ * `replan` and `cancel` only.
  */
 export async function resolveInputs(
   request: InputsRequest,
@@ -462,7 +476,8 @@ class TooLarge extends Error {}
 
 /**
  * A GitHub attachment the Objective names, with the service's token sent
- * only to the URL itself; at most 5 redirects, only to GitHub content
+ * only to the URL itself, and only for a user attachment or one of the
+ * configured repository's (another repository's holds); at most 5 redirects, only to GitHub content
  * hosts, never an HTML page, at most MAX_ATTACHMENT_BYTES, and 30 minutes
  * for the whole download.
  */
@@ -479,6 +494,27 @@ async function attachmentSource(
   const tooLarge = (bytes?: number): Copied =>
     hold(
       `GitHub attachment ${path} is larger than Factory's bound of ${MAX_ATTACHMENT_BYTES} bytes for an attachment${bytes ? ` (${bytes} bytes)` : ""}. Answer replan to cite a smaller file (or put it in the repository through Git LFS), or cancel.`,
+      ["replan", "cancel"],
+    );
+  // The token goes only to a user attachment or one of the configured
+  // repository's own (the plan check recognized the URL's form).
+  let owned = false;
+  try {
+    const url = new URL(path);
+    const [first, second, third] = url.pathname.split("/").slice(1);
+    owned =
+      url.protocol === "https:" &&
+      url.hostname === "github.com" &&
+      (first === "user-attachments" ||
+        (third === "assets" &&
+          `${first}/${second}`.toLowerCase() ===
+            request.repository.toLowerCase()));
+  } catch {
+    owned = false;
+  }
+  if (!owned)
+    return hold(
+      `GitHub attachment ${path} is not a user attachment or one of ${request.repository}'s, and Factory sends its GitHub token only to those. Answer replan to cite a copy attached to an issue of ${request.repository} (or put the file in the repository), or cancel.`,
       ["replan", "cancel"],
     );
   const token = await request.githubToken();
@@ -921,7 +957,7 @@ export async function destinationFinding(input: {
 // ── Selection ───────────────────────────────────────────────────────────
 
 /** Plan items that depend directly on `item`: the only ones a selection can bind. */
-function directDependents(plan: Plan, item: WorkItem): string[] {
+export function directDependents(plan: Plan, item: WorkItem): string[] {
   return plan.items
     .filter((other) => other.dependencies.includes(item.id))
     .map((other) => other.id);
@@ -1071,6 +1107,7 @@ export async function materializeSelection(input: {
   /** The ref that keeps the selection commit from Git's pruning (selectionRef). */
   ref: string;
   signal: AbortSignal;
+  log: (event: Record<string, unknown>) => void;
 }): Promise<MediaOutcome<{ commit: string; tree: string }>> {
   const { checkout, directory, item, set, signal } = input;
   const again = set.id.toLowerCase();
@@ -1081,7 +1118,7 @@ export async function materializeSelection(input: {
       [NEW_CANDIDATES, "cancel"],
     );
   await removeWorktree(checkout, directory, signal);
-  await addWorktree(checkout, directory, input.commit, signal);
+  await addWorktree(checkout, directory, input.commit, signal, input.log);
   try {
     const git = (args: string[]) => hostGit(directory, args, { signal });
     if (await hasGitlink(directory, { commit: input.commit, signal }))
@@ -1109,7 +1146,8 @@ export async function materializeSelection(input: {
       return ownsPath(".gitattributes", item.ownedPaths)
         ? {
             kind: "repair",
-            finding: `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that .gitattributes doesn't route through Git LFS: ${listed}. Add a filter=lfs rule that covers them, or make them smaller.`,
+            finding: `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that .gitattributes doesn't route through Git LFS: ${listed}. Add a filter=lfs rule that covers them.`,
+            keepsSelection: true,
           }
         : hold(
             `Candidate set ${set.id} has members over GitHub's ${GITHUB_FILE_BYTES}-byte file limit that the repository's .gitattributes doesn't route through Git LFS: ${listed}. Work Item ${item.id} doesn't own .gitattributes. Answer repair to have the worker make smaller candidates, replan to give an item that rule, or cancel.`,
@@ -1122,6 +1160,7 @@ export async function materializeSelection(input: {
         ? {
             kind: "repair",
             finding: `.gitattributes does not route ${paths} through Git LFS, but the roles ${uncovered.map((m) => m.role).join(", ")} must be stored in LFS. Add a filter=lfs rule that covers them.`,
+            keepsSelection: true,
           }
         : hold(
             `The repository's .gitattributes does not route ${paths} through Git LFS, and Work Item ${item.id} must store ${uncovered.map((m) => m.role).join(", ")} there but doesn't own .gitattributes. Answer replan to give an item that rule, or cancel.`,
@@ -1186,11 +1225,92 @@ export async function materializeSelection(input: {
       .toString("utf8")
       .trim();
     // The worktree goes below; the ref keeps the commit until cleanup.
+    await clearStaleLocks(checkout, { signal, log: input.log });
     await hostGit(checkout, ["update-ref", input.ref, commit], { signal });
     return { kind: "done", value: { commit, tree } };
   } finally {
     await removeWorktree(checkout, directory, signal);
   }
+}
+
+/**
+ * Keep the sets the operator sent back with a select `repair` apart from
+ * `candidates/`, which the next capture replaces (never rewrites in
+ * place): hard links (copies across devices) under
+ * `<directory>/sent-back/<set>/`. A set whose copies are gone is left out.
+ */
+export async function keepSentBack(
+  directory: string,
+  sets: readonly CandidateSet[],
+): Promise<CandidateSet[]> {
+  const root = sentBackDirectory(directory);
+  await forceRemove(root);
+  const kept: CandidateSet[] = [];
+  for (const set of sets) {
+    if (await missingMember(set)) continue;
+    const members: CapturedMember[] = [];
+    for (const member of set.members) {
+      const file = join(root, set.id.toLowerCase(), basename(member.file));
+      await mkdir(join(file, ".."), { recursive: true, mode: 0o700 });
+      await link(member.file, file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EXDEV" && error.code !== "EPERM") throw error;
+        return copyFile(member.file, file);
+      });
+      members.push({ ...member, file });
+    }
+    kept.push({ ...set, members });
+  }
+  return kept;
+}
+
+/** Where keepSentBack keeps the sets; the work step removes it once the fact is gone. */
+export function sentBackDirectory(directory: string): string {
+  return join(directory, "sent-back");
+}
+
+/**
+ * The first captured set whose content is a sent-back set's: the operator
+ * already refused it, so offering it again asks the same question.
+ */
+export function resentSet(
+  captured: readonly CandidateSet[],
+  sentBack: readonly CandidateSet[],
+): { set: string; sentBack: string } | undefined {
+  const content = (set: CandidateSet) =>
+    JSON.stringify(
+      set.members.map(({ role, sha256 }) => [role, sha256]).sort(),
+    );
+  const refused = new Map(sentBack.map((set) => [content(set), set.id]));
+  for (const set of captured) {
+    const match = refused.get(content(set));
+    if (match !== undefined) return { set: set.id, sentBack: match };
+  }
+  return undefined;
+}
+
+/** The sent-back sets' members as read-only worker inputs; a set whose copies are gone is left out. */
+export async function sentBackInputs(
+  itemId: string,
+  sets: readonly CandidateSet[],
+): Promise<MediaInput[]> {
+  const inputs: MediaInput[] = [];
+  for (const set of sets) {
+    if (await missingMember(set)) continue;
+    for (const member of set.members)
+      inputs.push({
+        origin: "sent-back",
+        role: member.role,
+        mediaType: member.mediaType,
+        sha256: member.sha256,
+        bytes: member.bytes,
+        file: member.file,
+        fromItem: itemId,
+        set: set.id,
+        destination: member.destination,
+        provenance: set.provenance,
+      });
+  }
+  return inputs;
 }
 
 /** The first member whose private copy is missing or no longer has its captured digest. */

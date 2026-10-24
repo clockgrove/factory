@@ -11,12 +11,16 @@ import {
 import { join } from "node:path";
 import { crashPoint } from "./crash.js";
 import {
+  CANCEL_CLEANUP,
   type CapacityUse,
   DEFAULT_LIMITS,
   type EngineLimits,
+  FRESH,
   hostLimits,
   itemOf,
+  MAX_CLEANUP_FAILURES,
   ObjectiveRunner,
+  REPLAN,
   type ServiceRun,
   type Workflow,
 } from "./engine.js";
@@ -27,11 +31,11 @@ import type {
 } from "./github-sync.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { takeServiceLock } from "./lock.js";
-import { newRunId, RunLog, rotateLogs } from "./log.js";
+import { endCrashedRun, newRunId, RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
+import { currentPlan } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -39,10 +43,11 @@ import {
   type RequestResult,
   type RunRequest,
   refused,
+  rejectRequest,
   removeRequest,
   type StoredRequest,
 } from "./requests.js";
-import { RESET, type ResetRecord, resetRecord } from "./reset.js";
+import { ownedPlan, RESET, type ResetRecord, resetRecord } from "./reset.js";
 import {
   deadlineAt,
   type Frozen,
@@ -93,6 +98,13 @@ export interface ServeOptions {
    * requests only, and says so in its log and in `status`.
    */
   unconfigured?: string;
+  /**
+   * The longest a stop waits for its drain: the process exits right
+   * after, which ends what is still in flight.
+   */
+  drainMs: number;
+  /** Stops the service like SIGTERM: another installation took the repository over (holder.ts). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -259,7 +271,9 @@ export async function serve(options: ServeOptions): Promise<number> {
         error: loaded.error,
         incident: loaded.incident,
       });
-    return loaded?.kind === "ok" ? open(loaded.state) : undefined;
+    if (loaded?.kind !== "ok") return undefined;
+    workflow.resumed?.(loaded.state);
+    return open(loaded.state);
   };
   /** State files not read yet because the read failed: tried every tick. */
   const unloaded = new Set<number>();
@@ -353,6 +367,9 @@ export async function serve(options: ServeOptions): Promise<number> {
     });
   const heartbeat = (stopped = false): void => {
     record.queue = queue;
+    const intake = options.sync?.intakeProblem();
+    if (intake) record.intake = intake;
+    else delete record.intake;
     record.capacity = hostLimits.usage();
     record.waits = Object.fromEntries([
       ...[...waitingForSlot].map((issue) => [issue, { slot: true as const }]),
@@ -363,6 +380,15 @@ export async function serve(options: ServeOptions): Promise<number> {
   // Saved before any hold below, so a crash in between never counts the
   // same death twice.
   heartbeat();
+  // The last run died: its files end with that, as far as this start knows them
+  // (after the heartbeat that records the death).
+  if (previous?.runId && !previous.stopped && previous.runId !== runId)
+    endCrashedRun(
+      paths.logs,
+      previous.runId,
+      [...runners.keys(), ...unreadable.keys()],
+      runId,
+    );
   // The evidence is spent before any question is visible: the steps to
   // ask about are saved in the record first (`suspected`), so a death
   // before their questions are saved asks them at the next start, and a
@@ -400,32 +426,103 @@ export async function serve(options: ServeOptions): Promise<number> {
   }
   crashPoint("serve:loaded");
 
+  /**
+   * Each pending request is applied once. One that can't be taken (checked
+   * where it enters: requests.ts `pendingRequests`) moves to rejected/ and
+   * is refused; one whose apply throws is refused with the error after
+   * that one try, never retried every tick. Neither stops the others.
+   */
+  /** Rejected requests whose file could neither move nor go: refused once, then skipped. */
+  const refusedOnce = new Set<string>();
   const applyRequests = (): void => {
-    for (const { file, stored } of pendingRequests(paths.requests)) {
+    for (const pending of pendingRequests(paths.requests)) {
+      const { file, id, stored } = pending;
       if (!stored) {
-        removeRequest(file);
+        if (refusedOnce.has(id)) continue;
+        log.write(0, {
+          event: "request-rejected",
+          id,
+          problem: pending.problem,
+        });
+        try {
+          rejectRequest(file);
+        } catch (error) {
+          // Never read again either way: the refusal below answers it.
+          log.write(0, { event: "reject-failed", id, error: String(error) });
+          try {
+            removeRequest(file);
+          } catch {
+            // It stays, but it is refused only this once.
+            refusedOnce.add(id);
+          }
+        }
+        writeResult(
+          paths.requests,
+          id,
+          refused(
+            "invalid_request",
+            `Request ${id} can't be taken: ${pending.problem}. It moved to requests/rejected/.`,
+          ),
+        );
         continue;
       }
       let result: RequestResult | undefined;
       try {
         result = applyRequest(stored);
       } catch (error) {
-        // Not saved: the request file stays and is tried again next tick.
         log.write(stored.request.issue, {
           event: "request-failed",
-          id: stored.id,
+          id,
           error: String(error),
         });
-        continue;
+        result = refused(
+          "request_failed",
+          `Applying the request failed, so nothing changed: ${String(error)}. Run the command again.`,
+        );
       }
       // A reset that is rebuilding, or a run waiting for its admission:
       // answered when that lands.
       if (!result) continue;
-      if (stored.request.kind === "run")
-        endRun(stored.request.issue, stored.id);
-      writeResult(paths.requests, stored.id, result);
+      if (stored.request.kind === "run") endRun(stored.request.issue, id);
+      if (stored.source === "github" && result.code)
+        recordRefusal(id, stored, result);
+      writeResult(paths.requests, id, result);
       crashPoint("requests:applied");
       removeRequest(file);
+    }
+  };
+
+  /**
+   * A `/factory` comment's refusal made outside the Objective's own save
+   * (no state for it now, a failed apply): kept in its applied requests
+   * when it has a run, so the sync replies once (`unreplied`) and the same
+   * comment read again is answered from there, never applied again.
+   */
+  const recordRefusal = (
+    id: string,
+    stored: StoredRequest,
+    result: RequestResult,
+  ): void => {
+    const runner = runners.get(stored.request.issue);
+    if (!runner || runner.state.appliedRequests.some((r) => r.id === id))
+      return;
+    try {
+      runner.transact(() => {
+        runner.state.appliedRequests = [
+          ...runner.state.appliedRequests,
+          {
+            id,
+            message: result.message,
+            ...(result.code ? { code: result.code } : {}),
+          },
+        ].slice(-KEEP_REQUEST_IDS);
+      });
+    } catch (error) {
+      log.write(stored.request.issue, {
+        event: "refusal-unsaved",
+        id,
+        error: String(error),
+      });
     }
   };
 
@@ -526,7 +623,6 @@ export async function serve(options: ServeOptions): Promise<number> {
             request.writtenAt,
             request.question,
             request.arg,
-            request.reviewArtifacts,
           );
           break;
         case "pause":
@@ -615,6 +711,17 @@ export async function serve(options: ServeOptions): Promise<number> {
     const known = find(issue);
     if (known && !TERMINAL.includes(known.state.status))
       return { message: "ok" };
+    // Admission never replaces a run whose cleanup still runs (`admit`),
+    // so the request would wait unanswered: it is refused instead.
+    if (known && !known.settled) {
+      const last = known.state.retries[CANCEL_CLEANUP]?.lastError;
+      return refused(
+        "cleanup_running",
+        known.state.status === "cancelled"
+          ? `#${issue}'s cleanup after cancel hasn't settled yet${last ? ` (${last.slice(0, 300)})` : ""}; it settles after ${MAX_CLEANUP_FAILURES} tries at most once it has retried for ${Math.round(limits.maxWaitMs / 60_000)} min. Run factory run ${issue} again then, or factory reset ${issue} to rebuild it from GitHub now.`
+          : `#${issue} is done, and its last step is still ending; run factory run ${issue} again in a moment, or factory reset ${issue} to rebuild it from GitHub.`,
+      );
+    }
     const current = runs.get(issue);
     if (current && current.id > stored.id)
       return refused(
@@ -789,13 +896,14 @@ export async function serve(options: ServeOptions): Promise<number> {
       }
       const { state } = runner;
       // Dequeued while its check or a re-run's cleanup ran: it goes once
-      // that ends, and nothing past them starts. A cleanup the service's
-      // death interrupted resumes first; one that holds or errors is never
-      // asked about: the run goes at once.
+      // that ends and its status comment shows the withdrawal, and nothing
+      // past them starts. A cleanup the service's death interrupted resumes
+      // first; one that holds or errors is never asked about: the run goes
+      // at once.
       if (state.withdrawing && !TERMINAL.includes(state.status)) {
         if (!ending(runner)) {
           try {
-            withdrawNow(runner);
+            if (options.sync?.withdrawShown(state) ?? true) withdrawNow(runner);
           } catch (error) {
             log.write(state.issue, {
               event: "withdraw-failed",
@@ -807,10 +915,36 @@ export async function serve(options: ServeOptions): Promise<number> {
         if (runner.busy) continue;
       }
       let run = false;
-      const allow = allowed(runner, queue);
+      let allow = allowed(runner, queue);
+      // Waiting its turn on another Objective's paths, however busy it is,
+      // it starts no step but an amendment's (planning never waits) and one
+      // answered `replan` or `fresh`, so the answer applies at once (rule
+      // 3): steps running finish, and one the service's death interrupted
+      // resumes. Once the wait ends, the steps it stopped don't count it.
+      const owner = TERMINAL.includes(state.status)
+        ? undefined
+        : pathOwner(runner, ordered);
+      if (owner !== undefined) {
+        waitingOnPaths.set(state.issue, owner);
+        const stops = (key: string) => pathWaitStops(runner.state, key);
+        runner.waitOn(stops);
+        const operator = allow;
+        allow = (key) => operator(key) && !stops(key);
+      } else {
+        try {
+          runner.waited();
+        } catch (error) {
+          log.write(state.issue, {
+            event: "tick-failed",
+            error: String(error),
+          });
+        }
+      }
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
-      // Paused (the queue or the Objective), or drained with nothing left
-      // to start: no slot; a step the service's death interrupted resumes.
+      // Paused (the queue or the Objective), drained with nothing left to
+      // start, or waiting on paths with only building left: no slot, so a
+      // hold that owns common paths can't stall the queue (rule 1); a step
+      // the service's death interrupted resumes.
       else if (
         !runner.busy &&
         !workflow.steps(state).some((step) => allow(step.key))
@@ -832,16 +966,10 @@ export async function serve(options: ServeOptions): Promise<number> {
       // A wait on a human gate (an approval, a required review) has no
       // deadline, so it takes no slot: it polls, and its paths stay owned.
       else if (gated(runner, workflow)) run = true;
-      // Waiting on another Objective's paths takes no slot either, so a hold
-      // that owns common paths can't stall the queue (rule 1).
-      else {
-        const owner = pathOwner(runner, ordered);
-        if (owner !== undefined) waitingOnPaths.set(state.issue, owner);
-        else if (slots > 0) {
-          slots -= 1;
-          run = true;
-        } else waitingForSlot.add(state.issue);
-      }
+      else if (slots > 0) {
+        slots -= 1;
+        run = true;
+      } else waitingForSlot.add(state.issue);
       if (!run) continue;
       try {
         runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
@@ -965,10 +1093,14 @@ export async function serve(options: ServeOptions): Promise<number> {
           started(runner.state)
         )
           return false;
-        // Its check or a re-run's cleanup still runs: it goes once that
-        // ends, and nothing past them starts meanwhile (see tick). A
-        // cleanup not begun never runs: the earlier run's record stands.
-        if (ending(runner)) {
+        // Its check or a re-run's cleanup still runs, or its status comment
+        // doesn't show the withdrawal yet: it goes once that's done, and
+        // nothing past them starts meanwhile (see tick). A cleanup not
+        // begun never runs: the earlier run's record stands.
+        if (
+          ending(runner) ||
+          !(options.sync?.withdrawShown(runner.state) ?? true)
+        ) {
           if (!runner.state.withdrawing)
             runner.transact(() => {
               runner.state.withdrawing = true;
@@ -1000,39 +1132,79 @@ export async function serve(options: ServeOptions): Promise<number> {
   const stop = (): void => {
     stopping = true;
   };
+  // A stray rejection must not end the service: log it and keep serving.
+  const stray = (reason: unknown): void =>
+    log.write(0, { event: "unhandled-rejection", error: String(reason) });
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
-  // A stray rejection must not end the service: log it and keep serving.
-  process.on("unhandledRejection", (reason) =>
-    log.write(0, { event: "unhandled-rejection", error: String(reason) }),
-  );
-  const housekeeping = (): void => {
-    try {
-      rotateLogs(paths.logs, runId);
-      sweepResults(paths.requests);
-    } catch (error) {
-      log.write(0, { event: "housekeeping-failed", error: String(error) });
+  // An abort before this point is kept by the signal, so it is never lost.
+  if (options.signal?.aborted) stop();
+  options.signal?.addEventListener("abort", stop, { once: true });
+  process.on("unhandledRejection", stray);
+  try {
+    const housekeeping = (): void => {
+      try {
+        rotateLogs(paths.logs, runId);
+        sweepResults(paths.requests);
+      } catch (error) {
+        log.write(0, { event: "housekeeping-failed", error: String(error) });
+      }
+    };
+    housekeeping();
+    let lastHousekeeping = Date.now();
+    while (!stopping) {
+      try {
+        tick();
+      } catch (error) {
+        // A bug in the loop itself: log it and keep serving.
+        log.write(0, { event: "loop-error", error: String(error) });
+      }
+      if (Date.now() - lastHousekeeping > RESULT_TTL_MS) {
+        housekeeping();
+        lastHousekeeping = Date.now();
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, options.tickMs ?? 1000),
+      );
     }
-  };
-  housekeeping();
-  let lastHousekeeping = Date.now();
-  while (!stopping) {
-    try {
-      tick();
-    } catch (error) {
-      // A bug in the loop itself: log it and keep serving.
-      log.write(0, { event: "loop-error", error: String(error) });
-    }
-    if (Date.now() - lastHousekeeping > RESULT_TTL_MS) {
-      housekeeping();
-      lastHousekeeping = Date.now();
-    }
-    await new Promise((resolve) => setTimeout(resolve, options.tickMs ?? 1000));
+    // Nothing of this run writes after its end, or after the lock is
+    // released: every step stops (never saving again) and every
+    // observation and sync job is aborted, and each has ended.
+    const settledAtStop = new Map(
+      [...runners].map(([issue, runner]) => [issue, runner.settled]),
+    );
+    const drained = Promise.allSettled([
+      ...[...runners.values()].map((runner) => runner.stop()),
+      observing.drain(),
+      options.sync?.drain(),
+    ]).then(() => true);
+    const { drainMs } = options;
+    let timer: NodeJS.Timeout | undefined;
+    const ended = await Promise.race([
+      drained,
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), drainMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    // Stopped runners never save again; what still runs ends with the
+    // process, which exits right after.
+    if (!ended) log.write(0, { event: "stop-drain-timeout", afterMs: drainMs });
+    options.sync?.flushTransport();
+    // An Objective still unfinished is handed off to the next run.
+    log.end((issue) =>
+      settledAtStop.get(issue) === false ? "handed-off" : "stopped",
+    );
+    // A clean stop (an upgrade, a reboot) ends any crash streak.
+    heartbeat(true);
+    lock.close();
+    return 0;
+  } finally {
+    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop);
+    process.off("unhandledRejection", stray);
+    options.signal?.removeEventListener("abort", stop);
   }
-  // A clean stop (an upgrade, a reboot) ends any crash streak.
-  heartbeat(true);
-  lock.close();
-  return 0;
 }
 
 /**
@@ -1040,25 +1212,36 @@ export async function serve(options: ServeOptions): Promise<number> {
  * overlapping path; planning never waits. Earlier means its plan was
  * accepted earlier: an Objective still planning owns nothing yet, and once
  * its plan lands it waits on every plan accepted before it, so two
- * Objectives never build overlapping paths at once.
+ * Objectives never build overlapping paths at once. Its paths are its
+ * current plan's, so an accepted amendment's count from the next tick; the
+ * amendment keeps the plan's acceptance time, so the order never reverses.
+ * It owns them until it is done or cancelled, through final validation,
+ * final review and the report, which judge those files, and through a
+ * reset (reset.ts `ownedPlan`). An amendment that adds paths a later
+ * Objective's started items touch makes that one wait with those items
+ * unmerged on their branches (docs/reference/queue.md).
  */
 function pathOwner(
   runner: ObjectiveRunner,
   all: readonly ObjectiveRunner[],
 ): number | undefined {
-  const mine = ownedPaths(runner.state);
-  if (!mine.length || built(runner.state)) return undefined;
-  const at = acceptedAt(runner.state);
+  // Only building waits: an Objective with no accepted plan of its own
+  // (planning, resetting, or reviewing a rebuilt plan) never does.
+  const mine = currentPlan(runner.state) && ownedPlan(runner.state);
+  if (!mine || built(runner.state)) return undefined;
+  const paths = mine.plan.items.flatMap((item) => item.ownedPaths);
   return all.find((other) => {
-    if (other === runner) return false;
-    if (TERMINAL.includes(other.state.status) || built(other.state))
+    const theirs = other !== runner && ownedPlan(other.state);
+    if (!theirs) return false;
+    if (
+      theirs.accepted > mine.accepted ||
+      (theirs.accepted === mine.accepted &&
+        other.state.issue > runner.state.issue)
+    )
       return false;
-    const theirs = ownedPaths(other.state);
-    if (!theirs.length) return false;
-    const when = acceptedAt(other.state);
-    if (when > at || (when === at && other.state.issue > runner.state.issue))
-      return false;
-    return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
+    return theirs.plan.items.some((item) =>
+      item.ownedPaths.some((b) => paths.some((a) => pathsOverlap(a, b))),
+    );
   })?.state.issue;
 }
 
@@ -1105,20 +1288,13 @@ function control(
   return null;
 }
 
-function ownedPaths(state: ObjectiveState): string[] {
-  const plan = currentPlan(state);
-  // An envelope owns its selectors from acceptance, before children exist.
-  return plan
-    ? [
-        ...plan.items.flatMap((item) => item.ownedPaths),
-        ...(plan.expansions ?? []).flatMap((envelope) => envelope.selectors),
-      ]
-    : [];
-}
-
-/** When the Objective's plan was accepted (planning/steps.ts keeps it). */
-function acceptedAt(state: ObjectiveState): string {
-  return (state.kept?.[ACCEPTED_AT] as string | undefined) ?? "";
+/**
+ * Whether waiting on paths stops step `key`: every step but an
+ * amendment's, and one whose answer is `replan` or `fresh`.
+ */
+function pathWaitStops(state: ObjectiveState, key: string): boolean {
+  const answer = state.answers[key]?.answer;
+  return !key.startsWith("amend:") && answer !== REPLAN && answer !== FRESH;
 }
 
 /**
@@ -1184,16 +1360,28 @@ function writeResult(dir: string, id: string, result: RequestResult): void {
   }
 }
 
+/** Results, leftover temporary files and rejected requests past RESULT_TTL_MS. */
 function sweepResults(dir: string): void {
+  const rejected = join(dir, "rejected");
   let names: string[];
   try {
-    names = readdirSync(dir);
+    names = [
+      ...readdirSync(dir).filter(
+        (name) => name.endsWith(".result") || name.endsWith(".tmp"),
+      ),
+      ...(() => {
+        try {
+          return readdirSync(rejected).map((name) => join("rejected", name));
+        } catch {
+          return [];
+        }
+      })(),
+    ];
   } catch {
     return;
   }
   const cutoff = Date.now() - RESULT_TTL_MS;
   for (const name of names) {
-    if (!name.endsWith(".result") && !name.endsWith(".tmp")) continue;
     const path = join(dir, name);
     try {
       if (statSync(path).mtimeMs < cutoff) rmSync(path, { force: true });
@@ -1231,6 +1419,8 @@ interface ServiceRecord {
   unreadable: Record<string, string>;
   /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
   problem?: string;
+  /** Why queue reads have failed for a while (GitHubSync.intakeProblem); `status` shows it. */
+  intake?: string;
   /** The queue's mode. */
   queue?: QueueControl;
   /** The host limiter's slots and memory in use, as of the last heartbeat. */

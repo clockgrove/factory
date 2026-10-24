@@ -4,7 +4,7 @@ A plan says **what** must be true when the work is done, and **what other items 
 
 Why: a planner writes every detail from a partial read of the repository. Each mechanism, line number or edit list it adds can contradict the real code, and then becomes a review finding or blocks the worker on wording. Precise plans with 40 or more acceptance entries per item needed far more revision rounds than outcome-level plans.
 
-The rules live in `core/src/planning/rubric.ts`. The planner and the graph reviewer read the same Work Item standard. The reviewer applies the full checklist; the planner gets a short checklist of its plan-shaping judgments, quoted from the same text, without the review-packet mechanics.
+The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph reviewer read the same Work Item standard. The reviewer applies the full checklist; the planner gets a short checklist of its plan-shaping judgments, quoted from the same text, without the review-packet mechanics.
 
 ## A Work Item
 
@@ -61,8 +61,8 @@ All three happen in the planner's one session. Self-checking is a filter; the in
   - a validation command whose script (from the base `package.json`) invokes a known network tool. The authorized package bootstrap and npx runs of local bins are not refused. Why: validation has no network, so the command could never pass, whatever the item owns;
   - an item whose acceptance names a new table, when the base has migrations directories and neither it nor an item it depends on owns a path in one. Why: the data would have no storage the item can write;
   - a base-observed validation command whose package script body works in one directory (it starts with `cd DIR &&`, or is one command naming DIR after `--prefix`, `--dir` or `-C`) on a work item that owns no path there. The request lists these scoped commands with their directories. Why: the command checks nothing the item changed;
-  - a coverage criterion naming a privacy, authority (authorization) or accessibility claim whose proof is review or CI rather than a command proof. Why: a claim like this needs a test that names it, run by a validation command the item delivers. An Objective criterion that is a final command (an Acceptance list item of exactly one code element, `source.command` on its obligation) is exempt;
-  - acceptance that names a migration file number or test file name absent from the base tree (globs, names the Objective or a pinned source uses, and files the item owns are exempt). Why: the worker chooses new file names.
+  - a coverage criterion naming a privacy, access-control (`unauthorized`, `access control`) or accessibility claim whose proof is review or CI rather than a command proof. Why: a claim like this needs a test that names it, run by a validation command the item delivers. An Objective criterion that is a final command (an Acceptance list item of exactly one code element, `source.command` on its obligation) is exempt;
+  - acceptance that names a migration file number or test file name absent from the base tree (globs, names the Objective or a pinned source uses, and files the item owns are exempt; a bare name counts as owned only when it is an owned file's name, or an owned directory already holds a file of its type). Why: the worker chooses new file names.
 
   The planner gets all of these as one correction. Amendments skip this lint; graph review judges them.
 
@@ -78,7 +78,7 @@ The worker gets the standard before its self-review. Result review refuses a vio
 
 ## Plan checks
 
-When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. The planner request lists the exact authorized validation commands (computed by the function the check uses), the CI-only commands and the validation environment; a refusal names the allowed alternatives or the exact fix, with long lists bounded. A new plan check ships with its facts in the request (core/src/planning/facts.ts) and an actionable refusal (core/src/planning/checks.ts).
+When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. The planner request lists the exact authorized validation commands (computed by the function the check uses), the CI-only commands and the validation environment; a refusal names the allowed alternatives or the exact fix, with long lists bounded. A new plan check ships with its facts in the request and an actionable refusal, and joins `PLAN_CHECKS` in `src/compiler/sources.ts`.
 
 **Command authority.** A backticked command in a sentence of the Objective is declared (the operator wrote it); in a repository source doc only a command on its own line is. `factory queue add` runs the dispatch-time Objective preflight and refuses with `objective_preflight_failed` and the fix, so a bad Objective never sits admitted and held.
 

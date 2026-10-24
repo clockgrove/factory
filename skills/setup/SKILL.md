@@ -28,7 +28,7 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
   - final commands: `--required-command`, `--ci-only-command`;
   - worker settings, such as `--codex-network host` or `--claude-model`.
 
-  docs/CORE.md#Setup lists every option and the key it sets.
+  docs/reference/setup.md#Setup lists every option and the key it sets.
 
 Keep the configuration, credentials and state outside the target checkout. Setup refuses a configuration or state directory inside it.
 

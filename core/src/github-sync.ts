@@ -1,11 +1,20 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
-import { DEADLINE, type EngineLimits, type ObjectiveRunner } from "./engine.js";
+import { displayTime } from "./display.js";
+import {
+  CANCEL_CLEANUP,
+  DEADLINE,
+  type EngineLimits,
+  type Left,
+  type ObjectiveRunner,
+} from "./engine.js";
 import {
   type GitHub,
   GitHubError,
   issueGone,
   TransientError,
+  type Transport,
+  transport,
 } from "./github.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { type RunLog, redact } from "./log.js";
@@ -26,6 +35,7 @@ import {
   unqueueIssue,
 } from "./queue.js";
 import { type RequestResult, refused, writeRequest } from "./requests.js";
+import { resetting, statusRecordOf } from "./reset.js";
 import type {
   Hold,
   ObjectiveState,
@@ -52,6 +62,12 @@ export interface GitHubModule {
   /** The Factory field option last written. */
   shown?: string;
   /**
+   * When Factory's last write of the card landed, by GitHub's clock: a
+   * card reading another option set no later than this is a stale read,
+   * not the operator's change.
+   */
+  shownAt?: string;
+  /**
    * The option Factory last saw on the card or wrote, null when the card
    * had none (cleared, or off the Project). A card that changes from this
    * changed by someone else: a change from queued dequeues.
@@ -67,8 +83,7 @@ export interface GitHubModule {
   writing?: string;
   /**
    * When the card was set to queued for this run, by GitHub's clock: a
-   * stale read after a dequeue never admits the issue again (`withdrawnAt`),
-   * and `reset` tells this run's plan comment from an earlier run's.
+   * stale read after a dequeue never admits the issue again (`withdrawnAt`).
    */
   queuedAt?: string;
   /** An unreadable state's question comment exists (open holds keep theirs: `Hold.shownAt`). */
@@ -96,6 +111,8 @@ export interface GitHubModule {
   status?: { hash: string; shown: ObjectiveStatus; at: string };
   /** This run's live status comment can't be written (a lasting refusal or render failure): it counts as shown. */
   statusGivenUp?: boolean;
+  /** A run being withdrawn: its live status comment and open question comments show the withdrawal, or it has none. */
+  statusWithdrawn?: boolean;
   /** The Work Item issues as last written (tracking.ts). */
   tracking?: Tracking;
   /** This run's Work Item issues can't be written (the repository refused a list or a create): they count as shown. A refusal on one item's issue is kept on that item (tracking.ts), never here. */
@@ -130,7 +147,8 @@ export interface SyncView {
   admit(issue: number, github: GitHubModule): void;
   /**
    * Withdraw an Objective dequeued before it started: now, or (`pending`)
-   * once its running check or a re-run's cleanup ends; false when it has
+   * once its running check or a re-run's cleanup ends and its status
+   * comment shows the withdrawal (`withdrawShown`); false when it has
    * started.
    */
   withdraw(issue: number): "withdrawn" | "pending" | false;
@@ -160,6 +178,12 @@ const OPTION: Record<ObjectiveStatus, QueueOption | undefined> = {
 
 /** Live status edits per hour, across the installation's Objectives. */
 const STATUS_EDITS_PER_HOUR = 300;
+/** A run withdrawn before planning: its status comment's final body, after the marker. */
+const WITHDRAWN_LINE =
+  "Withdrawn before planning; queue it again to start afresh.";
+/** An open question's comment once its run is withdrawn, after the marker. */
+const WITHDRAWN_QUESTION =
+  "This question no longer applies: the run was withdrawn before planning. Queue the issue again to start afresh.";
 /** Status or tracking job failures in a row, other than GitHub's transient errors, before it is given up. */
 const GIVE_UP_AFTER = 3;
 
@@ -170,14 +194,14 @@ const MAX_BACKOFF_MS = 10 * 60_000;
 const DEADLINE_MS = 10 * 60_000;
 /** Comments kept waiting for their author's access to be read, per Objective. */
 const MAX_UNCHECKED = 20;
+/** Queue reads failing this long show as an intake problem in `factory status`. */
+const INTAKE_PROBLEM_MS = 10 * 60_000;
 const COMMAND = /^\/factory\s+(\S+)(?:\s+([\s\S]*))?$/;
 /**
- * The options right after the answer, before its text: `--question ID`
- * names the hold it answers, and each `--review-artifacts N` a selector a
- * `revalidate` captures.
+ * The option right after the answer, before its text: `--question ID`
+ * names the hold it answers.
  */
-const ANSWER_OPTION =
-  /^--(question|review-artifacts)\s+(\S+)(?:\s+([\s\S]*))?$/;
+const ANSWER_OPTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
 
 /**
  * GitHub is input and display, never a precondition: every call here runs in
@@ -210,6 +234,18 @@ export class GitHubSync {
   /** A queue read landed since the last intake. */
   private fresh = false;
   /**
+   * Known issues the last read couldn't read, with when that began (this
+   * host's clock) and GitHub's error: their last good cards stay in
+   * `view`, and intake leaves them alone.
+   */
+  private unread = new Map<number, { since: number; error: string }>();
+  /** The entries the last read left out, as logged: each is logged once while it lasts. */
+  private skipped = new Set<string>();
+  /** When the queue read started failing as a whole (this host's clock). */
+  private failingSince: number | undefined;
+  /** Why intake is stopped, once queue reads have failed for INTAKE_PROBLEM_MS. */
+  private intakeStopped: string | undefined;
+  /**
    * Withdrawn runs' last queued time, by GitHub's clock: a card that still
    * reads queued from then (a read that began before the dequeue) is never
    * a new queue. Only a later queue admits the issue again.
@@ -238,6 +274,13 @@ export class GitHubSync {
   private readonly trackTried = new Map<number, number>();
   /** Status and tracking jobs failed in a row by something other than GitHub's transient errors, by job key. */
   private readonly failures = new Map<string, number>();
+  /** Per job key: GitHub requests not yet written as `github-call` (`countTransport`). */
+  private readonly transportTally = new Map<
+    string,
+    Transport & { issue: number; since: number; runs: number; ms: number }
+  >();
+  /** Job keys whose last run failed: the next run counts as a retry. */
+  private readonly transportFailed = new Map<string, number>();
   /** Question comments written compact after GitHub refused them in full, by Objective and hold id (`compactAsk`). */
   private readonly compact = new Map<number, Set<string>>();
   /** When each live status edit of the last hour was made, across Objectives (this host's clock). */
@@ -277,6 +320,41 @@ export class GitHubSync {
     return this.github.moved?.message;
   }
 
+  /**
+   * What intake hasn't seen for INTAKE_PROBLEM_MS, naming the fix; `factory
+   * status` shows it: no queue read worked (the Project's permission lost,
+   * a wrong `queue.projectId`), or a known issue's card kept erroring.
+   * Running Objectives carry on, and intake resumes at the next good read.
+   */
+  intakeProblem(): string | undefined {
+    const now = this.now();
+    const frozen = [...this.unread]
+      .filter(([, entry]) => now - entry.since >= INTAKE_PROBLEM_MS)
+      .map(
+        ([issue, entry]) =>
+          `#${issue}'s card unreadable for ${Math.floor((now - entry.since) / 60_000)} min: ${redact(entry.error)}; card changes aren't seen`,
+      );
+    const problems = [
+      ...(this.intakeStopped ? [this.intakeStopped] : []),
+      ...frozen,
+    ];
+    return problems.length ? problems.join(". ") : undefined;
+  }
+
+  /** A queue read that failed as a whole: past INTAKE_PROBLEM_MS, intake reports it. */
+  private queueFailed(error: unknown, startedAt: number): void {
+    this.failingSince ??= startedAt;
+    const minutes = Math.floor((this.now() - this.failingSince) / 60_000);
+    if (this.now() - this.failingSince < INTAKE_PROBLEM_MS) return;
+    const first = this.intakeStopped === undefined;
+    this.intakeStopped = `Factory hasn't read the queue for ${minutes} min (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued. Check that the service's GitHub login can still read Project ${this.config.queue.projectId} (a token needs the project scope) and that queue.projectId names it; intake resumes at the next good read`;
+    if (first)
+      this.log.write(0, {
+        event: "intake-stopped",
+        error: errorMessage(error),
+      });
+  }
+
   tick(sync: SyncView): void {
     if (this.problem()) return;
     // Read once at start: a rename while the service was down pauses
@@ -307,8 +385,24 @@ export class GitHubSync {
         "queue",
         async (signal) => {
           const read = await readQueue(this.github, this.config, known, signal);
-          this.view = read.items;
-          this.viewKnown = new Set(known);
+          // An issue GitHub answered with an error for keeps its last good card.
+          const unread = new Map(
+            read.unread.map((issue) => [
+              issue,
+              {
+                since: this.unread.get(issue)?.since ?? startedAt,
+                error:
+                  read.skipped.find((entry) => entry.issue === issue)?.error ??
+                  "",
+              },
+            ]),
+          );
+          this.view = [
+            ...read.items,
+            ...this.view.filter((item) => unread.has(item.issue)),
+          ];
+          this.unread = unread;
+          this.viewKnown = new Set(known.filter((issue) => !unread.has(issue)));
           this.viewAt = startedAt;
           this.fresh = true;
           for (const issue of read.gone) this.lose(issue, "queue");
@@ -317,8 +411,25 @@ export class GitHubSync {
               event: "queue-truncated",
               unread: read.truncated,
             });
+          const skipped = new Set<string>();
+          for (const entry of read.skipped) {
+            const key = `${entry.issue ?? ""} ${entry.error}`;
+            if (!this.skipped.has(key))
+              this.log.write(entry.issue ?? 0, {
+                event: "queue-entry-skipped",
+                error: entry.error,
+              });
+            skipped.add(key);
+          }
+          this.skipped = skipped;
+          this.failingSince = undefined;
+          if (this.intakeStopped) {
+            this.intakeStopped = undefined;
+            this.log.write(0, { event: "intake-resumed" });
+          }
         },
         false,
+        (error) => this.queueFailed(error, startedAt),
       );
     }
     if (this.fresh) {
@@ -458,6 +569,10 @@ export class GitHubSync {
    * marker makes it idempotent.
    */
   forget(issue: number): void {
+    for (const [key, tally] of this.transportTally)
+      if (tally.issue === issue) this.writeTransport(key);
+    for (const [key, owner] of this.transportFailed)
+      if (owner === issue) this.transportFailed.delete(key);
     this.settled.delete(issue);
     this.queuing.delete(issue);
     this.changed.delete(issue);
@@ -487,8 +602,8 @@ export class GitHubSync {
    * last write admits its Objective (a new one is admitted on first sight,
    * so it is checked at once; planning waits for a slot), and a card that
    * changed from what Factory last saw or wrote (`seen`) is someone else's
-   * change: from queued to anything else (another option, cleared, or off
-   * the Project) dequeues an Objective that hasn't started. Every
+   * change: to anything but queued (another option, cleared, or off the
+   * Project) it dequeues an Objective that hasn't started. Every
    * unfinished Objective takes its order from the card, so reordering works
    * until it starts. A card Factory wrote after the read began is skipped:
    * the read is stale for it.
@@ -497,7 +612,7 @@ export class GitHubSync {
     const queuedOption = this.config.queue.options.queued;
     const items = new Map(this.view.map((item) => [item.issue, item]));
     for (const issue of new Set([...items.keys(), ...this.viewKnown])) {
-      if (sync.unreadable.has(issue)) continue;
+      if (sync.unreadable.has(issue) || this.unread.has(issue)) continue;
       if (
         this.jobs.active(`show:${issue}`) ||
         (this.wroteAt.get(issue) ?? -1) >= this.viewAt
@@ -544,11 +659,21 @@ export class GitHubSync {
         if (module.seen === undefined || option === module.writing)
           runner.transact(() => {
             const github = runner.state.modules.github as GitHubModule;
+            if (option === github.writing && item?.optionAt)
+              github.shownAt = item.optionAt;
             github.seen = option;
             delete github.writing;
           });
         else if (option !== module.seen) {
-          if (this.cardChanged(runner, option, sync) === "withdrawn") continue;
+          if (
+            this.cardChanged(
+              runner,
+              option,
+              item?.optionAt ?? undefined,
+              sync,
+            ) === "withdrawn"
+          )
+            continue;
         }
         if (item && (module.order ?? null) !== item.order)
           runner.transact(() => {
@@ -565,8 +690,13 @@ export class GitHubSync {
   }
 
   /**
-   * Someone else changed the card since Factory last saw or wrote it. From
-   * queued, that dequeues an Objective that hasn't started. A finished
+   * Someone else changed the card since Factory last saw or wrote it. To
+   * anything but queued, that dequeues an Objective that hasn't started
+   * planning: from queued; cleared or off the Project, which Factory never
+   * writes; or, from what Factory showed for its check or a re-run's
+   * cleanup (such as "Needs you" for a held one), an option set after
+   * Factory's write (`at` later than `shownAt`), so a stale read of an
+   * earlier write of Factory's own never withdraws. A finished
    * Objective set to queued is left to intake, which runs it again. Any
    * other change stands: Factory doesn't write over it until the status
    * moves on (`ceded`).
@@ -574,6 +704,7 @@ export class GitHubSync {
   private cardChanged(
     runner: ObjectiveRunner,
     option: string | null,
+    at: string | undefined,
     sync: SyncView,
   ): "withdrawn" | "requeued" | "ceded" {
     const issue = runner.state.issue;
@@ -592,7 +723,15 @@ export class GitHubSync {
         this.log.write(issue, { event: "card-changed", option, ceded: final });
         return "requeued";
       }
-    } else if (module.seen === queued && option !== queued) {
+    } else if (
+      option !== queued &&
+      (module.seen === queued ||
+        option === null ||
+        Date.parse(at ?? "") > Date.parse(module.shownAt ?? ""))
+    ) {
+      // Not started (its check, or a re-run's cleanup): the operator's
+      // change away from what Factory last saw or wrote dequeues it, so one
+      // held there can be withdrawn. `withdraw` refuses a started Objective.
       const withdrawn = sync.withdraw(issue);
       if (withdrawn === "pending")
         runner.transact(() => {
@@ -672,7 +811,7 @@ export class GitHubSync {
     const option = this.desired(runner, sync);
     if (
       option === undefined ||
-      runner.state.withdrawing ||
+      withdrawingNow(runner.state) ||
       module.shown === option ||
       module.ceded === option ||
       this.changed.has(issue)
@@ -681,28 +820,31 @@ export class GitHubSync {
     const github = () => runner.state.modules.github as GitHubModule;
     this.background(issue, `show:${issue}`, async (signal) => {
       const card = await this.display.get(github().itemId, signal);
-      if (runner.state.withdrawing) return;
+      if (withdrawingNow(runner.state)) return;
       const { seen, writing } = github();
       if (
         seen !== undefined &&
         card.option !== seen &&
         card.option !== writing
       ) {
-        if (this.cardChanged(runner, card.option, sync) === "requeued")
+        if (this.cardChanged(runner, card.option, card.at, sync) === "requeued")
           this.changed.add(issue);
         return;
       }
+      let at = card.at;
       if (card.option !== option) {
         runner.transact(() => {
           github().writing = option;
         });
         crashPoint("sync:show:before");
-        await this.display.set(github().itemId, option, signal);
+        at = await this.display.set(github().itemId, option, signal);
         crashPoint("sync:show:after");
         this.wroteAt.set(issue, this.now());
       }
       runner.transact(() => {
         const module = github();
+        if (at) module.shownAt = at;
+        else delete module.shownAt;
         module.shown = option;
         module.seen = option;
         delete module.writing;
@@ -834,8 +976,15 @@ export class GitHubSync {
   private status(runner: ObjectiveRunner, sync: SyncView): void {
     const { state } = runner;
     const issue = state.issue;
+    // A run being withdrawn shows the withdrawal; one cancelled meanwhile
+    // shows its final status like any other.
+    if (withdrawingNow(state)) {
+      this.statusWithdrawn(runner);
+      return;
+    }
     const given = (state.modules.github as GitHubModule).statusGivenUp;
-    if (!this.config.progress.enabled || state.withdrawing || given) return;
+    // A resetting record shows nothing: its rebuild reads the run's comment.
+    if (!this.config.progress.enabled || given || resetting(state)) return;
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;
@@ -865,6 +1014,7 @@ export class GitHubSync {
             ...this.tally.read(issue, state.startedAt ?? ""),
             decisions: decisionsOf(state),
             ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+            record: statusRecordOf(state),
           },
           this.config.secrets,
           { questions: this.config.progress.includeQuestions },
@@ -914,6 +1064,74 @@ export class GitHubSync {
   }
 
   /**
+   * A run being withdrawn: before the state goes, its live status comment
+   * (if one was posted, and progress comments are on) is edited to a final
+   * line, so nothing is left reading "checking", and each open question's
+   * comment Factory posted is edited to say it no longer applies. Each is
+   * found by its marker (Factory's own comments only), so after a crash
+   * they are edited again; the service withdraws once this is shown
+   * (`withdrawShown`).
+   */
+  private statusWithdrawn(runner: ObjectiveRunner): void {
+    const { state } = runner;
+    const issue = state.issue;
+    const module = state.modules.github as GitHubModule;
+    if (
+      module.statusWithdrawn ||
+      module.statusGivenUp ||
+      this.jobs.pending(`status:${issue}`)
+    )
+      return;
+    this.background(
+      issue,
+      `status:${issue}`,
+      async (signal) => {
+        if (this.config.progress.enabled) {
+          const marker = mark(issue, "status", runOf(state));
+          await this.github.editComment(
+            issue,
+            marker,
+            `${marker}\n${WITHDRAWN_LINE}`,
+            "sync:status",
+            signal,
+            module.status ? skewed(module.status.at) : sinceRun(state),
+          );
+        }
+        for (const hold of state.holds) {
+          const marker = mark(issue, "hold", hold.id);
+          await this.github.editComment(
+            issue,
+            marker,
+            `${marker}\n${WITHDRAWN_QUESTION}`,
+            "sync:ask",
+            signal,
+            new Date(Date.parse(hold.askedAt) - CLOCK_SKEW_MS).toISOString(),
+          );
+        }
+        runner.transact(() => {
+          (runner.state.modules.github as GitHubModule).statusWithdrawn = true;
+        });
+      },
+      true,
+      (error) => this.givenUp(runner, "status", error),
+    );
+  }
+
+  /**
+   * Whether a run being withdrawn may go: its comments show the
+   * withdrawal, or they were given up, or the issue is gone.
+   */
+  withdrawShown(state: ObjectiveState): boolean {
+    const module = state.modules.github as GitHubModule | undefined;
+    return (
+      !module ||
+      module.statusGivenUp === true ||
+      module.statusWithdrawn === true ||
+      this.gone.has(state.issue)
+    );
+  }
+
+  /**
    * The Work Item issues (tracking.ts): projected from the plan in force
    * and each item's state by a background job, at most once per
    * STATUS_EVERY_MS while the Objective runs and at once when it has
@@ -955,6 +1173,16 @@ export class GitHubSync {
             }),
           log: (event) => this.log.write(issue, event),
           signal,
+          cardStatus: {
+            project: this.config.queue.projectId,
+            set: async (item, option, signal) => {
+              await this.display.set(
+                item,
+                this.config.queue.options[option],
+                signal,
+              );
+            },
+          },
         }),
       true,
       (error) => this.givenUp(runner, "track", error),
@@ -1005,16 +1233,17 @@ export class GitHubSync {
    * A wait shown on the issue: one status note, edited in place, once an
    * unknown transient cause has lasted `noteAfterMs`; one reminder once a
    * human gate (an approval, a required review) has lasted `remindAfterMs`.
-   * Neither for a step an open question stops: it waits on the answer,
-   * and the engine pauses its clocks until it comes. Neither while
-   * progress comments are off.
+   * Neither for a step an open question or a wait on another Objective's
+   * paths stops (engine.ts `blocked`): it waits on that, and the engine
+   * pauses its clocks until it ends. Neither while progress comments are
+   * off.
    */
   private note(runner: ObjectiveRunner, module: GitHubModule): void {
     if (!this.config.progress.enabled) return;
     const now = this.now();
     const issue = runner.state.issue;
     const waits = Object.entries(runner.state.retries)
-      .filter(([step, retry]) => retry.count === 0 && !runner.heldBy(step))
+      .filter(([step, retry]) => retry.count === 0 && !runner.blocked(step))
       .sort(([, a], [, b]) => a.since.localeCompare(b.since));
     const transient = waits.find(
       ([, retry]) =>
@@ -1028,7 +1257,7 @@ export class GitHubSync {
         await this.github.upsertComment(
           issue,
           marker,
-          `${marker}\n**Factory is waiting.** Step ${code(step)} has been retrying since ${code(retry.since)}. It began with: ${excerpt(retry.cause ?? retry.lastError, this.config.secrets, 500)}\n\nLast error: ${excerpt(retry.lastError, this.config.secrets, 500)}\n\nFactory keeps retrying on its own, and asks here if the wait goes on.`,
+          `${marker}\n**Factory is waiting.** Step ${code(step)} has been retrying since ${code(displayTime(retry.since))}. It began with: ${excerpt(retry.cause ?? retry.lastError, this.config.secrets, 500)}\n\nLast error: ${excerpt(retry.lastError, this.config.secrets, 500)}\n\nFactory keeps retrying on its own, and asks here if the wait goes on.`,
           "sync:note",
           signal,
         );
@@ -1116,22 +1345,27 @@ export class GitHubSync {
   }
 
   /**
-   * A cancelled run's one closing comment: who cancelled it (the login
-   * of a `/factory cancel` comment's author; a CLI cancel is "the
-   * operator", never the host's user name), or its deadline. Keyed by the run, so a restart never posts it twice;
-   * a finished Objective settles once it is posted, or GitHub refused it
-   * (`givenUp`). None for a withdrawn run or while progress comments are
-   * off.
+   * A cancelled run's one closing comment, once its cleanup has settled:
+   * who cancelled it (the login of a `/factory cancel` comment's author; a
+   * CLI cancel is "the operator", never the host's user name), or its
+   * deadline, and what the cleanup left when it settled without finishing
+   * (engine.ts `Left`). Keyed by the run, so a restart never posts it
+   * twice; a finished Objective settles once it is posted, or GitHub
+   * refused it (`givenUp`). None for a withdrawn run or while progress
+   * comments are off.
    */
   private cancelled(runner: ObjectiveRunner, module: GitHubModule): void {
     const { state } = runner;
+    const cleanup = state.done[CANCEL_CLEANUP] as Left | true | undefined;
     if (
       !this.config.progress.enabled ||
       state.status !== "cancelled" ||
       state.withdrawing ||
-      module.cancelShown
+      module.cancelShown ||
+      cleanup === undefined
     )
       return;
+    const left = cleanup === true ? undefined : cleanup;
     const issue = state.issue;
     this.background(
       issue,
@@ -1148,7 +1382,7 @@ export class GitHubSync {
         await this.github.ensureComment(
           issue,
           marker,
-          `${marker}\n**Factory cancelled this Objective**${ended ? ` at ${code(ended.at)}` : ""}: ${why}. Its open pull requests close and the issue closes as not planned; what merged stays merged. Queue it again to run it from a new plan.`,
+          `${marker}\n**Factory cancelled this Objective**${ended ? ` at ${code(ended.at)}` : ""}: ${why}. ${left ? `Its cleanup stopped after ${left.failures} tries, and left what it couldn't do: ${excerpt(left.left, this.config.secrets, 1500)} Close or delete those by hand.` : "Its open pull requests are closed and the issue is closed as not planned."} What merged stays merged. Queue it again to run it from a new plan.`,
           "sync:cancel",
           signal,
           sinceRun(state),
@@ -1318,15 +1552,13 @@ export class GitHubSync {
     const answer = command[1]!.toLowerCase();
     let rest = command[2]?.trim() ?? "";
     let question: string | undefined;
-    let reviewArtifacts: string[] | undefined;
     for (
       let option = ANSWER_OPTION.exec(rest);
       option;
       option = ANSWER_OPTION.exec(rest)
     ) {
-      if (option[1] === "question") question = option[2];
-      else reviewArtifacts = [...(reviewArtifacts ?? []), option[2]!];
-      rest = option[3]?.trim() ?? "";
+      question = option[1];
+      rest = option[2]?.trim() ?? "";
     }
     const text = rest;
     writeRequest(
@@ -1342,7 +1574,6 @@ export class GitHubSync {
               ...(text ? { text } : {}),
               writtenAt: comment.createdAt,
               ...(question ? { question } : {}),
-              ...(reviewArtifacts ? { reviewArtifacts } : {}),
             },
       comment.login,
       `comment-${comment.id}`,
@@ -1418,16 +1649,114 @@ export class GitHubSync {
     backoff = true,
     failed?: (error: unknown) => void,
   ): void {
-    this.jobs.run(issue, key, job, {
-      backoff,
-      done: () => failed && this.failures.delete(key),
-      failed: async (error) => {
-        failed?.(error);
-        if (issue && issueGone(error)) await this.confirmGone(issue, key);
+    const counted: Transport = {
+      calls: 0,
+      retries: this.transportFailed.has(key) ? 1 : 0,
+      rateLimited: 0,
+      failed: 0,
+      bytes: 0,
+    };
+    const started = this.now();
+    const ended = (ok: boolean) => {
+      if (ok) this.transportFailed.delete(key);
+      else this.transportFailed.set(key, issue);
+      // Each failed, re-sent or rate-limited request, unthrottled: one bad request stays traceable.
+      for (const request of counted.requests ?? [])
+        this.log.write(issue, {
+          event: "github-request",
+          job: key,
+          ...request,
+        });
+      if (counted.unnoted)
+        this.log.write(issue, {
+          event: "github-request",
+          job: key,
+          unnoted: counted.unnoted,
+        });
+      this.countTransport(issue, key, counted, this.now() - started, !ok);
+    };
+    this.jobs.run(
+      issue,
+      key,
+      (signal) => transport.run(counted, () => job(signal)),
+      {
+        backoff,
+        done: () => {
+          ended(true);
+          if (failed) this.failures.delete(key);
+        },
+        failed: async (error) => {
+          ended(false);
+          failed?.(error);
+          if (issue && issueGone(error)) await this.confirmGone(issue, key);
+        },
       },
-    });
+    );
+  }
+
+  /**
+   * Add one job run's GitHub requests to its key's tally, and write the
+   * tally as a `github-call` event at most once a minute per key (at once
+   * after a failed run), and when its Objective is forgotten: counts, never
+   * bodies.
+   */
+  private countTransport(
+    issue: number,
+    key: string,
+    run: Transport,
+    ms: number,
+    failed: boolean,
+  ): void {
+    const tally = this.transportTally.get(key) ?? {
+      issue,
+      since: this.now(),
+      runs: 0,
+      ms: 0,
+      calls: 0,
+      retries: 0,
+      rateLimited: 0,
+      failed: 0,
+      bytes: 0,
+    };
+    tally.runs += 1;
+    tally.ms += ms;
+    tally.calls += run.calls;
+    tally.retries += run.retries;
+    tally.rateLimited += run.rateLimited;
+    tally.failed += run.failed;
+    tally.bytes += run.bytes;
+    this.transportTally.set(key, tally);
+    if (failed || this.now() - tally.since >= TRANSPORT_EVERY_MS)
+      this.writeTransport(key);
+  }
+
+  /** The service stops: abort the sync's jobs and wait until each has ended. */
+  drain(): Promise<void> {
+    return this.jobs.drain();
+  }
+
+  /** Write every unwritten `github-call` tally: at the service's stop, before its run ends. */
+  flushTransport(): void {
+    for (const key of [...this.transportTally.keys()]) this.writeTransport(key);
+  }
+
+  private writeTransport(key: string): void {
+    const tally = this.transportTally.get(key);
+    this.transportTally.delete(key);
+    if (!tally?.calls) return;
+    const {
+      issue,
+      since: _since,
+      requests: _requests,
+      unnoted: _unnoted,
+      ...counts
+    } = tally;
+    this.log.write(issue, { event: "github-call", job: key, ...counts });
   }
 }
+
+/** The most often one job key's `github-call` tally is written. */
+const TRANSPORT_EVERY_MS = 60_000;
 
 /** A question's most in a comment: whole up to here, then cut with where the rest is. */
 const QUESTION_LIMIT = 20_000;
@@ -1555,6 +1884,11 @@ export function requeued(
     finalShown(state, config) &&
     (!Number.isFinite(since) || Date.parse(item.optionAt ?? "") > since)
   );
+}
+
+/** Dequeued and not finished: it shows nothing but the withdrawal. */
+function withdrawingNow(state: ObjectiveState): boolean {
+  return state.withdrawing === true && !TERMINAL.includes(state.status);
 }
 
 /**

@@ -1,0 +1,25 @@
+# Delivery and cancel
+
+Part of [the design](../DESIGN.md).
+
+## Delivery
+
+`delivery.kind` in the installation's configuration picks how Work Items reach the default branch. The service reads it once at start.
+
+- **`regular`** (default): one PR per Work Item, merged with a merge commit once its checks pass.
+- **`native-stack`**: each linear chain of the plan is one GitHub native stack. Each layer's PR targets the branch below it, and the top layer's merge step merges the whole stack with one shared merge commit. An item off a chain is an ordinary PR. When the layer below moves (GitHub updates it with the default branch, or it is repaired), GitHub merges its new head into the layer above, with no worker; only a conflict is that layer's repair.
+- **Strict protection.** A PR BEHIND the default branch is updated by GitHub (update-branch), not by a worker; a conflict is the item's repair. A repair that only replays the refused change onto a moved base, and applies cleanly, runs no worker either.
+- **`accept`.** A stack that merged by other means (layer by layer, or with different merge commits) is a question with `accept`, `retry` and `cancel`. `accept` takes the unit as delivered once every layer is merged at Factory's head with its merge commit on the default branch; otherwise the question names what is missing.
+- **After the last merge.** Final validation and final review run on the default branch head, so every Objective gets QA on the default branch, with or without commands (see [QA on the default branch](steps.md#steps)).
+- **Changing it.** A plan is split by the setting it ran with, so a retry never switches it. To deliver an Objective without native stacks: cancel it, set `delivery.kind` to `regular`, restart the service and queue it again.
+
+## Cancel
+
+`/factory cancel`, `factory cancel <issue>`, or the Objective's deadline (see [Deadlines](steps.md#deadlines)):
+
+1. Abort the Objective's running steps. This kills the process groups the service started for those steps; it tracks them in memory, and they die with the service anyway.
+2. Close every open Factory PR of the Objective (each branch under `factory/<issue>/`, whatever plan made it) with a comment, delete those branches Factory made (see [Idempotence](steps.md#idempotence)), close the issue as not planned, and set Status to Cancelled.
+3. Mark the state cancelled, recording who cancelled and when (`ended`).
+4. Once the cleanup has settled, post one closing comment on the issue (github-sync.ts, marker `cancelled:<run>`): who cancelled it, or that its deadline passed, and what the cleanup left if it settled without finishing. Only a `/factory cancel` comment's author is named (`ended.source: github`); a CLI cancel says "the operator", never the host's user name. A cancelled Objective settles once it is posted, or GitHub refused it (`cancel-comment-given-up`). None for a dequeued run withdrawn before it started, or while `progress.enabled` is false. Crash points: `sync:cancel:before` and `sync:cancel:after`.
+
+Cancel reads only the Objective's state file and its open PRs, so its cost doesn't depend on history. It can't be refused. The cleanup (`cancel:cleanup`) never asks: each attempt tries every part (the PRs, then the branches of PRs it closed, the issue, the work files), so one that fails never stops the others, and a failed attempt names what it left. It retries in the background with the usual backoff (from a rate limit's reset, when one says), and only after 5 failed attempts in a row over at least `maxWaitMs` (3 h) since the first does it settle anyway, so an outage or a rate limit alone never leaves PRs open: its result records what was left (`{ left, failures }`, engine.ts `Left`), the log has a `cleanup-left` event, the closing comment and `factory status` name it, and the Objective can be queued again. Until it settles, `factory run N` is refused (`cleanup_running`) and names `factory reset N`. An issue GitHub no longer has here (404 or 410: deleted; a redirect, while the repository itself has not moved: transferred away) has nothing to close: the PRs, branches and work files still go, and the Objective settles.

@@ -1,6 +1,7 @@
 /**
  * The Planner seam: one structured answer from a model, for planning, plan
- * review, result review, final review, diagnosis and semantic discovery. Provider APIs stay in
+ * review, result review, final review, diagnosis and `propose`
+ * (proposals.ts). Provider APIs stay in
  * the adapters (codex.ts, claude.ts).
  */
 import { accessSync, constants, statSync } from "node:fs";
@@ -14,7 +15,19 @@ import {
   type Outcome,
 } from "../engine.js";
 import type { Wait } from "../state.js";
-import { captureRequest, logUsage, plannerRole, usageRecord } from "./usage.js";
+import {
+  type Conversation,
+  ResumeOverflow,
+  type Session,
+  withoutPrevious,
+} from "./session.js";
+import {
+  describeRequest,
+  logUsage,
+  type PromptFacts,
+  plannerRole,
+  usageRecord,
+} from "./usage.js";
 
 export const PLANNER_PHASES = [
   "plan",
@@ -23,9 +36,16 @@ export const PLANNER_PHASES = [
   "objective-review",
   "diagnosis",
   "dream",
-  "discovery",
+  "propose",
 ] as const;
 export type PlannerPhase = (typeof PLANNER_PHASES)[number];
+/** The phases called with the reviewer's model, so the ones `reviewEffort` can set. */
+export const REVIEW_PHASES = [
+  "graph-review",
+  "result-review",
+  "objective-review",
+] as const satisfies readonly PlannerPhase[];
+export type ReviewPhase = (typeof REVIEW_PHASES)[number];
 
 export interface PlannerCall {
   role: "planner" | "reviewer";
@@ -37,10 +57,18 @@ export interface PlannerCall {
   readDir?: string;
   /** Absolute paths of PNG files the model sees beside the prompt. */
   images?: string[];
+  /** The prompt's parts and sources, from its builder (usage.ts PromptFacts). */
+  facts?: PromptFacts;
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
   /** Called on every provider event: the call is alive. */
   activity?(): void;
+  /**
+   * The conversation this call may continue (session.ts): `prompt` is
+   * still the whole request; a continuing turn sends only its delta.
+   * Absent: a fresh call that keeps nothing.
+   */
+  conversation?: Conversation;
 }
 
 export interface PlannerAnswer {
@@ -51,6 +79,10 @@ export interface PlannerAnswer {
   costUsd?: number;
   turns?: number;
   ms: number;
+  /** The call's `model-usage` id, for a `model-refused` event (usage.ts logRefused). */
+  callId?: string;
+  /** The conversation to keep after this call; absent when none was given or the provider keeps none. */
+  session?: Session;
 }
 
 export interface Planner {
@@ -67,7 +99,7 @@ export class PlannerError extends Error {
    * What a `hold` stops (engine.ts HoldScope). A provider failure that
    * holds is about its login, billing, quota or model, its package or
    * setup, or the host: installation-, account- or provider-wide, so it is
-   * the Objective's, asked once for every item (CORE.md#Holds and answers).
+   * the Objective's, asked once for every item (docs/reference/holds.md#Holds and answers).
    * Only a cause that is one Work Item's own (its files, its review images,
    * its session's budget) is `item`.
    */
@@ -76,7 +108,7 @@ export class PlannerError extends Error {
     readonly outcome: "retry" | "hold" | "fail",
     reason: string,
     /**
-     * For `retry`: a usage limit and its reset (CORE.md#Waits), or an
+     * For `retry`: a usage limit and its reset (docs/reference/steps.md#Waits), or an
      * error (an idle model), which holds after three.
      */
     readonly wait?: Wait,
@@ -92,6 +124,31 @@ export class PlannerError extends Error {
   /** A hold whose cause is one Work Item's own: it stops that item only. */
   static itemHold(reason: string): PlannerError {
     return new PlannerError("hold", reason, undefined, undefined, "item");
+  }
+
+  /** The request is larger than the model's context window (`fail`); a continued conversation then starts fresh (session.ts ResumeOverflow). */
+  tooLarge = false;
+
+  static contextOverflow(reason: string): PlannerError {
+    const error = new PlannerError("fail", reason);
+    error.tooLarge = true;
+    return error;
+  }
+}
+
+/**
+ * Run `once`, and when a continued conversation ran out of context
+ * (session.ts ResumeOverflow), once more with no session: fresh.
+ */
+export async function freshOnOverflow<T>(
+  call: PlannerCall,
+  once: (call: PlannerCall) => Promise<T>,
+): Promise<T> {
+  try {
+    return await once(call);
+  } catch (error) {
+    if (!(error instanceof ResumeOverflow)) throw error;
+    return once({ ...call, conversation: withoutPrevious(call.conversation) });
   }
 }
 
@@ -130,8 +187,8 @@ export interface ModelChoice<Effort extends string = string> {
 export interface PlannerModels<Effort extends string = string> {
   planner: ModelChoice<Effort>;
   reviewer: ModelChoice<Effort>;
-  /** An omitted phase uses `reviewer.effort`. */
-  reviewEffort?: Partial<Record<PlannerPhase, Effort>>;
+  /** A review phase's effort; an omitted one uses `reviewer.effort`. */
+  reviewEffort?: Partial<Record<ReviewPhase, Effort>>;
 }
 
 /** The model a call uses: the planner, or the reviewer at its phase's effort. */
@@ -140,7 +197,7 @@ export function modelChoice<Effort extends string>(
   call: Pick<PlannerCall, "role" | "phase">,
 ): ModelChoice<Effort> {
   if (call.role === "planner") return models.planner;
-  const effort = models.reviewEffort?.[call.phase];
+  const effort = models.reviewEffort?.[call.phase as ReviewPhase];
   return effort ? { ...models.reviewer, effort } : models.reviewer;
 }
 
@@ -169,11 +226,20 @@ export async function loggedCall<Effort extends string>(
     phase: call.phase,
   });
   record.tools = Boolean(call.readDir);
-  captureRequest(record, call.prompt);
+  describeRequest(record, {
+    prompt: call.prompt,
+    schema: call.schema,
+    ...(call.images ? { images: call.images } : {}),
+    ...(call.facts ? { facts: call.facts } : {}),
+  });
   try {
     const answer = await run(record);
     record.outcome = "done";
-    return { ...answer, ms: Date.now() - started };
+    return {
+      ...answer,
+      ms: Date.now() - started,
+      callId: record.callId as string,
+    };
   } catch (error) {
     record.outcome = error instanceof PlannerError ? error.outcome : "error";
     record.error = detail(String(error));
@@ -335,19 +401,26 @@ export class HedgedPlanner implements Planner {
       let running = 0;
       let hedged = false;
       let failure: unknown;
+      const attempts: Promise<unknown>[] = [];
       const finish = (settle: () => void) => {
         if (settled) return;
         settled = true;
         clearInterval(timer);
         for (const controller of controllers)
           controller.abort(new Error("hedged"));
-        settle();
+        // The first call's conversation directory is its own until it has
+        // stopped: the step's next call must not open it before then.
+        if (call.conversation) void Promise.allSettled(attempts).then(settle);
+        else settle();
       };
       const start = (n: number) => {
         running += 1;
-        this.inner
+        const attempt = this.inner
           .answer({
             ...call,
+            // The hedge never shares the first call's conversation: it
+            // starts fresh and keeps none.
+            ...(n ? { conversation: undefined } : {}),
             signal: AbortSignal.any([call.signal, controllers[n]!.signal]),
             log: (event) => call.log({ ...event, ...(n ? { hedge: n } : {}) }),
             activity: () => {
@@ -367,6 +440,7 @@ export class HedgedPlanner implements Planner {
               if (running === 0) finish(() => reject(failure));
             },
           );
+        attempts.push(attempt);
       };
       call.signal.addEventListener(
         "abort",

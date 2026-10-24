@@ -2,6 +2,9 @@ name: Quality
 
 on:
   pull_request:
+  # The merge queue runs the checks on each pull request on top of main and
+  # everything queued ahead of it; package-gate is the check it waits for.
+  merge_group:
   push:
     branches: [main]
 
@@ -35,7 +38,7 @@ jobs:
       - run: npm run test:core
 
   # The single required check for main; it passes only when every job above
-  # passes, including the packed tarball installed offline (core/test).
+  # passes, including offline installation in the CI tests.
   package-gate:
     if: always()
     needs: [checks, core]

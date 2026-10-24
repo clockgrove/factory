@@ -14,13 +14,7 @@ import {
   unknownCheckMessage,
   unknownCheckNames,
 } from "./facts.js";
-import {
-  coverageCriterion,
-  isRecord,
-  joinTemplates,
-  pathsOverlap,
-  validateGraph,
-} from "./graph.js";
+import { coverageCriterion, pathsOverlap, validateGraph } from "./graph.js";
 import type {
   Citation,
   CoverageObligation,
@@ -54,59 +48,28 @@ export async function checkPlan(
     });
   const graph = validateGraph(draft, facts, previous);
   findings.push(...graph.findings);
-  if (draft.split) await splitFindings(draft, facts, files, findings);
   if (!graph.usable) return findings;
-  const shapes = workShapes(draft);
-  await commandFindings(shapes, facts, files, found);
-  await boundaryFindings(shapes, facts, files, found);
-  // Templates lint as their children will join: an envelope's selectors
-  // must not overlap independent work.
-  graphLint(
-    {
-      ...draft,
-      items: joinTemplates(
-        draft.items,
-        (draft.expansions ?? []).filter(
-          (envelope) =>
-            isRecord(envelope?.template) &&
-            isRecord(envelope.input) &&
-            Array.isArray(envelope.dependencies) &&
-            Array.isArray(envelope.integrationBarrierItemIds),
-        ),
-      ),
-    },
-    new Map(),
-    facts.authorizedCommands,
-    facts.coverageObligations,
-    found,
-  );
-  await citationFindings(shapes, facts.sources, files, found);
-  await mediaFindings(shapes, facts, files, found);
+  const { items } = draft;
+  await commandFindings(items, facts, files, found);
+  await boundaryFindings(items, facts, files, found);
+  graphLint(draft, facts.authorizedCommands, facts.coverageObligations, found);
+  await citationFindings(items, facts.sources, files, found);
+  await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
   return findings;
-}
-
-/** Reviewed expansion templates share source and command authority without becoming executable nodes. */
-function workShapes(draft: Draft): WorkItem[] {
-  return [
-    ...draft.items,
-    ...(draft.expansions ?? []).flatMap((entry) =>
-      entry?.template ? [entry.template] : [],
-    ),
-  ];
 }
 
 // ── Commands ────────────────────────────────────────────────────────────
 
 /** command-authority and ci-only. */
 async function commandFindings(
-  shapes: readonly WorkItem[],
+  items: readonly WorkItem[],
   facts: PlanningFacts,
   files: BaseFiles,
   found: Found,
 ): Promise<void> {
   const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
-  for (const item of shapes)
+  for (const item of items)
     for (const check of item.validation) {
       if (ciOnly.has(ciOnlyKey(check.command))) {
         found(
@@ -194,7 +157,7 @@ function dependencyClosure(
  * script bodies and file-name shapes.
  */
 async function boundaryFindings(
-  shapes: readonly WorkItem[],
+  items: readonly WorkItem[],
   facts: PlanningFacts,
   files: BaseFiles,
   found: Found,
@@ -207,11 +170,19 @@ async function boundaryFindings(
     names: new Set(paths.map((path) => path.replace(/^.*\//, ""))),
   };
   const migrations = migrationDirs(paths);
+  // A bare name could live in an owned directory that already holds a file of its type.
+  const holdsType = (directory: string, name: string) => {
+    const type = /\.[^.]+$/.exec(name)?.[0];
+    return (
+      type !== undefined &&
+      paths.some((path) => path.startsWith(directory) && path.endsWith(type))
+    );
+  };
   // A name the Objective or a pinned source uses is fixed, not the worker's choice.
   const fixedTexts = [facts.body, ...facts.sources.map((s) => s.content)];
   const authorized = facts.authorizedCommands;
-  const byId = new Map(shapes.map((item) => [item.id, item]));
-  for (const item of shapes) {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  for (const item of items) {
     for (const { command, provenance } of item.validation) {
       if (packageBootstrap(command) || ciOnly.has(ciOnlyKey(command))) continue;
       const tool = networkToolOfCommand(command, scripts);
@@ -256,12 +227,14 @@ async function boundaryFindings(
         item.ownedPaths.some((owned) =>
           file.includes("/")
             ? owned === file || (owned.endsWith("/") && file.startsWith(owned))
-            : owned.endsWith("/") || owned.replace(/^.*\//, "") === file,
+            : owned.endsWith("/")
+              ? holdsType(owned, file)
+              : owned.replace(/^.*\//, "") === file,
         )
       )
         continue;
       found(
-        `Work Item ${item.id} acceptance names ${file}, which does not exist at the base: a new migration number or test file is the worker's choice, so describe it by role and data and leave the name out`,
+        `Work Item ${item.id} acceptance names ${file}, which does not exist at the base: a new migration number or test file is the worker's choice, so describe it by role and data and leave the name out, or give its path in a directory the item owns`,
         item.id,
       );
     }
@@ -294,8 +267,6 @@ const bounded = (entry: CoverageObligation): string => {
  */
 function graphLint(
   draft: Draft,
-  /** In a split, each item's child Objective: children run as separate Objectives. */
-  childOf: ReadonlyMap<string, string>,
   authorized: readonly string[],
   obligations: readonly CoverageObligation[],
   found: Found,
@@ -319,15 +290,8 @@ function graphLint(
       const shared = left.ownedPaths.flatMap((a) =>
         right.ownedPaths.filter((b) => pathsOverlap(a, b)).map((b) => [a, b]),
       );
-      // Opposite branches of one condition never both run.
-      const exclusive =
-        left.condition !== undefined &&
-        left.condition.conditionId === right.condition?.conditionId &&
-        left.condition.when !== right.condition.when;
       if (
         !shared.length ||
-        exclusive ||
-        childOf.get(left.id) !== childOf.get(right.id) ||
         ancestorsOf(left.id).has(right.id) ||
         ancestorsOf(right.id).has(left.id)
       )
@@ -440,7 +404,7 @@ function allowedHeadings(pins: readonly PinnedSource[]): string {
  * command authority and are bounded in size.
  */
 async function citationFindings(
-  shapes: readonly WorkItem[],
+  items: readonly WorkItem[],
   sources: readonly PinnedSource[],
   files: BaseFiles,
   found: Found,
@@ -448,7 +412,7 @@ async function citationFindings(
   const tracked = new Set(await files.paths());
   const cited = new Map<string, number>();
   let over = false;
-  for (const item of shapes)
+  for (const item of items)
     for (const citation of item.citations) {
       const pins = sources.filter((source) => source.path === citation.path);
       const heading = citation.heading ?? "";
@@ -522,6 +486,7 @@ function recognizedObjectiveAttachment(value: string): boolean {
   try {
     const url = new URL(value);
     return (
+      url.href === value &&
       url.protocol === "https:" &&
       url.hostname === "github.com" &&
       !url.username &&
@@ -540,14 +505,14 @@ function recognizedObjectiveAttachment(value: string): boolean {
 
 /** Output roles, candidate counts, LFS roles and source assets. */
 async function mediaFindings(
-  shapes: readonly WorkItem[],
+  items: readonly WorkItem[],
   facts: PlanningFacts,
   files: BaseFiles,
   found: Found,
 ): Promise<void> {
   const shown = objectiveText(facts.blocks);
   const tracked = new Set(await files.paths());
-  for (const item of shapes) {
+  for (const item of items) {
     const roles = item.expectedOutputRoles ?? [];
     if (new Set(roles).size !== roles.length)
       found(
@@ -633,81 +598,4 @@ function gateFindings(draft: Draft, facts: PlanningFacts, found: Found): void {
   ];
   for (const name of unknownCheckNames(used, facts.checkNames))
     found(unknownCheckMessage(name, facts.checkNames));
-}
-
-// ── Split ───────────────────────────────────────────────────────────────
-
-/**
- * A split's child Objectives: they carry exactly the Objective's criteria,
- * with unique keys, known sibling dependencies and pinned sources. Each
- * planned child graph is checked like a plan whose Acceptance is the
- * child's outcomes, against the parent's pinned sources.
- */
-async function splitFindings(
-  draft: Draft,
-  facts: PlanningFacts,
-  files: BaseFiles,
-  findings: Finding[],
-): Promise<void> {
-  const children = draft.split?.children ?? [];
-  const found = (message: string) =>
-    findings.push({ source: "check", message });
-  if (draft.items.length || draft.coverage.length)
-    found(
-      "A split plan has no Work Items or coverage of its own; put them in the child Objectives",
-    );
-  const sorted = (values: string[]) => JSON.stringify([...values].sort());
-  const criteria = facts.coverageObligations.flatMap((obligation) =>
-    obligation.source.path === "OBJECTIVE"
-      ? [obligation.source.text ?? ""]
-      : [],
-  );
-  if (
-    sorted(children.flatMap((child) => child.outcomes ?? [])) !==
-    sorted(criteria)
-  )
-    found(
-      "Child Objectives must carry exactly the Objective's Acceptance criteria between them: give each criterion, verbatim, to exactly one child as an outcome",
-    );
-  const keys = new Set(children.map((child) => child.key));
-  const seen = new Set<string>();
-  for (const child of children) {
-    const label = `Split child ${JSON.stringify(child.key)}`;
-    if (!/^[a-z][a-z0-9-]{0,63}$/.test(child.key) || seen.has(child.key))
-      found(
-        `${label} needs a unique key of lowercase letters, digits and hyphens that starts with a letter`,
-      );
-    seen.add(child.key);
-    if (!child.title?.trim() || !child.goal?.trim() || !child.outcomes?.length)
-      found(`${label} needs a title, a goal and at least one outcome`);
-    for (const dependency of child.dependsOn ?? [])
-      if (!keys.has(dependency) || dependency === child.key)
-        found(
-          `${label} depends on ${JSON.stringify(dependency)}; name another child's key`,
-        );
-    for (const source of child.sources ?? [])
-      if (!facts.sources.some((pin) => pin.path === source.path))
-        found(
-          `${label} names source ${source.path}, which is not one of the parent's pinned sources`,
-        );
-    if (!child.graph) continue;
-    if (child.dependsOn?.length) {
-      found(
-        `${label} depends on siblings, so its graph is planned after they merge; leave graph out`,
-      );
-      continue;
-    }
-    const childFacts: PlanningFacts = {
-      ...facts,
-      // An outcome keeps its parent criterion's command.
-      coverageObligations: child.outcomes.map(
-        (text) =>
-          facts.coverageObligations.find(
-            ({ source }) => source.path === "OBJECTIVE" && source.text === text,
-          ) ?? { source: { path: "OBJECTIVE", text } },
-      ),
-    };
-    for (const finding of await checkPlan(child.graph, childFacts, files))
-      findings.push({ ...finding, message: `${label}: ${finding.message}` });
-  }
 }

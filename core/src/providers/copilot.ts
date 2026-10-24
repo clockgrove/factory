@@ -5,13 +5,14 @@
  * every read or write is checked to stay inside its directory. Copilot
  * shell, web, GitHub, MCP, plugins and configuration discovery are off.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
   CopilotClient,
   CopilotSession,
   PermissionRequest,
+  SessionConfigBase,
   SessionEvent,
   Tool,
 } from "@github/copilot-sdk";
@@ -27,11 +28,13 @@ import {
 } from "../work/self-validate.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
-import { ACTIVE_TOOL_IDLE_MS } from "./claude.js";
+import { ACTIVE_TOOL_IDLE_MS, serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
+import { COPILOT_SECRETS } from "./config.js";
 import {
   callImages,
   detail,
+  freshOnOverflow,
   IdleWatchdog,
   loggedCall,
   type ModelChoice,
@@ -44,9 +47,24 @@ import {
   providerOutcome,
 } from "./planner.js";
 import {
+  type Conversation,
+  openTurn,
+  overflowed,
+  ResumeOverflow,
+  type Session,
+  type Turn as SessionTurn,
+  turnFields,
+  withoutPrevious,
+} from "./session.js";
+import {
   captureRequest,
   captureResponse,
+  captureToolOutput,
+  describeRequest,
+  firstToken,
   logUsage,
+  NativeTools,
+  providerUsage,
   Tallies,
   tokens,
   usageRecord,
@@ -56,6 +74,24 @@ export const DEFAULT_COPILOT_MODELS: PlannerModels = {
   planner: { model: "gpt-6.1-sol", effort: "high" },
   reviewer: { model: "gpt-6.1-sol", effort: "medium" },
 };
+
+/**
+ * The additive counts of an `assistant.usage` event kept per model as the
+ * call's `providerUsage`: tokens, Copilot's own cost and duration, and
+ * its billing in nano AI units (not USD).
+ */
+const COPILOT_USAGE_KEYS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "acceptedPredictionTokens",
+  "rejectedPredictionTokens",
+  "cost",
+  "duration",
+  "totalNanoAiu",
+];
 
 /** Silence that ends a planning or review call; a worker turn uses `worker.idleSeconds`. */
 const PLANNER_IDLE_MS = 15 * 60 * 1000;
@@ -118,6 +154,14 @@ interface Turn {
   onEvent(event: SessionEvent): void;
   /** The call's model-usage record (usage.ts): its tokens and tool calls as they arrive. */
   record: Record<string, unknown>;
+  /**
+   * A retained conversation's turn (session.ts): it resumes the kept
+   * session when it continues one, and keeps its session after a finished
+   * turn instead of deleting it.
+   */
+  conversation?: SessionTurn;
+  /** A session this turn replaces: deleted once this one is open. */
+  replaces?: string;
 }
 
 interface TurnResult {
@@ -126,21 +170,39 @@ interface TurnResult {
   session: string;
 }
 
-/** Copilot login values the runtime may see, beside a worker's environment. */
-const COPILOT_LOGIN = ["COPILOT_HOME", "COPILOT_GITHUB_TOKEN"];
+/**
+ * Copilot settings the runtime may see, beside a worker's environment: its
+ * home, a GitHub Enterprise endpoint (`COPILOT_API_URL`), and a custom
+ * model endpoint (`COPILOT_PROVIDER_*`); its secrets are COPILOT_SECRETS.
+ */
+const COPILOT_LOGIN = [
+  "COPILOT_API_URL",
+  "COPILOT_HOME",
+  "COPILOT_PROVIDER_BASE_URL",
+  "COPILOT_PROVIDER_TYPE",
+];
 
 /**
  * The Copilot runtime's environment: a worker's (worktree.ts
  * workerEnvironment, nothing of GitHub, Git or SSH, no API keys, no
- * COPILOT_ALLOW_ALL) plus Copilot's own login: its home, its token, and
+ * COPILOT_ALLOW_ALL) plus Copilot's own login: COPILOT_LOGIN, the
+ * COPILOT_SECRETS from the environment or the service's credentials, and
  * the gh CLI's configuration, which holds the login when Copilot signs in
- * through gh. The model has no shell, so these stay with the runtime.
+ * through gh. The model has no shell, and Validate runs its commands in the sandbox
+ * on validationEnvironment, so these stay with the runtime.
  */
 function copilotEnvironment(): Record<string, string> {
   const gh =
     process.env.GH_CONFIG_DIR ??
     join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "gh");
-  return workerEnvironment(gh, COPILOT_LOGIN);
+  const env = workerEnvironment(gh, COPILOT_LOGIN);
+  // A supervised service has its secrets as loaded credentials; and
+  // workerEnvironment drops every GITHUB_ name, GITHUB_COPILOT_API_TOKEN too.
+  for (const name of COPILOT_SECRETS) {
+    const value = process.env[name] ?? serviceCredential(name);
+    if (value) env[name] = value;
+  }
+  return env;
 }
 
 /** The SDK's built-ins, which name grep `rg`; Validate is Factory's own. */
@@ -168,7 +230,7 @@ function sessionFailure(
           `Restore the Copilot plan or billing for the service's login, then answer retry (${shown})`,
         )
       : // A spent premium-request quota resets at a time Copilot doesn't
-        // say: Factory asks whether to wait or switch (CORE.md#Waits).
+        // say: Factory asks whether to wait or switch (docs/reference/steps.md#Waits).
         new PlannerError("retry", `Copilot quota: ${shown}`, {
           kind: "reset",
           provider: "copilot",
@@ -182,8 +244,7 @@ function sessionFailure(
       : // A short rate limit is an unknown transient cause: back off.
         new PlannerError("retry", `Copilot rate limit: ${shown}`);
   if (data.errorType === "context_limit")
-    return new PlannerError(
-      "fail",
+    return PlannerError.contextOverflow(
       `The request is larger than the model's context window: ${shown}`,
     );
   return new PlannerError("retry", `Copilot call failed: ${shown}`);
@@ -266,6 +327,15 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     const usage = { input: 0, output: 0, cached: 0 };
     let reasoning: number | null = null;
     const calls = new Tallies();
+    const tools = new NativeTools();
+    const toolNames = new Map<string, string>();
+    /** The provider's own usage per model, summed over its responses. */
+    const byModel: Record<string, Record<string, number>> = {};
+    let sentAt: number | undefined;
+    // One prompt per call: a fresh session's first turn, or the next turn
+    // of the retained session it resumes.
+    turnFields(turn.record, turn.conversation ?? { number: 1 });
+    turn.record.imageOutputs = 0;
     let settle: () => void = () => undefined;
     let fail: (error: PlannerError) => void = () => undefined;
     // The turn ends at idle, or at once on a session error (as sendAndWait does).
@@ -307,8 +377,13 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
             feedback: "Factory grants file access only inside this directory",
           };
     };
+    const resumed = turn.conversation?.resumed?.id;
+    const open = (config: SessionConfigBase) =>
+      resumed
+        ? client.resumeSession(resumed, config)
+        : client.createSession(config);
     session = await watchdog.race(
-      client.createSession({
+      open({
         clientName: "factory",
         model: turn.choice.model,
         reasoningEffort: turn.choice.effort as never,
@@ -347,7 +422,29 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
                 false,
               ),
             );
+          if (
+            sentAt !== undefined &&
+            (event.type === "assistant.message_delta" ||
+              event.type === "assistant.reasoning_delta" ||
+              event.type === "assistant.message")
+          )
+            firstToken(turn.record, sentAt);
+          if (event.type === "assistant.turn_end") tools.response();
           if (event.type === "assistant.usage") {
+            turn.record.reportedModel = event.data.model;
+            const sums = byModel[event.data.model] ?? { responses: 0 };
+            byModel[event.data.model] = sums;
+            sums.responses = (sums.responses ?? 0) + 1;
+            const counts: Record<string, unknown> = {
+              ...event.data,
+              totalNanoAiu: event.data.copilotUsage?.totalNanoAiu,
+            };
+            for (const key of COPILOT_USAGE_KEYS) {
+              const value = counts[key];
+              if (typeof value === "number" && Number.isFinite(value))
+                sums[key] = (sums[key] ?? 0) + value;
+            }
+            turn.record.providerUsage = providerUsage(byModel) ?? null;
             usage.input += event.data.inputTokens ?? 0;
             usage.output += event.data.outputTokens ?? 0;
             usage.cached += event.data.cacheReadTokens ?? 0;
@@ -358,6 +455,21 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
           if (event.type === "tool.execution_start") {
             calls.add(event.data.toolName, event.data.toolCallId);
             turn.record.nativeToolActivity = calls.value;
+            toolNames.set(event.data.toolCallId, event.data.toolName);
+            tools.call(event.data.toolCallId);
+            turn.record.nativeTools = tools.value;
+          }
+          if (event.type === "tool.execution_complete") {
+            tools.result(event.data.toolCallId, !event.data.success);
+            turn.record.nativeTools = tools.value;
+            const output =
+              event.data.result?.content ?? event.data.error?.message;
+            if (output)
+              captureToolOutput(
+                turn.record,
+                toolNames.get(event.data.toolCallId) ?? "unknown",
+                output,
+              );
           }
           if (event.type === "session.error") fail(sessionFailure(event.data));
           if (event.type === "session.idle" && sent) settle();
@@ -387,7 +499,9 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
         remoteSession: "off",
       }),
     );
+    if (turn.replaces) await bounded(client.deleteSession(turn.replaces));
     sent = true;
+    sentAt = Date.now();
     await watchdog.race(
       session.send({
         prompt: turn.prompt,
@@ -418,11 +532,54 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     if (session) {
       if (!finished) await bounded(session.abort());
       await bounded(session.disconnect());
-      await bounded(client.deleteSession(session.sessionId));
+      // A retained conversation's finished session stays for its next turn.
+      if (!(finished && turn.conversation))
+        await bounded(client.deleteSession(session.sessionId));
     }
     await bounded(client.stop());
     await bounded(client.forceStop());
   }
+}
+
+/**
+ * Open a retained Copilot turn (session.ts openTurn). Whether the kept
+ * session is still there is known only when it is resumed: a resume that
+ * fails leaves the turn's mark, so the next attempt starts fresh.
+ */
+function copilotTurn(
+  conversation: Conversation | undefined,
+  prompt: string,
+  model: string,
+): SessionTurn | undefined {
+  if (!conversation) return undefined;
+  try {
+    return openTurn(conversation, prompt, "copilot", model, () => true);
+  } catch (error) {
+    throw new PlannerError(
+      "hold",
+      `Factory could not set up the Copilot conversation; fix the host's work directory, then answer retry (${detail(String(error))})`,
+    );
+  }
+}
+
+/** The session a turn left, as an answer's or result's field. */
+function withSession(session: Session | undefined): { session?: Session } {
+  return session ? { session } : {};
+}
+
+/** A turn's conversation for runTurn: the session it continues or replaces. */
+function replacing(
+  turn: SessionTurn | undefined,
+  conversation: Conversation | undefined,
+): Pick<Turn, "conversation" | "replaces"> {
+  if (!turn) return {};
+  const previous = conversation?.previous;
+  return {
+    conversation: turn,
+    ...(!turn.resumed && previous?.provider === "copilot"
+      ? { replaces: previous.id }
+      : {}),
+  };
 }
 
 /** Planning and review through Copilot, with read-only tools over `readDir`. */
@@ -432,25 +589,36 @@ export class CopilotPlanner implements Planner {
   ) {}
 
   answer(call: PlannerCall): Promise<PlannerAnswer> {
+    return freshOnOverflow(call, (once) => this.once(once));
+  }
+
+  private once(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
     return loggedCall("copilot", call, choice, async (record) => {
       const started = Date.now();
       const images = callImages(call);
-      // Without a tree the session gets an empty directory and no tools.
-      const empty = call.readDir
-        ? undefined
-        : mkdtempSync(join(tmpdir(), "factory-copilot-"));
+      const turn = copilotTurn(call.conversation, call.prompt, choice.model);
+      if (turn?.resumed) captureRequest(record, turn.prompt);
+      // Without a tree the session gets an empty directory and no tools: a
+      // retained conversation's own, so it is the same on every turn.
+      let empty: string | undefined;
+      if (!call.readDir && call.conversation) {
+        empty = join(call.conversation.dir, "work");
+        mkdirSync(empty, { recursive: true, mode: 0o700 });
+      } else if (!call.readDir)
+        empty = mkdtempSync(join(tmpdir(), "factory-copilot-"));
       try {
         const result = await runTurn({
           choice,
           directory: call.readDir ?? empty!,
           tools: call.readDir ? READ_TOOLS : [],
           writes: false,
-          prompt: `${call.prompt}\n\nAnswer with only one JSON object that matches this JSON Schema, with no other text:\n${JSON.stringify(call.schema)}`,
+          prompt: `${turn?.prompt ?? call.prompt}\n\nAnswer with only one JSON object that matches this JSON Schema, with no other text:\n${JSON.stringify(call.schema)}`,
           images,
           record,
           idleMs: PLANNER_IDLE_MS,
           signal: call.signal,
+          ...replacing(turn, call.conversation),
           onEvent: (event) => {
             call.activity?.();
             call.log({
@@ -470,6 +638,7 @@ export class CopilotPlanner implements Planner {
         try {
           value = JSON.parse(body);
         } catch {
+          record.stage = "parse";
           throw new PlannerError(
             "retry",
             `Copilot answer is not JSON: ${detail(result.text)}`,
@@ -480,9 +649,13 @@ export class CopilotPlanner implements Planner {
           model: choice.model,
           effort: choice.effort,
           usage: result.usage,
+          ...withSession(turn?.end(result.session)),
         };
+      } catch (error) {
+        throw overflowed(error, turn);
       } finally {
-        if (empty) rmSync(empty, { recursive: true, force: true });
+        if (empty && !call.conversation)
+          rmSync(empty, { recursive: true, force: true });
       }
     });
   }
@@ -501,13 +674,26 @@ export interface CopilotWorkerOptions {
 /** Copilot's file tools that write the file their `path` names. */
 const EDIT_TOOLS = ["create", "edit"];
 
-/** A Copilot session event as worker activity: tools, edits, commands, turns. */
+/** A Copilot session event as worker activity: tools, edits, commands, turns, context and compactions. */
 function copilotActivity(
   input: WorkerInput,
   event: SessionEvent,
   toolNames: Map<string, string>,
 ): void {
   if (event.type === "assistant.turn_start") input.activity({ kind: "turn" });
+  // The main agent's context; a sub-agent's events carry its agentId.
+  if (event.type === "session.usage_info" && !event.agentId)
+    input.activity({
+      kind: "context",
+      tokens: event.data.currentTokens,
+      window: event.data.tokenLimit,
+    });
+  if (
+    event.type === "session.compaction_complete" &&
+    event.data.success &&
+    !event.agentId
+  )
+    input.activity({ kind: "compaction" });
   if (event.type === "tool.execution_complete") {
     const tool = toolNames.get(event.data.toolCallId);
     toolNames.delete(event.data.toolCallId);
@@ -529,6 +715,19 @@ export class CopilotWorker implements Worker {
   constructor(private readonly options: CopilotWorkerOptions) {}
 
   async run(input: WorkerInput): Promise<WorkerResult> {
+    try {
+      return await this.once(input);
+    } catch (error) {
+      // A continued session ran out of context: once more, fresh.
+      if (!(error instanceof ResumeOverflow)) throw error;
+      return this.once({
+        ...input,
+        conversation: withoutPrevious(input.conversation),
+      });
+    }
+  }
+
+  private async once(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
     const tools = copilotTools(this.options.tools);
     const record = usageRecord({
@@ -538,7 +737,22 @@ export class CopilotWorker implements Worker {
       effort: this.options.model.effort,
       item: input.item.id,
     });
-    captureRequest(record, input.prompt);
+    describeRequest(record, {
+      prompt: input.prompt,
+      ...(input.facts ? { facts: input.facts } : {}),
+    });
+    let turn: SessionTurn | undefined;
+    try {
+      turn = copilotTurn(
+        input.conversation,
+        input.prompt,
+        this.options.model.model,
+      );
+    } catch (error) {
+      if (error instanceof PlannerError) return providerOutcome(error);
+      throw error;
+    }
+    if (turn?.resumed) captureRequest(record, turn.prompt);
     /** Running tool calls' names by id, for their completions. */
     const toolNames = new Map<string, string>();
     // Validate, as Claude's (work/self-validate.ts): only declared commands.
@@ -583,8 +797,9 @@ export class CopilotWorker implements Worker {
             },
           },
         ],
-        prompt: input.prompt,
+        prompt: turn?.prompt ?? input.prompt,
         record,
+        ...replacing(turn, input.conversation),
         idleMs: this.options.idleMs,
         ...(validator && {
           toolIdleMs: validationDeadlineMs(
@@ -604,8 +819,13 @@ export class CopilotWorker implements Worker {
         kind: "finished",
         finalResponse: result.text,
         ...(tree && { validated: { tree, commands: [...input.commands] } }),
+        ...withSession(turn?.end(result.session)),
       };
     } catch (error) {
+      if (turn?.resumed && error instanceof PlannerError && error.tooLarge) {
+        record.outcome = error.outcome;
+        throw new ResumeOverflow();
+      }
       if (!(error instanceof PlannerError)) {
         record.outcome = "error";
         record.error = detail(String(error));

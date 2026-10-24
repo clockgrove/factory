@@ -1,0 +1,887 @@
+import { readPinnedWorkflowRecipe } from "../workflow-recipes.js";
+import {
+  admitExecution,
+  concurrentObjectives,
+  executionConflictDetail,
+  sharedCapacity as createSharedCapacity,
+} from "../concurrent-objectives.js";
+import {
+  applyPendingGraphExpansion,
+  authenticateExpansionInputs,
+  authenticateObjectiveInputs,
+  graphExpansionPending,
+} from "./expansion.js";
+import { authenticateWorkRouting } from "./routing.js";
+import { settleSplitParent, splitObjective } from "./split.js";
+import { checkRequiredEnvironment } from "../repair-policy.js";
+import { stopRetryCommand } from "../run-outcome.js";
+import {
+  applyWorkCorrection,
+  failedItemOf,
+  resumeDiagnoses,
+} from "../work-repair.js";
+import {
+  AmendmentRejection,
+  amendmentBlocksDispatch,
+  applyPendingAmendment,
+} from "../graph-amendments.js";
+import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import {
+  assertObjectiveCriteria,
+  planningSources,
+  validateCommandProvenance,
+} from "../compiler.js";
+import { closeObjectiveIssue, closeWorkItem } from "../completion.js";
+import type { FactoryConfig } from "../config.js";
+import { factoryConfigDigest, stateRoot, validateTarget } from "../config.js";
+import {
+  attachedFault,
+  attachFault,
+  cancelledFault,
+  decision,
+  faultDetail,
+} from "../fault.js";
+import { runNativeGraph } from "../delivery/native-runner.js";
+import { runRegularGraph } from "../delivery/regular-runner.js";
+import { DiagnosticEmitter, StateDiagnostics } from "../diagnostics.js";
+import {
+  awaitsOperator,
+  outageOf,
+  StepPaused,
+  step,
+  type StepContext,
+  type StepState,
+  waitOf,
+} from "../step.js";
+import {
+  executionProfileChoices,
+  verifyExecutionProfiles,
+} from "../execution-profiles.js";
+import { fetchHead } from "../process.js";
+import { objectiveCandidate } from "../qa.js";
+import type {
+  ContinuationState,
+  FactoryState,
+  PreparationState,
+} from "../state.js";
+import {
+  isExecutionState,
+  isPreparationState,
+  handOffCoordinator,
+} from "../state.js";
+import {
+  objectiveRoot,
+  assertRestoredContinuationReady,
+  continuationConfigurationMatches,
+  readContinuation,
+  saveState,
+  statePath,
+  writePreState,
+} from "../state-store.js";
+import { AwaitingBeforeState } from "../run-outcome.js";
+import { sweepValidationWorktrees } from "../validation.js";
+import {
+  type ApplicationServices,
+  type LocalOwner,
+  configuredDiagnosticSecrets,
+  canHandoff,
+  synchronizeWorkItemPause,
+  CoordinatorHandoff,
+  cancelRecordedSubprocesses,
+} from "./ownership.js";
+import { prepareObjective } from "./planning.js";
+import {
+  projectPreparedObjective,
+  activateProjectedObjective,
+} from "./projection.js";
+import { finalizeObjective } from "./finalization.js";
+import { assertDiscoveryAdmission } from "./discovery.js";
+
+/** Publish the execution snapshot before yielding to live owner control. */
+export function checkpointExecutionState(
+  owner: Pick<
+    LocalOwner,
+    "snapshot" | "pause" | "workPause" | "handoff" | "recordSnapshot"
+  >,
+  path: string,
+  state: FactoryState,
+): void {
+  owner.snapshot = state;
+  synchronizeWorkItemPause(owner);
+  saveState(path, state);
+  owner.recordSnapshot?.(state);
+}
+
+/**
+ * Draining finishes admitted work; a plain pause still stops its next step. A
+ * handoff whose items hold no effect in flight stops them at their next safe
+ * point (#1289); a plain drain keeps retrying them.
+ */
+export function workItemPauseSignal(
+  owner: Pick<
+    LocalOwner,
+    "snapshot" | "pause" | "workPause" | "handoff" | "activeItems"
+  >,
+): AbortSignal {
+  return owner.handoff &&
+    owner.snapshot?.coordinator?.mode === "draining" &&
+    canHandoff(owner.snapshot, owner.activeItems)
+    ? owner.pause.signal
+    : owner.workPause.signal;
+}
+
+/**
+ * The pause an Objective step honors. Pause, drain and handoff stop it waiting
+ * between tries only at a safe point (no running item depends on it); a drain
+ * that must still drive running items keeps it going. Only a handoff counts
+ * items no step of this pass runs (`active`) as idle (#1289): a plain drain
+ * never stops while an item is running.
+ */
+export function objectiveStepPause(
+  owner: Pick<LocalOwner, "snapshot" | "pause" | "handoff">,
+  active?: ReadonlyMap<string, unknown>,
+): AbortSignal | undefined {
+  const snapshot = owner.snapshot;
+  if (!snapshot) return owner.pause.signal;
+  if (owner.handoff)
+    return canHandoff(snapshot, active) ? owner.pause.signal : undefined;
+  if (
+    isExecutionState(snapshot) &&
+    Object.values(snapshot.work).some((work) => work.status === "running")
+  )
+    return undefined;
+  return canHandoff(snapshot) ? owner.pause.signal : undefined;
+}
+
+/** How often an Objective held behind an overlapping one checks again. */
+const EXECUTION_ADMISSION_POLL_MS = 15_000;
+
+export async function runObjectivePass(
+  config: FactoryConfig,
+  objective: number,
+  services: ApplicationServices,
+  owner: LocalOwner,
+): Promise<ContinuationState> {
+  validateTarget(config.repository, config.checkout);
+  const root = stateRoot(config.repository);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const path = statePath(config.repository, objective);
+  const restored = readContinuation(config.repository, objective);
+  if (restored) assertRestoredContinuationReady(restored, config);
+  const diagnostics = new DiagnosticEmitter(
+    config.repository,
+    objective,
+    configuredDiagnosticSecrets(config),
+    config.capture,
+    restored?.restoration ? restored.configDigest : factoryConfigDigest(config),
+  );
+  let stateDiagnostics: StateDiagnostics | undefined;
+  const save = (state: FactoryState) => {
+    if (state.coordinator) {
+      const phases = [
+        ...new Set(
+          Object.values(state.work)
+            .filter((work) => work.status === "running")
+            .map((work) => work.step ?? "active"),
+        ),
+      ];
+      const phase = phases.join(",") || "waiting";
+      if (state.coordinator.phase !== phase) {
+        state.coordinator.phase = phase;
+        state.coordinator.phaseStartedAt = new Date().toISOString();
+      }
+    }
+    checkpointExecutionState(owner, path, state);
+    try {
+      stateDiagnostics?.observe();
+    } catch (error) {
+      process.stderr.write(
+        `Factory diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
+  owner.save = save;
+  const active = new Map<string, Promise<void>>();
+  owner.activeItems = active;
+  const {
+    driver,
+    github,
+    delivery,
+    contentStore,
+    planningModel,
+    reportRunStatus,
+  } = services;
+  let stateForSignal: FactoryState | undefined;
+  const cancellationRequested = () => Boolean(owner.snapshot?.cancelRequested);
+  // Cancel stops every step; pause, drain and handoff stop an Objective step
+  // only at a safe point (see objectiveStepPause).
+  const objectiveSignal = () => owner.abort.signal;
+  const objectivePause = () => objectiveStepPause(owner, active);
+  /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
+  const stopIfCancelled = () => {
+    if (cancellationRequested())
+      throw cancelledFault("Objective cancellation requested");
+  };
+  try {
+    diagnostics.emit({ operation: "objective-run", outcome: "started" });
+    // A record of an earlier run's wait is stale once this run starts; its
+    // steps write theirs again.
+    writePreState(config.repository, objective, {});
+    // Before the Objective has state its first reads repeat in memory: there
+    // is nothing to save yet.
+    const unsaved: Pick<PreparationState, "repeats" | "wait"> = {};
+    /** Run one Objective step (see src/step.ts) on `state`'s records. */
+    const objectiveStep = <T>(
+      state: ContinuationState | undefined,
+      name: string,
+      fn: (context: StepContext) => Promise<T>,
+      paid = false,
+      /** False inside item runners, which keep driving their items. */
+      pausable = true,
+    ): Promise<T> =>
+      step(
+        state ?? (unsaved as StepState),
+        { scope: "objective", name, paid },
+        fn,
+        {
+          save: () => {
+            if (state && isExecutionState(state)) save(state);
+            else if (state) saveState(path, state);
+            else {
+              // No state file yet: keep the records beside it for status, and
+              // report an outage to the run's output.
+              writePreState(config.repository, objective, unsaved);
+              const outage = outageOf(unsaved as StepState, "objective");
+              if (outage)
+                reportRunStatus?.(
+                  `Factory: ${outage.step} failing since ${outage.since} (${outage.tries} tries): ${faultDetail(outage.last)}`,
+                );
+            }
+          },
+          signal: objectiveSignal(),
+          pause: pausable ? objectivePause() : undefined,
+        },
+      );
+    const observeObjective = (state = owner.snapshot) =>
+      objectiveStep(state, "observe", () => github.objective(objective));
+    /**
+     * The Objective issue changed outside Factory since planning: the
+     * operator's decision, whether the run or a resume sees it first.
+     */
+    const changedOutside = (
+      issue: { state?: string; body: string },
+      state: FactoryState,
+    ): Error | undefined => {
+      const changed =
+        issue.state === "closed" && !state.finalValidation?.passed
+          ? "The Objective issue was closed"
+          : createHash("sha256").update(issue.body).digest("hex") !==
+              state.objectiveBodyDigest
+            ? "The Objective issue body changed"
+            : undefined;
+      return changed
+        ? attachFault(
+            new Error(`${changed}; operator direction required`),
+            decision(
+              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
+            ),
+          )
+        : undefined;
+    };
+    const issue = await observeObjective();
+    if (
+      owner.admittedObjectiveBodyDigest &&
+      createHash("sha256").update(issue.body).digest("hex") !==
+        owner.admittedObjectiveBodyDigest
+    )
+      throw attachFault(
+        new Error(
+          "Objective contents differ from the approved Project admission",
+        ),
+        decision(
+          "Retain the original Project owner claim and reconcile its changed Objective contents through supported queue recovery before planning",
+        ),
+      );
+    assertObjectiveCriteria(issue.body);
+    const continuation = readContinuation(config.repository, objective);
+    if (continuation) assertRestoredContinuationReady(continuation, config);
+    const installationConfigDigest = continuation?.restoration
+      ? continuation.configDigest
+      : factoryConfigDigest(config);
+    owner.snapshot = continuation;
+    checkRequiredEnvironment(config, continuation?.autonomy);
+    if (owner.handoff && continuation?.coordinator) {
+      handOffCoordinator(continuation, owner.handoffBy);
+      saveState(path, continuation);
+    }
+    let preparation =
+      continuation && isPreparationState(continuation)
+        ? continuation
+        : undefined;
+    let state =
+      continuation && isExecutionState(continuation) ? continuation : undefined;
+    // A split parent's own run ended when its children were admitted: a later
+    // run only closes it once every child is accepted.
+    if (preparation?.split?.enqueuedAt) {
+      await settleSplitParent({
+        config,
+        github,
+        parent: objective,
+        lockParent: false,
+      });
+      return readContinuation(config.repository, objective)!;
+    }
+    if (issue.state === "closed" && !state)
+      throw new Error(
+        "Objective issue is confirmed closed; operator direction required",
+      );
+    if (state) {
+      if (
+        !isExecutionState(state) ||
+        state.repository !== config.repository ||
+        !continuationConfigurationMatches(state, config)
+      ) {
+        throw new Error(
+          // Cancel is refused once acceptance is sealed; the restored run reconciles.
+          `Existing Objective state does not match this Factory installation; restore the configuration it started with${state.finalAcceptance ? ", then run it again" : `, or run \`factory cancel --objective ${objective}\``}`,
+        );
+      }
+      if (state.workflowRecipePin)
+        await objectiveStep(state, "recipe-inputs", async () => {
+          try {
+            await readPinnedWorkflowRecipe(
+              state!.workflowRecipePin!,
+              contentStore,
+            );
+          } catch (error) {
+            throw attachFault(
+              new Error("Pinned workflow recipe content is unavailable", {
+                cause: error,
+              }),
+              decision(
+                "Restore the exact retained recipe definition and resolved contract before continuing; preserve the original pin and owned work",
+              ),
+            );
+          }
+        });
+      // Subprocesses recorded by an interrupted controller (for example a
+      // validation command) are ours: stop any survivor and clear the
+      // records, then repeat the step they belonged to.
+      if (state.coordinator?.processes?.length) {
+        await cancelRecordedSubprocesses(state);
+        saveState(path, state);
+      }
+      if (state.error)
+        throw new Error(
+          `Objective stopped: ${state.error}. Fix the cause, then run \`${stopRetryCommand(state)}\``,
+        );
+      // A decision, as when delivery observes the change: the observe
+      // step saves the question, and `factory retry` asks it again.
+      const changed = changedOutside(issue, state);
+      if (changed)
+        await objectiveStep(state, "observe", async () => {
+          throw changed;
+        });
+      stateDiagnostics = new StateDiagnostics(
+        diagnostics,
+        state,
+        config.delivery.kind,
+        state.capacity.concurrency,
+      );
+      const saveCurrent = () => save(state!);
+      if (state.conditionFacts)
+        await objectiveStep(state, "routing-inputs", () =>
+          authenticateWorkRouting({
+            config,
+            state: state!,
+            store: contentStore,
+          }),
+        );
+      if (
+        state.finalValidation?.passed &&
+        !state.finalAcceptance &&
+        state.objectiveClosure !== "complete"
+      ) {
+        await authenticateObjectiveInputs({ state, config, contentStore });
+        stopIfCancelled();
+      }
+      for (const item of state.graph.items)
+        if (["done", "skipped"].includes(state.work[item.id]?.status ?? ""))
+          await closeWorkItem(
+            state,
+            item.id,
+            github,
+            saveCurrent,
+            config.delivery.kind === "native-stack",
+            objectiveSignal(),
+            objectivePause(),
+          );
+      if (state.finalValidation?.passed) {
+        reportRunStatus?.(
+          "Factory: resuming the existing run from atomic state",
+        );
+        if (!state.finalAcceptance && state.objectiveClosure !== "complete") {
+          // A remote read: transient faults repeat with backoff.
+          const head = await objectiveStep(state, "final-head", async () =>
+            fetchHead(config.checkout, await github.defaultBranch()),
+          );
+          if (head !== objectiveCandidate(state)?.commitSha)
+            throw new Error(
+              "Default branch changed before historical final acceptance could be sealed",
+            );
+        }
+        await closeObjectiveIssue(
+          state,
+          issue.body,
+          github,
+          saveCurrent,
+          objectiveSignal(),
+          objectivePause(),
+        );
+        return state;
+      }
+      if (state.cancelRequested || state.cancelledAt)
+        throw new Error(
+          "Objective was cancelled; use explicit retry or operator direction",
+        );
+      reportRunStatus?.("Factory: resuming the existing run from atomic state");
+    } else {
+      const prepared = await prepareObjective({
+        config,
+        objective,
+        issue,
+        path,
+        diagnostics,
+        planningModel,
+        driver,
+        contentStore,
+        github,
+        owner,
+        installationConfigDigest,
+        preparation,
+        objectiveStep,
+        cancellationRequested,
+        reportRunStatus,
+      });
+      if ("schemaVersion" in prepared) return prepared;
+      preparation = prepared.preparation;
+      const { plan } = prepared;
+      if (plan.graph.split) {
+        const splitting = preparation;
+        return await splitObjective({
+          config,
+          objective,
+          body: issue.body,
+          path,
+          github,
+          preparation: splitting,
+          plan,
+          admitChildObjectives: owner.admitChildObjectives,
+          objectiveStep,
+          waitWhileStopped: async () => {
+            while (
+              splitting.coordinator.mode !== "running" &&
+              !cancellationRequested()
+            )
+              await owner.waitForWake();
+            stopIfCancelled();
+          },
+        });
+      }
+      const projected = await projectPreparedObjective({
+        config,
+        objective,
+        issue,
+        root,
+        path,
+        diagnostics,
+        driver,
+        contentStore,
+        github,
+        owner,
+        preparation,
+        plan,
+        objectiveStep,
+        cancellationRequested,
+        stopIfCancelled,
+      });
+      state = activateProjectedObjective({
+        config,
+        objective,
+        issue,
+        installationConfigDigest,
+        preparation,
+        plan,
+        projected,
+      });
+      // Live control must own the activated coordinator before any awaited
+      // amendment, readiness or driver preflight can receive a pause.
+      stateForSignal = state;
+      save(state);
+      stateDiagnostics = new StateDiagnostics(
+        diagnostics,
+        state,
+        config.delivery.kind,
+        state.capacity.concurrency,
+      );
+    }
+    state.coordinator ??= {
+      mode: "running",
+      phase: "active",
+      phaseStartedAt: new Date().toISOString(),
+    };
+    state.coordinator.observedAt = new Date().toISOString();
+    await applyPendingAmendment({
+      state,
+      config,
+      contentStore,
+      body: issue.body,
+      model: planningModel,
+      github,
+      save: () => save(state),
+      cancelled: cancellationRequested,
+      signal: objectiveSignal(),
+      pause: objectivePause(),
+      diagnostics,
+    });
+    if (state.coordinator.mode === "running" && !cancellationRequested()) {
+      await applyPendingGraphExpansion({
+        state,
+        config,
+        contentStore,
+        github,
+        save: () => save(state),
+        signal: objectiveSignal(),
+        pause: objectivePause(),
+      });
+    }
+    const resolvedExpansionIds = await authenticateExpansionInputs({
+      state,
+      config,
+      contentStore,
+    });
+    if (state.coordinator.mode === "running" && !cancellationRequested()) {
+      for (const [id, work] of Object.entries(state.work)) {
+        if (
+          work.status === "failed" &&
+          work.recovery?.phase === "ready" &&
+          work.recovery.correction
+        ) {
+          applyWorkCorrection(state, id, work.recovery.correction);
+          save(state);
+        }
+      }
+      const current = state;
+      await resumeDiagnoses({
+        state: current,
+        model: planningModel,
+        contentStore,
+        diagnostics,
+        sources: planningSources(issue.body, current.baseSha, config.checkout),
+        checkout: config.checkout,
+        save: () => save(current),
+        stopped: () =>
+          cancellationRequested() || current.coordinator?.mode !== "running",
+        signal: objectiveSignal(),
+        pause: objectivePause(),
+      });
+    }
+    const graph = state.graph;
+    for (const item of graph.items)
+      assertDiscoveryAdmission(config, state, item);
+    verifyExecutionProfiles(graph, executionProfileChoices(config));
+    await diagnostics.span(
+      { runId: state.runId, operation: "execution-driver-preflight" },
+      async () => {
+        await driver.preflight?.(graph);
+      },
+    );
+    // This controller owns the Objective: none of its validations runs yet.
+    // Validation trees live in the Objective's directory, so another
+    // Objective's controller keeps its own.
+    const objectiveDirectory = objectiveRoot(config.repository, objective);
+    await sweepValidationWorktrees(config.checkout, objectiveDirectory, root);
+    validateCommandProvenance(
+      graph,
+      planningSources(issue.body, state.baseSha, config.checkout),
+      config.checkout,
+    );
+    stateForSignal = state;
+    save(state);
+    // Objectives running at once (queue.maxActiveObjectives above 1): this one
+    // executes only while no earlier-admitted unfinished Objective owns an
+    // overlapping path, and its phases share the host's capacity with theirs.
+    if (concurrentObjectives(config))
+      await objectiveStep(state, "execution-admission", async (context) => {
+        const conflict = admitExecution(config, state);
+        // A service run hands its slot back and returns to the queue.
+        if (conflict) owner.executionHeld?.(conflict);
+        if (conflict)
+          context.pending(
+            { kind: "dependency", detail: executionConflictDetail(conflict) },
+            new Date(Date.now() + EXECUTION_ADMISSION_POLL_MS).toISOString(),
+          );
+        context.progress();
+      });
+    const sharedCapacity = owner.lock
+      ? createSharedCapacity(config, objective, owner.lock.token)
+      : undefined;
+    /** Delivery re-observes the Objective: a foreign edit or closure is a decision. */
+    // Items deliver concurrently; they share one observation in flight.
+    let observing: Promise<void> | undefined;
+    const reconcile = async () => {
+      observing ??= observeUnchanged().finally(() => {
+        observing = undefined;
+      });
+      await observing;
+      stopIfCancelled();
+    };
+    const observeUnchanged = async () => {
+      await objectiveStep(
+        state,
+        "observe",
+        async () => {
+          const changed = changedOutside(
+            await github.objective(objective),
+            state,
+          );
+          if (changed) throw changed;
+        },
+        false,
+        false,
+      );
+      state.coordinator!.observedAt = new Date().toISOString();
+      save(state);
+    };
+    if (config.delivery.kind === "native-stack") {
+      await runNativeGraph({
+        config,
+        objective,
+        objectiveBody: issue.body,
+        root: objectiveDirectory,
+        state,
+        driver,
+        delivery,
+        contentStore,
+        github,
+        planningModel,
+        save: () => save(state),
+        active,
+        reconcile,
+        cancelled: cancellationRequested,
+        sharedCapacity,
+        signal: owner.abort.signal,
+        // Read at each step: resume replaces the controller.
+        get pause() {
+          return workItemPauseSignal(owner);
+        },
+        paused: () => state.coordinator?.mode !== "running",
+        resolvedExpansionIds,
+        amendmentPending: () =>
+          amendmentBlocksDispatch(state) || graphExpansionPending(state),
+        diagnostics,
+      });
+      if (graph.items.some((item) => state.work[item.id]?.status === "waiting"))
+        return state;
+    } else {
+      const awaitingSelection = await runRegularGraph({
+        config,
+        objective,
+        objectiveBody: issue.body,
+        root: objectiveDirectory,
+        state,
+        driver,
+        delivery,
+        contentStore,
+        github,
+        planningModel,
+        save: () => save(state),
+        active,
+        reconcile,
+        cancelled: cancellationRequested,
+        sharedCapacity,
+        signal: owner.abort.signal,
+        // Read at each step: resume replaces the controller.
+        get pause() {
+          return workItemPauseSignal(owner);
+        },
+        paused: () => state.coordinator?.mode !== "running",
+        resolvedExpansionIds,
+        amendmentPending: () =>
+          amendmentBlocksDispatch(state) || graphExpansionPending(state),
+        woken: owner.woken,
+        diagnostics,
+      });
+      if (awaitingSelection) return state;
+    }
+    if (graphExpansionPending(state)) return state;
+    return await finalizeObjective({
+      config,
+      objective,
+      issue,
+      state,
+      graph,
+      objectiveDirectory,
+      root,
+      diagnostics,
+      github,
+      planningModel,
+      contentStore,
+      save,
+      objectiveStep,
+      stopIfCancelled,
+      cancellationRequested,
+      objectiveSignal,
+      objectivePause,
+    });
+  } catch (error) {
+    if (error instanceof CoordinatorHandoff) throw error;
+    // A step stopped by pause, drain or handoff while waiting between tries
+    // (or a try cut off by a handoff) is not a fault: its record stays and
+    // the next run resumes it.
+    const paused =
+      error instanceof StepPaused ||
+      (attachedFault(error)?.kind === "cancelled" &&
+        !!owner.handoff &&
+        !cancellationRequested());
+    // A handoff releases ownership at a safe point, also before the first
+    // snapshot exists; the step repeats on restart.
+    if (
+      owner.handoff &&
+      (owner.snapshot
+        ? canHandoff(owner.snapshot, active)
+        : paused && !cancellationRequested())
+    ) {
+      // No item step may outlive ownership: a sibling sleeping between tries
+      // stops at that safe point, and every active item settles first (#1268).
+      owner.handoffStopped = true;
+      owner.workPause.abort(new Error("Coordinator handoff requested"));
+      await Promise.allSettled(active.values());
+      if (owner.snapshot?.coordinator) {
+        handOffCoordinator(owner.snapshot, owner.handoffBy);
+        saveState(path, owner.snapshot);
+      }
+      throw new CoordinatorHandoff();
+    }
+    if (error instanceof StepPaused && owner.snapshot) {
+      await Promise.allSettled(active.values());
+      saveState(path, owner.snapshot);
+      // Paused planning: the owner serves control until resume.
+      if (isPreparationState(owner.snapshot)) throw error;
+      return owner.snapshot;
+    }
+    const current = owner.snapshot;
+    // Before any state exists nothing can hold the wait, and `factory retry`
+    // has no record to clear: the operator fixes it and runs the Objective again.
+    if (!current && !cancellationRequested()) {
+      const early = attachedFault(error);
+      if (early?.kind === "decision" || early?.kind === "config") {
+        diagnostics.emit({
+          operation: "objective-run",
+          outcome: "waiting",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+        throw new AwaitingBeforeState(
+          objective,
+          early.kind === "decision" ? early.question : early.detail,
+          early.kind === "config" ? early.fix : undefined,
+        );
+      }
+    }
+    // A decision or a prerequisite to fix: the scope waits for the operator
+    // and nothing fails, no worker stops (step.ts rule 7). A handoff stops
+    // the pass; the next controller repeats the step.
+    const fault = attachedFault(error);
+    const handedOff =
+      fault?.kind === "cancelled" &&
+      !!owner.handoff &&
+      !cancellationRequested();
+    const waiting =
+      !!current &&
+      !cancellationRequested() &&
+      (fault?.kind === "decision" || fault?.kind === "config" || handedOff);
+    diagnostics.emit({
+      runId: stateForSignal?.runId,
+      operation: "objective-run",
+      outcome: waiting ? "waiting" : "failed",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+    if (waiting && current) {
+      // Other items run on to their own stopping points.
+      await Promise.allSettled(active.values());
+      // A question raised outside a step still names its answer.
+      if (
+        (fault.kind === "decision" || fault.kind === "config") &&
+        !awaitsOperator(waitOf(current, "objective")) &&
+        !(
+          isExecutionState(current) &&
+          Object.values(current.work).some((work) => awaitsOperator(work.wait))
+        )
+      )
+        current.wait =
+          fault.kind === "decision"
+            ? {
+                kind: "decision",
+                detail: fault.question,
+                step: "objective/coordinator",
+              }
+            : {
+                kind: "prerequisite",
+                detail: fault.detail,
+                fix: fault.fix,
+                step: "objective/coordinator",
+              };
+      saveState(path, current);
+      return current;
+    }
+    // A rejected graph amendment waits for the operator's replacement, which
+    // status names; it is not a run failure (#1292).
+    if (
+      error instanceof AmendmentRejection &&
+      current &&
+      isExecutionState(current) &&
+      current.pendingAmendment?.phase === "rejected" &&
+      !cancellationRequested()
+    ) {
+      await Promise.allSettled(active.values());
+      save(current);
+      return current;
+    }
+    if (current && isExecutionState(current) && current.finalAcceptance) {
+      // A rejected resume cannot turn immutable accepted evidence into a failed run.
+      current.coordinator!.waitReason = `Sealed acceptance preserved: ${error instanceof Error ? error.message : String(error)}`;
+      saveState(path, current);
+      throw error;
+    }
+    // A failure stops only its own item (its runner stops its worker); only
+    // cancel stops other items' workers. Other items run on to their own
+    // stopping points.
+    if (!cancellationRequested()) await Promise.allSettled(active.values());
+    if (current) {
+      if (cancellationRequested()) {
+        await owner.cancellation;
+        await Promise.allSettled(active.values());
+        // This pass still carries the aborted process scope. The owner
+        // finalizes cancellation after it unwinds: remote issue closure,
+        // session disposal and terminal state must not inherit this signal.
+      } else if (isPreparationState(current)) {
+        // Preparation resumes by repeating its step; record why it paused.
+        current.coordinator.waitReason =
+          error instanceof Error ? error.message : String(error);
+      } else {
+        // A run refused for an earlier stop keeps that stop's error; it must
+        // not wrap the same cause again on every run.
+        if (current.error === undefined) {
+          current.error =
+            error instanceof Error ? error.message : String(error);
+          const item = failedItemOf(error);
+          if (item !== undefined) current.errorItem = item;
+        }
+      }
+      if (isExecutionState(current)) save(current);
+      else saveState(path, current);
+    }
+    throw error;
+  }
+}

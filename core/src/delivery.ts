@@ -2,7 +2,7 @@
  * Regular PR delivery for one Work Item: push its result to its fixed
  * branch, find or open its PR, wait for CI on the exact head, bring the
  * branch up to date, and merge with a merge commit. Every effect is found
- * on GitHub before it is made (CORE.md#Idempotence), so a step that runs
+ * on GitHub before it is made (docs/reference/steps.md#Idempotence), so a step that runs
  * again carries on from whatever the last run left. Each function returns
  * data the item steps return as their outcome; GitHub's and Git's
  * failures escape to the engine, which maps them in one place (workflow.ts
@@ -42,6 +42,7 @@ import {
   Unreadable,
 } from "./github.js";
 import { redact } from "./log.js";
+import { inert, prose, readRunMarks, runMarks } from "./markdown.js";
 import { lfsObjectsHoldingSecrets, lfsPushIfPointers } from "./media.js";
 import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
@@ -55,7 +56,7 @@ const GITHUB_LAG_MS = 2 * MINUTE;
 /**
  * How long a newly pushed head may show no run or status of a check it
  * needs before Factory asks: a check that never registers, or a workflow
- * that didn't trigger, needs a person (CORE.md#Waits).
+ * that didn't trigger, needs a person (docs/reference/steps.md#Waits).
  */
 const CHECK_SETTLE_MS = 15 * MINUTE;
 const CI_POLL_MS = 20_000;
@@ -183,8 +184,12 @@ export interface PublishInput {
    * (`itemBranch(issue, predecessor)`) for a layer above it.
    */
   baseBranch?: string;
-  /** The Objective's run (state.ts runOf), marked in the PR body for `factory reset`. */
-  run?: string;
+  /**
+   * The Objective's run (state.ts runOf) and accepted plan
+   * (planning/plan.ts ACCEPTED_AT), marked in the PR body for `factory
+   * reset` (markdown.ts `runMarks`).
+   */
+  run?: { run: string; plan: string };
   /** The Work Item's issue (tracking.ts), once it exists: the PR body closes it on merge. */
   itemIssue?: number;
 }
@@ -366,13 +371,28 @@ export async function publish(
       return hold(
         `PR #${pull.number} for ${branch} targets ${pull.base.ref}, not ${baseBranch}. Change its base back and answer retry, or cancel.`,
       );
-    if (await updates(context, pull.head.sha, current, bases))
+    if (await updates(context, pull.head.sha, current, bases)) {
+      // A PR reused after a replan names this run and plan from now on,
+      // so `factory reset` finds it (markdown.ts `runMarks`).
+      if (input.run) {
+        const marks = runMarks(input.run.run, input.run.plan);
+        const body = pull.body ?? "";
+        const named = readRunMarks(body);
+        if (named?.run !== input.run.run || named.plan !== input.run.plan)
+          await github.updatePull(
+            pull,
+            `${body.replace(/(?:<!-- factory-run:\S+ -->)(?:<!-- factory-plan:\S+ -->)?\s*$/, "").trimEnd()}\n\n${marks}`,
+            "deliver:pr-marks",
+            signal,
+          );
+      }
       return {
         kind: "published",
         pr: pull.number,
         head: pull.head.sha,
         merged: false,
       };
+    }
     if (await updates(context, pull.head.sha, earlier, bases))
       return lagging(
         `PR #${pull.number} does not show the pushed head ${input.commit} yet`,
@@ -385,7 +405,7 @@ export async function publish(
   let created: PullRequest;
   try {
     created = await github.createPull(
-      { head: branch, base: baseBranch, title: input.item.title, body },
+      { head: branch, base: baseBranch, title: inert(input.item.title), body },
       signal,
     );
   } catch (error) {
@@ -543,6 +563,9 @@ async function pushBranch(
     );
   }
   crashPoint("deliver:push:after");
+  // GitHub's reads of the new branch and commit may lag behind the push.
+  context.github.made(commit);
+  context.github.made(branch);
   if ((await remoteHead(context, branch)) !== commit)
     return retry(
       `Remote branch ${branch} does not show the pushed ${commit} yet`,
@@ -615,7 +638,9 @@ async function pullRequestBody(
     `<code>${safe(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "&#10;").replaceAll("\r", "&#13;")}</code>`;
   const issues = `https://github.com/${context.github.repository}/issues`;
   const parts: string[] = [
-    safe(input.item.goal).trim().slice(0, 4000) ||
+    // The goal is the model's: no reference, closing keyword or mention
+    // in it acts, so the Closes line below is the PR's only closing one.
+    prose(inert(safe(input.item.goal).trim().slice(0, 4000))) ||
       "This candidate contains the changes listed below.",
     `Work Item: ${code(input.item.id)} · Objective: [#${input.issue}](${issues}/${input.issue})`,
     // GitHub closes the item's issue when this PR merges into the default
@@ -678,7 +703,7 @@ async function pullRequestBody(
   parts.push(
     `Candidate commit: ${code(input.commit)}\n\nCandidate tree: ${code(input.tree)}`,
     pullMarker(input.issue, input.item.id),
-    ...(input.run ? [`<!-- factory-run:${input.run} -->`] : []),
+    ...(input.run ? [runMarks(input.run.run, input.run.plan)] : []),
   );
   return parts.join("\n\n");
 }
@@ -722,7 +747,7 @@ export type CiResult =
  * re-ran, with a needed check that never registered, or with no checks at
  * all, is a question (#1640). Checks queued or running are a transient
  * wait; an environment approval or a required review is a human gate the
- * engine waits on without a deadline (CORE.md#Waits).
+ * engine waits on without a deadline (docs/reference/steps.md#Waits).
  */
 export async function observeCi(
   context: DeliveryContext,
@@ -989,7 +1014,7 @@ async function judge(
       kind: "retry",
       reason: gate ? `Waiting on ${gate}` : waiting,
       afterMs: CI_POLL_MS,
-      ...(gate ? { wait: { kind: "gate", gate } } : {}),
+      ...(gate ? { wait: { kind: "gate", gate, human: true } } : {}),
       ...(settle ? { holdAfter: settle } : {}),
     };
   }
@@ -1244,6 +1269,7 @@ async function unregisteredChecks(
           wait: {
             kind: "gate",
             gate: `an environment approval for Actions workflow runs on PR #${pr}`,
+            human: true,
           },
         }
       : {

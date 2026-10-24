@@ -5,6 +5,7 @@ import { type CoreConfig, ownRepositoryProblem } from "../config.js";
 import {
   errored,
   failure,
+  type Held,
   hold,
   type Offer,
   type Outcome,
@@ -15,20 +16,27 @@ import {
 import { defaultHead } from "../git.js";
 import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
-import { prose } from "../markdown.js";
+import { planMarks, prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
-import type { Planner } from "../providers/planner.js";
-import { resolvedProvider } from "../providers/selection.js";
+import type { Planner, PlannerAnswer } from "../providers/planner.js";
+import { profileWorker, resolvedProvider } from "../providers/selection.js";
+import {
+  type Conversation,
+  conversationDir,
+  scopeOf,
+} from "../providers/session.js";
+import { logRefused } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
-import type { Answer, ObjectiveState } from "../state.js";
-import { adaptiveWorkflow, declarationProblems } from "../validate.js";
+import { type Answer, type ObjectiveState, runOf } from "../state.js";
+import { oneLine } from "../text.js";
+import { declarationProblems } from "../validate.js";
+import { fact, facts as keptFacts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
 import {
   BaseFiles,
   buildFacts,
-  childIdentity,
   commandInstructions,
   finalCommands,
   objectiveCommandProblems,
@@ -37,6 +45,7 @@ import {
 import { forgetting, lookupsKey, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
+  amendmentGrants,
   currentPlan,
   generationInputs,
   position,
@@ -49,20 +58,11 @@ import {
   predecessorsOnBase,
 } from "./predecessors.js";
 import {
-  draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
   revisionScope,
 } from "./prompts.js";
-import {
-  adaptiveGraph,
-  type RecipeSelection,
-  recipeFindings,
-  recipeInstallation,
-  recipePrerequisites,
-  selectRecipe,
-} from "./recipes.js";
 import {
   exportTree,
   type RepositoryView,
@@ -84,6 +84,7 @@ import type {
 } from "./types.js";
 import {
   applyRevision,
+  type CannotPlan,
   controllerGuarantees,
   decodePlan,
   planChoices,
@@ -145,8 +146,6 @@ export interface ObjectiveInputs {
   shown: ShownObjective;
   /** The author can write: mermaid and math sources stay as code. */
   writer?: true;
-  /** A Factory-created split child, from the raw body's marker (structure, never text). */
-  child?: true;
   base: string;
   title: string;
   /**
@@ -155,13 +154,6 @@ export interface ObjectiveInputs {
    * accepted plan all use these, whatever the configuration says later.
    */
   reviewArtifacts: ReviewArtifactSelector[];
-  /** The Objective's Workflow recipe, resolved once at the base. */
-  recipe?: RecipeSelection;
-  /**
-   * planning.adaptiveGraph when the Objective was admitted: the recipe check
-   * and every plan round use this, so a config change can't split them.
-   */
-  adaptiveGraph?: true;
   /** The done predecessors' accepted results, checked to be on `base` (planning/predecessors.ts). */
   predecessors?: PredecessorEvidence[];
 }
@@ -176,6 +168,8 @@ interface PlanRound {
   draft?: Draft;
   findings?: Finding[];
   question?: string;
+  /** The planner declared the Objective can't be planned as written: no plan to review or revise. */
+  cannot?: CannotPlan;
   /** The operator answered `replan` to a problem with the Objective. */
   replan?: true;
 }
@@ -197,6 +191,8 @@ interface Decision {
   decision?: PlannerDecision;
   /** An `approve` that found the Objective edited, before this decision. */
   approved?: PlannerDecision;
+  /** The `more` that sent a kept `decision` past the allowance, after it. */
+  more?: PlannerDecision;
 }
 
 function cleanDraft(round: PlanRound): boolean {
@@ -212,8 +208,8 @@ export function decisions(
     .filter(([key]) => key.startsWith("decide:") && keep(key))
     .sort(([a], [b]) => compareKeys(a, b))
     .flatMap(([, value]) => {
-      const { approved, decision } = value as Decision;
-      return [approved, decision].filter(
+      const { approved, decision, more } = value as Decision;
+      return [approved, decision, more].filter(
         (d): d is PlannerDecision => d !== undefined,
       );
     });
@@ -262,8 +258,12 @@ function decisionsBefore(
   return decisions(state, (key) => compareKeys(key, `decide:${g}:${m}`) < 0);
 }
 
-/** Workers get a sandboxed shell (docs/CORE.md). */
+/** Workers get a sandboxed shell (docs/DESIGN.md). */
 const WORKERS = { default: "shell" } as const;
+
+/** The execution profile ids the planner is offered: every configured one. */
+const profileIds = (config: CoreConfig): string[] =>
+  Object.keys(config.execution.profiles ?? {});
 
 /**
  * What the workers the planner may assign can execute: the Objective's
@@ -274,7 +274,7 @@ const WORKERS = { default: "shell" } as const;
 export function workers(
   config: CoreConfig,
 ): Readonly<Record<string, WorkerCommandAccess>> {
-  const offered = recipeInstallation(config).profileIds;
+  const offered = profileIds(config);
   if (!offered.length) return WORKERS;
   return Object.fromEntries(
     offered.map((id) => {
@@ -302,21 +302,22 @@ export function workers(
 }
 
 /**
- * The execution profiles the planner is offered, with what each is for:
- * the ones a recipe's expansions are checked against (recipeInstallation),
- * so the two agree. Undefined without any: the planner assigns none.
+ * The execution profiles the planner is offered, with what each is for.
+ * Undefined without any: the planner assigns none.
  */
 export function offeredProfiles(
   config: CoreConfig,
 ): WireOptions["profiles"] | undefined {
-  const ids = recipeInstallation(config).profileIds;
+  const ids = profileIds(config);
   if (!ids.length) return undefined;
   return ids.map((id) => {
-    const { description, selectionHints } = config.execution.profiles![id]!;
+    const { provider, description, selectionHints, worktreeRead } =
+      config.execution.profiles![id]!;
     return {
       id,
       description,
       ...(selectionHints.length ? { selectionHints } : {}),
+      worker: profileWorker(config.providers[provider]!, worktreeRead === true),
     };
   });
 }
@@ -342,7 +343,7 @@ async function citedSections(
   );
   const seen = new Set<string>();
   const sections: { path: string; heading?: string; content: string }[] = [];
-  for (const item of draftItems(draft)) {
+  for (const item of draft.items) {
     if (!ids.has(item.id)) continue;
     for (const citation of item.citations) {
       const id = `${citation.path}#${citation.heading ?? ""}`;
@@ -420,33 +421,15 @@ function planRoundStep(
       const revising = Boolean(previous?.answer);
       const profiles = offeredProfiles(config);
       const wire = {
-        child: inputs.child === true,
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
-        adaptive: adaptiveGraph(
-          inputs.shown.blocks,
-          inputs.adaptiveGraph === true,
-        ),
         ...(profiles ? { profiles } : {}),
       };
-      // An enabled section still plans, with its context and memory but
-      // without the graph kinds; say so once per generation.
-      if (
-        n === 1 &&
-        adaptiveWorkflow(inputs.shown.blocks).enabled &&
-        inputs.adaptiveGraph !== true
-      )
-        context.log({
-          event: "adaptive-graph-off",
-          message:
-            "Adaptive workflow is enabled, but planning.adaptiveGraph is off: the planner isn't offered discovery items, work conditions or expansions",
-        });
       const cited = revising
         ? await citedSections(previous!.draft, fixes, facts, files)
         : [];
       const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         instructions: `${renderPlanningInstructions(
           inputs.shown.blocks,
           corrections,
@@ -462,10 +445,10 @@ function planRoundStep(
               })),
             }
           : {}),
-        ...(lookups ? { contextLookups: lookups.data } : {}),
+        contextLookups: lookups.data,
       };
       const local = await localExecutables(inputs, config, signal);
-      const prompt = renderCompilationCall({
+      const { prompt, facts: promptFacts } = renderCompilationCall({
         facts,
         data,
         revising,
@@ -474,11 +457,9 @@ function planRoundStep(
         citedSections: cited,
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
-        adaptive: wire.adaptive,
-        recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
-        ...(lookups ? { lookups } : {}),
+        lookups,
       });
       const schema = revising
         ? revisionSchema(facts, wire)
@@ -487,25 +468,27 @@ function planRoundStep(
         role: "planner",
         phase: "plan",
         prompt,
-        schema: lookups ? lookups.schema(schema) : schema,
+        facts: promptFacts,
+        schema: lookups.schema(schema),
         readDir: workDir,
+        // A revision or lookup turn continues the generation's planner.
+        conversation: planningConversation(deps, state, "planner", g, prompt),
         signal,
         log: context.log,
       });
+      keepSession(context, "planner", answer);
       context.log({
         event: "planner-answer",
         model: answer.model,
         ms: answer.ms,
         usage: answer.usage,
       });
-      const taken = lookups
-        ? await lookups.take(answer.value, {
-            issue: state.issue,
-            files,
-            secrets: config.secrets,
-            log: context.log,
-          })
-        : { value: answer.value };
+      const taken = await lookups.take(answer.value, {
+        issue: state.issue,
+        files,
+        secrets: config.secrets,
+        log: context.log,
+      });
       if ("outcome" in taken) return taken.outcome;
       let full: unknown = taken.value;
       if (revising) {
@@ -515,7 +498,8 @@ function planRoundStep(
           facts,
           wire,
         );
-        if (revised.invalidShape) return invalidAnswer(revised.findings);
+        if (revised.invalidShape)
+          return refusedAnswer(context.log, answer, revised.findings);
         if (!revised.answer)
           return done({
             ...(g > 1 && n === 1 ? { inputs } : {}),
@@ -525,7 +509,16 @@ function planRoundStep(
         full = revised.answer;
       }
       const decoded = decodePlan(full, facts, wire);
-      if (decoded.invalidShape) return invalidAnswer(decoded.findings);
+      if (decoded.invalidShape)
+        return refusedAnswer(context.log, answer, decoded.findings);
+      if (decoded.cannot) {
+        context.log({ event: "planner-cannot-plan", ...decoded.cannot });
+        // No plan to revise: a round after it answers in full.
+        return done({
+          ...(g > 1 && n === 1 ? { inputs } : {}),
+          cannot: decoded.cannot,
+        } satisfies PlanRound);
+      }
       const round: PlanRound = {
         ...(g > 1 && n === 1 ? { inputs } : {}),
         answer: full,
@@ -536,9 +529,6 @@ function planRoundStep(
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
-        ...(inputs.recipe
-          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-          : []),
       ];
       return done({
         ...round,
@@ -598,7 +588,7 @@ function reviewStep(
         signal,
       );
       const scope = lastReview(state, g, n);
-      const prompt = renderGraphReviewCall({
+      const { prompt, facts: promptFacts } = renderGraphReviewCall({
         facts,
         draft,
         evidence,
@@ -613,7 +603,6 @@ function reviewStep(
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
         workers: workers(config),
-        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
@@ -634,18 +623,30 @@ function reviewStep(
         role: "reviewer",
         phase: "graph-review",
         prompt,
+        facts: promptFacts,
         schema: graphReviewSchema(),
         readDir: workDir,
+        // A revision round's review continues the generation's reviewer.
+        conversation: planningConversation(
+          deps,
+          state,
+          "graph-review",
+          g,
+          prompt,
+        ),
         signal,
         log: context.log,
       });
+      keepSession(context, "graph-review", answer);
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
-        draftItems(draft).map((item) => item.id),
+        draft.items.map((item) => item.id),
       );
-      if (decoded.invalid)
+      if (decoded.invalid) {
+        logRefused(context.log, answer.callId, decoded.reason);
         return errored(`The plan review answer was invalid: ${decoded.reason}`);
+      }
       const result: ReviewRound = { findings: decoded.findings };
       return done(result);
     },
@@ -674,19 +675,22 @@ function lastReview(
 // decide:g:n
 
 // Text is required (`needsText`): the engine refuses an answer without it.
-const ANSWERING: Offer = {
+// `spent`: past planningRevisions, an answer is kept until `more` sends it.
+const KEPT = "Keeps your answer; `more` then sends it to the planner.";
+const answering = (spent: boolean): Offer => ({
   answer: "answer",
   family: "answer",
-  consequence: "Sends your decision back to the planner.",
+  consequence: spent ? KEPT : "Sends your decision back to the planner.",
   needsText: true,
-};
-const ASK: Offer[] = [
-  ANSWERING,
+});
+const ask = (spent: boolean): Offer[] => [
+  answering(spent),
   {
     answer: "allow",
     family: "answer",
-    consequence:
-      "Authorizes that exact validation command for this Objective and plans again.",
+    consequence: spent
+      ? `Authorizes that exact validation command for this Objective. ${KEPT}`
+      : "Authorizes that exact validation command for this Objective and plans again.",
     needsText: true,
   },
   "replan",
@@ -720,7 +724,32 @@ function decideStep(
           ...(decision ? { decision } : {}),
         } satisfies Decision);
       }
-      const question = questionFor(state, g, n, planned, fixes, asks);
+      // Every round counts against planningRevisions, whatever started it:
+      // past the allowance, the next round waits for `more`. An answer that
+      // would start one is kept (`answeredKey`) until `more` sends it.
+      const answeredKey = `${key}:answered`;
+      const answered = state.kept?.[answeredKey] as PlannerDecision | undefined;
+      const allowance =
+        allowances(state).planningRevisions + granted(state, g, n);
+      const spent = n > allowance;
+      const question = questionFor(state, g, n, planned, fixes, asks, spent);
+      const nextRound = (decision?: PlannerDecision): Outcome =>
+        spent
+          ? {
+              ...spentHold(state, n, allowance, fixes, decision),
+              keep: { [answeredKey]: decision ?? null },
+            }
+          : {
+              kind: "done",
+              result: {
+                corrections: [
+                  ...fixes,
+                  ...(decision ? operatorCorrections([decision]) : []),
+                ],
+                ...(decision ? { decision } : {}),
+              } satisfies Decision,
+              keep: { [answeredKey]: null },
+            };
       // An `approve` that found the Objective edited (see changedHold).
       const approvedKey = `${key}:approved`;
       const approved = state.kept?.[approvedKey] as PlannerDecision | undefined;
@@ -736,11 +765,20 @@ function decideStep(
         const record = (text?: string) => decisionOf(answer, text);
         switch (answer.answer) {
           case "more":
-            return done({
-              corrections: fixes,
-              grant: grant(state, "planningRevisions"),
-              decision: record(),
-            } satisfies Decision);
+            // A kept answer is the round's decision, and `more` its grant.
+            return {
+              kind: "done",
+              result: {
+                corrections: [
+                  ...fixes,
+                  ...(answered ? operatorCorrections([answered]) : []),
+                ],
+                grant: grant(state, "planningRevisions"),
+                decision: answered ?? record(),
+                ...(answered ? { more: record() } : {}),
+              } satisfies Decision,
+              keep: { [answeredKey]: null },
+            };
           case "approve":
             if (await objectiveChanged(state, g, deps, signal))
               return {
@@ -762,12 +800,8 @@ function decideStep(
             );
           case "answer":
           case "allow": {
-            // Text is required (ASK): the engine refuses an answer without it.
-            const decision = record((answer.text ?? "").trim());
-            return done({
-              decision,
-              corrections: [...fixes, ...operatorCorrections([decision])],
-            } satisfies Decision);
+            // Text is required (`ask`): the engine refuses an answer without it.
+            return nextRound(record((answer.text ?? "").trim()));
           }
         }
       }
@@ -780,9 +814,54 @@ function decideStep(
         }
         return done({ accept: true } satisfies Decision);
       }
-      return done({ corrections: fixes } satisfies Decision);
+      return nextRound();
     },
   };
+}
+
+/**
+ * The question before a round past `planningRevisions` (with `allowance`
+ * the grants included): `more` grants as much again and starts it, with
+ * the kept answer `pending` when an answer asked for it.
+ */
+function spentHold(
+  state: ObjectiveState,
+  n: number,
+  allowance: number,
+  fixes: Finding[],
+  pending: PlannerDecision | undefined,
+): Held {
+  const more = grant(state, "planningRevisions");
+  const list = fixes.map((f, i) => `${i + 1}. ${f.message}`).join("\n");
+  const past = `${n} rounds, past the ${allowance} autonomy.allowances.planningRevisions allows`;
+  return pending
+    ? hold(
+        `Planning has run ${past}. Your answer is kept until \`more\` sends it to the planner.\n\nQuestion: ${prose(oneLine(pending.question, 500))}\n\nAnswer: \`${pending.answer}\`${pending.text ? ` ${prose(pending.text)}` : ""}\n\n\`more\` allows ${more} more rounds and sends it.`,
+        [
+          {
+            answer: "more",
+            family: "retry",
+            consequence: `Allows ${more} more plan rounds and sends your answer.`,
+          },
+          "replan",
+          "cancel",
+        ],
+      )
+    : hold(
+        `The plan still has ${fixes.length} problem${fixes.length === 1 ? "" : "s"} after ${past}:
+
+${list}
+
+\`more\` allows ${more} more rounds.`,
+        [
+          {
+            answer: "more",
+            family: "retry",
+            consequence: `Allows ${more} more plan rounds.`,
+          },
+          ...ask(true),
+        ],
+      );
 }
 
 /**
@@ -818,7 +897,8 @@ export function planningReplan(
       decision,
       ...(approved ? { approved } : {}),
     } satisfies Decision,
-    keep: { [approvedKey]: null },
+    // An answer kept past the allowance (see decideStep) ends with it.
+    keep: { [approvedKey]: null, [`${key}:answered`]: null },
   };
 }
 
@@ -881,24 +961,37 @@ function questionFor(
   planned: PlanRound,
   fixes: Finding[],
   asks: Finding[],
+  spent: boolean,
 ): { text: string; offers: Offer[] } | undefined {
   const list = (items: Finding[]) =>
     items.map((f, i) => `${i + 1}. ${f.message}`).join("\n");
+  const question = (text: string, offers: Offer[]) => ({
+    text: spent
+      ? `${text}\n\nPlanning has run ${n} rounds, past what autonomy.allowances.planningRevisions allows, so an answer is kept and \`more\` then sends it to the planner.`
+      : text,
+    offers,
+  });
+  const ASK = ask(spent);
+  if (planned.cannot)
+    return question(
+      `The planner says this Objective can't be planned as written:\n\n${planned.cannot.reason}\n\nWhat would have to change: ${planned.cannot.change}\n\nEdit the issue, then \`replan\` plans again from it. \`answer <guidance>\` sends your guidance to the planner for another round.`,
+      ["replan", answering(spent), "cancel"],
+    );
   if (planned.question)
-    return {
-      text: `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,
-      offers: ASK,
-    };
+    return question(
+      `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,
+      ASK,
+    );
   if (asks.length && !fixes.length && !state.done[`review:${g}:${n}`])
-    return {
-      text: `Factory's plan checks found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`answer <decision>\` sends your decision back to the planner.`,
-      offers: ASK,
-    };
+    return question(
+      `Factory's plan checks found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`answer <decision>\` sends your decision back to the planner.`,
+      ASK,
+    );
   if (asks.length && !fixes.length)
-    return {
-      text: `The plan reviewer found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`approve\` runs the plan as it is; \`answer <decision>\` sends your decision back to the planner.`,
-      offers: [
-        ANSWERING,
+    return question(
+      `The plan reviewer found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`approve\` runs the plan as it is; \`answer <decision>\` sends your decision back to the planner.`,
+      [
+        answering(spent),
         {
           answer: "approve",
           family: "accept",
@@ -906,56 +999,32 @@ function questionFor(
         },
         ...ASK.slice(1),
       ],
-    };
+    );
   if (!fixes.length) return undefined;
   const previous =
     n > 1 ? (state.done[`decide:${g}:${n - 1}`] as Decision) : undefined;
   if (previous?.corrections && sameFindings(previous.corrections, fixes))
-    return {
-      text: `Plan round ${n} came back with the same problems as round ${n - 1}:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`,
-      offers: ASK,
-    };
-  const allowance = allowances(state).planningRevisions + granted(state, g, n);
-  if (fixRounds(state, g, n) > allowance)
-    return {
-      text: `The plan still has ${fixes.length} problem${fixes.length === 1 ? "" : "s"} after ${n} rounds, past the ${allowance} autonomy.allowances.planningRevisions allows:
-
-${list(fixes)}
-
-\`more\` allows ${grant(state, "planningRevisions")} more rounds.`,
-      offers: [
-        {
-          answer: "more",
-          family: "retry",
-          consequence: `Allows ${grant(state, "planningRevisions")} more plan rounds.`,
-        },
-        ...ASK,
-      ],
-    };
+    return question(
+      `Plan round ${n} came back with the same problems as round ${n - 1}:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`,
+      ASK,
+    );
   return undefined;
 }
 
-/** Rounds of this generation spent on fixes (not on operator answers), this one included. */
-function fixRounds(state: ObjectiveState, g: number, n: number): number {
-  let rounds = 1;
-  for (let m = 1; m < n; m++) {
-    const decided = state.done[`decide:${g}:${m}`] as Decision | undefined;
-    // A `more` grant is a decision, but the round after it fixes findings.
-    if (decided && (!decided.decision || decided.grant)) rounds += 1;
-  }
-  return rounds;
-}
-
 /**
- * Planning revisions of the current generation: the rounds spent on fixes
- * before this one, plus the amendments of the plan it accepted, and the
- * rounds allowed with the operator's grants.
+ * Planning revisions of the current generation: the rounds before this
+ * one, whatever started them (fixes, answers, grants), plus the amendments
+ * of the plan it accepted; and what is allowed with every `more` granted,
+ * to planning and to amendments alike.
  */
 export function planningRevisions(state: ObjectiveState): Usage {
   const { g, n } = position(state);
   return {
-    used: fixRounds(state, g, n) - 1 + proposalsOf(state).length,
-    allowed: allowances(state).planningRevisions + granted(state, g, n),
+    used: n - 1 + proposalsOf(state).length,
+    allowed:
+      allowances(state).planningRevisions +
+      granted(state, g, n) +
+      amendmentGrants(state),
   };
 }
 
@@ -1018,12 +1087,9 @@ function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
           ? { reviewArtifacts: inputs.reviewArtifacts }
           : {}),
       };
-      await postPlan(deps, state.issue, plan, signal);
-      return {
-        kind: "done",
-        result: plan,
-        keep: { [ACCEPTED_AT]: new Date().toISOString() },
-      };
+      const accepted = new Date().toISOString();
+      await postPlan(deps, state, plan, signal, { accepted });
+      return { kind: "done", result: plan, keep: { [ACCEPTED_AT]: accepted } };
     },
   };
 }
@@ -1053,26 +1119,25 @@ const LISTED_ITEMS = 200;
  * Post the plan on the issue, or edit the comments already there. The plan
  * data (what `factory reset` rebuilds from) goes in the plan comment when
  * it fits, else in numbered continuation comments the plan comment names;
- * it is never dropped. An accepted amendment posts its plan the same way,
- * with `note` saying which amendment it is and its own crash points
+ * it is never dropped. The line after the marker names the run, the
+ * accepted plan (`accepted`, else the one accepted now) and the data's
+ * digest, so a reset takes only its own run's plan, as Factory wrote it. An accepted amendment posts its plan the same
+ * way, with `note` saying which amendment it is and its own crash points
  * (`point`: `<point>:post:*`, `<point>:data:*`).
  */
 export async function postPlan(
-  deps: PlanningDeps,
-  issue: number,
+  deps: Pick<PlanningDeps, "github">,
+  state: ObjectiveState,
   plan: Plan,
   signal: AbortSignal,
-  { point = "plan", note }: { point?: string; note?: string } = {},
+  {
+    point = "plan",
+    note,
+    accepted = state.kept[ACCEPTED_AT] as string,
+  }: { point?: string; note?: string; accepted?: string } = {},
 ): Promise<void> {
+  const issue = state.issue;
   const marker = PLAN_MARK(issue);
-  const children = plan.split
-    ? plan.split.children
-        .map(
-          (child) =>
-            `- **${child.key}** ${prose(child.title)} (child Objective)`,
-        )
-        .join("\n")
-    : "";
   const listed = plan.items.slice(0, LISTED_ITEMS);
   const items = `${listed
     .map(
@@ -1082,12 +1147,12 @@ export async function postPlan(
     .join(
       "\n",
     )}${plan.items.length > listed.length ? `\n- and ${plan.items.length - listed.length} more (see the plan data)` : ""}`;
+  const json = JSON.stringify(plan);
   const summary =
-    `${marker}\n**Factory's plan** (${plan.split ? `split into ${plan.split.children.length} child Objectives` : `${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}`}, base \`${plan.base.slice(0, 12)}\`)${note ? `\n\n${note}` : ""}\n\n${plan.split ? children : items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${prose(d.text)}` : ""} (${prose(d.by)})`).join("\n")}` : ""}`.slice(
+    `${marker}\n${planMarks(runOf(state), accepted, json)}\n**Factory's plan** (${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}, base \`${plan.base.slice(0, 12)}\`)${note ? `\n\n${note}` : ""}\n\n${items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${prose(d.text)}` : ""} (${prose(d.by)})`).join("\n")}` : ""}`.slice(
       0,
       COMMENT_LIMIT - 200,
     );
-  const json = JSON.stringify(plan);
   const data = (text: string, label: string) =>
     `\n\n<details><summary>${label}</summary>\n\n\`\`\`json\n${text}\n\`\`\`\n</details>`;
   const whole = data(json, "Plan data");
@@ -1155,7 +1220,7 @@ export async function readObjective(
       ),
     };
   }
-  // Planning reads what GitHub shows; Factory's own marker is structure.
+  // Planning reads what GitHub shows.
   const author = found.user?.login;
   const writer = !!author && (await deps.github.canWrite(author, signal));
   const shown = readShown(found.body_html, { sources: writer });
@@ -1166,43 +1231,11 @@ export async function readObjective(
   const inputs: ObjectiveInputs = {
     shown,
     ...(writer && { writer: true as const }),
-    ...(childIdentity(found.body ?? "") && { child: true as const }),
     base: await defaultHead(config.checkout, config.repository, signal),
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,
   };
-  const { problems } = checkObjective(shown.blocks);
-  // The optional declarations (Package manager update, Quality checkpoint,
-  // Workspace package additions, Adaptive workflow): checked here once,
-  // trusted afterwards.
-  problems.push(...declarationProblems(shown.blocks));
-  const recipe = await selectRecipe(
-    shown.blocks,
-    new BaseFiles(config.checkout, inputs.base, signal),
-  );
-  if (recipe.problem) problems.push(recipe.problem);
-  if (recipe.selected) {
-    problems.push(
-      ...recipePrerequisites(
-        recipe.selected.recipe,
-        adaptiveWorkflow(shown.blocks).enabled,
-        recipeInstallation(config),
-      ),
-    );
-    inputs.recipe = recipe.selected;
-  }
-  if (config.planning.adaptiveGraph) inputs.adaptiveGraph = true;
-  if (!problems.length)
-    problems.push(
-      ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {
-        child: inputs.child === true,
-        requiredCommands: config.finalValidation.requiredCommands,
-        ciOnlyCommands: config.finalValidation.ciOnlyCommands,
-        signal,
-      })),
-    );
-  if (!problems.length)
-    problems.push(...(await localExecutables(inputs, config, signal)).problems);
+  const problems = await objectiveProblems(config, inputs, signal);
   if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
   // Planning reads a base that has its predecessors' accepted work.
   const predecessors = predecessorEvidence(state);
@@ -1217,6 +1250,34 @@ export async function readObjective(
     inputs.predecessors = predecessors;
   }
   return { inputs };
+}
+
+/**
+ * The Objective checks on what GitHub shows of it at `inputs.base`: its
+ * sections, its declarations (Package manager update, Quality checkpoint,
+ * Workspace package additions; checked here once, trusted afterwards), its
+ * commands and local executables. The check step
+ * and `factory propose` (proposals.ts) both use it.
+ */
+export async function objectiveProblems(
+  config: CoreConfig,
+  inputs: ObjectiveInputs,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const { shown } = inputs;
+  const { problems } = checkObjective(shown.blocks);
+  problems.push(...declarationProblems(shown.blocks));
+  if (!problems.length)
+    problems.push(
+      ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {
+        requiredCommands: config.finalValidation.requiredCommands,
+        ciOnlyCommands: config.finalValidation.ciOnlyCommands,
+        signal,
+      })),
+    );
+  if (!problems.length)
+    problems.push(...(await localExecutables(inputs, config, signal)).problems);
+  return problems;
 }
 
 /** Where the operator's approval of a non-writer's Objective is kept. */
@@ -1298,20 +1359,17 @@ export async function planningFacts(
   return buildFacts({
     objective: state.issue,
     shown: inputs.shown,
-    child: inputs.child === true,
     base: inputs.base,
     checkout: config.checkout,
     requiredCommands: config.finalValidation.requiredCommands,
     ciOnlyCommands: config.finalValidation.ciOnlyCommands,
     extraCommands: allowedCommands(state),
     localAssetRoots: config.media.localAssetRoots,
-    discoveryLimits: config.planning.discoveryLimits,
     // No playbook in the target reads as empty. Knowledge adds the pinned
-    // Dream playbook and, for Adaptive workflow, planning context and memory.
+    // Dream playbook, the planning context and memory.
     playbook: await planningKnowledge({
       state,
       shown: inputs.shown,
-      child: inputs.child === true,
       files,
       playbook: (await files.text(config.planning.playbook)) ?? "",
     }),
@@ -1351,6 +1409,43 @@ export async function planningTree(
   };
 }
 
+/** The planning conversations, each kept as `session:<name>` (work/facts.ts). */
+export type PlanningConversation = "planner" | "graph-review";
+
+/**
+ * The planner's or plan reviewer's retained conversation for one call
+ * (providers/session.ts): it continues the kept session of the same plan
+ * generation `g` and frozen configuration, so a replan or `adopt` starts fresh. None with `sessions.enabled` off.
+ */
+export function planningConversation(
+  deps: PlanningDeps,
+  state: ObjectiveState,
+  name: PlanningConversation,
+  g: number,
+  prompt: string,
+): Conversation | undefined {
+  if (!deps.config.sessions.enabled) return undefined;
+  const previous = fact(state, `session:${name}`);
+  return {
+    dir: conversationDir(deps.workDir(state.issue), name),
+    // The generation and the frozen configuration: a replan or `adopt`
+    // starts fresh.
+    scope: scopeOf(name, g, state.frozen?.digest),
+    prompt,
+    policy: deps.config.sessions,
+    ...(previous ? { previous } : {}),
+  };
+}
+
+/** Keep the conversation `answer` left with the step's outcome; none forgets it. */
+export function keepSession(
+  context: StepContext,
+  name: PlanningConversation,
+  answer: Pick<PlannerAnswer, "session">,
+): void {
+  context.keep(keptFacts({ [`session:${name}`]: answer.session ?? null }));
+}
+
 /** The exported base tree for planning. Trees of other bases are removed. */
 function treeDir(deps: PlanningDeps, issue: number, base: string): string {
   const root = deps.workDir(issue);
@@ -1366,6 +1461,16 @@ function treeDir(deps: PlanningDeps, issue: number, base: string): string {
 
 function done(result: unknown): Outcome {
   return { kind: "done", result };
+}
+
+/** An answer Factory's checks refused: logged as such (usage.ts logRefused), and retried. */
+function refusedAnswer(
+  log: (event: Record<string, unknown>) => void,
+  answer: PlannerAnswer,
+  findings: Finding[],
+): Extract<Outcome, { kind: "retry" }> {
+  logRefused(log, answer.callId, findings.map((f) => f.message).join("; "));
+  return invalidAnswer(findings);
 }
 
 export function invalidAnswer(

@@ -1,0 +1,1393 @@
+#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PLANNING_REVISION_GRANT } from "./compiler.js";
+import { runCaptureExportCommand } from "./capture-export-cli.js";
+import { assertKnownFlags, option } from "./cli-flags.js";
+import { itemActivities, renderWatch } from "./worker-activity.js";
+import {
+  type ModelCallRow,
+  readRunTelemetry,
+  runningCallText,
+} from "./run-telemetry.js";
+import { displayDateTime } from "./display-time.js";
+import {
+  readSelectedConfig,
+  type SelectedConfig,
+} from "./provider-selection.js";
+import {
+  configPath,
+  type FactoryConfig,
+  factoryConfigDigest,
+  maxActiveObjectives,
+  readConfig,
+  readConfigFile,
+  stateRoot,
+} from "./config.js";
+import { LocalContentStore } from "./content/local.js";
+import {
+  ControllerCommandIncompleteError,
+  requestControl,
+} from "./coordinator-control.js";
+import {
+  continuationStatusDocument,
+  redactDiagnosticDetail,
+} from "./diagnostics.js";
+import {
+  runDiagnosticsCommand,
+  runDiagnosticsScorecardCommand,
+} from "./diagnostics-cli.js";
+import { compose, composeIntake, composePlanning } from "./index.js";
+import {
+  ColdPublicationHeld,
+  type IntakeAuthorization,
+  QUEUE_COMMAND_TIMEOUT_MS,
+  withIntakeCommandDeadline,
+} from "./intake.js";
+import { runDreamCommand } from "./learning.js";
+import { operatorName } from "./operator.js";
+import {
+  locallyAdmitted,
+  locallyClaimedObjectives,
+  refuseUnadmittedRun,
+  QueueAuthorityChanged,
+} from "./project-queue-state.js";
+import { runProposeCommand } from "./proposals.js";
+import {
+  loadServiceLoginCredentials,
+  requiredProviderCredentials,
+} from "./provider-credentials.js";
+import { checkReadiness } from "./readiness.js";
+import {
+  commandSandboxPolicy,
+  commandSandboxStatus,
+} from "./execution/sandbox.js";
+import {
+  onlyCheckpointBoundsExceeded,
+  gitPersistenceStatus,
+  inspectRecoveryCheckpoint,
+  maintainRecoveryCheckpoint,
+  stopRecoveryCheckpointMaintenance,
+  synchronizeRecoveryCheckpoint,
+  withOperatorCommand,
+  withRecoveryCheckpointOperation,
+} from "./recovery-checkpoint.js";
+import { buildRecoveryCheckpointClosure } from "./recovery-checkpoint-closure.js";
+import {
+  AwaitingBeforeState,
+  awaitingOutcome,
+  EXIT_FAILED,
+  EXIT_NEEDS_DECISION,
+  intakeExitCode,
+  runOutcome,
+} from "./run-outcome.js";
+import { controlObjective, selectAssetSetFromCli } from "./runner.js";
+import { setupTarget } from "./setup.js";
+import type { ContinuationState } from "./state.js";
+import {
+  continuationConfigurationMatches,
+  installationLockPath,
+  liveControllerOwner,
+  liveObjectiveOwners,
+  objectiveLockPath,
+  readContinuation,
+  readPreState,
+  resolveIssue,
+  reconcileRestoredContinuation,
+  restoreRecoveryCheckpoint,
+} from "./state-store.js";
+import {
+  configurationCommand,
+  inFlightLine,
+  renderServiceStatus,
+  renderStatusText,
+} from "./status-summary.js";
+import { supervise } from "./supervision.js";
+import { runWorkflowRecipePreview } from "./workflow-recipes-cli.js";
+import { LifecycleRefusal, lifecycleCode } from "./lifecycle-refusal.js";
+
+/** Whether a live controller owns this Objective; null when a lock is unreadable. */
+function controllerActive(
+  repository: string,
+  objective: number,
+): boolean | null {
+  try {
+    const installation = liveControllerOwner(installationLockPath(repository));
+    if (installation)
+      return (
+        installation.intake === true || installation.objective === objective
+      );
+    return !!liveControllerOwner(objectiveLockPath(repository, objective));
+  } catch {
+    return null;
+  }
+}
+
+const INSTALL_OPTIONS =
+  "[--provider NAME] [--repository OWNER/REPO --checkout ABSOLUTE_PATH] [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning codex-sdk|claude-agent-sdk] [--planning-transport exec|app-server] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...]";
+
+function help(): void {
+  console.log(
+    [
+      "Factory CLI",
+      "",
+      "Commands (every command also takes [--config PATH]):",
+      `  setup --config-only ${INSTALL_OPTIONS}`,
+      "      Write the configuration (first run), add a new --provider, or verify one against the options given",
+      "      Codex planning defaults to exec with source-only file reads; tool-free app-server is opt-in. Tree reviews use exec.",
+      `  setup --background ${INSTALL_OPTIONS} [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...]`,
+      "      Configure if needed, check readiness, then install and start the background service that runs the queue (this command is the consent)",
+      "  propose --source DOC#HEADING [--output ABSOLUTE_NEW_FILE] [--provider NAME]",
+      "  propose --file ABSOLUTE_FILE --approve SHA256 [--enqueue]",
+      "      Draft and review Objectives, then explicitly approve their exact file before issue creation",
+      "  dream [--input-budget-bytes N] [--budget-bytes N] [--preview] | --show | --record --objective N",
+      "  dream --file ABSOLUTE_DRAFT --approve|--reject SHA256",
+      "      Collect terminal experience, propose a compact playbook, then explicitly approve its exact draft before advisory use",
+      "  recipe --file ABSOLUTE_OBJECTIVE",
+      "      Preview a pinned workflow recipe against the current checkout without model calls or admission",
+      "  persistence status | sync | inspect | maintain | restore [--checkpoint SHA]",
+      "  persistence reconcile --objective N",
+      "      Inspect local and verified Git durability, or synchronize to the explicitly configured archive",
+      "      maintain runs one bounded housekeeping pass (pack the publisher, reclaim retired Objectives); the service runs it in the background",
+      "  run --objective N [--deadline ISO_TIMESTAMP] [--provider NAME]",
+      "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness and fixes its provider (--provider, else defaultProvider)",
+      "  queue add N [N ...] | list | sync | remove N | pause | resume | drain",
+      "      The Objectives the background service runs, in order",
+      "  supervisor start | check | stop [--disable] | upgrade --cli ABSOLUTE_INSTALLED_CLI | uninstall",
+      "      Control the background service (stop drains and keeps state; --disable also stops it starting at login)",
+      "  status [--objective N | --issue N|URL] [--json]",
+      "      With --objective: the phase and the exact next command. --issue finds the Objective, or Work Item, an issue names in local state. Without: the service and the queue",
+      "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT [--question DIGEST]] --reason TEXT",
+      "      Decide a plan or a pending amendment's question (--answer is required to accept either; --question names the question status shows, and decide refuses another) or a result criterion (--item names the Work Item; without it, the final acceptance)",
+      "  retry --objective N [--item ITEM [--fresh] [--retire-command COMMAND --reason TEXT]] [--rereview] [--review-artifacts FILE]",
+      "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt (continuing from its refused result; --fresh starts from the base; --retire-command first drops one validation command that cannot pass offline, such as a network check CI covers, recording --reason), or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
+      "  repair --objective N --proposal FILE",
+      "      Record a diagnosed correction for a failed Work Item",
+      "  decline-discovery --objective N --decision FILE",
+      "      Decline an obsolete settled worker proposal; preserves its result and ordinary acceptance",
+      "  collect --objective N --item ITEM --run RUN_ID --attempt ATTEMPT_ID",
+      "      Freeze an existing completed local return; ordinary validation and review remain required",
+      "  propose-amendment --objective N --proposal FILE",
+      "      Submit a graph amendment (or a replacement for a rejected one)",
+      "  watch [--objective N] [--json] [--follow [--interval SECONDS]] [--stale-minutes N]",
+      "      One screen: each Work Item's step, worker liveness and effort, files changed so far and recent tool calls; without --objective, every running Objective",
+      "  diagnostics --objective N [--follow | --summary | --analyze | --logs ITEM [--follow] | --captures [--content RECORD_ID]]",
+      "  diagnostics --scorecard FILE [--json] [--output ABSOLUTE_NEW_FILE]",
+      "      The one observation command: agent timeline by default. --summary prints the efficiency report (time per stage, operator waits, attempts, tokens per role; --json for tools). --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
+      "  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST]",
+      "      Preview, then send, retained captures off this host",
+      "  select --objective N --item ITEM --output ABSOLUTE_NEW_DIRECTORY",
+      "      Write the candidate AssetSets of a waiting Work Item to look at",
+      "  select --objective N --item ITEM --set SET_ID [--bind DEPENDENT_ITEM ...]",
+      "      Record the pick",
+      "  pause|drain|resume --objective N",
+      "  cancel --objective N [--provider NAME]",
+      "      Cancel the Objective; --provider names the provider it ran with when its frozen configuration matches none",
+    ].join("\n"),
+  );
+}
+
+/** The words of `factory queue ...`: the action, then Objective numbers. `--config PATH` is read elsewhere. */
+function queueWords(args: string[]): string[] {
+  const words: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--config") index++;
+    else if (arg.startsWith("--"))
+      throw new Error(
+        `Unknown option ${arg} for factory queue; see factory help`,
+      );
+    else words.push(arg);
+  }
+  return words;
+}
+
+/** Objective numbers: positive integers. */
+function objectiveNumbers(words: string[]): number[] {
+  return words.map((word) => {
+    const value = Number(word);
+    if (!/^\d+$/.test(word) || !Number.isSafeInteger(value) || value <= 0)
+      throw new Error(`${word} is not an Objective number`);
+    return value;
+  });
+}
+
+/** `factory queue`: the Objectives the background service runs. */
+async function queueCommand(args: string[], path: string): Promise<void> {
+  const [action, ...rest] = queueWords(args);
+  const config = readConfig(path);
+  const numbers = [...new Set(objectiveNumbers(rest))];
+  if (action === "add") {
+    if (!numbers.length)
+      throw new Error(
+        "queue add requires Objective numbers: queue add N [N ...]",
+      );
+    const record = await composeIntake(config).enqueueIntake(numbers);
+    console.log(
+      JSON.stringify(
+        record.watch
+          ? record
+          : {
+              ...record,
+              note: "The background service is not set up; `factory setup --background` starts it and runs this queue",
+            },
+        null,
+        2,
+      ),
+    );
+  } else if (action === "remove") {
+    if (!numbers.length)
+      throw new Error(
+        "queue remove requires Objective numbers: queue remove N",
+      );
+    const record = await composeIntake(config).intakeControl(
+      "dequeue",
+      numbers,
+    );
+    console.log(JSON.stringify(record, null, 2));
+  } else if (
+    action === "list" ||
+    action === "sync" ||
+    action === "pause" ||
+    action === "resume" ||
+    action === "drain"
+  ) {
+    if (numbers.length)
+      throw new Error(`queue ${action} takes no Objective numbers`);
+    console.log(
+      JSON.stringify(
+        await composeIntake(config).intakeControl(
+          action === "list" ? "sync" : action,
+        ),
+        null,
+        2,
+      ),
+    );
+  } else
+    throw new Error(
+      `Unknown queue action ${action ?? "(none)"}; use add, list, sync, remove, pause, resume or drain`,
+    );
+}
+
+/** Model-free Git restore and inspection never activate a provider or service. */
+async function persistenceCommand(args: string[], path: string): Promise<void> {
+  const words: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index]!;
+    if (["--config", "--checkpoint", "--objective"].includes(argument)) {
+      const value = args[++index];
+      if (!value || value.startsWith("--"))
+        throw new Error(`${argument} requires a value`);
+    } else words.push(argument);
+  }
+  const [action, ...rest] = words;
+  if (
+    rest.length ||
+    !["status", "sync", "inspect", "maintain", "restore", "reconcile"].includes(
+      action ?? "",
+    )
+  )
+    throw new Error(
+      "Use factory persistence status | sync | inspect | maintain | restore [--checkpoint SHA] | reconcile --objective N",
+    );
+  const checkpoint = option(args, "checkpoint");
+  const objectiveValue = option(args, "objective");
+  if (checkpoint !== undefined && action !== "restore")
+    throw new Error("--checkpoint belongs to persistence restore");
+  if (objectiveValue !== undefined && action !== "reconcile")
+    throw new Error("--objective belongs to persistence reconcile");
+  if (checkpoint !== undefined && !/^[a-f0-9]{40,64}$/.test(checkpoint))
+    throw new Error("--checkpoint requires an exact Git commit SHA");
+  const config = readConfig(path);
+  let result: unknown;
+  if (action === "restore")
+    result = await restoreRecoveryCheckpoint({ config, checkpoint });
+  else if (action === "reconcile") {
+    if (objectiveValue === undefined)
+      throw new Error("persistence reconcile requires --objective N");
+    const [objective] = objectiveNumbers([objectiveValue]);
+    result = await reconcileRestoredContinuation({
+      config,
+      objective: objective!,
+    });
+  } else if (action === "status") result = gitPersistenceStatus(config);
+  else if (action === "inspect")
+    result = await inspectRecoveryCheckpoint(config);
+  else if (action === "maintain")
+    result = await maintainRecoveryCheckpoint(config);
+  else
+    result = await synchronizeRecoveryCheckpoint(config, {
+      reason: "explicit",
+    });
+  console.log(JSON.stringify(result, null, 2));
+}
+
+/** `factory supervisor`: control the background service `setup --background` installed. */
+async function supervisorCommand(args: string[], path: string): Promise<void> {
+  // The action comes first, before any option; `--config PATH` may precede it.
+  const [action] = args[0] === "--config" ? args.slice(2) : args;
+  if (action === "serve") {
+    const config = readConfig(path);
+    // A service reads only the credentials systemd loaded for it.
+    const loaded = args.flatMap((arg, index) =>
+      arg === "--service-credential" && args[index + 1]
+        ? [args[index + 1]!]
+        : [],
+    );
+    loadServiceLoginCredentials(config, loaded);
+    let record: IntakeAuthorization;
+    try {
+      record = await compose(config, loaded).runIntake({
+        backgroundConfigurationPath: path,
+      });
+    } catch (error) {
+      // Queue metadata approved under this installation's earlier queue
+      // authority waits for the operator's re-authorization (#1305).
+      const changed =
+        error instanceof QueueAuthorityChanged
+          ? error
+          : error instanceof Error &&
+              error.cause instanceof QueueAuthorityChanged
+            ? error.cause
+            : undefined;
+      if (!changed) throw error;
+      console.error(
+        `Factory: ${changed.message}; then start the service with factory supervisor start`,
+      );
+      process.exitCode = EXIT_NEEDS_DECISION;
+      return;
+    }
+    reportIntake(record);
+    return;
+  }
+  if (
+    !action ||
+    !["start", "stop", "upgrade", "uninstall", "check"].includes(action)
+  )
+    throw new Error(
+      `Unknown supervisor action ${action ?? "(none)"}; use start, stop, check, upgrade or uninstall`,
+    );
+  if (args.includes("--disable") && action !== "stop")
+    throw new Error("--disable belongs to factory supervisor stop");
+  if (args.includes("--cli") && action !== "upgrade")
+    throw new Error("--cli belongs to factory supervisor upgrade");
+  const result = await supervise(action, path, {
+    cli: option(args, "cli"),
+    disable: args.includes("--disable"),
+  });
+  console.log(
+    typeof result === "string" ? result : JSON.stringify(result, null, 2),
+  );
+  // An upgrade that waits for running Objectives to finish needs a rerun.
+  if (result && typeof result === "object" && "draining" in result)
+    process.exitCode = EXIT_NEEDS_DECISION;
+}
+
+/** Every Objective a live controller runs: the service's, else foreground runs. */
+async function runningObjectives(config: FactoryConfig): Promise<number[]> {
+  if (liveControllerOwner(installationLockPath(config.repository))?.intake) {
+    const queue = (await composeIntake(config).intakeControl("status")) as {
+      activeObjectives?: number[];
+      activeObjective?: number | null;
+    };
+    return (
+      queue.activeObjectives ??
+      (queue.activeObjective ? [queue.activeObjective] : [])
+    );
+  }
+  return liveObjectiveOwners(config.repository).map((owner) => owner.objective);
+}
+
+/** `factory status` without an Objective: the service and the queue. */
+async function serviceStatus(path: string, json: boolean): Promise<void> {
+  const config = readConfig(path);
+  const service = (await supervise("status", path)) as ServiceStatus["service"];
+  const queue = (await composeIntake(config).intakeControl(
+    "status",
+  )) as ServiceStatus["queue"] &
+    Pick<IntakeAuthorization, "remoteObservation"> & {
+      localMode?: string;
+    };
+  const secrets = () =>
+    config.policy.allowedSecretNames
+      .map((name) => process.env[name])
+      .filter((value): value is string => Boolean(value));
+  // Every Objective a live controller runs: the service's, else the
+  // foreground runs side by side.
+  const running =
+    queue.activeObjectives ??
+    (queue.activeObjective ? [queue.activeObjective] : []);
+  // Objectives the live service holds for a person while it runs the others.
+  const waiting = queue.waitingObjectives ?? [];
+  const objective =
+    running[0] ?? waiting[0]?.objective ?? queue.observation?.needsDecision;
+  const summaryOf = (id: number) => {
+    try {
+      const { document } = statusDocument(
+        config,
+        id,
+        { serviceRegistered: service.registered === true },
+        path,
+      );
+      return {
+        objective: id,
+        phase: document.phase,
+        summary: document.summary,
+        ...(document.nextAction
+          ? { command: document.nextAction.command }
+          : {}),
+      };
+    } catch (error) {
+      return {
+        objective: id,
+        phase: "unknown",
+        summary: redactDiagnosticDetail(
+          error instanceof Error ? error.message : String(error),
+          secrets(),
+        ),
+      };
+    }
+  };
+  const activeObjectives = running.map((id) => {
+    const entry = summaryOf(id);
+    return {
+      objective: entry.objective,
+      phase: entry.phase,
+      summary: entry.summary,
+    };
+  });
+  const waitingObjectives = waiting.map(({ objective: id, reason }) => ({
+    ...summaryOf(id),
+    reason,
+  }));
+  let current: Pick<
+    ServiceStatus,
+    "currentObjective" | "currentObjectiveError"
+  > = {};
+  if (objective) {
+    try {
+      current = {
+        currentObjective: statusDocument(
+          config,
+          objective,
+          { serviceRegistered: service.registered === true },
+          path,
+        ).document,
+      };
+    } catch (error) {
+      current = {
+        currentObjectiveError: redactDiagnosticDetail(
+          error instanceof Error ? error.message : String(error),
+          secrets(),
+        ),
+      };
+    }
+  }
+  const document = {
+    service,
+    queue,
+    activeObjectives,
+    ...(waitingObjectives.length ? { waitingObjectives } : {}),
+    ...current,
+    durability: gitPersistenceStatus(config),
+    commandSandbox: commandSandboxStatus(commandSandboxPolicy(config)),
+    provider: {
+      name: readConfigFile(path).defaultProvider,
+      selectedBy: "default",
+    },
+  };
+  if (json) console.log(JSON.stringify(document));
+  else {
+    for (const line of renderServiceStatus(document)) console.log(line);
+    if (queue.localMode)
+      console.log(
+        `Local new dispatch: ${queue.localMode}; admitted work is retained.`,
+      );
+    if (queue.remoteObservation)
+      console.log(
+        queue.remoteObservation.availability === "last-observed"
+          ? `Project observation: last observed at ${queue.remoteObservation.observedAt ? displayDateTime(queue.remoteObservation.observedAt) : "an unknown time"}.`
+          : "Project observation: unavailable; status grants no new admission.",
+      );
+    console.log(`Durability: ${JSON.stringify(document.durability)}`);
+    console.log(
+      `Command sandbox: ${document.commandSandbox.mode}; ${document.commandSandbox.detail}`,
+    );
+    console.log(
+      `Provider for new queued work: ${document.provider.name} (${providerSummary(config)})`,
+    );
+  }
+}
+type ServiceStatus = Parameters<typeof renderServiceStatus>[0];
+
+/**
+ * Refusals that need no recovery checkpoint: invalid `decide` arguments, and a
+ * first `run` the local queue receipts show was never admitted. They run before
+ * the command opens its checkpoint operation, whose verification and closing
+ * synchronization can take minutes. Nothing is mutated, so nothing needs
+ * durability; every other check, including the full Project-backed admission
+ * check, still runs in its original place.
+ */
+function refuseStatelessly(
+  command: string,
+  args: string[],
+  config: FactoryConfig,
+): void {
+  if (command === "decide" || command === "run") {
+    const objective = Number(option(args, "objective"));
+    if (!Number.isSafeInteger(objective) || objective <= 0)
+      throw new Error(`${command} requires --objective N`);
+  }
+  if (command === "decide") {
+    const outcome = option(args, "outcome");
+    if (
+      !option(args, "reason") ||
+      (outcome !== "accept" && outcome !== "refuse")
+    )
+      throw new Error("decide requires --outcome accept|refuse and --reason");
+    if (option(args, "question") !== undefined && !option(args, "answer"))
+      throw new Error("--question names the question an --answer answers");
+  }
+  if (command === "run") {
+    const objective = Number(option(args, "objective"));
+    if (
+      Number.isSafeInteger(objective) &&
+      objective > 0 &&
+      !readContinuation(config.repository, objective)
+    )
+      refuseUnadmittedRun(config, objective);
+  }
+}
+
+/** `factory decide`: the plan a run saved, or a result criterion, read from the Objective's state. */
+async function decideCommand(
+  config: ReturnType<typeof readConfig>,
+  objective: number,
+  args: string[],
+): Promise<void> {
+  const outcome = option(args, "outcome");
+  const reason = option(args, "reason");
+  const item = option(args, "item");
+  if (!reason || (outcome !== "accept" && outcome !== "refuse"))
+    throw new Error("decide requires --outcome accept|refuse and --reason");
+  const decided = await composePlanning(config).decide(objective, {
+    item,
+    criterion: option(args, "criterion"),
+    actor: operatorName(),
+    outcome,
+    answer: option(args, "answer"),
+    question: option(args, "question"),
+    reason,
+  });
+  // A live service recorded the decision itself and dispatches it again.
+  const run = liveControllerOwner(installationLockPath(config.repository))
+    ?.intake
+    ? "the service's next dispatch pass"
+    : `\`factory run --objective ${objective}\``;
+  console.log(
+    decided === "plan-accepted"
+      ? `Accepted the plan for Objective #${objective}; ${run} continues it`
+      : decided === "plan-answered"
+        ? `Recorded your answer for Objective #${objective}; ${run} revises the plan with your answer and reviews it again`
+        : decided === "plan-revisions-granted"
+          ? `Granted ${PLANNING_REVISION_GRANT} more plan revisions for Objective #${objective}; ${run} revises the retained draft for the last review's findings`
+          : decided === "plan-refused"
+            ? `Refused and discarded the plan for Objective #${objective}; the next run plans again`
+            : decided === "amendment-accepted"
+              ? `Answered the amendment's question for Objective #${objective}; ${run} compiles it with your answer`
+              : decided === "amendment-refused"
+                ? `Refused the amendment for Objective #${objective} and gave back its planning revision; submit a corrected one with \`factory propose-amendment --objective ${objective} --proposal FILE\``
+                : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${
+                    decided === "result-open"
+                      ? `other criteria still wait: \`factory status --objective ${objective}\` lists each decision, then ${run} continues`
+                      : `${run} continues it`
+                  }`,
+  );
+}
+
+/** The planner, reviewer and worker models a provider runs, for status. */
+function providerSummary(config: FactoryConfig): string {
+  const harness =
+    config.execution.kind === "local" ? config.execution.harness : undefined;
+  const worker =
+    config.execution.kind === "managed-agent"
+      ? config.execution.provider
+      : harness && "model" in harness
+        ? `${harness.kind} ${harness.model}`
+        : config.execution.profiles
+          ? `profiles ${Object.keys(config.execution.profiles).join(", ")}`
+          : (harness?.kind ?? "none");
+  return `planning ${config.planning.kind} ${config.planning.planner.model}, review ${config.planning.reviewer.model}, workers ${worker}`;
+}
+
+/**
+ * The provider a command runs with. Queue, service and persistence commands share the
+ * service's default provider; Objective commands keep the provider the Objective froze;
+ * new work follows --provider, else the default.
+ */
+function selectedForCommand(
+  command: string,
+  args: string[],
+  path: string,
+): SelectedConfig {
+  if (
+    ["queue", "supervisor", "persistence"].includes(command) ||
+    (command === "status" && option(args, "objective") === undefined) ||
+    (command === "diagnostics" && option(args, "scorecard") !== undefined)
+  )
+    return readSelectedConfig(path);
+  const objective = option(args, "objective");
+  return readSelectedConfig(path, {
+    objective:
+      objective !== undefined && /^\d+$/.test(objective)
+        ? Number(objective)
+        : undefined,
+    flag: option(args, "provider"),
+    cancel: command === "cancel",
+  });
+}
+
+/** The issue `status --issue` was given, and what it names in local state. */
+interface IssueFocus {
+  issue: number;
+  objective: number;
+  item?: string;
+}
+
+/**
+ * `status --issue N|URL`: the Objective or Work Item an issue names, resolved
+ * from this installation's state, then that Objective's status.
+ */
+function statusForIssue(args: string[]): Promise<void> {
+  assertKnownFlags("status", args);
+  if (option(args, "objective") !== undefined)
+    throw new Error("--issue names the Objective; omit --objective");
+  const value = option(args, "issue") ?? "";
+  const { config } = readSelectedConfig(option(args, "config") ?? configPath());
+  const url =
+    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)(?:[/?#].*)?$/.exec(
+      value,
+    );
+  if (url && url[1]!.toLowerCase() !== config.repository.toLowerCase())
+    throw new Error(
+      `${value} is not an issue of the configured target ${config.repository}`,
+    );
+  const digits = url ? url[2]! : value;
+  const issue = Number(digits);
+  if (!/^[1-9][0-9]*$/.test(digits) || !Number.isSafeInteger(issue))
+    throw new Error("--issue takes an issue number or its GitHub URL");
+  const focus = { issue, ...resolveIssue(config.repository, issue) };
+  const index = args.indexOf("--issue");
+  return dispatchMain(
+    [
+      "status",
+      ...args.filter((_, at) => at !== index && at !== index + 1),
+      "--objective",
+      String(focus.objective),
+    ],
+    focus,
+  );
+}
+
+async function dispatchMain(
+  argv = process.argv.slice(2),
+  focus?: IssueFocus,
+): Promise<void> {
+  const [command, ...args] = argv;
+  if (!command || command === "help" || command === "--help") return help();
+  assertKnownFlags(command, args);
+  const path = option(args, "config") ?? configPath();
+  if (command === "setup") {
+    const result = await setupTarget(args, path);
+    console.log(JSON.stringify(result, null, 2));
+    if (result.status === "blocked") process.exitCode = 1;
+    return;
+  }
+  if (command === "propose")
+    return runProposeCommand(
+      selectedForCommand(command, args, path).config,
+      args,
+      path,
+    );
+  if (command === "dream")
+    return runDreamCommand(
+      selectedForCommand(command, args, path).config,
+      args,
+      path,
+    );
+  if (command === "recipe")
+    return runWorkflowRecipePreview(
+      selectedForCommand(command, args, path).config,
+      args,
+    );
+  if (command === "persistence") return persistenceCommand(args, path);
+  if (command === "queue") return queueCommand(args, path);
+  if (command === "supervisor") return supervisorCommand(args, path);
+  if (command === "status" && option(args, "objective") === undefined)
+    return serviceStatus(path, args.includes("--json"));
+  if (
+    ![
+      "decide",
+      "run",
+      "status",
+      "watch",
+      "diagnostics",
+      "export-captures",
+      "select",
+      "cancel",
+      "propose-amendment",
+      "decline-discovery",
+      "collect",
+      "pause",
+      "drain",
+      "resume",
+      "retry",
+      "repair",
+    ].includes(command)
+  )
+    throw new Error(`Unknown command: ${command}; see factory help`);
+  const selected = selectedForCommand(command, args, path);
+  const { config } = selected;
+  if (command === "diagnostics" && option(args, "scorecard") !== undefined)
+    return runDiagnosticsScorecardCommand(config, args);
+  if (command === "watch" && option(args, "objective") === undefined)
+    return watchObjective(config, () => runningObjectives(config), args);
+  const objective = Number(option(args, "objective"));
+  if (!Number.isSafeInteger(objective) || objective <= 0)
+    throw new Error(`${command} requires --objective N`);
+  let application: ReturnType<typeof compose> | undefined;
+  const requireApplication = (): ReturnType<typeof compose> =>
+    (application ??= compose(config));
+  if (command === "decide") return decideCommand(config, objective, args);
+  if (command === "collect") {
+    const item = option(args, "item"),
+      runId = option(args, "run"),
+      attempt = option(args, "attempt");
+    if (!item || !runId || !attempt)
+      throw new Error("collect requires --item, --run and --attempt");
+    await requireApplication().collectCompletedWorker(objective, {
+      item,
+      runId,
+      attempt,
+    });
+    console.log(
+      "Completed worker evidence collected; normal validation and review remain required",
+    );
+    return;
+  }
+  if (command === "decline-discovery") {
+    const decisionPath = option(args, "decision");
+    if (!decisionPath)
+      throw new Error("decline-discovery requires --decision FILE");
+    const input = JSON.parse(readFileSync(decisionPath, "utf8"));
+    const request = { objective, action: "decline-discovery" as const, input };
+    const remote = await requestControl(config.repository, request);
+    if (!remote.handled)
+      requireApplication().declineWorkerDiscovery(objective, input);
+    console.log(JSON.stringify(remote.handled ? remote.result : "applied"));
+    return;
+  }
+  if (command === "propose-amendment") {
+    const proposalPath = option(args, "proposal");
+    if (!proposalPath)
+      throw new Error("propose-amendment requires --proposal FILE");
+    const result = await controlObjective(config, {
+      objective,
+      action: "propose-amendment",
+      input: JSON.parse(readFileSync(proposalPath, "utf8")),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (["pause", "drain", "resume"].includes(command)) {
+    const result = (await controlObjective(config, {
+      objective,
+      action: command as "pause" | "drain" | "resume",
+    })) as { hold?: { reason: string; next: string | null } } | undefined;
+    // A rejected amendment keeps the Objective paused: the resume or drain
+    // changed nothing, so say what does (#1297).
+    if (result?.hold)
+      throw new LifecycleRefusal(
+        "rejection_hold",
+        `Objective #${objective} stays paused: a rejected graph amendment holds it; ${result.hold.next ? `run ${result.hold.next}` : "submit a replacement or cancel"}`,
+      );
+    console.log(JSON.stringify(result));
+    return;
+  }
+  if (command === "status") {
+    const { document, secrets } = statusDocument(config, objective);
+    const provider = { name: selected.provider, selectedBy: selected.source };
+    if (args.includes("--json"))
+      console.log(
+        JSON.stringify({
+          ...document,
+          provider,
+          ...(focus ? { issue: focus } : {}),
+        }),
+      );
+    else {
+      if (focus)
+        console.log(
+          focus.item
+            ? `Issue #${focus.issue}: Work Item ${focus.item} of Objective #${focus.objective}`
+            : `Issue #${focus.issue}: Objective #${focus.objective}`,
+        );
+      for (const line of statusLines(document, secrets)) console.log(line);
+      console.log(
+        provider.selectedBy === "unmatched"
+          ? `Provider: ${provider.name} (${providerSummary(config)}; default, because the Objective's frozen configuration matches no configured provider: restore its settings to continue it, or name the provider it ran with to cancel it: factory cancel --objective ${objective} --provider NAME)`
+          : `Provider: ${provider.name} (${providerSummary(config)}; selected by ${provider.selectedBy})`,
+      );
+    }
+  } else if (command === "watch") {
+    await watchObjective(config, objective, args);
+  } else if (command === "export-captures") {
+    const result = await runCaptureExportCommand(config, objective, args);
+    console.log(JSON.stringify(result, null, 2));
+    if (!["preview", "accepted"].includes(result.status)) process.exitCode = 1;
+  } else if (command === "diagnostics") {
+    await runDiagnosticsCommand(config, objective, args);
+  } else if (command === "cancel") {
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "cancel",
+    });
+    // Cancel releases the Objective's own sessions and workers, so it needs the
+    // adapters it ran with; a default guess would refuse their bindings.
+    if (!reply.handled && selected.source === "unmatched")
+      throw new Error(
+        `Objective #${objective}'s frozen configuration matches no configured provider; cancel it with the provider it ran with: factory cancel --objective ${objective} --provider NAME`,
+      );
+    const result = reply.handled
+      ? reply.result
+      : await requireApplication().cancelObjective(objective);
+    console.log(`Objective #${objective} cancellation ${result}`);
+  } else if (command === "repair") {
+    const file = option(args, "proposal");
+    if (!file)
+      throw new Error(
+        "repair requires --proposal FILE containing item and diagnosed correction",
+      );
+    const input = JSON.parse(readFileSync(file, "utf8"));
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "repair",
+      input,
+    });
+    if (!reply.handled) requireApplication().repairWorkItem(objective, input);
+    console.log("Diagnosed repair recorded within the configured allowance");
+  } else if (command === "retry") {
+    const item = option(args, "item");
+    if (args.includes("--rereview")) {
+      if (!item) throw new Error("retry --rereview requires --item");
+      if (args.includes("--fresh"))
+        throw new Error("--fresh starts a new attempt; it cannot rereview");
+      const selectionFile = option(args, "review-artifacts");
+      if (
+        args.includes("--review-artifacts") &&
+        (!selectionFile || selectionFile.startsWith("--"))
+      )
+        throw new Error("--review-artifacts requires a selector JSON file");
+      const input = {
+        item,
+        actor: operatorName(),
+        ...(selectionFile && {
+          reviewArtifacts: JSON.parse(readFileSync(selectionFile, "utf8")),
+        }),
+      };
+      const reply = await requestControl(config.repository, {
+        objective,
+        action: "rereview",
+        input,
+      });
+      if (!reply.handled)
+        requireApplication().rereviewWorkItem(objective, input);
+      console.log(
+        `Work Item ${item} is ready for validation and automatic review; \`factory run --objective ${objective}\` continues it`,
+      );
+      return;
+    }
+    if (option(args, "review-artifacts"))
+      throw new Error("--review-artifacts requires --rereview");
+    const fresh = args.includes("--fresh");
+    if (fresh && !item) throw new Error("retry --fresh requires --item");
+    const command = option(args, "retire-command");
+    const reason = option(args, "reason");
+    if ((command === undefined) !== (reason === undefined))
+      throw new Error("retry --retire-command and --reason go together");
+    if (command !== undefined && !item)
+      throw new Error("retry --retire-command requires --item");
+    const retire =
+      command === undefined
+        ? undefined
+        : { command, reason: reason!, actor: operatorName() };
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "retry",
+      input:
+        item === undefined
+          ? {}
+          : { item, ...(fresh && { fresh: true }), ...(retire && { retire }) },
+    });
+    const retried = reply.handled
+      ? reply.result
+      : requireApplication().retryWorkItem(objective, item, {
+          fresh,
+          ...(retire && { retire }),
+        });
+    console.log(
+      retried === "step"
+        ? `The ${item === undefined ? "Objective" : `Work Item ${item}`} step will run again; ${reply.handled ? "the active run continues it" : `factory run --objective ${objective} continues it`}`
+        : `Work Item ${item} is pending for a new explicit attempt`,
+    );
+  } else if (command === "select") {
+    const item = option(args, "item");
+    const set = option(args, "set");
+    const output = option(args, "output");
+    if (!item) throw new Error("select requires --item");
+    if (!set) {
+      if (!output || args.includes("--bind"))
+        throw new Error(
+          "select without --set writes the candidates for review and requires --output ABSOLUTE_NEW_DIRECTORY; select --set SET_ID records the pick",
+        );
+      const sets = await requireApplication().exportAssetSetsForReview(
+        objective,
+        item,
+        output,
+      );
+      console.log(
+        `Wrote ${sets.length} candidate AssetSet${sets.length === 1 ? "" : "s"} (${sets.join(", ")}) to ${output}; choose with factory select --objective ${objective} --item ${item} --set SET_ID`,
+      );
+      return;
+    }
+    if (output)
+      throw new Error("--output writes the candidates; omit --set to use it");
+    const downstreamItems = args.flatMap((arg, index) =>
+      arg === "--bind" && args[index + 1] ? [args[index + 1]!] : [],
+    );
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "select",
+      input: { item, set, downstreamItems },
+    });
+    if (!reply.handled)
+      await selectAssetSetFromCli(
+        config,
+        objective,
+        item,
+        set,
+        new LocalContentStore(join(stateRoot(config.repository), "content")),
+        { downstreamItems },
+      );
+    console.log(
+      `Selected AssetSet ${set} for Work Item ${item}; run the Objective to continue`,
+    );
+  } else {
+    // A first run checks what the Objective will need before it plans.
+    if (!readContinuation(config.repository, objective)) {
+      const ready = await checkReadiness(config);
+      if (!ready.ready)
+        return reportRun(
+          config,
+          new AwaitingBeforeState(objective, ready.detail!, ready.fix),
+        );
+    }
+    reportRun(
+      config,
+      await requireApplication()
+        .runObjective(objective, { deadlineAt: option(args, "deadline") })
+        .catch(waitBeforeState),
+    );
+  }
+}
+
+/** Print the queue record and set the documented exit code. */
+function reportIntake(record: IntakeAuthorization): void {
+  console.log(JSON.stringify(record, null, 2));
+  process.exitCode = intakeExitCode(record);
+}
+
+/** A run that waits before any state exists is an outcome, not a failure. */
+function waitBeforeState(error: unknown): AwaitingBeforeState {
+  if (error instanceof AwaitingBeforeState) return error;
+  throw error;
+}
+
+/** The status view `factory status --objective N` shows, from the recorded state. */
+function statusDocument(
+  config: FactoryConfig,
+  objective: number,
+  guidanceContext: import("./prerequisite-guidance.js").PrerequisiteGuidanceContext = {},
+  configuration = option(process.argv.slice(3), "config"),
+) {
+  const requiredSecretNames = requiredProviderCredentials(config);
+  const secrets = [
+    ...new Set([...config.policy.allowedSecretNames, ...requiredSecretNames]),
+  ]
+    .map((name) => process.env[name])
+    .filter((value): value is string => Boolean(value));
+  const continuation = readContinuation(config.repository, objective);
+  const currentConfigDigest = factoryConfigDigest(config);
+  const configurationMatches =
+    !continuation || continuationConfigurationMatches(continuation, config);
+  const document = continuationStatusDocument(
+    continuation,
+    config.repository,
+    objective,
+    config.delivery.kind,
+    secrets,
+    continuation?.capacity.concurrency,
+    controllerActive(config.repository, objective),
+    continuation ? undefined : readPreState(config.repository, objective),
+    continuation && configurationMatches
+      ? continuation.configDigest
+      : currentConfigDigest,
+    {
+      ...guidanceContext,
+      requiredSecretNames: configurationMatches ? requiredSecretNames : [],
+      configuration,
+    },
+  );
+  if (continuation?.restoration?.status === "held") {
+    const terminal =
+      document.state === "complete" || document.state === "cancelled";
+    document.summary = terminal
+      ? "Restored terminal history; the original outcome remains unchanged"
+      : "Restored records require ownership reconciliation";
+    document.nextAction = terminal
+      ? null
+      : {
+          command: `factory persistence reconcile --objective ${objective}`,
+          reason: continuation.restoration.reason,
+        };
+  }
+  // With a Project queue, `run` needs an admission (#1577): an Objective the
+  // local receipts do not show admitted is added first, and a running service
+  // starts an admitted one itself.
+  if (
+    !continuation &&
+    config.queue?.project &&
+    document.state === "not-started" &&
+    document.nextAction?.command === `factory run --objective ${objective}`
+  ) {
+    let service = false;
+    try {
+      service =
+        liveControllerOwner(installationLockPath(config.repository))?.intake ===
+        true;
+    } catch {
+      // An unreadable lock leaves the service unknown; `run` then says why.
+    }
+    if (!locallyAdmitted(config, objective))
+      document.nextAction = {
+        command: `factory queue add ${objective}`,
+        reason: service
+          ? "Admits the Objective to the queue; the running service then starts it in queue order"
+          : `Admits the Objective to the queue; then \`factory run --objective ${objective}\` starts it`,
+      };
+    else if (service) {
+      document.summary =
+        "queued; the running service starts it in queue order while the queue runs (`factory status` shows the queue and what holds it)";
+      document.nextAction = null;
+    } else {
+      // Every dispatch slot is held by another run's unsettled claim.
+      const claimed = locallyClaimedObjectives(config, objective);
+      if (claimed && claimed.length >= maxActiveObjectives(config)) {
+        document.summary = `queued; waits for ${claimed.map((id) => `Objective #${id}`).join(", ")} to finish`;
+        document.nextAction = null;
+      }
+    }
+  }
+  if (document.nextAction)
+    document.nextAction.command = configurationCommand(
+      document.nextAction.command,
+      configuration,
+    );
+  return {
+    document: {
+      ...document,
+      restoration: continuation?.restoration ?? null,
+      durability: gitPersistenceStatus(config),
+    },
+    secrets,
+  };
+}
+
+/**
+ * `factory watch`: one screen of each Work Item's live state; `--follow`
+ * reprints it. Without `--objective`, every Objective a live controller runs,
+ * one after another, re-resolved at each reprint.
+ */
+async function watchObjective(
+  config: FactoryConfig,
+  target: number | (() => Promise<number[]>),
+  args: string[],
+): Promise<void> {
+  const number = (name: string, fallback: number): number => {
+    const raw = option(args, name);
+    if (raw === undefined) return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0)
+      throw new Error(`--${name} requires a positive number`);
+    return value;
+  };
+  const staleMs = number("stale-minutes", 5) * 60_000;
+  const intervalMs = number("interval", 30) * 1000;
+  const printAll = async () => {
+    const objectives = typeof target === "number" ? [target] : await target();
+    if (!objectives.length && !args.includes("--json"))
+      console.log("No Objective is running");
+    for (const [index, objective] of objectives.entries()) {
+      if (index && !args.includes("--json")) console.log("");
+      print(objective);
+    }
+  };
+  const print = (objective: number) => {
+    const { document, secrets } = statusDocument(config, objective);
+    const continuation = readContinuation(config.repository, objective);
+    const items = continuation
+      ? itemActivities(config.repository, continuation)
+      : [];
+    const now = Date.now();
+    let running: ModelCallRow[] = [];
+    try {
+      if (continuation)
+        running = readRunTelemetry(config.repository, continuation, now).filter(
+          (call) => call.outcome === "running",
+        );
+    } catch {
+      // Telemetry only: an unreadable record leaves the calls out.
+    }
+    if (args.includes("--json")) {
+      console.log(
+        redactDiagnosticDetail(
+          JSON.stringify({
+            objective,
+            state: document.state,
+            phase: document.phase,
+            summary: document.summary,
+            inFlight: document.prerequisiteGuidance?.inFlight ?? [],
+            observedAt: new Date().toISOString(),
+            staleMinutes: staleMs / 60_000,
+            items,
+            modelCalls: running,
+          }),
+          secrets,
+        ),
+      );
+      return;
+    }
+    const pending = inFlightLine(document);
+    const headline = [
+      renderStatusText(document, option(process.argv.slice(3), "config"))[0] ??
+        `Objective #${objective}`,
+      ...(pending ? [pending] : []),
+      ...running.map(
+        (call) =>
+          `model: ${call.itemId ? `${call.itemId} ` : ""}${runningCallText(call, now)}`,
+      ),
+    ];
+    for (const line of renderWatch(headline, items, now, staleMs))
+      console.log(redactDiagnosticDetail(line, secrets));
+  };
+  await printAll();
+  if (!args.includes("--follow")) return;
+  await new Promise<void>((resolve) => {
+    const timer = setInterval(() => {
+      // JSON output stays one object per line.
+      if (!args.includes("--json")) console.log("");
+      printAll().catch((error: unknown) => {
+        process.stderr.write(
+          `factory watch: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }, intervalMs);
+    const stop = () => {
+      clearInterval(timer);
+      resolve();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
+function statusLines(
+  document: ReturnType<typeof statusDocument>["document"],
+  secrets: string[],
+): string[] {
+  return [
+    ...renderStatusText(document, option(process.argv.slice(3), "config")),
+    `Durability: ${JSON.stringify(document.durability)}`,
+  ].map((line) => redactDiagnosticDetail(line, secrets));
+}
+
+/** Print how a run ended and set the documented exit code. */
+function reportRun(
+  config: FactoryConfig,
+  state: ContinuationState | AwaitingBeforeState,
+): void {
+  const configuration = option(process.argv.slice(3), "config");
+  const outcome =
+    state instanceof AwaitingBeforeState
+      ? awaitingOutcome(state, configuration)
+      : runOutcome(
+          state,
+          () => {
+            const { document, secrets } = statusDocument(
+              config,
+              state.objective,
+            );
+            return statusLines(document, secrets);
+          },
+          configuration,
+        );
+  console.log(outcome.message);
+  process.exitCode = outcome.code;
+}
+
+async function main(): Promise<void> {
+  const enteredAt = Date.now();
+  const [, , command, ...args] = process.argv;
+  if (command === "status" && args.includes("--issue"))
+    return statusForIssue(args);
+  if (
+    command === "queue" ||
+    (command === "status" && !option(args, "objective"))
+  ) {
+    assertKnownFlags(command, args);
+    const localStatus = command === "status";
+    // Intake owns both foreground durability and authenticated forwarding. The
+    // CLI prints that exact outcome without a second terminal publication.
+    return withIntakeCommandDeadline(
+      enteredAt + (localStatus ? 1000 : QUEUE_COMMAND_TIMEOUT_MS),
+      () => (localStatus ? dispatchMain() : withOperatorCommand(dispatchMain)),
+      (acknowledgment) => {
+        const ack = acknowledgment as {
+          kind?: string;
+          newDispatch?: string;
+          admittedWork?: string;
+          projectSynchronization?: string;
+        };
+        if (
+          ack?.kind === "local-cessation-acknowledgment" &&
+          ack.newDispatch === "held" &&
+          ack.admittedWork === "retained" &&
+          ack.projectSynchronization === "pending"
+        )
+          console.error(
+            "Factory: New queue dispatch is held. Already admitted work is retained; Project synchronization and durability are pending.",
+          );
+      },
+    );
+  }
+  const mutating = new Set([
+    "propose",
+    "dream",
+    "run",
+    "decide",
+    "retry",
+    "repair",
+    "select",
+    "propose-amendment",
+    "decline-discovery",
+    "collect",
+    "pause",
+    "drain",
+    "resume",
+    "cancel",
+  ]);
+  if (!command || !mutating.has(command)) return dispatchMain();
+  assertKnownFlags(command, args);
+  const { config } = selectedForCommand(
+    command,
+    args,
+    option(args, "config") ?? configPath(),
+  );
+  refuseStatelessly(command, args, config);
+  // The command verifies the archive through the installation's sealed
+  // verifier copy (an incremental fetch and re-hashed reads), never a cold
+  // full verification while that copy exists. Housekeeping a foreground run
+  // started at an idle point stops before its terminal publication (#1714).
+  // Every mutating command but `run` is a one-shot operator command.
+  const operator =
+    command === "run"
+      ? (task: () => Promise<void>) => task()
+      : withOperatorCommand;
+  await operator(() =>
+    withRecoveryCheckpointOperation(
+      {
+        config,
+        buildClosure: () =>
+          buildRecoveryCheckpointClosure({
+            config,
+            scope: config.gitPersistence?.scope ?? "private-history",
+          }),
+      },
+      () =>
+        dispatchMain().finally(() =>
+          stopRecoveryCheckpointMaintenance(config.repository),
+        ),
+      { queueControlVerification: true },
+    ),
+  );
+}
+
+// Node opens its inspector on an unhandled SIGUSR1. Factory takes the signal
+// only as a run's cancellation, so outside a run's handler it does nothing.
+process.on("SIGUSR1", () => undefined);
+
+main().catch((error: unknown) => {
+  if (error instanceof ControllerCommandIncompleteError && error.returned)
+    // The Project effect returned and its operations are retained; the archive
+    // acknowledgment is pending or already recorded. The caller still failed.
+    console.error(
+      JSON.stringify({
+        kind: error.returned.acknowledged
+          ? "queue-command-returned"
+          : "queue-command-durability-pending",
+        returnedEffect: {
+          commandId: error.returned.commandId,
+          operations: error.returned.operations,
+        },
+        deadlineAt: error.deadlineAt ?? null,
+        completion: error.returned.acknowledged
+          ? "acknowledged"
+          : "durability-pending",
+        durability: error.returned.durability,
+        nextAction: error.returned.acknowledged
+          ? "Do not repeat the queue command; the archive already acknowledges its retained operations"
+          : "Do not repeat the queue command. Run factory persistence status, then factory persistence sync to acknowledge the retained bytes",
+      }),
+    );
+  else if (error instanceof ControllerCommandIncompleteError)
+    console.error(
+      JSON.stringify({
+        kind: "queue-command-incomplete",
+        requestId: error.requestId ?? null,
+        submission: error.submission,
+        deadlineAt: error.deadlineAt ?? null,
+        completion: "not-established",
+        ...(error.cause instanceof Error ? { cause: error.cause.message } : {}),
+        nextAction:
+          "Inspect retained status; do not replay an unknown mutation",
+      }),
+    );
+  // A lifecycle refusal names its stable code for tools, once: the outermost
+  // code of the cause chain. The message stays for people (#1714).
+  const code = lifecycleCode(error);
+  if (code) console.error(JSON.stringify({ kind: "lifecycle-refusal", code }));
+  console.error(
+    `Factory: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  // A configured archive limit names its fix (#1306).
+  const bounds = onlyCheckpointBoundsExceeded(error);
+  if (bounds) console.error(`Fix: ${bounds.fault.fix}`);
+  // A held archive at service start or a configured archive limit needs the
+  // operator, like a decision.
+  process.exitCode =
+    bounds ||
+    error instanceof ColdPublicationHeld ||
+    (error instanceof Error && error.cause instanceof ColdPublicationHeld)
+      ? EXIT_NEEDS_DECISION
+      : EXIT_FAILED;
+});

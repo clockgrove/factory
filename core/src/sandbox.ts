@@ -31,6 +31,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import type * as path from "node:path";
@@ -172,7 +173,9 @@ function privatePaths(
     join(state, "factory"),
     join(state, "clockgrove-factory"),
     ...(source.FACTORY_STATE_DIR ? [source.FACTORY_STATE_DIR] : []),
-    ...(source.FACTORY_CONFIG ? [dirname(source.FACTORY_CONFIG)] : []),
+    // A custom configuration may sit beside the target clone. Seal the
+    // file; the containment check also refuses any mount that includes it.
+    ...(source.FACTORY_CONFIG ? [source.FACTORY_CONFIG] : []),
     ...(linked && sealCommonGit ? [linked.common] : []),
   ].map(real);
   return {
@@ -954,6 +957,93 @@ function killWorkerProcesses(): void {
 
 process.once("exit", killWorkerProcesses);
 
+/** Quote one shell word. */
+const shellWord = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Write an executable launcher at `path` that runs `program` (with the
+ * launcher's arguments) as the leader of a new process group, as the init
+ * of a PID namespace of its own (`unshare --user --map-current-user --pid
+ * --fork --kill-child --mount-proc`). Its process id, the group's, goes to
+ * `pidFile` first. Killing the group, or the program ending, ends the
+ * namespace, and the kernel then kills every process left in it, however
+ * its commands regrouped or detached: an abort can't leave a command
+ * running. The launcher ignores SIGTERM; LaunchedGroup kills it. `stderr`
+ * appends the program's standard error to that file. Throws when
+ * util-linux's `setsid` or `unshare` is missing.
+ */
+export function namespacedLauncher(
+  path: string,
+  program: string,
+  pidFile: string,
+  stderr?: string,
+): void {
+  const find = (name: string) =>
+    [`/usr/bin/${name}`, `/bin/${name}`].find((candidate) =>
+      existsSync(candidate),
+    );
+  const setsid = find("setsid");
+  const unshare = find("unshare");
+  if (!setsid || !unshare)
+    throw new Error(
+      "setsid and unshare (util-linux) are needed to stop a Codex process and every command it started; install util-linux",
+    );
+  writeFileSync(
+    path,
+    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nexec ${setsid} ${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc ${shellWord(program)} "$@"${stderr ? ` 2>>${shellWord(stderr)}` : ""}\n`,
+    { mode: 0o700, flag: "wx" },
+  );
+}
+
+/**
+ * The process group a namespacedLauncher records, in processGroups from
+ * when it appears until `end`, so a service exit kills it even before the
+ * caller sees it start. `signal` aborting kills it; so does `end`, which
+ * ends whatever the run left behind.
+ */
+export class LaunchedGroup {
+  private group: number | undefined;
+  private readonly polling: NodeJS.Timeout;
+
+  constructor(
+    private readonly pidFile: string,
+    private readonly signal: AbortSignal,
+  ) {
+    this.polling = setInterval(() => {
+      if (this.track() !== undefined) clearInterval(this.polling);
+    }, 100);
+    this.polling.unref();
+    signal.addEventListener("abort", this.kill, { once: true });
+  }
+
+  /** The group, once the launcher has written it. */
+  track(): number | undefined {
+    if (this.group !== undefined) return this.group;
+    try {
+      const pid = Number(readFileSync(this.pidFile, "utf8").trim());
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        this.group = pid;
+        processGroups.add(pid);
+      }
+    } catch {
+      // Not started yet.
+    }
+    return this.group;
+  }
+
+  readonly kill = (): void => {
+    const group = this.track();
+    if (group !== undefined) killGroup(group);
+  };
+
+  end(): void {
+    clearInterval(this.polling);
+    this.signal.removeEventListener("abort", this.kill);
+    this.kill();
+    if (this.group !== undefined) processGroups.delete(this.group);
+  }
+}
+
 /** Process group and start time of `pid`, from /proc. */
 function processStat(
   pid: number,
@@ -1052,6 +1142,46 @@ class Refusal extends Error {
 }
 
 /**
+ * Throws a Refusal for a path a sandbox mount would expose: the operator's
+ * real HOME, a login, Factory's own paths, runtime sockets or a shared
+ * temporary directory.
+ */
+function exposureCheck(
+  checkout: string,
+): (path: string, field: string) => void {
+  const { exposes } = privatePaths(process.env, checkout);
+  return (path, field) => {
+    if (exposes(path) || showsHostSockets(path))
+      throw new Refusal(
+        `${field} ${path} would show sandboxed commands your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`,
+        `Point ${field} at a directory of its own, outside /tmp and the runtime directories`,
+      );
+  };
+}
+
+/**
+ * sandbox.readOnlyPaths entries as the real paths a sandbox may mount
+ * read-only. Throws a Refusal for a missing or exposing one. The Codex
+ * Worker grants the same paths (codex-worker.ts).
+ */
+export function readOnlyMounts(
+  entries: readonly string[],
+  checkout: string,
+  unsafe = exposureCheck(checkout),
+): string[] {
+  return entries.map((entry) => {
+    if (!existsSync(entry))
+      throw new Refusal(
+        `read-only path ${entry} does not exist`,
+        "Create it or remove it from sandbox.readOnlyPaths",
+      );
+    const resolved = realpathSync(entry);
+    unsafe(resolved, "read-only path");
+    return resolved;
+  });
+}
+
+/**
  * Package-manager store and cache directories under `root`: the pnpm store
  * and metadata cache and the npm cache. Set explicitly, since pnpm otherwise
  * puts its store at the root of the project's mount when that differs from
@@ -1125,15 +1255,7 @@ function launch(
   }
   if (runsAsRoot() && config.required)
     throw new Refusal(ROOT_REFUSED, ROOT_FIX);
-  // Exposure is judged against the operator's real HOME and Factory's paths.
-  const { exposes } = privatePaths(process.env, checkout);
-  const unsafe = (path: string, field: string) => {
-    if (exposes(path) || showsHostSockets(path))
-      throw new Refusal(
-        `${field} ${path} would show sandboxed commands your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`,
-        `Point ${field} at a directory of its own, outside /tmp and the runtime directories`,
-      );
-  };
+  const unsafe = exposureCheck(checkout);
   // Factory's own launcher stays off the PATH, as for workers.
   const path = workerToolchainPath(base.PATH);
   let toolchains: string[];
@@ -1149,17 +1271,10 @@ function launch(
       "Run Factory with a PATH whose directories hold only tools",
     );
   }
-  const readOnly = [...config.readOnlyPaths, ...(options.readOnly ?? [])].map(
-    (entry) => {
-      if (!existsSync(entry))
-        throw new Refusal(
-          `read-only path ${entry} does not exist`,
-          "Create it or remove it from sandbox.readOnlyPaths",
-        );
-      const resolved = realpathSync(entry);
-      unsafe(resolved, "read-only path");
-      return resolved;
-    },
+  const readOnly = readOnlyMounts(
+    [...config.readOnlyPaths, ...(options.readOnly ?? [])],
+    checkout,
+    unsafe,
   );
   const env: Record<string, string> = { ...base };
   // Configured values come first, so Factory's own variables win; the
@@ -1227,8 +1342,11 @@ function launch(
     // Nor does it fetch and run another pnpm version.
     env.pnpm_config_manage_package_manager_versions = "false";
   }
-  const system = SYSTEM_DIRECTORIES.filter((path) => existsSync(path)).map(
-    (path) => real(path),
+  // systemMounts already provides both the real directories and aliases
+  // such as /bin -> usr/bin. Binding a PATH entry over an alias would make
+  // bubblewrap refuse the symlink destination.
+  const system = SYSTEM_DIRECTORIES.filter((path) => existsSync(path)).flatMap(
+    (path) => [path, real(path)],
   );
   const mounts = new Map<string, "ro" | "rw">();
   // Git metadata is the checkout's own, never a login or Factory's files.

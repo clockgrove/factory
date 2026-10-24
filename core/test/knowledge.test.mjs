@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { githubOrigin } from "./helpers.mjs";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = "drill/target";
@@ -30,6 +31,16 @@ function installation() {
   const checkout = join(dir, "checkout");
   mkdirSync(checkout);
   spawnSync("git", ["init", "-q", checkout]);
+  spawnSync("git", ["init", "-q", "--bare", join(dir, "origin.git")]);
+  spawnSync("git", [
+    "-C",
+    checkout,
+    "remote",
+    "add",
+    "origin",
+    join(dir, "origin.git"),
+  ]);
+  githubOrigin(checkout, join(dir, "origin.git"), REPO);
   const config = join(dir, "factory.json");
   writeFileSync(
     config,
@@ -114,6 +125,7 @@ function seedDone(inst, issue, dir = inst.objectives) {
         },
       },
       retries: {},
+      asking: {},
       kept: {
         "plan:acceptedAt": "2026-10-01T00:00:00Z",
         "item:a:decisions": [
@@ -431,9 +443,7 @@ test("a planner lookup reads a file at the base inside the selectors and refuses
     selectors: ["docs/"],
     memory: false,
   };
-  const shown = readShown("<h2>Adaptive workflow</h2><p>enabled</p>", {
-    sources: false,
-  });
+  const shown = readShown("<p>Read the docs.</p>", { sources: false });
   const lookups = plannerLookups(
     { kept: {} },
     "plan:1:1",

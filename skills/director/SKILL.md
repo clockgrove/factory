@@ -21,7 +21,7 @@ Drive Objectives on a target repository through the installed `factory` CLI. `fa
 ```sh
 factory status [ISSUE] [--json]                 # where each Objective is, open holds, the next step
 factory log ISSUE [--tail N] [--follow] [--json] # what happened, from the run log
-factory answer ISSUE ANSWER [ARG] --question HOLD_ID [--text T | --text-file ABSOLUTE_PATH] [--review-artifacts N]...
+factory answer ISSUE ANSWER [ARG] --question HOLD_ID [--text T | --text-file ABSOLUTE_PATH]
 factory retry ISSUE [--question HOLD_ID]         # run unheld waiting steps now; with --question, answer retry
 factory cancel ISSUE
 factory pause|drain|resume ISSUE                # this Objective only
@@ -73,7 +73,7 @@ An Objective can have several holds at once: at most one per Work Item and one f
 1. Read `holds` from `status ISSUE --json`. Each option is `{answer, family, arg?, consequence, needsText?, recommended?}`, and exactly one is `recommended`. Explain an answer only with its `consequence`; never from memory.
 2. Ask with AskUserQuestion, one question per hold (several in one call when there are several holds): the hold's `question` as the text, naming its Work Item when `item` is set. Each option is one choice: label `answer` plus `arg` when set (`switch claude`), the recommended one first and labelled recommended, and `consequence` as its description. Keep free text available. Without a structured question tool, ask in plain text the same way.
 3. **More than 4 options.** AskUserQuestion takes at most 4, so ask in two steps. First ask for the family: one choice per distinct `family`, in the order the options first appear (the recommended option's family first), each described by its options' answers. Then ask for the specific option within the chosen family; a family with one option needs no second question. A family with more than 4 options (one per set id, say) offers its first 4, recommended first, and names the rest in the question text; the operator can type one of them as free text.
-4. For each hold, run `factory answer ISSUE ANSWER [ARG] --question HOLD_ID` with that hold's own id, passing the option's `arg` as ARG when it has one (never inside `--text`). For `retry`, `factory retry ISSUE --question HOLD_ID` does the same. When the option has `needsText`, ask the operator for the text and pass it with `--text`, or a long one with `--text-file` (the question says what goes in it); text on any other answer is optional and recorded as the reason. Always pass `--question`: an answer bound to an id lands only on that question, and a re-asked question gets a new id. With `revalidate` (or the `more` that revalidates), `--review-artifacts N`, repeatable, limits this rereview's capture to the configured `reviewArtifacts` selectors numbered N (from 1), or `none`. Pass it only when the operator asks to change what is captured; an `invalid_answer` refusal lists the configured selectors.
+4. For each hold, run `factory answer ISSUE ANSWER [ARG] --question HOLD_ID` with that hold's own id, passing the option's `arg` as ARG when it has one (never inside `--text`). For `retry`, `factory retry ISSUE --question HOLD_ID` does the same. When the option has `needsText`, ask the operator for the text and pass it with `--text`, or a long one with `--text-file` (the question says what goes in it); text on any other answer is optional and recorded as the reason. Always pass `--question`: an answer bound to an id lands only on that question, and a re-asked question gets a new id. `accept <n>`, `refuse <n>` and `retire-command <n>` name their criterion or command by number as ARG, and need the operator's reason as text.
 5. Read `status` again and report the new state. A hold that is re-asked has a new id, so ask again rather than reuse the old one.
 
 ## Refusals
@@ -94,6 +94,9 @@ A refused command exits 1 and prints `{"kind":"lifecycle-refusal","code":"..."}`
 | `plan_unreadable`                   | A reset can't read the plan comment. Show the operator the message; cancel only on request.                                                               |
 | `queue_not_running`                 | A reset would create the Objective while the queue is paused or draining. Tell the operator; run `factory queue resume` only if they want it.             |
 | `reset_in_progress`                 | A reset is already rebuilding the state. Tell the operator and wait for `reset` to disappear from `status`; don't retry.                                  |
+| `cleanup_running`                   | A cancelled Objective is still cleaning up (at most 5 tries). Run it again later, or `factory reset ISSUE` if the operator wants it now.                  |
+| `invalid_request`                   | The request file was malformed and moved to `requests/rejected/`. Run the command again.                                                                  |
+| `request_failed`                    | Applying the request failed; nothing changed. Show the operator the message, then run the command again once.                                             |
 | `usage` (exit 2)                    | Fix the command.                                                                                                                                          |
 
 Any other code, or a non-zero exit with no JSON line: show the operator the message (and the code, if any), and stop. Never retry a refused command unchanged.

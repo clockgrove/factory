@@ -19,7 +19,7 @@ npm run build
 
 Keep optional dependencies enabled for source development: TypeScript and notice checks inspect the optional harness SDKs.
 
-Read [AGENTS.md](AGENTS.md) for contributor rules and [the core spec](docs/CORE.md) for the design. Factory must never execute an Objective against its own source repository.
+Read [AGENTS.md](AGENTS.md) for contributor rules and [the design](docs/DESIGN.md) for how Factory works. Factory must never execute an Objective against its own source repository.
 
 ## Run the CLI from a checkout
 
@@ -59,26 +59,83 @@ npm run notices:check
 npm run test:core
 ```
 
-`npm run test:core` builds the core and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target.
+`npm run test:core` builds Factory and runs its CI tests against real temporary Git repositories, processes and files, including the packed CLI installed offline. They use no mocks and no GitHub, need no provider credentials, and take about 3 minutes.
 
-The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
+The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one CI-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 
 `npm run lint` uses Biome. `npm run format` applies formatting. Commits do not install hooks or re-stage files; CI enforces the checks.
 
-For an affected integration check after the batch, build and run its file directly:
+For an affected CI test after the batch, build and run its file directly:
+
+```sh
+npm run build:core
+node --test core/test/holds.test.mjs
+```
+
+Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the complete small suite.
+
+### Integration tests
+
+[Integration tests](integration/README.md) run real Objectives with real providers against the scratch repository `clockgrove/factory-drill`, and never run in CI. They crash the service at every crash point, cut the network and stop models mid-turn. Run them on demand, as bounded groups:
+
+```sh
+npm run build:core
+npm run integration -- --dry-run          # groups, expected minutes and preconditions
+npm run integration -- --only queue
+```
+
+A plan expected to take over 60 minutes needs the maintainer's approval, then `--approved-long`.
+
+### Recovery end-to-end test
+
+`scripts/recovery-e2e.mjs` stops, times out and crashes real runs on a Project-queue installation, then recovers them only through `factory run`, `retry`, `decide`, `cancel`, `queue` and `status --json`. It asserts exit codes and JSON fields, never output text. It runs on demand and is not part of `npm test` or any release gate: it needs a Claude login and an authenticated `gh`, and it spends real model calls (the cheapest capable model at `low` effort by default).
+
+| Scenario | Fault                                                | Recovery it proves                                                                                 |
+| -------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `s1`     | controller SIGKILL while the compile call runs       | the next run settles the abandoned turn and completes                                              |
+| `s2a`    | the queue's Objective deadline passes during compile | the run exits 1 cancelled, a repeated `cancel` reconciles and `decide --outcome refuse` is refused |
+| `s2b`    | SIGSTOP of the planner until its inactivity timeout  | `retry` and the next run re-plan and complete                                                      |
+| `s3`     | plan revision                                        | skipped: no supported way forces one; each row reports the revisions it used                       |
+| `s4`     | controller SIGKILL while a worker attempt runs       | a run while the worker lives is held without effects; after it ends, a run collects and completes  |
+| `s5`     | controller SIGKILL during result review              | the stopped run hands off after the collected result and completes                                 |
+| `s6`     | a command in the run's control-socket exit window    | the `retry` sent there (during `s2b`) waits for the exiting owner and succeeds                     |
+| `s7`     | `cancel` of a queued Objective while its worker runs | the worker stops, claims settle and the next queued Objective runs and completes                   |
+
+After each scenario it checks the `status --json` phase, settled agent sessions, one Work Item issue and at most one recorded PR per item, settled Project queue owner claims, an acknowledged checkpoint with no pending changes, and that none of its processes is left running.
+
+Every run uses a new isolated installation under `--root`: its own `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`, a fresh checkout, the worktree's `dist/cli.js`, a new archive ref and a new queue control card. It signals only processes whose environment names its own state root, and it never reads or writes your installed Factory configuration, state or service. It installs no systemd unit: `supervisor serve` needs the registration from `setup --background`, so `s7` dispatches the next queued Objective with a foreground run, which takes the same Project claim. `s2a` sets `queue.objectiveDeadlineSeconds` for its own Objective, then removes it, re-authorizing the queue with `queue resume` each time.
+
+Prepare a disposable fixture once. Use a private repository you own that holds only test content, because each run resets it:
+
+1. A private repository with a small Node.js project whose README declares `npm test`, and a tag (for example `fixture-base`) on its initial commit. Each run closes its open issues and pull requests and force-resets `main` to that tag.
+2. A separate empty private repository for the checkpoint archive.
+3. An organization Project linked to the repository, with a TEXT field named `Factory metadata` and a NUMBER field named `Factory order`. Each run deletes its items and adds a new control card.
+
+Then describe it in a private JSON file and run the test from a built checkout:
+
+```json
+{
+  "repository": "OWNER/fixture",
+  "baseRef": "fixture-base",
+  "project": { "owner": "OWNER", "number": 6 },
+  "archive": "https://github.com/OWNER/fixture-archive.git",
+  "model": "claude-sonnet-5-5",
+  "effort": "low"
+}
+```
 
 ```sh
 npm run build
-node --test --test-timeout=120000 core/test/service.test.mjs
+node scripts/recovery-e2e.mjs --fixture /abs/fixture.json --root /abs/scratch [--scenarios s1,s4]
 ```
 
-Keep coverage within the [testing rules](AGENTS.md#testing); CI runs the complete small suite.
+It prints one row per scenario with its result, minutes, tokens and model calls, writes every check and note to `report.json` in the run directory, and exits 1 when any check fails. Controller logs are in the run directory's `logs/`. A failure that shows a Factory defect is filed as its own bug.
 
 Check documentation commands, links and formatting when they change. Use the [release procedure](docs/RELEASING.md) for the release issue’s actual milestone acceptance; do not add per-fix live runs or a separate public-fixture gate. Local CI does not claim live provider or GitHub acceptance.
 
 ## Pull requests
 
-Link the issue, explain the user-visible change, and report the checks you ran. Keep each pull request focused on one complete outcome, with adjacent cleanup left out. Describe any remaining limitations and distinguish local test results from live acceptance evidence. Never include credentials, private repository content, raw agent transcripts, or private run details.
+Link the issue, explain the user-visible change, and report the checks you ran. Land through the merge queue, in stacks where changes build on each other, and push with `scripts/land-prep.sh`; see [Landing changes](docs/LANDING.md). Keep each pull request focused on one complete outcome, with adjacent cleanup left out. Describe any remaining limitations and distinguish local test results from live acceptance evidence. Never include credentials, private repository content, raw agent transcripts, or private run details.
 
 Preserve these boundaries:
 

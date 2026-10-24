@@ -8,7 +8,13 @@ import {
 } from "./allowances.js";
 import type { CapacityRecommendation } from "./capacity.js";
 import { displayTime, duration, eventLine, redactDeep } from "./display.js";
-import { type CapacityUse, DEADLINE, hold as question } from "./engine.js";
+import {
+  CANCEL_CLEANUP,
+  type CapacityUse,
+  DEADLINE,
+  type Left,
+  hold as question,
+} from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
 import { currentPlan, decisionsOf, retiredLines } from "./planning/plan.js";
@@ -82,12 +88,6 @@ export interface ObjectiveView {
   running: string[];
   /** Work Items whose validation failed once and passed on its one rerun. */
   flakyRerun: { item: string; command: string }[];
-  /**
-   * Work Items whose current result is a rereview with the operator's
-   * `--review-artifacts`: the commands of the selectors it captures
-   * instead of all (empty for none).
-   */
-  rereviews: { item: string; reviewArtifacts: string[]; by: string }[];
   /** The operator's `accept <n>` and `refuse <n>` of single criteria under the current plan, with their reasons. */
   decisions: CriterionDecision[];
   /**
@@ -111,6 +111,8 @@ export interface ObjectiveView {
   endedAt?: string;
   /** Who cancelled it: `deadline` when its deadline did. */
   endedBy?: string;
+  /** What cleanup after cancel left when it settled without finishing (engine.ts `Left`). */
+  cleanupLeft?: string;
   /** What happens next, and the command that moves it, if one does. */
   nextAction: { command: string | null; reason: string };
   /** The latest run log event. */
@@ -122,6 +124,8 @@ export interface ObjectiveView {
 export interface ServiceView {
   crashLoop?: { crashes: number; resumeAt: string };
   problem?: string;
+  /** Why the service admits nothing from the queue now (GitHubSync.intakeProblem). */
+  intake?: string;
   /** The host limiter's slots and memory in use (engine.ts HostLimiter). */
   capacity?: CapacityUse;
   waits: Record<string, { slot: true } | { paths: number }>;
@@ -132,6 +136,7 @@ export interface StatusView {
   service: "running" | "stopped";
   crashLoop?: ServiceView["crashLoop"];
   problem?: string;
+  intake?: string;
   capacity?: CapacityUse;
   queue: QueueControl;
   objectives: ObjectiveView[];
@@ -254,7 +259,6 @@ export function statusOf(
       waitsOn: null,
       running: [],
       flakyRerun: [],
-      rereviews: [],
       decisions: [],
       nextAction: {
         command: `factory reset ${issue}`,
@@ -294,7 +298,6 @@ export function statusOf(
     waitsOn: context.waitsOn,
     running: Object.keys(state.attempts),
     flakyRerun: flakyReruns(state),
-    rereviews: rereviews(state),
     decisions: decisionsOf(state),
     allowances: {
       planningRevisions: planningRevisions(state),
@@ -320,6 +323,10 @@ export function statusOf(
       : {}),
     ...(state.ended ? { endedAt: state.ended.at } : {}),
     ...(state.ended?.by ? { endedBy: state.ended.by } : {}),
+    ...(typeof (state.done[CANCEL_CLEANUP] as Left | undefined)?.left ===
+    "string"
+      ? { cleanupLeft: (state.done[CANCEL_CLEANUP] as Left).left }
+      : {}),
     nextAction: { command: null, reason: "" },
     lastEvent,
   };
@@ -365,13 +372,7 @@ export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
       id: item.id,
       kind: item.kind ?? "work",
       phase: mergeOf(state, item.id)
-        ? (
-            state.done[`item:${item.id}:merge`] as
-              | { settled?: string }
-              | undefined
-          )?.settled === "skipped"
-          ? "skipped"
-          : "merged"
+        ? "merged"
         : running
           ? `${phase(running)} (running)`
           : hold
@@ -403,27 +404,6 @@ function flakyReruns(state: ObjectiveState): ObjectiveView["flakyRerun"] {
       reruns.push({ item, command: rerun.command });
   }
   return reruns;
-}
-
-/** The rereviews whose review artifacts the operator chose (work/facts.ts `rereview`). */
-function rereviews(state: ObjectiveState): ObjectiveView["rereviews"] {
-  const chosen: ObjectiveView["rereviews"] = [];
-  for (const [key, value] of Object.entries(state.kept ?? {})) {
-    const item = /^item:(.+):rereview$/.exec(key)?.[1];
-    const rereview = value as {
-      reviewArtifacts?: { command: string }[];
-      by?: string;
-    };
-    if (item && rereview?.reviewArtifacts)
-      chosen.push({
-        item,
-        reviewArtifacts: rereview.reviewArtifacts.map(
-          (selector) => selector.command,
-        ),
-        by: rereview.by ?? "",
-      });
-  }
-  return chosen;
 }
 
 /** The one thing that moves the Objective on, or what it waits for. */
@@ -512,8 +492,8 @@ function nextAction(
  * The running service's record, from `service.json`: its crash loop (the
  * deaths in a row before this start, and when it resumes interrupted
  * steps; shown until the run has lived 10 min past that time), a problem
- * that pauses its GitHub effects, and the Objectives waiting for a slot or
- * on another's paths.
+ * that pauses its GitHub effects, why it admits nothing from the queue,
+ * and the Objectives waiting for a slot or on another's paths.
  */
 function serviceRecord(paths: Paths): ServiceView {
   try {
@@ -523,6 +503,7 @@ function serviceRecord(paths: Paths): ServiceView {
       deaths?: Death[];
       resumeAt?: string;
       problem?: string;
+      intake?: string;
       capacity?: CapacityUse;
       waits?: ServiceView["waits"];
     };
@@ -539,6 +520,7 @@ function serviceRecord(paths: Paths): ServiceView {
       ...(typeof record.problem === "string"
         ? { problem: record.problem }
         : {}),
+      ...(typeof record.intake === "string" ? { intake: record.intake } : {}),
       ...(record.capacity ? { capacity: record.capacity } : {}),
       waits: record.waits ?? {},
     };
@@ -558,6 +540,7 @@ export function statusText(
   const lines = [`Service: ${view.service}`];
   if (view.problem)
     lines.push(`  Problem: ${view.problem}. GitHub effects are paused.`);
+  if (view.intake) lines.push(`  Intake: ${view.intake}.`);
   const loop = view.crashLoop;
   if (loop)
     lines.push(
@@ -592,6 +575,7 @@ function objectiveText(row: ObjectiveView): string[] {
       ? `  Next: ${row.nextAction.command}\n    ${row.nextAction.reason}`
       : `  Next: ${row.nextAction.reason}`,
   ];
+  if (row.cleanupLeft) lines.push(`  Cleanup left: ${row.cleanupLeft}`);
   if (row.deadline)
     lines.push(
       `  Deadline: ${displayTime(row.deadline.at)} (${row.deadline.leftSeconds ? `${duration(row.deadline.leftSeconds * 1000)} left` : "passed: Factory cancels it"})`,
@@ -645,10 +629,6 @@ function objectiveText(row: ObjectiveView): string[] {
     );
   for (const line of decisionLines(row.decisions, displayTime))
     lines.push(`  Decided: ${line}`);
-  for (const rereview of row.rereviews)
-    lines.push(
-      `  Rereview: ${rereview.item} captures ${rereview.reviewArtifacts.length ? `only the review artifacts of ${rereview.reviewArtifacts.map((command) => `\`${command}\``).join(", ")}` : "no review artifacts"} (--review-artifacts, by ${rereview.by})`,
-    );
   if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
   return lines;
 }

@@ -1,0 +1,69 @@
+{
+  "execution": {
+    "profiles": {
+      "src-code": {
+        "provider": "codex",
+        "description": "Work Items that add or change code under src/ together with its own tests.",
+        "selectionHints": ["any item that owns a src/ file"],
+        "instructions": "Keep each exported function small and pure; no new dependencies."
+      },
+      "tests-only": {
+        "provider": "codex",
+        "description": "Work Items that only add or change tests under test/ and no src/ file.",
+        "selectionHints": ["items whose owned paths are all under test/"]
+      }
+    }
+  },
+  "delivery": {
+    "kind": "native-stack"
+  },
+  "providers": {
+    "codex": {
+      "planner": "codex",
+      "worker": {
+        "kind": "codex"
+      }
+    },
+    "claude": {
+      "planner": "claude",
+      "worker": {
+        "kind": "claude"
+      }
+    }
+  },
+  "defaultProvider": "codex",
+  "planning": {
+    "context": {
+      "bounds": {
+        "maxRounds": 4,
+        "maxRequestsPerRound": 8,
+        "maxResults": 16,
+        "maxBytes": 65536,
+        "maxElapsedMs": 30000,
+        "maxProviderCalls": 5
+      },
+      "selectors": ["src/", "test/", "docs/"],
+      "memory": true
+    },
+    "adaptiveGraph": true
+  },
+  "reviewArtifacts": [
+    {
+      "command": "node scripts/review-image.mjs",
+      "receipt": {
+        "stdoutPathField": "receipt",
+        "stdoutSha256Field": "sha256",
+        "maxBytes": 4096
+      },
+      "image": {
+        "file": "swatch.png",
+        "sha256Field": "image",
+        "maxBytes": 1048576
+      },
+      "candidate": {
+        "file": "src/palette.js",
+        "sha256Field": "candidate"
+      }
+    }
+  ]
+}

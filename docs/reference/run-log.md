@@ -1,0 +1,132 @@
+# Run log
+
+Part of [the design](../DESIGN.md).
+
+## Run log
+
+Each service run appends to `logs/<issue>/<run id>.jsonl`: step start and end, outcome, durations, one `model-usage` event per model call, errors, and references to capture files. Issue 0 holds the service's own events.
+
+- **Run ids.** A run id is the run's start time and process id (`2026-10-23T04-12-09-125Z-4242`, log.ts `newRunId`): ids sort by start time. The service, its GitHub sync and every Objective share the run's id, so one service run is one file per issue. A `factory dream` call is a run of its own. Readers (`factory log --json`, watch, status) mark each event with `run`, from its file's name.
+- **Formal history** (log.ts RunLog). Each run file starts with a `run-header` event: `factoryVersion` (the nearest package.json's version) and `sourceDigest` (sha256 over the running build's JavaScript files). Every line carries `seq`, consecutive per file from 1, so a missing number is a lost line. A write that fails (a full disk) is counted, never retried; the next line that lands is followed by a `log-health` event (`emitted`, `failed`: failed line and capture writes, `lost`: lines). At a clean stop each run file gets `run-end` (`outcome`: `stopped`, or `handed-off` for an Objective still unfinished, which the next run carries on) and a last `log-health`; a `factory dream` run ends `stopped`. A start that finds the last run died appends `run-end` with `outcome: "crashed"` and `detectedBy` (the new run) to the dead run's files of the service and the Objectives it loaded. Step `start`, `outcome` and every event a step logs carry `attemptId` (`<step>#<n>`, the step's nth attempt, counted in the state's `stepRuns`); a `start` carries `parentAttemptId` when it continues another attempt: a continuation (`retry` with `progress`), the repair that sent the step back, or the interrupted attempt it reruns.
+- **GitHub transport.** Each sync job's GitHub requests are counted (github.ts `transport`), never their bodies: a `github-call` event per job key, at most once a minute (at once after a failed run, and when its Objective is forgotten), with `runs`, `ms`, `calls`, `retries` (a 401 re-sent with a fresh login, and a run after a failed one), `rateLimited`, `failed` and `bytes` (request bodies and response content-length). Every request that failed, was re-sent or was rate-limited also gets its own `github-request` event at the end of its job run, unthrottled: `method`, `route` (the path without its query, numbers and hashes as `{n}` and `{sha}`), `status` (`null` for a network failure), `attempt`, `rateLimited`, `requestId` (`x-github-request-id`), and `retryAfterSeconds` or `rateLimitReset` when GitHub sent them; at most 50 per job run, the rest counted as `unnoted`. Never a body, a token or a query value.
+- `factory status` reads the state file plus the end of the log. `status --issue N` (or the issue's URL) takes an Objective's issue or a Work Item issue and shows its Objective, naming the Work Item: it resolves N from local state only (the tracked items), with no GitHub call, and refuses an issue no state names (`no_factory_state`).
+- `factory watch [ISSUE]` follows the log like `log --follow` and shows one row per Work Item: its step, its last outcome or hold, and its worker's activity (see Worker activity), with its context (tokens, and its share of the window when known), its compactions, `no progress for` once a running worker has gone 15 min without an edit, a finished tool or a validation run since its step started, and `validation failing for` since the item's first failed validation command or Validate after it last passed (a passing Validate or validate step clears it). A worker whose provider reported no context shows `context and compactions unknown`. It reads the log only.
+- `factory diagnostics ISSUE` (diagnostics.ts) shows what a run did: a timeline of steps with durations, waits, repairs (with their target), holds (the engine logs a `hold` event with the question's id once saved) and the answers to them, model calls and each step's worker activity, relative to the run's start. `--follow` streams new lines, `--logs ITEM` shows one Work Item's events with their fields, including each validation command's output tail and each model call's capture file; `--show-captures` prints the captured request and response (redacted as stored, and again with the current secrets), and with capture off it says full requests and responses are kept only with `capture.enabled` (see [Content capture](#content-capture)). And `--summary` totals model calls, tokens, cost (when known) and time per role and per phase (a planner call's `phase`, else its step's), with repairs per item, holds and their wait, the observed critical path (walking back from the step that ended last, each time to the step that ended last before it started; the log has no dependency edges) and the slowest steps. The latest run, `--run ID` or `--all-runs`; `--json` in every mode. It streams each run file in chunks and redacts every event as it reads it.
+- `factory diagnostics ISSUE --captures` (analysis.ts) lists the run's captured model calls (id, role and phase, item, provider and model, size, path); `--content ID` prints one, from any run, read without following links and redacted again. `--analyze` shows where the time went (steps, retry waits, holds, idle, model calls and validation, each a union so overlaps count once), steps per phase with their outcomes, retries by wait class, continuations, repairs per item and target, holds and their answers, validation commands, worker activity, and the step-attempt history (each start paired with its outcome, failed and unfinished attempts, each run's last lifecycle event); and per group (`--group-by FIELD`, default `phase`; `--filter FIELD=VALUE`, `null` for a missing value; fields `run`, `item`, `phase`, `role`, `provider`, `model`, `effort`, `outcome`, `tokenSource`, `hedge`, `reportedModel`, `stage`, `sessionMode`, `currency`) the model calls' tokens with how many calls reported each count, cache effectiveness (cached over input of the calls that report both), `nativeToolActivity` and `sdkOperations` as separate views, native tool rounds, outputs, failures and time, outcomes with failure stages and semantic refusals, reported models (and calls whose model differs from the one asked for), request bytes by prompt part, distinct prompt, schema and source digests, sessions, time to first token, image outputs, cost currency, hedges and efficiency (time, tokens and cost per call, output tokens per minute). The history adds, per run, its Factory version and source digest, its line count and sequence gaps, its log health and its `run-end`; and the attempts that continue another. GitHub requests are summed from `github-call`, and the traced ones counted by status from `github-request`. `--gantt` draws each Work Item's steps over time, one lane per item and phase, with waits, holds, model calls and validation commands; `--json` gives each bar's start and end. The engine's `outcome` event carries a retry's `wait` class (`error`, `reset`, `gate`) and `progress: true` for a continuation, which is not a wait.
+- `factory diagnostics --scorecard ABSOLUTE_FILE [--json]` (scorecard.ts) compares Factory with codex-direct baselines, the old scorecard's selection format: the file names packets (a task done by one route), each a `factory` packet with `factoryObjectives` or a `codex-direct` packet with `codexSessions`, the private (`0600`) stream of a fresh `codex exec --json` thread with its externally observed times, outcome, role and configuration. A Factory Objective is read from its state (outcome, base, final commit and tree, repairs) and from the runs of its latest admission (model calls, tokens, cost, cache, holds and their waits, first-try planning and delivery; its runs' Factory versions and build digests from their `run-header`, its calls' distinct prompt digests, and `nativeUsage`: calls with a `providerUsage` view and Codex child threads' usage, never added to the tokens); a session from its stream (the latest `turn.completed` usage, which is the thread's total; zero cached or reasoning counts are unknown). It reports per packet, per scope and route, and per `pairId` pair the deltas of time, attempts and tokens, only when both are accepted, bound to the same task, source, base and environment, and a comparison plan is declared. Each Objective reports `N of M runs available`: a run rotated away leaves its counts partial, its first-try verdicts unknown and its pair not comparable. Read-only and redacted. The old optional `nativeCapturePath` (capture metadata of the old format) is refused, and `--output` is replaced by stdout.
+- `factory export-captures ISSUE` (capture-export.ts) turns the run's model calls into OpenTelemetry spans (OTLP/HTTP JSON): one root span per `model-usage` event in a trace per run, with its role, phase, provider, model, outcome, item, tokens and cost as `factory.*` attributes, and the per-call fields of [Model usage](#model-usage) it has (`callId`, `attemptId`, `reportedModel`, `stage`, the digests, `requestBytes`, `promptComponents`, `timeToFirstTokenMs`, session turn and mode, `nativeTools`, `imageOutputs`, `providerUsage`, `currency`), and with `--content retained` the captured request and response (each cut to 512 KiB head and tail). It reads like `--captures`, redacting every event and capture as it reads them and every exported string again. The latest run, `--run ID` or `--all-runs`; `--invocation ID` (repeatable) keeps only those model calls, by the span id or capture id the preview lists, and an id that matches none is refused. By default it is a preview that sends nothing: it prints the counts, batches, endpoint, header names and each selected call (`--json` the same as JSON), and `--output ABSOLUTE_FILE` writes the OTLP requests to a new `0600` file, one per line. With `--endpoint URL` (a base URL, HTTPS or HTTP to a loopback host, no credentials, query or fragment; Factory appends `/v1/traces`) the preview prints a digest that binds the endpoint, the content, the `--invocation` selection, every batch and the headers. `--send --endpoint URL --authorize DIGEST` sends only when the export still has that digest, else refuses with `export_refused`. Headers come from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, else `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated URL-encoded `key=value`); values are never printed, and a malformed one is refused without echo. Batches are at most 512 spans and 3 MiB; each is one POST with a 30-second timeout, no redirects or retries and a 4 MiB response cap, in order, and the first one not fully acknowledged stops the send (exit 1, with its receipt). Span ids are stable, so a repeat send may duplicate spans at the collector.
+- Diagnostics, capture export, accounting, scorecards and analysis read logs. They never write state.
+- **Retention.** A run is its log file and its capture directory, kept or deleted together. The service keeps the last 20 runs per Objective and 2 GB in total, deleting the oldest first. It never deletes its own run, or a run whose files changed in the last 10 minutes (a `factory dream` call still running); they still count toward both bounds. Before it deletes a run it appends `{run, lastAt}` to `logs/<issue>/rotated`, so the scorecard can say how many runs are gone (log.ts `rotatedRuns`).
+
+### Model usage
+
+Every model call writes one `model-usage` event when it ends, whatever its outcome: planning, plan and result review, final review, diagnosis, Dream and every worker run. The shape is the same for Codex, Claude, Copilot and managed workers (providers/usage.ts). A count the provider doesn't report is `null`, never 0. Diagnostics, analysis and the scorecard (wave 5) read this event.
+
+```json
+{
+  "at": "...",
+  "step": "item:a:work",
+  "event": "model-usage",
+  "role": "worker",
+  "provider": "codex",
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "item": "a",
+  "outcome": "finished",
+  "ms": 81234,
+  "tokens": {
+    "input": 993817,
+    "output": 2974,
+    "cached": 936192,
+    "reasoning": 752,
+    "total": 996791
+  },
+  "tokenSource": "sdk",
+  "costUsd": null,
+  "sdkOperations": {
+    "total": 14,
+    "byName": { "command_execution": 11, "file_change": 3 }
+  },
+  "nativeToolActivity": { "total": 16, "byName": { "exec": 16 } },
+  "cacheEffectiveness": { "hitRate": 0.942, "uncachedInput": 57625 },
+  "capture": "4f0c..."
+}
+```
+
+- `role`: `planner`, `reviewer`, `worker` or `dream`. A planner-seam call also has `phase` (`plan`, `graph-review`, `result-review`, `objective-review`, `diagnosis`, `dream`, `propose`) and `tools` (it could read a tree); a worker has `item`.
+- `outcome`: a planner call's `done`, `retry`, `hold`, `fail` or `error` (with `error`); a worker's result kind (`finished`, `retry`, `hold`) or `error`. `ms` is the call's wall time. A hedged second call (planner.ts HedgedPlanner) logs its own event with `hedge: 1`.
+- `tokens`: `input` includes `cached`; `output` includes `reasoning`; `total` is input plus output, or the provider's own total when it reports no split (managed workers). Claude and Copilot report no reasoning count; a Claude worker sums its queries, credential retries included.
+- `tokenSource` (Codex only): `sdk`, from the SDK's `turn.completed`, or `native`, from Codex's session record when the stream ended before it.
+- `costUsd`: list cost when the provider reports it (Claude, Claude managed), else `null`.
+- `sdkOperations`: the SDK's own operation items, each item id once across its started, updated and completed events (Codex: command executions, file changes, MCP calls, web searches, to-do lists); `null` where the SDK has no such view (Claude, Copilot, managed).
+- `nativeToolActivity`: the model-visible tool calls by name, each call id once (Codex: from its session record, providers/codex-telemetry.ts; Claude: `tool_use` blocks; Copilot: tool executions); `null` where unseen. One call can run many commands. `nativePartial: true` when the Codex record was past its 8 MiB read bound.
+- `cacheEffectiveness`: this call's `hitRate` (cached over input, 4 places; `null` with no input) and `uncachedInput` (input minus cached); `null` when either count is unknown. Aggregates weight by input; never average hit rates.
+- `callId`: the call's id; a `model-refused` event (or a `diagnosis-rejected` one) with `stage: "semantic"` names it when Factory's checks refused a well-formed answer.
+- `reportedModel`: the model as the provider reported it (Claude's init and messages, Codex's session record, Copilot's usage events, a managed agent's), else `null`.
+- `promptDigest`, `schemaDigest`, `sourceDigest`: sha256 of the prompt, of the answer schema (planner calls) and over the source bodies the call was given (a worker's pinned sources, the Objective's sources for planning and plan review); `null` when there is none. `requestBytes`: prompt, schema and images as sent; `promptComponents`: bytes of `prompt`, `schema`, `images`, and `sections`, the prompt's parts as its builder rendered them (the worker prompt, planning and plan review).
+- `stage`: where a failed call failed: `provider` (the default), `parse` (an answer that isn't JSON) or `protocol` (an answer that breaks its schema or contract).
+- `timeToFirstTokenMs`: from the call's start to its first model output, where the SDK streams (not managed agents, which are polled). `sessionTurn` and `sessionMode`: the turn's ordinal in its provider session and `fresh` or `resumed`.
+- `nativeTools`: `rounds` (responses that asked for a tool), `outputs`, `failures` (reported failed), `missingOutputs` and `ms`; with capture on the tool outputs go to the capture file. `imageOutputs`: images the model produced.
+- `providerUsage`: the provider's own usage breakdown, numbers only: Claude's `usage` and per-model `modelUsage` (subagents included), Codex's turn usage, its session record's last `token_count` and its child threads' (`descendants`), Copilot's per-model usage (with its `totalNanoAiu` billing units), managed spend.
+- `currency`: `USD` beside a known `costUsd`, else `null`.
+- `capture`: the id of the call's capture file, only when capture is on and the file was written.
+- A call that continued a retained conversation has `sessionMode` `resumed` and its turn number in `sessionTurn` (see [Retained conversations](#retained-conversations)). Its tokens and cost are its own turn's, never the conversation's running totals; its capture holds the delta it sent, and `deltaBytes` its size.
+- An adapter adds its own fields: `session` or `thread`, `turns`, `stopReason`, `finalTreeValidated`, managed `key` and `spend`.
+
+**Codex native telemetry.** Each Codex call runs in a private `CODEX_HOME`. Before it is removed, providers/codex-telemetry.ts reads the thread's session record (`sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl`, its last 8 MiB): the last `token_count` gives the thread's counts (reasoning included), and the `function_call`, `custom_tool_call`, `local_shell_call` and `web_search_call` items give `nativeToolActivity`. Unreadable or missing, it adds nothing.
+
+### Content capture
+
+Off by default. With `"capture": {"enabled": true}` in the configuration, the request and response bodies of each model call go to `logs/<issue>/<run id>.captures/<id>.json`, and the call's `model-usage` event names the file by `capture`. Bodies never enter the run log itself.
+
+- A capture file is `{id, run, request, response, tools, truncated}`: the request is the prompt the call sent (a worker's whole prompt), the response its answer or final message, `tools` the native tool outputs in order (`{name, output}`); a call with no answer has no `response`.
+- Each body is redacted (log.ts `redact`, with the configuration's secrets), then cut to half of `capture.maxBytesPerCall` (with tool outputs: two fifths each, and a quarter for the outputs together) (default 8 MiB, at least 1 KiB, at most 256 MiB); `truncated` says a body was cut. Redaction is best effort.
+- Files are `0600` in a `0700` directory and rotate with their run. A capture that can't be written is skipped; the call and its event are unaffected.
+- Capture is operational, never frozen with an Objective: turning it on or off applies from the next service start and changes no run.
+
+### Retained conversations
+
+A planner or reviewer round, or a worker repair, continues the provider's previous session by its id instead of starting fresh (providers/session.ts): a Codex thread (`resumeThread`), a Claude Agent SDK session (`resume`) or a Copilot session (`resumeSession`). Managed workers start fresh on every attempt.
+
+- **Which conversations.** The planner across a generation's plan revisions and context lookups, and the amendments of the plan it accepted; the plan reviewer across its review rounds and amendment reviews; each Work Item's result reviewer across re-reviews after repairs and after an invalid answer; final review across its re-reviews; each Work Item's worker across its repairs. Each is kept as a fact (work/facts.ts `session:planner`, `session:graph-review`, `session:final-review`, and an item's `workSession` and `reviewSession`), so it survives restarts, with its id, provider, model, turn count, scope and last-turn time. Its provider state lives in a private directory, `<work dir>/sessions/<name>`, removed with the work directory when the Objective ends. A retained Codex home keeps only its Codex state between turns (no HOME, scratch, login link or configuration). Claude keeps its settings and transcripts in a private `CLAUDE_CONFIG_DIR` there, under one fixed project name (`CLAUDE_CODE_PROJECT_DIR_NAME`), so a turn finds its transcript from any working directory, while the login stays where the operator's clients keep it (`CLAUDE_SECURESTORAGE_CONFIG_DIR`), refreshed in place, never copied. A turn's mark holds its token: a turn that a later one replaced (a hedge's loser, an aborted attempt) leaves the directory alone, and a hedged call with a conversation returns only once both attempts stopped.
+- **The delta.** A continuing call sends only the request's paragraphs the conversation hasn't seen (session.ts `promptDelta`, by paragraph digest), after a preamble (earlier paths and tool observations are historical: read again from the current files; history grants no permission or acceptance) and a manifest: how many paragraphs the request has and left out, and the ones seen before that left it, by name (an evidence row, a compiler choice, a first line). A revision's findings and plan, a re-review's changed evidence rows (result review sends one evidence row a paragraph, and its tail names the base, the tree and the row count), a lookup turn's answers and an amendment's new choices (the planner request puts each compiler choice, the revision and lookup rules, cited sections and lookup answers in their own paragraphs). The answer format is given again on every turn.
+- **When it starts fresh.** With `sessions.enabled` off; on another provider or model; in another scope: the scope holds the plan generation (planner, plan reviewer) or the accepted plan and the Work Item's design or the whole plan (worker, result and final review), and the frozen configuration's digest, so `replan`, `reset` (which keeps no conversation), an amendment that changes the design, `switch` and `adopt` start fresh; after `fresh`, which forgets the item's conversations; for an independent second look (`retry` or `revalidate` to a review, or a rereview); at `sessions.maxTurns` turns (default 8) or after `sessions.maxIdleMinutes` idle (default 60), when the provider's cache is cold; when the session is gone (no Codex session record, or no Claude transcript or kept totals); when its last turn failed or was interrupted (a mark stays until a turn ends well); after a turn the provider compacted (Claude `compact_boundary`, a Codex compacted record); when nothing changed, a seen paragraph left the request unnamed, or the delta would be more than half the request. A continued turn that runs out of context runs again fresh, once, instead of failing. A hedged second call (planner.ts HedgedPlanner) always starts fresh and keeps nothing.
+- **Accounting.** Codex and Claude report a continued session's tokens and cost cumulatively. A resumed Codex turn subtracts the totals its session record held before the turn; a resumed Claude turn subtracts the per-model counts and cost kept with the session, and a credential restart moves that baseline to the restarted query's totals.
+- Settings are operational, never frozen: `"sessions": {"enabled": true, "maxTurns": 8, "maxIdleMinutes": 60}`.
+
+### Worker activity
+
+Every worker (Codex, Claude, Copilot, managed) reports what it is doing through one hook, `WorkerInput.activity` (work/worker.ts): a tool started or finished (its name), a file edited (its path), a command run (its command line), a command failed, a model turn, the tokens in its context at its last model request (with the model's window when the provider gives it), or a compaction of its conversation. The adapters write no other per-tool lines. `ActivityLog` writes it to the run log as one event, at most one per Work Item per 5 s: the first report after a quiet interval at once, the rest coalesced, and what is pending when the run ends. The shape is stable: the live status comment and other log readers build on it.
+
+```json
+{
+  "at": "...",
+  "step": "item:a:work",
+  "event": "worker-activity",
+  "item": "a",
+  "counts": {
+    "toolsStarted": 4,
+    "toolsFinished": 3,
+    "edits": 2,
+    "commands": 1,
+    "commandsFailed": 0,
+    "turns": 2,
+    "compactions": 0
+  },
+  "tools": ["Edit", "Bash"],
+  "paths": ["src/a.ts"],
+  "command": "npm test",
+  "context": { "tokens": 84000, "window": 272000 }
+}
+```
+
+- `counts`: what happened since the previous event; every field is always present. `commandsFailed` counts commands that ended with a non-zero exit, a signal or their time limit (Codex's shell, Claude's Factory shell).
+- `tools`: the distinct tools started in that window, at most 8; `paths`: the distinct files edited, relative to the worktree when inside it, at most 8.
+- `command`: the last command started in the window, on one line and cut to 200 characters; absent when none ran.
+- `context`: the last context report in the window; absent when none came. `compactions` counts the compactions in the window. What each provider reports:
+  - Codex: the last request's input tokens and the model's window, from the thread's session record, read every 5 s while the turn runs (the SDK stream has no counts until the turn ends); compactions from its `compacted` records.
+  - Claude: the main thread's input tokens (with cache reads and writes) of each response, and `compact_boundary`; the SDK gives no window.
+  - Copilot: `session.usage_info` (tokens and window) and each successful `session.compaction_complete`, the main agent's only.
+  - Claude managed: `span.model_request_end`'s tokens and `agent.thread_context_compacted`; no window.
+  - OpenAI managed: neither; its polled turns carry no live counts.
+- Every string is redacted (log.ts `redact`, with the configuration's secrets) before it is cut. File contents, tool output and model text are never reported.

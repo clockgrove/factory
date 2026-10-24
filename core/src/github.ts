@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
@@ -98,12 +99,15 @@ export function issueGone(error: unknown): error is GitHubError {
 }
 
 const TIMEOUT_MS = 60_000;
+/** How long GitHub may lag behind what Factory made (`GitHub.made`). */
+const FRESH_MS = 2 * 60_000;
 
 /**
- * A GitHub failure as a step outcome (CORE.md#Waits): only what a person
+ * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
  * must fix holds, at once: a rejected login (401), a refusal (403, or a
- * 404 of anything but an issue; rate limits are TransientErrors) naming
- * the permission the call needs (`needing`), and a missing issue (404).
+ * 404 of anything but an issue; rate limits, and a 403 or 404 of what
+ * Factory just made, are TransientErrors: `GitHub.made`) naming the
+ * permission the call needs (`needing`), and a missing issue (404).
  * A rate limit waits for its reset. Everything else (5xx, timeouts, 409,
  * 410, 422, GraphQL errors) may change, so it retries as an unknown
  * transient wait; a 5xx's retry-after only sets its backoff. Undefined
@@ -206,6 +210,7 @@ export interface PullRequest {
   base: { ref: string; sha: string };
   body?: string | null;
   html_url?: string;
+  user?: { login: string } | null;
 }
 
 export interface CheckRun {
@@ -259,6 +264,109 @@ export interface AsyncMerge {
 /** How long a write-access answer counts (canWrite). */
 const WRITER_TTL_MS = 10 * 60_000;
 
+/**
+ * What one sync job's GitHub requests cost (github-sync.ts `github-call`):
+ * requests sent, re-sends (a 401 retried with a fresh login), rate-limit
+ * answers, other failed answers, and bytes sent and received (request
+ * bodies, response content-length). Counts only, never bodies.
+ */
+export interface Transport {
+  calls: number;
+  retries: number;
+  rateLimited: number;
+  failed: number;
+  bytes: number;
+  /**
+   * Each request that failed, was re-sent or was rate-limited, for one
+   * `github-request` event apiece (at most MAX_NOTED per job run; the
+   * rest only counted in `unnoted`).
+   */
+  requests?: NotedRequest[];
+  unnoted?: number;
+}
+
+/** One traced request: never a body, a token or a query value. */
+export interface NotedRequest {
+  method: string;
+  /** The path with its query dropped and ids, numbers and hashes as placeholders. */
+  route: string;
+  /** Null when no answer came (the network). */
+  status: number | null;
+  /** 2: re-sent once with a fresh login after a 401. */
+  attempt: number;
+  rateLimited?: true;
+  requestId?: string;
+  retryAfterSeconds?: number;
+  rateLimitReset?: string;
+}
+
+const MAX_NOTED = 50;
+
+/**
+ * Statuses the running read's caller takes as an answer (a 404 for "no
+ * such user", for "unprotected"): `send` neither traces nor counts them
+ * as failed. Set with `expecting`.
+ */
+const expectedStatuses = new AsyncLocalStorage<readonly number[]>();
+
+function expecting<T>(
+  statuses: readonly number[],
+  read: () => Promise<T>,
+): Promise<T> {
+  return expectedStatuses.run(statuses, read);
+}
+
+/** The job whose requests `send` counts; outside a job nothing is counted. */
+export const transport = new AsyncLocalStorage<Transport>();
+
+/** `path` as a route template: no query, and numbers, hashes and node ids as placeholders. */
+export function routeOf(path: string): string {
+  return path
+    .split("?")[0]!
+    .split("/")
+    .map((part) =>
+      /^\d+$/.test(part)
+        ? "{n}"
+        : /^[0-9a-f]{7,64}$/i.test(part) && /\d/.test(part)
+          ? "{sha}"
+          : part,
+    )
+    .join("/");
+}
+
+/** Keep one request of the current job for its `github-request` event. */
+function note(
+  counted: Transport | undefined,
+  method: string,
+  path: string,
+  attempt: number,
+  response: Response | undefined,
+  rateLimited = false,
+): void {
+  if (!counted) return;
+  counted.requests ??= [];
+  if (counted.requests.length >= MAX_NOTED) {
+    counted.unnoted = (counted.unnoted ?? 0) + 1;
+    return;
+  }
+  const header = (name: string) => response?.headers.get(name) ?? undefined;
+  const retryAfter = Number(header("retry-after"));
+  const reset = Number(header("x-ratelimit-reset"));
+  const requestId = header("x-github-request-id");
+  counted.requests.push({
+    method,
+    route: routeOf(path),
+    status: response?.status ?? null,
+    attempt,
+    ...(rateLimited ? { rateLimited: true as const } : {}),
+    ...(requestId ? { requestId: requestId.slice(0, 80) } : {}),
+    ...(retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}),
+    ...(reset > 0 && (rateLimited || response?.status === 429)
+      ? { rateLimitReset: new Date(reset * 1000).toISOString() }
+      : {}),
+  });
+}
+
 export class GitHub {
   private token: string | undefined;
   private secrets: readonly string[] = [];
@@ -266,6 +374,8 @@ export class GitHub {
   private readonly writers = new Map<string, { ok: boolean; at: number }>();
   /** Set once the repository is found under another name; never cleared (a restart reads the configuration again). */
   private renamed: RepositoryMoved | undefined;
+  /** What Factory made lately, and when (`made`): a 403 or 404 under one is GitHub's lag. */
+  private readonly fresh = new Map<string, number>();
 
   constructor(
     readonly repository: string,
@@ -361,7 +471,79 @@ export class GitHub {
   ): Promise<T> {
     const response = await this.send(method, path, body, signal);
     if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    const result = await this.body(response, method, path, signal, "json");
+    // A resource Factory just created (an issue, a PR, a comment): GitHub
+    // may not serve it, or what is under it, for a moment.
+    const url = (result as { url?: unknown } | null)?.url;
+    if (
+      response.status === 201 &&
+      typeof url === "string" &&
+      url.startsWith(`${this.api}/`)
+    )
+      this.made(url.slice(this.api.length));
+    return result as T;
+  }
+
+  /**
+   * The response's body. Its headers came, but the body can still fail
+   * (a socket reset, the deadline, truncated JSON): that is a
+   * TransientError like any network failure, so it retries.
+   */
+  private async body(
+    response: Response,
+    method: string,
+    path: string,
+    signal: AbortSignal | undefined,
+    as: "json" | "text",
+  ): Promise<unknown> {
+    try {
+      return as === "json" ? await response.json() : await response.text();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransientError(
+        `GitHub ${method} ${path}: the answer's body didn't arrive whole: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Factory made `what` at `at` (now, or a saved time on a restart): an API
+   * path (a created issue, PR or comment; what is under it counts too), or
+   * a pushed branch or commit (a path naming it as a whole segment, or as
+   * one side of a compare). For FRESH_MS after, a 403 or 404 there is
+   * GitHub's lag, a TransientError, never a missing permission or resource.
+   */
+  made(what: string, at = Date.now()): void {
+    const now = Date.now();
+    for (const [mark, when] of this.fresh)
+      if (now - when >= FRESH_MS) this.fresh.delete(mark);
+    if (now - at < FRESH_MS)
+      this.fresh.set(what, Math.max(at, this.fresh.get(what) ?? at));
+  }
+
+  /** Whether `path` is under, or names, something Factory made within FRESH_MS. */
+  private isFresh(path: string): boolean {
+    const now = Date.now();
+    let decoded = path;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      // Not encoded: compared as it is.
+    }
+    const asked = decoded.toLowerCase().split("?")[0]!;
+    for (const [mark, at] of this.fresh) {
+      if (now - at >= FRESH_MS) continue;
+      const made = mark.toLowerCase();
+      if (made.startsWith("/")) {
+        if (asked === made || asked.startsWith(`${made}/`)) return true;
+        continue;
+      }
+      const named = new RegExp(
+        `(?:^|/|\\.\\.\\.)${made.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|/|\\.\\.\\.)`,
+      );
+      if (named.test(asked)) return true;
+    }
+    return false;
   }
 
   /** An issue's comments, oldest first; from `since` on when given. */
@@ -423,13 +605,38 @@ export class GitHub {
       signal,
       { accept: "application/vnd.github.full+json" },
     );
-    const found = (await response.json()) as Awaited<
-      ReturnType<GitHub["issue"]>
-    > & { body_html?: unknown };
+    const found = (await this.body(
+      response,
+      "GET",
+      `/repos/${this.repository}/issues/${issue}`,
+      signal,
+      "json",
+    )) as Awaited<ReturnType<GitHub["issue"]>> & { body_html?: unknown };
     if (typeof found.body_html === "string")
       return { ...found, body_html: found.body_html };
     if (!found.body) return { ...found, body_html: "" };
     throw new Unreadable(`GitHub sent issue #${issue} without body_html`);
+  }
+
+  /**
+   * `text` as GitHub renders an issue body in this repository (GFM, the
+   * same renderer and sanitizer as `body_html`). A read: it writes nothing.
+   */
+  async renderMarkdown(text: string, signal?: AbortSignal): Promise<string> {
+    const response = await this.send(
+      "POST",
+      "/markdown",
+      { text, mode: "gfm", context: this.repository },
+      signal,
+      { accept: "text/html" },
+    );
+    return (await this.body(
+      response,
+      "POST",
+      "/markdown",
+      signal,
+      "text",
+    )) as string;
   }
 
   async postComment(
@@ -544,6 +751,33 @@ export class GitHub {
     return written;
   }
 
+  /**
+   * Edit the marked comment if it exists, between the crash points
+   * `<point>:before` and `<point>:after`; never post one. Returns whether
+   * it exists.
+   */
+  async editComment(
+    issue: number,
+    marker: string,
+    body: string,
+    point: string,
+    signal?: AbortSignal,
+    since?: string,
+  ): Promise<boolean> {
+    const existing = await this.markedComment(issue, marker, since, signal);
+    if (!existing) return false;
+    if (existing.body === body) return true;
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "PATCH",
+      `/repos/${this.repository}/issues/comments/${existing.id}`,
+      { body },
+      signal,
+    );
+    crashPoint(`${point}:after`);
+    return true;
+  }
+
   /** Close an issue with a reason, unless it is closed already. */
   async closeIssue(
     issue: number,
@@ -603,20 +837,21 @@ export class GitHub {
   // next run, never made twice.
 
   /**
-   * Issues with `label` that Factory's login opened, updated from `since`
-   * on, newest first: one bounded, paginated list that stops at the first
-   * page reaching issues created before `since`. Past `maxPages` pages it
-   * throws, so a lookup never misses an issue and makes it again.
+   * Issues (with `label`, when given) that Factory's login opened, updated
+   * from `since` on, newest first: one bounded, paginated list that stops
+   * at the first page reaching issues created before `since`. Past
+   * `maxPages` pages it throws, so a lookup never misses an issue and
+   * makes it again.
    */
   async issuesByLabel(
-    label: string,
+    label: string | undefined,
     since: string | undefined,
     signal?: AbortSignal,
     maxPages = 10,
   ): Promise<IssueSummary[]> {
     const self = await this.login(signal);
     const query = [
-      `labels=${encodeURIComponent(label)}`,
+      ...(label ? [`labels=${encodeURIComponent(label)}`] : []),
       "state=all",
       `creator=${encodeURIComponent(self)}`,
       "sort=created",
@@ -634,7 +869,7 @@ export class GitHub {
     );
     if (found.length > maxPages * 100)
       throw new Error(
-        `More than ${maxPages * 100} issues labelled ${label} were updated since ${since}: too many to look up`,
+        `More than ${maxPages * 100} issues${label ? ` labelled ${label}` : ""} were updated since ${since}: too many to look up`,
       );
     return found.filter((issue) => issue.pull_request === undefined);
   }
@@ -645,8 +880,17 @@ export class GitHub {
     marker: string,
     signal?: AbortSignal,
   ): Promise<IssueSummary | undefined> {
+    return (await this.markedIssues(found, marker, signal))[0];
+  }
+
+  /** Every issue in `found` that Factory's login opened with `marker` first. */
+  async markedIssues(
+    found: readonly IssueSummary[],
+    marker: string,
+    signal?: AbortSignal,
+  ): Promise<IssueSummary[]> {
     const self = await this.login(signal);
-    return found.find(
+    return found.filter(
       (issue) =>
         (issue.body ?? "").startsWith(marker) &&
         issue.user !== null &&
@@ -814,15 +1058,25 @@ export class GitHub {
       { query, variables },
       signal,
     );
-    const result = (await response.json()) as {
+    const result = (await this.body(
+      response,
+      "POST",
+      "/graphql",
+      signal,
+      "json",
+    )) as {
       data?: T;
       errors?: GraphQLError[];
-    };
+    } | null;
+    if (!result) throw new TransientError("GitHub GraphQL: no answer");
     const errors = result.errors ?? [];
     const refused = errors.filter((e) => !accept(e));
     if (refused.length) {
       const message = refused.map((e) => e.message).join("; ");
       if (refused.some((e) => e.type === "RATE_LIMITED")) {
+        const counted = transport.getStore();
+        if (counted) counted.rateLimited += 1;
+        note(counted, "POST", "/graphql", 1, response, true);
         const reset = Number(response.headers.get("x-ratelimit-reset"));
         throw new TransientError(
           `GitHub GraphQL: ${message}`,
@@ -871,9 +1125,9 @@ export class GitHub {
   }
 
   /** A read the login may not be allowed: 403 or 404 is undefined. */
-  private async optional<T>(read: Promise<T>): Promise<T | undefined> {
+  private async optional<T>(read: () => Promise<T>): Promise<T | undefined> {
     try {
-      return await read;
+      return await expecting([403, 404], read);
     } catch (error) {
       if (
         error instanceof GitHubError &&
@@ -918,11 +1172,13 @@ export class GitHub {
     if (known && Date.now() - known.at < WRITER_TTL_MS) return known.ok;
     let permission: string;
     try {
-      ({ permission } = await this.rest<{ permission: string }>(
-        "GET",
-        this.repo(`collaborators/${encodeURIComponent(login)}/permission`),
-        undefined,
-        signal,
+      ({ permission } = await expecting([404], () =>
+        this.rest<{ permission: string }>(
+          "GET",
+          this.repo(`collaborators/${encodeURIComponent(login)}/permission`),
+          undefined,
+          signal,
+        ),
       ));
     } catch (error) {
       // No such user: a definite no. Anything else may pass.
@@ -946,6 +1202,24 @@ export class GitHub {
 
   pull(number: number, signal?: AbortSignal): Promise<PullRequest> {
     return this.rest("GET", this.repo(`pulls/${number}`), undefined, signal);
+  }
+
+  /** Set PR `pull`'s body, unless it already reads `body`. */
+  async updatePull(
+    pull: Pick<PullRequest, "number" | "body">,
+    body: string,
+    point: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (pull.body === body) return;
+    crashPoint(`${point}:before`);
+    await this.rest(
+      "PATCH",
+      this.repo(`pulls/${pull.number}`),
+      { body },
+      signal,
+    );
+    crashPoint(`${point}:after`);
   }
 
   createPull(
@@ -1177,7 +1451,7 @@ export class GitHub {
     sha: string,
     signal?: AbortSignal,
   ): Promise<WorkflowRun[] | undefined> {
-    return this.optional(
+    return this.optional(() =>
       this.pages<WorkflowRun>(
         this.repo(`actions/runs?head_sha=${sha}`),
         signal,
@@ -1209,7 +1483,7 @@ export class GitHub {
   ): Promise<{ names: string[]; strict: boolean | undefined }> {
     const name = encodeURIComponent(branch);
     const rules =
-      (await this.optional(
+      (await this.optional(() =>
         this.pages<{
           type?: string;
           parameters?: {
@@ -1226,11 +1500,13 @@ export class GitHub {
     // The branch read's protection never shows `strict`.
     let strictKnown = true;
     try {
-      classic = await this.rest<Required>(
-        "GET",
-        this.repo(`branches/${name}/protection/required_status_checks`),
-        undefined,
-        signal,
+      classic = await expecting([403, 404], () =>
+        this.rest<Required>(
+          "GET",
+          this.repo(`branches/${name}/protection/required_status_checks`),
+          undefined,
+          signal,
+        ),
       );
     } catch (error) {
       if (!(error instanceof GitHubError && [403, 404].includes(error.status)))
@@ -1290,7 +1566,7 @@ export class GitHub {
     if (repository.allow_merge_commit !== true) return false;
     const name = encodeURIComponent(branch);
     const rules =
-      (await this.optional(
+      (await this.optional(() =>
         this.pages<{
           type?: unknown;
           parameters?: { allowed_merge_methods?: unknown } | null;
@@ -1306,7 +1582,7 @@ export class GitHub {
       )
     )
       return false;
-    const classic = await this.optional(
+    const classic = await this.optional(() =>
       this.rest<{ required_linear_history?: { enabled?: unknown } }>(
         "GET",
         this.repo(`branches/${name}/protection`),
@@ -1326,7 +1602,7 @@ export class GitHub {
     sha: string,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const activity = await this.optional(
+    const activity = await this.optional(() =>
       this.rest<{ after?: unknown; timestamp?: unknown }[]>(
         "GET",
         this.repo(
@@ -1477,6 +1753,9 @@ export class GitHub {
         if (size > 1024 * 1024) return undefined;
         chunks.push(value);
       }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransientError(`job ${job} log: ${errorMessage(error)}`);
     } finally {
       await reader.cancel().catch(() => undefined);
     }
@@ -1494,6 +1773,18 @@ export class GitHub {
     if (this.renamed) throw this.renamed;
     const token = await this.auth(refreshed);
     const deadline = AbortSignal.timeout(TIMEOUT_MS);
+    const sent =
+      body === undefined
+        ? undefined
+        : JSON.stringify(
+            method === "GET" ? body : redactDeep(body, this.secrets),
+          );
+    const counted = transport.getStore();
+    if (counted) {
+      counted.calls += 1;
+      if (refreshed) counted.retries += 1;
+      counted.bytes += sent === undefined ? 0 : Buffer.byteLength(sent);
+    }
     let response: Response;
     try {
       response = await fetch(`${this.api}${path}`, {
@@ -1505,24 +1796,26 @@ export class GitHub {
           ...(body === undefined ? {} : { "content-type": "application/json" }),
           ...headers,
         },
-        ...(body === undefined
-          ? {}
-          : {
-              body: JSON.stringify(
-                method === "GET" ? body : redactDeep(body, this.secrets),
-              ),
-            }),
+        ...(sent === undefined ? {} : { body: sent }),
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
         // Never followed: a redirect is an answer (see `moved`).
         redirect: "manual",
       });
     } catch (error) {
+      if (counted) counted.failed += 1;
+      note(counted, method, path, refreshed ? 2 : 1, undefined);
       if (signal?.aborted) throw error;
       throw new TransientError(
         `GitHub ${method} ${path}: ${errorMessage(error)}`,
       );
     }
-    if (response.ok) return response;
+    if (counted)
+      counted.bytes += Number(response.headers.get("content-length")) || 0;
+    if (response.ok) {
+      // A re-send that worked is traced too: it was retried.
+      if (refreshed) note(counted, method, path, 2, response);
+      return response;
+    }
     const text = await response.text().catch(() => "");
     let answer: unknown;
     try {
@@ -1531,8 +1824,10 @@ export class GitHub {
       answer = undefined;
     }
     const detail = `GitHub ${method} ${path}: ${response.status} ${text.slice(0, 300)}`;
-    if (response.status === 401 && !refreshed)
+    if (response.status === 401 && !refreshed) {
+      note(counted, method, path, 1, response);
       return this.send(method, path, body, signal, headers, true);
+    }
     const retryAfter = Number(response.headers.get("retry-after"));
     const reset = Number(response.headers.get("x-ratelimit-reset"));
     const limited =
@@ -1540,6 +1835,14 @@ export class GitHub {
       (response.status === 403 &&
         (response.headers.get("x-ratelimit-remaining") === "0" ||
           /rate limit/i.test(text)));
+    const expected =
+      !limited && expectedStatuses.getStore()?.includes(response.status);
+    if (counted && !expected) {
+      if (limited) counted.rateLimited += 1;
+      else counted.failed += 1;
+    }
+    if (!expected)
+      note(counted, method, path, refreshed ? 2 : 1, response, limited);
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
     if (response.status === 401) throw new GitHubError(detail, 401, answer);
     if (limited)
@@ -1575,6 +1878,15 @@ export class GitHub {
       throw new TransientError(
         detail,
         retryAfter > 0 ? retryAfter * 1000 : undefined,
+      );
+    // Something Factory just made may not show yet (GitHub's lag): a
+    // refusal or a 404 there retries; past FRESH_MS it stands.
+    if (
+      (response.status === 403 || response.status === 404) &&
+      this.isFresh(path)
+    )
+      throw new TransientError(
+        `${detail} (Factory made this within the last ${FRESH_MS / 60_000} min, so GitHub may not show it yet)`,
       );
     const failed = new GitHubError(
       detail,
@@ -1625,7 +1937,7 @@ export class GitHub {
 }
 
 /** One account, as a user (`name`) or as its app's bot (`name[bot]`). */
-function sameLogin(a: string, b: string): boolean {
+export function sameLogin(a: string, b: string): boolean {
   const plain = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
   return plain(a) === plain(b);
 }

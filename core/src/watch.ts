@@ -20,6 +20,8 @@ const BACKLOG = 500;
 const QUIET_MS = 24 * 60 * 60 * 1000;
 /** A terminal redraws at least this often, so ages stay current. */
 const REDRAW_MS = 5_000;
+/** A running worker without progress this long shows how long. */
+const QUIET_PROGRESS_MS = 15 * 60_000;
 
 interface Totals {
   toolsStarted: number;
@@ -28,6 +30,7 @@ interface Totals {
   commands: number;
   commandsFailed: number;
   turns: number;
+  compactions: number;
 }
 
 /** One Work Item's line (or the Objective's own steps, item `-`). */
@@ -46,6 +49,12 @@ interface Row {
   paths?: string[];
   command?: string;
   activityAt?: string;
+  /** The worker's last reported context; absent: its provider reported none. */
+  context?: { tokens: number; window?: number };
+  /** The step's start, or its last edit, finished tool or validation run. */
+  progressAt?: string;
+  /** The item's first failed validation since it last passed. */
+  failingSince?: string;
 }
 
 export interface WatchOutput {
@@ -132,13 +141,15 @@ function applyEvent(
   switch (event.event) {
     case "start":
       if (!step) return undefined;
-      // A new step: its activity starts again.
+      // A new step: its activity starts again; failing validation stays.
       rows.set(key, {
         issue,
         item,
         phase: phaseOf(step),
         state: "running",
         at: event.at,
+        progressAt: event.at,
+        ...(row.failingSince ? { failingSince: row.failingSince } : {}),
       });
       return key;
     case "outcome":
@@ -148,6 +159,19 @@ function applyEvent(
       row.at = event.at;
       if (typeof event.reason === "string") row.reason = event.reason;
       else delete row.reason;
+      if (phaseOf(step) === "validate" && event.outcome === "done")
+        delete row.failingSince;
+      break;
+    // Validation: Factory's validate step and a worker's own Validate.
+    case "validation-result":
+    case "worker-validate":
+      row.progressAt = event.at;
+      if (event.passed === false) row.failingSince ??= event.at;
+      // One command passing isn't the run passing; a whole Validate is.
+      else if (event.event === "worker-validate" && event.passed === true)
+        delete row.failingSince;
+      if (!row.phase && step) row.phase = phaseOf(step);
+      row.state ||= "running";
       break;
     case "worker-activity": {
       const counts = (event.counts ?? {}) as Partial<Totals>;
@@ -158,6 +182,7 @@ function applyEvent(
         commands: 0,
         commandsFailed: 0,
         turns: 0,
+        compactions: 0,
       };
       for (const name of Object.keys(totals) as (keyof Totals)[])
         totals[name] += Number(counts[name] ?? 0);
@@ -167,6 +192,15 @@ function applyEvent(
       if (Array.isArray(event.paths) && event.paths.length)
         row.paths = event.paths.map(String);
       if (typeof event.command === "string") row.command = event.command;
+      const context = event.context as Row["context"] | undefined;
+      if (typeof context?.tokens === "number")
+        row.context = {
+          tokens: context.tokens,
+          ...(typeof context.window === "number"
+            ? { window: context.window }
+            : {}),
+        };
+      if (counts.edits || counts.toolsFinished) row.progressAt = event.at;
       row.activityAt = event.at;
       if (!row.phase && step) row.phase = phaseOf(step);
       if (!row.state) row.state = "running";
@@ -202,7 +236,11 @@ function view(rows: Row[], issue: number | undefined): string {
   );
 }
 
-/** One row: `#54 a work running for 2m · 4 turns · 9 tools (Edit, Bash) · 3 edits (src/a.ts) · $ npm test · 12s ago`. */
+/**
+ * One row: `#54 a work running for 2m · 4 turns · 9 tools (Edit, Bash) · 3
+ * edits (src/a.ts) · $ npm test · context 84K/272K (31%) · 1 compaction ·
+ * no progress for 3m · validation failing for 9m · active 12s ago`.
+ */
 function rowLine(row: Row, now = Date.now()): string {
   const since =
     row.state === "running"
@@ -225,9 +263,35 @@ function rowLine(row: Row, now = Date.now()): string {
     if (row.command) parts.push(`$ ${row.command}`);
     if (totals.commandsFailed)
       parts.push(`${totals.commandsFailed} failed commands`);
-    if (row.activityAt) parts.push(`active ${age(now, row.activityAt)} ago`);
+    // A provider that never reports its context is unknown, never zero.
+    if (row.context) {
+      const { tokens, window } = row.context;
+      parts.push(
+        `context ${kilo(tokens)}${window ? `/${kilo(window)} (${Math.round((tokens / window) * 100)}%)` : ""}`,
+      );
+      if (totals.compactions)
+        parts.push(
+          `${totals.compactions} compaction${totals.compactions === 1 ? "" : "s"}`,
+        );
+    } else parts.push("context and compactions unknown");
   }
+  if (row.state === "running" && totals) {
+    const quiet = now - Date.parse(row.progressAt ?? row.at);
+    if (quiet >= QUIET_PROGRESS_MS)
+      parts.push(`no progress for ${age(now, row.progressAt ?? row.at)}`);
+  }
+  if (row.failingSince)
+    parts.push(`validation failing for ${age(now, row.failingSince)}`);
+  if (totals && row.activityAt)
+    parts.push(`active ${age(now, row.activityAt)} ago`);
   return parts.join(" · ");
+}
+
+/** A token count: `840`, `84K`, `1.2M`. */
+function kilo(tokens: number): string {
+  if (tokens < 1_000) return String(tokens);
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}K`;
+  return `${(tokens / 1_000_000).toFixed(1)}M`;
 }
 
 /** A short duration since `at`: `12s`, `4m`, `2h`. */

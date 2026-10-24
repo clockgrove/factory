@@ -72,9 +72,10 @@ test("the packed tarball installs offline and runs the core's CLI", {
       "skills/director/SKILL.md",
       "skills/setup/SKILL.md",
       "docs/USER-GUIDE.md",
-      "docs/CORE.md",
+      "docs/DESIGN.md",
+      "docs/reference/setup.md",
       "docs/templates/objective.md",
-      "assets/recipes/repository-migration.json",
+      "assets/factory-mark.svg",
       "THIRD_PARTY_NOTICES.md",
     ])
       assert.ok(existsSync(join(installed, path)), `missing: ${path}`);
@@ -109,6 +110,7 @@ test("the packed tarball installs offline and runs the core's CLI", {
     );
     assert.equal(loads.status, 0, loads.stderr);
     assert.ok(JSON.parse(loads.stdout).recommendation, loads.stderr);
+
     rmSync(env.FACTORY_CONFIG);
     const own = spawnSync(
       cli,

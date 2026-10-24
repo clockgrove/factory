@@ -1,16 +1,19 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { captureDir } from "./paths.js";
 
 /**
@@ -26,7 +29,7 @@ export const runOfFile = (path: string): string =>
   basename(path).split(".")[0]!;
 
 /**
- * Content capture (CORE.md#Content capture): off by default. Enabled, the
+ * Content capture (docs/reference/run-log.md#Content capture): off by default. Enabled, the
  * request and response bodies of each model call go to their own file,
  * redacted and cut to `maxBytesPerCall`, and the run log references it.
  */
@@ -50,6 +53,36 @@ export const CAPTURE = Symbol("capture");
 export interface CaptureBody {
   request: string;
   response?: string;
+  /** Native tool outputs, in order (usage.ts captureToolOutput), and their UTF-8 bytes. */
+  tools?: { name: string; output: string }[];
+  toolBytes?: number;
+}
+
+let toolCapture = false;
+
+/** Whether a run log of this process captures: only then are tool outputs kept for it. */
+export const capturingTools = (): boolean => toolCapture;
+
+/**
+ * How a run ended, in its `run-end` event: `stopped` (a clean stop, or a
+ * one-off run that finished), `handed-off` (a clean stop with the
+ * Objective unfinished: the next run carries it on), or `crashed` (the
+ * process died; the next start detects it and appends this event to the
+ * dead run's files, `endCrashedRun`).
+ */
+export type RunEnd = "stopped" | "handed-off" | "crashed";
+
+/** One run file's line counters: what `log-health` reports. */
+interface FileHealth {
+  path: string;
+  /** The last sequence number given out: every line gets the next, written or not. */
+  seq: number;
+  emitted: number;
+  /** Failed writes: lines (`lost`) and capture files. */
+  failed: number;
+  lost: number;
+  /** `failed` when the last `log-health` went out. */
+  reported: number;
 }
 
 /**
@@ -58,28 +91,75 @@ export interface CaptureBody {
  * `logs/<issue>/<run id>.captures/`. It records what happened for status,
  * diagnostics and analysis. It never drives progress, and losing it loses
  * no work.
+ *
+ * Its formal history (docs/reference/run-log.md#Run log): each file starts with a
+ * `run-header` (Factory's version and the running build's source digest);
+ * every line carries `seq`, consecutive per file from 1, so a missing
+ * number is a lost line; a write that fails is counted, and the next line
+ * that lands is followed by a `log-health` event (emitted, failed and
+ * lost), as is the run's end (`end`), after its `run-end` event.
  */
 export class RunLog {
-  private readonly files = new Map<number, string>();
+  private readonly files = new Map<number, FileHealth>();
 
   constructor(
     private readonly dir: string,
     readonly runId: string,
     private readonly capture: CaptureSettings = CAPTURE_OFF,
     private readonly secrets: readonly string[] = [],
-  ) {}
+  ) {
+    if (capture.enabled) toolCapture = true;
+  }
 
   write(issue: number, event: Record<string, unknown>): void {
+    const file = this.file(issue);
+    if (!file) return;
+    if (file.seq === 0) this.append(file, { event: "run-header", ...build() });
+    const body = (event as { [CAPTURE]?: CaptureBody })[CAPTURE];
+    const id = body && this.capture.enabled && this.captured(issue, body);
+    if (body && this.capture.enabled && !id) file.failed += 1;
+    if (!this.append(file, { ...event, ...(id ? { capture: id } : {}) }))
+      return;
+    if (file.failed > file.reported) this.health(file);
+  }
+
+  /**
+   * The run's end: a `run-end` event (`outcome(issue)`) then a
+   * `log-health` event in every file this run wrote. Call it once, last.
+   */
+  end(outcome: (issue: number) => RunEnd): void {
+    for (const [issue, file] of this.files) {
+      this.append(file, { event: "run-end", outcome: outcome(issue) });
+      this.health(file);
+    }
+  }
+
+  /** One line with the file's next `seq`; false, counted, when it couldn't be written. */
+  private append(file: FileHealth, event: Record<string, unknown>): boolean {
+    file.seq += 1;
     try {
-      const body = (event as { [CAPTURE]?: CaptureBody })[CAPTURE];
-      const id = body && this.capture.enabled && this.captured(issue, body);
       appendFileSync(
-        this.file(issue),
-        `${JSON.stringify({ at: new Date().toISOString(), ...event, ...(id ? { capture: id } : {}) })}\n`,
+        file.path,
+        `${JSON.stringify({ at: new Date().toISOString(), seq: file.seq, ...event })}\n`,
       );
+      file.emitted += 1;
+      return true;
     } catch {
       // A full disk or a removed directory must not stop the run: the log only observes.
+      file.failed += 1;
+      file.lost += 1;
+      return false;
     }
+  }
+
+  private health(file: FileHealth): void {
+    file.reported = file.failed;
+    this.append(file, {
+      event: "log-health",
+      emitted: file.emitted,
+      failed: file.failed,
+      lost: file.lost,
+    });
   }
 
   /**
@@ -92,12 +172,24 @@ export class RunLog {
       const dir = join(this.dir, captureDir(issue, this.runId));
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const id = randomUUID();
-      const half = Math.floor(this.capture.maxBytesPerCall / 2);
-      const request = bounded(redact(body.request, this.secrets), half);
+      // Request and response share the bound; tool outputs, when any, take a quarter.
+      const share = Math.floor(
+        (this.capture.maxBytesPerCall * (body.tools?.length ? 3 : 4)) / 8,
+      );
+      const request = bounded(redact(body.request, this.secrets), share);
       const response =
         body.response === undefined
           ? undefined
-          : bounded(redact(body.response, this.secrets), half);
+          : bounded(redact(body.response, this.secrets), share);
+      let toolBytes = Math.floor(this.capture.maxBytesPerCall / 4);
+      let toolsCut = false;
+      const tools: { name: string; output: string }[] = [];
+      for (const tool of body.tools ?? []) {
+        const output = bounded(redact(tool.output, this.secrets), toolBytes);
+        tools.push({ name: tool.name, output: output.text });
+        toolBytes -= Buffer.byteLength(output.text);
+        toolsCut ||= output.cut;
+      }
       writeFileSync(
         join(dir, `${id}.json`),
         JSON.stringify({
@@ -105,7 +197,8 @@ export class RunLog {
           run: this.runId,
           request: request.text,
           ...(response ? { response: response.text } : {}),
-          truncated: request.cut || Boolean(response?.cut),
+          ...(tools.length ? { tools } : {}),
+          truncated: request.cut || Boolean(response?.cut) || toolsCut,
         }),
         { mode: 0o600 },
       );
@@ -115,16 +208,120 @@ export class RunLog {
     }
   }
 
-  private file(issue: number): string {
-    let path = this.files.get(issue);
-    if (!path) {
+  private file(issue: number): FileHealth | undefined {
+    let file = this.files.get(issue);
+    if (!file) {
       const dir = join(this.dir, String(issue));
-      mkdirSync(dir, { recursive: true });
-      path = join(dir, `${this.runId}.jsonl`);
-      this.files.set(issue, path);
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
+        // Tried again with the next line; nothing was numbered yet.
+        return undefined;
+      }
+      file = {
+        path: join(dir, `${this.runId}.jsonl`),
+        seq: 0,
+        emitted: 0,
+        failed: 0,
+        lost: 0,
+        reported: 0,
+      };
+      this.files.set(issue, file);
     }
-    return path;
+    return file;
   }
+}
+
+/**
+ * At a start that found the last run dead: append `run-end` (`crashed`)
+ * to that run's files of `issues` (and the service's, 0) that exist,
+ * numbered after their last line, which a torn last line doesn't swallow;
+ * a file that already has one is left alone.
+ * Only the given issues are looked at: the Objectives this start loaded.
+ */
+export function endCrashedRun(
+  dir: string,
+  runId: string,
+  issues: Iterable<number>,
+  detectedBy: string,
+): void {
+  for (const issue of new Set([0, ...issues])) {
+    const path = join(dir, String(issue), `${runId}.jsonl`);
+    try {
+      if (!existsSync(path)) continue;
+      const size = sizeOf(path);
+      const tail = readFrom(path, Math.max(0, size - 64 * 1024), size);
+      const lines = parseLines(completeLines(tail).toString("utf8"), true);
+      // Ended already (a start that died after writing this): once only.
+      if (lines.some((line) => line.event === "run-end")) continue;
+      const last = lines.at(-1);
+      const seq = typeof last?.seq === "number" ? last.seq + 1 : undefined;
+      appendFileSync(
+        path,
+        `${tail.length && tail[tail.length - 1] !== 10 ? "\n" : ""}${JSON.stringify(
+          {
+            at: new Date().toISOString(),
+            ...(seq ? { seq } : {}),
+            event: "run-end",
+            outcome: "crashed" satisfies RunEnd,
+            detectedBy,
+          },
+        )}\n`,
+      );
+    } catch {
+      // The log only observes.
+    }
+  }
+}
+
+interface Build {
+  factoryVersion: string | null;
+  sourceDigest: string | null;
+}
+let built: Build | undefined;
+
+/**
+ * The running build, once per process: Factory's version (the nearest
+ * package.json above this module) and a sha256 over the build's own
+ * JavaScript files (paths and bytes, in path order).
+ */
+function build(): Build {
+  if (built) return built;
+  const root = dirname(fileURLToPath(import.meta.url));
+  let factoryVersion: string | null = null;
+  for (let dir = root; ; dir = dirname(dir)) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+      factoryVersion = typeof pkg.version === "string" ? pkg.version : null;
+      break;
+    } catch {
+      if (dirname(dir) === dir) break;
+    }
+  }
+  let sourceDigest: string | null = null;
+  try {
+    const hash = createHash("sha256");
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true })
+        .flatMap((entry) =>
+          entry.isDirectory()
+            ? walk(join(dir, entry.name))
+            : entry.name.endsWith(".js")
+              ? [join(dir, entry.name)]
+              : [],
+        )
+        .sort();
+    for (const file of walk(root))
+      hash
+        .update(`${relative(root, file)}\0`)
+        .update(readFileSync(file))
+        .update("\0");
+    sourceDigest = hash.digest("hex");
+  } catch {
+    // Unreadable: the header says so with null.
+  }
+  built = { factoryVersion, sourceDigest };
+  return built;
 }
 
 /** `text` within `bytes` of UTF-8, cut at a character boundary. */
@@ -211,21 +408,28 @@ function ofRun(file: string, events: LogEvent[]): LogEvent[] {
 }
 
 /**
- * Call `poll` every `everyMs` until SIGINT or SIGTERM, or until it returns
- * a result (anything but undefined): a follow's loop. Returns that result,
- * undefined when interrupted.
+ * Call `poll` every `everyMs` until SIGINT, SIGTERM or `signal`, or until
+ * it returns a result (anything but undefined): a follow's loop. Returns
+ * that result, undefined when interrupted. `started` runs once the signals
+ * are caught: what tells a person (or a script) that Ctrl-C now stops the
+ * follow goes there, so a signal sent on seeing it never meets Node's
+ * default exit.
  */
 export async function untilInterrupted<T>(
   poll: () => T | undefined | Promise<T | undefined>,
+  signal?: AbortSignal,
   everyMs = 500,
+  started?: () => void,
 ): Promise<T | undefined> {
-  let stop = false;
+  let stop = signal?.aborted ?? false;
   const stopping = () => {
     stop = true;
   };
   process.once("SIGINT", stopping);
   process.once("SIGTERM", stopping);
+  signal?.addEventListener("abort", stopping, { once: true });
   try {
+    started?.();
     while (!stop) {
       await new Promise((resolve) => setTimeout(resolve, everyMs));
       if (stop) break;
@@ -236,6 +440,7 @@ export async function untilInterrupted<T>(
   } finally {
     process.off("SIGINT", stopping);
     process.off("SIGTERM", stopping);
+    signal?.removeEventListener("abort", stopping);
   }
 }
 
@@ -304,7 +509,9 @@ const LIVE_MS = 10 * 60 * 1000;
  * together. Run ids sort by start time, so id order is age order. The
  * `active` run (the caller's own) and any run changed in the last 10
  * minutes (a `factory dream` call still running) are never removed; they
- * still count toward both bounds.
+ * still count toward both bounds. Each removed run is first recorded in
+ * its Objective's `rotated` file, so a reader can say how many runs it
+ * no longer has (`rotatedRuns`).
  */
 export function rotateLogs(
   dir: string,
@@ -321,11 +528,17 @@ export function rotateLogs(
         return false;
       }
     });
-  const runs: { paths: string[]; id: string; bytes: number }[] = [];
+  const runs: {
+    paths: string[];
+    id: string;
+    bytes: number;
+    issueDir: string;
+  }[] = [];
   for (const issue of safeList(dir)) {
     const issueDir = join(dir, issue);
     const byRun = new Map<string, string[]>();
     for (const name of safeList(issueDir)) {
+      if (name === ROTATED) continue;
       const id = runOfFile(name);
       byRun.set(id, [...(byRun.get(id) ?? []), join(issueDir, name)]);
     }
@@ -333,8 +546,8 @@ export function rotateLogs(
     const excess = ids.length - retention.runsPerObjective;
     ids.forEach((id, i) => {
       const paths = byRun.get(id)!;
-      if (i < excess && !kept(id, paths)) remove(paths);
-      else runs.push({ paths, id, bytes: paths.reduce(addSize, 0) });
+      if (i < excess && !kept(id, paths)) remove(issueDir, id, paths);
+      else runs.push({ paths, id, bytes: paths.reduce(addSize, 0), issueDir });
     });
   }
   runs.sort((a, b) => (a.id < b.id ? 1 : -1));
@@ -342,12 +555,54 @@ export function rotateLogs(
   for (const run of runs) {
     total += run.bytes;
     if (total > retention.totalBytes && !kept(run.id, run.paths))
-      remove(run.paths);
+      remove(run.issueDir, run.id, run.paths);
   }
 }
 
-function remove(paths: string[]): void {
+/** An Objective's record of the runs rotation removed: one JSON line each. */
+const ROTATED = "rotated";
+
+/** A run rotation removed: its id, and when its files were last written. */
+export interface RotatedRun {
+  run: string;
+  lastAt: string;
+}
+
+/** Record the run in its Objective's `rotated` file, then remove its files. */
+function remove(issueDir: string, run: string, paths: string[]): void {
+  let last = 0;
+  for (const path of paths)
+    try {
+      last = Math.max(last, statSync(path).mtimeMs);
+    } catch {
+      // Gone meanwhile.
+    }
+  const record: RotatedRun = { run, lastAt: new Date(last).toISOString() };
+  try {
+    appendFileSync(join(issueDir, ROTATED), `${JSON.stringify(record)}\n`);
+  } catch {
+    // Like a run-log line: losing the record must not stop housekeeping.
+  }
   for (const path of paths) rmSync(path, { recursive: true, force: true });
+}
+
+/** The runs rotation removed from the Objective's run log, each once; a run still there is not one. */
+export function rotatedRuns(dir: string, issue: number): RotatedRun[] {
+  const issueDir = join(dir, String(issue));
+  const present = new Set(logFiles(dir, issue).map(runOfFile));
+  const file = join(issueDir, ROTATED);
+  const found = new Map<string, RotatedRun>();
+  const text = readFrom(file, 0, sizeOf(file)).toString("utf8");
+  for (const line of text.split("\n")) {
+    try {
+      const { run, lastAt } = JSON.parse(line) as RotatedRun;
+      if (typeof run === "string" && typeof lastAt === "string")
+        if (!present.has(run)) found.set(run, { run, lastAt });
+    } catch {
+      // A torn line: skipped.
+    }
+  }
+  return [...found.values()].sort((a, b) => a.run.localeCompare(b.run));
 }
 
 /** A file's size, or a capture directory's files' sizes. */
@@ -381,11 +636,15 @@ export function sizeOf(path: string): number {
   }
 }
 
-/** Tokens, bearer headers and the named secret values, line by line, as [REDACTED]. */
+/** Tokens, JWTs, bearer headers and the named secret values, line by line, as [REDACTED]. */
 export function redact(value: string, secrets: readonly string[] = []): string {
   let result = value
     .replace(
       /\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{8,}\b/g,
+      "[REDACTED]",
+    )
+    .replace(
+      /\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g,
       "[REDACTED]",
     )
     .replace(/(Authorization:\s*Bearer\s+)\S+/gi, "$1[REDACTED]");

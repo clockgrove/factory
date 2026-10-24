@@ -41,16 +41,6 @@ const KNOWN = [
   "non-goals",
 ];
 
-/** Older names Objectives still use for a known section. */
-const ALIASES: Record<string, string> = { outcome: "goal" };
-
-const RETIRED: Record<string, string> = {
-  "final validation":
-    "write each command as an Acceptance bullet that is exactly one backticked command",
-  "planning sources": "rename it to Sources",
-  "what must be true": "rename it to Acceptance",
-};
-
 interface Section {
   name: string;
   blocks: ObjectiveBlock[];
@@ -61,8 +51,7 @@ function sections(blocks: readonly ObjectiveBlock[]): Section[] {
   const result: Section[] = [];
   for (const block of blocks) {
     if (block.kind === "heading" && (block.level === 2 || block.level === 3)) {
-      const text = block.text.toLowerCase();
-      const name = ALIASES[text] ?? text;
+      const name = block.text.toLowerCase();
       const last = result[result.length - 1];
       if (last && last.name === name && last.blocks.length === 0) continue;
       result.push({ name, blocks: [] });
@@ -118,9 +107,6 @@ export function checkObjective(blocks: readonly ObjectiveBlock[]): {
   const all = sections(blocks);
   const seen = new Set<string>();
   for (const section of all) {
-    const retired = RETIRED[section.name];
-    if (retired)
-      problems.push(`The "${section.name}" heading is retired: ${retired}.`);
     if (KNOWN.includes(section.name)) {
       if (seen.has(section.name))
         problems.push(
@@ -157,6 +143,7 @@ export function checkObjective(blocks: readonly ObjectiveBlock[]): {
     }
     sources.push(heading ? { path, heading } : { path });
   }
+  problems.push(...mayChange(blocks).problems);
   return {
     objective: {
       goal,
@@ -197,6 +184,33 @@ export function declaration(
     entries.push(block);
   }
   return { entries };
+}
+
+/**
+ * The protected paths (CI configuration, `.github/`, CODEOWNERS) the
+ * Objective lets a worker change: its one "May change" section, each entry
+ * a list item that is exactly one code element naming a repository path,
+ * as an Acceptance command is written. Any other entry is a problem. A
+ * path named anywhere else in the Objective allows nothing.
+ */
+export function mayChange(blocks: readonly ObjectiveBlock[]): {
+  paths: string[];
+  problems: string[];
+} {
+  const { entries, problem } = declaration(blocks, "may change", "May change");
+  if (problem) return { paths: [], problems: [problem] };
+  const paths: string[] = [];
+  const problems: string[] = [];
+  for (const entry of entries ?? []) {
+    if (entry.kind === "empty") continue;
+    const path = entry.kind === "item" ? entry.code?.trim() : undefined;
+    if (path && validPath(path)) paths.push(path);
+    else
+      problems.push(
+        `May change entry ${JSON.stringify(entry.text)} isn't one path; write each as a bullet that is exactly one backticked repository path, such as "- \`.github/workflows/ci.yml\`".`,
+      );
+  }
+  return { paths, problems };
 }
 
 /** A declaration's only entry, when it has exactly one. */

@@ -34,11 +34,26 @@ export function stateRoot(): string {
   );
 }
 
-export function installationPaths(repository: string): Paths {
-  // Lock on the real directory, so two spellings of one path share one lock.
-  const named = resolve(
+/** OWNER/NAME as GitHub allows it: never a path that leaves the state root. */
+export function validRepository(repository: string): boolean {
+  const match = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)$/.exec(repository);
+  return !!match && match[2] !== "." && match[2] !== "..";
+}
+
+/** The installation's directory, created by neither this nor a reader. */
+function installationDir(repository: string): string {
+  if (!validRepository(repository))
+    throw new Error(
+      `${JSON.stringify(repository)} is not a repository: give OWNER/NAME`,
+    );
+  return resolve(
     join(stateRoot(), repository.toLowerCase().replace("/", "__")),
   );
+}
+
+export function installationPaths(repository: string): Paths {
+  // Lock on the real directory, so two spellings of one path share one lock.
+  const named = installationDir(repository);
   mkdirSync(named, { recursive: true, mode: 0o700 });
   const root = realpathSync(named);
   const id = createHash("sha256").update(root).digest("hex").slice(0, 24);
@@ -54,7 +69,7 @@ export function installationPaths(repository: string): Paths {
 /** A capture id: what `RunLog` names a capture file by (a UUID). */
 export const CAPTURE_ID = /^[\w-]{1,128}$/;
 
-/** A run's capture directory under the logs directory: `<issue>/<run id>.captures` (CORE.md#Content capture). */
+/** A run's capture directory under the logs directory: `<issue>/<run id>.captures` (docs/reference/run-log.md#Content capture). */
 export function captureDir(issue: number, run: string): string {
   return `${issue}/${run}.captures`;
 }

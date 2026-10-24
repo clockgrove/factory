@@ -28,6 +28,8 @@ export interface JobOptions {
 interface Running {
   issue: number;
   controller: AbortController;
+  /** The job itself, settled however it ends. */
+  ended?: Promise<unknown>;
 }
 
 /**
@@ -92,6 +94,7 @@ export class Jobs {
     } catch (error) {
       work = Promise.reject(error);
     }
+    entry.ended = work.catch(() => undefined);
     const current = () => this.running.get(key) === entry;
     Promise.race([work, deadline])
       .then(
@@ -144,6 +147,18 @@ export class Jobs {
   /** Whether any job of Objective `issue` is in flight. */
   busy(issue: number): boolean {
     return [...this.running.values()].some((entry) => entry.issue === issue);
+  }
+
+  /**
+   * The service stops: abort every running job, drop the backoffs, and
+   * wait until each job has ended, so none writes after the run's end.
+   */
+  async drain(): Promise<void> {
+    const all = [...this.running.values()];
+    this.running.clear();
+    this.waits.clear();
+    for (const entry of all) entry.controller.abort(new Error("stopping"));
+    await Promise.allSettled(all.map((entry) => entry.ended));
   }
 
   /**

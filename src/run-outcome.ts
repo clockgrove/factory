@@ -1,0 +1,200 @@
+import { splitSettled } from "./objective-split.js";
+import {
+  answeredQuestionDigest,
+  isExecutionState,
+  isPreparationState,
+  openAmendmentQuestion,
+  openPlanningQuestion,
+  openReviewDecision,
+  reviewDecisionAnswerable,
+  planningRevisionGrantable,
+} from "./state.js";
+import { objectiveComplete } from "./completion.js";
+import type { IntakeAuthorization } from "./intake.js";
+import { objectiveCandidate } from "./qa.js";
+import { PLANNING_REVISION_GRANT } from "./repair-policy.js";
+import type { ContinuationState } from "./state.js";
+import {
+  configurationCommand,
+  namedQuestion,
+  shortPlanDigest,
+} from "./status-summary.js";
+import { awaitsOperator } from "./step.js";
+
+/** Process exit codes for run and the background service (supervisor serve). */
+const EXIT_COMPLETE = 0;
+export const EXIT_FAILED = 1;
+export const EXIT_NEEDS_DECISION = 2;
+
+/**
+ * A run stopped on a decision or a prerequisite before the Objective had any
+ * state. Nothing records it, so `factory retry` has nothing to clear: the
+ * operator resolves it and runs the Objective again.
+ */
+export class AwaitingBeforeState extends Error {
+  constructor(
+    readonly objective: number,
+    readonly detail: string,
+    readonly fix?: string,
+  ) {
+    super(`Objective #${objective} waits before it starts: ${detail}`);
+    this.name = "AwaitingBeforeState";
+  }
+}
+
+/** Exit code and message for a run that stopped before any state existed. */
+export function awaitingOutcome(
+  wait: AwaitingBeforeState,
+  configuration?: string,
+): {
+  code: number;
+  message: string;
+} {
+  return {
+    code: EXIT_NEEDS_DECISION,
+    message: `Objective #${wait.objective} waits before it starts: ${wait.detail}${wait.fix ? `\nFix: ${wait.fix}` : ""}\nResolve it, then run \`${configurationCommand(`factory run --objective ${wait.objective}`, configuration)}\` again`,
+  };
+}
+
+/**
+ * The retry that answers a stop by a defect. A failed Work Item that ended
+ * the attempt needs its own new attempt (`--item`); a defect outside any
+ * item runs the Objective's step again.
+ */
+export function stopRetryCommand(state: ContinuationState): string {
+  const retry = `factory retry --objective ${state.objective}`;
+  if (!("work" in state) || state.error === undefined) return retry;
+  // `retry --item` accepts only a failed or cancelled item; an item that
+  // finished since the stop (done, published) is answered by the Objective's retry.
+  const item = state.errorItem;
+  const status = item === undefined ? undefined : state.work[item]?.status;
+  return item !== undefined && (status === "failed" || status === "cancelled")
+    ? `${retry} --item ${item}`
+    : retry;
+}
+
+/** How a run ended: the exit code and one message naming the next command. */
+export function runOutcome(
+  state: ContinuationState,
+  /** `factory status` for this Objective, for a stop no message above names. */
+  statusLines: () => string[],
+  configuration?: string,
+): {
+  code: number;
+  message: string;
+} {
+  const objective = state.objective;
+  const rerun = configurationCommand(
+    `factory run --objective ${objective}`,
+    configuration,
+  );
+  // Binds a printed --answer to the open question decide checks.
+  const named = namedQuestion(answeredQuestionDigest(state));
+  // A step's decision stands until the operator's retry clears it.
+  const retry = configurationCommand(
+    `factory retry --objective ${objective}`,
+    configuration,
+  );
+  // An Objective step waits for the operator: a prerequisite to fix, or a decision.
+  const wait = state.wait;
+  if (
+    wait?.kind === "prerequisite" &&
+    !(isExecutionState(state) && objectiveComplete(state))
+  )
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message: `Objective #${objective} waits for a prerequisite: ${wait.detail}\nFix: ${wait.fix ?? "see the detail"}; then \`${retry}\` and \`${rerun}\``,
+    };
+  // The planner's unanswered question about the pending amendment (#1296).
+  const amendmentAsked = openAmendmentQuestion(state);
+  if (amendmentAsked)
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message: `Objective #${objective} amendment needs a decision: ${amendmentAsked.question}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…"${named} --reason "…"`, configuration)}\` and \`${rerun}\`, or refuse the amendment with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``,
+    };
+  if (
+    wait?.kind === "decision" &&
+    !(isExecutionState(state) && objectiveComplete(state))
+  )
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message: `Objective #${objective} needs a decision: ${wait.detail}\nAnswer with \`${retry}\` (the step runs again on \`${rerun}\`), or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
+    };
+  // A split ends the parent's own run: the queue runs its children.
+  if (splitSettled(state))
+    return {
+      code: EXIT_COMPLETE,
+      message: state.split.closedAt
+        ? `Objective #${objective} closed: all ${state.split.children.length} child Objectives were accepted`
+        : `Objective #${objective} was split into child Objectives ${state.split.children.map((child) => `#${state.split.issues[child.key]}`).join(", ")}; ${state.split.queued ? "the queue runs each child once the children it builds on are accepted" : `run each child with \`${configurationCommand("factory run --objective N", configuration)}\` once the children it builds on are accepted`}. Factory closes #${objective} when every child is accepted`,
+    };
+  if (isPreparationState(state))
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message: state.plan
+        ? state.plan.review.acceptable === false
+          ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} cannot be accepted: ${state.coordinator.waitReason ?? "inspect status"}\nRefuse it with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
+          : reviewDecisionAnswerable(state)
+            ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\n${reviewDecisionAnswerable(state)!.count > 1 ? "Answer every question in one --answer" : "Answer"} with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…"${named} --reason "…"`, configuration)}\`, then \`${rerun}\` revises the plan with your answer and reviews it again; or discard the plan with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
+            : openReviewDecision(state)
+              ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nThis plan's draft is not retained, so an answer cannot revise it: refuse it with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, state the decision in the Objective, then rerun \`${rerun}\``
+              : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept|refuse --answer "…"${named} --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
+        : openPlanningQuestion(state)
+          ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…"${named} --reason "…"`, configuration)}\`, then \`${rerun}\` revises the draft plan with your answer; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
+          : planningRevisionGrantable(state)
+            ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning used up its revisions with review fix findings left"}\nGrant ${PLANNING_REVISION_GRANT} more revisions with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --reason "…"`, configuration)}\`, then \`${rerun}\` revises the retained draft for the last review's findings; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
+            : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, or on the default branch when it is a repository change that is yours to make; discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``,
+    };
+  if (objectiveComplete(state))
+    return {
+      code: EXIT_COMPLETE,
+      message: `Objective #${objective} completed at ${objectiveCandidate(state)!.commitSha} (${objectiveCandidate(state)!.basis}); final validation passed`,
+    };
+  if (state.cancelledAt)
+    return {
+      code: EXIT_FAILED,
+      message: `Objective #${objective} was cancelled`,
+    };
+  // A Work Item step waits for the operator: its question or fix names the answer.
+  const asked = Object.entries(state.work).find(([, work]) =>
+    awaitsOperator(work.wait),
+  );
+  if (asked) {
+    const [id, work] = asked;
+    // A failed item whose diagnosis waits repeats it on the next run; a
+    // retry would start a new attempt without it.
+    if (
+      work.status === "failed" &&
+      work.recovery?.phase === "diagnosing" &&
+      work.wait!.kind === "prerequisite"
+    )
+      return {
+        code: EXIT_NEEDS_DECISION,
+        message: `Objective #${objective} Work Item ${id} waits for a prerequisite: ${work.wait!.detail}\nFix: ${work.wait!.fix ?? "see the detail"}; then \`${rerun}\` asks the diagnosis again`,
+      };
+    const itemRetry = `${retry} --item ${id}`;
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message:
+        work.wait!.kind === "prerequisite"
+          ? `Objective #${objective} Work Item ${id} waits for a prerequisite: ${work.wait!.detail}\nFix: ${work.wait!.fix ?? "see the detail"}; then \`${itemRetry}\` and \`${rerun}\``
+          : `Objective #${objective} Work Item ${id} needs a decision: ${work.wait!.detail}\nAnswer with \`${itemRetry}\` (the step runs again on \`${rerun}\`), or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
+    };
+  }
+  if (state.error)
+    return {
+      code: EXIT_FAILED,
+      message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${configurationCommand(stopRetryCommand(state), configuration)}\` and \`${rerun}\`; or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
+    };
+  // The pending decision is whatever status shows: its headline, question and
+  // exact next command.
+  return { code: EXIT_NEEDS_DECISION, message: statusLines().join("\n") };
+}
+
+/** Intake exits 2 when an installation-wide limit stopped the queue for a decision, 1 when a failure paused it. One Objective's decision keeps the service running (#1714). */
+export function intakeExitCode(record: IntakeAuthorization): number {
+  if (record.observation?.needsDecision) return EXIT_NEEDS_DECISION;
+  return record.mode === "paused" && record.observation?.error
+    ? EXIT_FAILED
+    : EXIT_COMPLETE;
+}

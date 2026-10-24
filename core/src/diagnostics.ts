@@ -200,7 +200,7 @@ export async function diagnostics(
   const captureNote = () => {
     if (options.item !== undefined && !captured && !options.json)
       write(
-        `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (CORE.md#Content capture).\n`,
+        `No captured model calls for ${options.item}: full requests and responses are kept only with capture.enabled (docs/reference/run-log.md#Content capture).\n`,
       );
   };
   const visit = (event: LogEvent) => {
@@ -511,6 +511,13 @@ class Timeline {
           ),
         ];
       }
+      case "media-auto-selected":
+        return [
+          entry(
+            "answer",
+            `${step ?? "select"} selected set ${String(event.set)} without asking: the only candidate${Array.isArray(event.bound) && event.bound.length ? `, bound to ${event.bound.join(", ")}` : ""}`,
+          ),
+        ];
       case "diagnosis":
         return [
           entry(

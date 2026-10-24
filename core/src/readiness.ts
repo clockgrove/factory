@@ -3,18 +3,30 @@
  * target repository need before the service runs an Objective, read with
  * no model call and no change to the target or its settings (the Codex
  * probe writes only its own temporary directories). Setup shows it; a `blocked` check names its
- * fix. Logins are checked by presence: account access, billing and
- * entitlements are first known when a provider is called.
+ * fix. Codex and Copilot logins are checked by presence, Claude's by asking
+ * its SDK which login it resolves, which may refresh the operator's login
+ * and update ~/.claude.json as any Claude client does; account access,
+ * billing and entitlements are first known when a provider is called.
  */
+
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
+import { checkoutCredentialEntries } from "./git.js";
 import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
+import { currentHolder, holderText } from "./holder.js";
+import { installationPaths } from "./paths.js";
 import { networkToolOfCommand } from "./planning/facts.js";
+import {
+  CLAUDE_LOGIN_CREDENTIALS,
+  claudeLoginProbe,
+} from "./providers/claude.js";
+import { codexLauncherProblem } from "./providers/codex.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
+import { COPILOT_SECRETS } from "./providers/config.js";
 import { executable, sandboxStatus } from "./sandbox.js";
 import { errorMessage } from "./text.js";
 
@@ -58,7 +70,7 @@ export async function readiness(
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
-    ...providerChecks(config, bound),
+    ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
   ];
   const environment = validationEnvironment(config, scripts);
@@ -132,6 +144,22 @@ function hostChecks(
       status: "warn",
       detail: warning,
     });
+  // Sandboxed commands read the checkout's Git configuration.
+  const credentials = checkoutCredentialEntries(config.checkout);
+  if (!credentials)
+    checks.push({
+      name: "checkout git config",
+      status: "warn",
+      detail: `Git can't read ${config.checkout}'s configuration, so whether it holds a credential sandboxed commands could read is unknown`,
+      fix: `Check \`git -C ${config.checkout} config --local --list\` runs, then repeat`,
+    });
+  else if (credentials.length)
+    checks.push({
+      name: "checkout git config",
+      status: "blocked",
+      detail: `${config.checkout}'s Git configuration holds ${credentials.join(", ")}, which sandboxed commands can read`,
+      fix: `Remove ${credentials.length === 1 ? "it" : "them"} (\`git -C ${config.checkout} config --unset-all NAME\`, with \`--worktree\` for a worktree entry), use remote URLs without credentials, and keep Git credentials in the user's global configuration (for example \`gh auth setup-git\`)`,
+    });
   const store = config.sandbox.packageStore;
   if (store && existsSync(store) && !statSync(store).isDirectory())
     checks.push({
@@ -201,11 +229,18 @@ const SDK: Record<string, string> = {
   copilot: "@github/copilot-sdk",
 };
 
-/** The login each kind uses, found by presence alone, or why it is missing. */
-function login(
+/** The Claude SDK's login, probed once per process: every Claude provider shares it. */
+let claudeProbe: ReturnType<typeof claudeLoginProbe> | undefined;
+const claudeLogin = () => (claudeProbe ??= claudeLoginProbe());
+
+/**
+ * The login each kind uses, or why it is missing: Codex's and Copilot's by
+ * presence, Claude's as its SDK resolves it, with no model call.
+ */
+async function login(
   kind: string,
   bound: readonly string[],
-): string | { missing: string; fix: string } {
+): Promise<string | { missing: string; fix: string } | { unchecked: string }> {
   const set = (...names: string[]) => names.find((name) => process.env[name]);
   switch (kind) {
     case "codex": {
@@ -222,26 +257,29 @@ function login(
       };
     }
     case "claude": {
-      const file = join(
-        process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
-        ".credentials.json",
+      // A credential the service loads at start can't be read here.
+      const credential = CLAUDE_LOGIN_CREDENTIALS.find(
+        (name) => !process.env[name] && bound.includes(name),
       );
-      // Only Claude takes a login from the service's credentials.
-      const names = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
-      const named = set(...names);
-      if (named) return `${named} in the environment`;
-      const credential = names.find((name) => loaded(name, bound));
       if (credential) return `${credential} in the service's credentials`;
-      if (existsSync(file)) return `the Claude login in ${file}`;
+      const probe = await claudeLogin();
+      if ("found" in probe) return probe.found;
+      if ("unchecked" in probe) return { unchecked: probe.unchecked };
       return {
-        missing: `no Claude login at ${file}, and no CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY`,
-        fix: "Run `claude auth login` as the user the service runs as",
+        missing: probe.missing,
+        fix: probe.unreadable
+          ? "Restore the private file the service loads that credential from (`--credential-file`), then repeat"
+          : "Run `claude auth login` as the user the service runs as, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
       };
     }
-    default:
-      return set("COPILOT_GITHUB_TOKEN")
-        ? "COPILOT_GITHUB_TOKEN in the environment"
+    default: {
+      const named = set("COPILOT_PROVIDER_BASE_URL", ...COPILOT_SECRETS);
+      if (named) return `${named} in the environment`;
+      const credential = COPILOT_SECRETS.find((name) => loaded(name, bound));
+      return credential
+        ? `${credential} in the service's credentials`
         : "the GitHub CLI login";
+    }
   }
 }
 
@@ -254,14 +292,16 @@ function loaded(name: string, bound: readonly string[]): boolean {
   );
 }
 
-function providerChecks(
+async function providerChecks(
   config: CoreConfig,
   bound: readonly string[],
-): ReadinessCheck[] {
+): Promise<ReadinessCheck[]> {
   const checks: ReadinessCheck[] = [];
   for (const [name, provider] of Object.entries(config.providers)) {
     const worker = provider.worker;
-    const kinds = new Map<string, string>([[provider.planner, "planner"]]);
+    const kinds = new Map<string, string>(
+      provider.planner in SDK ? [[provider.planner, "planner"]] : [],
+    );
     if (worker.kind in SDK)
       kinds.set(
         worker.kind,
@@ -278,24 +318,43 @@ function providerChecks(
         });
         continue;
       }
-      const found = login(kind, bound);
+      const found = await login(kind, bound);
       checks.push(
         typeof found === "string"
           ? ok(at, `${found}; account access is checked at the first call`)
-          : {
+          : "unchecked" in found
+            ? { name: at, status: "warn", detail: found.unchecked }
+            : {
+                name: at,
+                status: "blocked",
+                detail: found.missing,
+                fix: found.fix,
+              },
+      );
+    }
+    // Planning and review start codex through the same launcher as a
+    // worker (its sandbox probe below covers the worker).
+    if (provider.planner === "codex" && installed(SDK.codex!)) {
+      const problem = codexLauncherProblem();
+      const at = `provider ${name}: codex planner and reviewer launch`;
+      checks.push(
+        problem
+          ? {
               name: at,
               status: "blocked",
-              detail: found.missing,
-              fix: found.fix,
-            },
+              detail: problem,
+              fix: "Allow unprivileged user namespaces on this host (as for bubblewrap) and install util-linux, then repeat",
+            }
+          : ok(at, "codex starts in its own process namespace"),
       );
     }
     // Codex sandboxes its workers' commands itself: try it, as a worker would.
     if (worker.kind === "codex" && installed(SDK.codex!)) {
       const network = worker.network === "host";
-      const problem = codexSandboxProblem(
+      const problem = await codexSandboxProblem(
         network,
         config.policy.allowedSecretNames,
+        config.sandbox,
       );
       const at = `provider ${name}: codex worker sandbox`;
       checks.push(
@@ -308,7 +367,7 @@ function providerChecks(
             }
           : ok(
               at,
-              `a command writes its worktree and is refused outside it (network ${network ? "host" : "off"})`,
+              `a command writes its worktree${config.sandbox.readOnlyPaths.length ? ", reads a read-only path" : ""} and is refused writes outside it and a sealed file${network ? " (network host)" : ", and can't connect out (network off)"}`,
             ),
       );
     }
@@ -447,7 +506,43 @@ async function repositoryChecks(
       fix: "Check the GitHub CLI login's access, then repeat",
     });
   }
+  checks.push(await holderCheck(config));
   return checks;
+}
+
+/** Which installation serves the repository (holder.ts): one at a time. */
+async function holderCheck(config: CoreConfig): Promise<ReadinessCheck> {
+  const context = {
+    checkout: config.checkout,
+    repository: config.repository,
+    root: installationPaths(config.repository).root,
+  };
+  try {
+    const holder = await currentHolder(context);
+    if (!holder)
+      return ok(
+        "installation",
+        `No installation serves ${config.repository} yet; this one takes it when it starts`,
+      );
+    if (holder.mine)
+      return ok(
+        "installation",
+        `This installation serves ${config.repository} (since ${holder.record.since})`,
+      );
+    return {
+      name: "installation",
+      status: "warn",
+      detail: `${config.repository} is served by another installation: ${holderText(holder.record)}, so this one is refused when it starts`,
+      fix: `Stop that installation first; if it is stopped for good, take over with factory serve --repo ${config.repository} --take-over`,
+    };
+  } catch (error) {
+    return {
+      name: "installation",
+      status: "warn",
+      detail: `Can't read which installation serves ${config.repository}: ${errorMessage(error).split("\n")[0]}`,
+      fix: "Check the checkout's origin and the GitHub login, then repeat",
+    };
+  }
 }
 
 function validationEnvironment(

@@ -30,6 +30,7 @@ import {
   closeSync,
   copyFileSync,
   createReadStream,
+  createWriteStream,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -39,12 +40,14 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { create, extract, list } from "tar";
 import { crashPoint } from "../crash.js";
 import { hold } from "../engine.js";
@@ -63,9 +66,12 @@ import { pathInsideRoot } from "./claude-worker.js";
 import type { WorkerConfig } from "./config.js";
 import { detail, PlannerError, providerOutcome } from "./planner.js";
 import {
-  captureRequest,
   captureResponse,
+  captureToolOutput,
+  describeRequest,
   logUsage,
+  NativeTools,
+  providerUsage,
   tokens,
   usageRecord,
 } from "./usage.js";
@@ -174,6 +180,24 @@ function saveMarker(worktree: string, marker: Marker): void {
 interface Usage {
   cents: number;
   tokens: number;
+  /** The session's own counts, as reported (the call's `providerUsage`). */
+  reported?: Record<string, number>;
+}
+
+/** Add `counts`' finite numbers into `usage.reported`. */
+function report(usage: Usage, counts: Record<string, unknown>): void {
+  usage.reported ??= {};
+  for (const [key, value] of Object.entries(counts))
+    if (typeof value === "number" && Number.isFinite(value))
+      usage.reported[key] = (usage.reported[key] ?? 0) + value;
+}
+
+/** The model a hosted agent reports: a name, or an object with its `id`. */
+function agentModel(agent: unknown): string | null {
+  const model = (agent as { model?: unknown } | undefined)?.model;
+  if (typeof model === "string") return model;
+  const id = (model as { id?: unknown } | undefined)?.id;
+  return typeof id === "string" ? id : null;
 }
 
 interface Packed {
@@ -249,7 +273,30 @@ async function pack(
 }
 
 /**
- * Check every entry of the result archive, then write it into the
+ * Stream a downloaded result archive to `path`, refusing it as soon as it
+ * passes RESULT_MAX_BYTES, so an oversized one is never held in memory.
+ */
+async function saveResult(response: Response, path: string): Promise<void> {
+  let bytes = 0;
+  await pipeline(
+    response.body
+      ? Readable.fromWeb(response.body as WebReadableStream<Uint8Array>)
+      : Readable.from([]),
+    async function* (source: AsyncIterable<Buffer>) {
+      for await (const chunk of source) {
+        bytes += chunk.length;
+        if (bytes > RESULT_MAX_BYTES)
+          throw new Error("The managed result is larger than 200 MiB");
+        yield chunk;
+      }
+    },
+    createWriteStream(path, { mode: 0o600 }),
+  );
+}
+
+/**
+ * Check every entry of the result archive (saveResult bounded its size),
+ * then write it into the
  * worktree: changed and new files, and deletions of files the agent
  * removed. Private staging is never written back.
  */
@@ -259,8 +306,6 @@ async function apply(
   scratch: string,
   sent: readonly string[],
 ): Promise<number> {
-  if (statSync(archive).size > RESULT_MAX_BYTES)
-    throw new Error("The managed result is larger than 200 MiB");
   const files = new Map<string, number>();
   let total = 0;
   let invalid: string | undefined;
@@ -360,7 +405,7 @@ function statusFailure(
       `${what} refused the request (${status}); check the managed worker settings, then answer retry`,
     );
   if (status === 429) {
-    // A rate limit that names its reset waits until then (CORE.md#Waits);
+    // A rate limit that names its reset waits until then (docs/reference/steps.md#Waits);
     // without one it is an unknown transient cause and backs off.
     const at = retryAt(retryAfter);
     return new PlannerError(
@@ -498,7 +543,10 @@ abstract class ManagedWorker implements Worker {
       item: input.item.id,
     });
     record.key = key;
-    captureRequest(record, input.prompt);
+    describeRequest(record, {
+      prompt: input.prompt,
+      ...(input.facts ? { facts: input.facts } : {}),
+    });
     const signal = AbortSignal.any([
       input.signal,
       AbortSignal.timeout(this.config.timeoutSeconds * 1000),
@@ -586,14 +634,18 @@ abstract class ManagedWorker implements Worker {
       return { ...result, spend };
     } finally {
       if (marker)
-        await this.cleanUp(marker, input, spend).catch((error: unknown) =>
-          input.log({
-            event: "possible-orphan",
-            provider: this.config.kind,
-            key,
-            ...(marker?.session ? { session: marker.session } : {}),
-            detail: `Cleanup failed at ${new Date().toISOString()}; the next run of this step tries again: ${detail(errorMessage(error))}`,
-          }),
+        await this.cleanUp(marker, input, spend).then(
+          (usage) => {
+            record.providerUsage = providerUsage(usage.reported) ?? null;
+          },
+          (error: unknown) =>
+            input.log({
+              event: "possible-orphan",
+              provider: this.config.kind,
+              key,
+              ...(marker?.session ? { session: marker.session } : {}),
+              detail: `Cleanup failed at ${new Date().toISOString()}; the next run of this step tries again: ${detail(errorMessage(error))}`,
+            }),
         );
       if (scratch) rmSync(scratch, { recursive: true, force: true });
       if (typeof record.finalResponse === "string")
@@ -615,7 +667,7 @@ abstract class ManagedWorker implements Worker {
     marker: Marker,
     input: WorkerInput,
     spend: WorkerSpend,
-  ): Promise<void> {
+  ): Promise<Usage> {
     let usage: Usage;
     try {
       usage = await this.dispose(
@@ -636,6 +688,7 @@ abstract class ManagedWorker implements Worker {
     if (readMarker(input.worktree)?.createdAt === marker.createdAt)
       rmSync(markerPath(input.worktree), { force: true });
     crashPoint("managed:marker-removed");
+    return usage;
   }
 }
 
@@ -762,6 +815,10 @@ export class OpenAIManagedWorker extends ManagedWorker {
     note({ session });
     crashPoint("managed:session-recorded");
     record.session = session;
+    // A fresh session per run, one Work Item message: its first turn.
+    record.sessionTurn = 1;
+    record.sessionMode = "fresh";
+    record.reportedModel = agentModel(created.agent);
     const environment = String(
       (created.environment as { id?: unknown } | undefined)?.id,
     );
@@ -834,7 +891,7 @@ export class OpenAIManagedWorker extends ManagedWorker {
       signal,
     );
     const path = join(scratch, "result.tar");
-    writeFileSync(path, Buffer.from(await content!.arrayBuffer()));
+    await saveResult(content!, path);
     return path;
   }
 
@@ -873,11 +930,13 @@ export class OpenAIManagedWorker extends ManagedWorker {
       return { cents: 0, tokens: 0 };
     }
     let tokens = 0;
+    const reported: Usage = { cents: 0, tokens: 0 };
     for (const turn of await this.turns(session, signal)) {
       const usage = turn.usage as
         | { input_tokens?: number; output_tokens?: number }
         | undefined;
       tokens += (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0);
+      if (usage) report(reported, usage);
     }
     await this.request(
       "POST",
@@ -899,7 +958,7 @@ export class OpenAIManagedWorker extends ManagedWorker {
       session,
       key: marker.key,
     });
-    return { cents: 0, tokens };
+    return { ...reported, tokens };
   }
 }
 
@@ -912,18 +971,72 @@ interface ManagedEvent {
   name?: string;
   input?: unknown;
   tool_use_id?: string;
+  is_error?: boolean;
+  content?: { type: string; text?: string }[];
+  /** A Claude managed `span.model_request_end`'s usage. */
+  model_usage?: {
+    input_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
+/**
+ * A hosted event into the call's native tool record: a use opens a call, a
+ * result answers it (and ends the response that asked: its uses come
+ * before their results), and an agent message's image blocks count as
+ * image outputs. Runs before managedActivity, which forgets an answered
+ * call's name.
+ */
+function observeTools(
+  record: Record<string, unknown>,
+  tools: NativeTools,
+  event: ManagedEvent,
+  toolNames: Map<string, string>,
+): void {
+  if (event.type === "agent.tool_use") tools.call(event.id);
+  if (event.type === "agent.tool_result" && event.tool_use_id) {
+    tools.response();
+    tools.result(event.tool_use_id, event.is_error === true);
+    const text = (event.content ?? [])
+      .map((block) => block.text ?? "")
+      .join("");
+    if (text)
+      captureToolOutput(
+        record,
+        toolNames.get(event.tool_use_id) ?? "unknown",
+        text,
+      );
+  }
+  if (event.type === "agent.message")
+    record.imageOutputs =
+      Number(record.imageOutputs ?? 0) +
+      (event.content ?? []).filter((block) => block.type === "image").length;
+  record.nativeTools = tools.value;
 }
 
 /** Hosted tools that write the file their `file_path` or `path` names. */
 const MANAGED_EDIT_TOOLS = ["write", "edit"];
 
-/** A hosted session event as worker activity: tools, edits, commands, turns. */
+/** A hosted session event as worker activity: tools, edits, commands, turns, and a Claude session's context and compactions. */
 function managedActivity(
   input: WorkerInput,
   event: ManagedEvent,
   toolNames: Map<string, string>,
 ): void {
   if (event.type === "agent.message") input.activity({ kind: "turn" });
+  // Claude managed sessions only; the API gives no window.
+  const usage = event.model_usage;
+  if (event.type === "span.model_request_end" && usage)
+    input.activity({
+      kind: "context",
+      tokens:
+        (usage.input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0),
+    });
+  if (event.type === "agent.thread_context_compacted")
+    input.activity({ kind: "compaction" });
   if (event.type === "agent.tool_result" && event.tool_use_id) {
     const tool = toolNames.get(event.tool_use_id);
     toolNames.delete(event.tool_use_id);
@@ -1104,6 +1217,10 @@ export class ClaudeManagedWorker extends ManagedWorker {
     note({ session });
     crashPoint("managed:session-recorded");
     record.session = session;
+    // A fresh session per run, one Work Item message: its first turn.
+    record.sessionTurn = 1;
+    record.sessionMode = "fresh";
+    record.reportedModel = agentModel(created.agent);
     const agent = created.agent as unknown as {
       tools?: {
         type?: string;
@@ -1151,6 +1268,8 @@ export class ClaudeManagedWorker extends ManagedWorker {
     // Newest first, down to this turn's message: the turn ends at an idle status after it.
     const seen = new Set<string>();
     const toolNames = new Map<string, string>();
+    const native = new NativeTools();
+    record.imageOutputs = 0;
     for (;;) {
       await wait(POLL_MS, signal);
       let end: { stop_reason?: { type?: string } } | undefined;
@@ -1184,6 +1303,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
       });
       for (const e of fresh.reverse()) {
         seen.add(e.id);
+        observeTools(record, native, e, toolNames);
         managedActivity(input, e, toolNames);
       }
       if (terminated)
@@ -1221,7 +1341,7 @@ export class ClaudeManagedWorker extends ManagedWorker {
       sdk.beta.files.download(file!.id, this.scope, options),
     );
     const path = join(scratch, "result.tar");
-    writeFileSync(path, Buffer.from(await response.arrayBuffer()));
+    await saveResult(response, path);
     return path;
   }
 
@@ -1273,6 +1393,11 @@ export class ClaudeManagedWorker extends ManagedWorker {
       usage.tokens +=
         (counted?.input_tokens ?? 0) + (counted?.output_tokens ?? 0);
       usage.cents += Number(counted?.list_cost?.amount ?? 0) || 0;
+      if (counted)
+        report(usage, {
+          ...counted,
+          list_cost_cents: Number(counted.list_cost?.amount ?? 0) || 0,
+        });
       if (found.status === "running" || found.status === "rescheduling") {
         await sdk.beta.sessions.events
           .send(

@@ -1,10 +1,11 @@
 /**
  * Result collection: Factory, not the worker, turns a worker's files into
  * a commit. The worktree is staged minus private staging, checked for
- * ownership and filesystem safety, scanned for secrets, and committed under
- * the Factory identity on the exact base. A wrong result is a repair
- * finding, a suspected secret a question for the operator, and a scanner
- * that can't run a retry. A failed Git read throws, and the step retries.
+ * ownership, protected paths and filesystem safety, scanned for secrets,
+ * and committed under the Factory identity on the exact base. A wrong
+ * result is a repair finding, a suspected secret a question for the
+ * operator, and a scanner that can't run a retry. A failed Git read
+ * throws, and the step retries.
  */
 import { spawn } from "node:child_process";
 import {
@@ -22,6 +23,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
 import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
+import { inert } from "../markdown.js";
 import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
 import {
@@ -43,9 +45,47 @@ import {
 /** The committer email on every commit Factory writes. */
 export const FACTORY_EMAIL = "factory@users.noreply.github.com";
 
-/** The commit message of a collected result. */
+/** The commit message of a collected result; the title can't close or mention (markdown.ts inert). */
 function collectionMessage(item: Pick<WorkItem, "title">): string {
-  return `Factory: ${item.title}`;
+  return `Factory: ${inert(item.title)}`;
+}
+
+/** CI configuration Factory knows of, by path from the root. */
+const CI_PATHS = [
+  ".appveyor.yml",
+  ".drone.yml",
+  ".gitlab-ci.yaml",
+  ".gitlab-ci.yml",
+  ".travis.yml",
+  ".woodpecker.yaml",
+  ".woodpecker.yml",
+  "appveyor.yml",
+  "azure-pipelines.yaml",
+  "azure-pipelines.yml",
+  "bitbucket-pipelines.yml",
+  "Jenkinsfile",
+];
+const CI_DIRECTORIES = [
+  ".buildkite/",
+  ".circleci/",
+  ".forgejo/workflows/",
+  ".gitea/workflows/",
+  ".github/",
+  ".woodpecker/",
+];
+
+/**
+ * Whether `path` steers CI or review: anything under `.github/` (workflows,
+ * CODEOWNERS, settings), a CODEOWNERS file anywhere, or another CI
+ * system's configuration. A worker changes one only when the Objective's
+ * May change section lists that path.
+ */
+function protectedPath(path: string): boolean {
+  return (
+    CI_DIRECTORIES.some((directory) => path.startsWith(directory)) ||
+    CI_PATHS.includes(path) ||
+    basename(path) === "CODEOWNERS"
+  );
 }
 
 /** A worker's advisory note from `.factory-handoff.json`. */
@@ -69,6 +109,8 @@ export interface CollectInput {
   base: string;
   plan: Plan;
   item: WorkItem;
+  /** The accepted Objective's "May change" paths (objective.ts mayChange): the only protected paths a worker may change. */
+  mayChange: readonly string[];
   sandbox: SandboxConfig;
   /** The worker's last message, carried by an empty-result finding. */
   finalResponse: string;
@@ -169,12 +211,14 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   // A collection interrupted after its own commit, or a repair continuing
   // from Factory's earlier commit, is undone to the staged candidate and
   // checked again from the top.
+  // Its subject is the inert one, or the raw title an earlier Factory wrote.
   const head = await text("rev-parse", "HEAD");
   if (
     head !== base &&
     (await parent(worktree, signal)) === base &&
-    (await text("log", "-1", "--format=%ae%n%s")) ===
-      `${FACTORY_EMAIL}\n${collectionMessage(item)}`
+    [collectionMessage(item), `Factory: ${item.title}`]
+      .map((subject) => `${FACTORY_EMAIL}\n${subject}`)
+      .includes(await text("log", "-1", "--format=%ae%n%s"))
   )
     await git("reset", "--quiet", "--soft", base);
   if ((await text("rev-parse", "HEAD")) !== base)
@@ -594,6 +638,13 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
   if (unowned.length)
     throw new WorkFinding(
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,
+    );
+  const guarded = paths.filter(
+    (path) => protectedPath(path) && !input.mayChange.includes(path),
+  );
+  if (guarded.length)
+    throw new WorkFinding(
+      `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. CI configuration, .github/ and CODEOWNERS change only when that section lists the exact path; undo these changes`,
     );
   const findings: SecretFinding[] = [];
   for (const path of paths) {

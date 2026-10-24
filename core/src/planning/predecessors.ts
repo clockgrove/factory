@@ -17,7 +17,7 @@ import type { PlanningDeps } from "./steps.js";
 
 /*
  * Objective dependencies through GitHub's native blocked-by links
- * (CORE.md#Predecessors). The `predecessors` step runs before the check:
+ * (docs/reference/queue.md#Predecessors). The `predecessors` step runs before the check:
  * while a blocker is open, or its Objective isn't done, the Objective
  * waits with no question, and takes no slot. A blocker that ended without
  * being done holds; a dependency cycle holds, naming it. Once every
@@ -188,7 +188,10 @@ export function predecessorsStep(deps: PlanningDeps): Step {
   };
 }
 
-/** Where one blocker stands: done (with its evidence), still to come, or ended without delivering. */
+/**
+ * Where one blocker stands: done (with its evidence), still to come, or
+ * ended without delivering.
+ */
 async function classify(
   deps: PlanningDeps,
   blocker: IssueSummary,
@@ -301,12 +304,11 @@ async function cycleThrough(
     if (seen.has(issue)) continue;
     seen.add(issue);
     reads += 1;
-    let next: IssueSummary[];
+    let next: IssueSummary[] = [];
     try {
       next = await github.blockedBy(issue, signal);
     } catch (error) {
       if (signal.aborted) throw error;
-      continue;
     }
     for (const blocker of next.filter(open)) {
       if (blocker.number === self) return [...path, self];

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { QueueOption } from "./config.js";
+import { crashPoint } from "./crash.js";
 import {
   type GitHub,
   GitHubError,
@@ -15,7 +17,7 @@ import {
   removeLabel,
   WORK_ITEM_LABEL,
 } from "./github-roles.js";
-import { code, mark, prose } from "./markdown.js";
+import { code, inert, mark, prose } from "./markdown.js";
 import { currentPlan } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
 import { addCard, cardProject } from "./queue.js";
@@ -48,6 +50,15 @@ import { errorMessage } from "./text.js";
  * Objective keeps the issues recorded (service.ts), so one created but
  * never linked is still found.
  *
+ * A create repeated because GitHub's list hadn't shown the first yet
+ * makes a duplicate: the time the first began is kept (`duplicates`),
+ * and once SWEEP_AFTER_MS has passed, or the Objective has ended, one
+ * list of Factory's labelled issues since then finds every issue with an
+ * item's marker. Each one that isn't the item's recorded issue, and that
+ * still reads as Factory wrote it, is closed as not planned with a comment
+ * naming the issue Factory keeps; an edited copy only gets that comment,
+ * as a possible duplicate, and stays open.
+ *
  * A refusal on one item's issue (deleted, locked, transferred) stops
  * only that issue's writes: the others are still written and closed.
  * Only a refusal of the Objective-wide calls (the lists, a create) gives
@@ -74,6 +85,10 @@ export interface ItemIssue {
   labels?: string[];
   /** It has its card on the Project. */
   card?: true;
+  /** The card's Project item id: its Factory field shows the item's phase. */
+  cardItem?: string;
+  /** The Factory option last written on the card. */
+  status?: QueueOption;
   closed?: true;
   /** GitHub refused a write to it: only its close is still tried this run. */
   refused?: true;
@@ -86,6 +101,11 @@ export interface Tracking {
   items: Record<string, ItemIssue>;
   /** Items whose issue may have been created without being recorded here, with when (host time) each create began: looked up first. */
   creating?: Record<string, string>;
+  /**
+   * A create may have been repeated: when (host time) the earliest
+   * repeated one's first create began. Swept for duplicates once.
+   */
+  duplicates?: string;
   /** The repository doesn't offer the native type, or refused it: not tried again this run. */
   untyped?: true;
   /** The Objective has its role for this run, and the priority labels its items inherit. */
@@ -94,6 +114,8 @@ export interface Tracking {
   project?: string | null;
   /** The Project refused a card: not tried again this run. */
   uncarded?: true;
+  /** The cards aren't on the queue's Project, so no Factory field shows their phase. */
+  statusless?: true;
 }
 
 /** What one Work Item's issue should show. */
@@ -106,6 +128,8 @@ interface Wanted {
   comment: string;
   /** Closed, and how; open when absent. */
   close?: "completed" | "not_planned";
+  /** The card's Factory option for the item's phase; none before it starts. */
+  status?: QueueOption;
 }
 
 /** The issue of `item`, once tracking has recorded it: a PR body names it. */
@@ -136,23 +160,31 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
   for (const item of plan?.items ?? []) {
     const row = rows.get(item.id)!;
     const close =
-      row.phase === "merged"
-        ? "completed"
-        : row.phase === "skipped" || ended
-          ? "not_planned"
-          : undefined;
+      row.phase === "merged" ? "completed" : ended ? "not_planned" : undefined;
     const why =
       row.phase === "merged"
         ? "merged."
-        : row.phase === "skipped"
-          ? "skipped: its condition doesn't hold."
-          : state.status === "cancelled"
-            ? "not planned: the Objective was cancelled."
-            : "not planned: the Objective finished without it.";
+        : state.status === "cancelled"
+          ? "not planned: the Objective was cancelled."
+          : "not planned: the Objective finished without it.";
+    // As the Objective's card, by the item's phase.
+    const status: QueueOption | undefined =
+      row.phase === "merged"
+        ? "done"
+        : row.phase === "pending"
+          ? undefined
+          : ended
+            ? "cancelled"
+            : row.hold
+              ? "holding"
+              : "building";
     items.set(item.id, {
       planned: !ended,
-      // A title is plain text, never Markdown: only cut to one line.
-      title: cut(item.title, 200),
+      ...(status ? { status } : {}),
+      // A title is plain text, never Markdown: cut to one line, and it
+      // references and mentions nothing (markdown.ts inert). Every create
+      // and edit of the issue uses this title.
+      title: inert(cut(item.title, 200)),
       body: issueBody(objective, item, plan!),
       dependencies: [...item.dependencies].sort(),
       comment: liveComment(objective, item.id, [
@@ -186,6 +218,7 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
           `**Closed:** not planned: ${state.status === "cancelled" ? "the Objective was cancelled" : "it is not in the current plan (replanned or amended)"}.`,
         ]),
         close: "not_planned",
+        status: "cancelled",
       });
   return items;
 }
@@ -206,13 +239,36 @@ export function carried(tracking: Tracking): Tracking {
       ),
     ),
     ...(tracking.creating ? { creating: tracking.creating } : {}),
+    ...(tracking.duplicates ? { duplicates: tracking.duplicates } : {}),
   };
 }
 
+/** How long after a repeated create the duplicates are swept: GitHub's lists lag by seconds. */
+const SWEEP_AFTER_MS = 10 * 60_000;
+
+/** The least wait before a sweep, even once the Objective has ended: the lag the list just showed. */
+const SWEEP_LAG_MS = 2 * 60_000;
+
+/**
+ * Whether the duplicate sweep is due: SWEEP_AFTER_MS on, or once the
+ * Objective has ended, but never within SWEEP_LAG_MS, when the list may
+ * still not show the first create.
+ */
+function sweepDue(state: ObjectiveState, now: number): boolean {
+  const from = trackingOf(state)?.duplicates;
+  if (from === undefined) return false;
+  const waited = now - Date.parse(from);
+  return (
+    waited >= SWEEP_AFTER_MS ||
+    (TERMINAL.includes(state.status) && waited >= SWEEP_LAG_MS)
+  );
+}
+
 /** Whether a tracking pass has a write to make. */
-export function trackingDue(state: ObjectiveState): boolean {
+export function trackingDue(state: ObjectiveState, now = Date.now()): boolean {
   const tracking = trackingOf(state);
   if (Object.keys(tracking?.creating ?? {}).length) return true;
+  if (sweepDue(state, now)) return true;
   const all = wanted(state);
   if (all.size && !tracking?.objective) return true;
   const priority = tracking?.objective?.priority.join("\n");
@@ -227,6 +283,13 @@ export function trackingDue(state: ObjectiveState): boolean {
       if (want.close && !has.closed) return true;
       continue;
     }
+    if (
+      want.status &&
+      has.card &&
+      !tracking?.statusless &&
+      has.status !== want.status
+    )
+      return true;
     if (
       has.comment !== hash(want.comment) ||
       Boolean(has.closed) !== Boolean(want.close) ||
@@ -254,6 +317,14 @@ export interface TrackContext {
   /** Log an event on the Objective's run log. */
   log(event: Record<string, unknown>): void;
   signal: AbortSignal;
+  /**
+   * The queue's Project and how to set a card's Factory option on it
+   * (queue.ts QueueDisplay); absent, the cards show no phase.
+   */
+  cardStatus?: {
+    project: string;
+    set(item: string, option: QueueOption, signal: AbortSignal): Promise<void>;
+  };
 }
 
 /**
@@ -323,13 +394,19 @@ export async function track(context: TrackContext): Promise<void> {
         signal,
       )),
     ];
-    for (const [id] of creating) {
+    for (const [id, at] of creating) {
       const issue = record().items[id]
         ? undefined
         : await github.markedIssue(found, issueMark(id), signal);
       context.save((tracking) => {
         if (issue) tracking.items[id] = adopted(issue);
         if (tracking.items[id] || !want.get(id)?.planned) created(tracking, id);
+        // Not found yet, and created again below: the first may exist.
+        else if (
+          !tracking.duplicates ||
+          Date.parse(at) < Date.parse(tracking.duplicates)
+        )
+          tracking.duplicates = at;
       });
     }
   }
@@ -405,6 +482,95 @@ export async function track(context: TrackContext): Promise<void> {
         close: closing,
       });
     }
+  }
+
+  if (sweepDue(context.state(), Date.now())) await sweep();
+
+  /**
+   * Close every issue with an item's marker that isn't the item's
+   * recorded issue: duplicates a repeated create made.
+   */
+  async function sweep(): Promise<void> {
+    const from = record().duplicates!;
+    const listed = await github.issuesByLabel(
+      WORK_ITEM_LABEL,
+      new Date(Date.parse(from) - CLOCK_SKEW_MS).toISOString(),
+      signal,
+    );
+    for (const [id, kept] of Object.entries(record().items))
+      for (const duplicate of await github.markedIssues(
+        listed,
+        issueMark(id),
+        signal,
+      )) {
+        if (duplicate.number === kept.issue || duplicate.state !== "open")
+          continue;
+        // Only an exact copy is closed: one a person edited may be in use.
+        const exact = [
+          kept.body,
+          ...(want.get(id)?.title
+            ? [hash(want.get(id)!.title, want.get(id)!.body)]
+            : []),
+        ].includes(
+          hash(duplicate.title, (duplicate.body ?? "").replace(/\r\n/g, "\n")),
+        );
+        const about = `#${kept.issue}, which Factory keeps for Work Item ${code(id)} of #${objective}`;
+        try {
+          if (exact) {
+            const marker = mark(
+              objective,
+              "duplicate",
+              String(duplicate.number),
+            );
+            await github.ensureComment(
+              duplicate.number,
+              marker,
+              `${marker}\nDuplicate of ${about}.`,
+              "sync:item-duplicate:comment",
+              signal,
+            );
+            await github.closeIssue(
+              duplicate.number,
+              "not_planned",
+              "sync:item-duplicate:close",
+              signal,
+            );
+          } else {
+            const marker = mark(
+              objective,
+              "possible-duplicate",
+              String(duplicate.number),
+            );
+            await github.ensureComment(
+              duplicate.number,
+              marker,
+              `${marker}\nPossible duplicate of ${about}. It was edited after Factory opened it, so Factory leaves it open: close it once nobody needs it.`,
+              "sync:item-duplicate:comment",
+              signal,
+            );
+          }
+          context.log({
+            event: exact
+              ? "item-issue-duplicate-closed"
+              : "item-issue-duplicate-left-open",
+            item: id,
+            issue: duplicate.number,
+            kept: kept.issue,
+          });
+        } catch (error) {
+          if (!refusal(error)) throw error;
+          context.log({
+            event: "item-issue-refused",
+            item: id,
+            issue: duplicate.number,
+            status: error.status,
+            duplicate: true,
+          });
+        }
+      }
+    context.save((tracking) => {
+      delete tracking.duplicates;
+    });
   }
 
   /** The issue's body, type, labels, card, links, live comment and reopen, as due. */
@@ -496,6 +662,8 @@ export async function track(context: TrackContext): Promise<void> {
         delete issue.closed;
       });
     }
+    if (item.status && has.card && has.status !== item.status)
+      await status(has, item.status, update);
     const comment = hash(item.comment);
     if (has.comment !== comment) {
       await github.upsertComment(
@@ -512,6 +680,70 @@ export async function track(context: TrackContext): Promise<void> {
   }
 
   /**
+   * The card's Factory option, as the Objective's card shows its own
+   * phase. Only on the queue's Project, where the field is; the queue's
+   * reads leave out the Work Item label, so a card never reaches the queue.
+   */
+  async function status(
+    has: ItemIssue,
+    option: QueueOption,
+    update: (change: (issue: ItemIssue) => void) => void,
+  ): Promise<void> {
+    const display = context.cardStatus;
+    const project = record().project;
+    if (record().statusless) return;
+    if (!display || !project || project !== display.project) {
+      context.save((tracking) => {
+        tracking.statusless = true;
+      });
+      return;
+    }
+    // A card recorded before its item id was: the Project returns it again.
+    const item =
+      has.cardItem ??
+      (await addCard(github, project, has.node ?? (await node(has)), signal));
+    try {
+      crashPoint("sync:item-issue:status:before");
+      await display.set(item, option, signal);
+      crashPoint("sync:item-issue:status:after");
+    } catch (error) {
+      // The field or its option, not this issue, refused (or is missing):
+      // no card shows a phase this run, and the issue's other writes go on.
+      if (
+        error instanceof TransientError ||
+        (error instanceof GitHubError && error.status === 401) ||
+        signal.aborted
+      )
+        throw error;
+      context.save((tracking) => {
+        tracking.statusless = true;
+      });
+      context.log({
+        event: "item-status-refused",
+        issue: has.issue,
+        error: errorMessage(error),
+      });
+      return;
+    }
+    update((issue) => {
+      issue.cardItem = item;
+      issue.status = option;
+    });
+  }
+
+  /** The issue's node id, which a Project card takes. */
+  async function node(has: ItemIssue): Promise<string> {
+    return (
+      await github.rest<{ node_id: string }>(
+        "GET",
+        `/repos/${github.repository}/issues/${has.issue}`,
+        undefined,
+        signal,
+      )
+    ).node_id;
+  }
+
+  /**
    * The issue's card on the Project. A refusal (no access to the Project,
    * a Project that's gone) is logged and not tried again this run: the
    * issue stays tracked without its card.
@@ -521,18 +753,10 @@ export async function track(context: TrackContext): Promise<void> {
     project: string,
     update: (change: (issue: ItemIssue) => void) => void,
   ): Promise<void> {
-    const node =
-      has.node ??
-      (
-        await github.rest<{ node_id: string }>(
-          "GET",
-          `/repos/${github.repository}/issues/${has.issue}`,
-          undefined,
-          signal,
-        )
-      ).node_id;
+    const content = has.node ?? (await node(has));
+    let item: string;
     try {
-      await addCard(github, project, node, signal);
+      item = await addCard(github, project, content, signal);
     } catch (error) {
       if (
         error instanceof TransientError ||
@@ -552,7 +776,8 @@ export async function track(context: TrackContext): Promise<void> {
     }
     update((issue) => {
       issue.card = true;
-      issue.node = node;
+      issue.node = content;
+      issue.cardItem = item;
     });
   }
 }
@@ -680,11 +905,13 @@ function liveComment(objective: number, item: string, lines: string[]): string {
 
 /**
  * Model or worker text as prose on one line, cut to `max`: it can open no
- * HTML, mention no one (markdown.ts `prose`), and start no link
- * definition, so nothing in it is hidden.
+ * HTML, mention or reference nothing (markdown.ts `prose`, `inert`), and
+ * start no link definition, so nothing in it is hidden.
  */
 function line(value: string, max: number): string {
-  return prose(cut(value, max)).replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+  return prose(inert(cut(value, max)))
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
 }
 
 /** One line, cut to `max` characters. */

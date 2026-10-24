@@ -28,6 +28,7 @@ import { GitHub } from "./github.js";
 import { lockHeld } from "./lock.js";
 import { installationPaths } from "./paths.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
+import { defaultModels } from "./providers/selection.js";
 import { projectProblems } from "./queue.js";
 import { type Readiness, readiness } from "./readiness.js";
 import {
@@ -121,6 +122,7 @@ const PROVIDER_OPTIONS: Record<string, Option> = {
   "copilot-model": { key: "worker.model", read: "text" },
   "copilot-effort": { key: "worker.effort", read: "text" },
   "copilot-tools": { key: "worker.tools", read: "names" },
+  "copilot-timeout-seconds": { key: "worker.idleSeconds", read: "number" },
 };
 
 /** Worker kinds setup can write: the managed ones need settings by hand. */
@@ -133,7 +135,7 @@ const MANAGED_FIELDS: Record<string, string> = {
     '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
 };
 
-/** Setup's options for the command table, by kind (cli.ts `FlagKind`). */
+/** Setup's options for the command table, by kind (commands/shared.ts `FlagKind`). */
 export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   "config-only": "switch",
   background: "switch",
@@ -445,10 +447,28 @@ function providerOptions(
   const workerKind = worker ?? current ?? kind;
   if (workerKind !== current)
     set("worker", { kind: workerKind }, provider, prefix);
+  // A model choice names both model and effort: one given alone keeps the
+  // other from the choice in effect, the planner kind's default if none.
+  for (const role of ["planner", "reviewer"] as const) {
+    const model = values[`${role}-model`]?.at(-1);
+    const effort = values[`${role}-effort`]?.at(-1);
+    if (model === undefined && effort === undefined) continue;
+    const choice = get(provider, `models.${role}`);
+    set(
+      `models.${role}`,
+      {
+        ...(isObject(choice) ? choice : defaultModels(kind)[role]),
+        ...(model !== undefined && { model }),
+        ...(effort !== undefined && { effort }),
+      },
+      provider,
+      prefix,
+    );
+  }
   for (const flag of Object.keys(PROVIDER_OPTIONS)) {
     const value = values[flag];
-    if (!value) continue;
     const option = PROVIDER_OPTIONS[flag]!;
+    if (!value || option.key.startsWith("models.")) continue;
     const owner = flag.split("-")[0]!;
     if (SETUP_WORKERS.includes(owner) && owner !== workerKind)
       throw new SetupUsage(

@@ -1,6 +1,6 @@
 /**
- * Knowledge settings: where the curated store lives and the optional
- * `planning.context` section that admits adaptive planning context,
+ * Knowledge settings: where the curated store lives and the
+ * `planning.context` section that bounds planning context and memory,
  * checked with the rest of the configuration (config.ts loadConfig).
  */
 import { join } from "node:path";
@@ -31,12 +31,15 @@ export const DEFAULT_BOUNDS: Readonly<ContextBounds> = Object.freeze({
   maxProviderCalls: 5,
 });
 
-/** The admitted adaptive planning context. Absent: Adaptive workflow Objectives are refused. */
+/** The admitted planning context, for every Objective. */
 export interface PlanningContext {
   bounds: ContextBounds;
-  /** Literal repository files, or directory prefixes ending in a slash. */
+  /**
+   * Literal repository files, or directory prefixes ending in a slash;
+   * by default the root `""`, which admits every tracked path.
+   */
   selectors: string[];
-  /** Supply retained repository memory to adaptive planning. */
+  /** Supply retained repository memory to every role. */
   memory: boolean;
 }
 
@@ -46,7 +49,7 @@ export interface KnowledgeSettings {
   root: string;
   /** The target checkout: Dream drafts must be outside it. */
   checkout: string;
-  planningContext?: PlanningContext;
+  planningContext: PlanningContext;
   /** Secret values Dream input is redacted of. */
   secrets: string[];
 }
@@ -70,7 +73,7 @@ export function knowledgeDir(root: string): string {
   return join(root, "knowledge");
 }
 
-/** The `planning.context` section: its presence admits Adaptive workflow Objectives. */
+/** The `planning.context` section; absent, every default. */
 export const planningContext: Check<PlanningContext> = (
   value,
   path,
@@ -89,6 +92,7 @@ export const planningContext: Check<PlanningContext> = (
         ) as Record<keyof ContextBounds, Check<number>>,
       ),
       selectors: (selectors: unknown, at: string, found: string[]) => {
+        if (selectors === undefined) return [""];
         if (
           Array.isArray(selectors) &&
           selectors.length &&
@@ -102,10 +106,9 @@ export const planningContext: Check<PlanningContext> = (
         );
         return [];
       },
-      memory: flag(false),
+      memory: flag(true),
     },
     problems,
-    { enabled: "the section's presence turns planning context on" },
   );
 
 function literalSelector(selector: unknown): boolean {
@@ -131,11 +134,17 @@ function literalSelector(selector: unknown): boolean {
   );
 }
 
-/** `path` is one of the selectors, or under a directory selector. */
+/** `path` is one of the selectors, or under a directory selector or the root `""`. */
 export function admitted(path: string, selectors: readonly string[]): boolean {
   return selectors.some(
     (selector) =>
       path === selector ||
-      (selector.endsWith("/") && path.startsWith(selector)),
+      ((selector === "" || selector.endsWith("/")) &&
+        path.startsWith(selector)),
   );
+}
+
+/** The selectors as prose: the root reads as every tracked path. */
+export function selectorText(selectors: readonly string[]): string {
+  return selectors.includes("") ? "all tracked paths" : selectors.join(", ");
 }

@@ -18,11 +18,13 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { isRecord } from "../planning/graph.js";
 import type { Wait } from "../state.js";
+import { errorMessage } from "../text.js";
 import { workerEnvironment } from "../worktree.js";
-import type { CLAUDE_EFFORTS } from "./config.js";
+import type { ClaudeEffort, ClaudePlannerOptions } from "./config.js";
 import {
   callImages,
   detail,
+  freshOnOverflow,
   IdleWatchdog,
   loggedCall,
   type ModelChoice,
@@ -31,16 +33,27 @@ import {
   type PlannerAnswer,
   type PlannerCall,
   PlannerError,
-  type PlannerModels,
 } from "./planner.js";
-import { captureResponse, Tallies, tokens } from "./usage.js";
+import {
+  type ModelCounts,
+  openTurn,
+  overflowed,
+  type Turn,
+  turnFields,
+} from "./session.js";
+import {
+  captureRequest,
+  captureResponse,
+  captureToolOutput,
+  firstToken,
+  NativeTools,
+  providerUsage,
+  Tallies,
+  tokens,
+} from "./usage.js";
 
-export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
-
-export interface ClaudePlannerOptions extends PlannerModels<ClaudeEffort> {
-  /** Output token ceiling for every planning and review call. */
-  maxOutputTokens?: number;
-}
+// Declared beside the configuration, so the package's types never need the optional SDK.
+export type { ClaudeEffort, ClaudePlannerOptions } from "./config.js";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
@@ -448,6 +461,98 @@ export function claudeEnvironment(
   };
 }
 
+/** The login probe's bound: it reads local state and may refresh a token. */
+const LOGIN_PROBE_MS = 30_000;
+
+/**
+ * The login the Claude SDK resolves, asked of the SDK itself with no model
+ * call: a keychain, token, profile or third-party login counts, and an
+ * expired one the CLI could not refresh reports none. Like any Claude
+ * client, it may refresh the operator's login and update ~/.claude.json.
+ * `unreadable` when a service credential can't be read; `unchecked` when
+ * the SDK could not answer.
+ */
+export async function claudeLoginProbe(): Promise<
+  | { found: string }
+  | { missing: string; unreadable?: true }
+  | { unchecked: string }
+> {
+  let root: string | undefined;
+  const controller = new AbortController();
+  let release!: () => void;
+  const idle = new Promise<void>((done) => {
+    release = done;
+  });
+  let session: Query | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    root = mkdtempSync(join(tmpdir(), "factory-claude-login-"));
+    const credentials = join(root, "gh");
+    mkdirSync(credentials, { mode: 0o700 });
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    // Streaming input keeps the session open for the control request and
+    // ends it, with no message sent, when the probe finishes.
+    session = query({
+      prompt: {
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            idle.then(() => ({
+              done: true as const,
+              value: undefined,
+            })),
+        }),
+      },
+      options: {
+        abortController: controller,
+        cwd: root,
+        tools: [],
+        mcpServers: {},
+        strictMcpConfig: true,
+        settingSources: [],
+        persistSession: false,
+        env: claudeEnvironment(
+          credentials,
+          DEFAULT_MAX_OUTPUT_TOKENS,
+          serviceLoginEnvironment(),
+        ),
+      },
+    });
+    const account = await Promise.race([
+      session.accountInfo(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`no answer in ${LOGIN_PROBE_MS / 1000}s`)),
+          LOGIN_PROBE_MS,
+        );
+      }),
+    ]);
+    const source = [account.apiKeySource, account.tokenSource].find(
+      (value) => value && value !== "none",
+    );
+    if (source) return { found: `the Claude login from ${source}` };
+    if (account.subscriptionType || account.email)
+      return {
+        found: `the Claude login${account.subscriptionType ? ` (${account.subscriptionType})` : ""}`,
+      };
+    if (account.apiProvider && account.apiProvider !== "firstParty")
+      return { found: `Claude through ${account.apiProvider}` };
+    return { missing: "the Claude SDK found no usable login" };
+  } catch (error) {
+    // A loaded service credential that can't be read is a missing login.
+    if (error instanceof PlannerError)
+      return { missing: error.message, unreadable: true };
+    return {
+      unchecked: `the Claude login could not be checked: ${detail(errorMessage(error))}`,
+    };
+  } finally {
+    clearTimeout(timer);
+    release();
+    session?.close();
+    controller.abort();
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
+}
+
 /**
  * An isolated Agent SDK session for one structured answer, authenticated by
  * the operator's Claude login.
@@ -462,6 +567,8 @@ function claudePlanningOptions(input: {
   abortController: AbortController;
   /** `cwd` is the exact tree to read: allow read-only tools over it. */
   tree: boolean;
+  /** A retained conversation's turn in `dir`: the transcript is kept there, and continued when it resumes one. */
+  retained?: { turn: Turn; dir: string };
 }): Options {
   return {
     abortController: input.abortController,
@@ -505,13 +612,153 @@ function claudePlanningOptions(input: {
     maxTurns: input.tree
       ? CLAUDE_TREE_REVIEW_MAX_TURNS
       : CLAUDE_PLANNING_MAX_TURNS,
-    persistSession: false,
-    env: claudeEnvironment(
-      input.credentialDirectory,
-      input.maxOutputTokens,
-      input.login,
-    ),
+    ...sessionOptions(input.retained?.turn),
+    env: {
+      ...claudeEnvironment(
+        input.credentialDirectory,
+        input.maxOutputTokens,
+        input.login,
+      ),
+      ...(input.retained ? claudeSessionEnvironment(input.retained.dir) : {}),
+    },
   };
+}
+
+/**
+ * A Claude query's transcript options: none kept for a call without a
+ * conversation; kept for a retained one, and continued by id when its turn
+ * resumes a session.
+ */
+export function sessionOptions(
+  turn: Turn | undefined,
+): Pick<Options, "persistSession" | "resume"> {
+  return turn
+    ? {
+        persistSession: true,
+        ...(turn.resumed ? { resume: turn.resumed.id } : {}),
+      }
+    : { persistSession: false };
+}
+
+/** A Claude session id: a UUID, never a path. */
+const SESSION_ID = /^[0-9a-f-]{8,64}$/i;
+
+/** The one project name every retained transcript is kept under, whatever the turn's working directory. */
+const PROJECT = "factory";
+
+/**
+ * A retained conversation's Claude storage: a private configuration
+ * directory inside the conversation's own (settings and transcripts, under
+ * one fixed project name, so a turn finds its transcript from any working
+ * directory, and it goes with the work directory), while the login stays
+ * where the operator's Claude clients keep it: the CLI reads and refreshes
+ * it there (CLAUDE_SECURESTORAGE_CONFIG_DIR), so it is never forked. The
+ * empty value is the CLI's default login directory.
+ */
+export function claudeSessionEnvironment(dir: string): Record<string, string> {
+  const login =
+    process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ??
+    process.env.CLAUDE_CONFIG_DIR ??
+    "";
+  // The CLI resolves a relative directory against its working directory.
+  if (login && !isAbsolute(login))
+    throw new PlannerError(
+      "hold",
+      "CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR must be absolute paths; fix the service environment, then answer retry",
+    );
+  const config = join(dir, "claude");
+  mkdirSync(config, { recursive: true, mode: 0o700 });
+  return {
+    CLAUDE_CONFIG_DIR: config,
+    CLAUDE_SECURESTORAGE_CONFIG_DIR: login,
+    CLAUDE_CODE_PROJECT_DIR_NAME: PROJECT,
+  };
+}
+
+/** Whether the conversation in `dir` holds Claude session `id`'s transcript. */
+function hasTranscript(dir: string, id: string): boolean {
+  return (
+    SESSION_ID.test(id) &&
+    existsSync(join(dir, "claude", "projects", PROJECT, `${id}.jsonl`))
+  );
+}
+
+/**
+ * Open a retained Claude turn (session.ts openTurn): it continues the kept
+ * session when its transcript is there and its cumulative cost and counts
+ * are known, so this turn's own can be told apart. A fresh turn empties
+ * the directory, transcript and all.
+ */
+export function claudeTurn(
+  conversation: PlannerCall["conversation"],
+  prompt: string,
+  model: string,
+): Turn | undefined {
+  if (!conversation) return undefined;
+  return openTurn(
+    conversation,
+    prompt,
+    "claude",
+    model,
+    (session) =>
+      session.costUsd !== undefined &&
+      session.models !== undefined &&
+      hasTranscript(conversation.dir, session.id),
+  );
+}
+
+/** A query's cumulative per-model counts, as the SDK reports them for its session. */
+export function modelCounts(
+  result: SDKResultMessage,
+): Record<string, ModelCounts> | undefined {
+  const entries = Object.entries(result.modelUsage ?? {});
+  if (!entries.length) return undefined;
+  return Object.fromEntries(
+    entries.map(([name, model]) => [
+      name,
+      {
+        input: model.inputTokens,
+        output: model.outputTokens,
+        cacheRead: model.cacheReadInputTokens,
+        cacheCreation: model.cacheCreationInputTokens,
+      },
+    ]),
+  );
+}
+
+/**
+ * Where a query's cumulative totals start: nothing for a new session, the
+ * kept session's totals for a resumed one. A resumed session's cost and
+ * per-model counts include its earlier turns.
+ */
+export interface ClaudeBaseline {
+  costUsd: number;
+  models: Record<string, ModelCounts>;
+}
+
+export function baselineOf(turn: Turn | undefined): ClaudeBaseline {
+  const resumed = turn?.resumed;
+  return {
+    costUsd: resumed?.costUsd ?? 0,
+    models: resumed?.models ?? {},
+  };
+}
+
+/** `models` as a TurnEnd field, when known. */
+export function withModels(models: Record<string, ModelCounts> | undefined): {
+  models?: Record<string, ModelCounts>;
+} {
+  return models ? { models } : {};
+}
+
+/** A query's own cost: its cumulative total less its baseline. */
+export function ownCost(
+  result: SDKResultMessage,
+  baseline: ClaudeBaseline,
+): number | undefined {
+  return Number.isFinite(result.total_cost_usd)
+    ? Math.max(0, result.total_cost_usd - baseline.costUsd)
+    : undefined;
 }
 
 const LOGIN_HOLD =
@@ -559,6 +806,18 @@ function checkInitialization(
       "fail",
       "Claude SDK initialized an unconfigured MCP server",
     );
+}
+
+/** A tool result's text content, for its capture. */
+export function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part: { type?: unknown; text?: unknown }) =>
+      part.type === "text" && typeof part.text === "string" ? part.text : "",
+    )
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** The runtime's stand-in for a model message it produced itself. */
@@ -698,8 +957,7 @@ function settle(
           throw new CredentialRejected("retry", `${LOGIN_HOLD} (${ended})`);
         throw new PlannerError("hold", `${LOGIN_HOLD} (${ended})`);
       case "too-long":
-        throw new PlannerError(
-          "fail",
+        throw PlannerError.contextOverflow(
           `The request is larger than the model's context window: ${ended}`,
         );
       case "limit":
@@ -723,21 +981,36 @@ function settle(
   return claudeOutputValue(schema, result.structured_output);
 }
 
-export function usageOf(result: SDKResultMessage): PlannerAnswer["usage"] {
-  const models = Object.values(result.modelUsage ?? {});
-  if (models.length)
-    return models.reduce(
-      (sum, model) => ({
-        input:
-          sum.input +
-          model.inputTokens +
-          model.cacheReadInputTokens +
-          model.cacheCreationInputTokens,
-        output: sum.output + model.outputTokens,
-        cached: (sum.cached ?? 0) + model.cacheReadInputTokens,
-      }),
+export function usageOf(
+  result: SDKResultMessage,
+  /**
+   * The cumulative per-model counts the query's session started from (a
+   * resumed session's earlier turns): this query's own are the rest.
+   */
+  baseline: Record<string, ModelCounts> = {},
+): PlannerAnswer["usage"] {
+  const counts = modelCounts(result);
+  if (counts) {
+    const less = (a: number, b = 0) => Math.max(0, a - b);
+    return Object.entries(counts).reduce(
+      (sum, [name, model]) => {
+        const before = baseline[name];
+        const read = less(model.cacheRead, before?.cacheRead);
+        return {
+          input:
+            sum.input +
+            less(model.input, before?.input) +
+            read +
+            less(model.cacheCreation, before?.cacheCreation),
+          output: sum.output + less(model.output, before?.output),
+          cached: (sum.cached ?? 0) + read,
+        };
+      },
       { input: 0, output: 0, cached: 0 },
     );
+  }
+  // A resumed session's own counts can't be told from a query's main loop.
+  if (Object.keys(baseline).length) return undefined;
   const usage = result.usage;
   if (!usage) return undefined;
   const read = usage.cache_read_input_tokens ?? 0;
@@ -788,7 +1061,11 @@ function claudePrompt(
 export class ClaudePlanner implements Planner {
   constructor(private readonly options: ClaudePlannerOptions) {}
 
-  async answer(call: PlannerCall): Promise<PlannerAnswer> {
+  answer(call: PlannerCall): Promise<PlannerAnswer> {
+    return freshOnOverflow(call, (once) => this.withLogin(once));
+  }
+
+  private async withLogin(call: PlannerCall): Promise<PlannerAnswer> {
     try {
       return await this.attempt(call);
     } catch (error) {
@@ -828,9 +1105,22 @@ export class ClaudePlanner implements Planner {
       );
     }
     const login = serviceLoginEnvironment();
+    let turn: Turn | undefined;
+    try {
+      turn = claudeTurn(call.conversation, call.prompt, choice.model);
+    } catch (error) {
+      throw new PlannerError(
+        "hold",
+        `Factory could not set up the Claude planning conversation; fix the host's work directory, then answer retry (${detail(String(error))})`,
+      );
+    }
+    if (turn) {
+      turnFields(record, turn);
+      if (turn.resumed) captureRequest(record, turn.prompt);
+    }
     let prompt: ReturnType<typeof claudePrompt>;
     try {
-      prompt = claudePrompt(call.prompt, callImages(call));
+      prompt = claudePrompt(turn?.prompt ?? call.prompt, callImages(call));
     } catch (error) {
       if (error instanceof PlannerError) throw error;
       throw PlannerError.itemHold(
@@ -850,15 +1140,24 @@ export class ClaudePlanner implements Planner {
     const facts: SessionFacts = { initialized: false, modelResponded: false };
     let session: Query | undefined;
     let root: string | undefined;
+    let retained: { turn: Turn; dir: string } | undefined;
+    let compacted = false;
+    // Recorded in `finally`, so a call that fails mid-stream keeps its tool calls.
+    const tools = new NativeTools();
     try {
       let credentialDirectory: string;
       let cwd: string;
       try {
-        root = mkdtempSync(join(tmpdir(), "factory-claude-"));
+        // A retained conversation keeps its directory, so a tool-free
+        // turn's working directory is the same on every turn.
+        root =
+          call.conversation?.dir ??
+          mkdtempSync(join(tmpdir(), "factory-claude-"));
+        retained = turn && call.conversation && { turn, dir: root };
         credentialDirectory = join(root, "gh");
-        mkdirSync(credentialDirectory, { mode: 0o700 });
+        mkdirSync(credentialDirectory, { mode: 0o700, recursive: true });
         cwd = call.readDir ? resolve(call.readDir) : join(root, "work");
-        if (!tree) mkdirSync(cwd, { mode: 0o700 });
+        if (!tree) mkdirSync(cwd, { mode: 0o700, recursive: true });
       } catch (error) {
         throw new PlannerError(
           "hold",
@@ -877,12 +1176,17 @@ export class ClaudePlanner implements Planner {
           login,
           abortController,
           tree,
+          ...(retained ? { retained } : {}),
         }),
       });
       const callStarted = Date.now();
       const events = session[Symbol.asyncIterator]();
       let result: SDKResultMessage | undefined;
       const calls = new Tallies();
+      const toolNames = new Map<string, string>();
+      let response: string | undefined;
+      if (!turn) turnFields(record, { number: 1 });
+      record.imageOutputs = 0;
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
@@ -908,6 +1212,17 @@ export class ClaudePlanner implements Planner {
             ? message.retry_delay_ms + (message.no_response?.retry_wait_ms ?? 0)
             : 0,
         );
+        if (message.type === "stream_event") firstToken(record, callStarted);
+        if (
+          message.type === "assistant" &&
+          message.message.model !== SYNTHETIC_MODEL
+        ) {
+          firstToken(record, callStarted);
+          record.reportedModel = message.message.model;
+          // One response may arrive split over several messages with its id.
+          if (message.message.id !== response) tools.response();
+          response = message.message.id;
+        }
         if (message.type === "assistant" || message.type === "user") {
           const content = message.message.content;
           if (Array.isArray(content))
@@ -915,6 +1230,18 @@ export class ClaudePlanner implements Planner {
               if (block.type === "tool_use") {
                 calls.add(block.name, block.id);
                 record.nativeToolActivity = calls.value;
+                tools.call(block.id);
+                toolNames.set(block.id, block.name);
+              }
+              if (message.type === "assistant" && block.type === "image")
+                record.imageOutputs = (record.imageOutputs as number) + 1;
+              if (block.type === "tool_result") {
+                tools.result(block.tool_use_id, block.is_error === true);
+                captureToolOutput(
+                  record,
+                  toolNames.get(block.tool_use_id) ?? "unknown",
+                  toolResultText(block.content),
+                );
               }
               if (
                 block.type === "tool_use" &&
@@ -941,8 +1268,11 @@ export class ClaudePlanner implements Planner {
           if (message.message.model !== SYNTHETIC_MODEL)
             facts.modelResponded = true;
         }
+        if (message.type === "system" && message.subtype === "compact_boundary")
+          compacted = true;
         if (message.type === "system" && message.subtype === "init") {
           record.session = message.session_id;
+          record.reportedModel = message.model;
           checkInitialization(message, choice, cwd, tree);
           facts.initialized = true;
         }
@@ -953,9 +1283,21 @@ export class ClaudePlanner implements Planner {
       }
       if (!result)
         throw new PlannerError("retry", "Claude SDK ended without a result");
-      const usage = usageOf(result);
+      const baseline = baselineOf(turn);
+      const usage = usageOf(result, baseline.models);
       record.tokens = tokens({ ...usage });
-      record.costUsd = result.total_cost_usd;
+      record.providerUsage =
+        providerUsage({ usage: result.usage, modelUsage: result.modelUsage }) ??
+        null;
+      if (
+        result.subtype === "error_max_structured_output_retries" ||
+        (result.subtype === "success" &&
+          !result.is_error &&
+          result.structured_output === undefined)
+      )
+        record.stage = "protocol";
+      const costUsd = ownCost(result, baseline);
+      record.costUsd = costUsd ?? null;
       captureResponse(
         record,
         result.subtype === "success"
@@ -967,20 +1309,28 @@ export class ClaudePlanner implements Planner {
       record.turns = result.num_turns;
       if (result.stop_reason) record.stopReason = result.stop_reason;
       const value = settle(result, facts, call.schema);
+      const sessionId = record.session as string | undefined;
+      const kept =
+        turn &&
+        sessionId &&
+        turn.end(sessionId, {
+          compacted,
+          costUsd: result.total_cost_usd,
+          ...withModels(modelCounts(result)),
+        });
       return {
+        ...(kept ? { session: kept } : {}),
         value,
         model: choice.model,
         effort: choice.effort,
         ...(usage && { usage }),
-        ...(Number.isFinite(result.total_cost_usd) && {
-          costUsd: result.total_cost_usd,
-        }),
+        ...(costUsd !== undefined && { costUsd }),
         ...(Number.isSafeInteger(result.num_turns) && {
           turns: result.num_turns,
         }),
       };
     } catch (error) {
-      if (error instanceof PlannerError) throw error;
+      if (error instanceof PlannerError) throw overflowed(error, turn);
       const idle = watchdog.expired;
       if (idle)
         throw new PlannerError("retry", idle.message, { kind: "error" });
@@ -988,11 +1338,14 @@ export class ClaudePlanner implements Planner {
       if (call.signal.aborted) throw call.signal.reason ?? error;
       throw error;
     } finally {
+      tools.response();
+      record.nativeTools = tools.value;
       watchdog.signal.removeEventListener("abort", abort);
       watchdog.stop();
       abortController.abort();
       session?.close();
-      if (root) rmSync(root, { recursive: true, force: true });
+      if (root && !call.conversation)
+        rmSync(root, { recursive: true, force: true });
     }
   }
 }

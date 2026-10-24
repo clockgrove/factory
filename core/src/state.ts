@@ -11,11 +11,11 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import { isObject } from "./checked.js";
 import { crashPoint } from "./crash.js";
 import type { HoldScope } from "./engine.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
-import type { ReviewArtifactSelector } from "./review/artifacts.js";
 
 /**
  * 6: a hold carries its answers as `options`, each with its family and
@@ -66,7 +66,7 @@ export type AnswerFamily =
   | "retire"
   | "reset";
 
-/** One answer a hold offers (CORE.md#Holds and answers). */
+/** One answer a hold offers (docs/reference/holds.md#Holds and answers). */
 export interface HoldOption {
   /** The literal answer token: `/factory <answer>`. */
   answer: string;
@@ -89,7 +89,7 @@ export interface Hold {
   /**
    * The Work Item it stops (a Work Item step's question about that item):
    * that item waits, and the items that depend on it. Absent: the whole
-   * Objective waits (CORE.md#Holds and answers).
+   * Objective waits (docs/reference/holds.md#Holds and answers).
    */
   item?: string;
   question: string;
@@ -104,6 +104,11 @@ export interface Hold {
   shownAt?: string;
   /** The comment shows the short form `/factory <answer>` (it was the one open question). */
   shortForm?: boolean;
+  /**
+   * A human gate's question: its step keeps polling while it is open, and
+   * it closes by itself once the step no longer waits on the gate.
+   */
+  polls?: true;
 }
 
 /**
@@ -129,17 +134,15 @@ export interface Answer {
   /** The question this answers, as it was asked. */
   question?: string;
   answer: string;
-  /** The option's argument, for a parameterized answer (`retire 2`). */
+  /** The option's argument, for a parameterized answer (`accept 2`). */
   arg?: string;
   text?: string;
-  /** `revalidate --review-artifacts`: the selectors this rereview captures, resolved when the answer landed; empty for none. */
-  reviewArtifacts?: ReviewArtifactSelector[];
   by: string;
   at: string;
 }
 
 /**
- * Why a retry waits (CORE.md#Waits). Absent: an unknown transient cause,
+ * Why a retry waits (docs/reference/steps.md#Waits). Absent: an unknown transient cause,
  * such as the network, a GitHub or provider outage, or CI still running.
  */
 export type Wait =
@@ -151,8 +154,12 @@ export type Wait =
   | { kind: "error" }
   /** A limit that resets at `at` (unknown when absent), from `provider` when a model provider set it. */
   | { kind: "reset"; at?: string; provider?: string }
-  /** A person outside Factory: an environment approval, a required review. */
-  | { kind: "gate"; gate: string };
+  /**
+   * Something outside Factory: a person (`human`: an environment approval,
+   * a required review), or another Objective (a predecessor, a split's
+   * children). Only a person's gate asks after a while.
+   */
+  | { kind: "gate"; gate: string; human?: true };
 
 export interface Retry {
   /** Consecutive escaped errors and missed deadlines; any other outcome resets it. */
@@ -184,7 +191,7 @@ export interface PendingQuestion {
 
 /**
  * The configuration an Objective runs with, frozen at admission
- * (CORE.md#Frozen configuration): its provider, with that provider's
+ * (docs/reference/state.md#Frozen configuration): its provider, with that provider's
  * resolved settings, and every other key but the operational ones
  * (providers/selection.ts OPERATIONAL). A `switch` or `adopt` answer freezes it again.
  */
@@ -236,7 +243,14 @@ export interface ObjectiveState {
    * Steps started and not yet finished, with the service run that started
    * each. One found after a restart was interrupted, and runs again.
    */
-  attempts: Record<string, { startedAt: string; run?: string }>;
+  attempts: Record<string, { startedAt: string; run?: string; id?: string }>;
+  /**
+   * Per step: attempts started so far (`n`; an attempt's id is
+   * `<step>#<n>`), and the attempt its next one continues (`parent`: the
+   * continuation, the repair that sent it back, or the interrupted
+   * attempt it reruns). Run-log identity only; nothing decides on it.
+   */
+  stepRuns?: Record<string, { n: number; parent?: string }>;
   /** The service run that last finished a step of this Objective, saved with the step's outcome. */
   finishedRun?: string;
   /**
@@ -267,9 +281,9 @@ export interface ObjectiveState {
   deadline?: string;
   /**
    * The first save at a terminal status; `by` names who cancelled
-   * (`deadline`: the deadline did), and `source` says `by` is the GitHub
-   * login of a `/factory cancel` comment's author (absent: the CLI's host
-   * user, never shown on GitHub).
+   * (`deadline`: the deadline did); `source` says `by` is the GitHub login
+   * of a `/factory cancel` comment's author (absent: the CLI's host user,
+   * never shown on GitHub).
    */
   ended?: { at: string; by?: string; source?: "github" };
 }
@@ -456,7 +470,7 @@ export function saveObservation(dir: string, state: ObjectiveState): string {
 
 /**
  * The settled observations still to land. Only these files are read, never
- * the finished states; one that doesn't parse comes with its `error`, and
+ * the finished states; one that isn't a state comes with its `error`, and
  * leftover temporary files are removed.
  */
 export function listObservations(
@@ -481,11 +495,22 @@ export function listObservations(
     } catch {
       continue; // read again at the next start
     }
+    let problem: string | undefined;
+    let value: unknown;
     try {
-      found.push({ path, state: JSON.parse(text) });
+      value = JSON.parse(text);
+      problem = stateProblem(
+        value,
+        Number(/^(\d+)@/.exec(name)?.[1] ?? Number.NaN),
+      );
     } catch (error) {
-      found.push({ path, error: String(error) });
+      problem = String(error);
     }
+    found.push(
+      problem
+        ? { path, error: problem }
+        : { path, state: value as ObjectiveState },
+    );
   }
   return found;
 }
@@ -525,9 +550,10 @@ export type Loaded =
     };
 
 /**
- * The Objective's state; null when it has none. Only a file that doesn't
- * parse, or has another version, is unreadable; a read that fails (EMFILE,
- * EIO) throws, and the caller tries again later.
+ * The Objective's state; null when it has none. A file that doesn't
+ * parse, has another version or another shape (`stateProblem`) is
+ * unreadable; a read that fails (EMFILE, EIO) throws, and the caller tries
+ * again later.
  */
 export function loadState(dir: string, issue: number): Loaded | null {
   let text: string;
@@ -537,24 +563,102 @@ export function loadState(dir: string, issue: number): Loaded | null {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+  let problem: string | undefined;
+  let value: unknown;
   try {
-    const state = JSON.parse(text) as ObjectiveState;
-    if (state.version !== STATE_VERSION)
-      return {
-        kind: "unreadable",
-        issue,
-        error: `state version ${state.version}, expected ${STATE_VERSION}`,
-        incident: digest(text),
-      };
-    return { kind: "ok", state };
+    value = JSON.parse(text);
+    problem = stateProblem(value, issue);
   } catch (error) {
-    return {
-      kind: "unreadable",
-      issue,
-      error: String(error),
-      incident: digest(text),
-    };
+    problem = String(error);
   }
+  return problem
+    ? { kind: "unreadable", issue, error: problem, incident: digest(text) }
+    : { kind: "ok", state: value as ObjectiveState };
+}
+
+const STATUSES: readonly ObjectiveStatus[] = [
+  "checking",
+  "planning",
+  "building",
+  "finishing",
+  "holding",
+  "resetting",
+  "done",
+  "cancelled",
+];
+
+/**
+ * Why `value` isn't a state file of Objective `issue` this version can
+ * run; undefined when it is one. Checked once, where a file is read: the
+ * engine, the sync and status trust every state they get. It checks what
+ * every reader relies on (the top-level fields and each open question);
+ * a module's own data is its module's to check.
+ */
+function stateProblem(value: unknown, issue: number): string | undefined {
+  if (!isObject(value)) return "the state isn't an object";
+  if (value.version !== STATE_VERSION)
+    return `state version ${value.version}, expected ${STATE_VERSION}`;
+  if (value.issue !== issue)
+    return `the state names issue ${JSON.stringify(value.issue)}, not #${issue}`;
+  if (!STATUSES.includes(value.status as ObjectiveStatus))
+    return `status ${JSON.stringify(value.status)} isn't one Factory knows`;
+  for (const key of [
+    "answers",
+    "retries",
+    "asking",
+    "kept",
+    "done",
+    "attempts",
+    "modules",
+  ])
+    if (!isObject(value[key])) return `${key} isn't an object`;
+  for (const key of ["retries", "asking", "attempts"])
+    for (const [step, entry] of Object.entries(
+      value[key] as Record<string, unknown>,
+    ))
+      if (!isObject(entry)) return `${key}.${step} isn't an object`;
+  for (const key of ["repairs", "frozen", "control", "ended", "stepRuns"])
+    if (value[key] !== undefined && !isObject(value[key]))
+      return `${key} isn't an object`;
+  for (const key of [
+    "updatedAt",
+    "startedAt",
+    "deadline",
+    "lastShownAt",
+    "finishedRun",
+  ])
+    if (
+      (key === "updatedAt" || value[key] !== undefined) &&
+      typeof value[key] !== "string"
+    )
+      return `${key} isn't text`;
+  if (
+    !Array.isArray(value.appliedRequests) ||
+    !value.appliedRequests.every(
+      (applied) => isObject(applied) && typeof applied.id === "string",
+    )
+  )
+    return "appliedRequests isn't a list of applied requests";
+  if (!Array.isArray(value.holds)) return "holds isn't a list";
+  for (const hold of value.holds as unknown[]) {
+    if (
+      !isObject(hold) ||
+      !["id", "step", "question", "askedAt"].every(
+        (key) => typeof hold[key] === "string",
+      ) ||
+      (hold.item !== undefined && typeof hold.item !== "string") ||
+      !Array.isArray(hold.options) ||
+      !hold.options.every(
+        (option) =>
+          isObject(option) &&
+          typeof option.answer === "string" &&
+          typeof option.family === "string" &&
+          typeof option.consequence === "string",
+      )
+    )
+      return `holds has a question that isn't one: ${JSON.stringify(hold).slice(0, 200)}`;
+  }
+  return undefined;
 }
 
 const digest = (text: string): string =>

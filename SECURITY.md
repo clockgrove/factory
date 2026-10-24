@@ -11,7 +11,7 @@ Codex, Claude and GitHub Copilot workers run as the operator's OS account, in a 
 - **No settings hooks.** A Claude worker never loads project or local settings, whose hooks would run on the host.
 - **No fallback.** A missing login stops the work with the fix; Factory never falls back to another provider.
 
-See [sandbox and security](docs/USER-GUIDE.md#sandbox-and-security) and [CORE.md#Security](docs/CORE.md#security).
+See [sandbox and security](docs/USER-GUIDE.md#sandbox-and-security) and [the core's security rules](docs/reference/security.md#security).
 
 The managed workers (OpenAI Agents, Claude Managed Agents) are parked and not live-qualified; see [providers](docs/USER-GUIDE.md#providers).
 

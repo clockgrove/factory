@@ -1,0 +1,498 @@
+import { commandSandboxPolicy } from "./execution/sandbox.js";
+import { authenticateWorkRouting } from "./runner/routing.js";
+import { randomUUID } from "node:crypto";
+import { authenticateDiscoveryOutput } from "./discovery.js";
+import { assertWorkDiscoveryOutput } from "./state.js";
+import { join } from "node:path";
+import { planningSources } from "./compiler.js";
+import { closeWorkItem } from "./completion.js";
+import type { FactoryConfig } from "./config.js";
+import type {
+  ContentStore,
+  GitHubGateway,
+  PlanningModel,
+  WorkItem,
+} from "./contracts.js";
+import { assertProofCheckDefined } from "./delivery/check-sources.js";
+import type { DiagnosticEmitter } from "./diagnostics.js";
+import { cancelledFault, faultOf } from "./fault.js";
+import { graphDigest } from "./graph-amendments.js";
+import { reviewItem } from "./item-steps.js";
+import { validationLfsMembersForItem } from "./media.js";
+import { packageManagerUpdate } from "./package-manager-update.js";
+import type { PhaseAdmission } from "./phase-admission.js";
+import {
+  joinReviewArtifactSelectors,
+  plannedReviewArtifacts,
+} from "./review-artifacts.js";
+import { currentProcessSignal, fetchHead, gitAsync } from "./process.js";
+import {
+  environmentValidationIndices,
+  itemCoverage,
+  objectiveCandidate,
+  resultReviewCriteria,
+} from "./qa.js";
+import type { FactoryState } from "./state.js";
+import { clearWait, StepPaused, setWait, step, waitOf } from "./step.js";
+import {
+  validateWorkItem,
+  workItemReviewEvidence,
+  workItemReviewObservations,
+} from "./validation.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
+
+/** Run only source-authorized readiness probes before spending a worker call. */
+export async function preflightItemEnvironment(args: {
+  config: FactoryConfig;
+  root: string;
+  state: FactoryState;
+  item: WorkItem;
+  baseSha: string;
+  objectiveBody?: string;
+  store?: ContentStore;
+  diagnostics?: DiagnosticEmitter;
+}): Promise<void> {
+  const task = () => preflightItemEnvironmentObserved(args);
+  if (args.diagnostics)
+    return args.diagnostics.span(
+      {
+        runId: args.state.runId,
+        itemId: args.item.id,
+        operation: "environment-preflight",
+        metadata: { baseSha: args.baseSha },
+      },
+      task,
+    );
+  return task();
+}
+
+async function preflightItemEnvironmentObserved(
+  args: Parameters<typeof preflightItemEnvironment>[0],
+): Promise<void> {
+  const entries = itemCoverage(args.state.graph, args.item.id);
+  const indices = environmentValidationIndices(args.state.graph, args.item.id);
+  if (!indices.length) return;
+  for (const entry of entries) {
+    const preparedBy = entry.environment.preparedBy;
+    if (preparedBy && args.state.work[preparedBy]?.status !== "done")
+      throw new Error("Required environment preparation is not complete");
+  }
+  const commands = indices.map((index) => args.item.validation[index]!);
+  await validateWorkItem(
+    args.config.checkout,
+    join(args.root, "environment-preflight", args.item.id),
+    { ...args.item, validation: commands },
+    args.baseSha,
+    await gitAsync(args.config.checkout, "rev-parse", `${args.baseSha}^{tree}`),
+    args.state.baseSha,
+    (entry) =>
+      args.diagnostics?.emit({
+        runId: args.state.runId,
+        itemId: args.item.id,
+        operation: "environment-readiness-command",
+        outcome: entry.passed ? "completed" : "failed",
+        ...(!entry.passed && { formalFailure: true as const }),
+        durationMs: entry.durationMs,
+        metadata: {
+          scope: "preflight-fresh-checkout",
+          baseSha: args.baseSha,
+          validationIndex: indices[entry.index]!,
+          command: commands[entry.index]!.command,
+          source:
+            commands[entry.index]!.source ?? commands[entry.index]!.provenance,
+          purpose: entries.some(
+            (coverage) =>
+              coverage.environment.probe === commands[entry.index]!.command,
+          )
+            ? "probe"
+            : "prerequisite",
+          exitCode: entry.exitCode,
+        },
+        detail: entry.output,
+      }),
+    (entry) =>
+      args.diagnostics?.emitStream(
+        {
+          runId: args.state.runId,
+          itemId: args.item.id,
+          operation: "environment-readiness-output",
+          outcome: "observed",
+          metadata: {
+            scope: "preflight-fresh-checkout",
+            validationIndex: indices[entry.index]!,
+            stream: entry.stream,
+          },
+        },
+        entry.output,
+        entry.final,
+      ),
+    args.baseSha,
+    validationLfsMembersForItem(
+      args.state,
+      args.item,
+      args.config.checkout,
+      args.baseSha,
+    ),
+    args.store,
+    workspacePackageAdditions(args.objectiveBody ?? ""),
+    packageManagerUpdate(args.objectiveBody ?? ""),
+    // These are subset readiness probes, not the candidate's accepted
+    // validation command map. Retain their original failure without
+    // claiming failed-result receipts for a different phase.
+    false,
+    [],
+    commandSandboxPolicy(args.config),
+  );
+}
+
+/** A proof node uses ordinary WorkState and validation, never a fabricated worker or PR. */
+export async function runQaItem(args: {
+  config: FactoryConfig;
+  root: string;
+  state: FactoryState;
+  item: WorkItem;
+  github: GitHubGateway;
+  model: PlanningModel;
+  objectiveBody: string;
+  store: ContentStore;
+  save: () => void;
+  cancelled: () => boolean;
+  paused?: () => boolean;
+  /** The run's cancel signal; defaults to the pass's process signal. */
+  signal?: AbortSignal;
+  /** The run's pause signal: ends a step's wait; the item resumes later. */
+  pause?: AbortSignal;
+  diagnostics?: DiagnosticEmitter;
+  phases?: PhaseAdmission;
+}): Promise<void> {
+  const { state, item, save } = args;
+  const signal = args.signal ?? currentProcessSignal();
+  const cancelled = cancelledFault;
+  const work = state.work[item.id]!;
+  const ciWait = () => waitOf(state, { item: item.id })?.kind === "ci";
+  const readinessWasWaiting = ciWait();
+  const retainPausedWait = (): boolean => {
+    if (!readinessWasWaiting || !args.paused?.()) return false;
+    if (!ciWait())
+      setWait(
+        state,
+        { item: item.id },
+        { kind: "ci", detail: "Awaiting exact named CI before continuing QA" },
+      );
+    args.phases?.release(item.id);
+    save();
+    return true;
+  };
+  try {
+    await authenticateWorkRouting({
+      config: args.config,
+      state,
+      store: args.store,
+    });
+    const candidate = objectiveCandidate(state);
+    if (
+      (item.kind !== "qa" && item.kind !== "aggregate") ||
+      !item.dependencies.every(
+        (id) =>
+          state.work[id]?.status === "skipped" ||
+          (state.work[id]?.status === "done" &&
+            (state.graph.items.find((peer) => peer.id === id)?.kind ===
+              "discovery" ||
+              state.work[id]?.integratedSha ||
+              (candidate?.basis === "pinned-baseline" &&
+                state.work[id]?.changeRef === candidate.commitSha))),
+      )
+    )
+      throw new Error("QA cannot run before actual dependency integration");
+    for (const id of item.dependencies) {
+      const dependency = state.graph.items.find((peer) => peer.id === id);
+      if (dependency?.kind !== "discovery") continue;
+      assertWorkDiscoveryOutput(state, id, state.work[id]!);
+      if (state.work[id]?.discoveryOutput?.status !== "complete")
+        throw new Error("QA discovery dependency is incomplete");
+      await authenticateDiscoveryOutput({
+        checkout: args.config.checkout,
+        specification: dependency.discovery!,
+        manifest: state.work[id]!.discoveryOutput!,
+        store: args.store,
+      });
+    }
+    if (!candidate) throw new Error("QA has no integrated candidate");
+    if (args.cancelled()) throw cancelled();
+    const commit = candidate.commitSha;
+    if (!work.attempt) {
+      work.attempt = randomUUID();
+      save();
+    }
+    // Observation and validation repeat from the top; every read is free.
+    const validation = await step(
+      state,
+      { scope: { item: item.id }, name: "validate" },
+      async (ctx) => {
+        if (candidate.basis === "pinned-baseline") {
+          const head = await fetchHead(
+            args.config.checkout,
+            await args.github.defaultBranch(),
+          );
+          ctx.progress();
+          if (head !== commit)
+            throw new Error("Default branch changed before pinned-baseline QA");
+        }
+        if (ciWait() && work.changeRef !== commit)
+          throw new Error("QA candidate changed while awaiting exact named CI");
+        work.status = "running";
+        work.step = "validate";
+        work.graphRevisionDigest ??= graphDigest(state.graph);
+        work.startedAt ??= new Date().toISOString();
+        work.baseSha = commit;
+        work.executionBaseSha = commit;
+        work.changeRef = commit;
+        work.treeSha = await gitAsync(
+          args.config.checkout,
+          "rev-parse",
+          `${commit}^{tree}`,
+        );
+        save();
+        work.qaChecks = [];
+        for (const entry of itemCoverage(state.graph, item.id).filter(
+          (entry) =>
+            entry.proof.kind === "integrated-ci" ||
+            entry.proof.kind === "published-ci",
+        )) {
+          const proof = entry.proof;
+          if (proof.kind !== "integrated-ci" && proof.kind !== "published-ci")
+            continue;
+          const target =
+            proof.kind === "published-ci" ? state.work[proof.targetItem] : work;
+          if (
+            !target?.changeRef ||
+            (proof.kind === "published-ci" && !target.pullRequest)
+          )
+            throw new Error("Required CI candidate has not been published");
+          if (!args.github.namedCheck)
+            throw new Error(
+              "Authenticated named CI observation is unavailable",
+            );
+          const check = await args.github.namedCheck(
+            target.changeRef,
+            proof.checkName,
+          );
+          ctx.progress();
+          if (
+            !check ||
+            (check.status !== "completed" &&
+              check.name === proof.checkName &&
+              check.headSha === target.changeRef &&
+              Number.isSafeInteger(check.id) &&
+              check.id > 0)
+          ) {
+            // Only a proof that must still wait is bound, and to the commit
+            // its check must report on: a name that commit never defines
+            // would wait forever.
+            assertProofCheckDefined({
+              checkName: proof.checkName,
+              commit: target.changeRef,
+              objectiveBody: args.objectiveBody,
+              checkout: args.config.checkout,
+            });
+            setWait(
+              state,
+              { item: item.id },
+              {
+                kind: "ci",
+                detail: `Awaiting named CI check ${proof.checkName} at ${target.changeRef}`,
+              },
+            );
+            args.phases?.release(item.id);
+            save();
+            return undefined;
+          }
+          if (
+            check.name !== proof.checkName ||
+            check.headSha !== target.changeRef ||
+            !Number.isSafeInteger(check.id) ||
+            check.id <= 0 ||
+            check.status !== "completed" ||
+            check.conclusion !== "success"
+          )
+            throw new Error(
+              `Required named CI check ${proof.checkName} is stale, invalid, or failing at ${target.changeRef}`,
+            );
+          if (retainPausedWait()) return undefined;
+          work.qaChecks.push(check);
+          save();
+        }
+        await args.phases?.reserve(item.id, "validation");
+        if (retainPausedWait()) return undefined;
+        // This read-only proof has no implementation turn to preflight. Its
+        // complete declared sequence includes setup and probes in the actual
+        // fresh validator checkout; preparation in another checkout cannot
+        // transfer ignored runtime files or substitute for these receipts.
+        return validateWorkItem(
+          args.config.checkout,
+          join(args.root, "validation", item.id),
+          item,
+          commit,
+          work.treeSha,
+          state.baseSha,
+          (entry) =>
+            args.diagnostics?.emit({
+              runId: state.runId,
+              itemId: item.id,
+              operation: "qa-validation-command",
+              outcome: entry.passed ? "completed" : "failed",
+              durationMs: entry.durationMs,
+              metadata: {
+                validationIndex: entry.index,
+                command: item.validation[entry.index]!.command,
+                exitCode: entry.exitCode,
+              },
+              detail: entry.output,
+            }),
+          (entry) =>
+            args.diagnostics?.emitStream(
+              {
+                runId: state.runId,
+                itemId: item.id,
+                operation: "qa-validation-output",
+                outcome: "observed",
+                metadata: {
+                  validationIndex: entry.index,
+                  stream: entry.stream,
+                },
+              },
+              entry.output,
+              entry.final,
+            ),
+          commit,
+          validationLfsMembersForItem(
+            state,
+            item,
+            args.config.checkout,
+            commit,
+          ),
+          args.store,
+          workspacePackageAdditions(args.objectiveBody),
+          packageManagerUpdate(args.objectiveBody),
+          true,
+          joinReviewArtifactSelectors(
+            plannedReviewArtifacts(
+              state.reviewArtifactSelectors,
+              args.config.reviewArtifacts,
+            ),
+            work.reviewArtifactSelection,
+          ),
+          commandSandboxPolicy(args.config),
+        );
+      },
+      {
+        save,
+        ...(signal && { signal }),
+        ...(args.pause && { pause: args.pause }),
+      },
+    );
+    if (!validation) return;
+    work.validation = validation;
+    if (args.cancelled()) throw cancelled();
+    if (retainPausedWait()) return;
+    await args.phases?.reserve(item.id, "review");
+    if (retainPausedWait()) return;
+    clearWait(state, { item: item.id });
+    const reviewed = await reviewItem({
+      state,
+      item,
+      save,
+      // The run's cancel and pause reach the paid review step (#570).
+      cancelled: args.cancelled,
+      ...(signal && { signal }),
+      ...(args.pause && { pause: args.pause }),
+      review: (retry) => ({
+        ...retry,
+        model: args.model,
+        invocation: {
+          invocationId: randomUUID(),
+          phase: "result-review",
+          ordinal: 0,
+          observe: args.diagnostics?.modelObserver({
+            scopeId: work.attempt!,
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
+          }),
+        },
+        checkout: args.config.checkout,
+        baseSha: state.baseSha,
+        commit,
+        evidence: validation,
+        contentStore: args.store,
+        criteria: resultReviewCriteria(state.graph, item),
+        itemCriteria: item.acceptance.length,
+        sources: planningSources(
+          args.objectiveBody,
+          state.baseSha,
+          args.config.checkout,
+        ),
+        decisions: work.acceptanceDecisions,
+        observations: workItemReviewObservations(state, item, {
+          kind: "read-only-proof",
+        }),
+        evidenceSources: [
+          ...workItemReviewEvidence({
+            state,
+            item,
+            checkout: args.config.checkout,
+            delivery: args.config.delivery.kind,
+          }),
+          {
+            path: "Authenticated named CI checks",
+            content: JSON.stringify(work.qaChecks),
+          },
+        ],
+      }),
+    });
+    if (reviewed.pending) {
+      args.phases?.release(item.id);
+      work.status = "waiting";
+      work.step = "approve-result";
+      work.acceptancePending = reviewed.pending;
+      save();
+      return;
+    }
+    work.validation = reviewed.evidence;
+    if (args.cancelled()) throw cancelled();
+    delete work.acceptancePending;
+    if (candidate.basis === "current-graph-integration")
+      work.integratedSha = commit;
+    work.status = "done";
+    work.completedAt = new Date().toISOString();
+    delete work.step;
+    save();
+    // The slot frees once closure is durable, so dependents start after it.
+    try {
+      await closeWorkItem(
+        state,
+        item.id,
+        args.github,
+        save,
+        false,
+        signal,
+        args.pause,
+      );
+    } finally {
+      args.phases?.release(item.id);
+    }
+  } catch (error) {
+    args.phases?.release(item.id);
+    // Paused: stop quietly; the step's repeat record and wait stay.
+    if (error instanceof StepPaused) return;
+    // Decision, config and cancel leave the item in place (step rule 7):
+    // the step saved its wait, and the caller stops or waits.
+    const kind = faultOf(error).kind;
+    if (kind === "work" || kind === "defect") {
+      if (work.status !== "done") work.status = "failed";
+      work.error = error instanceof Error ? error.message : String(error);
+    }
+    save();
+    throw error;
+  }
+}

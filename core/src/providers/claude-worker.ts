@@ -34,6 +34,7 @@ import type {
   Options,
   Query,
   SDKResultMessage,
+  SDKSystemMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
@@ -58,16 +59,23 @@ import { validationEnvironment } from "../worktree.js";
 import {
   ACTIVE_TOOL_IDLE_MS,
   apiErrorStatus,
-  type ClaudeEffort,
+  baselineOf,
   claudeEnvironment,
+  claudeSessionEnvironment,
+  claudeTurn,
   DEFAULT_MAX_OUTPUT_TOKENS,
   failedResult,
+  modelCounts,
+  ownCost,
   type SessionFacts,
   SYNTHETIC_MODEL,
   serviceLoginEnvironment,
+  sessionOptions,
+  toolResultText,
   usageOf,
+  withModels,
 } from "./claude.js";
-import { CLAUDE_TOOLS } from "./config.js";
+import { CLAUDE_TOOLS, type ClaudeEffort } from "./config.js";
 import {
   detail,
   IdleWatchdog,
@@ -75,10 +83,23 @@ import {
   providerOutcome,
 } from "./planner.js";
 import {
+  ResumeOverflow,
+  type Session,
+  type Turn,
+  turnFields,
+  withoutPrevious,
+} from "./session.js";
+import {
   addTokens,
+  addUsage,
   captureRequest,
   captureResponse,
+  captureToolOutput,
+  describeRequest,
+  firstToken,
   logUsage,
+  NativeTools,
+  providerUsage,
   Tallies,
   tokens,
   usageRecord,
@@ -832,6 +853,43 @@ function toolAllowed(
 }
 
 /**
+ * What the settings grant, before an attempt narrows Validate and the shell
+ * (no commands, a gitlink, no sandbox, root). Write and Validate together
+ * grant the shell: it adds nothing they don't grant together. `read_file`
+ * comes only beside Read, so it grants no file the worker couldn't read.
+ */
+function claudeGrants(
+  config: ClaudeWorkerConfig,
+  worktreeRead: boolean,
+): { shell: boolean; validate: boolean; files: boolean; read: boolean } {
+  const granted = (tool: string) =>
+    config.tools.includes(tool) && config.allowedTools.includes(tool);
+  return {
+    shell: granted("Write") && granted(VALIDATE),
+    validate: granted(VALIDATE),
+    files: granted("Write"),
+    read: worktreeRead && granted("Read"),
+  };
+}
+
+/** The tools a worker on these settings is offered, by name, for the planner. */
+export function claudeWorkerTools(
+  config: ClaudeWorkerConfig,
+  worktreeRead: boolean,
+): string[] {
+  const grants = claudeGrants(config, worktreeRead);
+  return [
+    ...nativeTools(config, grants.shell).filter((tool) =>
+      config.allowedTools.includes(tool),
+    ),
+    ...(grants.files ? ["delete_file", "copy_file"] : []),
+    ...(grants.read ? ["read_file"] : []),
+    ...(grants.validate ? [VALIDATE] : []),
+    ...(grants.shell ? ["run_command (sandboxed, no network)"] : []),
+  ];
+}
+
+/**
  * The SDK built-ins a worker is offered. Glob and Grep walk the worktree on
  * the host, and a shell can link any host path into it, so they are
  * withheld with the shell; its `find` walks the same files in the sandbox.
@@ -900,6 +958,8 @@ const LOGIN_HOLD =
 function failure(
   result: SDKResultMessage,
   facts: SessionFacts,
+  /** The query continued a session: running out of context runs it again fresh (ResumeOverflow). */
+  resumed: boolean,
 ): WorkerResult | undefined {
   const succeeded = result.subtype === "success" && !result.is_error;
   const ended = `Claude worker ended with ${result.subtype}${result.stop_reason ? ` (stop_reason ${result.stop_reason})` : ""}: ${detail(resultError(result) ?? "") || "no detail"}`;
@@ -917,6 +977,7 @@ function failure(
         new PlannerError("hold", `${LOGIN_HOLD} (${ended})`),
       );
     case "too-long":
+      if (resumed) throw new ResumeOverflow();
       return hold(
         `The Work Item's prompt is larger than the worker model's context window; choose a model with a larger window or replan the item smaller, then answer retry (${ended})`,
       );
@@ -929,6 +990,74 @@ function failure(
     case "other":
       return { kind: "retry", reason: ended };
   }
+}
+
+/** A path as the filesystem resolves it, links followed where it exists. */
+function real(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * The session must start as configured: another directory or permission
+ * mode, or a reported effort that differs, holds before any tool runs.
+ * Init echoes the requested model, so the model is checked on the answers
+ * (`servedOther`).
+ */
+function startedOther(
+  message: SDKSystemMessage,
+  config: ClaudeWorkerConfig,
+  worktree: string,
+): WorkerResult | undefined {
+  if (real(message.cwd) !== real(worktree))
+    return hold(
+      `Claude SDK initialized in ${detail(message.cwd)}, not the Work Item's worktree; check the host's Claude installation, then answer retry`,
+    );
+  if (message.permissionMode !== config.permissionMode)
+    return hold(
+      `Claude SDK selected permission mode ${message.permissionMode}, not the configured ${config.permissionMode}; check the operator's Claude settings, then answer retry`,
+    );
+  // The pinned SDK may omit effort or report null: only a value can differ.
+  const effort = (message as { effort?: unknown }).effort;
+  if (effort !== undefined && effort !== null && effort !== config.effort)
+    return substitutionHold(
+      `${message.model} at ${String(effort)} effort`,
+      config,
+    );
+  return undefined;
+}
+
+/** A model id without the `[1m]` window suffix or a `-YYYYMMDD` snapshot date. */
+const modelId = (model: string) =>
+  model.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
+
+/**
+ * The main thread's answer came from another model than the configured
+ * full id. An alias (`opus`, `sonnet`) names no exact model, so it is
+ * never compared.
+ */
+function servedOther(
+  served: string,
+  config: ClaudeWorkerConfig,
+): WorkerResult | undefined {
+  if (!config.model.startsWith("claude-")) return undefined;
+  return modelId(served) === modelId(config.model)
+    ? undefined
+    : substitutionHold(served, config);
+}
+
+/** Copilot's substitution hold, for Claude: fix the model, then `switch`. */
+function substitutionHold(
+  served: string,
+  config: ClaudeWorkerConfig,
+): WorkerResult {
+  return hold(
+    `Claude served ${served}, not the configured ${config.model} at ${config.effort} effort. Set this provider's worker model to one the Claude login can use and restart the service, then answer \`switch NAME\` with this provider's name to run on its new settings, or with another configured provider's name; or cancel.`,
+    ["switch", "cancel"],
+  );
 }
 
 /** Built-in tools whose path argument names the file they write. */
@@ -957,6 +1086,19 @@ export class ClaudeWorker implements Worker {
   }
 
   async run(input: WorkerInput): Promise<WorkerResult> {
+    try {
+      return await this.once(input);
+    } catch (error) {
+      // A continued session ran out of context: once more, fresh.
+      if (!(error instanceof ResumeOverflow)) throw error;
+      return this.once({
+        ...input,
+        conversation: withoutPrevious(input.conversation),
+      });
+    }
+  }
+
+  private async once(input: WorkerInput): Promise<WorkerResult> {
     input.signal.throwIfAborted();
     let sdk: SdkModule;
     let z: Zod;
@@ -981,33 +1123,24 @@ export class ClaudeWorker implements Worker {
       throw error;
     }
     const { config } = this;
-    const granted = (tool: string) =>
-      config.tools.includes(tool) && config.allowedTools.includes(tool);
+    const granted = claudeGrants(config, this.options.worktreeRead === true);
     // Host Git must not enter a repository the commands could write behind
     // a gitlink, so neither Validate nor the shell runs in such a checkout.
     const gitlinks = await worktreeGitlinks(input);
     if (typeof gitlinks !== "boolean") return gitlinks;
-    const validate =
-      granted(VALIDATE) && input.commands.length > 0 && !gitlinks;
-    // Write and Validate together grant the shell: it adds nothing they
-    // don't grant together. Not as root (the sandbox refuses root), and
-    // only where bubblewrap runs.
-    const shell =
-      granted("Write") &&
-      granted(VALIDATE) &&
-      !gitlinks &&
-      process.geteuid?.() !== 0 &&
-      sandboxAvailable().available;
     const attempt = new Attempt(
       input,
       config,
       this.options,
       {
-        shell,
-        validate,
-        files: granted("Write"),
-        // Only beside Read, so it grants no file the worker couldn't read.
-        read: this.options.worktreeRead === true && granted("Read"),
+        ...granted,
+        validate: granted.validate && input.commands.length > 0 && !gitlinks,
+        // Not as root (the sandbox refuses root), and only where bubblewrap runs.
+        shell:
+          granted.shell &&
+          !gitlinks &&
+          process.geteuid?.() !== 0 &&
+          sandboxAvailable().available,
       },
       sdk,
       z,
@@ -1024,8 +1157,8 @@ export class ClaudeWorker implements Worker {
       provider: "claude",
       model: config.model,
       effort: config.effort,
-      shell,
-      validate,
+      shell: attempt.grants.shell,
+      validate: attempt.grants.validate,
       worktreeRead: attempt.grants.read,
     });
     const record = usageRecord({
@@ -1035,10 +1168,37 @@ export class ClaudeWorker implements Worker {
       effort: config.effort,
       item: input.item.id,
     });
-    captureRequest(record, input.prompt);
+    describeRequest(record, {
+      prompt: input.prompt,
+      ...(input.facts ? { facts: input.facts } : {}),
+    });
+    // A repair continues the item's conversation when it can; never with
+    // the operator's own settings, which the transcript doesn't bind.
+    let retained: Retained | undefined;
+    if (!config.settingSources.length && input.conversation)
+      try {
+        const turn = claudeTurn(input.conversation, input.prompt, config.model);
+        if (turn)
+          retained = {
+            turn,
+            env: claudeSessionEnvironment(input.conversation.dir),
+          };
+      } catch (error) {
+        await attempt.close();
+        return providerOutcome(
+          new PlannerError(
+            "hold",
+            `Factory could not set up the Claude worker conversation; fix the host's work directory, then answer retry (${detail(String(error))})`,
+          ),
+        );
+      }
+    if (retained) {
+      turnFields(record, retained.turn);
+      if (retained.turn.resumed) captureRequest(record, retained.turn.prompt);
+    }
     const started = Date.now();
     try {
-      const result = await this.converse(attempt, sdk, login, record);
+      const result = await this.converse(attempt, sdk, login, record, retained);
       record.outcome = result.kind;
       return result;
     } catch (error) {
@@ -1056,6 +1216,7 @@ export class ClaudeWorker implements Worker {
     attempt: Attempt,
     login: Record<string, string>,
     abortController: AbortController,
+    retained: Retained | undefined,
   ): Options {
     const { config } = this;
     const model = sdkModel(config.model);
@@ -1124,6 +1285,7 @@ export class ClaudeWorker implements Worker {
         // A Read over this many tokens fails and tells the worker to use
         // offset/limit or search; whole-file reads otherwise fill its context.
         CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: "8000",
+        ...retained?.env,
       },
       mcpServers: attempt.servers(),
       strictMcpConfig: true,
@@ -1137,7 +1299,7 @@ export class ClaudeWorker implements Worker {
       // Prompts carry untrusted source text; never expand @paths or commands.
       verbatimPrompts: true,
       thinking: { type: "adaptive" },
-      persistSession: false,
+      ...sessionOptions(retained?.turn),
     };
   }
 
@@ -1152,8 +1314,15 @@ export class ClaudeWorker implements Worker {
     sdk: SdkModule,
     login: Record<string, string>,
     record: Record<string, unknown>,
+    retained: Retained | undefined,
   ): Promise<WorkerResult> {
+    const turn = retained?.turn;
+    // Where this query's cumulative cost and counts start (claude.ts
+    // baselineOf); a credential restart moves it.
+    let base = baselineOf(turn);
+    let compacted = false;
     const { input } = attempt;
+    const prompt = turn?.prompt ?? input.prompt;
     // A running Validate or shell command sends no events; its silence is
     // bounded by the item's whole validation deadline, as for Copilot.
     const watchdog = new IdleWatchdog(
@@ -1172,14 +1341,24 @@ export class ClaudeWorker implements Worker {
     let facts: SessionFacts = { initialized: false, modelResponded: false };
     const abort = () => controller.abort(watchdog.signal.reason);
     watchdog.signal.addEventListener("abort", abort, { once: true });
+    // A query continues the item's session when its turn resumes one; its
+    // turns count on from the session's.
+    record.sessionMode = turn?.resumed ? "resumed" : "fresh";
+    record.imageOutputs = 0;
+    const callStarted = Date.now();
+    const send = (content: string) => {
+      record.sessionTurn = (record.sessionTurn as number) + 1;
+      turns.send(content);
+    };
     const start = (prompt: string) => {
       turns = userTurns();
       controller = new AbortController();
       facts = { initialized: false, modelResponded: false };
-      turns.send(prompt);
+      record.sessionTurn = (turn?.number ?? 1) - 1;
+      send(prompt);
       session = sdk.query({
         prompt: turns.messages(),
-        options: this.queryOptions(attempt, login, controller),
+        options: this.queryOptions(attempt, login, controller, retained),
       });
       return session[Symbol.asyncIterator]();
     };
@@ -1193,12 +1372,17 @@ export class ClaudeWorker implements Worker {
     // Tokens likewise: the queries a credential retry ended, and the running one.
     let spentTokens = tokens({ input: 0, output: 0, cached: 0 });
     let queryTokens = spentTokens;
+    // The provider's own usage, summed over queries like the tokens.
+    let spentUsage: Record<string, unknown> | undefined;
+    let queryUsage: Record<string, unknown> | undefined;
     let result: SDKResultMessage | undefined;
     /** Running tool calls' names by id, for their results. */
     const toolNames = new Map<string, string>();
     const calls = new Tallies();
+    const tools = new NativeTools();
+    let response: string | undefined;
     try {
-      let events = start(input.prompt);
+      let events = start(prompt);
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
@@ -1212,11 +1396,39 @@ export class ClaudeWorker implements Worker {
             ? message.retry_delay_ms + (message.no_response?.retry_wait_ms ?? 0)
             : 0,
         );
+        if (message.type === "stream_event") firstToken(record, callStarted);
+        if (
+          message.type === "assistant" &&
+          message.message.model !== SYNTHETIC_MODEL
+        ) {
+          firstToken(record, callStarted);
+          record.reportedModel = message.message.model;
+          if (message.parent_tool_use_id === null) {
+            const other = servedOther(message.message.model, this.config);
+            if (other) return other;
+          }
+          // The main thread's context at this request; the SDK gives no window.
+          const usage = message.message.usage;
+          if (message.parent_tool_use_id === null && usage)
+            input.activity({
+              kind: "context",
+              tokens:
+                usage.input_tokens +
+                (usage.cache_read_input_tokens ?? 0) +
+                (usage.cache_creation_input_tokens ?? 0),
+            });
+          // One response may arrive split over several messages with its id.
+          if (message.message.id !== response) tools.response();
+          response = message.message.id;
+        }
         if (message.type === "assistant" || message.type === "user") {
           const content = message.message.content;
           if (Array.isArray(content))
             for (const block of content)
-              if (block.type === "tool_use") {
+              if (message.type === "assistant" && block.type === "image")
+                record.imageOutputs = (record.imageOutputs as number) + 1;
+              else if (block.type === "tool_use") {
+                tools.call(block.id);
                 watchdog.progress(`tool_use:${block.name}`, {
                   id: block.id,
                   active: true,
@@ -1232,6 +1444,12 @@ export class ClaudeWorker implements Worker {
                 });
                 const tool = toolNames.get(block.tool_use_id);
                 toolNames.delete(block.tool_use_id);
+                tools.result(block.tool_use_id, block.is_error === true);
+                captureToolOutput(
+                  record,
+                  tool ?? "unknown",
+                  toolResultText(block.content),
+                );
                 if (tool)
                   input.activity({ kind: "tool", phase: "finished", tool });
               }
@@ -1251,19 +1469,35 @@ export class ClaudeWorker implements Worker {
           if (message.message.model !== SYNTHETIC_MODEL)
             facts.modelResponded = true;
         }
+        if (
+          message.type === "system" &&
+          message.subtype === "compact_boundary"
+        ) {
+          compacted = true;
+          input.activity({ kind: "compaction" });
+        }
         if (message.type === "system" && message.subtype === "init") {
           facts.initialized = true;
           record.session = message.session_id;
+          record.reportedModel = message.model;
+          const other = startedOther(message, this.config, input.worktree);
+          if (other) return other;
         }
         if (message.type !== "result") continue;
         result = message;
-        if (Number.isFinite(message.total_cost_usd))
-          queryUsd = message.total_cost_usd;
-        queryTokens = tokens({ ...usageOf(message) });
+        // A continued session reports its cost and per-model counts
+        // cumulatively: this turn's are what follows the kept total.
+        queryUsd = ownCost(message, base) ?? queryUsd;
+        queryTokens = tokens({ ...usageOf(message, base.models) });
         record.tokens = addTokens(spentTokens, queryTokens);
         record.costUsd = spentUsd + queryUsd;
         record.turns = message.num_turns;
         record.resultSubtype = message.subtype;
+        queryUsage = providerUsage({
+          usage: message.usage,
+          modelUsage: message.modelUsage,
+        });
+        record.providerUsage = addUsage(spentUsage, queryUsage) ?? null;
         if (message.stop_reason) record.stopReason = message.stop_reason;
         const error = resultError(message);
         if (
@@ -1291,9 +1525,21 @@ export class ClaudeWorker implements Worker {
           result = undefined;
           spentUsd += queryUsd;
           queryUsd = 0;
+          // A resumed turn's restart resumes the same session, whose totals
+          // now include this query; a fresh turn's starts a new session.
+          base = turn?.resumed
+            ? {
+                costUsd: Number.isFinite(message.total_cost_usd)
+                  ? message.total_cost_usd
+                  : base.costUsd,
+                models: modelCounts(message) ?? base.models,
+              }
+            : baselineOf(undefined);
           spentTokens = addTokens(spentTokens, queryTokens);
+          spentUsage = addUsage(spentUsage, queryUsage);
+          queryUsage = undefined;
           queryTokens = tokens({ input: 0, output: 0, cached: 0 });
-          events = start(`${input.prompt}${CREDENTIAL_RESTART}`);
+          events = start(`${prompt}${CREDENTIAL_RESTART}`);
           continue;
         }
         if (
@@ -1303,14 +1549,14 @@ export class ClaudeWorker implements Worker {
           // Unfinished work, not a failed attempt: the same conversation
           // and worktree continue.
           continuations += 1;
-          turns.send(continuation(attempt.grants.validate));
+          send(continuation(attempt.grants.validate));
           continue;
         }
         if (!error && handoffRefusals < MAX_HANDOFF_REFUSALS) {
           const handoff = await watchdog.race(attempt.validator.checkHandoff());
           if (!handoff.passed) {
             handoffRefusals += 1;
-            turns.send(
+            send(
               `Your result is not finished. ${handoff.text}\nThen give your final report.`,
             );
             continue;
@@ -1323,7 +1569,7 @@ export class ClaudeWorker implements Worker {
           (await watchdog.race(attempt.validator.finalTree())) === false
         ) {
           validationRequested = true;
-          turns.send(VALIDATE_REQUEST);
+          send(VALIDATE_REQUEST);
           continue;
         }
         break;
@@ -1339,6 +1585,8 @@ export class ClaudeWorker implements Worker {
         reason: `The Claude worker's turn was lost: ${detail(errorMessage(error))}`,
       };
     } finally {
+      tools.response();
+      record.nativeTools = tools.value;
       watchdog.signal.removeEventListener("abort", abort);
       watchdog.stop();
       turns.end();
@@ -1347,7 +1595,7 @@ export class ClaudeWorker implements Worker {
     }
     if (!result)
       return { kind: "retry", reason: "Claude SDK ended without a result" };
-    const failed = failure(result, facts);
+    const failed = failure(result, facts, Boolean(turn?.resumed));
     if (failed) return failed;
     if (!facts.initialized)
       return {
@@ -1360,12 +1608,35 @@ export class ClaudeWorker implements Worker {
     if (attempt.grants.validate) record.finalTreeValidated = Boolean(tree);
     const finalResponse = result.subtype === "success" ? result.result : "";
     captureResponse(record, finalResponse);
+    const sessionId = record.session as string | undefined;
     return {
       kind: "finished",
       finalResponse,
+      ...withSession(
+        turn &&
+          sessionId &&
+          turn.end(sessionId, {
+            compacted,
+            costUsd: result.total_cost_usd,
+            ...withModels(modelCounts(result)),
+          }),
+      ),
       ...(tree && { validated: { tree, commands: [...input.commands] } }),
     };
   }
+}
+
+/** A retained turn and the environment that keeps its transcript (claude.ts claudeSessionEnvironment). */
+interface Retained {
+  turn: Turn;
+  env: Record<string, string>;
+}
+
+/** The session a turn left, as a WorkerResult field. */
+function withSession(session: Session | "" | undefined): {
+  session?: Session;
+} {
+  return session ? { session } : {};
 }
 
 /** The named operator variables a worker's commands may see; never Git, GitHub or SSH ones. */

@@ -1,0 +1,21 @@
+name: drill-comment
+# Drill helper: posts an issue comment as github-actions[bot], a login that
+# isn't Factory's, for the forged-marker drill (integration tests, operator group).
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        required: true
+      body:
+        required: true
+permissions:
+  issues: write
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ inputs.issue }}
+          BODY: ${{ inputs.body }}
+        run: gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$BODY"

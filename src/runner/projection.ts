@@ -1,0 +1,400 @@
+import { StepFault, decision } from "../fault.js";
+import {
+  assertWorkflowRecipeAdmissionBinding,
+  readPinnedWorkflowRecipe,
+  type WorkflowRecipeAdmission,
+} from "../workflow-recipes.js";
+import { graphProjectionControl } from "../graph-projection-control.js";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import {
+  assertRequiredFinalCommands,
+  assertNoCiOnlyValidation,
+  finalObjectiveCommands,
+  type PlanCandidate,
+  verifyPlanCandidate,
+} from "../compiler.js";
+import {
+  finalValidationCommands,
+  requiredFinalCommands,
+  ciOnlyCommands,
+  type FactoryConfig,
+} from "../config.js";
+import type {
+  ApprovedPlaybookAdmission,
+  ContentStore,
+  ExecutionDriver,
+  GitHubGateway,
+} from "../contracts.js";
+import { assertApprovedPlaybookAdmission } from "../contracts.js";
+import type { DiagnosticEmitter } from "../diagnostics.js";
+import {
+  executionProfileChoices,
+  verifyExecutionProfiles,
+} from "../execution-profiles.js";
+import { preflightLocalExecutables } from "../local-preflight.js";
+import { prerequisitesDigest } from "../native-prerequisite-evidence.js";
+import { retainAcceptedPlanningDecision } from "../planning-decision-context.js";
+import type { FactoryState, PreparationState } from "../state.js";
+import { saveState } from "../state-store.js";
+import { plannedReviewArtifacts } from "../review-artifacts.js";
+import {
+  canHandoff,
+  configuredDiagnosticSecrets,
+  type LocalOwner,
+  type ObjectiveStep,
+} from "./ownership.js";
+
+export async function projectPreparedObjective(args: {
+  config: FactoryConfig;
+  objective: number;
+  issue: { body: string };
+  root: string;
+  path: string;
+  diagnostics: DiagnosticEmitter;
+  driver: ExecutionDriver;
+  contentStore: ContentStore;
+  github: GitHubGateway;
+  owner: LocalOwner;
+  preparation: PreparationState;
+  plan: PlanCandidate;
+  objectiveStep: ObjectiveStep;
+  cancellationRequested: () => boolean;
+  stopIfCancelled: () => void;
+}) {
+  const {
+    config,
+    objective,
+    issue,
+    root,
+    path,
+    diagnostics,
+    driver,
+    github,
+    owner,
+    preparation,
+    plan,
+    objectiveStep,
+    cancellationRequested,
+    stopIfCancelled,
+  } = args;
+  if (!canHandoff(preparation))
+    throw new Error(
+      "Planning must authenticate settlement before GitHub projection",
+    );
+  if (preparation.workflowRecipePin) {
+    try {
+      const retained = await readPinnedWorkflowRecipe(
+        preparation.workflowRecipePin,
+        args.contentStore,
+      );
+      if (JSON.stringify(retained) !== JSON.stringify(plan.workflowRecipe))
+        throw new Error(
+          "Accepted recipe plan differs from its retained definition",
+        );
+    } catch (error) {
+      throw new StepFault(
+        decision(
+          "Restore the exact retained workflow recipe before projection; preserve the original pin and planning settlement",
+        ),
+        { cause: error },
+      );
+    }
+  }
+  const baseSha = preparation.baseSha;
+  preparation.coordinator.phase = "projection";
+  preparation.coordinator.phaseStartedAt = new Date().toISOString();
+  saveState(path, preparation);
+  stopIfCancelled();
+  if (
+    JSON.stringify(plan.executionProfiles) !==
+    JSON.stringify(executionProfileChoices(config))
+  )
+    throw new Error(
+      "Accepted plan execution profile policy differs from installation",
+    );
+  // Required final-validation commands fail here, before any item starts,
+  // rather than at the end of final validation.
+  assertRequiredFinalCommands(
+    requiredFinalCommands(config),
+    issue.body,
+    baseSha,
+    config.checkout,
+    ciOnlyCommands(config),
+  );
+  assertNoCiOnlyValidation(plan.graph, ciOnlyCommands(config));
+  if (
+    JSON.stringify(plan.requiredFinalCommands ?? []) !==
+    JSON.stringify(requiredFinalCommands(config))
+  )
+    throw new Error(
+      "Accepted plan was reviewed with other required final-validation commands than the installation's; plan again",
+    );
+  plannedReviewArtifacts(plan.reviewArtifactSelectors, config.reviewArtifacts);
+  const graph = plan.graph;
+  if (
+    [12, 14, 16, 18, 20].includes(preparation.schemaVersion) &&
+    github.projectionMutationAdmission !== "controller-checkpoint-v1"
+  )
+    throw new Error(
+      "GitHub adapter cannot checkpoint expanded plan projection effects",
+    );
+  verifyExecutionProfiles(graph, executionProfileChoices(config));
+  await diagnostics.span(
+    { runId: preparation.runId, operation: "execution-readiness-preflight" },
+    async () => {
+      await driver.preflight?.(graph);
+      preflightLocalExecutables({
+        checkout: config.checkout,
+        baseSha,
+        graph,
+        finalCommands: plan.finalCommands,
+        objectiveBody: issue.body,
+        privateRoot: root,
+        credentialDirectory: join(root, "empty-gh-config"),
+        secrets: configuredDiagnosticSecrets(config),
+        observe: (entry) =>
+          diagnostics.emit({
+            itemId: entry.itemId,
+            operation: "local-executable-preflight",
+            outcome:
+              entry.status === "missing" || entry.status === "version-mismatch"
+                ? "failed"
+                : "observed",
+            metadata: {
+              origin: entry.origin,
+              source: entry.source,
+              commandIndex: entry.commandIndex,
+              executable: entry.executable,
+              preflightStatus: entry.status,
+              pathContext: entry.pathContext,
+            },
+            detail: entry.detail,
+          }),
+      });
+    },
+  );
+  const waitWhileStopped = async () => {
+    while (
+      preparation!.coordinator.mode !== "running" &&
+      !cancellationRequested()
+    )
+      await owner.waitForWake();
+    stopIfCancelled();
+  };
+  await waitWhileStopped();
+  // Projection finds existing issues by marker before creating any, so a
+  // repeat simply projects again; recorded numbers are passed as known.
+  const projected = await diagnostics.span(
+    {
+      operation: "github-projection",
+      metadata: { itemCount: graph.items.length },
+    },
+    () =>
+      objectiveStep(preparation, "project", (context) =>
+        github.projectGraph({
+          graph,
+          ...([12, 14, 16, 18, 20].includes(preparation.schemaVersion)
+            ? {
+                expansionControl: graphProjectionControl(
+                  preparation,
+                  graph,
+                  () => saveState(path, preparation),
+                ),
+              }
+            : {}),
+          objectiveIssue: objective,
+          knownIssues: preparation!.issueByItemId,
+          author: preparation!.issueAuthor,
+          authored: (login) => {
+            preparation!.issueAuthor = login;
+            saveState(path, preparation!);
+          },
+          beforeCreate: waitWhileStopped,
+          projected: (id, number) => {
+            preparation!.issueByItemId[id] = number;
+            saveState(path, preparation!);
+            context.progress();
+          },
+        }),
+      ),
+  );
+
+  return projected;
+}
+
+export function activateProjectedObjective(args: {
+  config: FactoryConfig;
+  objective: number;
+  issue: { body: string };
+  installationConfigDigest: string;
+  preparation: PreparationState;
+  plan: PlanCandidate;
+  projected: Awaited<ReturnType<GitHubGateway["projectGraph"]>>;
+}): FactoryState {
+  const {
+    config,
+    objective,
+    issue,
+    installationConfigDigest,
+    preparation,
+    plan,
+    projected,
+  } = args;
+  if (!canHandoff(preparation))
+    throw new Error(
+      "Planning must authenticate settlement before execution activation",
+    );
+  const { baseSha, capacity } = preparation;
+  const graph = plan.graph;
+  verifyPlanCandidate(
+    plan,
+    objective,
+    issue.body,
+    baseSha,
+    config.checkout,
+    installationConfigDigest,
+    false,
+    capacity.concurrency,
+  );
+  const approvedPlaybookAdmission: ApprovedPlaybookAdmission | undefined =
+    plan.approvedPlaybookPin === undefined
+      ? undefined
+      : {
+          approvedPlaybookPin: structuredClone(plan.approvedPlaybookPin),
+          configDigest: plan.configDigest,
+          graphDigest: plan.graphDigest,
+          packetDigest: plan.packetDigest,
+          reviewDigest: plan.reviewDigest,
+          sourcePacketDigest: preparation.sourcePacketDigest!,
+        };
+  assertApprovedPlaybookAdmission(
+    preparation.approvedPlaybookPin,
+    approvedPlaybookAdmission,
+    installationConfigDigest,
+    plan.graphDigest,
+  );
+  const workflowRecipeAdmission: WorkflowRecipeAdmission | undefined =
+    plan.workflowRecipe
+      ? {
+          schemaVersion: 1,
+          workflowRecipePin: structuredClone(plan.workflowRecipe.pin),
+          baseSha,
+          configDigest: installationConfigDigest,
+          sourcePacketDigest: preparation.sourcePacketDigest!,
+          graphDigest: plan.graphDigest,
+          packetDigest: plan.packetDigest,
+          reviewDigest: plan.reviewDigest,
+        }
+      : undefined;
+  if (workflowRecipeAdmission)
+    assertWorkflowRecipeAdmissionBinding(workflowRecipeAdmission, {
+      pin: preparation.workflowRecipePin!,
+      baseSha,
+      configDigest: installationConfigDigest,
+      sourcePacketDigest: preparation.sourcePacketDigest!,
+      graphDigest: plan.graphDigest,
+      packetDigest: plan.packetDigest,
+      reviewDigest: plan.reviewDigest,
+    });
+  return {
+    ...(workflowRecipeAdmission
+      ? {
+          workflowRecipePin: structuredClone(preparation.workflowRecipePin!),
+          workflowRecipeAdmission,
+        }
+      : {}),
+    ...(preparation.restoration
+      ? { restoration: structuredClone(preparation.restoration) }
+      : {}),
+    schemaVersion:
+      preparation.schemaVersion === 20
+        ? 19
+        : [18, 20].includes(preparation.schemaVersion)
+          ? 17
+          : preparation.schemaVersion === 16 || plan.schemaVersion === 7
+            ? 15
+            : preparation.schemaVersion === 14 || plan.schemaVersion === 6
+              ? 13
+              : preparation.schemaVersion === 12 || plan.schemaVersion === 5
+                ? 11
+                : preparation.schemaVersion === 10 || plan.schemaVersion === 4
+                  ? 9
+                  : 7,
+    ...(preparation.graphProjectionIntents
+      ? {
+          graphProjectionIntents: structuredClone(
+            preparation.graphProjectionIntents,
+          ),
+        }
+      : {}),
+    ...(preparation.memoryBindings
+      ? { memoryBindings: structuredClone(preparation.memoryBindings) }
+      : {}),
+    ...(preparation.sourcePacketDigest
+      ? { sourcePacketDigest: preparation.sourcePacketDigest }
+      : {}),
+    ...(preparation.agentSessions
+      ? { agentSessions: structuredClone(preparation.agentSessions) }
+      : {}),
+    ...(preparation.agentSessionHistory
+      ? {
+          agentSessionHistory: structuredClone(preparation.agentSessionHistory),
+        }
+      : {}),
+    ...(plan.humanDecision
+      ? { acceptedPlanningDecision: retainAcceptedPlanningDecision(plan) }
+      : {}),
+    ...(preparation.githubProjectStatus
+      ? { githubProjectStatus: preparation.githubProjectStatus }
+      : {}),
+    ...(preparation.githubProgress
+      ? { githubProgress: preparation.githubProgress }
+      : {}),
+    ...(preparation.githubLiveStatus
+      ? { githubLiveStatus: preparation.githubLiveStatus }
+      : {}),
+    publicationContract: "exact-request-v1",
+    approvedPlaybookAdmission,
+    approvedPlaybookPin: preparation.approvedPlaybookPin,
+    ...(preparation.planningRecovery
+      ? { planningRecovery: preparation.planningRecovery }
+      : {}),
+    ...(preparation.charges ? { charges: preparation.charges } : {}),
+    autonomy: preparation.autonomy,
+    capacity,
+    planGraphDigest: plan.graphDigest,
+    ...(plan.reviewArtifactSelectors
+      ? { reviewArtifactSelectors: plan.reviewArtifactSelectors }
+      : {}),
+    ...(plan.prerequisites
+      ? {
+          prerequisitesDigest: prerequisitesDigest(plan.prerequisites),
+          prerequisites: plan.prerequisites,
+        }
+      : {}),
+    repository: config.repository,
+    objective,
+    runId: preparation.runId,
+    coordinator: {
+      ...preparation.coordinator,
+      phase: "active",
+      phaseStartedAt: new Date().toISOString(),
+    },
+    configDigest: installationConfigDigest,
+    baseSha,
+    graph,
+    objectiveCommands: finalValidationCommands(
+      finalObjectiveCommands(issue.body),
+      requiredFinalCommands(config),
+    ),
+    objectiveBodyDigest: createHash("sha256").update(issue.body).digest("hex"),
+    issueByItemId: projected.issueByItemId,
+    ...(preparation.issueAuthor
+      ? { issueAuthor: preparation.issueAuthor }
+      : {}),
+    work: Object.fromEntries(
+      graph.items.map((item) => [item.id, { status: "pending" }]),
+    ),
+  };
+}

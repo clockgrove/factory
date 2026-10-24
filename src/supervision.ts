@@ -1,0 +1,1005 @@
+import { recordedSplitParent, splitSettled } from "./objective-split.js";
+import {
+  credentialFileBindings,
+  optionalProviderCredentials,
+  requiredProviderCredentials,
+  validateCredentialFile,
+} from "./provider-credentials.js";
+import {
+  readIntake,
+  intakeSettled,
+  resumeWatcherAfterUpgrade,
+  type IntakeAuthorization,
+} from "./intake.js";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  type FactoryConfig,
+  factoryConfigDigest,
+  maxActiveObjectives,
+  readConfig,
+  readConfigFile,
+  stateRoot,
+} from "./config.js";
+import { selectProvider } from "./provider-selection.js";
+import { objectiveComplete } from "./completion.js";
+import { canHandoff, SETTLE_DEADLINE_MS } from "./runner/ownership.js";
+import { splitReadyToClose } from "./runner/split.js";
+import {
+  type ControllerReadiness,
+  ControllerReadinessPendingError,
+  requestControl,
+} from "./coordinator-control.js";
+import { isExecutionState, type ContinuationState } from "./state.js";
+import { command, linuxProcessIdentity } from "./process.js";
+import {
+  assertRestoredContinuationReady,
+  assertRestoredInstallationDispatchReady,
+  continuationConfigurationMatches,
+  restoredContinuationOwnershipHold,
+  readContinuation,
+  readControllerOwner,
+  readScannedContinuation,
+  liveControllerOwner,
+  liveObjectiveOwners,
+  installationLockPath,
+} from "./state-store.js";
+import { type LifecycleCode, LifecycleRefusal } from "./lifecycle-refusal.js";
+
+interface ServiceBinding {
+  /** One systemd LoadCredential per credential the configured providers need. */
+  credentials?: { name: string; file: string }[];
+  version: 1;
+  node: string;
+  cli: string;
+  config: string;
+  stateHome: string;
+  environment: Record<string, string>;
+}
+const serviceEnvironment = [
+  "HOME",
+  "PATH",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "CODEX_HOME",
+  "CODEX_SQLITE_HOME",
+  "GH_CONFIG_DIR",
+  // Claude login location and the network settings needed to reach providers.
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "https_proxy",
+  "http_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+] as const;
+const marker = "# Factory local supervision v1 ";
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const serviceName = (repository: string) =>
+  `factory-${createHash("sha256").update(stateRoot(repository)).digest("hex").slice(0, 24)}.service`;
+function unitPath(config: FactoryConfig): string {
+  return join(
+    process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+    "systemd",
+    "user",
+    serviceName(config.repository),
+  );
+}
+function quoted(value: string, expandDollar = true): string {
+  if (/[\n\r\0]/.test(value))
+    throw new Error("Service arguments cannot contain line breaks or NUL");
+  return JSON.stringify(
+    (expandDollar ? value.replaceAll("$", () => "$$") : value).replaceAll(
+      "%",
+      "%%",
+    ),
+  );
+}
+function systemctl(...args: string[]): string {
+  return command("systemctl", ["--user", ...args]);
+}
+function inspect(...args: string[]): string {
+  const result = spawnSync("systemctl", ["--user", ...args], {
+    encoding: "utf8",
+  });
+  if (result.error || result.status === null) return "unavailable";
+  const value = result.stdout?.trim();
+  const states: Record<string, string[]> = {
+    "is-system-running": [
+      "initializing",
+      "starting",
+      "running",
+      "degraded",
+      "maintenance",
+      "stopping",
+      "offline",
+      "unknown",
+    ],
+    "is-active": [
+      "active",
+      "reloading",
+      "inactive",
+      "failed",
+      "activating",
+      "deactivating",
+      "maintenance",
+      "refreshing",
+      "unknown",
+    ],
+    "is-enabled": [
+      "enabled",
+      "enabled-runtime",
+      "linked",
+      "linked-runtime",
+      "alias",
+      "masked",
+      "masked-runtime",
+      "static",
+      "indirect",
+      "disabled",
+      "generated",
+      "transient",
+      "not-found",
+      "bad",
+    ],
+  };
+  return value && (!states[args[0]!] || states[args[0]!]!.includes(value))
+    ? value
+    : "unavailable";
+}
+export function supervisorHost(): {
+  supported: boolean;
+  manager: string;
+  logoutPersistence: string;
+  limitation: string;
+} {
+  const manager =
+    process.platform === "linux" && existsSync("/run/systemd/system")
+      ? inspect("is-system-running")
+      : "unavailable";
+  let logoutPersistence = "unknown";
+  try {
+    logoutPersistence =
+      command("loginctl", [
+        "show-user",
+        String(process.getuid!()),
+        "--property=Linger",
+        "--value",
+      ]) === "yes"
+        ? "enabled"
+        : "not-enabled";
+  } catch {
+    /* report uncertainty */
+  }
+  return {
+    supported: manager === "running" || manager === "degraded",
+    manager,
+    logoutPersistence,
+    limitation:
+      "Runs independently of chat while the user manager is available. Sleep suspends execution; shutdown stops it. Logout persistence is reported, never changed.",
+  };
+}
+function requireHost(): void {
+  if (!supervisorHost().supported)
+    throw new Error(
+      "A running Linux systemd user manager is required for the background service; use `factory run --objective N` in the foreground on this host",
+    );
+}
+function privateFile(path: string): void {
+  const info = statSync(path);
+  if (
+    !info.isFile() ||
+    (info.mode & 0o077) !== 0 ||
+    info.uid !== process.getuid!()
+  )
+    throw new Error(`Expected an owner-private file: ${path}`);
+}
+const bindingKeys = [
+  "credentials",
+  "version",
+  "node",
+  "cli",
+  "config",
+  "stateHome",
+  "environment",
+];
+
+function decodeBinding(text: string): ServiceBinding {
+  if (!text.startsWith(marker))
+    throw new Error("Refusing a service not registered by Factory");
+  const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
+  const path = (value: unknown) =>
+    typeof value === "string" && isAbsolute(value) && !/[\n\r\0]/.test(value);
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Object.keys(value).some((key) => !bindingKeys.includes(key)) ||
+    value.version !== 1 ||
+    ![value.node, value.cli, value.config, value.stateHome].every(path) ||
+    !value.environment ||
+    typeof value.environment !== "object" ||
+    Array.isArray(value.environment) ||
+    !Object.values(value.environment).every(
+      (value) => typeof value === "string",
+    ) ||
+    (value.credentials !== undefined &&
+      (!Array.isArray(value.credentials) ||
+        !value.credentials.length ||
+        !value.credentials.every(
+          (entry: { name?: unknown; file?: unknown }) =>
+            entry &&
+            typeof entry.name === "string" &&
+            /^[A-Z_][A-Z0-9_]*$/.test(entry.name) &&
+            path(entry.file),
+        ) ||
+        new Set(value.credentials.map((entry: { name: string }) => entry.name))
+          .size !== value.credentials.length))
+  )
+    throw new Error("Malformed Factory service binding");
+  return value as ServiceBinding;
+}
+function binding(config: FactoryConfig): ServiceBinding {
+  const value = decodeBinding(readFileSync(unitPath(config), "utf8"));
+  if (
+    value.stateHome !==
+      resolve(
+        process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
+      ) ||
+    readConfig(value.config).repository !== config.repository
+  )
+    throw new Error("Service binding differs from this installation");
+  return value;
+}
+interface BindingDiagnostic {
+  code: string;
+  message: string;
+  action: string;
+}
+interface BindingHealth {
+  status: "usable" | "unusable" | "unregistered";
+  limitation: string;
+  checks?: { node: boolean; cli: boolean; config: boolean };
+  diagnostics: BindingDiagnostic[];
+}
+function inspectBinding(
+  config: FactoryConfig,
+  registered: boolean,
+): {
+  binding?: ServiceBinding;
+  bindingHealth: BindingHealth;
+} {
+  const health: BindingHealth = {
+    status: registered ? "unusable" : "unregistered",
+    limitation:
+      "Local binding checks only; provider readiness, the state version and running ownership are not verified.",
+    diagnostics: [],
+  };
+  const report = (code: string, message: string, action: string) =>
+    health.diagnostics.push({ code, message, action });
+  if (!registered) {
+    report(
+      "unregistered",
+      "No local Factory service unit is registered.",
+      "Run `factory setup --background` to install the service; no work has been started.",
+    );
+    return { bindingHealth: health };
+  }
+  let text: string;
+  try {
+    text = readFileSync(unitPath(config), "utf8");
+  } catch {
+    report(
+      "unreadable-unit",
+      "The local service unit cannot be read.",
+      "Inspect the unit's availability and owner permissions; preserve continuation state.",
+    );
+    return { bindingHealth: health };
+  }
+  let value: ServiceBinding;
+  try {
+    value = decodeBinding(text);
+  } catch {
+    report(
+      "malformed-binding",
+      "The unit does not contain a valid Factory service binding.",
+      "Inspect the retained unit before any lifecycle operation. Do not delete continuation state or start this binding.",
+    );
+    return { bindingHealth: health };
+  }
+  const available = (path: string, mode: number) => {
+    try {
+      accessSync(path, mode);
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  };
+  health.checks = {
+    node: available(value.node, constants.X_OK),
+    cli: available(value.cli, constants.R_OK),
+    config: available(value.config, constants.R_OK),
+  };
+  if (!health.checks.node)
+    report(
+      "unavailable-node",
+      "The bound Node executable is missing or cannot be executed.",
+      "Restore the bound runtime, then use supported supervisor lifecycle commands. Preserve continuation state.",
+    );
+  if (!health.checks.cli)
+    report(
+      "missing-cli",
+      "The bound installed CLI is missing or unreadable.",
+      "Use `factory supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI` to point the service at an installed package. The upgrade drains the owner first and does not check the package; the new package refuses state it cannot read when the service starts.",
+    );
+  if (!health.checks.config)
+    report(
+      "missing-config",
+      "The bound configuration is missing or unreadable.",
+      "Restore the exact authorized configuration before lifecycle operations; do not replace or reset continuation state.",
+    );
+  let matches =
+    value.stateHome ===
+    resolve(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"));
+  if (health.checks.config) {
+    try {
+      const bound = readConfig(value.config);
+      matches =
+        matches &&
+        bound.repository === config.repository &&
+        factoryConfigDigest(bound) === factoryConfigDigest(config);
+    } catch {
+      report(
+        "invalid-config",
+        "The bound configuration cannot be validated.",
+        "Restore the exact authorized configuration before lifecycle operations; no binding has been executed.",
+      );
+    }
+  }
+  if (!matches)
+    report(
+      "installation-mismatch",
+      "The bound state root or configuration differs from this installation.",
+      "Select the original configuration and state environment. Do not overwrite another installation's unit or evidence.",
+    );
+  health.status = health.diagnostics.length ? "unusable" : "usable";
+  // Unit markers are local input, not a trusted source of safe output fields.
+  const safeBinding: ServiceBinding = {
+    version: value.version,
+    node: value.node,
+    cli: value.cli,
+    config: value.config,
+    stateHome: value.stateHome,
+    ...(value.credentials === undefined
+      ? {}
+      : {
+          credentials: value.credentials.map(({ name, file }) => ({
+            name,
+            file,
+          })),
+        }),
+    environment: Object.fromEntries(
+      serviceEnvironment.flatMap((key) =>
+        value.environment[key] === undefined
+          ? []
+          : [[key, value.environment[key]]],
+      ),
+    ),
+  };
+  return {
+    ...(matches ? { binding: safeBinding } : {}),
+    bindingHealth: health,
+  };
+}
+function renderService(value: ServiceBinding): string {
+  const args = [
+    value.node,
+    value.cli,
+    "supervisor",
+    "serve",
+    "--config",
+    value.config,
+    ...(value.credentials ?? []).flatMap(({ name }) => [
+      "--service-credential",
+      name,
+    ]),
+  ];
+  return `${marker}${JSON.stringify(value)}\n[Unit]\nDescription=Factory local Objective coordinator\n[Service]\nType=exec\nUMask=0077\nExecStart=${args.map((value) => quoted(value)).join(" ")}\n${Object.entries(
+    { ...value.environment, XDG_STATE_HOME: value.stateHome },
+  )
+    .map(([key, val]) => `Environment=${quoted(`${key}=${val}`, false)}`)
+    .join(
+      "\n",
+    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nSuccessExitStatus=2\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
+}
+/** A shell word for a command shown to the operator: plain when safe, single-quoted otherwise. */
+function word(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
+}
+/** The exact `factory supervisor ACTION` command an operator can paste. */
+function supervisorCommand(
+  action: string,
+  configPath: string,
+  target: { cli?: string } = {},
+): string {
+  const parts = ["factory", "supervisor", action];
+  if (target.cli) parts.push("--cli", word(target.cli));
+  parts.push("--config", word(resolve(configPath)));
+  return parts.join(" ");
+}
+/** The exact `factory setup --background` command that registers the service again, with a credential file for each required provider. */
+function setupCommand(configPath: string, credentials: string[]): string {
+  return [
+    "factory setup --background --config",
+    word(resolve(configPath)),
+    ...credentials.map(
+      (name) => `--credential-file ${name}=ABSOLUTE_PRIVATE_FILE`,
+    ),
+  ].join(" ");
+}
+/** Runnable continuation must match; settled terminal history is inspection-only. */
+export function checkServiceState(
+  config: FactoryConfig,
+  objective: number,
+  configPath: string,
+): void {
+  assertRestoredInstallationDispatchReady(config);
+  checkObjectiveServiceState(config, objective, configPath);
+}
+
+function checkObjectiveServiceState(
+  config: FactoryConfig,
+  objective: number,
+  configPath: string,
+): void {
+  const state = readContinuation(config.repository, objective);
+  if (
+    state?.restoration &&
+    (state.cancelledAt ||
+      (isExecutionState(state) && objectiveComplete(state)) ||
+      splitSettled(state))
+  )
+    return;
+  if (state && !continuationConfigurationMatches(state, config)) {
+    if (
+      !state.restoration &&
+      (state.cancelledAt ||
+        (isExecutionState(state) && objectiveComplete(state)) ||
+        splitSettled(state)) &&
+      canHandoff(state) &&
+      !restoredContinuationOwnershipHold(state)
+    )
+      return;
+    const setup = setupCommand(configPath, requiredProviderCredentials(config));
+    throw new LifecycleRefusal(
+      state.restoration?.status === "held"
+        ? "restoration_held"
+        : "config_frozen",
+      `Objective ${objective} continuation has a different configuration binding. Preserve its records and restore the original configuration at ${resolve(configPath)}, then run \`${setup}\`; a moved checkout requires supported Git restoration and ownership reconciliation`,
+    );
+  }
+  if (state) assertRestoredContinuationReady(state, config);
+}
+/**
+ * The configuration the service checks and runs a queued Objective with: a started
+ * Objective keeps the provider it froze, so it continues as its foreground run would;
+ * new work and a configuration no provider matches use the service's own.
+ */
+export function queuedObjectiveConfig(
+  config: FactoryConfig,
+  objective: number,
+  configPath: string,
+): FactoryConfig {
+  const state = readContinuation(config.repository, objective);
+  // A child Objective without state of its own runs on its parent's provider.
+  if (!state) {
+    const parent = recordedSplitParent(config.repository, objective);
+    return parent === undefined
+      ? config
+      : queuedObjectiveConfig(config, parent, configPath);
+  }
+  if (continuationConfigurationMatches(state, config)) return config;
+  return selectProvider(readConfigFile(configPath), { objective }).config;
+}
+function hasOwner(config: FactoryConfig): boolean {
+  const owner = readControllerOwner(
+    join(stateRoot(config.repository), "controller.lock"),
+  );
+  const current = owner && linuxProcessIdentity(owner.pid);
+  return Boolean(
+    current && current.startTime === owner?.startTime && current.state !== "Z",
+  );
+}
+function checkIntakeLocalServiceState(
+  config: FactoryConfig,
+  configPath: string,
+  intake: IntakeAuthorization | undefined,
+): IntakeAuthorization {
+  assertRestoredInstallationDispatchReady(config);
+  if (!intake?.watch)
+    throw new Error(
+      `The background service is not set up; run \`${setupCommand(configPath, requiredProviderCredentials(config))}\``,
+    );
+  for (const id of intake.objectives) {
+    // Retired terminal history is never acted on, so a snapshot shape this
+    // version no longer reads cannot stop the service (#1457).
+    const state = readScannedContinuation(config.repository, id);
+    if (state === "history") continue;
+    try {
+      checkObjectiveServiceState(
+        queuedObjectiveConfig(config, id, configPath),
+        id,
+        configPath,
+      );
+    } catch (error) {
+      // Only an Objective the service would dispatch or settle gates its
+      // start; a dequeued or finished one is reported instead (#1650).
+      if (serviceActsOn(config, intake, id, state)) throw error;
+      process.stderr.write(
+        `Factory: Objective ${id} is not dispatched by the service; its readiness is not checked: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+  return intake;
+}
+/** Whether the dispatch loop runs or settles this queued Objective. */
+function serviceActsOn(
+  config: FactoryConfig,
+  intake: IntakeAuthorization,
+  objective: number,
+  state: ContinuationState | undefined,
+): boolean {
+  if (intake.dequeued.includes(objective)) return false;
+  if (
+    state &&
+    (state.cancelledAt ||
+      (isExecutionState(state) && objectiveComplete(state)) ||
+      splitSettled(state))
+  )
+    return splitReadyToClose(config.repository, state);
+  return true;
+}
+/** The owned controller already authenticated this complete current observation. */
+export function checkPreparedIntakeServiceState(
+  config: FactoryConfig,
+  configPath: string,
+  intake: IntakeAuthorization,
+): void {
+  if (!intake.complete)
+    throw new Error(
+      "A complete current Project observation is required before background readiness",
+    );
+  checkIntakeLocalServiceState(config, configPath, intake);
+}
+async function checkIntakeServiceState(
+  config: FactoryConfig,
+  configPath: string,
+): Promise<IntakeAuthorization> {
+  assertRestoredInstallationDispatchReady(config);
+  return checkIntakeLocalServiceState(
+    config,
+    configPath,
+    await readIntake(config),
+  );
+}
+
+/** Ask the service to drain and release the installation. The queue is objective 0. */
+async function handoffService(config: FactoryConfig): Promise<void> {
+  const reply = await requestControl(config.repository, {
+    objective: 0,
+    action: "handoff",
+  });
+  if (!reply.handled) return;
+  // Its runs hand off, each settling within its own deadline.
+  const deadline = Date.now() + SETTLE_DEADLINE_MS + 10_000;
+  while (hasOwner(config)) {
+    if (Date.now() >= deadline)
+      throw new Error(
+        "Drain is not yet quiescent; service and evidence retained. Inspect `factory status` before another stop or upgrade",
+      );
+    await pause(100);
+  }
+}
+/**
+ * Upgrade drain with several Objectives (queue.maxActiveObjectives above 1).
+ * Restart means handoff (#1714): the service stops dispatching and every run
+ * hands off at its safe point, a paused or CI-waiting one included, and
+ * resumes after the restart. A foreground run is asked to hand off through
+ * its control too; it then waits for `factory resume`. Returns the
+ * Objectives still executing a step (each hands off when its step ends),
+ * and the foreground runs handed off.
+ */
+export async function drainForUpgrade(
+  config: FactoryConfig,
+): Promise<{ running: number[]; handedOff: number[] }> {
+  if (maxActiveObjectives(config) <= 1) return { running: [], handedOff: [] };
+  const service = liveControllerOwner(installationLockPath(config.repository));
+  let running: number[] = [];
+  if (service?.intake) {
+    const reply = await requestControl(config.repository, {
+      objective: 0,
+      action: "finish",
+    });
+    running = reply.handled
+      ? ((reply.result as { activeObjectives?: number[] }).activeObjectives ??
+        [])
+      : [];
+  }
+  // Objective locks the service holds are its own runs, counted above.
+  const handedOff: number[] = [];
+  const foreground = liveObjectiveOwners(config.repository).filter(
+    (owner) => owner.pid !== service?.pid,
+  );
+  const asked = await Promise.all(
+    foreground.map(({ objective }) =>
+      requestControl(config.repository, { objective, action: "handoff" })
+        .then(
+          (reply) =>
+            reply.handled &&
+            (reply.result as { executing?: boolean }).executing !== true,
+        )
+        .catch(() => false),
+    ),
+  );
+  const deadline = Date.now() + SETTLE_DEADLINE_MS + 5_000;
+  for (const [index, { objective }] of foreground.entries()) {
+    const live = () =>
+      liveObjectiveOwners(config.repository).some(
+        (owner) => owner.objective === objective,
+      );
+    while (asked[index] && live() && Date.now() < deadline) await pause(100);
+    if (live()) running.push(objective);
+    else if (asked[index]) handedOff.push(objective);
+  }
+  return {
+    running: [...new Set(running)].sort((left, right) => left - right),
+    handedOff,
+  };
+}
+/**
+ * A stopped service that exited 2 waits for an installation-wide decision (an
+ * archive limit, a changed queue authority), not failed. One Objective's
+ * decision never stops it: the live service holds that Objective and keeps
+ * dispatching the others (#1714), and its status names the waiting Objective.
+ */
+function awaitsDecision(name: string): boolean {
+  return (
+    !["active", "activating"].includes(inspect("is-active", name) ?? "") &&
+    inspect("show", name, "--property=ExecMainStatus", "--value") === "2"
+  );
+}
+type ServiceReadiness =
+  | "starting"
+  | "owned-ready"
+  | "needs-decision"
+  | "stopped"
+  | "failed";
+
+function serviceProcess(name: string) {
+  const active = inspect("is-active", name);
+  const pid = Number(inspect("show", name, "--property=MainPID", "--value"));
+  const identity =
+    Number.isSafeInteger(pid) && pid > 0
+      ? linuxProcessIdentity(pid)
+      : undefined;
+  if (
+    ["active", "activating"].includes(active ?? "") &&
+    (!identity || identity.state === "Z")
+  )
+    throw new Error(
+      "Service process identity is unavailable; preserve startup and inspect the unit",
+    );
+  return { active, pid, identity };
+}
+
+async function observeServiceReadiness(
+  config: FactoryConfig,
+  name: string,
+  deadlineAt: number,
+): Promise<ServiceReadiness> {
+  const service = serviceProcess(name);
+  if (!["active", "activating"].includes(service.active ?? "")) {
+    if (awaitsDecision(name)) return "needs-decision";
+    if (service.active === "failed") return "failed";
+    if (service.active === "inactive") return "stopped";
+    throw new Error(
+      "Service startup state is unavailable; inspect the exact unit",
+    );
+  }
+  const owner = liveControllerOwner(installationLockPath(config.repository));
+  if (!owner) return "starting";
+  if (
+    owner.pid !== service.pid ||
+    !owner.intake ||
+    owner.startTime !== service.identity?.startTime
+  )
+    throw new Error(
+      "Service has a different live controller owner; preserve ownership and inspect it",
+    );
+  let reply: Awaited<ReturnType<typeof requestControl>> | undefined;
+  try {
+    reply = await requestControl(
+      config.repository,
+      {
+        objective: 0,
+        action: "readiness",
+      },
+      { deadlineAt },
+    );
+  } catch (error) {
+    if (!(error instanceof ControllerReadinessPendingError)) throw error;
+  }
+  const current = serviceProcess(name);
+  const currentOwner = liveControllerOwner(
+    installationLockPath(config.repository),
+  );
+  if (
+    !["active", "activating"].includes(current.active ?? "") ||
+    current.pid !== service.pid ||
+    current.identity?.startTime !== service.identity?.startTime ||
+    !currentOwner ||
+    currentOwner.token !== owner.token ||
+    currentOwner.pid !== owner.pid ||
+    currentOwner.startTime !== owner.startTime ||
+    !currentOwner.intake
+  )
+    throw new Error(
+      "Service ownership changed during its readiness handshake; inspect retained state",
+    );
+  if (!reply?.handled) return "starting";
+  const ready = reply.result as ControllerReadiness;
+  if (
+    !ready.owner.intake ||
+    ready.owner.pid !== current.pid ||
+    ready.owner.startTime !== current.identity?.startTime
+  )
+    throw new Error("Service readiness does not match its exact MainPID");
+  return "owned-ready";
+}
+
+async function verifyServiceOwner(
+  config: FactoryConfig,
+  name: string,
+): Promise<"owned-ready" | "starting" | "needs-decision"> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const readiness = await observeServiceReadiness(config, name, deadline);
+    if (readiness === "owned-ready" || readiness === "needs-decision")
+      return readiness;
+    if (readiness !== "starting") break;
+    if (Date.now() >= deadline) return "starting";
+    await pause(Math.min(100, Math.max(0, deadline - Date.now())));
+  }
+  const readiness = await observeServiceReadiness(config, name, deadline);
+  if (readiness === "starting" || readiness === "needs-decision")
+    return readiness;
+  throw new Error(
+    `Service has not established its exact coordinator owner. The service log has the reason (a package that refuses the retained state says so there): \`journalctl --user -u ${name} -n 50 --no-pager\`. Inspect \`factory status\` and retained evidence, which are untouched`,
+  );
+}
+function saveUnit(path: string, value: ServiceBinding): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, renderService(value), { flag: "wx", mode: 0o600 });
+  renameSync(temporary, path);
+}
+export async function supervise(
+  action: string,
+  configPath: string,
+  input: {
+    cli?: string;
+    /** `stop` also stops the service from starting again at login. */
+    disable?: boolean;
+    /** `NAME=ABSOLUTE_PRIVATE_FILE` for each required provider credential. */
+    credentialFiles?: string[];
+  } = {},
+): Promise<unknown> {
+  const config = readConfig(configPath);
+  const path = unitPath(config),
+    name = serviceName(config.repository);
+  if (action === "status" || action === "check") {
+    const registered = existsSync(path);
+    const host = supervisorHost();
+    const health = inspectBinding(config, registered);
+    let readiness: ServiceReadiness | "unavailable" | "held" = "unavailable";
+    let readinessDetail: string | undefined;
+    if (
+      registered &&
+      host.supported &&
+      health.bindingHealth.status === "usable"
+    ) {
+      try {
+        readiness = await observeServiceReadiness(
+          config,
+          name,
+          Date.now() + 15_000,
+        );
+      } catch {
+        readiness = "held";
+        readinessDetail =
+          "Exact service ownership could not be verified; inspect the unit and retained owner";
+      }
+    }
+    return {
+      ...host,
+      unit: name,
+      registered,
+      active: inspect("is-active", name),
+      enabled: inspect("is-enabled", name),
+      ...(registered && awaitsDecision(name)
+        ? { waitingFor: "human-decision" }
+        : {}),
+      ...health,
+      readiness,
+      ...(readinessDetail ? { readinessDetail } : {}),
+    };
+  }
+  requireHost();
+  if (action === "install") {
+    const configFile = realpathSync(configPath);
+    privateFile(configFile);
+    const environment: Record<string, string> = {};
+    for (const key of serviceEnvironment)
+      if (process.env[key]) environment[key] = process.env[key]!;
+    const credentials = credentialFileBindings(
+      config,
+      input.credentialFiles ?? [],
+    );
+    const value: ServiceBinding = {
+      ...(credentials.length ? { credentials } : {}),
+      version: 1,
+      node: realpathSync(process.execPath),
+      cli: realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url))),
+      config: configFile,
+      stateHome: resolve(
+        process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
+      ),
+      environment,
+    };
+    await checkIntakeServiceState(config, configPath);
+    if (existsSync(path)) {
+      if (JSON.stringify(binding(config)) !== JSON.stringify(value))
+        throw new Error(
+          `Different service already registered. To replace it, run \`${supervisorCommand("uninstall", configPath)}\`, then \`${setupCommand(configPath, requiredProviderCredentials(config))}\`. \`supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI\` changes only the package`,
+        );
+    } else saveUnit(path, value);
+    systemctl("daemon-reload");
+    // The running manager may use a different XDG root. Let systemd link
+    // this exact private unit into its own search path.
+    systemctl("enable", realpathSync(path));
+    return { registered: name, started: false, ...supervisorHost() };
+  }
+  if (!existsSync(path) && ["uninstall", "stop"].includes(action))
+    return { registered: false };
+  const value = binding(config);
+  if (action === "start") {
+    const required = requiredProviderCredentials(config);
+    const optional = optionalProviderCredentials(config);
+    const bound = (value.credentials ?? []).map(({ name }) => name);
+    if (
+      required.some((name) => !bound.includes(name)) ||
+      bound.some((name) => !required.includes(name) && !optional.includes(name))
+    )
+      throw new Error(
+        `Service credential bindings (${bound.join(", ") || "none"}) differ from the configured providers (${required.join(", ") || "none"}). Run \`${supervisorCommand("uninstall", configPath)}\`, then \`${setupCommand(configPath, required)}\``,
+      );
+    for (const { name, file } of value.credentials ?? [])
+      validateCredentialFile(config, name, file);
+    // The actual lease-owning controller authenticates archive, Project and
+    // retained Objective state once before readiness or model dispatch.
+    assertRestoredInstallationDispatchReady(config);
+    if (hasOwner(config) && inspect("is-active", name) !== "active")
+      throw new Error(
+        "An existing foreground owner must hand off before service start",
+      );
+    systemctl("start", name);
+    const outcome = await verifyServiceOwner(config, name);
+    return {
+      active: inspect("is-active", name),
+      startRequested: true,
+      readiness: outcome,
+      ...(outcome === "needs-decision" ? { waitingFor: "human-decision" } : {}),
+    };
+  }
+  if (["stop", "uninstall", "upgrade"].includes(action)) {
+    let candidate: ServiceBinding | undefined;
+    if (action === "upgrade") {
+      if (!input.cli || !isAbsolute(input.cli))
+        throw new Error("upgrade requires --cli ABSOLUTE_INSTALLED_CLI");
+      candidate = { ...value, cli: realpathSync(input.cli) };
+    }
+    // A failed unit is one that should be running: upgrading it, as when returning from a
+    // package that refused the retained state, starts it again.
+    const wasActive = ["active", "failed"].includes(inspect("is-active", name));
+    let upgradeResumes = {};
+    if (candidate) {
+      const { running, handedOff } = await drainForUpgrade(config);
+      // A foreground run handed off waits for its operator to resume it.
+      const resumes = handedOff.length
+        ? {
+            handedOff,
+            resume: handedOff.map((id) => `factory resume --objective ${id}`),
+          }
+        : {};
+      if (running.length)
+        return {
+          code: "upgrade_draining" satisfies LifecycleCode,
+          artifact: candidate.cli,
+          upgraded: false,
+          draining: running,
+          ...resumes,
+          next: `New dispatch is held while ${running.map((id) => `Objective #${id}`).join(", ")} finish${running.length === 1 ? "es its step" : " their steps"} and hand off; \`factory status\` shows them. Run this upgrade again once none is running; \`factory queue resume\` cancels the drain`,
+        };
+      upgradeResumes = resumes;
+    }
+    const beforeIntake =
+      candidate && wasActive ? await readIntake(config) : undefined;
+    const resumeIdleWatcher =
+      wasActive &&
+      beforeIntake?.watch &&
+      beforeIntake.mode === "running" &&
+      (await intakeSettled(config));
+    await handoffService(config);
+    systemctl("stop", name);
+    if (candidate) {
+      saveUnit(path, candidate);
+      systemctl("daemon-reload");
+      const restart = beforeIntake?.watch
+        ? !!resumeIdleWatcher &&
+          (await resumeWatcherAfterUpgrade(config, beforeIntake))
+        : wasActive;
+      if (restart) {
+        systemctl("start", name);
+        try {
+          const readiness = await verifyServiceOwner(config, name);
+          return {
+            artifact: candidate.cli,
+            restarted: true,
+            readiness,
+            startRequested: true,
+            ...upgradeResumes,
+          };
+        } catch (error) {
+          throw new Error(
+            `${(error as Error).message}. The unit now runs ${candidate.cli}; to return to the previous package, which restarts the service, run \`${supervisorCommand("upgrade", configPath, { cli: value.cli })}\``,
+          );
+        }
+      }
+      return {
+        artifact: candidate.cli,
+        restarted: restart,
+        ...(wasActive && !restart ? { resumeRequired: true } : {}),
+        ...upgradeResumes,
+      };
+    }
+    if (action !== "stop" || input.disable) systemctl("disable", name);
+    // Disable removes external-unit links too. Keep the owned unit discoverable
+    // for explicit start, upgrade and uninstall, without enabling future starts.
+    if (action === "stop" && input.disable)
+      systemctl("link", realpathSync(path));
+    if (action === "uninstall") {
+      rmSync(path);
+      systemctl("daemon-reload");
+    }
+    return { stopped: true, evidenceRetained: true };
+  }
+  throw new Error(`Unknown supervisor action: ${action}`);
+}

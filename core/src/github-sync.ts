@@ -13,9 +13,14 @@ import {
   GitHubError,
   issueGone,
   TransientError,
+} from "./github.js";
+import {
+  callCounts,
+  newTransport,
+  requestEvents,
   type Transport,
   transport,
-} from "./github.js";
+} from "./github-trace.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { type RunLog, redact } from "./log.js";
 import { code, mark, prose } from "./markdown.js";
@@ -356,6 +361,14 @@ export class GitHubSync {
   }
 
   tick(sync: SyncView): void {
+    // Requests outside steps and sync jobs (readiness, the service's own
+    // reads): the service's, tallied like a job's.
+    const ambient = this.github.takeAmbient();
+    if (ambient) {
+      for (const event of requestEvents(AMBIENT, ambient))
+        this.log.write(0, event);
+      this.countTransport(0, AMBIENT, ambient, 0, ambient.failed > 0);
+    }
     if (this.problem()) return;
     // Read once at start: a rename while the service was down pauses
     // before any issue counts as gone (later redirects check it again).
@@ -1646,30 +1659,15 @@ export class GitHubSync {
     backoff = true,
     failed?: (error: unknown) => void,
   ): void {
-    const counted: Transport = {
-      calls: 0,
-      retries: this.transportFailed.has(key) ? 1 : 0,
-      rateLimited: 0,
-      failed: 0,
-      bytes: 0,
-    };
+    const counted = newTransport();
+    if (this.transportFailed.has(key)) counted.retries = 1;
     const started = this.now();
     const ended = (ok: boolean) => {
       if (ok) this.transportFailed.delete(key);
       else this.transportFailed.set(key, issue);
       // Each failed, re-sent or rate-limited request, unthrottled: one bad request stays traceable.
-      for (const request of counted.requests ?? [])
-        this.log.write(issue, {
-          event: "github-request",
-          job: key,
-          ...request,
-        });
-      if (counted.unnoted)
-        this.log.write(issue, {
-          event: "github-request",
-          job: key,
-          unnoted: counted.unnoted,
-        });
+      for (const event of requestEvents(key, counted))
+        this.log.write(issue, event);
       this.countTransport(issue, key, counted, this.now() - started, !ok);
     };
     this.jobs.run(
@@ -1705,15 +1703,11 @@ export class GitHubSync {
     failed: boolean,
   ): void {
     const tally = this.transportTally.get(key) ?? {
+      ...newTransport(),
       issue,
       since: this.now(),
       runs: 0,
       ms: 0,
-      calls: 0,
-      retries: 0,
-      rateLimited: 0,
-      failed: 0,
-      bytes: 0,
     };
     tally.runs += 1;
     tally.ms += ms;
@@ -1722,6 +1716,7 @@ export class GitHubSync {
     tally.rateLimited += run.rateLimited;
     tally.failed += run.failed;
     tally.bytes += run.bytes;
+    tally.requestMs += run.requestMs;
     this.transportTally.set(key, tally);
     if (failed || this.now() - tally.since >= TRANSPORT_EVERY_MS)
       this.writeTransport(key);
@@ -1741,16 +1736,18 @@ export class GitHubSync {
     const tally = this.transportTally.get(key);
     this.transportTally.delete(key);
     if (!tally?.calls) return;
-    const {
-      issue,
-      since: _since,
-      requests: _requests,
-      unnoted: _unnoted,
-      ...counts
-    } = tally;
-    this.log.write(issue, { event: "github-call", job: key, ...counts });
+    this.log.write(tally.issue, {
+      event: "github-call",
+      job: key,
+      runs: tally.runs,
+      ms: tally.ms,
+      ...callCounts(tally),
+    });
   }
 }
+
+/** The `job` of requests outside steps and sync jobs. */
+const AMBIENT = "service";
 
 /** The most often one job key's `github-call` tally is written. */
 const TRANSPORT_EVERY_MS = 60_000;

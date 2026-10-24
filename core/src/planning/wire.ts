@@ -1,3 +1,4 @@
+import type { ProfileWorker } from "../providers/selection.js";
 import { errorMessage } from "../text.js";
 import {
   coverageCriterion,
@@ -39,8 +40,13 @@ type ObjectValue = Record<string, unknown>;
 
 /** Options the facts don't carry. */
 export interface WireOptions {
-  /** Execution profiles the planner chooses from, by id, with what each is for. */
-  profiles?: { id: string; description?: string; selectionHints?: string[] }[];
+  /** Execution profiles the planner chooses from, by id, with what each is for and its worker's model, tools and network. */
+  profiles?: {
+    id: string;
+    description?: string;
+    selectionHints?: string[];
+    worker?: ProfileWorker;
+  }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
 }
@@ -570,6 +576,17 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     },
     coverage: coverageSchema,
     sourceObligations: sourceObligationsSchema,
+    cannotPlan: {
+      description:
+        "null when you return a plan. Otherwise no plan can meet the Objective as written: reason names the concrete obstacle, and change says what the operator must change in the Objective or the repository. Factory asks the operator instead of reviewing a plan, and the rest of this answer is discarded, so keep it minimal.",
+      anyOf: [
+        { type: "null" },
+        strict({
+          reason: { ...text, minLength: 1, maxLength: 4096 },
+          change: { ...text, minLength: 1, maxLength: 4096 },
+        }),
+      ],
+    },
     decisionRequired: {
       description:
         "null when the graph covers every obligation. Otherwise the one obligation the Objective as written does not let you cover (for example, it needs a change the Objective forbids or a human-owned choice) and the concrete question the operator must answer; Factory asks it before using this graph.",
@@ -643,6 +660,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
         },
       ]),
     ),
+    cannotPlan: schema.properties!.cannotPlan!,
     decisionRequired: schema.properties!.decisionRequired!,
   });
   return {
@@ -750,6 +768,17 @@ export function applyRevision(
 ): { answer?: unknown; findings: Finding[]; invalidShape?: true } {
   const wire = contract(facts, options);
   try {
+    // A declaration replaces the plan: edits beside it are discarded unread,
+    // so a broken one can't lose it.
+    const declared =
+      change && typeof change === "object" && !Array.isArray(change)
+        ? (change as ObjectValue).cannotPlan
+        : null;
+    if (declared !== null && declared !== undefined)
+      return {
+        answer: { ...object(current, "current plan"), cannotPlan: declared },
+        findings: [],
+      };
     return { answer: revise(wire, current, change), findings: [] };
   } catch (error) {
     return {
@@ -850,8 +879,17 @@ function revise(wire: Contract, current: unknown, value: unknown): unknown {
   }
   for (const field of wire.replaceable)
     if (change[field] !== null) plan[field] = change[field];
+  plan.cannotPlan = change.cannotPlan;
   plan.decisionRequired = change.decisionRequired;
   return plan;
+}
+
+/** The planner's answer that no plan can meet the Objective as written. */
+export interface CannotPlan {
+  /** The concrete obstacle. */
+  reason: string;
+  /** What the operator must change in the Objective or the repository. */
+  change: string;
 }
 
 /** What decoding a planner answer gives the planning step. */
@@ -859,6 +897,7 @@ export interface DecodedPlan {
   plan?: Draft;
   findings: Finding[];
   question?: string;
+  cannot?: CannotPlan;
   /**
    * The answer does not match the schema's shape: the step retries the call
    * rather than sending the findings back as a revision.
@@ -870,8 +909,9 @@ export interface DecodedPlan {
  * Decode a full planner answer. Returns the draft when every choice is valid
  * and every plan-standard item lint passes; otherwise every problem found, as
  * findings, with invalidShape set when any of them is a broken answer rather
- * than a wrong choice. A decisionRequired answer returns the operator
- * question instead. The graph-level plan lint runs in checkPlan.
+ * than a wrong choice. A cannotPlan answer returns the planner's reason,
+ * and a decisionRequired answer the operator question, instead. The
+ * graph-level plan lint runs in checkPlan.
  */
 export function decodePlan(
   raw: unknown,
@@ -890,10 +930,31 @@ export function decodePlan(
         "coverage",
         "sourceObligations",
         "requiredPreIntegrationChecks",
+        "cannotPlan",
         "decisionRequired",
       ],
       "response",
     );
+    if (answer.cannotPlan !== null) {
+      const declared = object(answer.cannotPlan, "cannot plan");
+      keys(declared, ["reason", "change"], "cannot plan");
+      const { reason, change } = declared;
+      if (
+        typeof reason !== "string" ||
+        typeof change !== "string" ||
+        !reason.trim() ||
+        !change.trim() ||
+        reason.length > 4096 ||
+        change.length > 4096
+      )
+        throw new Shape(
+          "A cannotPlan answer must state its reason and change, each in at most 4096 characters",
+        );
+      return {
+        findings: [],
+        cannot: { reason: reason.trim(), change: change.trim() },
+      };
+    }
     if (answer.decisionRequired !== null) {
       const asked = object(answer.decisionRequired, "decision required");
       keys(asked, ["obligationIndex", "question"], "decision required");
@@ -906,7 +967,7 @@ export function decodePlan(
         !asked.question.trim() ||
         asked.question.length > 4096
       )
-        throw new Refusal(
+        throw new Shape(
           "A required decision must state its question in at most 4096 characters",
         );
       return {

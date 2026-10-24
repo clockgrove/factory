@@ -956,6 +956,19 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if (!revised.answer) return reject(revised.findings);
       const decoded = decodePlan(revised.answer, facts, wire);
       if (decoded.invalidShape) return invalid(decoded.findings);
+      if (decoded.cannot) {
+        context.log({
+          event: "planner-cannot-plan",
+          amendment: proposal.id,
+          ...decoded.cannot,
+        });
+        return reject([
+          {
+            source: "check",
+            message: `The planner says it can't be planned: ${decoded.cannot.reason} What would have to change: ${decoded.cannot.change}`,
+          },
+        ]);
+      }
       if (decoded.question)
         return hold(
           `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; \`refuse\` rejects the amendment.`,
@@ -1215,7 +1228,7 @@ function amendAcceptStep(
       };
       // Crash points `amend:post:*` (and `amend:data:*` for a plan
       // posted in parts); the marker makes a rerun edit, never repeat.
-      await postPlan(deps, state.issue, plan, signal, {
+      await postPlan(deps, state, plan, signal, {
         point: "amend",
         note: `Amended by ${code(proposal.id)} (${prose(proposal.actor)}): ${prose(proposal.discovery.reason)}`,
       });

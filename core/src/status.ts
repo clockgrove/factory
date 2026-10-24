@@ -129,6 +129,8 @@ export interface ServiceView {
   /** The host limiter's slots and memory in use (engine.ts HostLimiter). */
   capacity?: CapacityUse;
   waits: Record<string, { slot: true } | { paths: number }>;
+  /** Objectives the service holds as unreadable, with why: a file it can't read, or one it set aside (service.ts `setAside`). */
+  unreadable: Record<string, string>;
 }
 
 /** The whole status: `--json` prints it as it is, the text renders it. */
@@ -151,7 +153,7 @@ export function readStatus(
   options: { only?: number; live: boolean; secrets: readonly string[] },
 ): StatusView {
   const { only, live } = options;
-  const service = live ? serviceRecord(paths) : { waits: {} };
+  const service = live ? serviceRecord(paths) : { waits: {}, unreadable: {} };
   const queue = loadQueueControl(paths.root);
   const objectives: ObjectiveView[] = [];
   for (const issue of listAllObjectives(paths.objectives)) {
@@ -164,6 +166,10 @@ export function readStatus(
       continue;
     }
     if (!loaded) continue;
+    // Set aside by the running service: it holds as unreadable until reset or cancel.
+    const setAside = service.unreadable[issue];
+    if (loaded.kind === "ok" && setAside !== undefined)
+      loaded = { kind: "unreadable", issue, error: setAside, incident: "" };
     objectives.push(
       statusOf(loaded, {
         issue,
@@ -174,7 +180,7 @@ export function readStatus(
       }),
     );
   }
-  const { waits: _waits, ...record } = service;
+  const { waits: _waits, unreadable: _unreadable, ...record } = service;
   return redactDeep(
     { service: live ? "running" : "stopped", ...record, queue, objectives },
     options.secrets,
@@ -493,7 +499,8 @@ function nextAction(
  * deaths in a row before this start, and when it resumes interrupted
  * steps; shown until the run has lived 10 min past that time), a problem
  * that pauses its GitHub effects, why it admits nothing from the queue,
- * and the Objectives waiting for a slot or on another's paths.
+ * the Objectives waiting for a slot or on another's paths, and those it
+ * holds as unreadable.
  */
 function serviceRecord(paths: Paths): ServiceView {
   try {
@@ -506,6 +513,7 @@ function serviceRecord(paths: Paths): ServiceView {
       intake?: string;
       capacity?: CapacityUse;
       waits?: ServiceView["waits"];
+      unreadable?: ServiceView["unreadable"];
     };
     return {
       ...(record.resumeAt &&
@@ -523,9 +531,10 @@ function serviceRecord(paths: Paths): ServiceView {
       ...(typeof record.intake === "string" ? { intake: record.intake } : {}),
       ...(record.capacity ? { capacity: record.capacity } : {}),
       waits: record.waits ?? {},
+      unreadable: record.unreadable ?? {},
     };
   } catch {
-    return { waits: {} };
+    return { waits: {}, unreadable: {} };
   }
 }
 

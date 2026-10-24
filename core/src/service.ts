@@ -62,6 +62,7 @@ import {
   saveObservation,
   saveQueueControl,
   saveState,
+  stateDigest,
   TERMINAL,
 } from "./state.js";
 import { carried } from "./tracking.js";
@@ -140,6 +141,8 @@ const observeKey = (state: ObjectiveState): string =>
   `${state.issue}@${runOf(state)}`;
 
 const KEEP_REQUEST_IDS = 50;
+/** Ticks in a row in which an Objective's work throws before it is set aside as unreadable. */
+const MAX_OBJECTIVE_ERRORS = 10;
 const RESULT_TTL_MS = 60 * 60 * 1000;
 
 /**
@@ -334,6 +337,61 @@ export async function serve(options: ServeOptions): Promise<number> {
     observed.delete(state.issue);
     if (owed) observeLate(state);
     else observing.forget(key);
+  };
+
+  /**
+   * Rule 1: a throw while the tick works on one Objective (its deadline,
+   * its scheduling, its steps, its sync, its observation, its retirement)
+   * is that Objective's alone. It is logged (`objective-error`), the
+   * Objective is left alone for the rest of the tick, and after
+   * MAX_OBJECTIVE_ERRORS ticks in a row it is set aside as unreadable:
+   * its steps stop, and it holds with `reset` and `cancel` like a state
+   * file that can't be read. A restart reads its file again.
+   */
+  const failing = new Map<number, string>();
+  /** Per Objective: the ticks in a row in which its work threw. */
+  const errors = new Map<number, number>();
+  /** Set-aside runs' stops: what replaces the run waits for them. */
+  const setAsideStops = new Map<number, Promise<void>>();
+  const failed = (issue: number, error: unknown): void => {
+    if (failing.has(issue)) return;
+    failing.set(issue, String(error));
+    log.write(issue, { event: "objective-error", error: String(error) });
+  };
+  /** Run `work` for one Objective, unless its work already threw this tick. */
+  const guarded = (issue: number, work: () => void): void => {
+    if (failing.has(issue)) return;
+    try {
+      work();
+    } catch (error) {
+      failed(issue, error);
+    }
+  };
+  const countErrors = (): void => {
+    for (const issue of [...errors.keys()])
+      if (!failing.has(issue)) errors.delete(issue);
+    for (const [issue, error] of failing) {
+      const count = (errors.get(issue) ?? 0) + 1;
+      errors.set(issue, count);
+      if (count >= MAX_OBJECTIVE_ERRORS) setAside(issue, error);
+    }
+  };
+  const setAside = (issue: number, error: string): void => {
+    errors.delete(issue);
+    const runner = runners.get(issue);
+    if (!runner) return;
+    const problem = `working on it failed ${MAX_OBJECTIVE_ERRORS} ticks in a row: ${error}`;
+    const github = runner.state.modules.github as GitHubModule | undefined;
+    unreadable.set(issue, {
+      error: problem,
+      incident: stateDigest(runner.state),
+      ...(github ? { github: structuredClone(github) } : {}),
+    });
+    setAsideStops.set(issue, runner.stop());
+    runners.delete(issue);
+    observed.delete(issue);
+    options.sync?.forget(issue);
+    log.write(issue, { event: "objective-set-aside", error: problem });
   };
 
   // Only the lock holder writes state, so leftover temporary files are from a crash.
@@ -590,7 +648,10 @@ export async function serve(options: ServeOptions): Promise<number> {
       if (broken.github) state.modules.github = broken.github;
       saveState(paths.objectives, state);
       unreadable.delete(request.issue);
-      open(state);
+      const stopped = setAsideStops.get(request.issue);
+      setAsideStops.delete(request.issue);
+      const cancelled = open(state);
+      if (stopped) cancelled.after(stopped);
       return { message: "ok" };
     }
     if (!runner)
@@ -815,7 +876,8 @@ export async function serve(options: ServeOptions): Promise<number> {
     // ended (each by its deadline at the latest), so no effect of theirs
     // (a merge) lands after the rebuild read GitHub. A cancel meanwhile
     // replaces the reset at once.
-    const stopped = known?.stop();
+    const stopped = known?.stop() ?? setAsideStops.get(issue);
+    setAsideStops.delete(issue);
     runners.delete(issue);
     unreadable.delete(issue);
     options.sync?.forget(issue);
@@ -855,6 +917,7 @@ export async function serve(options: ServeOptions): Promise<number> {
   /** The service-level problem last logged (GitHubSync.problem). */
   let reported: string | undefined;
   const tick = (): void => {
+    failing.clear();
     for (const issue of [...unloaded]) load(issue);
     applyRequests();
     // The repository moved: every GitHub effect pauses. No step runs (no
@@ -870,115 +933,56 @@ export async function serve(options: ServeOptions): Promise<number> {
       heartbeat();
       return;
     }
-    // Running steps keep their slot; then started Objectives; then queue order.
-    const ordered = [...runners.values()].sort(
-      (a, b) =>
-        Number(b.busy) - Number(a.busy) ||
-        Number(started(b.state)) - Number(started(a.state)) ||
-        queueOrder(a) - queueOrder(b) ||
-        a.state.issue - b.state.issue,
-    );
+    // Running steps keep their slot; then started Objectives; then queue
+    // order. One whose place can't be read sits this tick out.
+    const ordered = [...runners.values()]
+      .flatMap((runner) => {
+        let key: [number, number, number] | undefined;
+        guarded(runner.state.issue, () => {
+          key = [
+            Number(runner.busy),
+            Number(started(runner.state)),
+            queueOrder(runner),
+          ];
+        });
+        return key ? [{ runner, key }] : [];
+      })
+      .sort(
+        (a, b) =>
+          b.key[0] - a.key[0] ||
+          b.key[1] - a.key[1] ||
+          a.key[2] - b.key[2] ||
+          a.runner.state.issue - b.runner.state.issue,
+      )
+      .map(({ runner }) => runner);
     let slots = maxActive;
     waitingForSlot.clear();
     waitingOnPaths.clear();
-    for (const runner of ordered) {
-      // The deadline is absolute: checked for every Objective, whatever
-      // it waits on, before what it may run is decided.
-      try {
-        runner.expire();
-      } catch (error) {
-        log.write(runner.state.issue, {
-          event: "tick-failed",
-          error: String(error),
-        });
-      }
-      const { state } = runner;
-      // Dequeued while its check or a re-run's cleanup ran: it goes once
-      // that ends and its status comment shows the withdrawal, and nothing
-      // past them starts. A cleanup the service's death interrupted resumes
-      // first; one that holds or errors is never asked about: the run goes
-      // at once.
-      if (state.withdrawing && !TERMINAL.includes(state.status)) {
-        if (!ending(runner)) {
-          try {
-            if (options.sync?.withdrawShown(state) ?? true) withdrawNow(runner);
-          } catch (error) {
-            log.write(state.issue, {
-              event: "withdraw-failed",
-              error: String(error),
-            });
-          }
-          continue;
-        }
-        if (runner.busy) continue;
-      }
-      let run = false;
-      const allow = allowed(runner, queue);
-      if (TERMINAL.includes(state.status)) run = runner.hasWork;
-      // Paused (the queue or the Objective), or drained with nothing left
-      // to start: no slot; a step the service's death interrupted resumes.
-      else if (
-        !runner.busy &&
-        !workflow.steps(state).some((step) => allow(step.key))
-      )
-        run = Object.keys(state.attempts).length > 0;
-      // The check (and a new run's cleanup, and the wait for predecessors
-      // before it) runs when the Objective is first seen, slot or not
-      // (rule 7), within the host's `github` cap; planning and building
-      // need a slot. So an Objective waiting on its predecessors takes none.
-      else if (!state.done.check) run = true;
-      else if (runner.busy) {
-        // Running steps keep their slot, even while another step's question is open.
-        slots -= 1;
-        run = true;
-      } else if (runner.held)
-        // Questions that stop every step it could start take no slot; a
-        // step the service's death interrupted resumes.
-        run = Object.keys(state.attempts).length > 0;
-      // A wait on a human gate (an approval, a required review) has no
-      // deadline, so it takes no slot: it polls, and its paths stay owned.
-      else if (gated(runner, workflow)) run = true;
-      // Waiting on another Objective's paths takes no slot either, so a hold
-      // that owns common paths can't stall the queue (rule 1).
-      else {
-        const owner = pathOwner(runner, ordered);
-        if (owner !== undefined) waitingOnPaths.set(state.issue, owner);
-        else if (slots > 0) {
-          slots -= 1;
-          run = true;
-        } else waitingForSlot.add(state.issue);
-      }
-      if (!run) continue;
-      try {
-        runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
-      } catch (error) {
-        // A failed save: that Objective's state stays as on disk and is tried again next tick.
-        log.write(state.issue, {
-          event: "tick-failed",
-          error: String(error),
-        });
-      }
-    }
+    for (const runner of ordered)
+      guarded(runner.state.issue, () => {
+        slots = schedule(runner, ordered, slots);
+      });
     const observer = options.observer;
-    for (const runner of observer ? runners.values() : []) {
-      const { state } = runner;
-      const mark = observeMark(runner);
-      if (observed.get(state.issue) === mark) continue;
-      // The mark is kept only once the observation succeeded, and only
-      // while this run is the issue's (a released one goes on late).
-      const end = runner.settled;
-      observing.run(
-        state.issue,
-        observeKey(state),
-        (signal) => observer!.observe(structuredClone(state), end, signal),
-        {
-          done: () => {
-            if (runners.get(state.issue) === runner)
-              observed.set(state.issue, mark);
+    for (const runner of observer ? runners.values() : [])
+      guarded(runner.state.issue, () => {
+        const { state } = runner;
+        const mark = observeMark(runner);
+        if (observed.get(state.issue) === mark) return;
+        // The mark is kept only once the observation succeeded, and only
+        // while this run is the issue's (a released one goes on late).
+        const end = runner.settled;
+        observing.run(
+          state.issue,
+          observeKey(state),
+          (signal) => observer!.observe(structuredClone(state), end, signal),
+          {
+            done: () => {
+              if (runners.get(state.issue) === runner)
+                observed.set(state.issue, mark);
+            },
           },
-        },
-      );
-    }
+        );
+      });
     for (const [key, entry] of observer ? late : [])
       observing.run(
         entry.state.issue,
@@ -1089,6 +1093,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         return "withdrawn";
       },
       result: (id: string) => readResult(paths.requests, id),
+      guard: guarded,
     });
     // A finished Objective leaves memory, and its file objectives/, once
     // its cleanup and its final sync are done, and no observation of it is
@@ -1096,14 +1101,83 @@ export async function serve(options: ServeOptions): Promise<number> {
     // a re-queue reads it again from finished/.
     for (const runner of [...runners.values()]) {
       const issue = runner.state.issue;
-      if (
-        runner.settled &&
-        (options.sync?.idle(issue) ?? true) &&
-        !observing.active(observeKey(runner.state))
-      )
-        retire(issue);
+      guarded(issue, () => {
+        if (
+          runner.settled &&
+          (options.sync?.idle(issue) ?? true) &&
+          !observing.active(observeKey(runner.state))
+        )
+          retire(issue);
+      });
     }
+    countErrors();
     heartbeat();
+  };
+
+  /**
+   * What one Objective may run this tick, and its start; returns the slots
+   * left after it. Its guard (`guarded`) makes a throw here its own.
+   */
+  const schedule = (
+    runner: ObjectiveRunner,
+    ordered: readonly ObjectiveRunner[],
+    free: number,
+  ): number => {
+    let slots = free;
+    // The deadline is absolute: checked for every Objective, whatever
+    // it waits on, before what it may run is decided.
+    runner.expire();
+    const { state } = runner;
+    // Dequeued while its check or a re-run's cleanup ran: it goes once
+    // that ends and its status comment shows the withdrawal, and nothing
+    // past them starts. A cleanup the service's death interrupted resumes
+    // first; one that holds or errors is never asked about: the run goes
+    // at once.
+    if (state.withdrawing && !TERMINAL.includes(state.status)) {
+      if (!ending(runner)) {
+        if (options.sync?.withdrawShown(state) ?? true) withdrawNow(runner);
+        return slots;
+      }
+      if (runner.busy) return slots;
+    }
+    let run = false;
+    const allow = allowed(runner, queue);
+    if (TERMINAL.includes(state.status)) run = runner.hasWork;
+    // Paused (the queue or the Objective), or drained with nothing left
+    // to start: no slot; a step the service's death interrupted resumes.
+    else if (
+      !runner.busy &&
+      !workflow.steps(state).some((step) => allow(step.key))
+    )
+      run = Object.keys(state.attempts).length > 0;
+    // The check (and a new run's cleanup, and the wait for predecessors
+    // before it) runs when the Objective is first seen, slot or not
+    // (rule 7), within the host's `github` cap; planning and building
+    // need a slot. So an Objective waiting on its predecessors takes none.
+    else if (!state.done.check) run = true;
+    else if (runner.busy) {
+      // Running steps keep their slot, even while another step's question is open.
+      slots -= 1;
+      run = true;
+    } else if (runner.held)
+      // Questions that stop every step it could start take no slot; a
+      // step the service's death interrupted resumes.
+      run = Object.keys(state.attempts).length > 0;
+    // A wait on a human gate (an approval, a required review) has no
+    // deadline, so it takes no slot: it polls, and its paths stay owned.
+    else if (gated(runner, workflow)) run = true;
+    // Waiting on another Objective's paths takes no slot either, so a hold
+    // that owns common paths can't stall the queue (rule 1).
+    else {
+      const owner = pathOwner(runner, ordered);
+      if (owner !== undefined) waitingOnPaths.set(state.issue, owner);
+      else if (slots > 0) {
+        slots -= 1;
+        run = true;
+      } else waitingForSlot.add(state.issue);
+    }
+    if (run) runner.tick(TERMINAL.includes(state.status) ? undefined : allow);
+    return slots;
   };
 
   let stopping = false;
@@ -1201,14 +1275,20 @@ function pathOwner(
   const at = acceptedAt(runner.state);
   return all.find((other) => {
     if (other === runner) return false;
-    if (TERMINAL.includes(other.state.status) || built(other.state))
+    // Another Objective whose plan can't be read is skipped, never this
+    // one's error: its own guard sets it aside (serve `guarded`).
+    try {
+      if (TERMINAL.includes(other.state.status) || built(other.state))
+        return false;
+      const theirs = ownedPaths(other.state);
+      if (!theirs.length) return false;
+      const when = acceptedAt(other.state);
+      if (when > at || (when === at && other.state.issue > runner.state.issue))
+        return false;
+      return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
+    } catch {
       return false;
-    const theirs = ownedPaths(other.state);
-    if (!theirs.length) return false;
-    const when = acceptedAt(other.state);
-    if (when > at || (when === at && other.state.issue > runner.state.issue))
-      return false;
-    return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
+    }
   })?.state.issue;
 }
 

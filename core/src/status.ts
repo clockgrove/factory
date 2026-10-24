@@ -129,6 +129,8 @@ export interface ServiceView {
   /** The host limiter's slots and memory in use (engine.ts HostLimiter). */
   capacity?: CapacityUse;
   waits: Record<string, { slot: true } | { paths: number }>;
+  /** Objectives the service set aside as unreadable, with why (service.ts `setAside`). */
+  setAside: Record<string, string>;
 }
 
 /** The whole status: `--json` prints it as it is, the text renders it. */
@@ -151,7 +153,7 @@ export function readStatus(
   options: { only?: number; live: boolean; secrets: readonly string[] },
 ): StatusView {
   const { only, live } = options;
-  const service = live ? serviceRecord(paths) : { waits: {} };
+  const service = live ? serviceRecord(paths) : { waits: {}, setAside: {} };
   const queue = loadQueueControl(paths.root);
   const objectives: ObjectiveView[] = [];
   for (const issue of listAllObjectives(paths.objectives)) {
@@ -164,9 +166,14 @@ export function readStatus(
       continue;
     }
     if (!loaded) continue;
+    // Set aside by the running service: it holds as unreadable until retry, reset or cancel.
+    const setAside = service.setAside[issue];
+    if (loaded.kind === "ok" && setAside !== undefined)
+      loaded = { kind: "unreadable", issue, error: setAside, incident: "" };
     objectives.push(
       statusOf(loaded, {
         issue,
+        setAside: setAside !== undefined,
         live,
         queue,
         waitsOn: service.waits[issue] ?? null,
@@ -174,7 +181,7 @@ export function readStatus(
       }),
     );
   }
-  const { waits: _waits, ...record } = service;
+  const { waits: _waits, setAside: _setAside, ...record } = service;
   return redactDeep(
     { service: live ? "running" : "stopped", ...record, queue, objectives },
     options.secrets,
@@ -227,6 +234,8 @@ export function statusOf(
     queue: QueueControl;
     waitsOn: ObjectiveView["waitsOn"];
     lastEvent: LogEvent | null;
+    /** Set aside by the running service: `retry` reads its file again. */
+    setAside?: boolean;
   },
 ): ObjectiveView {
   const { issue, lastEvent } = context;
@@ -242,8 +251,19 @@ export function statusOf(
           step: "state",
           question: `Factory can't read this Objective's state (${loaded.error}).`,
           options: question("", [
+            ...(context.setAside
+              ? [
+                  {
+                    answer: "retry",
+                    family: "retry" as const,
+                    consequence:
+                      "Reads its state again and runs on, once its stopped steps have ended.",
+                  },
+                ]
+              : []),
             {
               answer: RESET,
+              recommended: true,
               family: "reset",
               consequence:
                 "Rebuilds the state from the plan comment and PRs on GitHub.",
@@ -262,8 +282,9 @@ export function statusOf(
       decisions: [],
       nextAction: {
         command: `factory reset ${issue}`,
-        reason:
-          "Its state can't be read: reset rebuilds it from GitHub (or cancel).",
+        reason: context.setAside
+          ? "The service set it aside: reset rebuilds it from GitHub (or retry, or cancel)."
+          : "Its state can't be read: reset rebuilds it from GitHub (or cancel).",
       },
       lastEvent,
       error: loaded.error,
@@ -493,7 +514,8 @@ function nextAction(
  * deaths in a row before this start, and when it resumes interrupted
  * steps; shown until the run has lived 10 min past that time), a problem
  * that pauses its GitHub effects, why it admits nothing from the queue,
- * and the Objectives waiting for a slot or on another's paths.
+ * the Objectives waiting for a slot or on another's paths, and those it
+ * set aside as unreadable.
  */
 function serviceRecord(paths: Paths): ServiceView {
   try {
@@ -506,6 +528,7 @@ function serviceRecord(paths: Paths): ServiceView {
       intake?: string;
       capacity?: CapacityUse;
       waits?: ServiceView["waits"];
+      setAside?: ServiceView["setAside"];
     };
     return {
       ...(record.resumeAt &&
@@ -523,9 +546,10 @@ function serviceRecord(paths: Paths): ServiceView {
       ...(typeof record.intake === "string" ? { intake: record.intake } : {}),
       ...(record.capacity ? { capacity: record.capacity } : {}),
       waits: record.waits ?? {},
+      setAside: record.setAside ?? {},
     };
   } catch {
-    return { waits: {} };
+    return { waits: {}, setAside: {} };
   }
 }
 

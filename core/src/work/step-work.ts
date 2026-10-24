@@ -372,6 +372,7 @@ export async function workStep(
         log: context.log,
         activity: activity.report,
         output: activity.output,
+        runFile: context.runFile,
         ...(spent ? { spend: spent } : {}),
         ...(context.answer ? { answer: context.answer } : {}),
       })

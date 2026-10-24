@@ -154,6 +154,7 @@ export async function finalValidation(
     commandTimeoutMs: commandTimeoutMs(deps),
     signal,
     log: context.log,
+    runFile: context.runFile,
   });
   if (result.kind === "failed") {
     const offer = retireOffer(

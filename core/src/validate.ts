@@ -27,6 +27,7 @@ import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal } from "./git.js";
+import type { RunFile } from "./log.js";
 import {
   hydrateTree,
   type LfsFile,
@@ -151,6 +152,12 @@ export interface ValidateInput {
   media?: readonly SelectedMember[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+  /**
+   * The attempt's private files (engine.ts StepContext.runFile): each
+   * command's whole output streams to one, kept only when the command
+   * failed, and its `validation-result` names it by `output`.
+   */
+  runFile(kind: string): RunFile;
 }
 
 export interface CommandResult {
@@ -370,6 +377,8 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       const started = Date.now();
       input.log({ event: "validation-command", index, command, preparing });
       const limit = capture ? outputLimit(selectors, command) : undefined;
+      // The whole output, as it arrives: what the run keeps of a failure.
+      const whole = input.runFile(`validation-${index}`);
       const run = await runSandboxed(command, {
         cwd: worktree,
         home: install ? await made("factory-install-home-") : home,
@@ -385,9 +394,12 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         network: online,
         readOnlyFiles: linked.map((file) => file.path),
         ...(limit ? { outputLimit: limit } : {}),
+        onOutput: (_stream, text) => whole.append(text),
         signal: input.signal,
         timeoutMs: input.commandTimeoutMs,
       });
+      whole.close();
+      if (run.kind === "fault") whole.remove();
       if (run.kind === "fault")
         return objectiveWide(
           hold(
@@ -400,6 +412,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       // to the next command.
       const moved = movedLinks(worktree, linked);
       if (moved.length) {
+        whole.remove();
         const detail = `Validation command modified the result tree: Git LFS files moved or replaced: ${moved
           .slice(0, 20)
           .join(
@@ -423,6 +436,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           ? `the command ran longer than ${Math.round(input.commandTimeoutMs / 1000)} s and was stopped`
           : undefined);
       const passed = run.exitCode === 0 && !overflow;
+      if (passed) whole.remove();
       input.log({
         event: "validation-result",
         index,
@@ -430,8 +444,16 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         passed,
         exitCode: run.exitCode,
         durationMs,
-        // A failed command keeps what its repair sees: its head and tail.
+        // A failed command keeps what its repair sees: its head and tail,
+        // and the whole output in its attempt file.
         tail: passed ? output.slice(-PASSED_OUTPUT_TAIL) : failedOutput(output),
+        ...(passed
+          ? {}
+          : {
+              output: whole.file,
+              outputBytes: whole.written,
+              ...(whole.dropped ? { outputDropped: whole.dropped } : {}),
+            }),
       });
       if (passed) {
         results.push({

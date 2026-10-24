@@ -103,7 +103,6 @@ export class RunLog {
   private readonly files = new Map<number, FileHealth>();
   /** Attempt files given out this run, oldest first, and their bytes on disk. */
   private readonly attempts: RunFile[] = [];
-  private readonly attemptNames = new Set<string>();
 
   constructor(
     private readonly dir: string,
@@ -136,15 +135,15 @@ export class RunLog {
    */
   runFile(issue: number, name: string): RunFile {
     const clean = name.replace(/[^\w.-]/g, "_");
+    const at = (unique: string) => `${attemptDir(issue, this.runId)}/${unique}`;
+    // Taken: a file of this run still listed, or one already on disk.
+    const taken = (unique: string) =>
+      this.attempts.some((file) => file.file === at(unique)) ||
+      existsSync(join(this.dir, `${at(unique)}.0`));
     let unique = clean;
-    for (let n = 2; this.attemptNames.has(`${issue}/${unique}`); n++)
-      unique = `${clean}-${n}`;
-    this.attemptNames.add(`${issue}/${unique}`);
-    const file = new RunFile(
-      this.dir,
-      `${attemptDir(issue, this.runId)}/${unique}`,
-      this.secrets,
-      () => this.budget(),
+    for (let n = 2; taken(unique); n++) unique = `${clean}-${n}`;
+    const file = new RunFile(this.dir, at(unique), this.secrets, () =>
+      this.budget(),
     );
     this.attempts.push(file);
     return file;
@@ -152,6 +151,11 @@ export class RunLog {
 
   /** Over the run's attempt-file budget: remove the oldest closed files until within it. */
   private budget(): void {
+    // Closed files with nothing left on disk (a passing command's) go from the list.
+    for (let i = this.attempts.length - 1; i >= 0; i--) {
+      const file = this.attempts[i]!;
+      if (file.closed && file.onDisk === 0) this.attempts.splice(i, 1);
+    }
     let total = this.attempts.reduce((sum, file) => sum + file.onDisk, 0);
     while (total > ATTEMPT_FILES_PER_RUN) {
       const oldest = this.attempts.findIndex((file) => file.closed);
@@ -337,7 +341,7 @@ export class RunFile {
   record(record: Record<string, unknown>): void {
     let line: string;
     try {
-      line = `${JSON.stringify({ at: new Date().toISOString(), ...(cutStrings(record) as object) })}\n`;
+      line = `${JSON.stringify({ at: new Date().toISOString(), ...(cutStrings(record, this.secrets) as object) })}\n`;
     } catch {
       this.failed += 1;
       return;
@@ -356,9 +360,18 @@ export class RunFile {
 
   /** Remove every segment: the run's budget dropped this file. */
   remove(): void {
-    for (const segment of this.kept.keys())
-      rmSync(this.path(segment), { force: true });
+    this.closed = true;
+    for (const segment of this.kept.keys()) this.unlink(segment);
     this.kept.clear();
+  }
+
+  /** Remove one segment; a failure is counted, never thrown: the file only observes. */
+  private unlink(segment: number): void {
+    try {
+      rmSync(this.path(segment), { force: true });
+    } catch {
+      this.failed += 1;
+    }
   }
 
   private path(segment: number): string {
@@ -376,7 +389,7 @@ export class RunFile {
       const old = this.segment - 2;
       if (old >= 1 && this.kept.has(old)) {
         this.dropped += this.kept.get(old)!;
-        rmSync(this.path(old), { force: true });
+        this.unlink(old);
         this.kept.delete(old);
       }
     }
@@ -408,16 +421,23 @@ export class RunFile {
 /** The longest string an attempt-file record keeps: its head and tail, the middle cut. */
 const RECORD_STRING = 64 * 1024;
 
-/** `value` with every string over RECORD_STRING cut in the middle. */
-function cutStrings(value: unknown): unknown {
-  if (typeof value === "string")
-    return value.length > RECORD_STRING
-      ? `${value.slice(0, RECORD_STRING / 2)}\n[… ${value.length - RECORD_STRING} characters cut …]\n${value.slice(-RECORD_STRING / 2)}`
-      : value;
-  if (Array.isArray(value)) return value.map(cutStrings);
+/** `value` with every string redacted, then cut in the middle when over RECORD_STRING. */
+function cutStrings(value: unknown, secrets: readonly string[]): unknown {
+  if (typeof value === "string") {
+    // Redacted before the cut and the JSON escaping, so neither hides a secret.
+    const shown = redact(value, secrets);
+    return shown.length > RECORD_STRING
+      ? `${shown.slice(0, RECORD_STRING / 2)}\n[… ${shown.length - RECORD_STRING} characters cut …]\n${shown.slice(-RECORD_STRING / 2)}`
+      : shown;
+  }
+  if (Array.isArray(value))
+    return value.map((entry) => cutStrings(entry, secrets));
   if (value && typeof value === "object")
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, cutStrings(entry)]),
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        cutStrings(entry, secrets),
+      ]),
     );
   return value;
 }

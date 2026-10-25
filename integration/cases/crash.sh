@@ -30,6 +30,11 @@ c_budget() { local s=$(( $1 - $(now) )); [ "$s" -gt 0 ] || return 1; [ "$s" -le 
 m_ready() { [ -n "$(timeout 30 git ls-remote "https://github.com/$M_REPO.git" refs/factory/holder 2>/dev/null)" ] && awk '$3=="M"{f=1} END{exit !f}' "$RUN_DIR/issues"; }
 c_project_refused() {
   local CASE=holder t0; t0=$(now)
+  # M holds its repository and has a card on the Project only once it has
+  # work: without a main-lane case (`--only crash`) nothing queues there.
+  if ! awk '$3=="M"{f=1} END{exit !f}' "$RUN_DIR/issues"; then
+    inst M; new_objective happy "M's Objective for the Project refusal" ID="$(uid)" >/dev/null || return 1
+  fi
   wait_for 300 m_ready || { record holder.project-refused FAIL "repository M had no holder record or queued Objective to refuse against" "$t0"; return 0; }
   sleep 15   # the queued card reaches the Project's open items
   inst X; serve_up || return 1

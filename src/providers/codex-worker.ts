@@ -25,6 +25,7 @@ import { redact } from "../log.js";
 import {
   gitMetadata,
   LaunchedGroup,
+  namespaceRefused,
   packageCacheEnvironment,
   ROOT_REFUSAL,
   readOnlyMounts,
@@ -631,6 +632,7 @@ export class CodexWorker implements Worker {
             (record.thread as string | undefined) ?? turn.resumed?.id,
             baseline?.size,
           ),
+          namespaceRefused(home.pidFile),
         ),
       );
     // The SDK hides the child: the group its launcher records is killed on

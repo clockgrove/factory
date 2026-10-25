@@ -24,8 +24,8 @@ import type {
 import { within } from "../paths.js";
 import {
   LaunchedGroup,
-  NAMESPACE_REFUSED,
   namespacedLauncher,
+  namespaceRefused,
 } from "../sandbox.js";
 import { errorMessage } from "../text.js";
 import { CodexStderr, withStderr } from "./codex-stderr.js";
@@ -203,12 +203,6 @@ export function codexLauncher(
 export function codexStderr(root: string): string {
   return join(root, "codex-stderr.log");
 }
-
-/**
- * How the SDK reports a launcher that exited NAMESPACE_REFUSED: the exit
- * code is the only structured fact it passes on, at the start of its error.
- */
-const REFUSED_EXIT = `Codex Exec exited with code ${NAMESPACE_REFUSED}: `;
 
 const NAMESPACE_FIX =
   "The service host must allow unprivileged user namespaces, as bubblewrap needs (on Ubuntu, kernel.apparmor_restrict_unprivileged_userns=0), and have util-linux's setsid and unshare";
@@ -433,7 +427,7 @@ function jsonStatus(message: string): unknown {
 /**
  * The outcome of a failed Codex turn. Codex exec (CLI and SDK 0.160.0)
  * passes only text on its stream, so the outcome comes from structured
- * facts: the SDK's exit code for a refused launcher, a JSON body's status,
+ * facts: the launcher's refused-namespace marker (`refused`), a JSON body's status,
  * and the turn's session record (codex-telemetry.ts): its error kind and
  * usage windows. A full window is a usage limit whatever the error says,
  * waiting for the latest full window's reset when each gives one; with
@@ -443,9 +437,10 @@ function jsonStatus(message: string): unknown {
 export function codexFailure(
   message: string,
   telemetry?: CodexTelemetry,
+  refused = false,
 ): PlannerError {
   const shown = detail(message);
-  if (message.startsWith(REFUSED_EXIT))
+  if (refused)
     return new PlannerError(
       "hold",
       `Factory couldn't start Codex in its own process namespace (${shown}). ${NAMESPACE_FIX}; fix the host, then answer retry`,
@@ -575,6 +570,7 @@ export class CodexPlanner implements Planner {
           (record.thread as string | undefined) ?? turn.resumed?.id,
           baseline?.size,
         ),
+        namespaceRefused(home.pidFile),
       );
     // An abort ends codex and every command it started (namespacedLauncher).
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);

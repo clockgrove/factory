@@ -1,6 +1,7 @@
 // Which package manager a candidate's pnpm lockfile may pin and still keep
-// the registry network for its verified install: the base lockfile's own
-// pin, or the exact version package.json names. Real Git, real lockfiles.
+// the registry network for its verified install: the exact version
+// packageManager names, or one inside devEngines.packageManager's range.
+// Real Git, real lockfiles.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -80,7 +81,7 @@ const range = (version) => ({
   devEngines: { packageManager: { name: "pnpm", version } },
 });
 const pinned =
-  /pins \S+ as the package manager: neither the base lockfile's pin/;
+  /pins \S+ as the package manager, not the one package\.json names/;
 
 for (const [shape, manifest, basePin, candidatePin, refused] of [
   [
@@ -106,13 +107,32 @@ for (const [shape, manifest, basePin, candidatePin, refused] of [
     range(">=10"),
     undefined,
     pnpm(">=10", "12.15.0"),
-    pinned,
   ],
   [
     "another version than the base lockfile's inside a devEngines range",
     range("^12.0.0"),
     pnpm("^12.0.0", "12.6.0"),
     pnpm("^12.0.0", "12.15.0"),
+  ],
+  [
+    "a version outside the devEngines range",
+    range("^11.0.0"),
+    undefined,
+    pnpm("^11.0.0", "12.6.0"),
+    pinned,
+  ],
+  [
+    "a prerelease the devEngines range does not name",
+    range("^12.0.0"),
+    undefined,
+    pnpm("^12.0.0", "12.7.0-rc.1"),
+    pinned,
+  ],
+  [
+    "a version beside a devEngines version that is no range",
+    range("latest"),
+    undefined,
+    pnpm("latest", "12.6.0"),
     pinned,
   ],
   [

@@ -12,6 +12,7 @@
  */
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { satisfies } from "semver";
 import { isScalar, parse, parseAllDocuments, visit } from "yaml";
 import { GitRefusal } from "./git.js";
 import { hostGit } from "./worktree.js";
@@ -238,44 +239,53 @@ function plainYaml(text: string, path: string): unknown[] | NetworkRefusal {
 }
 
 /**
- * The package manager package.json pins exactly, as the name pnpm records it
- * under `packageManagerDependencies` and its version: the root
- * `packageManager` (`name@version`, optionally `+sha...`), else a
- * `devEngines.packageManager` (`{ name, version }`) whose version is one
- * version, not a range. Undefined when neither pins one exactly.
+ * The package manager package.json pins, as the name pnpm records it under
+ * `packageManagerDependencies` and what its locked version must satisfy: the
+ * root `packageManager` (`name@version`, optionally `+sha...`), else
+ * `devEngines.packageManager` (`{ name, version }`, an exact version or a
+ * range). Undefined when neither pins one Factory can read.
  */
-function exactPackageManager(
+function pinnedPackageManager(
   packageManager: unknown,
   devEngines: unknown,
-): { name: string; version: string } | undefined {
+): { name: string; accepts: (version: unknown) => boolean } | undefined {
   if (typeof packageManager === "string") {
     const found = /^((?:@[^@/]+\/)?[^@]+)@([^+]+)(?:\+.*)?$/.exec(
       packageManager,
     );
     return found
-      ? { name: found[1] as string, version: found[2] as string }
+      ? {
+          name: found[1] as string,
+          accepts: (version) => version === found[2],
+        }
       : undefined;
   }
   const entry = (devEngines as Record<string, unknown> | null | undefined)
     ?.packageManager as Record<string, unknown> | null | undefined;
-  return entry &&
-    typeof entry.name === "string" &&
-    typeof entry.version === "string" &&
-    /^\d+\.\d+\.\d+(?:[-+][\w.+-]*)?$/.test(entry.version)
-    ? { name: entry.name, version: entry.version }
-    : undefined;
+  if (
+    !entry ||
+    typeof entry !== "object" ||
+    typeof entry.name !== "string" ||
+    typeof entry.version !== "string"
+  )
+    return undefined;
+  const range = entry.version;
+  return {
+    name: entry.name,
+    accepts: (version) =>
+      typeof version === "string" && satisfies(version, range),
+  };
 }
 
 /**
  * Why pnpm-lock.yaml is not registry-only, or undefined: in every document,
- * importers name registry ranges, aliases or sibling packages, each package
- * manager pinned is the `base` lockfile's own pin or the exact version
- * `packageManager` (or, without it, `devEngines.packageManager`) names, and
- * every package resolves by integrity from a registry origin.
+ * importers name registry ranges, aliases or sibling packages, the package
+ * manager pinned is the one `packageManager` (or, without it,
+ * `devEngines.packageManager`) names, and every package resolves by
+ * integrity from a registry origin.
  */
 function pnpmLockfileRefusal(
   text: string,
-  base: string | undefined,
   registries: Set<string>,
   packageManager: unknown,
   devEngines: unknown,
@@ -283,11 +293,8 @@ function pnpmLockfileRefusal(
   const path = "pnpm-lock.yaml";
   const documents = plainYaml(text, path);
   if (!Array.isArray(documents)) return documents;
-  // A base lockfile Factory cannot read pins nothing.
-  const read = base === undefined ? [] : plainYaml(base, path);
-  const baseDocuments = Array.isArray(read) ? read : [];
-  const exact = exactPackageManager(packageManager, devEngines);
-  for (const [index, document] of documents.entries()) {
+  const pinned = pinnedPackageManager(packageManager, devEngines);
+  for (const document of documents) {
     const lock = document as Record<string, unknown> | null;
     if (!lock || typeof lock !== "object")
       return { reason: `${path} has a document that is not a mapping` };
@@ -324,22 +331,13 @@ function pnpmLockfileRefusal(
               return {
                 reason: `${path} has ${name} in ${importer} from outside the registry (${String(specifier)})`,
               };
-            if (group !== "packageManagerDependencies") continue;
-            // The base's pin at the same place, or package.json's exact one.
-            const basePin = (
-              baseDocuments[index] as {
-                importers?: Record<
-                  string,
-                  { packageManagerDependencies?: Record<string, unknown> }
-                >;
-              } | null
-            )?.importers?.[importer]?.packageManagerDependencies?.[name];
+            // Only the package manager package.json pins, at its version.
             if (
-              !(basePin !== undefined && isDeepStrictEqual(entry, basePin)) &&
-              !(exact && name === exact.name && version === exact.version)
+              group === "packageManagerDependencies" &&
+              (!pinned || name !== pinned.name || !pinned.accepts(version))
             )
               return {
-                reason: `${path} pins ${name}@${String(version)} as the package manager: neither the base lockfile's pin nor the exact version package.json names (packageManager or devEngines.packageManager)`,
+                reason: `${path} pins ${name}@${String(version)} as the package manager, not the one package.json names (packageManager or devEngines.packageManager)`,
               };
           }
         }
@@ -518,7 +516,6 @@ export async function installNetworkRefusal(
             "pnpm-lock.yaml",
             pnpmLockfileRefusal(
               pnpm,
-              await file(worktree, base, "pnpm-lock.yaml", signal),
               registries,
               pinned.packageManager,
               pinned.devEngines,

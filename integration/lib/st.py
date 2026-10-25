@@ -16,6 +16,8 @@
   st.py ROOT applied N KIND      how many applied requests have KIND in their id/message (JSON count)
   st.py ROOT events N [K=V...]   count log events of Objective N matching every K=V
                                  (V may end in * for a prefix, or start with * for a suffix)
+  st.py ROOT at N first|last [K=V...]  the time of the first or last log event matching every K=V
+                                 (as events), or "" when none
   st.py ROOT started N STEPGLOB  1 when a "start" event exists for a step matching the glob
   st.py ROOT retries N STEPGLOB  max retry count over steps matching the glob (0 when none)
   st.py ROOT starts-since N ISO STEPGLOB  start events at or after ISO for steps matching the glob
@@ -167,7 +169,7 @@ def walk(obj):
 def main():
     root, cmd, n = sys.argv[1], sys.argv[2], sys.argv[3]
     rest = sys.argv[4:]
-    d = load(root, n) if cmd not in ("events", "started", "unreadable", "maxconc", "starts-since") else None
+    d = load(root, n) if cmd not in ("events", "at", "started", "unreadable", "maxconc", "starts-since") else None
     if cmd == "status":
         print("none" if d is None else ("unreadable" if d == "unreadable" else d.get("status")))
     elif cmd == "phase":
@@ -230,6 +232,11 @@ def main():
     elif cmd == "events":
         conds = [c.split("=", 1) for c in rest]
         print(sum(1 for e in events(root, n) if all(match(e.get(k), v) for k, v in conds)))
+    elif cmd == "at":
+        conds = [c.split("=", 1) for c in rest[1:]]
+        times = sorted(str(e["at"]) for e in events(root, n)
+                       if "at" in e and all(match(e.get(k), v) for k, v in conds))
+        print((times[0] if rest[0] == "first" else times[-1]) if times else "")
     elif cmd == "started":
         print(1 if any(e.get("event") == "start" and fnmatch.fnmatchcase(str(e.get("step")), rest[0]) for e in events(root, n)) else 0)
     elif cmd == "starts-since":

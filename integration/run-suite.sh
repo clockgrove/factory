@@ -1,7 +1,7 @@
 #!/bin/bash
 # Factory integration tests: real GitHub, real providers, on demand.
 #
-#   run-suite.sh [--suite main|edge] [--build DIR] [--state-base DIR] [--only a,b] [--dry-run]
+#   run-suite.sh [--suite main|edge|prd] [--build DIR] [--state-base DIR] [--only a,b] [--dry-run]
 #
 # One parallel wave: every case of the suite starts at once and runs
 # concurrently. The suite enforces its own wall clock: at 55 min it stops
@@ -15,6 +15,8 @@ SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""
 M_REPO=clockgrove/factory-drill; C_REPO=clockgrove/factory-drill-2
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill" (cards of both repositories)
+# The prd suite's factory-drill-2 installation queues on this Project (#1974 gives it its own).
+Q_PROJECT_ID=${FACTORY_DRILL2_PROJECT_ID:-$PROJECT_ID}
 usage() { sed -n 2,11p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -44,7 +46,19 @@ CASE_TABLE_edge=(
   "reset|E|30|factory-drill: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
   "archived|E|10|factory-drill: 'factory run N' on an issue whose Project card is archived admits it (queue.archived-card)"
 )
-case "$SUITE_NAME" in main|edge) ;; *) echo "unknown suite: $SUITE_NAME (main, edge)" >&2; exit 2 ;; esac
+CASE_TABLE_prd=(
+  "propose|P|15|factory propose from an intent and from a roadmap section; an approved draft creates its issues once, with blocked-by links (propose.*)"
+  "recheck|P|15|a failed check names a CI-only final command and a missing Source; after the issue is fixed, 'recheck' plans (toolchain.ci-only, intake.recheck)"
+  "outsider|P|15|an Objective github-actions[bot] filed waits for a writer's approve; the bot's own /factory approve is ignored; an edit after approval asks again (intake.non-writer)"
+  "amend|P|30|an operator's amendment is planned and reviewed; an edit after planning holds and 'replan' plans again (plan.amendment, plan.replan)"
+  "discovery|P|35|a worker's in-scope discovery becomes an amendment and is reviewed (plan.discovery)"
+  "scope|P|40|the base item's merge refused: it holds, the independent item merges, the dependent never starts; retry finishes it (holds.item-scope*)"
+  "paths|P|40|two Objectives owning the same file take turns (queue.paths-take-turns)"
+  "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"
+  "hostnet|P|25|sandbox.network host: final validation reaches a service on the host's loopback (worker.host-network)"
+  "prod|Q|45|factory-drill-2 at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory in a later run; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
+)
+case "$SUITE_NAME" in main|edge|prd) ;; *) echo "unknown suite: $SUITE_NAME (main, edge, prd)" >&2; exit 2 ;; esac
 declare -n TABLE="CASE_TABLE_$SUITE_NAME"
 for selected in ${ONLY//,/ }; do
   found=""
@@ -63,7 +77,7 @@ export HARD_STOP_AT STOP_AT
 if [ -n "$DRY" ]; then RUN_DIR=$(mktemp -d "$RUNS/.dry.XXXX"); else RUN_DIR="$RUNS/$RUN_ID"; mkdir -p "$RUN_DIR"; fi
 mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"
 source "$SUITE/lib/common.sh"; source "$SUITE/lib/gh.sh"; source "$SUITE/lib/serve.sh"
-source "$SUITE/cases/main.sh"; source "$SUITE/cases/crash.sh"; source "$SUITE/cases/edge.sh"
+source "$SUITE/cases/main.sh"; source "$SUITE/cases/crash.sh"; source "$SUITE/cases/edge.sh"; source "$SUITE/cases/prd.sh"
 commit=$(git -C "$BUILD" log -1 --format='%h %s' 2>/dev/null | cut -c1-80)
 
 budget() {
@@ -116,6 +130,16 @@ required_checks() {
       local point; for point in $CRASH_LIFECYCLE $CRASH_REMIND $CRASH_CANCEL; do echo "crash.$point"; done ;;
     reset) echo reset.clean-dir ;;
     archived) echo queue.archived-card ;;
+    propose) echo 'propose.intent propose.roadmap' ;;
+    recheck) echo 'toolchain.ci-only intake.recheck' ;;
+    outsider) echo intake.non-writer ;;
+    amend) echo 'plan.amendment plan.replan' ;;
+    discovery) echo plan.discovery ;;
+    scope) echo 'holds.item-scope holds.item-scope-after' ;;
+    paths) echo queue.paths-take-turns ;;
+    shared) echo delivery.shared-main ;;
+    hostnet) echo worker.host-network ;;
+    prod) echo 'setup.config setup.background queue.pause-github queue.order queue.concurrency-3 exec.parallel-items prod.no-holds visibility.github visibility.cli knowledge.memory knowledge.dream' ;;
   esac
 }
 check_complete() {
@@ -180,7 +204,7 @@ write_results() {
     awk -F'\t' '{d=$4-$3; printf "| %s | %s | +%dm%02ds | +%dm%02ds | %dm %02ds |\n", $1, $2, $3/60, $3%60, $4/60, $4%60, d/60, d%60}' "$RUN_DIR/cases.tsv"
     echo; echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
-    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H")?"drill-2 ":"", $1, $2}' "$RUN_DIR/issues")"; }
+    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"drill-2 ":"", $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2
 }
@@ -220,16 +244,16 @@ cancel_left() {
 }
 end_state() {
   local CASE=suite t0; t0=$(date +%s)
-  local name=M; [ "$SUITE_NAME" = main ] || name=E
+  local name; case $SUITE_NAME in main) name=M ;; edge) name=E ;; prd) name=P ;; esac
   if [ ! -s "$RUN_DIR/inst/$name/env" ]; then
     record suite.end-state FAIL "setup did not create installation $name; end state is unproved" "$t0"
     return
   fi
-  [ "$SUITE_NAME" = main ] && inst M || inst E
+  inst $name
   local nm rv open="" prs repo ok=0
   nm=$(gh api "repos/$M_REPO" --jq .name) || ok=1
   rv=$(gh_human_gate) || ok=1
-  local repos="$M_REPO"; [ "$SUITE_NAME" = main ] && repos="$repos $C_REPO"
+  local repos="$M_REPO"; [ "$SUITE_NAME" = edge ] || repos="$repos $C_REPO"
   for repo in $repos; do
     if prs=$(gh api "repos/$repo/pulls?state=open&per_page=100" --jq '.[].number'); then
       [ -z "$prs" ] || open="$open $repo:$(tr '\n' ',' <<<"$prs")"
@@ -256,9 +280,11 @@ cleanup() {
     if [ -n "$SERVE_DIR" ] && ! serve_alive && grep -q ' C$' "$RUN_DIR/issues"; then serve_up "" netns || record suite.restart FAIL "could not restart crash lane for cleanup" "$START_S"; fi
   fi
   cancel_left
-  local i p jobs=(); for i in C H M E; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
+  # Q's serve is the user service the prod case installed: uninstall it.
+  [ -s "$RUN_DIR/inst/Q/env" ] && (inst Q; q_uninstall)
+  local i p jobs=(); for i in C H M E P; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
   for p in "${jobs[@]}"; do wait "$p" || record suite.stop FAIL "a serve could not be stopped" "$START_S"; done
-  for i in M E; do proxy_stop $i; done
+  for i in M E P; do proxy_stop $i; done
   local s; while read -r p s; do kill_exact "$p" "$s" TERM || true; done <"$RUN_DIR/pids"
   end_state
   check_complete || code=1
@@ -320,15 +346,16 @@ setup_main() {
 }
 # The serve's own record names its PID: the CLI sees a running service from then on.
 serve_ready() { wait_for 90 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"pid\"))' '$ROOT/service.json' 2>/dev/null)\" = $(serve_pid) ]"; }
-if [ "$SUITE_NAME" = main ]; then setup_main || { log "setup failed"; exit 1; }
-else setup_edge || { log "setup failed"; exit 1; }; fi
+case $SUITE_NAME in
+  main) setup_main ;; edge) setup_edge ;; prd) setup_prd ;;
+esac || { log "setup failed"; exit 1; }
 record_setup() { local CASE=suite; record suite.setup PASS "setup took $(( $(date +%s) - SETUP0 )) s" "$SETUP0"; }; record_setup
 
 # ---------- the wave ----------
 run_case() { # NAME LANE
   local c=$1 lane=$2 t0; t0=$(( $(date +%s) - START_S ))
   ( CASE=$c
-    case $lane in M) inst M; SERVE_DIR=$(serve_dir_of M); case_$c ;; C) lane_c ;; E) inst E; SERVE_DIR=$(serve_dir_of E); case_$c ;; esac
+    case $lane in C) lane_c ;; *) inst "$lane"; SERVE_DIR=$(serve_dir_of "$lane"); case_$c ;; esac
     local rc=$?
     [ "$lane" = C ] || case_settle
     rec_if "case.$c" "$rc" "case returned $rc" "$START_S"
@@ -339,7 +366,7 @@ run_case() { # NAME LANE
 for row in "${SEL[@]}"; do IFS='|' read -r c lane _ _ <<<"$row"; run_case "$c" "$lane"; done
 log "wave: ${#SEL[@]} cases started; hard stop at $(TZ=America/Los_Angeles date -d @"$STOP_AT" '+%-I:%M %p')"
 # Supervise: the shared serve stays up (a death is a finding, and it restarts); stop at 55 min.
-SUP=""; [ "$SUITE_NAME" = main ] && SUP=M || SUP=E
+case $SUITE_NAME in main) SUP=M ;; edge) SUP=E ;; prd) SUP=P ;; esac
 while :; do
   alive=0; for p in "${CASE_PIDS[@]}"; do kill -0 "${p%% *}" 2>/dev/null && alive=1; done
   [ $alive = 0 ] && break

@@ -12,6 +12,7 @@ npm run build                                   # the suite runs dist/cli.js
 npm run integration -- --dry-run                     # every case, what it checks, its expected minutes and the budget
 npm run integration                                  # the main suite
 npm run integration -- --suite edge                  # the edge suite: PRD requirements no main case covers
+npm run integration -- --suite prd                   # the PRD suite: the requirements docs/PRD.md's Done still needs shown live
 npm run integration -- --only claude,queue           # some cases
 npm run integration -- --build ../other-checkout     # test another build (its dist/cli.js)
 ```
@@ -28,6 +29,7 @@ npm run integration -- --build ../other-checkout     # test another build (its d
 - `clockgrove/factory-drill-2`: a second scratch repository; an empty one is filled from factory-drill's main at setup.
 - Project "Factory drill" with Factory's single-select field `Factory`; both repositories queue on it.
 - A `gh` login with admin on both repositories; Codex and Claude logins (subscription, no API key); `pasta` and `unshare` for the network namespace; `git-lfs`.
+- For the prd suite: systemd user services (its `prod` case runs factory-drill-2's installation with `factory setup --background` at production models and concurrency, then uninstalls it), `curl`, and the Project's `Factory order` number field. `FACTORY_DRILL2_PROJECT_ID` names factory-drill-2's own Project once single player per Project lands (#1974); until then both repositories share the drill Project. Setup writes `drill/ROADMAP.md` (from `fixtures/repo/ROADMAP.md`) to factory-drill's main when it is missing, for `propose --source`.
 
 Each run makes fresh state directories under `/tmp/factory-integration/<time>/` and writes its own configuration there. An existing `--state-base` is refused. Plumbing runs on the fastest model and lowest effort each provider offers, and the cases whose check is a planner decision use the production planner.
 
@@ -41,6 +43,6 @@ Each run makes fresh state directories under `/tmp/factory-integration/<time>/` 
 ## Layout
 
 - `run-suite.sh`: the cases table, setup, the wave, the 55-minute stop, cleanup and the results.
-- `cases/main.sh`: the cases on factory-drill's shared serve. `cases/crash.sh`: the factory-drill-2 lane. `cases/edge.sh`: the edge suite.
+- `cases/main.sh`: the cases on factory-drill's shared serve. `cases/crash.sh`: the factory-drill-2 lane. `cases/edge.sh`: the edge suite. `cases/prd.sh`: the PRD suite (lane P on factory-drill, lane Q on factory-drill-2 at production settings).
 - `lib/common.sh`: installations, results, CLI, answers, waits, proxy rules, templates. `lib/serve.sh`: serves. `lib/gh.sh`: the Project, markers, PRs and end checks. `lib/st.py` reads state and run logs by structure only. `lib/crashpoints.mjs` finds a build's `crashPoint()` sites. `lib/netns-serve.sh` runs a serve in a network namespace.
 - `objectives/`: Objective templates. `fixtures/`: files the scratch repository uses.

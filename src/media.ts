@@ -111,8 +111,14 @@ export type MediaOutcome<T> =
    * The worker's result is wrong; the finding goes back to the work step.
    * `keepsSelection`: a select repair that isn't about the chosen set's
    * content (a missing .gitattributes LFS rule), so the choice stands.
+   * `staging`: capture refused the staged candidate sets themselves.
    */
-  | { kind: "repair"; finding: string; keepsSelection?: true }
+  | {
+      kind: "repair";
+      finding: string;
+      keepsSelection?: true;
+      staging?: "candidates";
+    }
   | Held
   /** Transient; `repushed` is set once verifyOriginMedia has re-pushed, for the step to keep. */
   | { kind: "retry"; reason: string; repushed?: true };
@@ -708,6 +714,7 @@ export async function captureAssets(input: {
       await forceRemove(candidates);
       return {
         kind: "repair",
+        staging: "candidates",
         finding: `Candidate sets refused: ${error.message}. Stage each set as regular files under a real .factory-media/ directory (at most ${MAX_MEMBER_BYTES} bytes a member, ${MAX_CAPTURE_BYTES} in all) and describe it in .factory-assets.json (at most ${MAX_MANIFEST_BYTES} bytes) as the media instructions say.`,
       };
     }

@@ -9,8 +9,9 @@
  * refused. A media item's candidate sets are staged outside its owned
  * paths, so its correction may instead name its staging or its candidate
  * receipt: a refused candidate set is repaired with new candidates like
- * any other result. A refusal of the handoff notes or the discovery
- * proposal, Factory's own files whose content the diagnosis never gets, is
+ * any other result. A refusal of the handoff notes, the discovery
+ * proposal or the staged candidate sets, Factory's own files whose content
+ * the diagnosis never gets, is
  * the correction itself unless the same refusal already failed. The step returns the correction as its `repair` finding; the
  * engine keeps the repair allowances (allowances.ts).
  *
@@ -249,13 +250,18 @@ const STAGING_REFUSALS: Record<
     file: ".factory-discovery.json",
     redo: "Write .factory-discovery.json again as the discovery instructions say, or leave it out when nothing outside the item's scope is needed; keep the result's own changes.",
   },
+  candidates: {
+    file: ".factory-media/ and .factory-assets.json",
+    redo: "Make and stage every candidate set again as the media instructions say (staging from an earlier attempt is gone), so the capture accepts them, and finish everything else the Work Item asks for (its owned files and tests).",
+  },
 };
 
 /**
- * A refusal of the handoff notes or the discovery proposal as the
- * correction, with no diagnosis call: they are Factory's private staging,
- * never owned paths and never in the diagnosis evidence, and the refusal
- * names exactly what to fix. The same refusal again goes to the diagnosis.
+ * A refusal of the handoff notes, the discovery proposal or the staged
+ * candidate sets as the correction, with no diagnosis call: they are
+ * Factory's private staging, never owned paths and never in the diagnosis
+ * evidence, and the refusal names exactly what to fix. The same refusal
+ * again goes to the diagnosis.
  */
 function stagingRefusalCorrection(
   input: CorrectionInput,
@@ -266,7 +272,7 @@ function stagingRefusalCorrection(
   const result = accepted(input, {
     source: "staging-refusal",
     failure: `Factory refused ${file} for the reason in the required correction below.`,
-    diagnosis: `Collection refused ${file}, Factory's private staging outside the owned paths, so the fix is to write it again.`,
+    diagnosis: `Factory refused ${file}, its private staging outside the owned paths, so the fix is to write it again.`,
     correction: `${redo} The refusal: ${bounded(finding.detail)}`,
   });
   return result.kind === "correction" ? result : undefined;

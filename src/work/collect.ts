@@ -147,8 +147,11 @@ export type Collection =
   | Held
   | { kind: "retry"; reason: string };
 
-/** The private staging files collection reads and can refuse. */
-export type CollectedStaging = "handoff" | "discovery";
+/**
+ * The private staging files collection reads and can refuse, and the
+ * candidate sets (`candidates`) media capture reads before it.
+ */
+export type CollectedStaging = "handoff" | "discovery" | "candidates";
 
 /** A deterministic problem with the worker's result; `staging`: in that private staging file. */
 class WorkFinding extends Error {

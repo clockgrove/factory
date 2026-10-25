@@ -345,7 +345,18 @@ export async function workStep(
             },
           }
         : candidates
-          ? { keptCandidates: candidates.map((set) => set.id) }
+          ? {
+              keptCandidates: {
+                sets: candidates.map((set) => set.id),
+                destinations: [
+                  ...new Set(
+                    candidates.flatMap((set) =>
+                      set.members.map((m) => m.destination),
+                    ),
+                  ),
+                ],
+              },
+            }
           : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
       ...(memory ? { memory } : {}),

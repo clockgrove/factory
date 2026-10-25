@@ -63,8 +63,8 @@ export interface WorkPromptInput {
   mediaInputs?: readonly MediaInput[];
   /** A repair of a media item whose selection stands: the chosen set and its destinations. */
   keptSelection?: { set: string; destinations: readonly string[] };
-  /** A media item's repair that isn't about its candidates: the ids of the sets Factory kept. */
-  keptCandidates?: readonly string[];
+  /** A media item's repair that isn't about its candidates: the sets Factory kept, and their destinations. */
+  keptCandidates?: { sets: readonly string[]; destinations: readonly string[] };
   /**
    * Earlier items' advisory notes for this item, with the item that wrote
    * each and that item's accepted result commit, whose bytes of each cited
@@ -510,8 +510,10 @@ function mediaContract(
   candidates: WorkPromptInput["keptCandidates"],
 ): string {
   if (!needsSelection(item)) return "";
-  if (!kept && candidates?.length)
-    return `\n\nMedia: Factory kept the candidate sets the previous attempt staged (${candidates.join(", ")}), and this repair is not about them, so the operator still chooses from those. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets replace the kept ones. Fix what the findings name in the owned code, tests and documentation.`;
+  if (!kept && candidates?.sets.length) {
+    const destinations = candidates.destinations.join(", ");
+    return `\n\nMedia: Factory kept the candidate sets the previous attempt staged (${candidates.sets.join(", ")}), and this repair is not about them, so the operator still chooses from those. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets replace the kept ones. Do not write, remove or otherwise change ${destinations}: Factory writes the chosen set there after selection, they are not in this checkout, and a result that changes them is refused. Fix what the findings name in the owned code, tests and documentation.`;
+  }
   if (kept) {
     const destinations = kept.destinations.join(", ");
     return `\n\nMedia: the operator chose candidate set ${kept.set} for this item, and that choice stands for this repair. Factory writes the set's bytes at ${destinations} on top of your result before it validates, reviews and delivers it, as it did for the previous attempt; they are not in this checkout. Their read-only copies are staged under .factory-inputs/assets (origin selected) for reading. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets discard the operator's choice and ask the operator again. Do not write, remove or otherwise change ${destinations}: a result that changes them is refused. A check that needs those files at their destinations can fail in this checkout for that reason alone: report it rather than writing them there. Fix what the findings name in the owned code, tests and documentation.`;

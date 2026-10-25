@@ -437,6 +437,7 @@ export async function workStep(
         item,
         {
           kind: "repair",
+          staging: "candidates",
           finding: `Candidate set ${resent.set} has the content of set ${resent.sentBack}, which the operator sent back. Stage new content for every set.`,
         },
         context,
@@ -459,8 +460,14 @@ export async function workStep(
     finished = { ...finished, sets: [] };
   }
   const sets = finished.sets ?? [];
-  // The kept copies replace the worker's staging.
-  if (sets.length) await forceRemove(join(worktree, ".factory-media"));
+  // The kept copies replace the worker's staging, manifest included: a
+  // repair after a refused collection must not capture its stale manifest.
+  if (sets.length)
+    await Promise.all(
+      [".factory-media", ".factory-assets.json"].map((path) =>
+        forceRemove(join(worktree, path)),
+      ),
+    );
   const keepFinished = { ...keepAll, ...facts({ finished }, item.id) };
 
   const collected = await collect({
@@ -548,9 +555,20 @@ export function mediaOutcome(
 ): Outcome {
   switch (outcome.kind) {
     case "repair":
-      return repairOutcome(item, from, outcome.finding, context.state, place, {
-        keep,
-      });
+      return repairOutcome(
+        item,
+        from,
+        outcome.staging
+          ? {
+              kind: "failure",
+              detail: outcome.finding,
+              staging: outcome.staging,
+            }
+          : outcome.finding,
+        context.state,
+        place,
+        { keep },
+      );
     case "retry":
       return { kind: "retry", reason: outcome.reason, keep };
     default:

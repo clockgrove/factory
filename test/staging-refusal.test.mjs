@@ -13,7 +13,7 @@ const refused = {
     "Handoff manifest is invalid:\n- note 8: consumerIndices must be [] (this Work Item has no peers)",
 };
 
-function input(prior, asked) {
+function input(prior, asked, finding = refused) {
   return {
     planner: new Proxy(
       {},
@@ -26,7 +26,7 @@ function input(prior, asked) {
     ),
     plan: { items: [] },
     item: { id: "ChainBase", ownedPaths: ["src/chainBase.js"], acceptance: [] },
-    finding: refused,
+    finding,
     checkout: "/nonexistent",
     base: "0".repeat(40),
     commit: "1".repeat(40),
@@ -48,4 +48,23 @@ test("a refused handoff manifest is the correction, and the same refusal again i
     (error) => ({ kind: "error", error }),
   );
   assert.notEqual(again.correction?.source, "staging-refusal");
+});
+
+// The media case: a repair after a refused handoff captured again and found
+// the staged sets gone; the diagnosis can't see staging and asked a person.
+test("a capture refusal of the candidate sets is the correction: stage them again and finish the item", async () => {
+  const asked = [];
+  const result = await correction(
+    input([], asked, {
+      kind: "failure",
+      staging: "candidates",
+      detail:
+        "Candidate sets refused: .factory-media/candidate-a/cube.glb does not exist.",
+    }),
+  );
+  assert.equal(result.kind, "correction", JSON.stringify(result));
+  assert.equal(result.correction.source, "staging-refusal");
+  assert.match(result.correction.correction, /stage every candidate set again/);
+  assert.match(result.correction.correction, /owned files and tests/);
+  assert.equal(asked.length, 0);
 });

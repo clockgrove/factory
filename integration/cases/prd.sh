@@ -384,7 +384,8 @@ case_prod() {
   local t0 id; t0=$(now); id=$(uid)
   local HOLD_POLICY="d2 review decide more"
   local co="$STATE_BASE/checkout-q"
-  cli_t 120 setup --checkout "$co" --project-id "$C_PROJECT_ID" --provider codex --planner codex --worker codex --json >"$RUN_DIR/q.setup.out" 2>&1; local rs=$?
+  # --default: on a fresh configuration setup keeps codex first and default otherwise.
+  cli_t 120 setup --checkout "$co" --project-id "$C_PROJECT_ID" --provider "$PROVIDER" --planner "$PROVIDER" --worker "$PROVIDER" --default --json >"$RUN_DIR/q.setup.out" 2>&1; local rs=$?
   local sj; sj=$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 node=[c for c in (d.get("readiness") or {}).get("checks", []) if c.get("name")=="node version"]

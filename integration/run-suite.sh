@@ -1,8 +1,10 @@
 #!/bin/bash
 # Factory integration tests: real GitHub, real providers, on demand.
 #
-#   run-suite.sh [--suite main|edge|prd] [--build DIR] [--state-base DIR] [--only a,b] [--capture] [--keep-repos] [--dry-run]
+#   run-suite.sh [--suite main|edge|prd] [--provider codex|claude] [--build DIR] [--state-base DIR] [--only a,b] [--capture] [--keep-repos] [--dry-run]
 #
+# --provider (default codex) is the provider every case runs on; the claude
+# case, the cross-provider one, runs 'factory run N --provider' with the other.
 # Each run creates its own private repositories under REPO_OWNER from
 # fixtures/baseline/ and deletes them when it passes (a failed run keeps them
 # for inspection; --keep-repos always does; later runs sweep them after 24 h).
@@ -18,13 +20,14 @@
 set -uo pipefail
 {   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
+BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
 REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
-usage() { sed -n 2,17p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n 2,19p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITE_NAME=${2:?}; shift 2 ;;
+    --provider) PROVIDER=${2:?}; shift 2 ;;
     --build) BUILD=$(realpath "${2:?}"); shift 2 ;;
     --state-base) STATE_BASE=$(realpath -m "${2:?}"); shift 2 ;;
     --only) ONLY=${2:?}; shift 2 ;;
@@ -35,12 +38,15 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option: $1" >&2; usage ;;
   esac
 done
+# The chosen provider's -plan variant asks the planner questions; the cross-provider case runs on the other one.
+case "$PROVIDER" in codex) OTHER_PROVIDER=claude ;; claude) OTHER_PROVIDER=codex ;; *) echo "unknown provider: $PROVIDER (codex, claude)" >&2; exit 2 ;; esac
+PLAN_PROVIDER=$PROVIDER-plan
 
 # Cases: NAME LANE MINUTES WHAT. Minutes are each case's expected duration from
 # the wave's start; every case runs concurrently, so the wave takes the longest.
 CASE_TABLE_main=(
-  "codex|M|30|Codex end to end on a two-layer native stack under strict protection: plan, work, PRs, CI, review, merge, update-branch, report, done once (happy.codex, stack.strict); the provider child killed in planning and in work retries with error count 0 (model-kill.*); a closing phrase in actual PR text closes no decoy issue (security.fixes-keyword)"
-  "claude|M|25|Claude end to end through 'factory run N --provider claude', followed to done: every model call on claude, card Done (happy.claude, queue.run-command)"
+  "codex|M|30|${PROVIDER^} end to end on a two-layer native stack under strict protection: plan, work, PRs, CI, review, merge, update-branch, report, done once (happy.codex, stack.strict); the provider child killed in planning and in work retries with error count 0 (model-kill.*); a closing phrase in actual PR text closes no decoy issue (security.fixes-keyword)"
+  "claude|M|25|${OTHER_PROVIDER^} end to end through 'factory run N --provider $OTHER_PROVIDER', followed to done: every model call on $OTHER_PROVIDER, card Done (happy.claude, queue.run-command)"
   "holds|M|25|a planner question asked once and answered by /factory comment; answers that decide nothing until the planning allowance asks 'more', which sends the kept answer once; then cancelled cleanly (holds.*, queue.cancel-held)"
   "queue|M|8|admitted, then its card cleared during a slowed check: withdrawn, never planned (queue.withdraw)"
   "cancel|M|20|a lasting 403 on merge holds the step (fault.lasting-403); with #1879 a 404 on a PR read right after creation retries (fault.lag-404); cancel with the PR open: one cancel comment, PR closed, branch deleted, issue closed not planned (queue.cancel-open-pr)"
@@ -102,7 +108,7 @@ budget() {
 }
 if [ -n "$DRY" ]; then
   echo "DRY RUN ($SUITE_NAME): nothing is started, queued or written."
-  echo "Build: $BUILD ($commit)"; echo "State: $STATE_BASE (fresh per run)"
+  echo "Build: $BUILD ($commit)"; echo "Provider: $PROVIDER (planner questions on $PLAN_PROVIDER, cross-provider case on $OTHER_PROVIDER)"; echo "State: $STATE_BASE (fresh per run)"
   echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
   for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  ~%2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
   echo; budget
@@ -173,15 +179,17 @@ check_complete() {
 
 # ---------- configuration ----------
 # Plumbing runs on the fastest model and lowest effort each provider offers;
-# `codex-plan` keeps the production planner, for the cases whose check is a
-# planner decision (it must ask its question).
+# `codex-plan` and `claude-plan` keep the production planner, for the cases
+# whose check is a planner decision (it must ask its question). The default
+# provider is --provider's.
 write_config() { # FILE REPO CHECKOUT MAX_ACTIVE [PY_EXPR...]
   local f=$1; shift
-  SUITE_CAPTURE=$CAPTURE python3 - "$f" "$@" <<'PY'
+  SUITE_CAPTURE=$CAPTURE SUITE_PROVIDER=$PROVIDER python3 - "$f" "$@" <<'PY'
 import json, os, sys
 f, repo, checkout, active, *more = sys.argv[1:]
 fast = {"model": "gpt-6-luna", "effort": "low", "serviceTier": "fast"}
 haiku = {"model": "claude-haiku-5-5", "effort": "low"}
+opus = {"model": "claude-opus-5-5", "effort": "medium"}  # Factory's Claude planner and reviewer default
 c = {
   "repository": repo, "checkout": checkout,
   "queue": {"projectId": "PVT_kwDOEvXlbc4BoR0S", "pollSeconds": 15, "maxActiveObjectives": int(active)},
@@ -190,8 +198,9 @@ c = {
     "codex": {"planner": "codex", "models": {"planner": fast, "reviewer": fast}, "worker": {"kind": "codex", **fast}},
     "codex-plan": {"planner": "codex", "models": {"reviewer": fast, "planner": {"model": "gpt-6.1-sol", "effort": "high"}}, "worker": {"kind": "codex", **fast}},
     "claude": {"planner": "claude", "models": {"planner": haiku, "reviewer": haiku}, "worker": {"kind": "claude", **haiku}},
+    "claude-plan": {"planner": "claude", "models": {"planner": opus, "reviewer": opus}, "worker": {"kind": "claude", **haiku}},
   },
-  "defaultProvider": "codex",
+  "defaultProvider": os.environ["SUITE_PROVIDER"],
 }
 if os.environ.get("SUITE_CAPTURE"):
   c["capture"] = {"enabled": True}
@@ -212,7 +221,7 @@ write_results() {
   {
     echo "# Integration run $RUN_ID ($SUITE_NAME)"; echo
     echo "Wall time: **$(( (end_s - START_S) / 60 )) min $(( (end_s - START_S) % 60 )) s** (limit 60), from $(TZ=America/Los_Angeles date -d @"$START_S" '+%-I:%M %p') to $(TZ=America/Los_Angeles date -d @"$end_s" '+%-I:%M %p') PDT${INTERRUPTED:+. **Interrupted**}."; echo
-    echo "- Build: $BUILD ($commit)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
+    echo "- Build: $BUILD ($commit)"; echo "- Provider: $PROVIDER (planner questions on $PLAN_PROVIDER, cross-provider case on $OTHER_PROVIDER)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
     echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ')$([ -s "$RUN_DIR/projects" ] && echo ", Project #$(paste -sd' ' "$RUN_DIR/projects")") (${REPOS_NOTE:-none created})"; echo
     echo "**Totals:** ${tot%, }."; echo
     echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"
@@ -327,7 +336,7 @@ git lfs version >/dev/null || { echo "git-lfs is required" >&2; exit 3; }
 login=$(gh api user --jq .login) || { echo "gh is not logged in" >&2; exit 3; }
 [ "$(gh api "orgs/$REPO_OWNER/memberships/$login" --jq .role 2>/dev/null)" = admin ] || { echo "gh login $login must be an owner of $REPO_OWNER to create its run repositories" >&2; exit 3; }
 gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | grep -qw delete_repo || { echo "the gh token needs the delete_repo scope (gh auth refresh -s delete_repo)" >&2; exit 3; }
-log "suite $SUITE_NAME, build $BUILD ($commit), state $STATE_BASE"
+log "suite $SUITE_NAME, provider $PROVIDER, build $BUILD ($commit), state $STATE_BASE"
 [ ! -e "$STATE_BASE" ] || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
 for r in $M_REPO $C_REPO; do s=$(running_serves "$r"); [ -n "$s" ] && { echo "refused: a serve runs for $r: $s" >&2; exit 3; }; done
 trap 'INTERRUPTED=1; exit 130' INT TERM

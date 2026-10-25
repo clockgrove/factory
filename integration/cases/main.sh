@@ -14,13 +14,17 @@ if rows:
     print("\t".join(r[k] for k in ("step", "id", "startedAt", "run")))'
 }
 
-# A Codex child whose --cd is this exact worker checkout or planning tree.
-# Matching the executable excludes unshare, the launcher and command children.
+# The provider's child whose directory is this exact worker checkout or
+# planning tree. Codex: executable `codex`, directory its --cd. Claude: the
+# Agent SDK spawns its native `claude` binary with stream-json input in the
+# session's cwd, so its directory is /proc/PID/cwd. Matching the executable
+# excludes unshare, the launcher and command children; the --input-format
+# flag the SDK always passes keeps only the session itself.
 m_child() { # N STEP -> "PID START" (newest)
   local f; f=$(mktemp "$RUN_DIR/desc.XXXX"); snap_desc "$(cat "$(serve_dir_of M)/pid")" "$f"
-  python3 - "$ROOT" "$1" "$2" "$f" <<'PY'
+  python3 - "$ROOT" "$1" "$2" "$f" "$PROVIDER" <<'PY'
 import os, sys
-root, issue, step, descendants = sys.argv[1:]
+root, issue, step, descendants, provider = sys.argv[1:]
 work = os.path.realpath(os.path.join(root, "work", issue))
 expected = os.path.join(work, issue, step.split(":")[1]) if step.startswith("item:") else None
 best = None
@@ -29,9 +33,12 @@ for line in open(descendants):
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             args = f.read().decode().split("\0")
-        if os.path.basename(args[0]) != "codex":
+        if os.path.basename(args[0]) != provider:
             continue
-        directory = next((args[i + 1] for i, arg in enumerate(args[:-1]) if arg in ("--cd", "-C")), None)
+        if provider == "codex":
+            directory = next((args[i + 1] for i, arg in enumerate(args[:-1]) if arg in ("--cd", "-C")), None)
+        else:
+            directory = f"/proc/{pid}/cwd" if "--input-format" in args else None
         if not directory:
             continue
         directory = os.path.realpath(directory)
@@ -65,7 +72,7 @@ m_kill() {
     case $(st status "$n") in done|cancelled|failed) break ;; esac
     sleep 1
   done
-  [ -n "$pid" ] || { record "$c" FAIL "not proved: no active $glob attempt with its own Codex child was killed for #$n" "$t0"; return; }
+  [ -n "$pid" ] || { record "$c" FAIL "not proved: no active $glob attempt with its own $PROVIDER child was killed for #$n" "$t0"; return; }
   log "#$n killed provider child $pid during $id (service run $run)"
   wait_for 300 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=retry 'step=$step' 'attemptId=$id') -gt 0 ]"
   local after errors; after=$(st events "$n" event=outcome outcome=retry "step=$step" "attemptId=$id")
@@ -101,7 +108,7 @@ m_update_merges() {
   done; echo "$n"
 }
 
-# 1, 5, 7, 8: the Codex happy path on a two-layer native stack under strict
+# 1, 5, 7, 8: the --provider happy path on a two-layer native stack under strict
 # protection; a model kill in planning and in work; a closing phrase in PR text when the build makes it inert.
 case_codex() {
   local t0 n extra="" decoy=""; t0=$(now)
@@ -111,7 +118,7 @@ case_codex() {
     extra="$extra For this fixture's PR presentation, include the literal example text \`fixes #$decoy\` in each Work Item title. The text is an example, not an instruction to close issue #$decoy."
   fi
   local id; id=$(uid)
-  n=$(new_objective chain2 "codex stack happy path" ID="$id" EXTRA="${extra//\{\{ID\}\}/$id}") || return
+  n=$(new_objective chain2 "$PROVIDER stack happy path" ID="$id" EXTRA="${extra//\{\{ID\}\}/$id}") || return
   m_kill "$n" 'plan*' model-kill.plan
   m_kill "$n" 'item:*:work' model-kill.work
   # Strict main: once the first layer's PR is open, main moves, so a layer
@@ -125,7 +132,8 @@ case_codex() {
   local layers; layers=$(python3 -c 'import json,sys;print(len(json.loads(sys.argv[1])))' "$prs")
   end_done "$n"; local ok=$?
   local ev="$EVID; layers $layers; strict main $(gh_strict)"
-  [ $ok = 0 ] && [ "$layers" = 2 ]; rec_if happy.codex $? "codex end to end, ended $p: $ev" "$t0"
+  local calls pc; calls=$(st events "$n" event=model-usage); pc=$(st events "$n" event=model-usage provider="$PROVIDER")
+  [ $ok = 0 ] && [ "$layers" = 2 ]; rec_if happy.codex $? "$PROVIDER end to end (model calls $pc/$calls on $PROVIDER), ended $p: $ev" "$t0"
   local ih; ih=$(st events "$n" event=outcome outcome=hold 'step=item:*')
   if [ $ok != 0 ]; then record stack.predecessor-wait UNREACHABLE "#$n didn't finish: $ev" "$t0"
   else [ "$ih" = 0 ]; rec_if stack.predecessor-wait $? "the upper layer waited on its predecessor with no hold: Work Item holds $ih" "$t0"; fi
@@ -148,22 +156,23 @@ case_codex() {
   else record security.fixes-keyword UNREACHABLE "feature absent: inert" "$t0"; fi
 }
 
-# 1, 2: the Claude happy path through `factory run N --provider claude`, followed to done.
+# 1, 2: the other provider's happy path through `factory run N --provider OTHER`
+# (claude on a Codex run, codex on a Claude run), followed to done.
 case_claude() {
   local t0 n rc=99 i; t0=$(now)
-  n=$(new_issue happy "claude happy path via factory run" ID="$(uid)") || return
+  n=$(new_issue happy "$OTHER_PROVIDER happy path via factory run" ID="$(uid)") || return
   # Exit 2 is a question (answered here) or a request the service hasn't applied yet: follow again.
   for i in $(seq 1 30); do
-    cli_t "$(left)" run "$n" $([ $i = 1 ] && echo --provider claude) >>"$RUN_DIR/run.$n.out" 2>&1; rc=$?
+    cli_t "$(left)" run "$n" $([ $i = 1 ] && echo --provider "$OTHER_PROVIDER") >>"$RUN_DIR/run.$n.out" 2>&1; rc=$?
     [ "$rc" = 2 ] || break
     stopping && break
     HOLD_POLICY="d2 review decide more" auto_answer "$n" || sleep 10
   done
   sleep 15
-  local calls cl card; calls=$(st events "$n" event=model-usage); cl=$(st events "$n" event=model-usage provider=claude); card=$(gh_card_value "$n")
+  local calls cl card; calls=$(st events "$n" event=model-usage); cl=$(st events "$n" event=model-usage provider="$OTHER_PROVIDER"); card=$(gh_card_value "$n")
   end_done "$n"; local ok=$?
   [ $ok = 0 ] && [ "$rc" = 0 ] && [ "$calls" -gt 0 ] && [ "$cl" = "$calls" ] && [ "$card" = Done ]
-  rec_if happy.claude $? "factory run exit $rc; model calls $cl/$calls on claude; card $card; $EVID" "$t0"
+  rec_if happy.claude $? "factory run --provider $OTHER_PROVIDER exit $rc; model calls $cl/$calls on $OTHER_PROVIDER; card $card; $EVID" "$t0"
   [ "$rc" = 0 ] && [ "$card" = Done ]; rec_if queue.run-command $? "'factory run #$n' queued the card and followed it: exit $rc, card $card" "$t0"
 }
 
@@ -173,7 +182,7 @@ case_claude() {
 case_holds() {
   local t0 n hj hid; t0=$(now)
   local HOLD_POLICY="d2 review"
-  n=$(new_objective hold "holds ask, answer, more" PROVIDER=codex-plan ID="$(uid)") || return
+  n=$(new_objective hold "holds ask, answer, more" PROVIDER="$PLAN_PROVIDER" ID="$(uid)") || return
   local p; p=$(wait_phase "$n" '^hold:decide' 900)
   [[ $p == hold:* ]] || { record holds.ask FAIL "#$n never asked ($p)" "$t0"; case_settle; return; }
   hj=$(st hold "$n" 'decide*'); hid=$(hold_field "$hj" id)

@@ -176,7 +176,7 @@ c_crash() {
   # Fifteen minutes remain after arming: ten to settle, five for end checks.
   CRASH_END=$(( STOP_AT - 900 ))
   inst C
-  CQ=$(new_objective hold "crash lane held" PROVIDER=codex-plan ID="$(uid)") || return
+  CQ=$(new_objective hold "crash lane held" PROVIDER="$PLAN_PROVIDER" ID="$(uid)") || return
   local ready=0
   if c_drive "$CRASH_REMIND $CRASH_CANCEL"; then
     CA=$(new_objective chain2 "crash lane two items" ID="$(uid)") &&

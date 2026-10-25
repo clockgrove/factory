@@ -17,7 +17,7 @@
 
 import { readBlobs } from "./git.js";
 import { validPath } from "./objective.js";
-import { isRecord, ownsPath } from "./planning/graph.js";
+import { ancestors, isRecord, ownsPath } from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
 import type { Planner } from "./providers/planner.js";
 import { type RefusedCriterion, resultCriteria } from "./review/result.js";
@@ -384,16 +384,7 @@ interface DiagnosisAnswer {
  * ones a diagnosis may blame. A native-stack layer below is one of them.
  */
 function predecessors({ plan, item }: CorrectionInput): WorkItem[] {
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const seen = new Set<string>();
-  const visit = (id: string) => {
-    for (const dependency of byId.get(id)?.dependencies ?? [])
-      if (!seen.has(dependency)) {
-        seen.add(dependency);
-        visit(dependency);
-      }
-  };
-  visit(item.id);
+  const seen = ancestors(plan.items, item.id);
   return plan.items.filter(
     (entry) => seen.has(entry.id) && (entry.kind ?? "work") === "work",
   );

@@ -1489,70 +1489,28 @@ function prove(
     ],
     "environment",
   );
-  const { probeValidationIndex, prerequisiteValidationIndices } = env;
-  if (
-    !["local", "real"].includes(String(env.kind)) ||
-    !["available", "prepare", "missing"].includes(String(env.readiness)) ||
-    typeof env.preparedBy !== "string"
-  )
-    throw new Refusal("Planner environment readiness is invalid", owner.id);
-  if (
-    env.readiness === "prepare"
-      ? !env.preparedBy ||
-        !owner.dependencies.includes(env.preparedBy) ||
-        !items.some((item) => item.id === env.preparedBy)
-      : env.preparedBy !== ""
-  )
-    throw new Refusal(
-      "Planner prepare requires an actual preparation dependency; same-owner setup uses available with ordered prerequisites and its probe",
-      owner.id,
-    );
-  if (env.kind === "real" && probeValidationIndex === null)
-    throw new Refusal(
-      "Planner real environment requires an exact authorized readiness probe",
-      owner.id,
-    );
-  if (!Array.isArray(prerequisiteValidationIndices))
+  // The indices become the owner's commands here; what the environment
+  // means (kind, readiness, order, preparedBy) is checked once, in graph.ts.
+  const command = (value: unknown, label: string): string =>
+    owner.validation[index(value, owner.validation.length, label)]!.command;
+  if (!Array.isArray(env.prerequisiteValidationIndices))
     throw new Refusal(
       "Readiness prerequisites must be ordered validation indices",
       owner.id,
     );
-  let previous = -1;
-  const prerequisites = prerequisiteValidationIndices.map((value) => {
-    const selected = index(
-      value,
-      owner.validation.length,
-      "prerequisiteValidationIndices",
-    );
-    if (
-      typeof probeValidationIndex !== "number" ||
-      selected <= previous ||
-      selected >= probeValidationIndex
-    )
-      throw new Refusal(
-        "Readiness prerequisites must be unique, ordered and precede their probe",
-        owner.id,
-      );
-    previous = selected;
-    return owner.validation[selected]!.command;
-  });
-  const probe =
-    probeValidationIndex === null
-      ? ""
-      : owner.validation[
-          index(
-            probeValidationIndex,
-            owner.validation.length,
-            "probeValidationIndex",
-          )
-        ]!.command;
-  const environment: CoverageEnvironment = {
-    kind: env.kind as CoverageEnvironment["kind"],
-    readiness: env.readiness as CoverageEnvironment["readiness"],
-    probe,
+  const prerequisites = env.prerequisiteValidationIndices.map((value) =>
+    command(value, "prerequisiteValidationIndices"),
+  );
+  const environment = {
+    kind: env.kind,
+    readiness: env.readiness,
+    probe:
+      env.probeValidationIndex === null
+        ? ""
+        : command(env.probeValidationIndex, "probeValidationIndex"),
     ...(prerequisites.length ? { prerequisites } : {}),
     preparedBy: env.preparedBy,
-  };
+  } as CoverageEnvironment;
   return { itemId: owner.id, proof: canonical, environment };
 }
 

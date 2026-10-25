@@ -40,7 +40,7 @@ import { defaultHead, sha256 } from "./git.js";
 import type { GitHub, IssueSummary } from "./github.js";
 import { takeServiceLock } from "./lock.js";
 import { code, mark, prose } from "./markdown.js";
-import { COMMANDS_LANG, validPath } from "./objective.js";
+import { COMMANDS_LANG, objectiveCommands, validPath } from "./objective.js";
 import type { Paths } from "./paths.js";
 import { BaseFiles, sectionText } from "./planning/facts.js";
 import { exportTree } from "./planning/repository.js";
@@ -252,18 +252,6 @@ export function composeObjective(
       ? [`## ${heading}`, lines.join(gap ? "\n\n" : "\n")]
       : ([] as string[]);
   const commands = objective.commands.map(clean).filter(Boolean);
-  // A fence longer than any backtick run inside, so no command closes it.
-  const fence = "`".repeat(
-    Math.max(
-      3,
-      ...commands.map((c) =>
-        (c.match(/`+/g) ?? [""]).reduce(
-          (n, run) => Math.max(n, run.length + 1),
-          0,
-        ),
-      ),
-    ),
-  );
   const parts = [
     proposalMark(id, objective.key),
     "## Goal",
@@ -271,7 +259,7 @@ export function composeObjective(
     "## Acceptance",
     bullets(objective.acceptance, line).join("\n"),
     ...(commands.length
-      ? [`${fence}${COMMANDS_LANG}\n${commands.join("\n")}\n${fence}`]
+      ? [`\`\`\`${COMMANDS_LANG}\n${commands.join("\n")}\n\`\`\``]
       : []),
     ...section("Context", objective.context.map(line).filter(Boolean), true),
     ...section(
@@ -313,11 +301,21 @@ async function draftProblems(
         `The title has ${composed.title.length} characters; GitHub allows ${TITLE_LIMIT}. Shorten it.`,
       );
     const html = await deps.github.renderMarkdown(composed.body, signal);
+    const shown = readShown(html, { sources: true });
+    // GitHub's rendering must give back exactly the proposed commands.
+    const proposed = objective.commands.map(clean).filter(Boolean);
+    if (
+      JSON.stringify(objectiveCommands(shown.blocks).commands) !==
+      JSON.stringify(proposed)
+    )
+      own.push(
+        `The commands ${JSON.stringify(proposed)} don't read back from GitHub's rendering of the ${COMMANDS_LANG} block; write each as one plain command line.`,
+      );
     own.push(
       ...(await objectiveProblems(
         deps.config,
         {
-          shown: readShown(html, { sources: true }),
+          shown,
           writer: true,
           base,
           title: composed.title,

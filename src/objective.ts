@@ -125,7 +125,7 @@ export function objectiveCommands(blocks: readonly ObjectiveBlock[]): {
         `The \`\`\`${COMMANDS_LANG} block is empty; write one command per line, or remove the block.`,
       ],
     };
-  return { commands: [...new Set(lines)], problems: [] };
+  return { commands: lines, problems: [] };
 }
 
 /** Parse GitHub's rendering of an issue body (`body_html`) as an Objective. */

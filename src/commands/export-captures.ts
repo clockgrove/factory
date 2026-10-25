@@ -93,6 +93,7 @@ async function exportCommand(
       ? { invocations: [...new Set(args.lists.invocation)] }
       : {}),
     ...(flags.endpoint !== undefined ? { endpoint: flags.endpoint } : {}),
+    ...(flags.authorize !== undefined ? { authorize: flags.authorize } : {}),
     maxBytesPerCall:
       config?.capture.maxBytesPerCall ?? CAPTURE_OFF.maxBytesPerCall,
     secrets: config?.secrets ?? [],

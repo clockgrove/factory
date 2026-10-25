@@ -89,19 +89,25 @@ export function chosenFiles(
   return files.slice(-1);
 }
 
-/** Stream `file` from `from` like streamFile, each event redacted and marked with its run. */
+/** Stream `file` from `from` (to `to`) like streamFile, each event redacted and marked with its run. */
 export function readRun(
   file: string,
   from: number,
   secrets: readonly string[],
   visit: (event: LogEvent) => void,
+  to?: number,
 ): number {
   const run = runOfFile(file);
-  return streamFile(file, from, (event) => {
-    const shown = redactDeep(event, secrets);
-    shown.run = run;
-    visit(shown);
-  });
+  return streamFile(
+    file,
+    from,
+    (event) => {
+      const shown = redactDeep(event, secrets);
+      shown.run = run;
+      visit(shown);
+    },
+    to,
+  );
 }
 
 /** Print the diagnostics `options` asks for to `write`; with follow, until interrupted. */

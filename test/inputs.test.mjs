@@ -153,7 +153,8 @@ test("an Objective whose work keeps throwing is set aside with retry, reset and 
     () => logged(inst, 11, "objective-set-aside").length === 1,
     "#11 is set aside",
   );
-  assert.ok(logged(inst, 11, "objective-error").length >= 10);
+  // Logged once, at the start of the streak.
+  assert.equal(logged(inst, 11, "objective-error").length, 1);
   await until(() => stateOf(inst, 12).retries.check, "#12's check runs");
   const row = (issue) =>
     status(inst).objectives.find((entry) => entry.issue === issue);
@@ -195,7 +196,7 @@ test("an Objective whose work keeps throwing is set aside with retry, reset and 
   await stopped(service);
 });
 
-test("saves that fail for a while are tried again, never set aside", {
+test("saves that fail for a while are tried again; ones that keep failing are set aside with retry", {
   skip: process.getuid?.() === 0 && "root writes any directory",
 }, async () => {
   const inst = installation();
@@ -206,9 +207,11 @@ test("saves that fail for a while are tried again, never set aside", {
   // No state can be saved for a while: each tick's start of the check fails.
   chmodSync(inst.objectives, 0o555);
   await until(
-    () => logged(inst, 12, "objective-error").length >= 10,
-    "ten failed ticks",
+    () => logged(inst, 12, "objective-error").length === 1,
+    "a failed tick",
   );
+  // More than ten ticks (50ms each), logged once.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
   chmodSync(inst.objectives, 0o755);
   // The start that kept failing is made at once.
   const { attempts } = stateOf(inst, 12).retries.check;
@@ -216,7 +219,26 @@ test("saves that fail for a while are tried again, never set aside", {
     () => stateOf(inst, 12).retries.check.attempts > attempts,
     "#12's check runs again",
   );
+  assert.equal(logged(inst, 12, "objective-error").length, 1);
   assert.deepEqual(logged(inst, 12, "objective-set-aside"), []);
+  // Saves that never pass ask, after a hundred ticks.
+  chmodSync(inst.objectives, 0o555);
+  await until(
+    () => logged(inst, 12, "objective-set-aside").length === 1,
+    "#12 is set aside",
+    30_000,
+  );
+  chmodSync(inst.objectives, 0o755);
+  assert.equal(logged(inst, 12, "objective-error").length, 2);
+  const row = status(inst).objectives.find((entry) => entry.issue === 12);
+  assert.match(row.error, /failed 100 ticks in a row/);
+  assert.equal(cli(inst, "retry", "12").code, 0);
+  await until(
+    () =>
+      status(inst).objectives.find((entry) => entry.issue === 12).status ===
+      "checking",
+    "#12 runs on",
+  );
   assert.equal(cli(inst, "cancel", "12").code, 0);
   await stopped(service);
 });

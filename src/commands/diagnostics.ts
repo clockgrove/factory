@@ -12,7 +12,7 @@ import {
 } from "../analysis.js";
 import { diagnostics } from "../diagnostics.js";
 import { configOf, Refusal } from "../host.js";
-import { logFiles, runOfFile } from "../log.js";
+import { CAPTURE_OFF, logFiles, runOfFile } from "../log.js";
 import type { Paths } from "../paths.js";
 import {
   type Scorecard,
@@ -120,6 +120,9 @@ async function diagnosticsCommand(
       "no_factory_state",
       `#${issue} has no run ${flags.run} in its run log; its runs: ${runs.join(", ") || "none"}.`,
     );
+  const config = configOf(repository);
+  const maxBytesPerCall =
+    config?.capture.maxBytesPerCall ?? CAPTURE_OFF.maxBytesPerCall;
   const read = {
     logs: paths.logs,
     issue,
@@ -130,7 +133,7 @@ async function diagnosticsCommand(
           ? { kind: "all" as const }
           : { kind: "latest" as const },
     json: flags.json !== undefined,
-    secrets: configOf(repository)?.secrets ?? [],
+    secrets: config?.secrets ?? [],
   };
   const write = (text: string) => {
     process.stdout.write(text);
@@ -139,6 +142,7 @@ async function diagnosticsCommand(
     const missing = captures(
       {
         ...read,
+        maxBytesPerCall,
         ...(flags.content !== undefined ? { id: flags.content } : {}),
       },
       write,
@@ -172,7 +176,8 @@ async function diagnosticsCommand(
       follow: flags.follow !== undefined,
       captures: flags["show-captures"] !== undefined,
       json: flags.json !== undefined,
-      secrets: configOf(repository)?.secrets ?? [],
+      secrets: read.secrets,
+      maxBytesPerCall,
     },
     (text) => process.stdout.write(text),
   );

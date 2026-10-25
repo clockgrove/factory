@@ -37,6 +37,8 @@ export interface ExportOptions {
   invocations?: readonly string[];
   /** `metadata` reads no captured text; `retained` adds the captured request and response. */
   content: "metadata" | "retained";
+  /** capture.maxBytesPerCall: what bounds a capture file's read (diagnostics.ts readCapture). */
+  maxBytesPerCall: number;
   /** The collector's base URL; the preview's digest needs it. */
   endpoint?: string;
   secrets: readonly string[];
@@ -283,7 +285,7 @@ function spansOf(options: ExportOptions): {
         const id = str(event.capture);
         const path = id && captureFile(options.issue, run, id);
         const body = path
-          ? readCapture(options.logs, path, secrets)
+          ? readCapture(options.logs, path, secrets, options.maxBytesPerCall)
           : undefined;
         attributes.push(
           attribute(

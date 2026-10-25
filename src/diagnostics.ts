@@ -37,6 +37,8 @@ export interface DiagnosticsOptions {
   follow?: boolean;
   /** With `item`: print each model call's captured request and response, not only its capture file. */
   captures?: boolean;
+  /** capture.maxBytesPerCall: what bounds a capture file's read (readCapture). */
+  maxBytesPerCall: number;
   json?: boolean;
   secrets: readonly string[];
 }
@@ -263,7 +265,12 @@ function captureOf(
   if (!file) return undefined;
   const path = join(options.logs, file);
   if (!bodies) return { path };
-  const body = readCapture(options.logs, file, options.secrets);
+  const body = readCapture(
+    options.logs,
+    file,
+    options.secrets,
+    options.maxBytesPerCall,
+  );
   return body ? { path, ...body } : { path };
 }
 
@@ -319,19 +326,20 @@ export function originalText(original?: Record<string, unknown>): string {
   return parts.length ? `; ${parts.join(", ")}` : "";
 }
 
-/** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */
-const CAPTURE_READ_MAX = 768 * 1024 * 1024;
-
 /**
  * A capture file's bodies (`file` under `logs`, from paths.ts captureFile),
  * read without following links; undefined when it was rotated away or
  * can't be read. Stored redacted and cut to capture.maxBytesPerCall, and
- * redacted again here with today's secrets.
+ * redacted again here with today's secrets. The read is bounded by that
+ * setting (`maxBytesPerCall`): three times it, for JSON escapes, and 1 MiB
+ * for the rest of the file; a larger file (written under a larger setting)
+ * isn't read.
  */
 export function readCapture(
   logs: string,
   file: string,
   secrets: readonly string[],
+  maxBytesPerCall: number,
 ):
   | {
       request?: string;
@@ -344,7 +352,12 @@ export function readCapture(
   try {
     const body = redactDeep(
       JSON.parse(
-        readContained(logs, file, CAPTURE_READ_MAX, true).toString("utf8"),
+        readContained(
+          logs,
+          file,
+          3 * maxBytesPerCall + 1024 * 1024,
+          true,
+        ).toString("utf8"),
       ) as Record<string, unknown>,
       secrets,
     );

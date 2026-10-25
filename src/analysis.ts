@@ -117,7 +117,7 @@ const size = (bytes: number | null) =>
  * that one's bodies, from any run. Returns why it can't, for a refusal.
  */
 export function captures(
-  options: AnalysisRead & { id?: string },
+  options: AnalysisRead & { id?: string; maxBytesPerCall: number },
   write: (text: string) => void,
 ): string | undefined {
   const { runs, rows } = captureRows(
@@ -128,7 +128,9 @@ export function captures(
       ? rows.find((candidate) => candidate.id === options.id)
       : undefined;
     const file = row && captureFile(options.issue, row.run, row.id);
-    const body = file && readCapture(options.logs, file, options.secrets);
+    const body =
+      file &&
+      readCapture(options.logs, file, options.secrets, options.maxBytesPerCall);
     if (!row || !body)
       return `#${options.issue} has no capture ${options.id}: \`factory diagnostics ${options.issue} --captures --all-runs\` lists them; retention removes a run's captures with its log.`;
     if (options.json) {

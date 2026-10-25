@@ -23,6 +23,7 @@ import {
   item,
   offered,
   plan,
+  REPO,
   refusal,
   seed,
   serve,
@@ -1389,4 +1390,142 @@ test("a correction already tried for the same failure asks instead of repeating"
     tried,
   );
   assert.equal(elsewhere.kind, "correction");
+});
+
+test("a failed check holds naming each problem with recheck; recheck checks the edited Objective again and continues once it passes", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { loadConfig } = await import("../dist/config.js");
+  const { checkInputs } = await import("../dist/planning/steps.js");
+  const { readShown } = await import("../dist/shown.js");
+  const { newObjective } = await import("../dist/state.js");
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const saved = process.env.FACTORY_CONFIG;
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  let config;
+  try {
+    config = loadConfig(REPO);
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_CONFIG;
+    else process.env.FACTORY_CONFIG = saved;
+  }
+  const git = (...args) => {
+    const result = spawnSync(
+      "git",
+      [
+        "-C",
+        config.checkout,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        ...args,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  writeFileSync(join(config.checkout, "README.md"), "# Drill\n");
+  git("add", "README.md");
+  git("commit", "--quiet", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  // The issue as GitHub shows it; the operator edits it while it holds.
+  let shown =
+    "<h2>Acceptance</h2><h2>Sources</h2><ul><li>the parser docs</li></ul>";
+  const checked = [];
+  // The check step's run once GitHub's reads are done (workflow.ts
+  // checkStep, planning/steps.ts readObjective).
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date()),
+    {
+      steps: (state) =>
+        state.done.check
+          ? []
+          : [
+              {
+                key: "check",
+                deadlineMs: 60_000,
+                run: async ({ state, signal }) => {
+                  checked.push(shown);
+                  const read = await checkInputs(
+                    config,
+                    {
+                      shown: readShown(shown, { sources: true }),
+                      writer: true,
+                      base,
+                      title: "Parser",
+                      reviewArtifacts: config.reviewArtifacts,
+                    },
+                    "recheck",
+                    state,
+                    signal,
+                  );
+                  return "hold" in read
+                    ? read.hold
+                    : { kind: "done", result: read.inputs };
+                },
+              },
+            ],
+      status: () => "checking",
+    },
+    mkdtempSync(join(tmpdir(), "factory-check-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+  );
+  const settled = (what, done) =>
+    until(() => {
+      runner.tick();
+      return done();
+    }, what);
+  const held = async (after) => {
+    await settled(
+      "the check holds",
+      () => runner.state.holds[0] && runner.state.holds[0].id !== after,
+    );
+    const [hold] = runner.state.holds;
+    assert.equal(hold.step, "check");
+    assert.equal(
+      hold.question,
+      [
+        "This Objective needs fixing before Factory can plan it:",
+        "- Add a Goal section with one paragraph.",
+        "- Add an Acceptance section with at least one observable outcome bullet.",
+        '- Sources entry "the parser docs" isn\'t a path; write "- path" or "- path#Exact Heading", one file per bullet, and put prose under Context.',
+        "",
+        "Edit the issue, then answer `recheck`.",
+      ].join("\n"),
+    );
+    assert.deepEqual(
+      hold.options.map((option) => option.answer),
+      ["recheck", "cancel"],
+    );
+    return hold;
+  };
+  const first = await held();
+  // Answered before the edit: it checks again, and holds again.
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("recheck", undefined, "op", undefined, first.id),
+    ),
+    null,
+  );
+  const second = await held(first.id);
+  assert.equal(checked.length, 2);
+  shown =
+    "<h2>Goal</h2><p>Ship the parser.</p><h2>Acceptance</h2><ul><li>The parser reads every fixture.</li></ul><h2>Sources</h2><ul><li>README.md</li></ul>";
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("recheck", undefined, "op", undefined, second.id),
+    ),
+    null,
+  );
+  await settled("the edited Objective passes", () => runner.state.done.check);
+  assert.deepEqual(runner.state.holds, []);
+  assert.equal(checked.length, 3);
+  assert.equal(runner.state.done.check.base, base);
+  assert.match(
+    runner.state.done.check.shown.body,
+    /## Goal\n\nShip the parser\./,
+  );
 });

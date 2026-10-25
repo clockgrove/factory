@@ -331,14 +331,14 @@ test("Objectives are taken in Project order: the order field ascending, a card w
 test("the one step running at three deaths, with progress between, holds", async () => {
   const inst = installation();
   const at = new Date().toISOString();
-  // The dead run's progress is in the saved state only: it died before
-  // its heartbeat counted the finished step.
+  // Interrupted at two deaths already, the second after progress; the
+  // dead run's progress is in the saved state only: it died before its
+  // heartbeat counted the finished step.
   seed(inst, 61, "checking", {
-    attempts: { check: { startedAt: at, run: "dead" } },
+    attempts: { check: { startedAt: at, run: "dead", interrupted: 2 } },
     finishedRun: "dead",
   });
-  const running = (...issues) =>
-    issues.map((issue) => ({ issue, step: "check" }));
+  const deaths = [1, 2].map(() => ({ at, lived: null }));
   writeFileSync(
     join(inst.root, "service.json"),
     JSON.stringify({
@@ -347,10 +347,7 @@ test("the one step running at three deaths, with progress between, holds", async
       at,
       startedAt: at,
       finished: 0,
-      deaths: [
-        { at, lived: null, running: running(61, 62), progressed: false },
-        { at, lived: null, running: running(61), progressed: true },
-      ],
+      deaths,
       setAside: {},
     }),
   );
@@ -365,12 +362,10 @@ test("the one step running at three deaths, with progress between, holds", async
     hold.options.map((option) => option.answer),
     ["retry", "cancel"],
   );
-  const record = JSON.parse(
-    readFileSync(join(inst.root, "service.json"), "utf8"),
-  );
-  assert.ok(
-    record.deaths.every((death) => death.spent),
-    "the evidence is spent",
+  assert.deepEqual(
+    stateOf(inst, 61).attempts,
+    {},
+    "the evidence goes with the attempt",
   );
   await stopped(service);
 });
@@ -446,10 +441,9 @@ test("every step running at three deaths, with progress between, holds with its 
   // A killer and an innocent long step, interrupted together every time.
   for (const issue of [63, 64])
     seed(inst, issue, "checking", {
-      attempts: { check: { startedAt: at, run: "dead" } },
+      attempts: { check: { startedAt: at, run: "dead", interrupted: 2 } },
       finishedRun: "dead",
     });
-  const running = [63, 64].map((issue) => ({ issue, step: "check" }));
   writeFileSync(
     join(inst.root, "service.json"),
     JSON.stringify({
@@ -458,10 +452,7 @@ test("every step running at three deaths, with progress between, holds with its 
       at,
       startedAt: at,
       finished: 0,
-      deaths: [
-        { at, lived: null, running, progressed: false },
-        { at, lived: null, running, progressed: true },
-      ],
+      deaths: [1, 2].map(() => ({ at, lived: null })),
       setAside: {},
     }),
   );

@@ -24,8 +24,9 @@ export class TransientError extends Error {
     /** When GitHub said to come back, if it did. */
     readonly retryAfterMs?: number,
     /**
-     * A rate limit (429, or a 403 rate limit): `retryAfterMs` is when it
-     * resets. Otherwise it is only a backoff hint (a 5xx's retry-after).
+     * A rate limit (429, or a 403 with GitHub's rate-limit headers):
+     * `retryAfterMs` is when it resets. Otherwise it is only a backoff hint
+     * (a 5xx's retry-after).
      */
     readonly limited = false,
   ) {
@@ -128,17 +129,20 @@ const answers = new WeakMap<
 >();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
 const FRESH_MS = 2 * 60_000;
+/** How long a 403 without rate-limit headers retries before it asks. */
+const REFUSED_MS = 2 * 60_000;
 
 /**
  * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
- * must fix holds, at once: a rejected login (401), a refusal (403, or a
- * 404 of anything but an issue; rate limits, and a 403 or 404 of what
- * Factory just made, are TransientErrors: `GitHub.made`) naming the
- * permission the call needs (`needing`), and a missing issue (404).
- * A rate limit waits for its reset. Everything else (5xx, timeouts, 409,
- * 410, 422, GraphQL errors) may change, so it retries as an unknown
- * transient wait; a 5xx's retry-after only sets its backoff. Undefined
- * for an error that isn't GitHub's.
+ * must fix holds, at once: a rejected login (401), a refusal (a 404 of
+ * anything but an issue; rate limits, and a 403 or 404 of what Factory
+ * just made, are TransientErrors: `GitHub.made`) naming the permission
+ * the call needs (`needing`), and a missing issue (404). Any other 403
+ * asks the same after REFUSED_MS of retries, since a secondary rate limit
+ * can come without headers. A rate limit waits for its reset. Everything
+ * else (5xx, timeouts, 409, 410, 422, GraphQL errors) may change, so it
+ * retries as an unknown transient wait; a 5xx's retry-after only sets its
+ * backoff. Undefined for an error that isn't GitHub's.
  */
 export function githubOutcome(
   error: unknown,
@@ -181,12 +185,16 @@ export function githubOutcome(
         ["cancel", "retry"],
       ),
     );
-  if (error.status === 403 || error.status === 404)
-    return objectiveWide(
-      hold(
-        `${detail}. Give Factory's login ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`,
-      ),
-    );
+  const refused = `${detail}. Give Factory's login ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`;
+  // A 403 without rate-limit headers may be a secondary limit, which
+  // passes: it asks only once it outlasts one.
+  if (error.status === 403)
+    return {
+      kind: "retry",
+      reason: error.message,
+      holdAfter: { ms: REFUSED_MS, question: refused, scope: "objective" },
+    };
+  if (error.status === 404) return objectiveWide(hold(refused));
   return { kind: "retry", reason: error.message };
 }
 
@@ -1811,11 +1819,13 @@ export class GitHub {
     }
     const retryAfter = Number(response.headers.get("retry-after"));
     const reset = Number(response.headers.get("x-ratelimit-reset"));
+    // GitHub marks a 403 rate limit (primary or secondary) by its headers;
+    // a 403 without them may still be a secondary limit (githubOutcome).
     const limited =
       response.status === 429 ||
       (response.status === 403 &&
         (response.headers.get("x-ratelimit-remaining") === "0" ||
-          /rate limit/i.test(text)));
+          response.headers.has("retry-after")));
     const expected =
       !limited && expectedStatuses.getStore()?.includes(response.status);
     if (!expected) {

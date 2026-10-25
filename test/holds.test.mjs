@@ -9,6 +9,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1235,4 +1236,72 @@ test("a planner's can't-be-planned answer holds once with replan and cancel, and
     .map((file) => readFileSync(join(inst.logs, "71", file), "utf8"))
     .join("");
   assert.doesNotMatch(log, /"model-usage"/, "no planner call");
+});
+
+test("a 403 is a rate limit only by GitHub's headers; one without them retries, then asks its refusal for the whole Objective", async (t) => {
+  const { GitHub, githubOutcome } = await import("../dist/github.js");
+  const { DEFAULT_LIMITS, ObjectiveRunner } = await import("../dist/engine.js");
+  const { newObjective } = await import("../dist/state.js");
+  const reset = Math.floor(Date.now() / 1000) + 600;
+  // A local stand-in for the API: each path's 403 carries these headers,
+  // and every body names a rate limit, which decides nothing.
+  const headers = {
+    "/repos/o/r/primary": {
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": String(reset),
+    },
+    "/repos/o/r/secondary": { "retry-after": "60" },
+    "/repos/o/r/refused": {},
+  };
+  const server = createHttpServer((req, res) => {
+    res.writeHead(403, {
+      "content-type": "application/json",
+      ...headers[req.url],
+    });
+    res.end(JSON.stringify({ message: "You have exceeded a rate limit" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const token = process.env.FACTORY_GITHUB_TOKEN;
+  process.env.FACTORY_GITHUB_TOKEN = "test-token";
+  t.after(() => {
+    if (token === undefined) delete process.env.FACTORY_GITHUB_TOKEN;
+    else process.env.FACTORY_GITHUB_TOKEN = token;
+  });
+  const github = new GitHub("o/r", `http://127.0.0.1:${server.address().port}`);
+  const outcome = async (path) => {
+    try {
+      await github.rest("GET", path);
+    } catch (error) {
+      return githubOutcome(error, "o/r");
+    }
+    assert.fail(`${path} answered`);
+  };
+  const primary = await outcome("/repos/o/r/primary");
+  assert.equal(primary.wait?.kind, "reset");
+  assert.equal(Date.parse(primary.wait.at), reset * 1000);
+  const secondary = await outcome("/repos/o/r/secondary");
+  assert.equal(secondary.wait?.kind, "reset");
+  assert.ok(Date.parse(secondary.wait.at) - Date.now() <= 60_000);
+  const refused = await outcome("/repos/o/r/refused");
+  assert.equal(refused.kind, "retry");
+  assert.equal(refused.wait, undefined, "an unknown transient");
+  // It retries for 2 min, then asks the refusal's question once.
+  let clock = Date.now();
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date(clock)),
+    { steps: () => [], status: () => "building" },
+    mkdtempSync(join(tmpdir(), "factory-refused-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+    DEFAULT_LIMITS,
+    () => new Date(clock),
+  );
+  runner.apply("item:a:work", refused);
+  assert.equal(runner.state.holds.length, 0, "a secondary limit may pass");
+  clock += 2 * 60_000;
+  runner.apply("item:a:work", await outcome("/repos/o/r/refused"));
+  const [held] = runner.state.holds;
+  assert.match(held.question, /Give Factory's login read access/);
+  assert.equal(held.item, undefined, "an Objective question");
 });

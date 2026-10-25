@@ -134,6 +134,8 @@ export interface HoldAfter {
   question: string;
   /** Absent: `retry` and `cancel`. */
   offers?: readonly Offer[];
+  /** Absent: `item` (see `HoldScope`). */
+  scope?: HoldScope;
   since?: string;
 }
 
@@ -1181,7 +1183,10 @@ export class ObjectiveRunner {
       Number.isFinite(answered) ? answered : -Infinity,
     );
     if (after && now - from >= after.ms)
-      question = hold(after.question, after.offers);
+      question = {
+        ...hold(after.question, after.offers),
+        ...(after.scope ? { scope: after.scope } : {}),
+      };
     else if (isError) {
       if (count >= this.limits.maxErrors)
         // A step whose input the operator can reject (`Step.redo`

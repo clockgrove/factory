@@ -20,9 +20,7 @@ set -uo pipefail
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
 REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
-PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill" (cards of both repositories)
-# The prd suite's repository C installation queues on this Project (#1974 gives it its own).
-Q_PROJECT_ID=${FACTORY_DRILL2_PROJECT_ID:-$PROJECT_ID}
+PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
 usage() { sed -n 2,17p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -88,7 +86,7 @@ STATE_BASE=${STATE_BASE:-/tmp/factory-integration/$RUN_ID}
 START_S=$(date +%s); HARD_STOP_AT=$(( START_S + 60 * 60 )); STOP_AT=$(( HARD_STOP_AT - 300 ))
 export HARD_STOP_AT STOP_AT
 if [ -n "$DRY" ]; then RUN_DIR=$(mktemp -d "$RUNS/.dry.XXXX"); else RUN_DIR="$RUNS/$RUN_ID"; mkdir -p "$RUN_DIR"; fi
-mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"; : >"$RUN_DIR/repos"
+mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"; : >"$RUN_DIR/repos"; : >"$RUN_DIR/projects"
 source "$SUITE/lib/common.sh"; source "$SUITE/lib/gh.sh"; source "$SUITE/lib/serve.sh"; source "$SUITE/lib/repos.sh"
 source "$SUITE/cases/main.sh"; source "$SUITE/cases/crash.sh"; source "$SUITE/cases/edge.sh"; source "$SUITE/cases/prd.sh"
 commit=$(git -C "$BUILD" log -1 --format='%h %s' 2>/dev/null | cut -c1-80)
@@ -215,7 +213,7 @@ write_results() {
     echo "# Integration run $RUN_ID ($SUITE_NAME)"; echo
     echo "Wall time: **$(( (end_s - START_S) / 60 )) min $(( (end_s - START_S) % 60 )) s** (limit 60), from $(TZ=America/Los_Angeles date -d @"$START_S" '+%-I:%M %p') to $(TZ=America/Los_Angeles date -d @"$end_s" '+%-I:%M %p') PDT${INTERRUPTED:+. **Interrupted**}."; echo
     echo "- Build: $BUILD ($commit)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
-    echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ') (${REPOS_NOTE:-none created})"; echo
+    echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ')$([ -s "$RUN_DIR/projects" ] && echo ", Project #$(paste -sd' ' "$RUN_DIR/projects")") (${REPOS_NOTE:-none created})"; echo
     echo "**Totals:** ${tot%, }."; echo
     echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{d=$4-$3; printf "| %s | %s | +%dm%02ds | +%dm%02ds | %dm %02ds |\n", $1, $2, $3/60, $3%60, $4/60, $4%60, d/60, d%60}' "$RUN_DIR/cases.tsv"
@@ -310,6 +308,7 @@ cleanup() {
   local r kept=""
   if [ -z "$KEEP_REPOS" ] && [ "$code" = 0 ]; then
     while read -r r; do [ -n "$r" ] && { repo_delete "$r" || kept="$kept $r"; }; done <"$RUN_DIR/repos"
+    while read -r r; do [ -n "$r" ] && { project_delete "$r" || kept="$kept Project #$r"; }; done <"$RUN_DIR/projects"
     REPOS_NOTE="deleted$([ -n "$kept" ] && echo "; could not delete:$kept")"
   else REPOS_NOTE="kept for inspection ($([ -n "$KEEP_REPOS" ] && echo "--keep-repos" || echo "the run failed"); swept after 24 h)"; fi
   write_results
@@ -335,10 +334,13 @@ trap 'INTERRUPTED=1; exit 130' INT TERM
 trap cleanup EXIT
 mkdir -p "$STATE_BASE"
 SETUP0=$(date +%s)
+C_PROJECT_ID=""
 setup_repos() {
-  repos_sweep
+  repos_sweep; projects_sweep
   repo_create "${M_REPO#*/}" || return 1
-  [ -z "$NEEDS_C" ] || repo_create "${C_REPO#*/}"
+  [ -z "$NEEDS_C" ] && return 0
+  repo_create "${C_REPO#*/}" || return 1
+  C_PROJECT_ID=$(project_create) && [ -n "$C_PROJECT_ID" ]
 }
 setup_main() {
   clone $M_REPO "$STATE_BASE/checkout-m" || return 1
@@ -346,7 +348,7 @@ setup_main() {
   inst_define M $M_REPO "$STATE_BASE/config-m.json"
   if [ -n "$NEEDS_C" ]; then
     clone $C_REPO "$STATE_BASE/checkout-c" || return 1
-    write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8
+    write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8 "c['queue']['projectId']='$C_PROJECT_ID'"
     inst_define C $C_REPO "$STATE_BASE/config-c.json"
     inst_define H $C_REPO "$STATE_BASE/config-c.json"
     printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"

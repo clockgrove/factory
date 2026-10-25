@@ -43,3 +43,44 @@ repos_sweep() {
     --jq ".[] | select((.description // \"\") | startswith(\"$REPO_MARK\")) | select(.createdAt < \"$cutoff\") | .name" |
     while read -r r; do [ -n "$r" ] && repo_delete "$r"; done
 }
+
+# ---------- repository C's Project ----------
+# One installation serves a Project (PRD 8), so repository C gets a Project of
+# its own each run, with Factory's queue field and order field, deleted with
+# the repositories. Only a Project whose title starts with REPO_MARK is deleted.
+
+# project_create: repository C's Project -> its node id (recorded by number in RUN_DIR/projects).
+project_create() {
+  local data number
+  data=$(gh project create --owner "$REPO_OWNER" --title "$REPO_MARK $RUN_ID" --format json) || return 1
+  number=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["number"])' <<<"$data") || return 1
+  echo "$number" >>"$RUN_DIR/projects"
+  gh project field-create "$number" --owner "$REPO_OWNER" --name Factory --data-type SINGLE_SELECT \
+    --single-select-options "Queued,Planning,Building,Needs you,Done,Cancelled" >/dev/null || return 1
+  gh project field-create "$number" --owner "$REPO_OWNER" --name "Factory order" --data-type NUMBER >/dev/null || return 1
+  log "created Project #$number for $C_REPO"
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])' <<<"$data"
+}
+
+# project_delete NUMBER: delete Project NUMBER, only when its title carries REPO_MARK.
+project_delete() {
+  local title
+  title=$(gh project view "$1" --owner "$REPO_OWNER" --format json --jq .title) || return 1
+  [[ $title == "$REPO_MARK"* ]] || { log "not deleting Project #$1: not a suite Project"; return 1; }
+  gh project delete "$1" --owner "$REPO_OWNER" >/dev/null && log "deleted Project #$1"
+}
+
+# projects_sweep: delete suite Projects whose run (the RUN_ID in the title) began over a day ago.
+projects_sweep() {
+  local n
+  gh project list --owner "$REPO_OWNER" --limit 200 --format json |
+    python3 -c 'import datetime,json,re,sys
+mark = sys.argv[1]; cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+for p in json.load(sys.stdin).get("projects", []):
+    t = p.get("title") or ""
+    m = re.match(re.escape(mark) + r" (\d{4}-\d\d-\d\dT\d{6})", t)
+    # RUN_ID is PDT/PST wall time; reading it as UTC-7 can only make a run look younger.
+    if m and datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H%M%S").replace(tzinfo=datetime.timezone(datetime.timedelta(hours=-7))) < cutoff:
+        print(p["number"])' "$REPO_MARK" |
+    while read -r n; do [ -n "$n" ] && project_delete "$n"; done
+}

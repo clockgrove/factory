@@ -60,6 +60,9 @@ for l in sys.stdin:
     if r["head"] == head and (not state or r["state"] == state):
         print(r["number"]); break' "$1" "$2" "${3:-}" <<<"$rows"
 }
+# p_ended N: when N's last step (report) finished; empty if it never did.
+# (`run-end` is the service run's end, logged at shutdown, not the Objective's.)
+p_ended() { st at "$1" last event=outcome outcome=done step=report; }
 # p_ignored N: /factory comments the service ignored on N (an author without write access).
 p_ignored() { echo $(( $(st events "$1" event=comment-ignored) + $(st events "$1" event=ignored) )); }
 # p_close N...: close issues the suite filed but never ran.
@@ -182,8 +185,17 @@ PY
   cli_t 60 propose-amendment "$n" --file "$f" >"$RUN_DIR/amend.$n.out" 2>&1; local rc=$?
   wait_for 1200 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=done 'step=amend:*:review') -gt 0 ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = done ]"
   local rv; rv=$(st events "$n" event=outcome outcome=done 'step=amend:*:review'); local pl; pl=$(st starts-since "$n" "$at" 'amend:*:plan')
+  # The review may reject it (it adds files the Objective doesn't name):
+  # `continue` runs the plan without it, so the edit below meets no
+  # open amendment question.
+  local ah verdict=accepted; ah=$(st hold "$n" 'amend:*:continue')
+  if [ "$ah" != null ]; then
+    verdict=rejected
+    answer_t 60 "$n" continue --question "$(hold_field "$ah" id)" >/dev/null 2>&1
+    wait_for 180 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' hold $n 'amend:*:continue')\" = null ]"
+  fi
   [ "$rc" = 0 ] && [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
-  rec_if plan.amendment $? "#$n propose-amendment exit $rc: amendment plan starts $pl, reviews done $rv" "$t0"
+  rec_if plan.amendment $? "#$n propose-amendment exit $rc: amendment plan starts $pl, reviews done $rv, $verdict" "$t0"
   if settled "$n"; then record plan.replan FAIL "#$n finished before the edit ($(st status "$n"))" "$t0"; return; fi
   local edited="$RUN_DIR/objectives/$CASE-amend-edit-$id.md"
   render happy "$edited" ID="$id" || return; printf '\n%s\n' "- \`countChar$id(\"aaa\", \"a\")\` is \`3\`." >>"$edited"
@@ -255,7 +267,7 @@ case_paths() {
   b=$(new_objective overlap "owned paths overlap B" ID="$id" FN="overlapB$id" SPEC="\`overlapB$id(s)\` returns \`\"?\" + s\`.") || return
   wait_phase "$a" 'done|cancelled|failed' 2400 >/dev/null; wait_phase "$b" 'done|cancelled|failed' 2400 >/dev/null
   local wa wb ea eb; wa=$(st at "$a" first event=start 'step=item:*:work'); wb=$(st at "$b" first event=start 'step=item:*:work')
-  ea=$(st at "$a" last event=run-end); eb=$(st at "$b" last event=run-end)
+  ea=$(p_ended "$a"); eb=$(p_ended "$b")
   local turns=1
   if [ -n "$wa" ] && [ -n "$wb" ]; then
     if [[ $wa < $wb ]]; then [ -n "$ea" ] && [[ ! $wb < $ea ]] && turns=0; else [ -n "$eb" ] && [[ ! $wa < $eb ]] && turns=0; fi
@@ -311,6 +323,18 @@ q_mode() { python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get("mode","running"))
 except (OSError, ValueError): print("running")' "$ROOT/queue.json"; }
 q_uninstall() { cli_t 60 setup --uninstall --json >"$RUN_DIR/q.uninstall.out" 2>&1; }
+# q_wait N: until N settles, answering by HOLD_POLICY; at once on a hold the
+# policy can't answer (prod.no-holds fails on it), so the checks after it
+# still run in the time left.
+q_wait() {
+  local p
+  while ! settled "$1"; do
+    p=$(st phase "$1")
+    if [[ $p == hold:* ]]; then auto_answer "$1" || return 1; sleep 3; continue; fi
+    stopping && return 1
+    sleep 4
+  done
+}
 
 # PRD 1, 10, 12, 13, 14 at production settings: `factory setup` writes the
 # configuration with no model call and `--background` runs it; a pause from
@@ -354,11 +378,11 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   [ "$paused" = paused ] && [ "$resumed" = running ] && [ "$admitted_paused" = 0 ] && [ "$starts_paused" = 0 ] && [ "$(marker_count "$m1" "reply:comment-$pc")" = 1 ] && [ "$(marker_count "$m1" "reply:comment-$rcm")" = 1 ]
   rec_if queue.pause-github $? "'/factory queue pause' on #$n1: mode $paused, replies x$(marker_count "$m1" "reply:comment-$pc"); queued while paused admitted: $admitted_paused; #$n1 steps started while paused (after 45 s): $starts_paused; '/factory queue resume': mode $resumed, replies x$(marker_count "$m1" "reply:comment-$rcm")" "$t0"
 
-  for x in "$n1" "$c" "$b" "$a"; do wait_phase "$x" 'done|cancelled|failed' "$(left)" >/dev/null; done
+  for x in "$n1" "$c" "$b" "$a"; do q_wait "$x"; done
   sleep 20
   # Order and the cap of 3: c, then b, then a once a slot freed.
   local ac ab aa e1 ec eb; ac=$(st at "$c" first event=admitted); ab=$(st at "$b" first event=admitted); aa=$(st at "$a" first event=admitted)
-  e1=$(st at "$n1" first event=run-end); ec=$(st at "$c" first event=run-end); eb=$(st at "$b" first event=run-end)
+  e1=$(p_ended "$n1"); ec=$(p_ended "$c"); eb=$(p_ended "$b")
   local first_end; first_end=$(printf '%s\n' "$e1" "$ec" "$eb" | grep . | sort | head -1)
   [ -n "$ac" ] && [ -n "$ab" ] && [ -n "$aa" ] && [[ ! $ab < $ac ]] && [[ ! $aa < $ab ]]
   rec_if queue.order $? "admitted: #$c (order 1) $ac, #$b (order 2) $ab, #$a (order 3) $aa" "$t0"

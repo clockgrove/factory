@@ -685,18 +685,6 @@ function environmentFindings(
     }
     previous = selected;
   }
-  if (environment.readiness === "missing") {
-    findings.push({
-      source: "check",
-      kind: "operator-decision",
-      itemId: item.id,
-      message:
-        environment.probe || environment.prerequisites?.length
-          ? `The plan needs an external prerequisite for criterion "${name}" (${environment.kind} environment, probe \`${environment.probe}\`). Establish it outside Factory, or say how the criterion should be covered.`
-          : `The plan cannot cover criterion "${name}" as the Objective stands. Say how it should be covered or what the Objective allows.`,
-    });
-    return findings;
-  }
   if (environment.kind === "real" && !environment.probe)
     found(
       `Coverage of "${name}" uses a real environment, which needs an exact readiness probe from ${item.id}'s validation commands`,
@@ -721,6 +709,16 @@ function environmentFindings(
       `Coverage of "${name}" names preparedBy ${environment.preparedBy} with readiness ${environment.readiness}; set readiness prepare, or leave preparedBy empty`,
       item.id,
     );
+  if (environment.readiness === "missing")
+    findings.push({
+      source: "check",
+      kind: "operator-decision",
+      itemId: item.id,
+      message:
+        environment.probe || environment.prerequisites?.length
+          ? `The plan needs an external prerequisite for criterion "${name}" (${environment.kind} environment, probe \`${environment.probe}\`). Establish it outside Factory, or say how the criterion should be covered.`
+          : `The plan cannot cover criterion "${name}" as the Objective stands. Say how it should be covered or what the Objective allows.`,
+    });
   return findings;
 }
 

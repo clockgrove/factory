@@ -13,4 +13,7 @@ No other file changes.
 - `scopeBase{{ID}}("  a b ")` is `"a b"`.
 - `scopeTop{{ID}}("  a b ")` is `"A B"`.
 - `scopeSolo{{ID}}("abc")` is `3`.
-- `npm test`
+
+```factory-commands
+npm test
+```

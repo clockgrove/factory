@@ -5,4 +5,7 @@ Add `docs/attachment{{ID}}.md`, a short note that records the byte size, SHA-256
 ## Acceptance
 
 - `docs/attachment{{ID}}.md` states the attachment's bytes, sha256, width and height.
-- `npm test`
+
+```factory-commands
+npm test
+```

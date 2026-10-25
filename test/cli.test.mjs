@@ -1019,7 +1019,6 @@ test("status: one model, the Work Item table, the full --json and the list view"
             source: {
               path: "OBJECTIVE",
               text: "Audit is clean",
-              command: "npm run audit",
             },
             itemId: "a",
             proof: { kind: "final-review" },
@@ -1095,7 +1094,7 @@ test("status: one model, the Work Item table, the full --json and the list view"
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
   assert.match(
     text,
-    /Retired: command `npm run audit` \(final validation\): retired by kirk at 2026-01-01 09:00:00 GMT\+9: covered by CI\. Judged by review instead: Audit is clean\n/,
+    /Retired: command `npm run audit` \(final validation\): retired by kirk at 2026-01-01 09:00:00 GMT\+9: covered by CI\n/,
   );
   assert.doesNotMatch(text, /npm run stale/);
   assert.match(

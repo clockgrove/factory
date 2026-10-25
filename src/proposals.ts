@@ -40,7 +40,7 @@ import { defaultHead, sha256 } from "./git.js";
 import type { GitHub, IssueSummary } from "./github.js";
 import { takeServiceLock } from "./lock.js";
 import { code, mark, prose } from "./markdown.js";
-import { validPath } from "./objective.js";
+import { COMMANDS_LANG, validPath } from "./objective.js";
 import type { Paths } from "./paths.js";
 import { BaseFiles, sectionText } from "./planning/facts.js";
 import { exportTree } from "./planning/repository.js";
@@ -251,16 +251,28 @@ export function composeObjective(
     lines.length
       ? [`## ${heading}`, lines.join(gap ? "\n\n" : "\n")]
       : ([] as string[]);
-  const acceptance = [
-    ...bullets(objective.acceptance, line),
-    ...bullets(objective.commands, (command) => code(clean(command))),
-  ];
+  const commands = objective.commands.map(clean).filter(Boolean);
+  // A fence longer than any backtick run inside, so no command closes it.
+  const fence = "`".repeat(
+    Math.max(
+      3,
+      ...commands.map((c) =>
+        (c.match(/`+/g) ?? [""]).reduce(
+          (n, run) => Math.max(n, run.length + 1),
+          0,
+        ),
+      ),
+    ),
+  );
   const parts = [
     proposalMark(id, objective.key),
     "## Goal",
     line(objective.goal),
     "## Acceptance",
-    acceptance.join("\n"),
+    bullets(objective.acceptance, line).join("\n"),
+    ...(commands.length
+      ? [`${fence}${COMMANDS_LANG}\n${commands.join("\n")}\n${fence}`]
+      : []),
     ...section("Context", objective.context.map(line).filter(Boolean), true),
     ...section(
       "Sources",

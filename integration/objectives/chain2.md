@@ -11,4 +11,7 @@ No other file changes.{{EXTRA}}
 
 - `chainBase{{ID}}("  a b ")` is `"a b"`.
 - `chainTop{{ID}}("  a b ")` is `"A B"`.
-- `npm test`
+
+```factory-commands
+npm test
+```

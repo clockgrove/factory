@@ -736,8 +736,7 @@ function environmentFindings(
 /**
  * Coverage against the pinned sources: every Objective obligation covered
  * once and every source span real and disjoint. Obligations are keyed by
- * text (Objective) or by path and lines (source exit items). An Objective
- * command (`source.command`) is run by final validation.
+ * text (Objective) or by path and lines (source exit items).
  */
 function checkCoverageSources(
   draft: Draft,

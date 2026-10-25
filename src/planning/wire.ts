@@ -318,7 +318,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
             lineIndex: {
               ...integer(),
               description:
-                "A standalone executable command line or one complete backticked command bullet; never prose around a code span.",
+                "A line of the Objective's factory-commands block; no other line is a command.",
             },
           }),
           strict({
@@ -326,7 +326,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
             command: {
               ...text,
               description:
-                "For package.json, use the repository's authorized npm/pnpm invocation by an existing script name, not its JSON script body. For other tracked files, use an exact standalone executable command line, without Markdown wrappers or surrounding prose.",
+                "A root package script by its authorized npm/pnpm invocation of an existing script name, with source package.json; never its JSON script body or a line of another file.",
             },
             source: text,
           }),

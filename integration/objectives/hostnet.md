@@ -9,5 +9,8 @@ The drill's host serves a readiness file on its loopback interface; the final co
 ## Acceptance
 
 - `{{FN}}(n)` returns `n` doubled: `{{FN}}(2)` is `4`.
-- `npm test`
-- `curl -sf {{URL}}`
+
+```factory-commands
+npm test
+curl -sf {{URL}}
+```

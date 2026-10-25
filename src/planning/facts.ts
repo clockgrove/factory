@@ -9,7 +9,7 @@ import { TransientError } from "../github.js";
 import { markdownLines } from "../markdown.js";
 import {
   checkObjective,
-  objectiveText,
+  objectiveCommands,
   type SourceRef,
   validPath,
 } from "../objective.js";
@@ -218,27 +218,18 @@ function utf8(bytes: Buffer): string | undefined {
 
 // ── Objective ───────────────────────────────────────────────────────────
 
-/** The Objective body as a pinned source: operator-authored. */
+/** The Objective body as a pinned source; it declares its commands block. */
 function objectiveSource(shown: ShownObjective): PinnedSource {
   return {
     path: "OBJECTIVE",
     content: shown.body,
-    shown: {
-      lines: objectiveText(shown.blocks).split("\n"),
-      spans: shown.spans,
-    },
-    operatorAuthored: true,
+    commands: objectiveCommands(shown.blocks).commands,
   };
 }
 
-/**
- * Commands the integrated result must pass: the Acceptance list items that
- * are exactly one code element. Any other criterion is a fact for review.
- */
+/** Commands the integrated result must pass: the Objective's `factory-commands` block. */
 function finalObjectiveCommands(blocks: readonly ObjectiveBlock[]): string[] {
-  return checkObjective(blocks).objective.acceptance.flatMap((criterion) =>
-    criterion.command ? [criterion.command] : [],
-  );
+  return objectiveCommands(blocks).commands;
 }
 
 /**
@@ -258,11 +249,9 @@ export function finalCommands(
 function coverageObligations(
   blocks: readonly ObjectiveBlock[],
 ): CoverageObligation[] {
-  return checkObjective(blocks).objective.acceptance.map(
-    ({ text, command }) => ({
-      source: { path: "OBJECTIVE", text, ...(command ? { command } : {}) },
-    }),
-  );
+  return checkObjective(blocks).objective.acceptance.map(({ text }) => ({
+    source: { path: "OBJECTIVE", text },
+  }));
 }
 
 /**
@@ -406,41 +395,6 @@ export function ciOnlyKey(command: string): string {
   return invocation ? `script:${invocation.name}` : normalized;
 }
 
-/** A leading executable word, no assignment, braces or statement separators. */
-const COMMAND_SHAPE = /^[a-z][\w.-]*(?: [^{}$;|&<>]*)?$/;
-
-/**
- * Inline code spans outside fenced code: the Objective's shown code
- * elements, a repository file's backticked spans.
- */
-function inlineSpans(
-  source: Pick<PinnedSource, "content" | "shown">,
-): string[] {
-  if (source.shown) return source.shown.spans.map((span) => span.trim());
-  return markdownLines(source.content).flatMap(({ text, fenced }) =>
-    fenced ? [] : [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]!.trim()),
-  );
-}
-
-function inlineCommand(source: PinnedSource, command: string): boolean {
-  if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
-    return false;
-  return inlineSpans(source).includes(command);
-}
-
-function exactLine(lines: readonly string[], command: string): boolean {
-  // Only a command-shaped line is authority; doc code never is.
-  if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
-    return false;
-  return lines.some((line) => {
-    const text = line
-      .trim()
-      .replace(/^[-*]\s+/, "")
-      .trim();
-    return text === command || text === `\`${command}\``;
-  });
-}
-
 /** The most commands a request or refusal lists; the rest are a count. */
 const MAX_LISTED_COMMANDS = 20;
 
@@ -578,12 +532,14 @@ function scopedCommands(
 // ── Command authority ───────────────────────────────────────────────────
 
 /**
- * The command-authority rule. A validation command is authorized when it is:
- * a supported root package-script form whose script exists at the base
- * (base-observed), or an exact command-shaped line in the pinned source it
- * names (source-declared). In the operator-written Objective body an inline
- * backticked span also counts. Fenced code never counts. Commands an
- * operator answer authorized (`operator`) always pass.
+ * The command-authority rule. A validation command is authorized only when
+ * it is exactly one of: a command an operator answer authorized
+ * (`operator`); a line a pinned source declares in `commands` (the
+ * Objective's `factory-commands` block, the installation's required
+ * commands), source-declared; or a supported root package-script form whose
+ * script exists at the base, base-observed from `package.json`. Nothing is
+ * read from prose: a backticked span, a bullet or a line of a repository
+ * file is never a command.
  */
 async function authorizedCommand(
   check: ValidationCommand,
@@ -619,33 +575,21 @@ async function authorizedCommand(
     return sources.some(
       (source) =>
         source.path === check.source &&
-        (exactLine(
-          source.shown?.lines ?? source.content.split("\n"),
-          check.command,
-        ) ||
-          // An operator-authored Objective body may declare a backticked
-          // command in its prose. Repository docs keep the own-line rule.
-          (source.operatorAuthored === true &&
-            inlineCommand(source, check.command))),
+        (source.commands ?? []).includes(check.command.trim()),
     );
-  if (
-    check.provenance !== "base-observed" ||
-    !/^[A-Za-z0-9_./-]+$/.test(check.source) ||
-    check.source.split("/").includes("..")
-  )
-    return false;
-  const content = await files.text(check.source);
-  if (content === undefined) return false;
-  if (exactLine(content.split("\n"), check.command)) return true;
-  return check.source === "package.json" && Boolean(invocation);
+  return (
+    check.provenance === "base-observed" &&
+    check.source === "package.json" &&
+    Boolean(invocation)
+  );
 }
 
 /**
  * The validation commands the command-authority check accepts at the base:
  * operator-authorized commands, root package scripts in the supported forms
- * (test and check first), then inline source-declared commands in the
- * pinned sources. CI-only and network commands are left out because
- * validation refuses those.
+ * (test and check first), then the commands the pinned sources declare.
+ * CI-only and network commands are left out because validation refuses
+ * those.
  */
 async function authorizedCommands(
   sources: readonly PinnedSource[],
@@ -694,11 +638,9 @@ async function authorizedCommands(
         break;
       }
   }
-  // Only inline command spans: never fenced code, prose or code fragments.
   for (const source of sources)
-    for (const command of new Set(inlineSpans(source)))
+    for (const command of source.commands ?? [])
       if (
-        COMMAND_SHAPE.test(command) &&
         usable(command) &&
         (await authorizedCommand(
           { command, provenance: "source-declared", source: source.path },
@@ -1101,9 +1043,9 @@ export async function buildFacts(
 /**
  * The Objective's command and source problems at queue time; each says how
  * to fix it. Empty means planning can start: every pinned Source reads as
- * UTF-8 at the base, every Acceptance command has authority there, the
- * Objective declares the commands it names, and the installation's required
- * and CI-only commands fit it.
+ * UTF-8 at the base, every command in its `factory-commands` block has
+ * authority there, and the installation's required and CI-only commands
+ * fit it.
  */
 export async function objectiveCommandProblems(
   shown: ShownObjective,
@@ -1132,7 +1074,7 @@ export async function objectiveCommandProblems(
   for (const command of finals) {
     if (ciOnly.has(ciOnlyKey(command)))
       problems.push(
-        `Acceptance command ${command} is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the Objective's Acceptance commands, or remove it from ciOnlyCommands if it runs offline.`,
+        `Command ${command} in the Objective's factory-commands block is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the block, or remove it from ciOnlyCommands if it runs offline.`,
       );
     else if (
       !(await authorizedCommand(
@@ -1142,53 +1084,18 @@ export async function objectiveCommandProblems(
       ))
     )
       problems.push(
-        `Acceptance command has no executable authority at the accepted base: ${command}. Use one of the authorized commands: ${await list()}, or remove it from Acceptance.`,
-      );
-  }
-
-  if (!finals.length) {
-    const named: string[] = [];
-    for (const span of new Set(shown.spans.map((span) => span.trim()))) {
-      if (!span) continue;
-      const declared =
-        (await authorizedCommand(
-          {
-            command: span,
-            provenance: "base-observed",
-            source: "package.json",
-          },
-          files,
-          sources,
-        )) ||
-        (
-          await Promise.all(
-            sources
-              .filter((source) => source.path !== "OBJECTIVE")
-              .map((source) =>
-                authorizedCommand(
-                  {
-                    command: span,
-                    provenance: "source-declared",
-                    source: source.path,
-                  },
-                  files,
-                  sources,
-                ),
-              ),
-          )
-        ).some(Boolean);
-      if (declared) named.push(span);
-    }
-    if (named.length)
-      problems.push(
-        `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Make each command the integrated result must pass an Acceptance bullet with exactly one backticked command, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions (a command named in prose stays usable by the plan, but is not a final command).`,
+        `Command in the Objective's factory-commands block has no executable authority at the accepted base: ${command}. A package command must be one of ${PACKAGE_SCRIPT_FORMS}; authorized commands: ${await list()}. Correct it or remove it from the block.`,
       );
   }
 
   const required = options.requiredCommands ?? [];
   const requiredSources: PinnedSource[] = [
     objectiveSource(shown),
-    { path: REQUIRED_COMMANDS_SOURCE, content: required.join("\n") },
+    {
+      path: REQUIRED_COMMANDS_SOURCE,
+      content: required.join("\n"),
+      commands: required.map((command) => command.trim()),
+    },
   ];
   for (const command of required)
     if (

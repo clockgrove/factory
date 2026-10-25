@@ -14,11 +14,17 @@ body:
     id: acceptance
     attributes:
       label: Acceptance
-      description: One observable fact per bullet. A bullet that is exactly one backticked command means that command must pass on the integrated result.
-      value: |
-        - `npm test`
+      description: One observable fact per bullet, for review. A bullet is never a command, whatever code it holds.
     validations:
       required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands
+      description: Optional. The commands the integrated result must pass, one per line, exactly as they run. Nothing outside this field is ever a command.
+      render: factory-commands
+      value: |
+        npm test
   - type: textarea
     id: context
     attributes:

@@ -78,8 +78,6 @@ export interface CoverageObligation {
     heading?: string;
     text?: string;
     lines?: [number, number];
-    /** An Objective criterion's command: an Acceptance list item that is exactly one code element. */
-    command?: string;
   };
   statement?: string;
 }
@@ -208,13 +206,12 @@ export interface PlannerDecision {
 /** A pinned source with its text at the base. */
 export interface PinnedSource extends Citation {
   content: string;
-  /** Set only on the operator-written Objective body. */
-  operatorAuthored?: true;
   /**
-   * The Objective's shown lines and inline code elements (shown.ts): its
-   * command authority reads these, never its Markdown text.
+   * The commands this source declares, exactly: the Objective's
+   * `factory-commands` block lines, or the installation's required
+   * commands. A repository file declares none.
    */
-  shown?: { lines: string[]; spans: string[] };
+  commands?: string[];
   /** AGENTS.md or README.md read as context: never a source of obligations. */
   context?: true;
 }

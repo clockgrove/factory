@@ -18,15 +18,10 @@ import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { TransientError } from "../dist/github.js";
 import { checkObjective } from "../dist/objective.js";
 import { observeLocalExecutables } from "../dist/planning/executables.js";
-import {
-  BaseFiles,
-  finalCommands,
-  sectionText,
-} from "../dist/planning/facts.js";
+import { BaseFiles, finalCommands } from "../dist/planning/facts.js";
 import { ownedSince } from "../dist/planning/plan.js";
 import { repositoryView } from "../dist/planning/repository.js";
-import { readShown, shownDigest } from "../dist/shown.js";
-import { declarationProblems } from "../dist/validate.js";
+import { readShown } from "../dist/shown.js";
 import {
   children,
   cli,
@@ -435,127 +430,81 @@ test("final validation names each Work Item command it skips because a later mer
   await stopped(service);
 });
 
-// A non-writer's Objective: Factory reads its structure from GitHub's
-// rendering (body_html) and plans from that rendering as Markdown text; the
-// approval names their digest. The stand-in renders like GitHub (micromark
-// + GFM, a math block as GitHub's math-renderer), with raw HTML let
-// through, so attributes and comments reach the parser. Sections are
-// GitHub's headings (a <br> in one is a space), bullets its list items (a
-// shown "- `cmd`" line in a paragraph is not one), commands only list
-// items of one code element (not a paragraph, struck or bold code, or math),
-// paths and headings keep emphasis as `__`/`_` (a `_` anchor finds a `*`
-// heading), a blank form field is empty, and a non-writer's diagram and
-// math sources are placeholders.
-const HIDDEN_BODY = `## Goal
-Ship the parser.<!-- HIDDEN-COMMENT -->
+// The Objective's commands are exactly the lines of its one
+// factory-commands block, as GitHub shows it (micromark + GFM stands in for
+// its renderer). Code in prose, a bullet of one code span, another code
+// block and a factory-commands block shown inside an example are text.
+const render = (body) =>
+  readShown(
+    micromark(body, { extensions: [gfm()], htmlExtensions: [gfmHtml()] }),
+    {
+      sources: true,
+    },
+  ).blocks;
 
-\\## Acceptance
+test("only the factory-commands block declares commands; prose, bullets and other code blocks never do", () => {
+  const blocks = render(`## Goal
 
-![HIDDEN-ALT](https://example.com/img/shot.png "HIDDEN-IMAGE-TITLE")
-
-See [docs](https://example.com/docs "HIDDEN-TITLE"), [ref][d] and <a href="https://e.com" title="HIDDEN-ATTR">x</a>.
+Ship the parser; the old \`npm run legacy\` is gone.
 
 ## Acceptance
-Run these:<br>- \`npm test\`<br>Never run:<br>- \`npm run deploy\`
 
-- [ ] parse works
-- \`npm run check\`
-- ~~The old \`--legacy\` flag still works~~
-- **\`npm run e2e\`**
-- <math-renderer class="js-inline-math">$O(n)$</math-renderer>
-- Release works; verify by hand:
+- \`npm run deploy\`
+- \`parse("")\` returns \`[]\`.
 
-\`npm run release\`
-
-Note[^a].
-
-\`\`\`mermaid
-%% HIDDEN-COMMENT
-graph TD; HIDDEN-NODE[Build]-->B
+\`\`\`sh
+npm run sh-block
 \`\`\`
 
-<math-renderer class="js-display-math">$$\\text{HIDDEN-MATH}$$</math-renderer>
+\`\`\`\`markdown
+\`\`\`factory-commands
+npm run example
+\`\`\`
+\`\`\`\`
 
-## Out of scope<br>never part of this
-- \`npm run deploy:prod\`
+\`\`\`factory-commands
+npm test
 
-## Sources
-- src/_internal.ts
-- src/__tests__/a.ts
-- pkg/__init__.py
-- docs/foo**bar**.md
-- docs/A&B.md
-- docs/PLAN.md#Heading [draft] *x* & y
-- docs/y.md#Step *y*
+node --test test/a.test.js 2>&1 | tee out.txt
+\`\`\`
+`);
+  const { objective, problems } = checkObjective(blocks);
+  assert.deepEqual(problems, []);
+  assert.deepEqual(objective.commands, [
+    "npm test",
+    "node --test test/a.test.js 2>&1 | tee out.txt",
+  ]);
+  assert.deepEqual(
+    objective.acceptance.map((criterion) => criterion.text),
+    [
+      "`npm run deploy`",
+      '`parse("")` returns `[]`.',
+      "npm run sh-block",
+      "```factory-commands npm run example ```",
+    ],
+  );
+  assert.deepEqual(finalCommands(blocks, ["npm test", "npm run lint"]), [
+    "npm test",
+    "node --test test/a.test.js 2>&1 | tee out.txt",
+    "npm run lint",
+  ]);
 
-### Package manager update
-
-_No response_
-
-[^a]: Shown note.
-[^z]: HIDDEN-FOOTNOTE
-
-[d]: https://example.com/ref "HIDDEN-REF-TITLE"`;
-const HIDDEN_HTML = micromark(HIDDEN_BODY, {
-  allowDangerousHtml: true,
-  extensions: [gfm()],
-  htmlExtensions: [gfmHtml()],
+  const block = (lines) => `\`\`\`factory-commands\n${lines}\n\`\`\``;
+  const twice = checkObjective(
+    render(
+      `## Goal\n\nX.\n\n## Acceptance\n\n- Y.\n\n${block("npm test")}\n\n${block("npm run lint")}\n`,
+    ),
+  );
+  assert.deepEqual(twice.objective.commands, []);
+  assert.match(
+    twice.problems.join("\n"),
+    /2 ```factory-commands blocks; put every command in one block/,
+  );
+  const empty = checkObjective(
+    render(`## Goal\n\nX.\n\n## Acceptance\n\n- Y.\n\n${block("")}\n`),
+  );
+  assert.match(empty.problems.join("\n"), /block is empty/);
 });
-const SHOWN = `## Goal
-
-Ship the parser.
-
-\\## Acceptance
-
-[image: shot.png]
-
-See [docs](https://example.com/docs), [ref](https://example.com/ref) and [x](https://e.com).
-
-## Acceptance
-
-Run these:\\
-\\- \`npm test\`\\
-Never run:\\
-\\- \`npm run deploy\`
-
-- [ ] parse works
-- \`npm run check\`
-- ~~The old \`--legacy\` flag still works~~
-- **\`npm run e2e\`**
-- [math]
-- Release works; verify by hand:
-
-\`npm run release\`
-
-Note[1].
-
-[mermaid diagram]
-
-[math]
-
-Out of scope\\
-never part of this
-------------------
-
-- \`npm run deploy:prod\`
-
-## Sources
-
-- src/\\_internal.ts
-- src/**tests**/a.ts
-- pkg/**init**.py
-- docs/foo**bar**.md
-- docs/A\\&B.md
-- docs/PLAN.md#Heading \\[draft] *x* & y
-- docs/y.md#Step *y*
-
-### Package manager update
-
-_No response_
-
-## Footnotes
-
-1. Shown note.`;
 
 test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-default-branch-"));

@@ -78,7 +78,7 @@ factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer
 
 An Objective is a GitHub issue that states a goal and its observable outcomes. Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). Describe what must be true, not the plan: the planner reads the repository at the base commit and decides the Work Items, their owned paths, checks and tests. It asks you when the Objective leaves a product choice open.
 
-Factory reads the issue as GitHub renders it, not its raw Markdown. What you see on the issue page is what counts: headings are sections, list items are bullets, and inline code is a command, path or pin. Hidden content (HTML comments, alt text) never reaches a check or a model.
+Factory reads the issue as GitHub renders it, not its raw Markdown. What you see on the issue page is what counts: headings are sections, list items are bullets, inline code is a path or pin, and the `factory-commands` code block holds the commands. Hidden content (HTML comments, alt text) never reaches a check or a model.
 
 Queue an Objective by setting its card's Factory field to the queued option on the Project, or with `factory run N`. When the service first sees it, it checks the Objective before planning (see [Check at queue time](reference/queue.md#check-at-queue-time)). A failed check is a hold that names each problem and its fix: edit the issue, then answer `recheck`. An issue written by someone without write access first asks you to approve it, and asks again after any edit. An edit after planning has read the issue asks whether to `replan` from the new text or `continue` with the current plan.
 
@@ -88,6 +88,7 @@ Sections are level-two or level-three headings (the issue form renders `###`). T
 
 - **Goal**: required. One paragraph: what changes, for whom, and what is out of scope.
 - **Acceptance**: required, at least one bullet. One observable fact per bullet; see below.
+- **Commands**: optional. One `factory-commands` code block, one command per line; see below.
 - **Context**: optional prose and links. Not parsed; the planner reads it with the rest of the issue.
 - **Sources**: optional. Files every worker must receive verbatim; see below.
 - **Constraints** or **Non-goals**: optional limits workers must respect.
@@ -97,16 +98,22 @@ Any other heading is read as prose. Each section above may appear once; a second
 
 ### Acceptance and final commands
 
-Every Acceptance bullet is an obligation the plan must cover and review checks. A bullet whose whole content is one inline code span is also a **final command**: the integrated result must pass it.
+Every Acceptance bullet is a criterion: the plan must cover it and review checks it. A criterion is never a command, whatever code it holds.
 
-```markdown
+Commands go in one fenced code block whose language is `factory-commands`, one command per line. These are the Objective's **final commands**: the integrated result must pass each one, and Work Items may run them.
+
+````markdown
 ## Acceptance
 
 - The settings page shows the saved theme after a reload.
-- `pnpm test`
-```
 
-A paragraph, a quote, a code block, or a bold or struck-out code span is never a final command, and neither is "run the tests". Keep a path or other code span inside a sentence, not alone on a bullet. Nested bullets count as bullets too.
+```factory-commands
+pnpm test
+pnpm run lint
+```
+````
+
+Nothing else declares a command. Code in a sentence, a bullet that is one code span, any other code block and every line of a repository file are text. Each non-blank line of the block is one command, run exactly as written. The block can sit anywhere in the body (the template puts it under Acceptance). A second `factory-commands` block, or an empty one, is refused at queue time. A block shown inside another code block, as in the example above, is an example: GitHub shows it as code, so it declares nothing.
 
 At queue time each final command must be runnable:
 
@@ -116,7 +123,7 @@ At queue time each final command must be runnable:
 
 Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well. With no final command, final validation runs each Work Item's own validation commands on the merged default branch instead, each item's list whole in a fresh checkout, so QA runs there either way.
 
-A backticked command in a sentence ("the probe is `node scripts/probe.mjs`") is declared, because you wrote it: the plan may use it as a Work Item check. It is not a final command. If the Objective has no final command at all but backticks a command the base already declares (a `package.json` script, or an own-line command in a Sources file), the check refuses it: make it an Acceptance bullet, or remove the backticks.
+A Work Item may run only a command that is one of these, exactly: a final command, a root `package.json` script in the forms above, a command in the installation's `finalValidation.requiredCommands`, or one you allow when the planner asks. A command the plan needs that none of them has goes in the `factory-commands` block.
 
 ### Sources
 

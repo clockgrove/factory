@@ -5,7 +5,10 @@ Add `discBase{{ID}}(s)` in its own file `src/discBase{{ID}}.js` as a named expor
 ## Acceptance
 
 - `discBase{{ID}}("a b c")` is `"abc"`.
-- `npm test`
+
+```factory-commands
+npm test
+```
 
 ## Constraints
 

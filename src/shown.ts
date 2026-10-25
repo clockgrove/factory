@@ -24,7 +24,8 @@ export type ObjectiveBlock =
   | { kind: "item"; text: string; code?: string }
   /** A paragraph or other shown text; `code` as for an item. */
   | { kind: "text"; text: string; code?: string }
-  | { kind: "code"; text: string }
+  /** A code block; `lang` is the language GitHub kept (`factory-commands` declares commands). */
+  | { kind: "code"; text: string; lang?: string }
   /** A blank issue-form field: `<p><em>No response</em></p>`. */
   | { kind: "empty" };
 
@@ -283,7 +284,8 @@ function collect(nodes: readonly ElementContent[], out: ObjectiveBlock[]) {
       continue;
     }
     if (tag === "pre") {
-      out.push({ kind: "code", text: textOf(node) });
+      const lang = language(node);
+      out.push({ kind: "code", text: textOf(node), ...(lang ? { lang } : {}) });
       continue;
     }
     if (tag === "p" && emptyMarker(node)) {

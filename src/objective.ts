@@ -8,8 +8,8 @@ import {
  * The Objective checks. They run once when an Objective is first taken from
  * the queue, and planning uses the same functions. They read the shown
  * structure (shown.ts): sections are GitHub's heading elements, bullets its
- * list items, commands and paths its code elements. Each problem says how
- * to fix it.
+ * list items, paths its code elements, and commands the lines of its one
+ * `factory-commands` code block. Each problem says how to fix it.
  */
 export interface SourceRef {
   path: string;
@@ -20,17 +20,21 @@ export interface ParsedObjective {
   goal: string;
   /**
    * Each Acceptance criterion: its shown text (code as backticked spans,
-   * emphasis and strikethrough with their markers) and, for a list item
-   * that is exactly one code element, its command.
+   * emphasis and strikethrough with their markers), for review. A
+   * criterion is never a command, whatever its code.
    */
   acceptance: Criterion[];
+  /** The final commands: each non-blank line of the `factory-commands` block, trimmed. */
+  commands: string[];
   sources: SourceRef[];
 }
 
 export interface Criterion {
   text: string;
-  command?: string;
 }
+
+/** The code block language that declares an Objective's commands. */
+export const COMMANDS_LANG = "factory-commands";
 
 const KNOWN = [
   "goal",
@@ -76,18 +80,52 @@ function blockText(block: ObjectiveBlock): string {
  */
 function bullets(
   section: Section | undefined,
-): { text: string; code?: string; item: boolean }[] {
+): { text: string; code?: string }[] {
   return (section?.blocks ?? []).flatMap((block) => {
     if (block.kind === "empty" || block.kind === "heading") return [];
+    // The commands block is no criterion, wherever it is.
+    if (block.kind === "code" && block.lang === COMMANDS_LANG) return [];
     const text = block.text.replace(/\s+/g, " ").trim();
     if (!text) return [];
-    const item = block.kind === "item";
     return [
       block.kind !== "code" && block.code !== undefined
-        ? { text, code: block.code, item }
-        : { text, item },
+        ? { text, code: block.code }
+        : { text },
     ];
   });
+}
+
+/**
+ * The Objective's commands: the lines of its one `factory-commands` code
+ * block, anywhere in the body. Nothing else declares a command: not code
+ * in a sentence, not a bullet of one code span, not another code block.
+ */
+export function objectiveCommands(blocks: readonly ObjectiveBlock[]): {
+  commands: string[];
+  problems: string[];
+} {
+  const declared = blocks.flatMap((block) =>
+    block.kind === "code" && block.lang === COMMANDS_LANG ? [block.text] : [],
+  );
+  if (declared.length > 1)
+    return {
+      commands: [],
+      problems: [
+        `The Objective has ${declared.length} \`\`\`${COMMANDS_LANG} blocks; put every command in one block, one command per line.`,
+      ],
+    };
+  const lines = (declared[0] ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (declared.length && !lines.length)
+    return {
+      commands: [],
+      problems: [
+        `The \`\`\`${COMMANDS_LANG} block is empty; write one command per line, or remove the block.`,
+      ],
+    };
+  return { commands: [...new Set(lines)], problems: [] };
 }
 
 /** Parse GitHub's rendering of an issue body (`body_html`) as an Objective. */
@@ -144,13 +182,13 @@ export function checkObjective(blocks: readonly ObjectiveBlock[]): {
     sources.push(heading ? { path, heading } : { path });
   }
   problems.push(...mayChange(blocks).problems);
+  const { commands, problems: commandProblems } = objectiveCommands(blocks);
+  problems.push(...commandProblems);
   return {
     objective: {
       goal,
-      // A command is a list item only: a paragraph or quote is prose.
-      acceptance: criteria.map(({ text, code, item }) =>
-        item && code?.trim() ? { text, command: code } : { text },
-      ),
+      acceptance: criteria.map(({ text }) => ({ text })),
+      commands,
       sources,
     },
     problems,
@@ -190,7 +228,7 @@ export function declaration(
  * The protected paths (CI configuration, `.github/`, CODEOWNERS, the
  * playbook) the Objective lets a worker change: its one "May change"
  * section, each entry a list item that is exactly one code element naming
- * a repository path, as an Acceptance command is written. Any other entry
+ * a repository path. Any other entry
  * is a problem. A path named anywhere else in the Objective allows nothing.
  */
 export function mayChange(blocks: readonly ObjectiveBlock[]): {

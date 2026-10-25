@@ -3,9 +3,9 @@ import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
-import { coverageCriterion, ownsPath } from "./graph.js";
+import { ownsPath } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
-import type { Plan, Retirement, WorkItem } from "./types.js";
+import type { Plan, WorkItem } from "./types.js";
 
 /*
  * The one reader of the accepted plan. The plan step saves it at
@@ -265,31 +265,17 @@ export function finalChecks(plan: Plan): string[] {
 }
 
 /**
- * The Objective criteria retired command `entry` proved, by the
- * criterion's command. Review judges them on other evidence now.
- */
-export function provedBy(plan: Plan, entry: Retirement): string[] {
-  return [
-    ...new Set(
-      plan.coverage
-        .filter((coverage) => coverage.source.command === entry.command)
-        .map(coverageCriterion),
-    ),
-  ];
-}
-
-/**
  * The retirements as lines for the report and status: command, reason,
- * who and when, and the obligations it proved, which review judges now.
+ * who and when.
  */
 export function retiredLines(
   plan: Plan,
   time: (at: string) => string = (at) => at,
 ): string[] {
-  return (plan.retired ?? []).map((entry) => {
-    const proved = provedBy(plan, entry);
-    return `command \`${entry.command}\` (final validation): retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}${proved.length ? `. Judged by review instead: ${proved.join("; ")}` : ""}`;
-  });
+  return (plan.retired ?? []).map(
+    (entry) =>
+      `command \`${entry.command}\` (final validation): retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}`,
+  );
 }
 
 /** The current planning generation and round, from the saved decisions. */

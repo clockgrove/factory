@@ -5,7 +5,4 @@ Add `joinPath{{ID}}(parts)` in its own file `src/joinPath{{ID}}.js` as a named e
 ## Acceptance
 
 - `joinPath{{ID}}(["a", "b", "c"])` joins the three parts in order with the chosen separator, and `joinPath{{ID}}([])` is `""`.
-
-```factory-commands
-npm test
-```
+- `npm test` passes.

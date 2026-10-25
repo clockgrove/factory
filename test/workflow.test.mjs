@@ -273,14 +273,13 @@ test("an Objective with no final command still gets QA on the default branch: fi
             ownedPaths: ["b.txt"],
             dependencies: ["a"],
             validation: ["node gen.mjs", "node check.mjs", "node b.mjs"].map(
-              (command) => ({ command, provenance: "base-observed" }),
+              (command) => ({ command }),
             ),
           }),
           item("a", {
             ownedPaths: ["parser.txt"],
             validation: ["node check.mjs", "node leak.mjs"].map((command) => ({
               command,
-              provenance: "base-observed",
             })),
           }),
         ],
@@ -387,16 +386,12 @@ test("final validation names each Work Item command it skips because a later mer
         [
           item("a", {
             ownedPaths: ["a.txt"],
-            validation: [
-              { command: "npm run check", provenance: "base-observed" },
-            ],
+            validation: [{ command: "npm run check" }],
           }),
           item("b", {
             ownedPaths: ["package.json"],
             dependencies: ["a"],
-            validation: [
-              { command: "node b.mjs", provenance: "base-observed" },
-            ],
+            validation: [{ command: "node b.mjs" }],
           }),
         ],
         { base },
@@ -428,82 +423,6 @@ test("final validation names each Work Item command it skips because a later mer
   );
   assert.equal(cli(inst, "cancel", "62").code, 0);
   await stopped(service);
-});
-
-// The Objective's commands are exactly the lines of its one
-// factory-commands block, as GitHub shows it (micromark + GFM stands in for
-// its renderer). Code in prose, a bullet of one code span, another code
-// block and a factory-commands block shown inside an example are text.
-const render = (body) =>
-  readShown(
-    micromark(body, { extensions: [gfm()], htmlExtensions: [gfmHtml()] }),
-    {
-      sources: true,
-    },
-  ).blocks;
-
-test("only the factory-commands block declares commands; prose, bullets and other code blocks never do", () => {
-  const blocks = render(`## Goal
-
-Ship the parser; the old \`npm run legacy\` is gone.
-
-## Acceptance
-
-- \`npm run deploy\`
-- \`parse("")\` returns \`[]\`.
-
-\`\`\`sh
-npm run sh-block
-\`\`\`
-
-\`\`\`\`markdown
-\`\`\`factory-commands
-npm run example
-\`\`\`
-\`\`\`\`
-
-\`\`\`factory-commands
-npm test
-
-node --test test/a.test.js 2>&1 | tee out.txt
-\`\`\`
-`);
-  const { objective, problems } = checkObjective(blocks);
-  assert.deepEqual(problems, []);
-  assert.deepEqual(objective.commands, [
-    "npm test",
-    "node --test test/a.test.js 2>&1 | tee out.txt",
-  ]);
-  assert.deepEqual(
-    objective.acceptance.map((criterion) => criterion.text),
-    [
-      "`npm run deploy`",
-      '`parse("")` returns `[]`.',
-      "npm run sh-block",
-      "```factory-commands npm run example ```",
-    ],
-  );
-  assert.deepEqual(finalCommands(blocks, ["npm test", "npm run lint"]), [
-    "npm test",
-    "node --test test/a.test.js 2>&1 | tee out.txt",
-    "npm run lint",
-  ]);
-
-  const block = (lines) => `\`\`\`factory-commands\n${lines}\n\`\`\``;
-  const twice = checkObjective(
-    render(
-      `## Goal\n\nX.\n\n## Acceptance\n\n- Y.\n\n${block("npm test")}\n\n${block("npm run lint")}\n`,
-    ),
-  );
-  assert.deepEqual(twice.objective.commands, []);
-  assert.match(
-    twice.problems.join("\n"),
-    /2 ```factory-commands blocks; put every command in one block/,
-  );
-  const empty = checkObjective(
-    render(`## Goal\n\nX.\n\n## Acceptance\n\n- Y.\n\n${block("")}\n`),
-  );
-  assert.match(empty.problems.join("\n"), /block is empty/);
 });
 
 test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {

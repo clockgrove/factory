@@ -5,7 +5,4 @@ Add `{{FN}}` as a named export of `src/overlap{{ID}}.js`, creating the file if i
 ## Acceptance
 
 - {{SPEC}}
-
-```factory-commands
-npm test
-```
+- `npm test` passes.

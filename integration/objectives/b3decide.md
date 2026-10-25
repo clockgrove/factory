@@ -6,7 +6,4 @@ Add `shout{{ID}}` in its own file `src/shout{{ID}}.js` as a named export, with i
 
 - `shout{{ID}}(s)` returns `s` in upper case followed by `"!"`: `shout{{ID}}("hi")` is `"HI!"`.
 - The JSDoc comment above `shout{{ID}}` reads naturally to a human product reviewer; only a human can judge this, so the reviewer must not decide it alone.
-
-```factory-commands
-npm test
-```
+- `npm test` passes.

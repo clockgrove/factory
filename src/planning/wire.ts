@@ -311,26 +311,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     validation: {
       type: "array",
       items: {
-        anyOf: [
-          strict({
-            kind: { type: "string", enum: ["source-line"] },
-            sourceIndex: integer(sources.length),
-            lineIndex: {
-              ...integer(),
-              description:
-                "A line of the Objective's factory-commands block; no other line is a command.",
-            },
-          }),
-          strict({
-            kind: { type: "string", enum: ["base-observed"] },
-            command: {
-              ...text,
-              description:
-                "A root package script by its authorized npm/pnpm invocation of an existing script name, with source package.json; never its JSON script body or a line of another file.",
-            },
-            source: text,
-          }),
-        ],
+        ...text,
+        description:
+          "One command line, exactly as validation runs it in the item's checkout: finite, offline, exit zero on success. A root package script runs by its npm/pnpm invocation, never its JSON body.",
       },
     },
     brief: { ...text, minLength: 1 },
@@ -1225,9 +1208,7 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
   });
   if (!Array.isArray(item.validation))
     throw new Refusal("Planner validation must be an array", id);
-  const validation = item.validation.map((value) =>
-    selectCommand(wire, object(value, "validation selection"), id),
-  );
+  const validation = item.validation.map((value) => selectCommand(value, id));
   const children = list("children");
   const resources = list("resources");
   const scheduling = schedulingHint(item.scheduling);
@@ -1342,53 +1323,14 @@ function schedulingHint(value: unknown): WorkItem["scheduling"] | undefined {
   };
 }
 
-/** A validation choice: a line of a pinned source, or a command observed at the base. */
-function selectCommand(
-  wire: Contract,
-  selection: ObjectValue,
-  id: string,
-): ValidationCommand {
-  if (selection.kind === "source-line") {
-    keys(selection, ["kind", "sourceIndex", "lineIndex"], "source line");
-    const source =
-      wire.sources[
-        index(selection.sourceIndex, wire.sources.length, "sourceIndex")
-      ]!;
-    const lines = source.content.split("\n");
-    let command = lines[
-      index(selection.lineIndex, lines.length, "lineIndex")
-    ]!.trim()
-      .replace(/^[-*]\s+/, "")
-      .trim();
-    if (command.startsWith("`")) {
-      const literal = /^`([^`]+)`$/.exec(command);
-      if (!literal)
-        throw new Refusal(
-          "Planner source line is prose around a code span; select a standalone command line",
-          id,
-        );
-      command = literal[1]!;
-    }
-    if (!validValidationCommand(command))
-      throw new Refusal(
-        "Planner source line is not an executable command line; select a line that is exactly one command",
-        id,
-      );
-    return { command, provenance: "source-declared", source: source.path };
-  }
-  keys(selection, ["kind", "command", "source"], "base-observed command");
-  if (
-    selection.kind !== "base-observed" ||
-    typeof selection.command !== "string" ||
-    !selection.command ||
-    typeof selection.source !== "string"
-  )
-    throw new Refusal("Planner base-observed command is invalid", id);
-  return {
-    command: selection.command,
-    provenance: "base-observed",
-    source: selection.source,
-  };
+/** A validation command: one command line as the planner wrote it. */
+function selectCommand(selection: unknown, id: string): ValidationCommand {
+  if (typeof selection !== "string" || !validValidationCommand(selection))
+    throw new Refusal(
+      "Planner validation entry is not one executable command line",
+      id,
+    );
+  return { command: selection.trim() };
 }
 
 /** An owner, proof and environment choice, checked against the decoded items. */

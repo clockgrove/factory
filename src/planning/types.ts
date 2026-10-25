@@ -55,14 +55,11 @@ export interface WorkItem {
 }
 
 /**
- * A command a Work Item runs. `source-declared` means a pinned source wrote
- * it, so the worker may create the script it names.
+ * A command a Work Item runs, exactly as the plan wrote it. The plan is its
+ * authority: the worker may create the script it names.
  */
 export interface ValidationCommand {
   command: string;
-  provenance: "base-observed" | "source-declared";
-  /** The source path that declared it. */
-  source?: string;
 }
 
 /**
@@ -206,12 +203,6 @@ export interface PlannerDecision {
 /** A pinned source with its text at the base. */
 export interface PinnedSource extends Citation {
   content: string;
-  /**
-   * The commands this source declares, exactly: the Objective's
-   * `factory-commands` block lines, or the installation's required
-   * commands. A repository file declares none.
-   */
-  commands?: string[];
   /** AGENTS.md or README.md read as context: never a source of obligations. */
   context?: true;
 }
@@ -225,10 +216,12 @@ export interface PlanningFacts {
   blocks: readonly ObjectiveBlock[];
   base: string;
   sources: PinnedSource[];
-  /** Commands a Work Item may run: test and check first, CI-only and network ones left out. */
-  authorizedCommands: string[];
+  /** The root package scripts in the forms validation runs, test and check first; CI-only and network ones left out. Facts for the planner, not a limit. */
+  packageCommands: string[];
   /** Installation commands that need network and run only in CI. */
   ciOnlyCommands: string[];
+  /** `sandbox.network: host`: validation reaches the host's network. */
+  hostNetwork?: true;
   /** CI check names the base's pull-request workflows report. */
   checkNames: string[];
   /** CI check names the base's workflows report on a push to the default branch: integrated-ci's only choices. */

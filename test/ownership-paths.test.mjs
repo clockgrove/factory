@@ -18,13 +18,7 @@ function findings(ownedPaths) {
     citations: [{ path: "OBJECTIVE" }],
     dependencies: [],
     ownedPaths,
-    validation: [
-      {
-        command: "npm test",
-        provenance: "base-observed",
-        source: "package.json",
-      },
-    ],
+    validation: [{ command: "npm test" }],
     brief: "Stage two colour sets for the operator to pick from.",
     priority: 1,
   };

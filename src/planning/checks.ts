@@ -5,7 +5,6 @@ import { localAssetPlace } from "../sandbox.js";
 import {
   type BaseFiles,
   ciOnlyKey,
-  commandAuthorized,
   commandScope,
   listCommands,
   networkToolOfCommand,
@@ -57,9 +56,9 @@ export async function checkPlan(
   findings.push(...graph.findings);
   if (!graph.usable) return findings;
   const { items } = draft;
-  await commandFindings(items, facts, files, found);
+  commandFindings(items, facts, found);
   await boundaryFindings(items, facts, files, found);
-  graphLint(draft, facts.authorizedCommands, found);
+  graphLint(draft, facts.packageCommands, found);
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
@@ -68,29 +67,20 @@ export async function checkPlan(
 
 // ── Commands ────────────────────────────────────────────────────────────
 
-/** command-authority and ci-only. */
-async function commandFindings(
+/** CI-only: a command the installation leaves to CI never runs in validation. */
+function commandFindings(
   items: readonly WorkItem[],
   facts: PlanningFacts,
-  files: BaseFiles,
   found: Found,
-): Promise<void> {
+): void {
   const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
   for (const item of items)
-    for (const check of item.validation) {
-      if (ciOnly.has(ciOnlyKey(check.command))) {
+    for (const check of item.validation)
+      if (ciOnly.has(ciOnlyKey(check.command)))
         found(
-          `Work Item ${item.id} validation runs ${check.command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and use an offline authorized command from the request instead; when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${check.command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
           item.id,
         );
-        continue;
-      }
-      if (!(await commandAuthorized(facts, check, files)))
-        found(
-          `Work Item ${item.id} has no exact ${check.provenance} command authority in ${check.source ?? "unknown source"}: ${check.command}. Use one complete standalone command from the pinned source. For base-observed package.json, invoke an existing script by name, not its JSON body; commands this plan creates are not base-observed. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; a tool-version probe must use --version without extra package-manager options or script execution. Do not invent a replacement command or weaken acceptance. Authorized commands: ${listCommands(facts.authorizedCommands)}.`,
-          item.id,
-        );
-    }
 }
 
 // ── Boundaries ──────────────────────────────────────────────────────────
@@ -107,25 +97,26 @@ async function boundaryFindings(
 ): Promise<void> {
   const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
   const scripts = await files.scripts();
-  const authorized = facts.authorizedCommands;
+  const offline = facts.packageCommands;
   for (const item of items)
-    for (const { command, provenance } of item.validation) {
+    for (const { command } of item.validation) {
       if (packageBootstrap(command) || ciOnly.has(ciOnlyKey(command))) continue;
-      const tool = networkToolOfCommand(command, scripts);
+      const tool = facts.hostNetwork
+        ? undefined
+        : networkToolOfCommand(command, scripts);
       if (tool)
         found(
-          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: select an offline authorized command instead${authorized.length ? ` (${listCommands(authorized)})` : ""}, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: validate with an offline command instead${offline.length ? ` (root package scripts: ${listCommands(offline)})` : ""}, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
           item.id,
         );
       const scope = commandScope(command, scripts);
       if (
         scope &&
-        provenance === "base-observed" &&
         (item.kind ?? "work") === "work" &&
         !item.ownedPaths.some((owned) => pathsOverlap(owned, scope))
       )
         found(
-          `Work Item ${item.id} validation runs ${command}, which checks only ${scope}, and the item owns no path there: select an authorized command that checks what the item owns${authorized.length ? ` (${listCommands(authorized.filter((c) => !commandScope(c, scripts)))})` : ""}, or own a path in ${scope}`,
+          `Work Item ${item.id} validation runs ${command}, which checks only ${scope}, and the item owns no path there: validate with a command that checks what the item owns${offline.length ? ` (root package scripts: ${listCommands(offline.filter((c) => !commandScope(c, scripts)))})` : ""}, or own a path in ${scope}`,
           item.id,
         );
     }
@@ -152,7 +143,7 @@ const bounded = (entry: CoverageObligation): string => {
  */
 function graphLint(
   draft: Draft,
-  authorized: readonly string[],
+  packageCommands: readonly string[],
   found: Found,
 ): void {
   const byId = new Map(draft.items.map((item) => [item.id, item]));
@@ -192,7 +183,7 @@ function graphLint(
   for (const item of draft.items)
     if ((item.kind ?? "work") === "work" && !item.validation.length)
       found(
-        `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: select one of the authorized commands (${listCommands(authorized)}) that runs the tests it owns, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
+        `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: give it a command that runs the tests it owns${packageCommands.length ? ` (root package scripts: ${listCommands(packageCommands)})` : ""}, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
         item.id,
       );
   for (const entry of draft.coverage) {
@@ -251,8 +242,8 @@ function allowedHeadings(pins: readonly PinnedSource[]): string {
 
 /**
  * A citation resolves to a pinned choice, or to a tracked UTF-8 file (whole,
- * or one exact Markdown heading) at the base. Repository citations carry no
- * command authority and are bounded in size.
+ * or one exact Markdown heading) at the base. Repository citations are
+ * bounded in size.
  */
 async function citationFindings(
   items: readonly WorkItem[],

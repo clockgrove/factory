@@ -159,7 +159,7 @@ test("the plan check refuses a media item whose destinations can't reach Git LFS
     blocks: [],
     base: target.commit,
     sources: [],
-    authorizedCommands: [],
+    packageCommands: [],
     ciOnlyCommands: [],
     checkNames: [],
     integratedCheckNames: [],

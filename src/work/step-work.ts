@@ -293,8 +293,15 @@ export async function workStep(
     keepAll = { ...keepAll, ...facts({ inputs: inputs.value }, item.id) };
 
     const files = new BaseFiles(config.checkout, base, signal);
+    // The acceptance runs stay fixed: the required commands and the plan's
+    // QA checks on the integrated result.
     const scripts = await fixedScripts(
-      finalCommands(shown.blocks, config.finalValidation.requiredCommands),
+      [
+        ...finalCommands(config.finalValidation.requiredCommands),
+        ...plan.items
+          .filter((planned) => planned.kind === "qa")
+          .flatMap((planned) => planned.validation.map((v) => v.command)),
+      ],
       files,
     );
     const pin = packageManagerUpdate(shown.blocks);

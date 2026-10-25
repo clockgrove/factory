@@ -347,10 +347,7 @@ function land(
       const plan: Plan = {
         ...draft,
         base: rebuilt.plan.base,
-        finalCommands: finalCommands(
-          inputs.shown.blocks,
-          config.finalValidation.requiredCommands,
-        ),
+        finalCommands: finalCommands(config.finalValidation.requiredCommands),
         decisions: decisions(state),
         ...(inputs.reviewArtifacts.length
           ? { reviewArtifacts: inputs.reviewArtifacts }

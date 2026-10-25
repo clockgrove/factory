@@ -40,7 +40,7 @@ import { defaultHead, sha256 } from "./git.js";
 import type { GitHub, IssueSummary } from "./github.js";
 import { takeServiceLock } from "./lock.js";
 import { code, mark, prose } from "./markdown.js";
-import { COMMANDS_LANG, objectiveCommands, validPath } from "./objective.js";
+import { validPath } from "./objective.js";
 import type { Paths } from "./paths.js";
 import { BaseFiles, sectionText } from "./planning/facts.js";
 import { exportTree } from "./planning/repository.js";
@@ -61,7 +61,6 @@ export interface ProposedObjective {
   title: string;
   goal: string;
   acceptance: string[];
-  commands: string[];
   context: string[];
   sources: string[];
   constraints: string[];
@@ -93,7 +92,6 @@ export interface ProposeDeps {
 const LISTS = [
   "dependencies",
   "acceptance",
-  "commands",
   "context",
   "sources",
   "constraints",
@@ -147,10 +145,7 @@ export const PROPOSAL_SCHEMA = {
               "One paragraph: what changes, for whom, and what is out of scope.",
           },
           acceptance: list(
-            "Observable facts, one per entry, each checkable against the delivered code and test results.",
-          ),
-          commands: list(
-            "Commands that must pass at the end, exactly as the repository declares them; empty when none fits.",
+            'Observable facts, one per entry, each checkable against the delivered code and test results. A command the result must pass is one, such as "`npm test` passes".',
           ),
           context: list("Optional paragraphs of background for the planner."),
           sources: list(
@@ -251,16 +246,12 @@ export function composeObjective(
     lines.length
       ? [`## ${heading}`, lines.join(gap ? "\n\n" : "\n")]
       : ([] as string[]);
-  const commands = objective.commands.map(clean).filter(Boolean);
   const parts = [
     proposalMark(id, objective.key),
     "## Goal",
     line(objective.goal),
     "## Acceptance",
     bullets(objective.acceptance, line).join("\n"),
-    ...(commands.length
-      ? [`\`\`\`${COMMANDS_LANG}\n${commands.join("\n")}\n\`\`\``]
-      : []),
     ...section("Context", objective.context.map(line).filter(Boolean), true),
     ...section(
       "Sources",
@@ -302,15 +293,6 @@ async function draftProblems(
       );
     const html = await deps.github.renderMarkdown(composed.body, signal);
     const shown = readShown(html, { sources: true });
-    // GitHub's rendering must give back exactly the proposed commands.
-    const proposed = objective.commands.map(clean).filter(Boolean);
-    if (
-      JSON.stringify(objectiveCommands(shown.blocks).commands) !==
-      JSON.stringify(proposed)
-    )
-      own.push(
-        `The commands ${JSON.stringify(proposed)} don't read back from GitHub's rendering of the ${COMMANDS_LANG} block; write each as one plain command line.`,
-      );
     own.push(
       ...(await objectiveProblems(
         deps.config,
@@ -370,8 +352,7 @@ const FIELD_RULES = [
   "- key: a short id; dependencies: keys of earlier Objectives in your list that must be done first.",
   "- title: a short title of the result.",
   "- goal: one paragraph: what changes, for whom, and what is out of scope.",
-  "- acceptance: observable facts about real behaviour, one per entry, each checkable against the delivered code and test results. No mocks.",
-  "- commands: commands that must pass at the end, exactly as the repository already declares them (its package scripts, Makefile or docs). Leave it empty rather than invent one.",
+  '- acceptance: observable facts about real behaviour, one per entry, each checkable against the delivered code and test results. No mocks. A command the result must pass is an entry such as "`npm test` passes", using a command the repository already has (its package scripts, Makefile or docs); never invent one.',
   "- context: optional background paragraphs.",
   '- sources: only files every worker must receive verbatim, each "path" or "path#Exact Heading" naming a tracked text file (and one exact heading in it). Usually empty: the planner reads the repository itself.',
   "- constraints and nonGoals: limits workers must respect, and what is left out.",

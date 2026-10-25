@@ -47,6 +47,7 @@ import {
   type StoredRequest,
 } from "./requests.js";
 import { ownedPlan, RESET, type ResetRecord, resetRecord } from "./reset.js";
+import { DaySpend } from "./spend.js";
 import {
   deadlineAt,
   type Frozen,
@@ -174,7 +175,12 @@ export async function serve(options: ServeOptions): Promise<number> {
   const startedAt = new Date();
   const log = options.log ?? new RunLog(paths.logs, newRunId(startedAt));
   const { runId } = log;
-  const run: ServiceRun = { id: runId, finished: 0, resumeAt: 0 };
+  const run: ServiceRun = {
+    id: runId,
+    finished: 0,
+    resumeAt: 0,
+    spend: new DaySpend(paths.root),
+  };
   // The last run's record, read before this run's first heartbeat replaces it.
   const previous = readServiceRecord(paths.root);
   // Unfinished Objectives, and finished ones until their cleanup, their

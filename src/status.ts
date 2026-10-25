@@ -24,6 +24,14 @@ import { RESET, type ResetRecord } from "./reset.js";
 import { type CriterionDecision, decisionLines } from "./review/result.js";
 import { crashStreak, type Death } from "./service.js";
 import {
+  type Amount,
+  amountText,
+  type Ceiling,
+  ceilings,
+  type Day,
+  readDay,
+} from "./spend.js";
+import {
   answerForm,
   type Frozen,
   findState,
@@ -124,6 +132,11 @@ export interface ObjectiveView {
     resultRereviews: Usage;
     perPath: Record<string, Usage>;
   };
+  /**
+   * Model spend so far, and each configured spend limit (spend.ts) with
+   * what it has used and allows with the operator's grants.
+   */
+  spend?: Amount & { limits: Ceiling[] };
   /** A reset rebuilding the state from GitHub. */
   reset?: { requestedAt: string; hadState: boolean };
   /**
@@ -175,6 +188,8 @@ export interface StatusView {
   intake?: string;
   capacity?: CapacityUse;
   queue: QueueControl;
+  /** The installation's model spend today (spend.ts `spend.json`). */
+  spentToday: Day;
   objectives: ObjectiveView[];
 }
 
@@ -196,6 +211,7 @@ export function readStatus(
   const { only, live } = options;
   const service = live ? serviceRecord(paths) : { waits: {}, setAside: {} };
   const queue = loadQueueControl(paths.root);
+  const day = readDay(paths.root);
   const objectives: ObjectiveView[] = [];
   for (const issue of listAllObjectives(paths.objectives)) {
     if (only !== undefined && issue !== only) continue;
@@ -219,6 +235,7 @@ export function readStatus(
         queue,
         waitsOn: service.waits[issue] ?? null,
         lastEvent: readLog(paths.logs, issue, 1).events[0] ?? null,
+        day,
       }),
     );
   }
@@ -230,6 +247,7 @@ export function readStatus(
       ...(options.unit ? { unit: options.unit } : {}),
       ...record,
       queue,
+      spentToday: day,
       objectives,
     },
     options.secrets,
@@ -284,6 +302,8 @@ export function statusOf(
     lastEvent: LogEvent | null;
     /** Set aside by the running service: `retry` reads its file again. */
     setAside?: boolean;
+    /** The installation's spend today: with it, the view shows the Objective's spend. */
+    day?: Day;
   },
 ): ObjectiveView {
   const { issue, lastEvent } = context;
@@ -379,6 +399,15 @@ export function statusOf(
       resultRereviews: resultRereviews(state),
       perPath: perPath(state),
     },
+    ...(context.day
+      ? {
+          spend: {
+            tokens: state.spend?.tokens ?? 0,
+            cents: state.spend?.cents ?? 0,
+            limits: ceilings(state, context.day),
+          },
+        }
+      : {}),
     ...(reset && !TERMINAL.includes(state.status)
       ? {
           reset: { requestedAt: reset.requestedAt, hadState: reset.hadState },
@@ -696,6 +725,11 @@ export function statusText(
     lines.push(
       `  Crash loop: the service restarted after ${loop.crashes} deaths in a row; interrupted steps ${Date.parse(loop.resumeAt) > Date.now() ? "resume" : "resumed"} at ${displayTime(loop.resumeAt)}.`,
     );
+  const today = view.spentToday;
+  if (today.tokens || today.cents)
+    lines.push(
+      `  Spend today (UTC): ${amountText("tokens", today.tokens)}, ${amountText("cents", today.cents)}`,
+    );
   const { queue } = view;
   if (queue.mode !== "running")
     lines.push(
@@ -747,6 +781,18 @@ function objectiveText(row: ObjectiveView): string[] {
     );
     lines.push(
       `  Allowances: planning revisions ${used(objective.planningRevisions)}, implementation repairs ${used(objective.implementationRepairs)}, result rereviews ${used(objective.resultRereviews)}${each.length ? `; repairs per path: ${each.join(", ")}` : ""}`,
+    );
+  }
+  if (
+    row.spend &&
+    (row.spend.tokens || row.spend.cents || row.spend.limits.length)
+  ) {
+    const limits = row.spend.limits.map(
+      ({ scope, unit, used, allowed }) =>
+        `${scope === "perObjective" ? "this Objective" : "today (UTC)"} ${amountText(unit, used)} of ${amountText(unit, allowed)}`,
+    );
+    lines.push(
+      `  Spend: ${amountText("tokens", row.spend.tokens)}, ${amountText("cents", row.spend.cents)}; ${limits.length ? `limits: ${limits.join(", ")}` : "no limit set"}`,
     );
   }
   for (const hold of row.holds)

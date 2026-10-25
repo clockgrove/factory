@@ -295,6 +295,19 @@ How much an Objective may correct itself before asking. These are frozen with it
 
 Running out holds with `more`, `replan` and `cancel`. An amendment past `planningRevisions` holds with `more` (allow as many again and plan it), `refuse` (reject it) and `cancel`.
 
+### Spend ceiling
+
+Model spend can have a limit per Objective and per day, in tokens, list cost or both. No limit is set by default. These are frozen with the Objective's configuration.
+
+| Setting (`autonomy.spend`) | Counts                                                                    |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `perObjective.tokens`      | tokens of this Objective's model calls                                    |
+| `perObjective.cents`       | their list cost, in whole cents                                           |
+| `perDay.tokens`            | tokens of every Objective's model calls in this installation, per UTC day |
+| `perDay.cents`             | their list cost, in whole cents, per UTC day                              |
+
+`factory setup --objective-tokens N --objective-cents N --day-tokens N --day-cents N` sets them. When a limit is reached, the Objective holds before its next model call with `more` (allow as much again) and `cancel`; calls already running finish. A cost limit counts only calls whose provider reports a cost. `factory status` shows each Objective's spend against its limits, and the spend today.
+
 ## Amend a plan
 
 An accepted plan can grow while it runs. An amendment revises the plan for work it lacks, passes the plan checks and a new independent plan review, and, once accepted, is the plan from then on, posted as the plan comment. Each one uses a planning revision (see [Allowances](#allowances)). One amendment is planned at a time, and no other step starts while it is pending.

@@ -29,18 +29,19 @@ Part of [the design](../DESIGN.md).
 
 Installation options, each setting one key:
 
-| Option                                                                                         | Key                                              |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives` |
-| `--concurrency`, `--workers`, `--validations`, `--planners`, `--memory-mib`                    | `execution.*` (`memoryMiB`)                      |
-| `--worker-mib`, `--validation-mib`, `--planner-mib`                                            | `execution.reservations.*`                       |
-| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                          |
-| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                   |
-| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                  |
-| `--sandbox-network off\|package-install`, `--package-store DIR`                                | `sandbox.network`, `sandbox.packageStore`        |
-| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`   |
-| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                              |
-| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                      |
+| Option                                                                                         | Key                                                        |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives`           |
+| `--concurrency`, `--workers`, `--validations`, `--planners`, `--memory-mib`                    | `execution.*` (`memoryMiB`)                                |
+| `--worker-mib`, `--validation-mib`, `--planner-mib`                                            | `execution.reservations.*`                                 |
+| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                                    |
+| `--objective-tokens`, `--objective-cents`, `--day-tokens`, `--day-cents`                       | `autonomy.spend.perObjective.*`, `autonomy.spend.perDay.*` |
+| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                             |
+| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                            |
+| `--sandbox-network off\|package-install`, `--package-store DIR`                                | `sandbox.network`, `sandbox.packageStore`                  |
+| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`             |
+| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                                        |
+| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                                |
 
 An option marked `...` repeats, and the values given replace the whole list.
 

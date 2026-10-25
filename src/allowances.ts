@@ -143,7 +143,7 @@ export function overrunQuestion(
  */
 const ASKED = "allowances:asked";
 
-export type Asked = "repairs" | "rereviews";
+export type Asked = "repairs" | "rereviews" | "spend";
 
 /** Note that open hold `id` asks for more of `kind`; closed ones are forgotten. */
 export function asked(state: ObjectiveState, id: string, kind: Asked): void {

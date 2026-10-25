@@ -22,6 +22,17 @@ import { deliveryChange, profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
 import {
+  amountOf,
+  charge,
+  type Day,
+  type DaySpend,
+  dayOf,
+  grantSpend,
+  reached,
+  spendLimits,
+  spendQuestion,
+} from "./spend.js";
+import {
   type Answer,
   answerForm,
   answersOf,
@@ -432,6 +443,8 @@ export interface ServiceRun {
   resumeAt: number;
   /** Steps across the service the last death made suspects (`ObjectiveRunner.interrupted`). */
   suspects?: number;
+  /** The installation's model spend today (spend.ts); absent, only the Objective's own is counted. */
+  spend?: DaySpend;
 }
 
 /** Deaths in a row an attempt runs at, other steps finishing between, before its step holds. */
@@ -805,6 +818,34 @@ export class ObjectiveRunner {
         });
         continue;
       }
+      // A model step past the spend ceiling asks before it starts
+      // (spend.ts): `more` grants as much again. Calls running finish.
+      const day =
+        (step.resource === "planner" || step.resource === "worker") &&
+        !this.state.attempts[step.key] &&
+        Object.keys(spendLimits(this.state)).length
+          ? this.today()
+          : undefined;
+      if (day && reached(this.state, day).length) {
+        this.transact(() => {
+          this.hold(step.key, {
+            ...hold(spendQuestion(this.state, day), [
+              {
+                answer: MORE,
+                family: "retry",
+                consequence:
+                  "Allows as much again of each spend limit reached, and model calls go on.",
+              },
+              "cancel",
+            ]),
+            scope: "objective",
+          });
+          const question = this.state.holds.at(-1);
+          if (question?.step === step.key)
+            asked(this.state, question.id, "spend");
+        });
+        continue;
+      }
       if (step.resource && !hostLimits.acquire(step.resource)) continue;
       try {
         this.start(step);
@@ -812,6 +853,35 @@ export class ObjectiveRunner {
         if (step.resource) hostLimits.release(step.resource);
         throw error;
       }
+    }
+  }
+
+  /** The installation's spend today; nothing without its ledger. */
+  private today(): Day {
+    return (
+      this.run.spend?.today() ?? {
+        day: dayOf(this.now()),
+        tokens: 0,
+        cents: 0,
+      }
+    );
+  }
+
+  /**
+   * Charge a model call to the Objective and the day (spend.ts). A charge
+   * that can't be saved is logged; the call's own event already is.
+   */
+  private charge(event: Record<string, unknown>): void {
+    const amount = amountOf(event);
+    if (!amount.tokens && !amount.cents) return;
+    try {
+      this.run.spend?.charge(amount);
+      if (!this.stopped) this.transact(() => charge(this.state, amount));
+    } catch (error) {
+      this.log.write(this.state.issue, {
+        event: "spend-unsaved",
+        error: String(error),
+      });
     }
   }
 
@@ -844,12 +914,14 @@ export class ObjectiveRunner {
       state: structuredClone(this.state),
       ...(answer ? { answer } : {}),
       signal: controller.signal,
-      log: (event) =>
+      log: (event) => {
         this.log.write(this.state.issue, {
           step: step.key,
           attemptId,
           ...event,
-        }),
+        });
+        if (event.event === "model-usage") this.charge(event);
+      },
       runFile: (kind) =>
         this.log.runFile(this.state.issue, `${attemptId}.${kind}`),
       keep: (facts) => {
@@ -1657,6 +1729,7 @@ export class ObjectiveRunner {
             if (other.wait?.kind === "reset" && other.wait.provider)
               delete this.state.retries[key];
       } else if (granting === "repairs") grantOverrun(this.state, hold.step);
+      else if (granting === "spend") grantSpend(this.state, this.today());
       else {
         // A rereview's `more` grants and revalidates. Each `revalidate` is
         // charged here, against the live state, so two at once can't both

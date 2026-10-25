@@ -124,13 +124,13 @@ write_results() {
   mkdir -p "$RUNS/results"; local out="$RUNS/results/$RUN_ID.md" pass fail unr
   pass=$(awk -F'\t' '$3=="PASS"' "$RUN_DIR/results.tsv" | wc -l); fail=$(awk -F'\t' '$3=="FAIL"' "$RUN_DIR/results.tsv" | wc -l)
   unr=$(awk -F'\t' '$3=="UNREACHABLE"' "$RUN_DIR/results.tsv" | wc -l)
-  # PARKED: needs an API key (managed providers); BLOCKED-BY-DEFECT: a confirmed Factory defect stops it. Neither counts against a gate.
-  local park blk; park=$(awk -F'\t' '$3=="PARKED"' "$RUN_DIR/results.tsv" | wc -l); blk=$(awk -F'\t' '$3=="BLOCKED-BY-DEFECT"' "$RUN_DIR/results.tsv" | wc -l)
+  # BLOCKED-BY-DEFECT: a confirmed Factory defect stops it. It doesn't count against a gate.
+  local blk; blk=$(awk -F'\t' '$3=="BLOCKED-BY-DEFECT"' "$RUN_DIR/results.tsv" | wc -l)
   {
     echo "# Integration run $RUN_ID"; echo
     echo "Started $STARTED, ended $(ts) PDT ($(( ($(now) - START_S) / 60 )) min)${INTERRUPTED:+. **Interrupted** during $CUR_GROUP}."; echo
     header | sed 's/^/- /'; echo "- Run dir (serve logs, scratch configs, Objective bodies): $RUN_DIR"; echo
-    echo "**Totals:** $pass PASS, $fail FAIL, $unr UNREACHABLE, $park PARKED, $blk BLOCKED-BY-DEFECT."; echo
+    echo "**Totals:** $pass PASS, $fail FAIL, $unr UNREACHABLE, $blk BLOCKED-BY-DEFECT."; echo
     echo "| Check | Group | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$4); d=$5+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($3=="FAIL"?"**FAIL**":$3), $4, d/60, d%60}' "$RUN_DIR/results.tsv"
     if [ -s "$RUN_DIR/issues" ]; then echo; echo "Objectives created: $(awk '{printf "#%s (%s) ", $1, $2}' "$RUN_DIR/issues")"; fi

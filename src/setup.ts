@@ -126,16 +126,6 @@ const PROVIDER_OPTIONS: Record<string, Option> = {
   "copilot-timeout-seconds": { key: "worker.idleSeconds", read: "number" },
 };
 
-/** Worker kinds setup can write: the managed ones need settings by hand. */
-const SETUP_WORKERS = ["codex", "claude", "copilot"];
-
-/** The settings a managed worker needs, which setup doesn't take. */
-const MANAGED_FIELDS: Record<string, string> = {
-  "openai-agents": '"model", "effort", "containerSize", "apiKeyEnv"',
-  "claude-managed-agents":
-    '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
-};
-
 /** Setup's options for the command table, by kind (commands/shared.ts `FlagKind`). */
 export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   "config-only": "switch",
@@ -324,7 +314,7 @@ export async function setup(
     else set(option.key, value);
   }
   if (conflicts.length) return refused(path, created, ...conflicts);
-  providerOptions(raw, values, path, set);
+  providerOptions(raw, values, set);
   if (!created && !changed.length) {
     const problems = loads(repository);
     if (problems) return refused(path, false, problems);
@@ -404,7 +394,6 @@ function loads(repository: string): string | undefined {
 function providerOptions(
   raw: Record<string, unknown>,
   values: Record<string, string[]>,
-  path: string,
   set: (
     key: string,
     value: unknown,
@@ -427,12 +416,8 @@ function providerOptions(
   const worker = values.worker?.at(-1);
   if (planner && !(PLANNERS as readonly string[]).includes(planner))
     throw new SetupUsage(`--planner is one of ${PLANNERS.join(", ")}`);
-  if (worker && !SETUP_WORKERS.includes(worker))
-    throw new SetupUsage(
-      (WORKERS as readonly string[]).includes(worker)
-        ? `a ${worker} worker needs settings setup doesn't take: write providers.${name}.worker = { "kind": "${worker}", ${MANAGED_FIELDS[worker]} } in ${path} by hand`
-        : `--worker is one of ${SETUP_WORKERS.join(", ")}`,
-    );
+  if (worker && !(WORKERS as readonly string[]).includes(worker))
+    throw new SetupUsage(`--worker is one of ${WORKERS.join(", ")}`);
   // Without providers the configuration has one: codex, the default.
   if (!isObject(raw.providers))
     raw.providers = { codex: { planner: "codex", worker: { kind: "codex" } } };
@@ -477,7 +462,7 @@ function providerOptions(
     const option = PROVIDER_OPTIONS[flag]!;
     if (!value || option.key.startsWith("models.")) continue;
     const owner = flag.split("-")[0]!;
-    if (SETUP_WORKERS.includes(owner) && owner !== workerKind)
+    if ((WORKERS as readonly string[]).includes(owner) && owner !== workerKind)
       throw new SetupUsage(
         `--${flag} sets a ${owner} worker, and providers.${name}'s worker is ${workerKind}; add --worker ${owner} to change it`,
       );

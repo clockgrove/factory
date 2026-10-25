@@ -119,7 +119,7 @@ export interface CoreConfig {
   };
   /**
    * Every secret value Factory's output is redacted of, derived once here:
-   * the allowedSecretNames values and each managed provider's credential.
+   * the allowedSecretNames values and, with Copilot configured, its secrets.
    */
   secrets: string[];
   validation: {
@@ -424,26 +424,16 @@ export function configPath(repository: string): string {
 const MIN_SECRET_LENGTH = 4;
 
 /**
- * The values of the operator variables workers may see, and, from the
- * environment or the service's credentials, of each managed provider's
- * credential (apiKeyEnv, credentialEnv) and, with Copilot configured, of
- * its secrets and endpoint (COPILOT_REDACTED). Only `names` reach a
- * worker's environment; all of them are redacted from output.
+ * The values of the operator variables workers may see and, with Copilot
+ * configured, from the environment or the service's credentials, of its
+ * secrets and endpoint (COPILOT_REDACTED). Only `names` reach a worker's
+ * environment; all of them are redacted from output.
  */
 function secretValues(
   names: readonly string[],
   providers: Record<string, ProviderConfig>,
 ): string[] {
-  const credentials = [
-    ...Object.values(providers).flatMap(({ worker }) =>
-      worker.kind === "openai-agents"
-        ? [worker.apiKeyEnv]
-        : worker.kind === "claude-managed-agents"
-          ? [worker.credentialEnv]
-          : [],
-    ),
-    ...(copilotConfigured(providers) ? COPILOT_REDACTED : []),
-  ];
+  const credentials = copilotConfigured(providers) ? COPILOT_REDACTED : [];
   const values = new Set<string>();
   for (const name of names) values.add(process.env[name] ?? "");
   for (const name of credentials) {

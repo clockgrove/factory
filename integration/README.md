@@ -35,7 +35,7 @@ The plan lists each group with its expected minutes and a total. A real run whos
 
 **Results:** `integration/.runs/results/<PDT timestamp>.md` holds a table of check, group, result, evidence and duration. The run directory `integration/.runs/<timestamp>/` holds serve logs, scratch configs, rendered Objective bodies and the journal. `.runs/` is gitignored. The suite exits 0 when nothing failed, 1 on any FAIL, 2 on bad usage and 3 when it refuses to start.
 
-Results are PASS, FAIL, UNREACHABLE (a precondition is missing: the build lacks a feature, the case needs approval, or the scenario didn't arise), PARKED (needs an API key, for managed providers) or BLOCKED-BY-DEFECT (a confirmed Factory defect stops it). Only FAIL fails a run.
+Results are PASS, FAIL, UNREACHABLE (a precondition is missing: the build lacks a feature, the case needs approval, or the scenario didn't arise) or BLOCKED-BY-DEFECT (a confirmed Factory defect stops it). Only FAIL fails a run.
 
 ## Groups
 
@@ -71,7 +71,7 @@ No group needs an API key: providers use their subscription logins.
 
 ### Crash points
 
-`lib/crashpoints.mjs` enumerates a build's crash points from its `crashPoint()` call sites, read from `src` with the TypeScript parser. A name built from a parameter (`${point}:before`) is resolved through every call that passes it. The local `CRASH_POINTS` list comes from `test/crash.test.mjs`; every other site is a GitHub-side point, except the families other groups drive (step boundaries `engine:*`, state saves, knowledge, dream and managed provider sessions). So a new crash point is covered here with no list to update. A point with no scenario reports UNREACHABLE.
+`lib/crashpoints.mjs` enumerates a build's crash points from its `crashPoint()` call sites, read from `src` with the TypeScript parser. A name built from a parameter (`${point}:before`) is resolved through every call that passes it. The local `CRASH_POINTS` list comes from `test/crash.test.mjs`; every other site is a GitHub-side point, except the families other groups drive (step boundaries `engine:*`, state saves, knowledge and dream). So a new crash point is covered here with no list to update. A point with no scenario reports UNREACHABLE.
 
 ```sh
 node integration/lib/crashpoints.mjs . lists     # LIST<TAB>POINT<TAB>yes|no

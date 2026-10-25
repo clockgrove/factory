@@ -13,14 +13,14 @@ npm run integration -- --dry-run                     # every case, what it check
 npm run integration                                  # the main suite
 npm run integration -- --suite edge                  # the edge suite: PRD requirements no main case covers
 npm run integration -- --suite prd                   # the PRD suite: the requirements docs/PRD.md's Done still needs shown live
-npm run integration -- --provider claude            # the main suite on Claude (default: --provider codex)
+npm run integration -- --provider claude             # the main suite on Claude (default: --provider codex)
 npm run integration -- --only claude,queue           # some cases
 npm run integration -- --build ../other-checkout     # test another build (its dist/cli.js)
 ```
 
 `--dry-run` is the one list of cases. Each case runs its own Objectives; every case of a suite starts at once and they run concurrently.
 
-**Provider.** `--provider codex|claude` (default `codex`) is the run's default provider: every case runs on it, and the cases whose check is a planner decision use its `-plan` variant (`codex-plan` or `claude-plan`). The `codex` case (`happy.codex`, `stack.strict`, `model-kill.*`) is the chosen provider's end-to-end stack run, and `model-kill.*` kills that provider's own child: `codex` by its `--cd`, `claude` (the Agent SDK's native binary) by its working directory. The `claude` case (`happy.claude`, `queue.run-command`) runs `factory run N --provider` with the other one, so a Claude run proves Codex there. Dry runs and the results file name the provider. A release qualifies on both (see [RELEASING.md](../docs/RELEASING.md)).
+**Provider.** `--provider codex|claude` (default `codex`) is the run's default provider: every case except the cross-provider `claude` case runs on it, and the cases whose check is a planner decision use its `-plan` variant (`codex-plan` or `claude-plan`). The `codex` case (`happy.codex`, `stack.strict`, `model-kill.*`) is the chosen provider's end-to-end stack run, and `model-kill.*` kills that provider's own child: `codex` by its `--cd`, `claude` (the Agent SDK's native binary) by its working directory. The `claude` case (`happy.claude`, `queue.run-command`) runs `factory run N --provider` with the other one, so a Claude run proves Codex there. Dry runs and the results file name the provider. A minor version qualifies only when main, edge and prd pass on both (see [RELEASING.md](../docs/RELEASING.md)).
 
 **Time limit.** A suite has 60 minutes of wall clock: at 55 minutes it stops its cases, cancels unsettled Objectives concurrently, then runs the end checks, cleanup and report. CLI and remote calls share the deadline. The crash lane advances through exact hooks against one shared deadline, with time reserved for terminal checks.
 

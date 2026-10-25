@@ -133,7 +133,7 @@ case_codex() {
   end_done "$n"; local ok=$?
   local ev="$EVID; layers $layers; strict main $(gh_strict)"
   local calls pc; calls=$(st events "$n" event=model-usage); pc=$(st events "$n" event=model-usage provider="$PROVIDER")
-  [ $ok = 0 ] && [ "$layers" = 2 ]; rec_if happy.codex $? "$PROVIDER end to end (model calls $pc/$calls on $PROVIDER), ended $p: $ev" "$t0"
+  [ $ok = 0 ] && [ "$layers" = 2 ] && [ "$calls" -gt 0 ] && [ "$pc" = "$calls" ]; rec_if happy.codex $? "$PROVIDER end to end (model calls $pc/$calls on $PROVIDER), ended $p: $ev" "$t0"
   local ih; ih=$(st events "$n" event=outcome outcome=hold 'step=item:*')
   if [ $ok != 0 ]; then record stack.predecessor-wait UNREACHABLE "#$n didn't finish: $ev" "$t0"
   else [ "$ih" = 0 ]; rec_if stack.predecessor-wait $? "the upper layer waited on its predecessor with no hold: Work Item holds $ih" "$t0"; fi

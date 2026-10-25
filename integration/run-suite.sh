@@ -108,7 +108,7 @@ budget() {
 }
 if [ -n "$DRY" ]; then
   echo "DRY RUN ($SUITE_NAME): nothing is started, queued or written."
-  echo "Build: $BUILD ($commit)"; echo "Provider: $PROVIDER (planner questions on $PLAN_PROVIDER, cross-provider case on $OTHER_PROVIDER)"; echo "State: $STATE_BASE (fresh per run)"
+  echo "Build: $BUILD ($commit)"; echo "Provider: $PROVIDER"; echo "State: $STATE_BASE (fresh per run)"
   echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
   for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  ~%2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
   echo; budget
@@ -221,7 +221,7 @@ write_results() {
   {
     echo "# Integration run $RUN_ID ($SUITE_NAME)"; echo
     echo "Wall time: **$(( (end_s - START_S) / 60 )) min $(( (end_s - START_S) % 60 )) s** (limit 60), from $(TZ=America/Los_Angeles date -d @"$START_S" '+%-I:%M %p') to $(TZ=America/Los_Angeles date -d @"$end_s" '+%-I:%M %p') PDT${INTERRUPTED:+. **Interrupted**}."; echo
-    echo "- Build: $BUILD ($commit)"; echo "- Provider: $PROVIDER (planner questions on $PLAN_PROVIDER, cross-provider case on $OTHER_PROVIDER)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
+    echo "- Build: $BUILD ($commit)"; echo "- Provider: $PROVIDER"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
     echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ')$([ -s "$RUN_DIR/projects" ] && echo ", Project #$(paste -sd' ' "$RUN_DIR/projects")") (${REPOS_NOTE:-none created})"; echo
     echo "**Totals:** ${tot%, }."; echo
     echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"

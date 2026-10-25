@@ -239,10 +239,34 @@ export async function readCards(
 }
 
 /**
+ * The other repositories with open issues on the Project, for single
+ * player (holder.ts `projectRival`). Bounded like the queue read: a
+ * repository whose cards all lie past the bound isn't seen.
+ */
+export async function projectRepositories(
+  github: GitHub,
+  config: CoreConfig,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const found = new Set<string>();
+  await readItems(
+    github,
+    config,
+    "is:open",
+    () => undefined,
+    [],
+    signal,
+    (repository) => found.add(repository),
+  );
+  return [...found];
+}
+
+/**
  * Read the Project's items matching `query`, page by page; returns how
  * many were left unread. An item GitHub answers with an error for (an
  * issue in a repository the login can't read, say) is left out and noted
  * in `skipped`; an error for the Project or its item list fails the read.
+ * Another repository's issue goes to `elsewhere`, by its `owner/name`.
  */
 async function readItems(
   github: GitHub,
@@ -251,6 +275,7 @@ async function readItems(
   each: (item: QueueItem) => void,
   skipped: Skipped[],
   signal?: AbortSignal,
+  elsewhere?: (repository: string) => void,
 ): Promise<number> {
   const entry = ["node", "items", "nodes"];
   let after: string | null = null;
@@ -283,14 +308,13 @@ async function readItems(
         });
         continue;
       }
-      if (
-        !node ||
-        node.isArchived ||
-        typeof content?.number !== "number" ||
-        content.repository?.nameWithOwner?.toLowerCase() !==
-          config.repository.toLowerCase()
-      )
+      const repository = content?.repository?.nameWithOwner?.toLowerCase();
+      if (!node || node.isArchived || typeof content?.number !== "number")
         continue;
+      if (repository !== config.repository.toLowerCase()) {
+        if (repository) elsewhere?.(repository);
+        continue;
+      }
       each({
         issue: content.number,
         itemId: node.id,

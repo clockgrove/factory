@@ -341,9 +341,13 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Repository memory.** Factory records what each finished Objective learned, and shows the relevant records, as advisory data, to planning, workers and reviews of every Objective. The planner may also look up memory, files and tracked paths before it plans. `planning.context.memory: false` turns memory off for the installation; the lookups stay.
 - **Dream.** `factory dream` proposes a playbook from settled Objectives; `--preview` only shows the input it would read. `--file PATH --approve SHA256` or `--reject SHA256` decides a proposal, and `--show` shows the playbook in force.
 
-## One installation per repository
+## One installation per repository and Project
 
-One installation serves a repository at a time, on one machine. Factory records which one in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
+One installation serves a repository at a time, on one machine, and one installation serves a Project: of two repositories that share a Project, only one is served at a time. Factory records which installation serves a repository in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository, or the other repository on the Project and the installation that holds it, and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
+
+The Project check runs when the installation starts: it reads the repositories of the Project's open issues from GitHub, then each one's record. If GitHub can't list them within a few seconds, or a record can't be read, the installation starts anyway and logs it.
+
+When another installation serves the Project, stop it first. If it can't stop cleanly, because its machine is gone or its state was wiped, take its repository over on a machine set up for that repository (`factory serve --repo OTHER/NAME --take-over`), then stop that one cleanly, which frees it.
 
 To move to another machine:
 
@@ -356,7 +360,7 @@ To move to another machine:
 
 3. On the new machine, run `factory reset N` for each Objective that was in flight (see A new machine in [Stopping and recovery](#stopping-and-recovery)). The new installation has no state for them, so until then it doesn't run them or answer their questions; `factory queue list` lists them as inert with that command.
 
-Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
+Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again. `--take-over` takes a repository, never a Project: a take-over of a repository on a Project another installation serves is refused like any other start.
 
 ## Upgrade
 

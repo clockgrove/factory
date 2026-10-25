@@ -63,7 +63,7 @@ Several Objectives move through these steps at once.
    - `cancel` always works, at once.
 8. **Single player.**
    - Factory runs on one machine for a repository and its Project.
-   - A second machine or installation that tries to serve the same repository or Project is refused. It does nothing on GitHub, and its message names the machine that holds the repository.
+   - A second machine or installation that tries to serve the same repository or Project is refused. It does nothing on GitHub, and its message names the machine that holds the repository or Project.
    - The check uses GitHub only.
    - Moving to another machine is a deliberate handoff: stop the first machine, then set up the second.
 9. **Storage.** No infrastructure beyond GitHub and the machine itself.

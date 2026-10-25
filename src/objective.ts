@@ -78,7 +78,12 @@ function bullets(
 ): { text: string; code?: string }[] {
   return (section?.blocks ?? []).flatMap((block) => {
     if (block.kind === "empty" || block.kind === "heading") return [];
-    const text = block.text.replace(/\s+/g, " ").trim();
+    // A list item is already one line with its inline code exact (shown.ts):
+    // collapsing it again would make `"ab  "` the criterion `"ab "`.
+    const text =
+      block.kind === "item"
+        ? block.text
+        : block.text.replace(/\s+/g, " ").trim();
     if (!text) return [];
     return [
       block.kind !== "code" && block.code !== undefined

@@ -127,6 +127,9 @@ gh_human_gate() { local data; data=$(gh_protection) || return 1; python3 -c 'imp
 d=json.loads(sys.argv[1])
 r=(d.get("required_pull_request_reviews") or {}).get("required_approving_review_count",0)
 print("true" if r and r>0 else "false")' "$data"; }
+# gh_move_main NAME: commit drill/moves/NAME.txt to main, a path no Objective
+# owns, so open PRs fall behind a strict main; prints the commit.
+gh_move_main() { gh api -X PUT "repos/$REPO/contents/drill/moves/$1.txt" -f message="Drill: move main ($1)" -f content="$(printf '%s\n' "$1" | base64 -w0)" --jq .commit.sha; }
 # File bytes on main (raw; LFS files come back as their pointer).
 gh_file() { gh api "repos/$REPO/contents/$1?ref=main" -H 'Accept: application/vnd.github.raw' 2>/dev/null; }
 

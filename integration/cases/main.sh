@@ -114,6 +114,11 @@ case_codex() {
   n=$(new_objective chain2 "codex stack happy path" ID="$id" EXTRA="${extra//\{\{ID\}\}/$id}") || return
   m_kill "$n" 'plan*' model-kill.plan
   m_kill "$n" 'item:*:work' model-kill.work
+  # Strict main: once the first layer's PR is open, main moves, so a layer
+  # must be updated from its base before the stack merges (stack.strict).
+  if [ "$(gh_strict)" = true ] && wait_for 1500 pr_or_settled "$n" && has_open_pr "$n"; then
+    local moved; moved=$(gh_move_main "codex-$id") && log "#$n: main moved to ${moved:0:12} with PR #$(gh_open_pr "$n") open"
+  fi
   local p; p=$(HOLD_POLICY="d2 review decide more" wait_phase "$n" 'done|cancelled|failed' 2400)
   sleep 15
   local prs; prs=$(gh_prs "$n")
@@ -222,15 +227,15 @@ case_queue() {
 # 2, fault: the merge answers a lasting 403: the step holds (no endless
 # retry); a cancel then closes the PR, deletes the branch, posts one cancel
 # comment and closes the issue. With #1879, a 404 on a PR read right after
-# Factory created it retries instead.
+# Factory created it retries instead (the proxy's `lag=` rule).
 case_cancel() {
   local t0 n pr; t0=$(now)
   local HOLD_POLICY="review decide more" lag=""
   local fn; fn="padEnd$(uid)"
   n=$(new_objective exec "cancel with an open PR" FN="$fn" SPEC="\`$fn(s, width)\` puts spaces after \`s\` until it is \`width\` characters long: \`$fn(\"ab\", 4)\` is \`\"ab  \"\`.") || return
   if has_feature isolation; then
-    # A read naming its branch right after the push (factory/N/...) answers 404 twice.
-    prule_add "GET factory(/|%2F)$n(/|%2F) status=404 times=2"; lag=1
+    # The PR Factory creates for factory/N/... answers 404 to its next two reads.
+    prule_add "POST ^/repos/$REPO/pulls\$ body=factory/$n/ lag=2 times=1"; lag=1
   fi
   wait_for 1500 has_open_pr "$n"
   pr=$(gh_open_pr "$n")
@@ -241,9 +246,10 @@ case_cancel() {
   local f403; f403=$(proxy_count PUT "/pulls/$pr/merge\$" 403)
   [[ $p == hold:item:*:merge ]]; rec_if fault.lasting-403 $? "PR #$pr merge answered 403 x$f403: $p [$(hold_field "$hj" answers)]" "$t0"
   if [ -n "$lag" ]; then
-    local f404; f404=$(proxy_count GET "factory(/|%2F)$n(/|%2F)" 404); local oh; oh=$(st events "$n" event=outcome outcome=hold 'step=item:*:publish')
-    if [ "$f404" = 0 ]; then record fault.lag-404 UNREACHABLE "no read of factory/$n/ came through the proxy after the push" "$t0"
-    else [ "$oh" = 0 ]; rec_if fault.lag-404 $? "404s served on factory/$n/ reads right after the push: $f404; publish holds $oh" "$t0"; fi
+    local f404; f404=$(proxy_count GET "/pulls/$pr\$" 404)
+    local ih mh; ih=$(st events "$n" event=outcome outcome=hold 'step=item:*'); mh=$(st events "$n" event=outcome outcome=hold 'step=item:*:merge')
+    if [ "$f404" = 0 ]; then record fault.lag-404 UNREACHABLE "no read of PR #$pr came through the proxy after its creation" "$t0"
+    else [ "$ih" = "$mh" ]; rec_if fault.lag-404 $? "404s served on PR #$pr reads right after its creation: $f404; Work Item holds other than the 403 merge: $((ih - mh))" "$t0"; fi
   else record fault.lag-404 UNREACHABLE "feature absent: isolation" "$t0"; fi
   cancel_wait "$n" 600; prule_clear; sleep 20
   end_cancelled "$n"; local ok=$?
@@ -251,6 +257,8 @@ case_cancel() {
   [ $ok = 0 ] && [ "$cc" = 1 ]; rec_if queue.cancel-open-pr $? "cancel comment x$cc; $EVID" "$t0"
 }
 has_open_pr() { [ -n "$(gh_open_pr "$1")" ]; }
+# pr_or_settled N: N has an open PR or has ended, answering its holds meanwhile (for wait_for).
+pr_or_settled() { has_open_pr "$1" || settled "$1" && return 0; [[ $(st phase "$1") == hold:* ]] && HOLD_POLICY="d2 review decide more" auto_answer "$1" >/dev/null; return 1; }
 
 # 7: media select and repair: two candidate sets, `repair` once, a new select, a pick; LFS on main.
 case_media() {

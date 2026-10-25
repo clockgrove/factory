@@ -9,5 +9,6 @@ No other file changes.{{EXTRA}}
 
 ## Acceptance
 
-- `chainBase{{ID}}("  a b ")` is `"a b"` and `chainTop{{ID}}("  a b ")` is `"A B"`.
+- `chainBase{{ID}}("  a b ")` is `"a b"`.
+- `chainTop{{ID}}("  a b ")` is `"A B"`.
 - `npm test`

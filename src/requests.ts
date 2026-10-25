@@ -251,9 +251,6 @@ const FIELDS: Record<
     text: optionalText,
     writtenAt: optionalText,
     question: optionalText,
-    reviewArtifacts: (value) =>
-      value === undefined ||
-      (Array.isArray(value) && value.every((one) => typeof one === "string")),
   },
   cancel: {},
   retry: { question: optionalText },

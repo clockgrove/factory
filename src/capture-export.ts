@@ -5,8 +5,10 @@
  * a preview: it prints what it would send, or writes it to a local file,
  * and sends nothing. A send needs `--send --endpoint URL --authorize
  * DIGEST`, the digest a preview of exactly that export printed; it binds
- * the endpoint, the content, every batch and the headers. Every event and
- * capture is redacted as it is read, and every exported string again.
+ * the endpoint, the content, every batch and the headers, and pins each
+ * run file to the bytes the preview read, so a run still writing sends
+ * what was previewed. Every event and capture is redacted as it is read,
+ * and every exported string again.
  */
 import { createHash } from "node:crypto";
 import {
@@ -24,7 +26,7 @@ import {
   readRun,
   str,
 } from "./diagnostics.js";
-import { redact } from "./log.js";
+import { type LogEvent, redact } from "./log.js";
 import { captureFile } from "./paths.js";
 import { headAndTail } from "./text.js";
 
@@ -37,8 +39,12 @@ export interface ExportOptions {
   invocations?: readonly string[];
   /** `metadata` reads no captured text; `retained` adds the captured request and response. */
   content: "metadata" | "retained";
+  /** capture.maxBytesPerCall: what bounds a capture file's read (diagnostics.ts readCapture). */
+  maxBytesPerCall: number;
   /** The collector's base URL; the preview's digest needs it. */
   endpoint?: string;
+  /** `--authorize`: a preview's digest, whose pin reads each run file only as far as that preview did. */
+  authorize?: string;
   secrets: readonly string[];
 }
 
@@ -214,19 +220,27 @@ const MEASURES = [
  * run; no invented parentage. Ids hash the run and the call's place in it,
  * so a repeat export keeps them.
  */
-function spansOf(options: ExportOptions): {
+function spansOf(
+  options: ExportOptions,
+  /** Each chosen run file's end, from an earlier preview; else its size. */
+  pin: readonly number[] = [],
+): {
   runs: string[];
   spans: Span[];
   calls: Invocation[];
+  /** Each chosen run file's offset after the last line read. */
+  ends: number[];
 } {
   const spans: Span[] = [];
   const calls: Invocation[] = [];
   const runs: string[] = [];
+  const ends: number[] = [];
   const chosen = options.invocations;
   const secrets = options.secrets;
-  for (const file of chosenFiles(options.logs, options.issue, options.runs)) {
+  const files = chosenFiles(options.logs, options.issue, options.runs);
+  for (const [at, file] of files.entries()) {
     let index = 0;
-    readRun(file, 0, secrets, (event) => {
+    const visit = (event: LogEvent) => {
       if (event.event !== "model-usage") return;
       const run = String(event.run);
       const end = Date.parse(event.at);
@@ -283,7 +297,7 @@ function spansOf(options: ExportOptions): {
         const id = str(event.capture);
         const path = id && captureFile(options.issue, run, id);
         const body = path
-          ? readCapture(options.logs, path, secrets)
+          ? readCapture(options.logs, path, secrets, options.maxBytesPerCall)
           : undefined;
         attributes.push(
           attribute(
@@ -317,9 +331,10 @@ function spansOf(options: ExportOptions): {
         endTimeUnixNano: nanos(end),
         attributes,
       });
-    });
+    };
+    ends.push(readRun(file, 0, secrets, visit, pin[at]));
   }
-  return { runs, spans, calls };
+  return { runs, spans, calls, ends };
 }
 
 /** A selected model call: `--invocation` takes its span id, or its capture id. */
@@ -372,13 +387,19 @@ function batchesOf(spans: Span[]): string[] {
   return batches;
 }
 
-/** Binds the endpoint, content, every batch and the headers (names ignoring case, values hashed). */
+/**
+ * Binds the endpoint, content, every batch and the headers (names ignoring
+ * case, values hashed), and the run files' ends the batches were read to:
+ * `<sha256>@<end>,<end>...`, the ends in the chosen files' order, so a
+ * send reads the same bytes however far a run has written since.
+ */
 function authorizationDigest(
   endpoint: string,
   content: string,
   selection: readonly string[],
   batches: string[],
   headers: Record<string, string>,
+  ends: readonly number[],
 ): string {
   const headerDigest = hash(
     JSON.stringify(
@@ -387,15 +408,23 @@ function authorizationDigest(
         .sort(([a], [b]) => (a! < b! ? -1 : 1)),
     ),
   );
-  return hash(
+  const digest = hash(
     JSON.stringify([
       endpoint,
       content,
       [...selection].sort(),
       batches.map(hash),
       headerDigest,
+      ends,
     ]),
   );
+  return `${digest}@${ends.join(",")}`;
+}
+
+/** The run files' ends a digest pins (authorizationDigest); none when it isn't one. */
+function pinOf(digest: string | undefined): number[] {
+  const ends = /^[0-9a-f]{64}@(\d+(?:,\d+)*)$/.exec(digest ?? "")?.[1];
+  return ends ? ends.split(",").map(Number) : [];
 }
 
 export interface Prepared {
@@ -431,7 +460,10 @@ export function prepareExport(
   const read = otlpHeaders(environment);
   if ("refused" in read) return read.refused;
   const { headers } = read;
-  const { runs, spans, calls } = spansOf(options);
+  const { runs, spans, calls, ends } = spansOf(
+    options,
+    pinOf(options.authorize),
+  );
   const unknown = options.invocations?.find(
     (id) => !calls.some((call) => call.spanId === id || call.capture === id),
   );
@@ -461,6 +493,7 @@ export function prepareExport(
               options.invocations ?? [],
               batches,
               headers,
+              ends,
             ),
       limitations: [
         "Each model call is a root span in its run's trace; Factory invents no parentage.",

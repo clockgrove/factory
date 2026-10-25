@@ -461,6 +461,96 @@ test("an Objective with no final command still gets QA on the default branch: fi
   await stopped(service);
 });
 
+test("final validation names each Work Item command it skips because a later merge changed its package script", async () => {
+  const inst = installation();
+  mkdirSync(inst.root, { recursive: true });
+  const git = (cwd, ...args) => {
+    const result = spawnSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@t", ...args],
+      { cwd, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(inst.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
+  git(inst.root, "clone", "--quiet", "origin.git", "work");
+  const work = join(inst.root, "work");
+  const commit = (path, text, message) => {
+    writeFileSync(join(work, path), text);
+    git(work, "add", path);
+    git(work, "commit", "--quiet", "-m", message);
+    git(work, "push", "--quiet", "origin", "HEAD:main");
+    return git(work, "rev-parse", "HEAD");
+  };
+  const scripts = (check) =>
+    `${JSON.stringify({ name: "t", private: true, scripts: { check } })}\n`;
+  commit("b.mjs", "process.exit(0);\n", "b");
+  const base = commit("package.json", scripts("node b.mjs"), "base");
+  const merged = commit("a.txt", "a\n", "a merged");
+  // b's merge changes the script a validated.
+  const mergedB = commit("package.json", scripts("node b.mjs --b"), "b merged");
+  git(inst.root, "clone", "--quiet", "origin.git", "checkout");
+  githubOrigin(join(inst.root, "checkout"), join(inst.root, "origin.git"));
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const at = "2026-01-01T00:00:00.000Z";
+  const merge = (sha) => ({ mergeSha: sha, integratedSha: sha, at });
+  seed(inst, 62, "building", {
+    done: {
+      check: {
+        shown: readShown(
+          "<h2>Goal</h2><p>Check.</p><h2>Acceptance</h2><ul><li>It checks.</li></ul>",
+          { sources: false },
+        ),
+        title: "Check",
+      },
+      plan: plan(
+        [
+          item("a", {
+            ownedPaths: ["a.txt"],
+            validation: [
+              { command: "npm run check", provenance: "base-observed" },
+            ],
+          }),
+          item("b", {
+            ownedPaths: ["package.json"],
+            dependencies: ["a"],
+            validation: [
+              { command: "node b.mjs", provenance: "base-observed" },
+            ],
+          }),
+        ],
+        { base },
+      ),
+      ...Object.fromEntries(
+        ["a", "b"].flatMap((id) =>
+          ["work", "validate", "review", "publish", "ci"].map((step) => [
+            `item:${id}:${step}`,
+            {},
+          ]),
+        ),
+      ),
+      "item:a:merge": merge(merged),
+      "item:b:merge": merge(mergedB),
+    },
+    kept: { "plan:acceptedAt": at },
+  });
+  const service = serve(inst);
+  await until(() => stateOf(inst, 62).done.final, "final passes", 30_000);
+  const { final } = stateOf(inst, 62).done;
+  assert.deepEqual(final.commands, ["node b.mjs"]);
+  assert.deepEqual(final.skipped, [
+    { item: "a", command: "npm run check", changedBy: ["b"] },
+  ]);
+  // Status says it didn't run, and why.
+  assert.match(
+    cli(inst, "status", "62").out,
+    /Skipped by final validation: command `npm run check` \(Work Item a\): the merge of b changed its package script; Work Item a's own validation ran it/,
+  );
+  assert.equal(cli(inst, "cancel", "62").code, 0);
+  await stopped(service);
+});
+
 // A non-writer's Objective: Factory reads its structure from GitHub's
 // rendering (body_html) and plans from that rendering as Markdown text; the
 // approval names their digest. The stand-in renders like GitHub (micromark

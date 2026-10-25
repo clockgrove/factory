@@ -37,6 +37,8 @@ import {
   TERMINAL,
 } from "./state.js";
 import type { Tracking } from "./tracking.js";
+import { type SkippedCheck, skippedLines } from "./validate.js";
+import type { FinalResult } from "./work/finish.js";
 import { mergeOf } from "./work/merged.js";
 import { objectiveWorkflow } from "./workflow.js";
 
@@ -108,6 +110,8 @@ export interface ObjectiveView {
   running: string[];
   /** Work Items whose validation failed once and passed on its one rerun. */
   flakyRerun: { item: string; command: string }[];
+  /** The Work Item commands final validation skipped (work/finish.ts finalRuns). */
+  finalSkipped: SkippedCheck[];
   /** The operator's `accept <n>` and `refuse <n>` of single criteria under the current plan, with their reasons. */
   decisions: CriterionDecision[];
   /**
@@ -324,6 +328,7 @@ export function statusOf(
       waitsOn: null,
       running: [],
       flakyRerun: [],
+      finalSkipped: [],
       decisions: [],
       nextAction: {
         command: context.setAside
@@ -366,6 +371,7 @@ export function statusOf(
     waitsOn: context.waitsOn,
     running: Object.keys(state.attempts),
     flakyRerun: flakyReruns(state),
+    finalSkipped: (state.done.final as FinalResult | undefined)?.skipped ?? [],
     decisions: decisionsOf(state),
     allowances: {
       planningRevisions: planningRevisions(state),
@@ -771,6 +777,8 @@ function objectiveText(row: ObjectiveView): string[] {
     );
   for (const line of row.plan ? retiredLines(row.plan, displayTime) : [])
     lines.push(`  Retired: ${line}`);
+  for (const line of skippedLines(row.finalSkipped))
+    lines.push(`  Skipped by final validation: ${line}`);
   for (const flaky of row.flakyRerun)
     lines.push(
       `  Possibly flaky: ${flaky.item}: \`${flaky.command}\` failed once; its rerun passed`,

@@ -8,10 +8,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  type ActivityCounts,
   addUsage,
   chosenFiles,
   count,
   emptyUsage,
+  foldActivity,
   itemOfEvent,
   num,
   originalText,
@@ -115,7 +117,7 @@ const size = (bytes: number | null) =>
  * that one's bodies, from any run. Returns why it can't, for a refusal.
  */
 export function captures(
-  options: AnalysisRead & { id?: string },
+  options: AnalysisRead & { id?: string; maxBytesPerCall: number },
   write: (text: string) => void,
 ): string | undefined {
   const { runs, rows } = captureRows(
@@ -126,7 +128,9 @@ export function captures(
       ? rows.find((candidate) => candidate.id === options.id)
       : undefined;
     const file = row && captureFile(options.issue, row.run, row.id);
-    const body = file && readCapture(options.logs, file, options.secrets);
+    const body =
+      file &&
+      readCapture(options.logs, file, options.secrets, options.maxBytesPerCall);
     if (!row || !body)
       return `#${options.issue} has no capture ${options.id}: \`factory diagnostics ${options.issue} --captures --all-runs\` lists them; retention removes a run's captures with its log.`;
     if (options.json) {
@@ -427,16 +431,7 @@ export interface AnalysisReport {
     ms: number;
     byStep: Record<string, { commands: number; failed: number }>;
   };
-  activity: Record<
-    string,
-    {
-      turns: number;
-      toolsStarted: number;
-      edits: number;
-      commands: number;
-      commandsFailed: number;
-    }
-  >;
+  activity: Record<string, ActivityCounts>;
   /** The old formal history's checks, on step attempts (start paired with outcome). */
   history: {
     attempts: number;
@@ -1037,17 +1032,7 @@ class Analysis {
       }
       case "worker-activity": {
         const item = itemOfEvent(event) ?? "objective";
-        this.activity[item] ??= {
-          turns: 0,
-          toolsStarted: 0,
-          edits: 0,
-          commands: 0,
-          commandsFailed: 0,
-        };
-        const row = this.activity[item];
-        const counts = (event.counts ?? {}) as Record<string, unknown>;
-        for (const name of Object.keys(row) as (keyof typeof row)[])
-          row[name] += num(counts[name]) ?? 0;
+        this.activity[item] = foldActivity(event, this.activity[item]);
         break;
       }
       case "aborted":
@@ -1149,10 +1134,7 @@ class Analysis {
     const reason = str(end?.reason);
     const id = str(start.attemptId);
     const parentId = str(start.parentAttemptId);
-    const error =
-      outcome === "retry" &&
-      (wait === "error" ||
-        (!wait && (reason?.startsWith("error") || reason === "deadline")));
+    const error = outcome === "retry" && wait === "error";
     this.attempts.push({
       run: String(start.run),
       step,

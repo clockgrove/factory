@@ -71,6 +71,7 @@ Run `factory status ISSUE --json`. Each entry in `objectives` has:
 - `running`: steps started and not finished. `lastEvent`: the latest run log event.
 - `frozen`: the configuration frozen when the Objective was admitted, `{provider, selectedBy, digest}`. `selectedBy` is `defaultProvider`, `--provider` (from `serve --provider`) or `switch` (an operator's `switch` answer). Report `provider`, `selectedBy` and the digest's first 12 characters.
 - `flakyRerun`: `{item, command}` for each validation that failed once and passed its one rerun. Report them.
+- `finalSkipped`: `{item, command, changedBy}` for each Work Item command final validation skipped because the merges of `changedBy` changed its package script. Report that it didn't run on the integrated tree.
 - `reset`: `{requestedAt, hadState}` while a reset rebuilds the state. It is done when the rebuild lands and `reset` disappears, not when the command returns.
 - `nextAction`: `{command, reason}`. When you suggest a next step, use `command` as given; `null` means nothing to run, and `reason` says why.
 

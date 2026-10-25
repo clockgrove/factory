@@ -1035,6 +1035,24 @@ export async function laterScriptChanges(input: {
   return changes;
 }
 
+/**
+ * A Work Item command final validation skipped (work/finish.ts finalRuns):
+ * merges of `changedBy` changed its package script.
+ */
+export interface SkippedCheck {
+  item: string;
+  command: string;
+  changedBy: string[];
+}
+
+/** Each skipped command and why, for the report, status and final review. */
+export function skippedLines(skipped: readonly SkippedCheck[]): string[] {
+  return skipped.map(
+    ({ item, command, changedBy }) =>
+      `command \`${command}\` (Work Item ${item}): the merge of ${changedBy.join(", ")} changed its package script; Work Item ${item}'s own validation ran it`,
+  );
+}
+
 /** Why `commands` may not run on `commit`, or undefined when every pin holds. */
 async function pinRefusal(
   git: Revisions,

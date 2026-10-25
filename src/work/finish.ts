@@ -32,6 +32,8 @@ import { runOf, sinceRun } from "../state.js";
 import { errorMessage } from "../text.js";
 import {
   laterScriptChanges,
+  type SkippedCheck,
+  skippedLines,
   type ValidateInput,
   type Validation,
   validateTree,
@@ -91,6 +93,8 @@ export interface FinalResult {
   artifacts?: ReviewArtifact[];
   /** The selected media origin serves, for the report; absent when there is none. */
   media?: string;
+  /** The Work Item commands final validation skipped (`finalRuns`); absent when none. */
+  skipped?: SkippedCheck[];
 }
 
 /** `final`: the final commands on the default branch head after every merge. */
@@ -145,7 +149,7 @@ export async function finalValidation(
   if (problem) return problem;
   const workDir = deps.workDir(state.issue);
   const members = validationMembers(plan, undefined, selection(state));
-  const { result, item } = await finalRuns(context, deps, plan, head);
+  const { result, item, skipped } = await finalRuns(context, deps, plan, head);
   if (result.kind === "failed") {
     const again = rerunOnce(
       result,
@@ -196,6 +200,7 @@ export async function finalValidation(
     commands: result.commands,
     ...(result.artifacts ? { artifacts: result.artifacts } : {}),
     ...(verified.value.summary ? { media: verified.value.summary } : {}),
+    ...(skipped.length ? { skipped } : {}),
   };
   return {
     kind: "done",
@@ -210,14 +215,15 @@ export async function finalValidation(
  * (planning/plan.ts `fallbackRuns`), each in a fresh checkout as its
  * validate step ran them. A command whose package script a later merge
  * changed is skipped: its own item validated it, and the later item owns
- * the change. `item` names the run that did not pass.
+ * the change; `skipped` names each such command. `item` names the run
+ * that did not pass.
  */
 async function finalRuns(
   context: StepContext,
   deps: BuildDeps,
   plan: Plan,
   head: string,
-): Promise<{ result: Validation; item?: string }> {
+): Promise<{ result: Validation; item?: string; skipped: SkippedCheck[] }> {
   const { state, signal } = context;
   const { config } = deps;
   const workDir = deps.workDir(state.issue);
@@ -256,12 +262,13 @@ async function finalRuns(
     results: [],
     artifacts: [],
   };
+  const skipped: SkippedCheck[] = [];
   for (const item of fallbackRuns(plan)) {
     const start = (
       state.done[stepKey(item.id, "work")] as WorkResult | undefined
     )?.base;
     const predecessor = start && start !== plan.base ? start : undefined;
-    const skipped = await laterScriptChanges({
+    const changed = await laterScriptChanges({
       checkout: config.checkout,
       base: plan.base,
       ...(predecessor ? { predecessor } : {}),
@@ -270,15 +277,17 @@ async function finalRuns(
       merges,
       signal,
     });
-    for (const { command, changedBy } of skipped)
+    for (const { command, changedBy } of changed) {
       context.log({
         event: "final-check-skipped",
         item: item.id,
         command,
         changedBy,
       });
+      skipped.push({ item: item.id, command, changedBy });
+    }
     const validation = item.validation.filter(
-      (check) => !skipped.some((entry) => entry.command === check.command),
+      (check) => !changed.some((entry) => entry.command === check.command),
     );
     if (!validation.length) continue;
     const result = await run([item.id], {
@@ -286,14 +295,14 @@ async function finalRuns(
       ...(predecessor ? { predecessor } : {}),
       requirePackageManagerUpdate: true,
     });
-    if (result.kind !== "passed") return { result, item: item.id };
+    if (result.kind !== "passed") return { result, item: item.id, skipped };
     passed.tree = result.tree;
     passed.commands.push(...result.commands);
     passed.results.push(...result.results);
     passed.artifacts!.push(...(result.artifacts ?? []));
   }
   // No Work Item run: the final commands, if any, in one checkout.
-  return { result: passed.tree ? passed : await run([], {}) };
+  return { result: passed.tree ? passed : await run([], {}), skipped };
 }
 
 /** `final-review`: every Objective criterion against the integrated result. */
@@ -386,6 +395,7 @@ export function finalReviewStep(deps: BuildDeps): Step {
         commit: final.commit,
         merges: merges.map((entry) => entry.merged.mergeSha),
         validation: { tree: final.tree, commands: final.commands },
+        skipped: final.skipped ?? [],
         artifacts: [
           { artifacts: final.artifacts ?? [] },
           ...[...mergedIds, ...qa.map((entry) => entry.itemId)].map((id) => ({
@@ -507,6 +517,14 @@ export function reportStep(deps: BuildDeps): Step {
       const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
         plan.retired?.length
           ? `\n\nRetired final validation commands:\n${retiredLines(plan)
+              .map((line) => `- ${line}`)
+              .join("\n")}`
+          : ""
+      }${
+        final.skipped
+          ? `\n\nFinal validation skipped these commands:\n${skippedLines(
+              final.skipped,
+            )
               .map((line) => `- ${line}`)
               .join("\n")}`
           : ""

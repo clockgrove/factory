@@ -741,13 +741,67 @@ export function readNew(
 ): LogEvent[] {
   const fresh: LogEvent[] = [];
   for (const file of logFiles(dir, issue)) {
-    const from = offsets.get(file) ?? 0;
-    const complete = completeLines(readFrom(file, from, sizeOf(file)));
-    if (!complete.length) continue;
-    offsets.set(file, from + complete.length);
-    fresh.push(...ofRun(file, parseLines(complete.toString("utf8"))));
+    const found: LogEvent[] = [];
+    offsets.set(
+      file,
+      streamFile(file, offsets.get(file) ?? 0, (event) => found.push(event)),
+    );
+    fresh.push(...ofRun(file, found));
   }
   return fresh.sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/** Bytes `streamFile` reads per chunk; a line longer than STREAM_LINE is skipped. */
+const STREAM_CHUNK = 1024 * 1024;
+const STREAM_LINE = 16 * 1024 * 1024;
+
+/**
+ * Read `file` from byte `from` to `to` (its size) in chunks, passing each
+ * complete event to `visit`; returns the offset after the last complete
+ * line, where a follow carries on. A large log costs time, not memory.
+ */
+export function streamFile(
+  file: string,
+  from: number,
+  visit: (event: LogEvent) => void,
+  to = sizeOf(file),
+): number {
+  let position = from;
+  let done = from;
+  let rest = Buffer.alloc(0);
+  let skipping = false;
+  while (position < to) {
+    const chunk = readFrom(
+      file,
+      position,
+      Math.min(to, position + STREAM_CHUNK),
+    );
+    if (!chunk.length) break;
+    position += chunk.length;
+    let bytes = rest.length ? Buffer.concat([rest, chunk]) : chunk;
+    if (skipping) {
+      // Inside an overlong line: drop it through its newline.
+      const end = bytes.indexOf(10);
+      if (end < 0) {
+        done += bytes.length;
+        rest = Buffer.alloc(0);
+        continue;
+      }
+      done += end + 1;
+      bytes = bytes.subarray(end + 1);
+      skipping = false;
+    }
+    const complete = completeLines(bytes);
+    for (const event of parseLines(complete.toString("utf8"))) visit(event);
+    done += complete.length;
+    rest = Buffer.from(bytes.subarray(complete.length));
+    if (rest.length > STREAM_LINE) {
+      done += rest.length;
+      rest = Buffer.alloc(0);
+      skipping = true;
+    }
+  }
+  return done;
 }
 
 /** Each event marked with the run whose file it was read from. */
@@ -803,12 +857,12 @@ export function loggedIssues(dir: string): number[] {
 }
 
 /** The bytes up to and including the last newline: the complete lines. */
-export function completeLines(bytes: Buffer): Buffer {
+function completeLines(bytes: Buffer): Buffer {
   return bytes.subarray(0, bytes.lastIndexOf(10) + 1);
 }
 
 /** The bytes of `file` from `start` to `end`; empty when it can't be read. */
-export function readFrom(file: string, start: number, end: number): Buffer {
+function readFrom(file: string, start: number, end: number): Buffer {
   if (end <= start) return Buffer.alloc(0);
   let fd: number | undefined;
   try {
@@ -824,7 +878,7 @@ export function readFrom(file: string, start: number, end: number): Buffer {
 }
 
 /** Complete JSON lines as events; with `partialFirst`, the first line was cut and is dropped. */
-export function parseLines(text: string, partialFirst = false): LogEvent[] {
+function parseLines(text: string, partialFirst = false): LogEvent[] {
   const lines = text.split("\n");
   if (partialFirst) lines.shift();
   const events: LogEvent[] = [];
@@ -860,15 +914,17 @@ const LIVE_MS = 10 * 60 * 1000;
  * `active` run (the caller's own) and any run changed in the last 10
  * minutes (a `factory dream` call still running) are never removed; they
  * still count toward both bounds. Each removed run is first recorded in
- * its Objective's `rotated` file, so a reader can say how many runs it
- * no longer has (`rotatedRuns`).
+ * its Objective's `rotated` file, once, so a reader can say how many runs
+ * it no longer has (`rotatedRuns`). A path that can't be removed is left
+ * for the next pass and the rest carry on; returns why each failed.
  */
 export function rotateLogs(
   dir: string,
   active?: string,
   retention = DEFAULT_RETENTION,
-): void {
+): string[] {
   const now = Date.now();
+  const failed: string[] = [];
   const kept = (id: string, paths: string[]) =>
     id === active ||
     paths.some((path) => {
@@ -878,35 +934,65 @@ export function rotateLogs(
         return false;
       }
     });
+  // Each Objective's recorded runs, read when it first loses one.
+  const recorded = new Map<string, Set<string>>();
+  const remove = (issueDir: string, run: string, paths: string[]) => {
+    let runs = recorded.get(issueDir);
+    if (!runs) {
+      runs = new Set(rotatedRecords(issueDir).map((record) => record.run));
+      recorded.set(issueDir, runs);
+    }
+    if (!runs.has(run)) {
+      record(issueDir, run, paths);
+      runs.add(run);
+    }
+    for (const path of paths)
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch (error) {
+        failed.push(String(error));
+      }
+  };
   const runs: {
     paths: string[];
     id: string;
     bytes: number;
     issueDir: string;
   }[] = [];
-  for (const issue of safeList(dir)) {
-    const issueDir = join(dir, issue);
-    const byRun = new Map<string, string[]>();
-    for (const name of safeList(issueDir)) {
-      if (name === ROTATED) continue;
-      const id = runOfFile(name);
-      byRun.set(id, [...(byRun.get(id) ?? []), join(issueDir, name)]);
+  // Each sweep on its own: one that throws leaves the other to run.
+  try {
+    for (const issue of safeList(dir)) {
+      const issueDir = join(dir, issue);
+      const byRun = new Map<string, string[]>();
+      for (const name of safeList(issueDir)) {
+        if (name === ROTATED) continue;
+        const id = runOfFile(name);
+        byRun.set(id, [...(byRun.get(id) ?? []), join(issueDir, name)]);
+      }
+      const ids = [...byRun.keys()].sort();
+      const excess = ids.length - retention.runsPerObjective;
+      ids.forEach((id, i) => {
+        const paths = byRun.get(id)!;
+        if (i < excess && !kept(id, paths)) remove(issueDir, id, paths);
+        else
+          runs.push({ paths, id, bytes: paths.reduce(addSize, 0), issueDir });
+      });
     }
-    const ids = [...byRun.keys()].sort();
-    const excess = ids.length - retention.runsPerObjective;
-    ids.forEach((id, i) => {
-      const paths = byRun.get(id)!;
-      if (i < excess && !kept(id, paths)) remove(issueDir, id, paths);
-      else runs.push({ paths, id, bytes: paths.reduce(addSize, 0), issueDir });
-    });
+  } catch (error) {
+    failed.push(String(error));
   }
-  runs.sort((a, b) => (a.id < b.id ? 1 : -1));
-  let total = 0;
-  for (const run of runs) {
-    total += run.bytes;
-    if (total > retention.totalBytes && !kept(run.id, run.paths))
-      remove(run.issueDir, run.id, run.paths);
+  try {
+    runs.sort((a, b) => (a.id < b.id ? 1 : -1));
+    let total = 0;
+    for (const run of runs) {
+      total += run.bytes;
+      if (total > retention.totalBytes && !kept(run.id, run.paths))
+        remove(run.issueDir, run.id, run.paths);
+    }
+  } catch (error) {
+    failed.push(String(error));
   }
+  return failed;
 }
 
 /** An Objective's record of the runs rotation removed: one JSON line each. */
@@ -918,8 +1004,8 @@ export interface RotatedRun {
   lastAt: string;
 }
 
-/** Record the run in its Objective's `rotated` file, then remove its files. */
-function remove(issueDir: string, run: string, paths: string[]): void {
+/** Append the run to its Objective's `rotated` file, before its files go. */
+function record(issueDir: string, run: string, paths: string[]): void {
   let last = 0;
   for (const path of paths)
     try {
@@ -927,31 +1013,37 @@ function remove(issueDir: string, run: string, paths: string[]): void {
     } catch {
       // Gone meanwhile.
     }
-  const record: RotatedRun = { run, lastAt: new Date(last).toISOString() };
+  const entry: RotatedRun = { run, lastAt: new Date(last).toISOString() };
   try {
-    appendFileSync(join(issueDir, ROTATED), `${JSON.stringify(record)}\n`);
+    appendFileSync(join(issueDir, ROTATED), `${JSON.stringify(entry)}\n`);
   } catch {
     // Like a run-log line: losing the record must not stop housekeeping.
   }
-  for (const path of paths) rmSync(path, { recursive: true, force: true });
+}
+
+/** The records of an Objective's `rotated` file, in order; a torn line is skipped. */
+function rotatedRecords(issueDir: string): RotatedRun[] {
+  const file = join(issueDir, ROTATED);
+  const records: RotatedRun[] = [];
+  for (const line of readFrom(file, 0, sizeOf(file))
+    .toString("utf8")
+    .split("\n"))
+    try {
+      const { run, lastAt } = JSON.parse(line) as RotatedRun;
+      if (typeof run === "string" && typeof lastAt === "string")
+        records.push({ run, lastAt });
+    } catch {
+      // A torn line: skipped.
+    }
+  return records;
 }
 
 /** The runs rotation removed from the Objective's run log, each once; a run still there is not one. */
 export function rotatedRuns(dir: string, issue: number): RotatedRun[] {
-  const issueDir = join(dir, String(issue));
   const present = new Set(logFiles(dir, issue).map(runOfFile));
-  const file = join(issueDir, ROTATED);
   const found = new Map<string, RotatedRun>();
-  const text = readFrom(file, 0, sizeOf(file)).toString("utf8");
-  for (const line of text.split("\n")) {
-    try {
-      const { run, lastAt } = JSON.parse(line) as RotatedRun;
-      if (typeof run === "string" && typeof lastAt === "string")
-        if (!present.has(run)) found.set(run, { run, lastAt });
-    } catch {
-      // A torn line: skipped.
-    }
-  }
+  for (const record of rotatedRecords(join(dir, String(issue))))
+    if (!present.has(record.run)) found.set(record.run, record);
   return [...found.values()].sort((a, b) => a.run.localeCompare(b.run));
 }
 

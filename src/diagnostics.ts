@@ -11,14 +11,11 @@ import { join } from "node:path";
 import { displayTime, duration, redactDeep } from "./display.js";
 import { itemOf } from "./engine.js";
 import {
-  completeLines,
   type LogEvent,
   logFiles,
-  parseLines,
-  readFrom,
   readRunFile,
   runOfFile,
-  sizeOf,
+  streamFile,
   untilInterrupted,
 } from "./log.js";
 import { captureFile, readContained } from "./paths.js";
@@ -40,6 +37,8 @@ export interface DiagnosticsOptions {
   follow?: boolean;
   /** With `item`: print each model call's captured request and response, not only its capture file. */
   captures?: boolean;
+  /** capture.maxBytesPerCall: what bounds a capture file's read (readCapture). */
+  maxBytesPerCall: number;
   json?: boolean;
   secrets: readonly string[];
 }
@@ -72,9 +71,6 @@ export interface Entry {
   event: LogEvent;
 }
 
-/** Bytes read per chunk; a line longer than the cap is skipped. */
-const CHUNK = 1024 * 1024;
-const MAX_LINE = 16 * 1024 * 1024;
 /** Text cut in timeline lines. */
 const TEXT = 200;
 /** Steps the summary lists as slowest. */
@@ -93,64 +89,25 @@ export function chosenFiles(
   return files.slice(-1);
 }
 
-/**
- * Read `file` from byte `from` in chunks, passing each complete event to
- * `visit`; returns the offset after the last complete line, where a follow
- * carries on.
- */
-export function streamFile(
-  file: string,
-  from: number,
-  visit: (event: LogEvent) => void,
-): number {
-  const size = sizeOf(file);
-  let position = from;
-  let done = from;
-  let rest = Buffer.alloc(0);
-  let skipping = false;
-  while (position < size) {
-    const chunk = readFrom(file, position, Math.min(size, position + CHUNK));
-    if (!chunk.length) break;
-    position += chunk.length;
-    let bytes = rest.length ? Buffer.concat([rest, chunk]) : chunk;
-    if (skipping) {
-      // Inside an overlong line: drop it through its newline.
-      const end = bytes.indexOf(10);
-      if (end < 0) {
-        done += bytes.length;
-        rest = Buffer.alloc(0);
-        continue;
-      }
-      done += end + 1;
-      bytes = bytes.subarray(end + 1);
-      skipping = false;
-    }
-    const complete = completeLines(bytes);
-    for (const event of parseLines(complete.toString("utf8"))) visit(event);
-    done += complete.length;
-    rest = Buffer.from(bytes.subarray(complete.length));
-    if (rest.length > MAX_LINE) {
-      done += rest.length;
-      rest = Buffer.alloc(0);
-      skipping = true;
-    }
-  }
-  return done;
-}
-
-/** Stream `file` from `from` like streamFile, each event redacted and marked with its run. */
+/** Stream `file` from `from` (to `to`) like streamFile, each event redacted and marked with its run. */
 export function readRun(
   file: string,
   from: number,
   secrets: readonly string[],
   visit: (event: LogEvent) => void,
+  to?: number,
 ): number {
   const run = runOfFile(file);
-  return streamFile(file, from, (event) => {
-    const shown = redactDeep(event, secrets);
-    shown.run = run;
-    visit(shown);
-  });
+  return streamFile(
+    file,
+    from,
+    (event) => {
+      const shown = redactDeep(event, secrets);
+      shown.run = run;
+      visit(shown);
+    },
+    to,
+  );
 }
 
 /** Print the diagnostics `options` asks for to `write`; with follow, until interrupted. */
@@ -314,7 +271,12 @@ function captureOf(
   if (!file) return undefined;
   const path = join(options.logs, file);
   if (!bodies) return { path };
-  const body = readCapture(options.logs, file, options.secrets);
+  const body = readCapture(
+    options.logs,
+    file,
+    options.secrets,
+    options.maxBytesPerCall,
+  );
   return body ? { path, ...body } : { path };
 }
 
@@ -370,19 +332,20 @@ export function originalText(original?: Record<string, unknown>): string {
   return parts.length ? `; ${parts.join(", ")}` : "";
 }
 
-/** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */
-const CAPTURE_READ_MAX = 768 * 1024 * 1024;
-
 /**
  * A capture file's bodies (`file` under `logs`, from paths.ts captureFile),
  * read without following links; undefined when it was rotated away or
  * can't be read. Stored redacted and cut to capture.maxBytesPerCall, and
- * redacted again here with today's secrets.
+ * redacted again here with today's secrets. The read is bounded by that
+ * setting (`maxBytesPerCall`): three times it, for JSON escapes, and 1 MiB
+ * for the rest of the file; a larger file (written under a larger setting)
+ * isn't read.
  */
 export function readCapture(
   logs: string,
   file: string,
   secrets: readonly string[],
+  maxBytesPerCall: number,
 ):
   | {
       request?: string;
@@ -395,7 +358,12 @@ export function readCapture(
   try {
     const body = redactDeep(
       JSON.parse(
-        readContained(logs, file, CAPTURE_READ_MAX, true).toString("utf8"),
+        readContained(
+          logs,
+          file,
+          3 * maxBytesPerCall + 1024 * 1024,
+          true,
+        ).toString("utf8"),
       ) as Record<string, unknown>,
       secrets,
     );
@@ -477,29 +445,57 @@ function modelText(event: LogEvent): string {
     .join(" · ");
 }
 
-interface Activity {
+/** The counts a `worker-activity` event carries (work/worker.ts ActivityLog), each since the event before. */
+export interface ActivityCounts {
   turns: number;
   toolsStarted: number;
+  toolsFinished: number;
   edits: number;
   commands: number;
   commandsFailed: number;
+  compactions: number;
+}
+
+/** One `worker-activity` event's counts added to `into` (fresh zeros when absent); a count it lacks adds 0. */
+export function foldActivity(
+  event: LogEvent,
+  into?: ActivityCounts,
+): ActivityCounts {
+  const totals = into ?? {
+    turns: 0,
+    toolsStarted: 0,
+    toolsFinished: 0,
+    edits: 0,
+    commands: 0,
+    commandsFailed: 0,
+    compactions: 0,
+  };
+  const counts = (event.counts ?? {}) as Record<string, unknown>;
+  for (const name of Object.keys(totals) as (keyof ActivityCounts)[])
+    totals[name] += num(counts[name]) ?? 0;
+  return totals;
+}
+
+interface Activity {
+  counts: ActivityCounts;
   tools: Set<string>;
   paths: Set<string>;
   command?: string;
 }
 
 function activityText(item: string, activity: Activity): string {
-  const parts = [`activity ${item}: ${activity.turns} turns`];
-  if (activity.toolsStarted)
+  const counts = activity.counts;
+  const parts = [`activity ${item}: ${counts.turns} turns`];
+  if (counts.toolsStarted)
     parts.push(
-      `${activity.toolsStarted} tools${activity.tools.size ? ` (${[...activity.tools].slice(0, 8).join(", ")})` : ""}`,
+      `${counts.toolsStarted} tools${activity.tools.size ? ` (${[...activity.tools].slice(0, 8).join(", ")})` : ""}`,
     );
-  if (activity.edits)
+  if (counts.edits)
     parts.push(
-      `${activity.edits} edits${activity.paths.size ? ` (${[...activity.paths].slice(0, 8).join(", ")})` : ""}`,
+      `${counts.edits} edits${activity.paths.size ? ` (${[...activity.paths].slice(0, 8).join(", ")})` : ""}`,
     );
-  if (activity.commands) parts.push(`${activity.commands} commands`);
-  if (activity.commandsFailed) parts.push(`${activity.commandsFailed} failed`);
+  if (counts.commands) parts.push(`${counts.commands} commands`);
+  if (counts.commandsFailed) parts.push(`${counts.commandsFailed} failed`);
   if (activity.command) parts.push(`last $ ${activity.command}`);
   return parts.join(" · ");
 }
@@ -696,20 +692,11 @@ class Timeline {
 /** One `worker-activity` event added to a step's activity. */
 function fold(event: LogEvent, into?: Activity): Activity {
   const activity = into ?? {
-    turns: 0,
-    toolsStarted: 0,
-    edits: 0,
-    commands: 0,
-    commandsFailed: 0,
+    counts: foldActivity(event),
     tools: new Set<string>(),
     paths: new Set<string>(),
   };
-  const counts = (event.counts ?? {}) as Record<string, unknown>;
-  activity.turns += num(counts.turns) ?? 0;
-  activity.toolsStarted += num(counts.toolsStarted) ?? 0;
-  activity.edits += num(counts.edits) ?? 0;
-  activity.commands += num(counts.commands) ?? 0;
-  activity.commandsFailed += num(counts.commandsFailed) ?? 0;
+  if (into) foldActivity(event, into.counts);
   if (Array.isArray(event.tools))
     for (const tool of event.tools) activity.tools.add(String(tool));
   if (Array.isArray(event.paths))

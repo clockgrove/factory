@@ -977,8 +977,10 @@ export function namespaceRefused(pidFile: string): boolean {
  * of a PID namespace of its own (`unshare --user --map-current-user --pid
  * --fork --kill-child --mount-proc`). Its process id, the group's, goes to
  * `pidFile` first. It tries the namespace with `true` before the program:
- * a host that refuses it exits NAMESPACE_REFUSED and leaves the marker
- * namespaceRefused reads, which each run clears first. Killing the group, or the
+ * a host that refuses it leaves the marker namespaceRefused reads (each
+ * run clears it first), reads its standard input to the end, so the
+ * caller's write of the prompt can't fail with EPIPE, and exits
+ * NAMESPACE_REFUSED. Killing the group, or the
  * program ending, ends the namespace, and the kernel then kills every
  * process left in it, however its commands regrouped or detached: an abort
  * can't leave a command running. The launcher ignores SIGTERM;
@@ -1009,7 +1011,7 @@ export function namespacedLauncher(
   const refused = shellWord(refusedMarker(pidFile));
   writeFileSync(
     path,
-    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nrm -f ${refused}\n${namespace} true${errors} || { : > ${refused}; exit ${NAMESPACE_REFUSED}; }\nexec ${setsid} ${namespace} ${shellWord(program)} "$@"${errors}\n`,
+    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nrm -f ${refused}\n${namespace} true${errors} || { : > ${refused}; cat > /dev/null; exit ${NAMESPACE_REFUSED}; }\nexec ${setsid} ${namespace} ${shellWord(program)} "$@"${errors}\n`,
     { mode: 0o700, flag: "wx" },
   );
 }

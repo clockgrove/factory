@@ -589,7 +589,7 @@ function nextAction(
   if (queue.mode === "paused")
     return {
       command: "factory queue resume",
-      reason: "The queue is paused: no step starts until resume.",
+      reason: `The queue is paused${queue.by ? ` by ${queue.by}` : ""}: no step starts until resume. A \`/factory queue resume\` comment on a running Objective's issue resumes it too.`,
     };
   if (!live)
     return {
@@ -699,7 +699,7 @@ export function statusText(
   const { queue } = view;
   if (queue.mode !== "running")
     lines.push(
-      `Queue: ${queue.mode}${queue.at ? ` since ${displayTime(queue.at)}` : ""}${queue.by ? ` (by ${queue.by})` : ""}; factory queue resume undoes it`,
+      `Queue: ${queue.mode}${queue.at ? ` since ${displayTime(queue.at)}` : ""}${queue.by ? ` (by ${queue.by})` : ""}; factory queue resume, or a /factory queue resume comment, undoes it`,
     );
   const old = (row: ObjectiveView) =>
     row.endedAt !== undefined &&

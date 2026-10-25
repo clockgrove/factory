@@ -312,6 +312,7 @@ factory cancel N                          # ends it, closes its PRs and the issu
 factory reset N                           # rebuild its state from GitHub: its plan comment, PRs and report
 ```
 
+- **Pause from a phone.** Comment `/factory queue pause` on any running Objective's issue (it needs write access to the repository) and the whole queue pauses within one queue poll: no new step starts, running calls finish, and nothing is lost. `/factory queue resume` there, or `factory queue resume` on the machine, resumes it; the latest pause or resume from either place wins. While it is paused, each running Objective's status comment says so and who paused it.
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
 - **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.

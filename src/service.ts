@@ -547,8 +547,11 @@ export async function serve(options: ServeOptions): Promise<number> {
       // answered when that lands.
       if (!result) continue;
       if (stored.request.kind === "run") endRun(stored.request.issue, id);
-      if (stored.source === "github" && result.code)
-        recordRefusal(id, stored, result);
+      if (
+        stored.source === "github" &&
+        (result.code || stored.request.kind === "queue")
+      )
+        recordReply(id, stored, result);
       writeResult(paths.requests, id, result);
       crashPoint("requests:applied");
       removeRequest(file);
@@ -556,12 +559,13 @@ export async function serve(options: ServeOptions): Promise<number> {
   };
 
   /**
-   * A `/factory` comment's refusal made outside the Objective's own save
-   * (no state for it now, a failed apply): kept in its applied requests
-   * when it has a run, so the sync replies once (`unreplied`) and the same
-   * comment read again is answered from there, never applied again.
+   * A `/factory` comment's result made outside the Objective's own save (a
+   * `/factory queue` comment, no state for it now, a failed apply): kept in
+   * its applied requests when it has a run, so the sync replies once
+   * (`unreplied`); a refused comment read again is answered from there,
+   * never applied again.
    */
-  const recordRefusal = (
+  const recordReply = (
     id: string,
     stored: StoredRequest,
     result: RequestResult,

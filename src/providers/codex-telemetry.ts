@@ -3,8 +3,10 @@
  * CODEX_HOME holds, read before the home is removed. It gives the thread's
  * own token counts (with reasoning, and when the SDK stream ended before
  * `turn.completed`) and the model-visible tool calls by name, for the
- * call's `model-usage` event (usage.ts). Best effort and bounded: an
- * unreadable or missing record gives nothing, never an error.
+ * call's `model-usage` event (usage.ts), and what a failed turn's own
+ * records say about it, for its outcome (codex.ts codexFailure). Best
+ * effort and bounded: an unreadable or missing record gives nothing, never
+ * an error.
  */
 import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -43,6 +45,17 @@ export interface CodexTelemetry {
   partial?: true;
   /** Codex compacted the thread's history in what was read. */
   compacted?: true;
+  /**
+   * The last turn's error as Codex classified it (`codex_error_info` on its
+   * `task_complete`): the kind, and an HTTP failure's status.
+   */
+  failure?: { kind: string; status?: number };
+  /**
+   * The usage windows of the last `token_count` that reported them (its
+   * `rate_limits`, primary and secondary): percent used, and the reset in
+   * epoch milliseconds when Codex gave one.
+   */
+  limits?: { used: number; resetsAt?: number }[];
 }
 
 /** Response items that are a model-visible tool call. */
@@ -79,6 +92,8 @@ export function codexTelemetry(
   let reportedModel: string | undefined;
   let imageOutputs = 0;
   let compacted = false;
+  let failure: CodexTelemetry["failure"];
+  let limits: CodexTelemetry["limits"];
   for (const line of lines) {
     if (!line.trim()) continue;
     let entry: unknown;
@@ -113,7 +128,10 @@ export function codexTelemetry(
         typeof counted.total_token_usage === "object"
       )
         total = counted.total_token_usage as Record<string, unknown>;
+      limits = usageWindows(payload.rate_limits) ?? limits;
     }
+    if (type === "event_msg" && payload.type === "task_complete")
+      failure = errorKind(payload.error);
     if (type !== "response_item") continue;
     const id = payload.call_id ?? payload.id;
     if (payload.type === "image_generation_call") imageOutputs += 1;
@@ -168,7 +186,41 @@ export function codexTelemetry(
     outputs,
     ...(partial ? { partial: true as const } : {}),
     ...(compacted ? { compacted: true as const } : {}),
+    ...(failure ? { failure } : {}),
+    ...(limits ? { limits } : {}),
   };
+}
+
+/** A `task_complete` error's `codex_error_info`: a kind's name, or `{kind: details}`. */
+function errorKind(error: unknown): CodexTelemetry["failure"] {
+  const info = (error as { codex_error_info?: unknown } | null)
+    ?.codex_error_info;
+  if (typeof info === "string") return { kind: info };
+  if (!info || typeof info !== "object") return undefined;
+  const [kind, details] = Object.entries(info)[0] ?? [];
+  if (!kind) return undefined;
+  const status = (details as { http_status_code?: unknown } | null)
+    ?.http_status_code;
+  return { kind, ...(typeof status === "number" ? { status } : {}) };
+}
+
+/** A `token_count`'s `rate_limits` windows; undefined when it reports none. */
+function usageWindows(limits: unknown): CodexTelemetry["limits"] {
+  if (!limits || typeof limits !== "object") return undefined;
+  const { primary, secondary } = limits as Record<string, unknown>;
+  const windows: NonNullable<CodexTelemetry["limits"]> = [];
+  for (const window of [primary, secondary]) {
+    const { used_percent: used, resets_at: resets } =
+      (window as Record<string, unknown> | null) ?? {};
+    if (typeof used !== "number" || !Number.isFinite(used)) continue;
+    windows.push({
+      used,
+      ...(typeof resets === "number" && Number.isFinite(resets)
+        ? { resetsAt: resets * 1000 }
+        : {}),
+    });
+  }
+  return windows.length ? windows : undefined;
 }
 
 /**

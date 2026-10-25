@@ -22,17 +22,17 @@ import type {
   ThreadOptions,
 } from "@openai/codex-sdk";
 import { within } from "../paths.js";
-import { LaunchedGroup, namespacedLauncher } from "../sandbox.js";
-import { errorMessage } from "../text.js";
 import {
-  BOUNDARY_RUST_LOG,
-  CodexStderr,
-  logBoundary,
-  withStderr,
-} from "./codex-boundary.js";
+  LaunchedGroup,
+  namespacedLauncher,
+  namespaceRefused,
+} from "../sandbox.js";
+import { errorMessage } from "../text.js";
+import { CodexStderr, withStderr } from "./codex-stderr.js";
 import {
   addCodexTelemetry,
   type CodexBaseline,
+  type CodexTelemetry,
   codexBaseline,
   codexLiveRecord,
   codexSessionRecord,
@@ -197,24 +197,12 @@ export function codexLauncher(
 }
 
 /**
- * Where a Codex home's launcher appends codex's standard error, with
- * RUST_LOG set to add its trace-safe records (codex-boundary.ts): what the
- * call's boundary telemetry and its error message read. Under
- * FACTORY_PROVIDER_TRACE, RUST_LOG comes from FACTORY_CODEX_RUST_LOG.
+ * Where a Codex home's launcher appends codex's standard error: what a
+ * failed call's error message ends with (codex-stderr.ts).
  */
-export function codexStderr(root: string, env: Record<string, string>): string {
-  const traced = process.env.FACTORY_PROVIDER_TRACE
-    ? process.env.FACTORY_CODEX_RUST_LOG
-    : undefined;
-  env.RUST_LOG = traced
-    ? `${traced},codex_otel.trace_safe=trace`
-    : BOUNDARY_RUST_LOG;
+export function codexStderr(root: string): string {
   return join(root, "codex-stderr.log");
 }
-
-/** The launcher's own failure (setsid or unshare), as the SDK reports codex's exit. */
-const LAUNCHER_FAILURE =
-  /exited with (?:code \d+|signal \w+): (?:unshare|setsid): /;
 
 const NAMESPACE_FIX =
   "The service host must allow unprivileged user namespaces, as bubblewrap needs (on Ubuntu, kernel.apparmor_restrict_unprivileged_userns=0), and have util-linux's setsid and unshare";
@@ -420,23 +408,14 @@ function codexHome(
     finish: ({ root, env }) => {
       const workdir = join(root, "work");
       mkdirSync(workdir, { mode: 0o700 });
-      const stderr = codexStderr(root, env);
+      const stderr = codexStderr(root);
       const launched = codexLauncher(root, env, stderr);
       return { root, workdir, env, stderr, ...launched };
     },
   });
 }
 
-/**
- * Codex exec (CLI and SDK 0.160.0) reports a failed turn only as text: the
- * ThreadError has just `message`, and a failed process just its stderr. A
- * rejected API request arrives as its JSON body with `status`. Credentials
- * the CLI finds missing or unrefreshable carry no status, so this narrowest
- * fallback matches the CLI's own login remediation and its rendering of 401.
- */
-const CODEX_EXEC_LOGIN =
-  /\bcodex login\b|\bsign in again\b|\b401 Unauthorized\b/;
-
+/** A rejected API request's status, when the message is its JSON body. */
 function jsonStatus(message: string): unknown {
   try {
     return (JSON.parse(message) as { status?: unknown } | null)?.status;
@@ -446,115 +425,54 @@ function jsonStatus(message: string): unknown {
 }
 
 /**
- * The outcome of a failed Codex turn, from the exact codex-cli 0.160.0
- * texts (exec reports no structured kind). Anything unmatched is a retry, so
- * a miss costs only time.
+ * The outcome of a failed Codex turn. Codex exec (CLI and SDK 0.160.0)
+ * passes only text on its stream, so the outcome comes from structured
+ * facts: the launcher's refused-namespace marker (`refused`), a JSON body's status,
+ * and the turn's session record (codex-telemetry.ts): its error kind and
+ * usage windows. A full window is a usage limit whatever the error says,
+ * waiting for the latest full window's reset when each gives one; with
+ * none known Factory asks whether to wait. Anything else is a retry, so a
+ * miss costs only time, and three in a row hold.
  */
-export function codexFailure(message: string): PlannerError {
-  const text = message.toLowerCase();
-  const has = (...phrases: string[]) =>
-    phrases.some((phrase) => text.includes(phrase));
+export function codexFailure(
+  message: string,
+  telemetry?: CodexTelemetry,
+  refused = false,
+): PlannerError {
   const shown = detail(message);
-  if (LAUNCHER_FAILURE.test(message))
+  if (refused)
     return new PlannerError(
       "hold",
       `Factory couldn't start Codex in its own process namespace (${shown}). ${NAMESPACE_FIX}; fix the host, then answer retry`,
     );
-  if (jsonStatus(message) === 401 || CODEX_EXEC_LOGIN.test(message))
+  const failure = telemetry?.failure;
+  if (
+    jsonStatus(message) === 401 ||
+    failure?.kind === "unauthorized" ||
+    failure?.status === 401
+  )
     return new PlannerError(
       "hold",
       `Planner login expired: run \`codex login\` on the service host, then answer retry (${shown})`,
     );
-  if (
-    has(
-      "codex ran out of room in the model's context window",
-      "context window exceeded",
-    )
-  )
+  if (failure?.kind === "context_window_exceeded")
     return PlannerError.contextOverflow(
       `The request is larger than the model's context window: ${shown}`,
     );
-  const usageLimit = /you[’']ve hit your usage limit\b/.test(text);
-  // A limit naming its reset is a wait even beside a plan upgrade offer.
-  if (
-    usageLimit &&
-    (has("try again at ") || !has("upgrade to plus to continue using codex"))
-  ) {
-    const at = codexResetAt(message);
+  const full = (telemetry?.limits ?? []).filter((window) => window.used >= 100);
+  if (failure?.kind === "usage_limit_exceeded" || full.length) {
+    const resets = full.map((window) => window.resetsAt);
+    const at =
+      resets.length && resets.every((reset) => reset !== undefined)
+        ? Math.max(...(resets as number[]))
+        : undefined;
     return new PlannerError("retry", `Codex usage limit: ${shown}`, {
       kind: "reset",
-      ...(at ? { at: at.toISOString() } : {}),
+      ...(at !== undefined ? { at: new Date(at).toISOString() } : {}),
       provider: "codex",
     });
   }
-  if (
-    usageLimit ||
-    has(
-      "quota exceeded. check your plan and billing details.",
-      "to use codex with your chatgpt plan, upgrade to plus",
-      "usage not included",
-    )
-  )
-    return new PlannerError(
-      "hold",
-      `Restore the Codex plan, credits or billing for the service's \`codex login\`, then answer retry (${shown})`,
-    );
-  // Rate limit, capacity, connection and anything unknown: try again.
   return new PlannerError("retry", `Codex call failed: ${shown}`);
-}
-
-const MONTHS = [
-  "jan",
-  "feb",
-  "mar",
-  "apr",
-  "may",
-  "jun",
-  "jul",
-  "aug",
-  "sep",
-  "oct",
-  "nov",
-  "dec",
-];
-
-/**
- * The reset time in a Codex usage-limit message. codex-cli 0.160.0 prints
- * it in the host's local zone without naming it ("Try again at 3:45 PM.",
- * or "Oct 24th, 2026 3:45 PM." when it isn't today), and Codex runs on the
- * service's host, so it reads as local time in this process's zone. A time
- * alone that has already passed today is tomorrow's. Undefined when the
- * message names no time Factory can read: the reset is then unknown.
- */
-export function codexResetAt(
-  message: string,
-  now = new Date(),
-): Date | undefined {
-  const found =
-    /try again at (?:([a-z]{3}) (\d{1,2})(?:st|nd|rd|th), (\d{4}) )?(\d{1,2}):(\d{2}) ([ap]m)\b/i.exec(
-      message,
-    );
-  if (!found) return undefined;
-  const [, month, day, year, hour, minute, half] = found;
-  const h = Number(hour);
-  const m = Number(minute);
-  if (h < 1 || h > 12 || m > 59) return undefined;
-  const hours = (h % 12) + (half!.toLowerCase() === "pm" ? 12 : 0);
-  if (month) {
-    const index = MONTHS.indexOf(month.toLowerCase());
-    const date = new Date(Number(year), index, Number(day), hours, m);
-    return index >= 0 && date.getDate() === Number(day) ? date : undefined;
-  }
-  const today = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    hours,
-    m,
-  );
-  return today.getTime() >= now.getTime() - 60_000
-    ? today
-    : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hours, m);
 }
 
 /** How often a running planner call's session record is read for its live view. */
@@ -641,9 +559,19 @@ export class CodexPlanner implements Planner {
     let events: AsyncGenerator<ThreadEvent> | undefined;
     let baseline: CodexBaseline | undefined;
     let reading: NodeJS.Timeout | undefined;
-    // Codex's standard error since this call began: its boundary telemetry.
+    // Codex's standard error since this call began, for a failure's message.
     const stderr = new CodexStderr(home.stderr);
-    let turnCompleted = false;
+    // A failure's outcome, with what this turn's session record says about it.
+    const failure = (message: string) =>
+      codexFailure(
+        message,
+        codexTelemetry(
+          home.env.CODEX_HOME!,
+          (record.thread as string | undefined) ?? turn.resumed?.id,
+          baseline?.size,
+        ),
+        namespaceRefused(home.pidFile),
+      );
     // An abort ends codex and every command it started (namespacedLauncher).
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
@@ -769,7 +697,6 @@ export class CodexPlanner implements Planner {
         }
         if (event.type === "turn.completed") {
           completed = true;
-          turnCompleted = true;
           const counts = baseline
             ? turnTokens(codexTokens(event.usage), baseline.tokens)
             : codexTokens(event.usage);
@@ -782,13 +709,12 @@ export class CodexPlanner implements Planner {
             };
           codexTurnUsage(record, event.usage);
         }
-        if (event.type === "turn.failed")
-          throw codexFailure(event.error.message);
+        if (event.type === "turn.failed") throw failure(event.error.message);
         // The CLI retries after a stream error; it counts only without a completed turn.
         if (event.type === "error") streamError = event.message;
       }
       if (!completed) {
-        if (streamError) throw codexFailure(streamError);
+        if (streamError) throw failure(streamError);
         throw new PlannerError("retry", "Codex ended without a completed turn");
       }
       if (response === undefined)
@@ -828,13 +754,8 @@ export class CodexPlanner implements Planner {
         throw new PlannerError("retry", idle.message, { kind: "error" });
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
-      // A failed codex process: its stderr is in the message.
-      throw overflowed(
-        codexFailure(
-          errorMessage(withStderr(error, stderr.read(false).ordinary)),
-        ),
-        turn,
-      );
+      // A failed codex process: its standard error ends the message.
+      throw overflowed(failure(withStderr(error, stderr)), turn);
     } finally {
       clearInterval(reading);
       watchdog.stop();
@@ -852,7 +773,6 @@ export class CodexPlanner implements Planner {
       group.end();
       saveModelsCache(home.env.CODEX_HOME!);
       addCodexTelemetry(record, home.env.CODEX_HOME!, baseline?.size);
-      logBoundary(record, call.log, stderr, turnCompleted);
       // A retained conversation's home stays for its next turn, unless a
       // later turn has taken it (a hedge's loser, an aborted attempt).
       if (call.conversation) {

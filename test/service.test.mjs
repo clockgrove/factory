@@ -246,24 +246,39 @@ test("three deaths while two Objectives run hold neither; the restart backs off"
   configured(inst, `http://127.0.0.1:${await silentServer()}`);
   seed(inst, 51);
   seed(inst, 52);
-  const runId = () =>
-    JSON.parse(readFileSync(join(inst.root, "service.json"), "utf8")).runId;
+  const runId = () => {
+    try {
+      return JSON.parse(readFileSync(join(inst.root, "service.json"), "utf8"))
+        .runId;
+    } catch {
+      return undefined;
+    }
+  };
   const runningIn = (run) =>
     [51, 52].every((issue) => stateOf(inst, issue).attempts.check?.run === run);
+  // The service holds its lock before it writes its record, so each start
+  // waits for its own record: the last run's would show one death too few.
+  let last;
+  const started = async () => {
+    await until(
+      () => status(inst).service === "running" && runId() !== last,
+      "service",
+    );
+    last = runId();
+    return last;
+  };
   for (let i = 0; i < 3; i++) {
     const service = serve(inst);
-    await until(() => status(inst).service === "running", "service");
-    const run = runId();
+    const run = await started();
     await until(() => runningIn(run), "both checks running");
     service.child.kill("SIGKILL");
     await service.exit;
   }
   const service = serve(inst);
-  await until(() => status(inst).service === "running", "service");
+  const run = await started();
   const { crashLoop } = status(inst);
   assert.equal(crashLoop.crashes, 3);
   assert.ok(Date.parse(crashLoop.resumeAt) > Date.now() - 60_000);
-  const run = runId();
   await until(() => runningIn(run), "both checks resumed");
   for (const issue of [51, 52]) {
     const state = stateOf(inst, issue);

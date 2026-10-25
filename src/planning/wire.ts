@@ -282,7 +282,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
       items: {
         ...text,
         description:
-          "Literal repository-relative files or trailing-slash directory prefixes; no wildcard, absolute path, empty, dot, parent or whitespace-padded components.",
+          'Literal repository-relative files or trailing-slash directory prefixes, each named in full (a new file too: choose its name); no wildcard, placeholder, < > " |, absolute path, empty, dot, parent or whitespace-padded components.',
       },
     },
     newPackages: {

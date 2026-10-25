@@ -150,6 +150,8 @@ const unasked = ({
 }: GitHubModule): GitHubModule => github;
 /** Ticks in a row in which an Objective's work throws before it is set aside as unreadable. */
 const MAX_OBJECTIVE_ERRORS = 10;
+/** The same, when only a system call's error (ENOSPC, EMFILE, EIO) throws: it may pass by itself. */
+const MAX_SYSCALL_ERRORS = 100;
 const RESULT_TTL_MS = 60 * 60 * 1000;
 
 /**
@@ -349,25 +351,27 @@ export async function serve(options: ServeOptions): Promise<number> {
   /**
    * Rule 1: a throw while the tick works on one Objective (its deadline,
    * its scheduling, its steps, its sync, its observation, its retirement)
-   * is that Objective's alone. It is logged (`objective-error`), the
-   * Objective is left alone for the rest of the tick, and after
-   * MAX_OBJECTIVE_ERRORS ticks in a row it is set aside as unreadable:
-   * its steps stop, and it holds with `retry` (read its file again),
-   * `reset` and `cancel`. A system call's error (a save or read failing
-   * with ENOSPC, EMFILE, EIO) never counts: the save left memory as on
-   * disk (`transact`), and the next tick tries again.
+   * is that Objective's alone. The first tick of a streak is logged
+   * (`objective-error`), the Objective is left alone for the rest of each
+   * tick, and after MAX_OBJECTIVE_ERRORS ticks in a row it is set aside as
+   * unreadable: its steps stop, and it holds with `retry` (read its file
+   * again), `reset` and `cancel`. A system call's error (a save or read
+   * failing with ENOSPC, EMFILE, EIO) counts only toward
+   * MAX_SYSCALL_ERRORS: the save left memory as on disk (`transact`), and
+   * the next tick tries again.
    */
-  const failing = new Map<number, { error: string; counts: boolean }>();
-  /** Per Objective: the ticks in a row in which its work threw. */
-  const errors = new Map<number, number>();
+  const failing = new Map<number, { error: string; syscall: boolean }>();
+  /** Per Objective: the ticks in a row in which its work threw, and those a system call's error threw in. */
+  const errors = new Map<number, { ticks: number; syscalls: number }>();
   /** Set-aside runs' stops: what replaces the run waits for them. */
   const setAsideStops = new Map<number, Promise<void>>();
   const failed = (issue: number, error: unknown): void => {
     if (failing.has(issue)) return;
-    const counts =
-      typeof (error as { syscall?: unknown })?.syscall !== "string";
-    failing.set(issue, { error: String(error), counts });
-    log.write(issue, { event: "objective-error", error: String(error) });
+    const syscall =
+      typeof (error as { syscall?: unknown })?.syscall === "string";
+    failing.set(issue, { error: String(error), syscall });
+    if (!errors.has(issue))
+      log.write(issue, { event: "objective-error", error: String(error) });
   };
   /** Run `work` for one Objective, unless its work already threw this tick. */
   const guarded = (issue: number, work: () => void): void => {
@@ -381,18 +385,23 @@ export async function serve(options: ServeOptions): Promise<number> {
   const countErrors = (): void => {
     for (const issue of [...errors.keys()])
       if (!failing.has(issue)) errors.delete(issue);
-    for (const [issue, { error, counts }] of failing) {
-      if (!counts) continue;
-      const count = (errors.get(issue) ?? 0) + 1;
-      errors.set(issue, count);
-      if (count >= MAX_OBJECTIVE_ERRORS) setAside(issue, error);
+    for (const [issue, { error, syscall }] of failing) {
+      const streak = errors.get(issue) ?? { ticks: 0, syscalls: 0 };
+      streak.ticks += 1;
+      if (syscall) streak.syscalls += 1;
+      errors.set(issue, streak);
+      if (
+        streak.ticks - streak.syscalls >= MAX_OBJECTIVE_ERRORS ||
+        streak.ticks >= MAX_SYSCALL_ERRORS
+      )
+        setAside(issue, streak.ticks, error);
     }
   };
-  const setAside = (issue: number, error: string): void => {
+  const setAside = (issue: number, ticks: number, error: string): void => {
     errors.delete(issue);
     const runner = runners.get(issue);
     if (!runner) return;
-    const problem = `working on it failed ${MAX_OBJECTIVE_ERRORS} ticks in a row: ${error}`;
+    const problem = `working on it failed ${ticks} ticks in a row: ${error}`;
     const github = runner.state.modules.github as GitHubModule | undefined;
     unreadable.set(issue, {
       error: problem,

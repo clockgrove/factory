@@ -18,6 +18,9 @@
                                  (V may end in * for a prefix, or start with * for a suffix)
   st.py ROOT at N first|last [K=V...]  the time of the first or last log event matching every K=V
                                  (as events), or "" when none
+  st.py ROOT slot N              "START END" of N's queue slot: its first plan:* start to its
+                                 report done or first hold after that (END empty while it still
+                                 holds the slot), or "" when it never planned
   st.py ROOT started N STEPGLOB  1 when a "start" event exists for a step matching the glob
   st.py ROOT retries N STEPGLOB  max retry count over steps matching the glob (0 when none)
   st.py ROOT starts-since N ISO STEPGLOB  start events at or after ISO for steps matching the glob
@@ -169,7 +172,7 @@ def walk(obj):
 def main():
     root, cmd, n = sys.argv[1], sys.argv[2], sys.argv[3]
     rest = sys.argv[4:]
-    d = load(root, n) if cmd not in ("events", "at", "started", "unreadable", "maxconc", "starts-since") else None
+    d = load(root, n) if cmd not in ("events", "at", "slot", "started", "unreadable", "maxconc", "starts-since") else None
     if cmd == "status":
         print("none" if d is None else ("unreadable" if d == "unreadable" else d.get("status")))
     elif cmd == "phase":
@@ -237,6 +240,14 @@ def main():
         times = sorted(str(e["at"]) for e in events(root, n)
                        if "at" in e and all(match(e.get(k), v) for k, v in conds))
         print((times[0] if rest[0] == "first" else times[-1]) if times else "")
+    elif cmd == "slot":
+        # The check runs with no slot; planning and building take one of
+        # queue.maxActiveObjectives, given back at the end or on a hold.
+        evs = sorted((e for e in events(root, n) if "at" in e), key=lambda e: str(e["at"]))
+        start = next((str(e["at"]) for e in evs if e.get("event") == "start" and match(e.get("step"), "plan:*")), "")
+        end = next((str(e["at"]) for e in evs if start and str(e["at"]) >= start and (e.get("event") == "hold" or (
+            e.get("event") == "outcome" and e.get("outcome") == "done" and e.get("step") == "report"))), "")
+        print(f"{start} {end}".strip())
     elif cmd == "started":
         print(1 if any(e.get("event") == "start" and fnmatch.fnmatchcase(str(e.get("step")), rest[0]) for e in events(root, n)) else 0)
     elif cmd == "starts-since":

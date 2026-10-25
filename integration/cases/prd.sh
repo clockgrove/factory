@@ -324,6 +324,28 @@ q_mode() { python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get("mode","running"))
 except (OSError, ValueError): print("running")' "$ROOT/queue.json"; }
 q_uninstall() { cli_t 60 setup --uninstall --json >"$RUN_DIR/q.uninstall.out" 2>&1; }
+# q_late N,CHECKED,PLANNED...: Objectives highest Project order first, with their
+# check's end and first planning start. Prints each that never planned and each
+# that started planning while one above it was checked and still waiting.
+q_late() {
+  python3 -c 'import sys
+rows = [a.split(",") for a in sys.argv[1:]]
+out = [f"#{x[0]} never planned" for x in rows if not x[2]]
+out += [f"#{y[0]} before #{x[0]}" for i, x in enumerate(rows) for y in rows[i + 1:]
+        if x[1] and y[2] and x[1] <= y[2] and not (x[2] and x[2] <= y[2])]
+print("; ".join(out))' "$@"
+}
+# q_overlap "START END"...: the most slots (`st slot`) held at once; an empty END still holds one.
+q_overlap() {
+  python3 -c 'import sys
+edges = []
+for a in sys.argv[1:]:
+    s, _, e = a.partition(" ")
+    if s: edges += [(s, 1), (e or "~", -1)]
+cur = best = 0
+for _, d in sorted(edges): cur += d; best = max(best, cur)
+print(best)' "$@"
+}
 # q_wait N: until N settles, answering by HOLD_POLICY; at once on a hold the
 # policy can't answer (prod.no-holds fails on it), so the checks after it
 # still run in the time left.
@@ -339,10 +361,11 @@ q_wait() {
 
 # PRD 1, 10, 12, 13, 14 at production settings: `factory setup` writes the
 # configuration with no model call and `--background` runs it; a pause from
-# GitHub admits nothing until resume; queued Objectives are taken in Project
+# GitHub admits nothing until resume; checked Objectives plan in Project
 # order, at most 3 at once; two independent Work Items build at once; nothing
-# asks a person; a check-in from GitHub alone shows the run; a later run uses
-# repository memory; dream changes the playbook only on approval.
+# asks a person; a check-in from GitHub alone shows the run; an Objective on a
+# file earlier planning read is shown repository memory; dream changes the
+# playbook only on approval.
 case_prod() {
   local t0 id; t0=$(now); id=$(uid)
   local HOLD_POLICY="d2 review decide more"
@@ -366,7 +389,7 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   local pc; pc=$(gh_comment "$n1" "/factory queue pause"); local pause_at; pause_at=$(iso_ms)
   wait_for 180 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"mode\"))' '$ROOT/queue.json' 2>/dev/null)\" = paused ]"
   local paused; paused=$(q_mode)
-  local a b c; a=$(new_issue happy "production: order 3" ID="${id}b") && b=$(new_issue happy "production: order 2" ID="${id}c") && c=$(new_issue pair "production: order 1, two items" ID="${id}d") || { q_uninstall; return; }
+  local a b c; a=$(new_issue readme "production: order 3" ID="${id}b") && b=$(new_issue happy "production: order 2" ID="${id}c") && c=$(new_issue pair "production: order 1, two items" ID="${id}d") || { q_uninstall; return; }
   local x; for x in "$a" "$b" "$c"; do gh_enqueue "$x" >/dev/null; done
   q_order "$a" 3; q_order "$b" 2; q_order "$c" 1
   sleep 90
@@ -381,17 +404,20 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
 
   for x in "$n1" "$c" "$b" "$a"; do q_wait "$x"; done
   sleep 20
-  # Order and the cap of 3: c, then b, then a once a slot freed.
-  local ac ab aa e1 ec eb; ac=$(st at "$c" first event=admitted); ab=$(st at "$b" first event=admitted); aa=$(st at "$a" first event=admitted)
-  e1=$(p_ended "$n1"); ec=$(p_ended "$c"); eb=$(p_ended "$b")
-  local first_end; first_end=$(printf '%s\n' "$e1" "$ec" "$eb" | grep . | sort | head -1)
-  [ -n "$ac" ] && [ -n "$ab" ] && [ -n "$aa" ] && [[ ! $ab < $ac ]] && [[ ! $aa < $ab ]]
-  rec_if queue.order $? "admitted: #$c (order 1) $ac, #$b (order 2) $ab, #$a (order 3) $aa" "$t0"
-  [ -n "$aa" ] && [ -n "$first_end" ] && [[ ! $aa < $first_end ]] && [[ $ab < $first_end ]]
-  rec_if queue.concurrency-3 $? "#$n1, #$c, #$b admitted before the first end ($first_end); #$a admitted $aa" "$t0"
+  # Order and the cap of 3: every queued card is admitted at once and checked
+  # with no slot; planning and building take one of 3 slots, in Project order
+  # among the Objectives whose check is done (docs/reference/queue.md).
+  local ord=() late; for x in "$c" "$b" "$a"; do ord+=("$x,$(st at "$x" first event=outcome outcome=done step=check),$(st at "$x" first event=start 'step=plan:*')"); done
+  late=$(q_late "${ord[@]}")
+  [ -z "$late" ]
+  rec_if queue.order $? "#$c order 1, #$b order 2, #$a order 3 as issue,check done,first planning: ${ord[*]}; out of order: ${late:-none}" "$t0"
+  local sl=() cap; for x in "$n1" "$c" "$b" "$a"; do sl+=("$(st slot "$x")"); done
+  cap=$(q_overlap "${sl[@]}")
+  [ "$cap" = 3 ]
+  rec_if queue.concurrency-3 $? "most planning or building at once: $cap; slots (first planning to report or hold): #$n1 ${sl[0]:-none}, #$c ${sl[1]:-none}, #$b ${sl[2]:-none}, #$a ${sl[3]:-none}" "$t0"
   local par; par=$(st maxconc 'item:*:work' "$c")
   [ "$par" -ge 2 ]; rec_if exec.parallel-items $? "#$c's Work Items working at once: $par" "$t0"
-  local all=0 holds=0 ev=""; for x in "$n1" "$c" "$b" "$a"; do end_done "$x" || all=1; ev="$ev | $EVID"; holds=$(( holds + $(st events "$x" event=outcome outcome=hold) )); done
+  local all=0 holds=0 ev=""; for x in "$n1" "$c" "$b" "$a"; do end_done "$x" || all=1; ev="$ev | $EVID"; holds=$(( holds + $(st events "$x" event=hold) )); done
   [ $all = 0 ] && [ "$holds" = 0 ]; rec_if prod.no-holds $? "four Objectives at production settings, holds $holds$ev" "$t0"
 
   # A check-in from GitHub alone, and the CLI's detail.
@@ -406,9 +432,11 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   [ $lg = 0 ] && [ -s "$RUN_DIR/q.log.out" ] && [ $dg = 0 ] && [ -s "$RUN_DIR/q.diag.out" ] && [ $xg = 0 ]
   rec_if visibility.cli $? "factory log exit $lg, diagnostics --summary exit $dg, export-captures exit $xg" "$t0"
 
-  # The last-admitted Objective planned after others had settled: its roles were shown repository memory.
+  # Memory is path-scoped: the order-3 Objective also changes README.md, which
+  # every planning call before it recorded as a reference, so its roles were
+  # shown memory.
   local mem shown0; mem=$(st events "$a" event=memory); shown0=$(st events "$a" event=memory shown=0)
-  [ "$(( mem - shown0 ))" -ge 1 ]; rec_if knowledge.memory $? "#$a (admitted after a run ended): memory sections $mem, with entries shown $(( mem - shown0 ))" "$t0"
+  [ "$(( mem - shown0 ))" -ge 1 ]; rec_if knowledge.memory $? "#$a (owns README.md): memory sections $mem, with entries shown $(( mem - shown0 ))" "$t0"
 
   # dream: a proposal changes nothing until it is approved.
   for x in "$n1" "$c" "$b" "$a"; do cli_t 120 dream --record --objective "$x" >/dev/null 2>&1; done
@@ -425,6 +453,8 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   [ "$rd" = 0 ] && [ -n "$draft" ] && [ "$mid" = "$before" ] && [ "${after:-0}" -gt "${before:-0}" ]
   rec_if knowledge.dream $? "dream exit $rd, draft ${draft:-none}; playbook version before $before, after the proposal $mid, after approval $after" "$t0"
 
+  # Only Q's running service applies a cancel: settle what's left before stopping it.
+  for x in "$n1" "$c" "$b" "$a"; do settled "$x" || cancel_wait "$x" 120; done
   cli_t 60 setup --stop --json >"$RUN_DIR/q.stop.out" 2>&1; local rst=$?
   cli_t 60 setup --check --json >/dev/null 2>&1; local rck=$?
   q_uninstall; local ru=$?

@@ -62,7 +62,7 @@ CASE_TABLE_prd=(
   "paths|P|40|two Objectives owning the same file take turns (queue.paths-take-turns)"
   "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"
   "hostnet|P|25|sandbox.network host: final validation reaches a service on the host's loopback (worker.host-network)"
-  "prod|Q|45|repository C at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory in a later run; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
+  "prod|Q|45|repository C at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; planning in Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory shown for a file earlier planning read; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
 )
 case "$SUITE_NAME" in main|edge|prd) ;; *) echo "unknown suite: $SUITE_NAME (main, edge, prd)" >&2; exit 2 ;; esac
 declare -n TABLE="CASE_TABLE_$SUITE_NAME"

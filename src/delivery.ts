@@ -393,7 +393,14 @@ export async function publish(
         merged: false,
       };
     }
-    if (await updates(context, pull.head.sha, earlier, bases))
+    // The branch holds the result now (pushed above, or already). A PR still
+    // showing a head Factory pushed before is GitHub catching up, whether
+    // or not a record of that push survives (a reset, a moved stack layer
+    // keeps none), on this read and every retry until it shows the result.
+    if (
+      (await updates(context, pull.head.sha, earlier, bases)) ||
+      (await factoryMade(context, pull.head.sha, defaultBranch, bases))
+    )
       return lagging(
         `PR #${pull.number} does not show the pushed head ${input.commit} yet`,
         `PR #${pull.number} still shows an earlier head (${pull.head.sha}), not the pushed ${input.commit}. Inspect it, then answer retry, or cancel.`,

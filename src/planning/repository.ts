@@ -17,6 +17,8 @@ export const REPOSITORY_DIRECTORY = "repository";
 export interface RepositoryView {
   /** Deterministic path map of the base tree. */
   map: string;
+  /** The map lists every tracked path (none cut by its bound). */
+  complete: boolean;
   /** Exported symbols and duplicated helpers of the base tree. */
   conventions: string;
   /** `repository/` in the read directory holds the exported base files. */
@@ -32,7 +34,7 @@ export async function repositoryView(
 ): Promise<RepositoryView> {
   const entries = await treeEntries(checkout, base, signal);
   return {
-    map: await renderMap(checkout, base, entries, signal),
+    ...(await renderMap(checkout, base, entries, signal)),
     conventions: await renderConventions(checkout, base, entries, signal),
     reads,
   };
@@ -141,13 +143,13 @@ async function baseBlobs(
   });
 }
 
-/** Deterministic orientation text: every tracked path with its byte size, bounded. */
+/** Deterministic orientation text: every tracked path with its byte size, bounded; `complete` when none is cut. */
 async function renderMap(
   checkout: string,
   base: string,
   entries: TreeEntry[],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ map: string; complete: boolean }> {
   const treeSha = (
     await git(checkout, ["rev-parse", `${base}^{tree}`], undefined, signal)
   )
@@ -164,7 +166,10 @@ async function renderMap(
     lines.push(line);
   }
   const omitted = entries.length - lines.length;
-  return `${header}${lines.join("")}${omitted ? `... ${omitted} more paths are not listed (map bound ${MAX_MAP_BYTES} bytes); find them with your read tools.\n` : ""}${await markdownOutline(checkout, exported, signal)}`;
+  return {
+    map: `${header}${lines.join("")}${omitted ? `... ${omitted} more paths are not listed (map bound ${MAX_MAP_BYTES} bytes); find them with your read tools.\n` : ""}${await markdownOutline(checkout, exported, signal)}`,
+    complete: !omitted,
+  };
 }
 
 /**

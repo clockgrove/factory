@@ -2,8 +2,15 @@
 // QA, and approval of a non-writer's Objective.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createHttpServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { micromark } from "micromark";
@@ -11,6 +18,7 @@ import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { checkObjective } from "../dist/objective.js";
 import { finalCommands, sectionText } from "../dist/planning/facts.js";
 import { ownedSince } from "../dist/planning/plan.js";
+import { repositoryView } from "../dist/planning/repository.js";
 import { readShown, shownDigest } from "../dist/shown.js";
 import { declarationProblems } from "../dist/validate.js";
 import {
@@ -918,4 +926,31 @@ test("an amendment's new paths rank by its acceptance: an earlier Objective wait
   for (const issue of [75, 77, 78, 81, 82, 83])
     assert.equal(cli(inst, "cancel", String(issue)).code, 0);
   await stopped(service);
+});
+
+test("the repository map says whether it lists every path, which makes the result review's tree inventory complete", async () => {
+  const checkout = mkdtempSync(join(tmpdir(), "factory-map-"));
+  const git = (...args) => {
+    const result = spawnSync("git", ["-C", checkout, ...args], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commit = () => {
+    git("add", "-A");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c");
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "--quiet");
+  writeFileSync(join(checkout, "a.txt"), "a\n");
+  const small = await repositoryView(checkout, commit(), true);
+  assert.equal(small.complete, true);
+  // More paths than the map's bound lists.
+  const dir = join(checkout, "d".repeat(80));
+  mkdirSync(dir);
+  for (let n = 0; n < 700; n++) writeFileSync(join(dir, `${n}.txt`), "a\n");
+  const large = await repositoryView(checkout, commit(), true);
+  assert.equal(large.complete, false);
+  assert.match(large.map, / more paths are not listed/);
 });

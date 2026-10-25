@@ -78,7 +78,7 @@ factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer
 
 An Objective is a GitHub issue that states a goal and its observable outcomes. Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). Describe what must be true, not the plan: the planner reads the repository at the base commit and decides the Work Items, their owned paths, checks and tests. It asks you when the Objective leaves a product choice open.
 
-Factory reads the issue as GitHub renders it, not its raw Markdown. What you see on the issue page is what counts: headings are sections, list items are bullets, and inline code is a command, path or pin. Hidden content (HTML comments, alt text) never reaches a check or a model.
+Factory reads the issue as GitHub renders it, not its raw Markdown. What you see on the issue page is what counts: headings are sections, list items are bullets, and inline code is a path or pin. Hidden content (HTML comments, alt text) never reaches a check or a model.
 
 Queue an Objective by setting its card's Factory field to the queued option on the Project, or with `factory run N`. When the service first sees it, it checks the Objective before planning (see [Check at queue time](reference/queue.md#check-at-queue-time)). A failed check is a hold that names each problem and its fix: edit the issue, then answer `recheck`. An issue written by someone without write access first asks you to approve it, and asks again after any edit. An edit after planning has read the issue asks whether to `replan` from the new text or `continue` with the current plan.
 
@@ -95,28 +95,24 @@ Sections are level-two or level-three headings (the issue form renders `###`). T
 
 Any other heading is read as prose. Each section above may appear once; a second copy is refused with "merge the two sections into one".
 
-### Acceptance and final commands
+### Acceptance and commands
 
-Every Acceptance bullet is an obligation the plan must cover and review checks. A bullet whose whole content is one inline code span is also a **final command**: the integrated result must pass it.
+Every Acceptance bullet is an obligation the plan must cover and review checks. A command the result must pass is an obligation like any other: write it as a fact.
 
 ```markdown
 ## Acceptance
 
 - The settings page shows the saved theme after a reload.
-- `pnpm test`
+- `pnpm test` passes.
 ```
 
-A paragraph, a quote, a code block, or a bold or struck-out code span is never a final command, and neither is "run the tests". Keep a path or other code span inside a sentence, not alone on a bullet. Nested bullets count as bullets too.
+The planner proves it by running that exact command, unchanged, on the integrated result: a QA item after the work it covers. Plan review refuses a plan that drops, changes or weakens it. Factory itself reads no command from the Objective.
 
-At queue time each final command must be runnable:
+Each Work Item's validation commands are the planner's. It writes them, they run in the sandbox like the worker's own commands, and plan review judges whether they prove what the item claims. The plan check refuses only what can't run: a command in the installation's `finalValidation.ciOnlyCommands`, a command that reaches a network validation doesn't have, and a command that checks only a directory its item doesn't own.
 
-- npm and pnpm commands use the root script forms `npm test`, `pnpm test`, `pnpm check`, `npm run NAME` or `pnpm run NAME`, with no other arguments. The only installs are exactly `pnpm install --frozen-lockfile --ignore-scripts` and `npm ci --ignore-scripts`.
-- A command listed in the installation's `finalValidation.ciOnlyCommands` is refused: final validation runs offline, so leave it to CI.
-- Each executable the command starts must be on the service's PATH, and an npm or pnpm it uses must match the `packageManager` pin. Factory never installs tools.
+Validation runs each command in the sandbox with no network (with `sandbox.network: host`, the host's; the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. The only installs are exactly `pnpm install --frozen-lockfile --ignore-scripts` and `npm ci --ignore-scripts`. Each executable a command starts must be on the service's PATH, and an npm or pnpm it uses must match the `packageManager` pin. Factory never installs tools.
 
-Final validation runs each command in the sandbox with no network (the exact install may fetch packages when the sandbox allows it), a private empty `HOME` and `TMPDIR`, and `FACTORY_BASE_SHA` set to the accepted base. Compare against `$FACTORY_BASE_SHA`, not `origin/main`, which can be stale. Commands in the installation's `finalValidation.requiredCommands` run as well. With no final command, final validation runs each Work Item's own validation commands on the merged default branch instead, each item's list whole in a fresh checkout, so QA runs there either way.
-
-A backticked command in a sentence ("the probe is `node scripts/probe.mjs`") is declared, because you wrote it: the plan may use it as a Work Item check. It is not a final command. If the Objective has no final command at all but backticks a command the base already declares (a `package.json` script, or an own-line command in a Sources file), the check refuses it: make it an Acceptance bullet, or remove the backticks.
+**Final commands** are the installation's `finalValidation.requiredCommands`: every Objective's integrated result must pass them. An npm or pnpm one uses the root script forms `npm test`, `pnpm test`, `pnpm check`, `npm run NAME` or `pnpm run NAME`, so its script stays fixed; the queue-time check refuses another form. With no final command, final validation runs each Work Item's own validation commands on the merged default branch instead, each item's list whole in a fresh checkout, so QA runs there either way.
 
 ### Sources
 

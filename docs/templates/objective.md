@@ -8,7 +8,7 @@ One paragraph: what changes, for whom, and what is out of scope for this Objecti
 
 - One observable fact per bullet. A reviewer must be able to check it against the delivered code and test results.
 - Put any constraint that must be verified here, not only under Constraints. For example: "Install, checks and tests leave the Git tree clean."
-- `npm test`
+- A command the result must pass is a fact too: `npm test` passes.
 
 ## Context
 

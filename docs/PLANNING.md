@@ -37,7 +37,7 @@ The rules live in `src/planning/rubric.ts`. The planner and the graph reviewer r
 
 **Existing tests are protected by default.** An item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why.
 
-**Generated values need a producing command.** The planner and graph reviewer are told what the configured workers can execute, from the worker harness kind: Codex workers have a sandboxed shell; Claude and Copilot workers run only the item's authorized validation commands and checkout file tools. Where a shell-less worker must commit values only running code produces (hashes, snapshots, goldens, generated files), an authorized command produces them or reports the actual values, or an item it depends on delivers that capability; otherwise review flags the item. A check that writes the actual values to a Git-ignored file under the item's owned paths is a valid producing command: Validate copies that file back to the worker's checkout.
+**Generated values need a producing command.** The planner and graph reviewer are told what the configured workers can execute, from the worker harness kind: Codex workers have a sandboxed shell; Claude and Copilot workers run only the item's validation commands and checkout file tools. Where a shell-less worker must commit values only running code produces (hashes, snapshots, goldens, generated files), one of its validation commands produces them or reports the actual values, or an item it depends on delivers that capability; otherwise review flags the item. A check that writes the actual values to a Git-ignored file under the item's owned paths is a valid producing command: Validate copies that file back to the worker's checkout.
 
 ## How the planner works
 
@@ -60,7 +60,7 @@ All three happen in the planner's one session. Self-checking is a filter; the in
   - two items that own the same or overlapping paths when neither depends on the other, directly or transitively. Why: the scheduler would run them one after the other anyway, and wide shared ownership turns a plan into a serial chain;
   - when the plan selects any validation command (so the repository has one), a work item without a validation command, and a criterion proved only by final review or CI whose owner runs none. Why: final review and hosted CI run nothing inside Factory validation;
   - a validation command whose script (from the base `package.json`) invokes a known network tool. The authorized package bootstrap and npx runs of local bins are not refused. Why: validation has no network, so the command could never pass, whatever the item owns;
-  - a base-observed validation command whose package script body works in one directory (it starts with `cd DIR &&`, or is one command naming DIR after `--prefix`, `--dir` or `-C`) on a work item that owns no path there. The request lists these scoped commands with their directories. Why: the command checks nothing the item changed.
+  - a validation command whose package script body works in one directory (it starts with `cd DIR &&`, or is one command naming DIR after `--prefix`, `--dir` or `-C`) on a work item that owns no path there. The request lists these scoped commands with their directories. Why: the command checks nothing the item changed.
 
   The planner gets all of these as one correction. Amendments skip this lint; graph review judges them.
 
@@ -78,7 +78,7 @@ The worker gets the standard before its self-review. Result review refuses a vio
 
 When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. The planner request lists the exact authorized validation commands (computed by the function the check uses), the CI-only commands and the validation environment; a refusal names the allowed alternatives or the exact fix, with long lists bounded. A new plan check ships with its facts in the request and an actionable refusal, and runs from `checkPlan` in `src/planning/checks.ts`; its facts come from `src/planning/facts.ts`.
 
-**Command authority.** A backticked command in a sentence of the Objective is declared (the operator wrote it); in a repository source doc only a command on its own line is. The service checks a queued Objective at once, whether or not a slot is free ([Check at queue time](reference/queue.md#check-at-queue-time)): a problem holds with its fix, and `recheck` checks the edited issue again, so a bad Objective is caught before it takes a slot.
+**Commands.** Factory reads no command from an Objective's text. The planner writes every validation command, and a criterion that requires a command to pass is proved by running that command unchanged on the integrated result, in a QA item; plan review checks it. The plan check refuses only a command that can't run: CI-only, reaching a network validation lacks, or checking only a directory its item doesn't own. Final commands are the installation's `finalValidation.requiredCommands`. The service checks a queued Objective at once, whether or not a slot is free ([Check at queue time](reference/queue.md#check-at-queue-time)): a problem holds with its fix, and `recheck` checks the edited issue again, so a bad Objective is caught before it takes a slot.
 
 Why: a planner that must guess what Factory accepts spends revision rounds finding it.
 

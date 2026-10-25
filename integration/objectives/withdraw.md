@@ -5,4 +5,4 @@ Add `onlyDigits{{ID}}` in its own file `src/onlyDigits{{ID}}.js` as a named expo
 ## Acceptance
 
 - `onlyDigits{{ID}}(s)` returns `s` with every character other than 0-9 removed: `onlyDigits{{ID}}("a1b2-3")` is `"123"`.
-- `npm test`
+- `npm test` passes.

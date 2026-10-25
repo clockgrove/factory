@@ -14,9 +14,9 @@ body:
     id: acceptance
     attributes:
       label: Acceptance
-      description: One observable fact per bullet. A bullet that is exactly one backticked command means that command must pass on the integrated result.
+      description: One observable fact per bullet. A command the result must pass is a fact too, such as "`npm test` passes"; the plan runs it unchanged on the integrated result.
       value: |
-        - `npm test`
+        - `npm test` passes.
     validations:
       required: true
   - type: textarea

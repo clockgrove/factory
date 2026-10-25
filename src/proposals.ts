@@ -61,7 +61,6 @@ export interface ProposedObjective {
   title: string;
   goal: string;
   acceptance: string[];
-  commands: string[];
   context: string[];
   sources: string[];
   constraints: string[];
@@ -93,7 +92,6 @@ export interface ProposeDeps {
 const LISTS = [
   "dependencies",
   "acceptance",
-  "commands",
   "context",
   "sources",
   "constraints",
@@ -147,10 +145,7 @@ export const PROPOSAL_SCHEMA = {
               "One paragraph: what changes, for whom, and what is out of scope.",
           },
           acceptance: list(
-            "Observable facts, one per entry, each checkable against the delivered code and test results.",
-          ),
-          commands: list(
-            "Commands that must pass at the end, exactly as the repository declares them; empty when none fits.",
+            'Observable facts, one per entry, each checkable against the delivered code and test results. A command the result must pass is one, such as "`npm test` passes".',
           ),
           context: list("Optional paragraphs of background for the planner."),
           sources: list(
@@ -251,16 +246,12 @@ export function composeObjective(
     lines.length
       ? [`## ${heading}`, lines.join(gap ? "\n\n" : "\n")]
       : ([] as string[]);
-  const acceptance = [
-    ...bullets(objective.acceptance, line),
-    ...bullets(objective.commands, (command) => code(clean(command))),
-  ];
   const parts = [
     proposalMark(id, objective.key),
     "## Goal",
     line(objective.goal),
     "## Acceptance",
-    acceptance.join("\n"),
+    bullets(objective.acceptance, line).join("\n"),
     ...section("Context", objective.context.map(line).filter(Boolean), true),
     ...section(
       "Sources",
@@ -301,11 +292,12 @@ async function draftProblems(
         `The title has ${composed.title.length} characters; GitHub allows ${TITLE_LIMIT}. Shorten it.`,
       );
     const html = await deps.github.renderMarkdown(composed.body, signal);
+    const shown = readShown(html, { sources: true });
     own.push(
       ...(await objectiveProblems(
         deps.config,
         {
-          shown: readShown(html, { sources: true }),
+          shown,
           writer: true,
           base,
           title: composed.title,
@@ -360,8 +352,7 @@ const FIELD_RULES = [
   "- key: a short id; dependencies: keys of earlier Objectives in your list that must be done first.",
   "- title: a short title of the result.",
   "- goal: one paragraph: what changes, for whom, and what is out of scope.",
-  "- acceptance: observable facts about real behaviour, one per entry, each checkable against the delivered code and test results. No mocks.",
-  "- commands: commands that must pass at the end, exactly as the repository already declares them (its package scripts, Makefile or docs). Leave it empty rather than invent one.",
+  '- acceptance: observable facts about real behaviour, one per entry, each checkable against the delivered code and test results. No mocks. A command the result must pass is an entry such as "`npm test` passes", using a command the repository already has (its package scripts, Makefile or docs); never invent one.',
   "- context: optional background paragraphs.",
   '- sources: only files every worker must receive verbatim, each "path" or "path#Exact Heading" naming a tracked text file (and one exact heading in it). Usually empty: the planner reads the repository itself.',
   "- constraints and nonGoals: limits workers must respect, and what is left out.",

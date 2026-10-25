@@ -1090,10 +1090,7 @@ function amendReviewStep(
         draft,
         evidence,
         decisions: all,
-        finalCommands: finalCommands(
-          inputs.shown.blocks,
-          config.finalValidation.requiredCommands,
-        ),
+        finalCommands: finalCommands(config.finalValidation.requiredCommands),
         controllerCapabilities: controllerGuarantees(
           inputs.reviewArtifacts.length > 0,
         ),

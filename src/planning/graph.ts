@@ -195,15 +195,11 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
   if (
     !Array.isArray(value.validation) ||
     !value.validation.every(
-      (entry) =>
-        isRecord(entry) &&
-        typeof entry.command === "string" &&
-        typeof entry.provenance === "string" &&
-        (entry.source === undefined || typeof entry.source === "string"),
+      (entry) => isRecord(entry) && typeof entry.command === "string",
     )
   ) {
     found(
-      `Work Item ${label} validation must be a list of {command, provenance, source?} commands`,
+      `Work Item ${label} validation must be a list of {command} commands`,
       id,
     );
     usable = false;
@@ -310,14 +306,10 @@ function orderItems(items: readonly WorkItem[]): {
   return { order, cycle: [...remaining.keys()] };
 }
 
-/**
- * The graph's shape and its dependency order. `pinned` is the set of pinned
- * source paths (OBJECTIVE included): a source-declared command names one.
- */
+/** The graph's shape and its dependency order. */
 function checkGraphShape(
   draft: Draft,
   base: string,
-  pinned: ReadonlySet<string>,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
   const { findings, found } = collector();
   if (draft.base !== base)
@@ -378,15 +370,6 @@ function checkGraphShape(
       if (!validValidationCommand(check.command))
         found(
           `Work Item ${item.id} validation needs an executable command line, not Markdown or prose surrounding a code span`,
-          item.id,
-        );
-      if (
-        !["base-observed", "source-declared"].includes(check.provenance) ||
-        (check.provenance === "source-declared" &&
-          !pinned.has(check.source ?? ""))
-      )
-        found(
-          `Work Item ${item.id} has invalid command provenance for ${JSON.stringify(check.command)} from ${JSON.stringify(check.source)}: use base-observed, or source-declared with the pinned source path that declares it (${[...pinned].join(", ")})`,
           item.id,
         );
     }
@@ -736,8 +719,7 @@ function environmentFindings(
 /**
  * Coverage against the pinned sources: every Objective obligation covered
  * once and every source span real and disjoint. Obligations are keyed by
- * text (Objective) or by path and lines (source exit items). An Objective
- * command (`source.command`) is run by final validation.
+ * text (Objective) or by path and lines (source exit items).
  */
 function checkCoverageSources(
   draft: Draft,
@@ -870,8 +852,7 @@ export function validateGraph(
   },
   previous?: Draft,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
-  const pinned = new Set(["OBJECTIVE", ...facts.sources.map((s) => s.path)]);
-  const shape = checkGraphShape(draft, facts.base, pinned);
+  const shape = checkGraphShape(draft, facts.base);
   // Coverage reads items; a draft whose items are unusable stops at shape.
   if (!shape.usable) return shape;
   return {

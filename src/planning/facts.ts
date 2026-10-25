@@ -7,19 +7,13 @@ import { parse } from "yaml";
 import { gitEnvironment, lfsFiltered } from "../git.js";
 import { TransientError } from "../github.js";
 import { markdownLines } from "../markdown.js";
-import {
-  checkObjective,
-  objectiveText,
-  type SourceRef,
-  validPath,
-} from "../objective.js";
+import { checkObjective, type SourceRef, validPath } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
 import type {
   CoverageObligation,
   PinnedSource,
   PlanningFacts,
-  ValidationCommand,
 } from "./types.js";
 
 const run = promisify(execFile);
@@ -218,51 +212,29 @@ function utf8(bytes: Buffer): string | undefined {
 
 // ── Objective ───────────────────────────────────────────────────────────
 
-/** The Objective body as a pinned source: operator-authored. */
+/** The Objective body as a pinned source. */
 function objectiveSource(shown: ShownObjective): PinnedSource {
-  return {
-    path: "OBJECTIVE",
-    content: shown.body,
-    shown: {
-      lines: objectiveText(shown.blocks).split("\n"),
-      spans: shown.spans,
-    },
-    operatorAuthored: true,
-  };
+  return { path: "OBJECTIVE", content: shown.body };
 }
 
 /**
- * Commands the integrated result must pass: the Acceptance list items that
- * are exactly one code element. Any other criterion is a fact for review.
+ * The plan's final commands: the installation's required commands, the
+ * only commands Factory itself declares. The Objective's criteria, a
+ * command among them, are the planner's to prove.
  */
-function finalObjectiveCommands(blocks: readonly ObjectiveBlock[]): string[] {
-  return checkObjective(blocks).objective.acceptance.flatMap((criterion) =>
-    criterion.command ? [criterion.command] : [],
+export function finalCommands(required: readonly string[] = []): string[] {
+  return [...new Set(required.map((command) => command.trim()))].filter(
+    Boolean,
   );
-}
-
-/**
- * An Objective's final commands: its own Acceptance commands, then each
- * installation-required command it doesn't already run. Planning, plan
- * review and final validation all use this one list.
- */
-export function finalCommands(
-  blocks: readonly ObjectiveBlock[],
-  required: readonly string[] = [],
-): string[] {
-  const own = finalObjectiveCommands(blocks);
-  return [...own, ...required.filter((command) => !own.includes(command))];
 }
 
 /** Every Objective Acceptance criterion is one obligation, keyed by its index. */
 function coverageObligations(
   blocks: readonly ObjectiveBlock[],
 ): CoverageObligation[] {
-  return checkObjective(blocks).objective.acceptance.map(
-    ({ text, command }) => ({
-      source: { path: "OBJECTIVE", text, ...(command ? { command } : {}) },
-    }),
-  );
+  return checkObjective(blocks).objective.acceptance.map(({ text }) => ({
+    source: { path: "OBJECTIVE", text },
+  }));
 }
 
 /**
@@ -363,7 +335,7 @@ export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
 }
 
 /**
- * A version-only invocation may be followed by a source-declared shell
+ * A version-only invocation may be followed by a shell
  * assertion. Every package-manager token must belong to that exact probe.
  */
 export function packageManagerVersionProbe(command: string): boolean {
@@ -404,41 +376,6 @@ export function ciOnlyKey(command: string): string {
   const normalized = normalizedCommand(command);
   const invocation = packageScriptInvocation(normalized);
   return invocation ? `script:${invocation.name}` : normalized;
-}
-
-/** A leading executable word, no assignment, braces or statement separators. */
-const COMMAND_SHAPE = /^[a-z][\w.-]*(?: [^{}$;|&<>]*)?$/;
-
-/**
- * Inline code spans outside fenced code: the Objective's shown code
- * elements, a repository file's backticked spans.
- */
-function inlineSpans(
-  source: Pick<PinnedSource, "content" | "shown">,
-): string[] {
-  if (source.shown) return source.shown.spans.map((span) => span.trim());
-  return markdownLines(source.content).flatMap(({ text, fenced }) =>
-    fenced ? [] : [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]!.trim()),
-  );
-}
-
-function inlineCommand(source: PinnedSource, command: string): boolean {
-  if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
-    return false;
-  return inlineSpans(source).includes(command);
-}
-
-function exactLine(lines: readonly string[], command: string): boolean {
-  // Only a command-shaped line is authority; doc code never is.
-  if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
-    return false;
-  return lines.some((line) => {
-    const text = line
-      .trim()
-      .replace(/^[-*]\s+/, "")
-      .trim();
-    return text === command || text === `\`${command}\``;
-  });
 }
 
 /** The most commands a request or refusal lists; the rest are a count. */
@@ -575,185 +512,82 @@ function scopedCommands(
   return scoped;
 }
 
-// ── Command authority ───────────────────────────────────────────────────
+// ── Package commands ────────────────────────────────────────────────────
 
 /**
- * The command-authority rule. A validation command is authorized when it is:
- * a supported root package-script form whose script exists at the base
- * (base-observed), or an exact command-shaped line in the pinned source it
- * names (source-declared). In the operator-written Objective body an inline
- * backticked span also counts. Fenced code never counts. Commands an
- * operator answer authorized (`operator`) always pass.
+ * The root package scripts at the base in the forms validation runs (test
+ * and check first), less CI-only and network ones: facts for the planner.
+ * Any other command the plan writes runs as written.
  */
-async function authorizedCommand(
-  check: ValidationCommand,
-  files: BaseFiles,
-  sources: readonly PinnedSource[],
-  operator: readonly string[] = [],
-): Promise<boolean> {
-  if (!check.command.trim()) return false;
-  if (
-    operator.map(normalizedCommand).includes(normalizedCommand(check.command))
-  )
-    return true;
-  if (!check.source) return false;
-  const packageCommand = /\b(?:npm|pnpm)\b/.test(check.command);
-  const bootstrap = packageBootstrap(check.command) !== undefined;
-  const invocation =
-    packageCommand && !bootstrap
-      ? packageScriptInvocation(check.command)
-      : undefined;
-  if (packageCommand) {
-    if (bootstrap) {
-      if (check.provenance !== "source-declared") return false;
-    } else if (!packageManagerVersionProbe(check.command)) {
-      if (!invocation) return false;
-      if (
-        check.provenance === "base-observed" &&
-        typeof (await files.scripts())[invocation.name] !== "string"
-      )
-        return false;
-    }
-  }
-  if (check.provenance === "source-declared")
-    return sources.some(
-      (source) =>
-        source.path === check.source &&
-        (exactLine(
-          source.shown?.lines ?? source.content.split("\n"),
-          check.command,
-        ) ||
-          // An operator-authored Objective body may declare a backticked
-          // command in its prose. Repository docs keep the own-line rule.
-          (source.operatorAuthored === true &&
-            inlineCommand(source, check.command))),
-    );
-  if (
-    check.provenance !== "base-observed" ||
-    !/^[A-Za-z0-9_./-]+$/.test(check.source) ||
-    check.source.split("/").includes("..")
-  )
-    return false;
-  const content = await files.text(check.source);
-  if (content === undefined) return false;
-  if (exactLine(content.split("\n"), check.command)) return true;
-  return check.source === "package.json" && Boolean(invocation);
-}
-
-/**
- * The validation commands the command-authority check accepts at the base:
- * operator-authorized commands, root package scripts in the supported forms
- * (test and check first), then inline source-declared commands in the
- * pinned sources. CI-only and network commands are left out because
- * validation refuses those.
- */
-async function authorizedCommands(
-  sources: readonly PinnedSource[],
+async function packageCommands(
   files: BaseFiles,
   ciOnlyCommands: readonly string[] = [],
-  operator: readonly string[] = [],
 ): Promise<string[]> {
   const ciOnly = new Set(ciOnlyCommands.map(ciOnlyKey));
   const scripts = await files.scripts();
-  const accepted = new Set<string>();
-  const usable = (command: string) =>
-    !ciOnly.has(ciOnlyKey(command)) && !networkToolOfCommand(command, scripts);
-  for (const command of operator)
-    if (command.trim() && !ciOnly.has(ciOnlyKey(command)))
-      accepted.add(normalizedCommand(command));
   const names = Object.keys(scripts).sort(
     (a, b) =>
       Number(b === "test" || b === "check") -
       Number(a === "test" || a === "check"),
   );
+  const commands: string[] = [];
   for (const name of names) {
+    if (typeof scripts[name] !== "string") continue;
+    const form = name === "test" ? "npm test" : `npm run ${name}`;
+    // A CI-only script is CI-only in every form.
     const forms =
       name === "test"
         ? ["npm test", "pnpm test", "npm run test", "pnpm run test"]
         : [
-            ...(name === "check" ? ["pnpm check"] : []),
             `npm run ${name}`,
             `pnpm run ${name}`,
+            ...(name === "check" ? ["pnpm check"] : []),
           ];
-    // A CI-only script is CI-only in every form.
-    if (forms.some((form) => ciOnly.has(ciOnlyKey(form)))) continue;
-    for (const form of forms)
-      if (
-        usable(form) &&
-        (await authorizedCommand(
-          {
-            command: form,
-            provenance: "base-observed",
-            source: "package.json",
-          },
-          files,
-          sources,
-        ))
-      ) {
-        accepted.add(form);
-        break;
-      }
+    if (forms.some((f) => ciOnly.has(ciOnlyKey(f)))) continue;
+    if (networkToolOfCommand(form, scripts)) continue;
+    commands.push(form);
   }
-  // Only inline command spans: never fenced code, prose or code fragments.
-  for (const source of sources)
-    for (const command of new Set(inlineSpans(source)))
-      if (
-        COMMAND_SHAPE.test(command) &&
-        usable(command) &&
-        (await authorizedCommand(
-          { command, provenance: "source-declared", source: source.path },
-          files,
-          sources,
-        ))
-      )
-        accepted.add(command);
-  return [...accepted];
-}
-
-/**
- * Whether a plan's validation command is authorized: one the request listed
- * (this covers operator-authorized commands), or one the full rule accepts.
- */
-export async function commandAuthorized(
-  facts: PlanningFacts,
-  check: ValidationCommand,
-  files: BaseFiles,
-): Promise<boolean> {
-  return (
-    facts.authorizedCommands.includes(normalizedCommand(check.command)) ||
-    authorizedCommand(check, files, facts.sources)
-  );
+  return commands;
 }
 
 // ── Planner instructions ────────────────────────────────────────────────
 
 /** The planner's note on the validation environment; always present. */
-function validationEnvironmentInstructions(): string {
-  return `\n\nValidation environment (differs from hosted CI): ${JSON.stringify(VALIDATION_ENVIRONMENT)}`;
+function validationEnvironmentInstructions(hostNetwork: boolean): string {
+  const environment = hostNetwork
+    ? {
+        ...VALIDATION_ENVIRONMENT,
+        network: "the host's network (sandbox.network host)",
+      }
+    : VALIDATION_ENVIRONMENT;
+  return `\n\nValidation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
 }
 
 /** The planner's note on the installation's CI-only commands, after the environment note. */
-function ciOnlyInstructions(ciOnlyCommands: readonly string[]): string {
+function ciOnlyInstructions(
+  ciOnlyCommands: readonly string[],
+  hostNetwork: boolean,
+): string {
   return (
-    validationEnvironmentInstructions() +
+    validationEnvironmentInstructions(hostNetwork) +
     (ciOnlyCommands.length
       ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
       : "")
   );
 }
 
-/** The planner's note of the exact validation commands Factory accepts. */
-function authorizedCommandInstructions(
+/** The planner's note of the root package scripts at the base. */
+function packageCommandInstructions(
   commands: readonly string[],
   scopes: ReadonlyMap<string, string> = new Map(),
 ): string {
   const scoped = commands.flatMap((command) =>
     scopes.has(command) ? [`\`${command}\` (${scopes.get(command)})`] : [],
   );
-  return `\n\nAuthorized validation commands (use one of these; other forms may be refused): ${listCommands(commands)}.${scoped.length ? `\nThese check only one directory; select one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
+  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself; any command line runs as written.${scoped.length ? `\nThese check only one directory; use one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
 }
 
-/** The CI-only and authorized-command notes for the planner request, in that order. */
+/** The CI-only and package-script notes for the planner request, in that order. */
 export async function commandInstructions(
   facts: PlanningFacts,
   checkout: string,
@@ -761,10 +595,10 @@ export async function commandInstructions(
 ): Promise<string> {
   const scripts = await new BaseFiles(checkout, facts.base, signal).scripts();
   return (
-    ciOnlyInstructions(facts.ciOnlyCommands) +
-    authorizedCommandInstructions(
-      facts.authorizedCommands,
-      scopedCommands(facts.authorizedCommands, scripts),
+    ciOnlyInstructions(facts.ciOnlyCommands, facts.hostNetwork === true) +
+    packageCommandInstructions(
+      facts.packageCommands,
+      scopedCommands(facts.packageCommands, scripts),
     )
   );
 }
@@ -794,8 +628,8 @@ function fixedPackageScripts(commands: readonly string[]): string[] {
 }
 
 /**
- * The package scripts the final commands run, as the base's root
- * package.json defines them. Validation keeps these bodies fixed, so the
+ * The package scripts `commands` run, as the base's root package.json
+ * defines them. Validation keeps these bodies fixed, so the
  * planner needs them to own the files a new check has to extend (#819).
  */
 export async function fixedScripts(
@@ -1013,10 +847,6 @@ export function unknownCheckMessage(name: string, known: string[]): string {
 }
 
 // ── Entry points ────────────────────────────────────────────────────────
-/** The declaring source of installation-required final commands. */
-const REQUIRED_COMMANDS_SOURCE =
-  "installation finalValidation.requiredCommands";
-
 export interface FactsArgs {
   objective: number;
   /** The Objective as shown: its structure and the planner text. */
@@ -1027,8 +857,8 @@ export interface FactsArgs {
   requiredCommands?: readonly string[];
   /** The installation's CI-only commands: never a validation command. */
   ciOnlyCommands?: readonly string[];
-  /** Exact commands an operator answer authorized; treated as authorized. */
-  extraCommands?: readonly string[];
+  /** `sandbox.network: host`: validation reaches the host's network. */
+  hostNetwork?: boolean;
   /** The approved playbook text. */
   playbook?: string;
   /** The operator's media.localAssetRoots. */
@@ -1074,20 +904,21 @@ export async function buildFacts(
     blocks: args.shown.blocks,
     base: args.base,
     sources,
-    authorizedCommands: await authorizedCommands(
-      sources,
-      files,
-      ciOnlyCommands,
-      args.extraCommands,
-    ),
+    packageCommands: await packageCommands(files, ciOnlyCommands),
     ciOnlyCommands,
+    ...(args.hostNetwork ? { hostNetwork: true as const } : {}),
     checkNames: await workflowCheckNames(files),
     integratedCheckNames: await pushCheckNames(
       files,
       await files.defaultBranch(),
     ),
+    // Every existing root script a validation command runs keeps its base
+    // body, so the planner sees each one it may run.
     fixedScripts: await fixedScripts(
-      finalCommands(args.shown.blocks, args.requiredCommands),
+      [
+        ...finalCommands(args.requiredCommands),
+        ...(await packageCommands(files)),
+      ],
       files,
     ),
     coverageObligations: coverageObligations(args.shown.blocks),
@@ -1099,11 +930,10 @@ export async function buildFacts(
 }
 
 /**
- * The Objective's command and source problems at queue time; each says how
+ * The Objective's source and command problems at queue time; each says how
  * to fix it. Empty means planning can start: every pinned Source reads as
- * UTF-8 at the base, every Acceptance command has authority there, the
- * Objective declares the commands it names, and the installation's required
- * and CI-only commands fit it.
+ * UTF-8 at the base, and each installation-required command that runs a
+ * package script uses a supported form, so its script stays fixed.
  */
 export async function objectiveCommandProblems(
   shown: ShownObjective,
@@ -1111,99 +941,20 @@ export async function objectiveCommandProblems(
   checkout: string,
   options: {
     requiredCommands?: readonly string[];
-    ciOnlyCommands?: readonly string[];
     signal?: AbortSignal;
   } = {},
 ): Promise<string[]> {
   const files = new BaseFiles(checkout, base, options.signal);
-  const { sources, problems } = await planningSources(shown, files);
-  const finals = finalObjectiveCommands(shown.blocks);
-  const ciOnly = new Set((options.ciOnlyCommands ?? []).map(ciOnlyKey));
-  let authorized: string[] | undefined;
-  const list = async () => {
-    authorized ??= await authorizedCommands(
-      sources,
-      files,
-      options.ciOnlyCommands,
-    );
-    return listCommands(authorized);
-  };
-
-  for (const command of finals) {
-    if (ciOnly.has(ciOnlyKey(command)))
-      problems.push(
-        `Acceptance command ${command} is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the Objective's Acceptance commands, or remove it from ciOnlyCommands if it runs offline.`,
-      );
-    else if (
-      !(await authorizedCommand(
-        { command, provenance: "source-declared", source: "OBJECTIVE" },
-        files,
-        sources,
-      ))
-    )
-      problems.push(
-        `Acceptance command has no executable authority at the accepted base: ${command}. Use one of the authorized commands: ${await list()}, or remove it from Acceptance.`,
-      );
-  }
-
-  if (!finals.length) {
-    const named: string[] = [];
-    for (const span of new Set(shown.spans.map((span) => span.trim()))) {
-      if (!span) continue;
-      const declared =
-        (await authorizedCommand(
-          {
-            command: span,
-            provenance: "base-observed",
-            source: "package.json",
-          },
-          files,
-          sources,
-        )) ||
-        (
-          await Promise.all(
-            sources
-              .filter((source) => source.path !== "OBJECTIVE")
-              .map((source) =>
-                authorizedCommand(
-                  {
-                    command: span,
-                    provenance: "source-declared",
-                    source: source.path,
-                  },
-                  files,
-                  sources,
-                ),
-              ),
-          )
-        ).some(Boolean);
-      if (declared) named.push(span);
-    }
-    if (named.length)
-      problems.push(
-        `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Make each command the integrated result must pass an Acceptance bullet with exactly one backticked command, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions (a command named in prose stays usable by the plan, but is not a final command).`,
-      );
-  }
-
-  const required = options.requiredCommands ?? [];
-  const requiredSources: PinnedSource[] = [
-    objectiveSource(shown),
-    { path: REQUIRED_COMMANDS_SOURCE, content: required.join("\n") },
-  ];
-  for (const command of required)
+  const { problems } = await planningSources(shown, files);
+  for (const command of finalCommands(options.requiredCommands))
     if (
-      !(await authorizedCommand(
-        {
-          command,
-          provenance: "source-declared",
-          source: REQUIRED_COMMANDS_SOURCE,
-        },
-        files,
-        requiredSources,
-      ))
+      /\b(?:npm|pnpm)\b/.test(command) &&
+      !packageBootstrap(command) &&
+      !packageManagerVersionProbe(command) &&
+      !packageScriptInvocation(command)
     )
       problems.push(
-        `Required final-validation command has no executable authority at the accepted base: ${command}. Package scripts must use ${PACKAGE_SCRIPT_FORMS}, with fixed script bodies, hooks and configuration; correct or remove it in the installation's finalValidation.requiredCommands. Authorized commands: ${listCommands(await authorizedCommands(requiredSources, files))}.`,
+        `Required final-validation command ${command} runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}, so its script can't be kept fixed; correct it in the installation's finalValidation.requiredCommands.`,
       );
   return problems;
 }

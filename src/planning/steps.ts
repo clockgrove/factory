@@ -232,20 +232,13 @@ function decisionOf(answer: Answer, text?: string): PlannerDecision {
   };
 }
 
-/** Exact commands the operator authorized with `allow`. */
-function allowedCommands(state: ObjectiveState): string[] {
-  return decisions(state)
-    .filter((d) => d.answer === "allow" && d.text)
-    .map((d) => d.text!.replace(/^`|`$/g, "").trim());
-}
-
 /** This generation's answers that carry content for the planner. */
 function generationDecisions(
   state: ObjectiveState,
   g: number,
 ): PlannerDecision[] {
   return decisions(state, (key) => key.startsWith(`decide:${g}:`)).filter(
-    (d) => d.answer === "answer" || d.answer === "allow",
+    (d) => d.answer === "answer",
   );
 }
 
@@ -603,10 +596,7 @@ function reviewStep(
         draft,
         evidence,
         decisions: all,
-        finalCommands: finalCommands(
-          inputs.shown.blocks,
-          config.finalValidation.requiredCommands,
-        ),
+        finalCommands: finalCommands(config.finalValidation.requiredCommands),
         controllerCapabilities: controllerGuarantees(
           inputs.reviewArtifacts.length > 0,
         ),
@@ -693,19 +683,7 @@ const answering = (spent: boolean): Offer => ({
   consequence: spent ? KEPT : "Sends your decision back to the planner.",
   needsText: true,
 });
-const ask = (spent: boolean): Offer[] => [
-  answering(spent),
-  {
-    answer: "allow",
-    family: "answer",
-    consequence: spent
-      ? `Authorizes that exact validation command for this Objective. ${KEPT}`
-      : "Authorizes that exact validation command for this Objective and plans again.",
-    needsText: true,
-  },
-  "replan",
-  "cancel",
-];
+const ask = (spent: boolean): Offer[] => [answering(spent), "replan", "cancel"];
 
 function decideStep(
   key: string,
@@ -808,8 +786,7 @@ function decideStep(
                 [OBJECTIVE_ACCEPTED]: await shownNow(state, g, deps, signal),
               },
             );
-          case "answer":
-          case "allow": {
+          case "answer": {
             // Text is required (`ask`): the engine refuses an answer without it.
             return nextRound(record((answer.text ?? "").trim()));
           }
@@ -991,7 +968,7 @@ function questionFor(
     );
   if (planned.question)
     return question(
-      `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,
+      `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`.`,
       ASK,
     );
   if (asks.length && !fixes.length && !state.done[`review:${g}:${n}`])
@@ -1091,7 +1068,6 @@ function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
       const plan: Plan = {
         ...draft,
         finalCommands: finalCommands(
-          inputs.shown.blocks,
           deps.config.finalValidation.requiredCommands,
         ),
         decisions: decisions(state),
@@ -1298,7 +1274,6 @@ export async function objectiveProblems(
     problems.push(
       ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {
         requiredCommands: config.finalValidation.requiredCommands,
-        ciOnlyCommands: config.finalValidation.ciOnlyCommands,
         signal,
       })),
     );
@@ -1390,7 +1365,7 @@ export async function planningFacts(
     checkout: config.checkout,
     requiredCommands: config.finalValidation.requiredCommands,
     ciOnlyCommands: config.finalValidation.ciOnlyCommands,
-    extraCommands: allowedCommands(state),
+    hostNetwork: config.sandbox.network === "host",
     localAssetRoots: config.media.localAssetRoots,
     // No playbook in the target reads as empty. Knowledge adds the pinned
     // Dream playbook, the planning context and memory.
@@ -1413,10 +1388,7 @@ export function localExecutables(
     checkout: config.checkout,
     base: inputs.base,
     blocks: inputs.shown.blocks,
-    finalCommands: finalCommands(
-      inputs.shown.blocks,
-      config.finalValidation.requiredCommands,
-    ),
+    finalCommands: finalCommands(config.finalValidation.requiredCommands),
     signal,
   });
 }

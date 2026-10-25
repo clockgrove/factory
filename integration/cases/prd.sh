@@ -113,29 +113,43 @@ print(sum(1 for l in links if l & issues))' "$i2" "$blocked")
   p_close $i1 $i2
 }
 
-# PRD 2, 14: a check that fails (a CI-only final command and a Source missing at
-# the default branch) holds naming both; after the issue is fixed, `recheck` plans.
+# PRD 2, 14: a check that fails (a Source missing at the default branch) holds
+# naming it; after the issue is fixed, `recheck` plans. The Objective asks for a
+# CI-only command to pass: no plan round may give it to validation.
 case_recheck() {
   local t0 n id fn; t0=$(now); id=$(uid); fn="reverse$id"
   n=$(new_objective recheck "recheck after a failed check" ID="$id" FN="$fn") || return
   local p; p=$(HOLD_POLICY="" wait_phase "$n" '^hold:' 600)
   local hj; hj=$(st hold "$n"); local hid; hid=$(hold_field "$hj" id)
   local q; q=$(hold_field "$hj" question)
-  local ci=0 src=0; [[ $q == *"npm run ci-only"* ]] && ci=1; [[ $q == *"missing$id"* ]] && src=1
+  local src=0; [[ $q == *"missing$id"* ]] && src=1
   local planned_before; planned_before=$(st events "$n" event=start 'step=plan*')
-  [[ $p == hold:* ]] && [ "$ci" = 1 ]
-  rec_if toolchain.ci-only $? "#$n $p: the check names the CI-only final command: $ci [$(hold_field "$hj" answers)]" "$t0"
   if [[ $p != hold:* ]] || [[ ,$(hold_field "$hj" answers), != *,recheck,* ]]; then
-    record intake.recheck FAIL "#$n $p, no recheck offered [$(hold_field "$hj" answers)]" "$t0"; cancel_wait "$n"; return
+    record intake.recheck FAIL "#$n $p, no recheck offered [$(hold_field "$hj" answers)]" "$t0"
+    record toolchain.ci-only FAIL "#$n never planned" "$t0"; cancel_wait "$n"; return
   fi
+  # The fix drops the missing Source and keeps the CI-only criterion.
   local fixed="$RUN_DIR/objectives/$CASE-fixed-$id.md"
-  render exec "$fixed" FN="$fn" SPEC="\`$fn(s)\` returns \`s\` reversed: \`$fn(\"abc\")\` is \`\"cba\"\`." || return
+  render recheck "$fixed" ID="$id" FN="$fn" || return
+  python3 - "$fixed" <<'EOF' || return
+import sys; p = sys.argv[1]; t = open(p).read()
+open(p, "w").write(t[: t.index("## Sources")].rstrip() + "\n")
+EOF
   gh issue edit "$n" --repo "$REPO" --body-file "$fixed" >/dev/null || { record intake.recheck FAIL "couldn't edit #$n" "$t0"; cancel_wait "$n"; return; }
   sleep 10
   answer_t 60 "$n" recheck --question "$hid" >/dev/null 2>&1
   wait_for 900 started "$n" 'plan*'; local planned; planned=$(st events "$n" event=start 'step=plan*')
   [ "$src" = 1 ] && [ "$planned_before" = 0 ] && [ "$planned" -ge 1 ]
   rec_if intake.recheck $? "#$n held naming the missing Source: $src; plan starts before recheck $planned_before, after $planned" "$t0"
+  # Planning ends in an accepted plan or a question; the accepted plan never runs the CI-only command.
+  wait_for 900 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' has $n done.plan)\" = 1 ] || [[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' phase $n)\" == hold:* ]]"
+  # Either the accepted plan leaves the command out, or planning asks the
+  # operator about it (a hold of the decide step); any other hold proves nothing.
+  local accepted; accepted=$(st has "$n" done.plan)
+  local step; step=$(hold_field "$(st hold "$n")" step)
+  local cmds; cmds=$(st validation-commands "$n" done.plan | sort -u | paste -sd'|')
+  { [ "$accepted" = 1 ] || [[ $step == decide:* ]]; } && ! st validation-commands "$n" done.plan | grep -qx 'npm run ci-only'
+  rec_if toolchain.ci-only $? "#$n plan accepted: $accepted, hold step '${step}'; accepted plan's validation commands: [${cmds}]" "$t0"
   cancel_wait "$n" 300
 }
 

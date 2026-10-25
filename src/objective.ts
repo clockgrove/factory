@@ -8,8 +8,8 @@ import {
  * The Objective checks. They run once when an Objective is first taken from
  * the queue, and planning uses the same functions. They read the shown
  * structure (shown.ts): sections are GitHub's heading elements, bullets its
- * list items, commands and paths its code elements. Each problem says how
- * to fix it.
+ * list items, paths its code elements. Factory reads no command from an
+ * Objective: the planner reads its criteria. Each problem says how to fix it.
  */
 export interface SourceRef {
   path: string;
@@ -20,8 +20,8 @@ export interface ParsedObjective {
   goal: string;
   /**
    * Each Acceptance criterion: its shown text (code as backticked spans,
-   * emphasis and strikethrough with their markers) and, for a list item
-   * that is exactly one code element, its command.
+   * emphasis and strikethrough with their markers). The planner decides
+   * how each is proved, a command included.
    */
   acceptance: Criterion[];
   sources: SourceRef[];
@@ -29,7 +29,6 @@ export interface ParsedObjective {
 
 export interface Criterion {
   text: string;
-  command?: string;
 }
 
 const KNOWN = [
@@ -76,16 +75,15 @@ function blockText(block: ObjectiveBlock): string {
  */
 function bullets(
   section: Section | undefined,
-): { text: string; code?: string; item: boolean }[] {
+): { text: string; code?: string }[] {
   return (section?.blocks ?? []).flatMap((block) => {
     if (block.kind === "empty" || block.kind === "heading") return [];
     const text = block.text.replace(/\s+/g, " ").trim();
     if (!text) return [];
-    const item = block.kind === "item";
     return [
       block.kind !== "code" && block.code !== undefined
-        ? { text, code: block.code, item }
-        : { text, item },
+        ? { text, code: block.code }
+        : { text },
     ];
   });
 }
@@ -147,10 +145,7 @@ export function checkObjective(blocks: readonly ObjectiveBlock[]): {
   return {
     objective: {
       goal,
-      // A command is a list item only: a paragraph or quote is prose.
-      acceptance: criteria.map(({ text, code, item }) =>
-        item && code?.trim() ? { text, command: code } : { text },
-      ),
+      acceptance: criteria.map(({ text }) => ({ text })),
       sources,
     },
     problems,
@@ -190,7 +185,7 @@ export function declaration(
  * The protected paths (CI configuration, `.github/`, CODEOWNERS, the
  * playbook) the Objective lets a worker change: its one "May change"
  * section, each entry a list item that is exactly one code element naming
- * a repository path, as an Acceptance command is written. Any other entry
+ * a repository path. Any other entry
  * is a problem. A path named anywhere else in the Objective allows nothing.
  */
 export function mayChange(blocks: readonly ObjectiveBlock[]): {

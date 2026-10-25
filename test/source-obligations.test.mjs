@@ -13,7 +13,7 @@ function facts(sources) {
     coverageObligations: [],
     checkNames: [],
     integratedCheckNames: [],
-    authorizedCommands: [],
+    packageCommands: [],
   };
 }
 

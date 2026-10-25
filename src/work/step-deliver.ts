@@ -341,7 +341,9 @@ export async function mergeStack(
  * Failed CI or a conflict: the worker repairs on the current base, and the
  * same PR gets the new head. A conflict is mechanical: the change moves onto
  * the base GitHub named (or the current start) and the worker resolves what
- * the replay left, with no diagnosis.
+ * the replay left, with no diagnosis. A conflict refuses nothing of the
+ * result, so its fact is `replayOnly`: a resolution may rightly end on the
+ * same tree (the base changed only what the result replaces).
  */
 export function deliveryRepair(
   item: WorkItem,
@@ -373,6 +375,7 @@ export function deliveryRepair(
         },
         item.id,
       ),
+      refusesResult: !repair.conflict,
     },
   );
 }
@@ -457,9 +460,10 @@ export function movedLayer(
  * (validate, review, CI, merge, a secret it writes), so the worker must
  * change it and the item's refused fact records it as refused. A select or
  * publish media repair (new candidates, a selection that couldn't be
- * written, LFS objects) may rightly end on the same tracked tree, so its
- * fact is `replayOnly`, and a correct fix is never "no change". The layers
- * above are moved, not refused: theirs is `replayOnly` too.
+ * written, LFS objects) or a conflict repair (`deliveryRepair`) may rightly
+ * end on the same tracked tree, so its fact is `replayOnly`, and a correct
+ * fix is never "no change". The layers above are moved, not refused: theirs
+ * is `replayOnly` too.
  */
 export function repairOutcome(
   item: WorkItem,

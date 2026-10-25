@@ -1279,7 +1279,8 @@ test("a 403 is a rate limit only by GitHub's headers; one without them retries, 
   };
   const primary = await outcome("/repos/o/r/primary");
   assert.equal(primary.wait?.kind, "reset");
-  assert.equal(Date.parse(primary.wait.at), reset * 1000);
+  // The wait is now plus the time left, so the clock may move a millisecond.
+  assert.ok(Math.abs(Date.parse(primary.wait.at) - reset * 1000) < 1000);
   const secondary = await outcome("/repos/o/r/secondary");
   assert.equal(secondary.wait?.kind, "reset");
   assert.ok(Date.parse(secondary.wait.at) - Date.now() <= 60_000);

@@ -21,6 +21,7 @@ import {
   pathsOverlap,
   validateGraph,
 } from "./graph.js";
+import { REPOSITORY_DIRECTORY } from "./repository.js";
 import type {
   Citation,
   CoverageObligation,
@@ -57,12 +58,34 @@ export async function checkPlan(
   if (!graph.usable) return findings;
   const { items } = draft;
   commandFindings(items, facts, found);
+  await exportPathFindings(items, files, found);
   await boundaryFindings(items, facts, files, found);
   graphLint(draft, facts.packageCommands, found);
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
   return findings;
+}
+
+/**
+ * Owned paths are relative to the repository root. The planner reads the
+ * base as `repository/` in its read directory, so an owned path under it
+ * names that export, which no worker's checkout has, unless the base
+ * itself has a top-level `repository`.
+ */
+async function exportPathFindings(
+  items: readonly WorkItem[],
+  files: BaseFiles,
+  found: Found,
+): Promise<void> {
+  const prefix = `${REPOSITORY_DIRECTORY}/`;
+  if ((await files.paths()).some((path) => path.startsWith(prefix))) return;
+  for (const item of items)
+    for (const path of item.ownedPaths.filter((p) => p.startsWith(prefix)))
+      found(
+        `Work Item ${item.id} owns ${JSON.stringify(path)}, under ${prefix}, which is your read directory's copy of the repository, not a path in it: owned paths are relative to the repository root, so own ${JSON.stringify(path.slice(prefix.length))}`,
+        item.id,
+      );
 }
 
 // ── Commands ────────────────────────────────────────────────────────────

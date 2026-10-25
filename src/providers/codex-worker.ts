@@ -50,7 +50,7 @@ import {
   saveModelsCache,
   trimCodexHome,
 } from "./codex.js";
-import { CodexStderr, logBoundary, withStderr } from "./codex-boundary.js";
+import { CodexStderr, withStderr } from "./codex-stderr.js";
 import {
   addCodexTelemetry,
   type CodexBaseline,
@@ -144,9 +144,7 @@ const PROXY = /^(?:HTTPS?|NO|ALL)_PROXY$/i;
  * nothing when the shell has no network; with network, each URL (one
  * without a scheme read as http://) without its user name and password (a
  * URL that doesn't parse is left out), so the shell never holds a proxy
- * credential. OPENAI_API_KEY and CODEX_API_KEY are always excluded, and
- * so is RUST_LOG, which is Codex's own (codex.ts codexStderr) unless
- * sandbox.environment sets it.
+ * credential. OPENAI_API_KEY and CODEX_API_KEY are always excluded.
  */
 function shellPolicy(
   source: NodeJS.ProcessEnv,
@@ -156,7 +154,7 @@ function shellPolicy(
 ): string {
   const set: string[] = [];
   // Codex's own API keys stay with Codex, whatever its default excludes are.
-  const exclude: string[] = ["OPENAI_API_KEY", "CODEX_API_KEY", "RUST_LOG"];
+  const exclude: string[] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
   for (const [name, value] of Object.entries(source)) {
     if (!PROXY.test(name) || value === undefined) continue;
     if (!network) {
@@ -281,7 +279,7 @@ ${shellPolicy(source, network, sandbox.environment, [
       // Package caches stay in the private HOME, never in the worktree.
       Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
       // Commands it starts end with it, an abort's included.
-      const stderr = codexStderr(root, env);
+      const stderr = codexStderr(root);
       const { launcher, pidFile } = codexLauncher(root, env, stderr);
       return { root, launcher, pidFile, env, stderr };
     },
@@ -416,7 +414,7 @@ export async function codexSandboxProblem(
     try {
       found = JSON.parse(readFileSync(join(worktree, "result"), "utf8"));
     } catch {
-      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(`${run.stderr}${probeStderr.read(true).ordinary}`.trim())}`;
+      return `Codex's sandbox couldn't run a command that writes its worktree (${run.error?.message ?? `exit ${run.status ?? run.signal}`}): ${detail(`${run.stderr}${probeStderr.tail()}`.trim())}`;
     }
     if (
       !["EACCES", "EPERM", "EROFS", "ENOENT"].includes(String(found.refused)) ||
@@ -621,9 +619,20 @@ export class CodexWorker implements Worker {
     };
     const reading = setInterval(readLive, ACTIVITY_INTERVAL_MS);
     reading.unref();
-    // Codex's standard error since this turn began: its boundary telemetry.
+    // Codex's standard error since this turn began, for a failure's message.
     const stderr = new CodexStderr(home.stderr);
-    let turnCompleted = false;
+    // A failure's outcome, with what this turn's session record says about it.
+    const failure = (message: string) =>
+      failed(
+        codexFailure(
+          redact(message, secrets),
+          codexTelemetry(
+            join(home.root, "codex-home"),
+            (record.thread as string | undefined) ?? turn.resumed?.id,
+            baseline?.size,
+          ),
+        ),
+      );
     // The SDK hides the child: the group its launcher records is killed on
     // an abort, and a service exit kills it even before its first event.
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);
@@ -690,21 +699,19 @@ export class CodexWorker implements Worker {
         }
         if (event.type === "turn.completed") {
           completed = true;
-          turnCompleted = true;
           record.tokens = baseline
             ? turnTokens(codexTokens(event.usage), baseline.tokens)
             : codexTokens(event.usage);
           codexTurnUsage(record, event.usage);
         }
-        if (event.type === "turn.failed")
-          return failed(codexFailure(redact(event.error.message, secrets)));
+        if (event.type === "turn.failed") return failure(event.error.message);
         // A stream error can precede a CLI retry; read through to the
         // terminal turn and natural EOF before it counts.
         if (event.type === "error") streamError = event.message;
       }
       if (!completed)
         return streamError
-          ? failed(codexFailure(redact(streamError, secrets)))
+          ? failure(streamError)
           : { kind: "retry", reason: "Codex ended without a completed turn" };
       captureResponse(record, finalResponse);
       const threadId =
@@ -733,15 +740,8 @@ export class CodexWorker implements Worker {
       if (idle) return errored(idle.message);
       // Cancelled or past the step deadline: the engine decides.
       if (input.signal.aborted) throw input.signal.reason ?? error;
-      // A failed codex process: its stderr is in the message.
-      return failed(
-        codexFailure(
-          redact(
-            errorMessage(withStderr(error, stderr.read(false).ordinary)),
-            secrets,
-          ),
-        ),
-      );
+      // A failed codex process: its standard error ends the message.
+      return failure(withStderr(error, stderr));
     } finally {
       clearInterval(reading);
       readLive();
@@ -761,7 +761,6 @@ export class CodexWorker implements Worker {
       group.end();
       saveModelsCache(join(home.root, "codex-home"));
       addCodexTelemetry(record, join(home.root, "codex-home"), baseline?.size);
-      logBoundary(record, input.log, stderr, turnCompleted);
       // A retained conversation's Codex state stays for the item's next
       // repair; its HOME, caches and scratch go now, as for any turn.
       // A later turn may have taken the directory: then it isn't this one's.

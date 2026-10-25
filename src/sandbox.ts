@@ -960,17 +960,22 @@ process.once("exit", killWorkerProcesses);
 /** Quote one shell word. */
 const shellWord = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
+/** A namespacedLauncher's exit when the host refuses its namespace: the program never ran. */
+export const NAMESPACE_REFUSED = 125;
+
 /**
  * Write an executable launcher at `path` that runs `program` (with the
  * launcher's arguments) as the leader of a new process group, as the init
  * of a PID namespace of its own (`unshare --user --map-current-user --pid
  * --fork --kill-child --mount-proc`). Its process id, the group's, goes to
- * `pidFile` first. Killing the group, or the program ending, ends the
- * namespace, and the kernel then kills every process left in it, however
- * its commands regrouped or detached: an abort can't leave a command
- * running. The launcher ignores SIGTERM; LaunchedGroup kills it. `stderr`
- * appends the program's standard error to that file. Throws when
- * util-linux's `setsid` or `unshare` is missing.
+ * `pidFile` first. It tries the namespace with `true` before the program:
+ * a host that refuses it exits NAMESPACE_REFUSED. Killing the group, or the
+ * program ending, ends the namespace, and the kernel then kills every
+ * process left in it, however its commands regrouped or detached: an abort
+ * can't leave a command running. The launcher ignores SIGTERM;
+ * LaunchedGroup kills it. `stderr` appends the probe's and the program's
+ * standard error to that file. Throws when util-linux's `setsid` or
+ * `unshare` is missing.
  */
 export function namespacedLauncher(
   path: string,
@@ -990,9 +995,11 @@ export function namespacedLauncher(
     );
   // Private like every telemetry file, whatever the umask.
   if (stderr) writeFileSync(stderr, "", { mode: 0o600, flag: "a" });
+  const namespace = `${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc`;
+  const errors = stderr ? ` 2>>${shellWord(stderr)}` : "";
   writeFileSync(
     path,
-    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nexec ${setsid} ${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc ${shellWord(program)} "$@"${stderr ? ` 2>>${shellWord(stderr)}` : ""}\n`,
+    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\n${namespace} true${errors} || exit ${NAMESPACE_REFUSED}\nexec ${setsid} ${namespace} ${shellWord(program)} "$@"${errors}\n`,
     { mode: 0o700, flag: "wx" },
   );
 }

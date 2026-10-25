@@ -6,4 +6,4 @@ Add `countChar{{ID}}` in its own file `src/countChar{{ID}}.js` as a named export
 
 - `countChar{{ID}}(s, ch)` returns how many times the single character `ch` occurs in `s`, case-sensitive: `countChar{{ID}}("banana", "a")` is `3`, `countChar{{ID}}("Banana", "b")` is `0` and `countChar{{ID}}("", "a")` is `0`.
 - `README.md` has one new line naming `countChar{{ID}}` and what it returns.
-- `npm test`
+- `npm test` passes.

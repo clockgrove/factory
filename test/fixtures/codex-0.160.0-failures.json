@@ -1,0 +1,204 @@
+{
+  "usage limit": {
+    "message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 12:57 AM.",
+    "rollout": [
+      {
+        "timestamp": "2026-10-25T00:03:02.523Z",
+        "ordinal": 8,
+        "type": "event_msg",
+        "payload": {
+          "type": "token_count",
+          "info": null,
+          "rate_limits": {
+            "limit_id": "codex",
+            "limit_name": null,
+            "primary": {
+              "used_percent": 100.0,
+              "window_minutes": 300,
+              "resets_at": 1792889879
+            },
+            "secondary": {
+              "used_percent": 40.0,
+              "window_minutes": 10080,
+              "resets_at": 1792976279
+            },
+            "credits": null,
+            "individual_limit": null,
+            "spend_control_reached": null,
+            "plan_type": null,
+            "rate_limit_reached_type": null
+          }
+        }
+      },
+      {
+        "timestamp": "2026-10-25T00:03:02.530Z",
+        "ordinal": 9,
+        "type": "event_msg",
+        "payload": {
+          "type": "task_complete",
+          "turn_id": "01a1705e-2ca8-7e02-a71d-2be74dd0aafa",
+          "last_agent_message": null,
+          "error": {
+            "message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 12:57 AM.",
+            "codex_error_info": "usage_limit_exceeded"
+          },
+          "started_at": 1792886582,
+          "completed_at": 1792886582,
+          "duration_ms": 87
+        }
+      }
+    ]
+  },
+  "usage limit without a reset": {
+    "message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+    "rollout": [
+      {
+        "timestamp": "2026-10-25T00:03:02.765Z",
+        "ordinal": 8,
+        "type": "event_msg",
+        "payload": {
+          "type": "token_count",
+          "info": null,
+          "rate_limits": {
+            "limit_id": "codex",
+            "limit_name": null,
+            "primary": {
+              "used_percent": 100.0,
+              "window_minutes": null,
+              "resets_at": null
+            },
+            "secondary": null,
+            "credits": null,
+            "individual_limit": null,
+            "spend_control_reached": null,
+            "plan_type": null,
+            "rate_limit_reached_type": null
+          }
+        }
+      },
+      {
+        "timestamp": "2026-10-25T00:03:02.768Z",
+        "ordinal": 9,
+        "type": "event_msg",
+        "payload": {
+          "type": "task_complete",
+          "turn_id": "01a1705e-2db6-7942-8248-5d7a4af28a9c",
+          "last_agent_message": null,
+          "error": {
+            "message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
+            "codex_error_info": "usage_limit_exceeded"
+          },
+          "started_at": 1792886582,
+          "completed_at": 1792886582,
+          "duration_ms": 56
+        }
+      }
+    ]
+  },
+  "expired login": {
+    "message": "unexpected status 401 Unauthorized: Your authentication token has expired., url: http://127.0.0.1:18977/v1/responses",
+    "rollout": [
+      {
+        "timestamp": "2026-10-25T00:03:03.025Z",
+        "ordinal": 8,
+        "type": "event_msg",
+        "payload": {
+          "type": "task_complete",
+          "turn_id": "01a1705e-2eab-7bc0-9558-1ca7dfe0986d",
+          "last_agent_message": null,
+          "error": {
+            "message": "unexpected status 401 Unauthorized: Your authentication token has expired., url: http://127.0.0.1:18977/v1/responses",
+            "codex_error_info": {
+              "http_connection_failed": {
+                "http_status_code": 401
+              }
+            }
+          },
+          "started_at": 1792886582,
+          "completed_at": 1792886583,
+          "duration_ms": 68
+        }
+      }
+    ]
+  },
+  "context window": {
+    "message": "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+    "rollout": [
+      {
+        "timestamp": "2026-10-25T00:03:03.269Z",
+        "ordinal": 8,
+        "type": "event_msg",
+        "payload": {
+          "type": "token_count",
+          "info": null,
+          "rate_limits": {
+            "limit_id": "codex",
+            "limit_name": null,
+            "primary": null,
+            "secondary": null,
+            "credits": null,
+            "individual_limit": null,
+            "spend_control_reached": null,
+            "plan_type": null,
+            "rate_limit_reached_type": null
+          }
+        }
+      },
+      {
+        "timestamp": "2026-10-25T00:03:03.273Z",
+        "ordinal": 9,
+        "type": "event_msg",
+        "payload": {
+          "type": "token_count",
+          "info": {
+            "total_token_usage": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 258400
+            },
+            "last_token_usage": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 258400
+            },
+            "model_context_window": 258400
+          },
+          "rate_limits": {
+            "limit_id": "codex",
+            "limit_name": null,
+            "primary": null,
+            "secondary": null,
+            "credits": null,
+            "individual_limit": null,
+            "spend_control_reached": null,
+            "plan_type": null,
+            "rate_limit_reached_type": null
+          }
+        }
+      },
+      {
+        "timestamp": "2026-10-25T00:03:03.281Z",
+        "ordinal": 10,
+        "type": "event_msg",
+        "payload": {
+          "type": "task_complete",
+          "turn_id": "01a1705e-2fa2-7c62-886f-6d2550c0060a",
+          "last_agent_message": null,
+          "error": {
+            "message": "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+            "codex_error_info": "context_window_exceeded"
+          },
+          "started_at": 1792886583,
+          "completed_at": 1792886583,
+          "duration_ms": 75
+        }
+      }
+    ]
+  }
+}

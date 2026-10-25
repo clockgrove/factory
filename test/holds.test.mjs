@@ -2,7 +2,13 @@
 // configuration changes, and which steps a question stops.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -643,46 +649,84 @@ test("an Objective question from an item step stops every item, once", async () 
   await stopped(service);
 });
 
-test("a Codex worker's login or quota hold on one item stops every item, once", async () => {
+test("a failed Codex turn's outcome comes from its session record; a login hold on one item stops every item, once", async () => {
   const { ObjectiveRunner } = await import("../dist/engine.js");
   const { codexFailure } = await import("../dist/providers/codex.js");
+  const { codexTelemetry } = await import(
+    "../dist/providers/codex-telemetry.js"
+  );
   const { providerOutcome } = await import("../dist/providers/planner.js");
   const { newObjective } = await import("../dist/state.js");
-  // The messages a failed Codex turn reports (codex.ts codexFailure), as
-  // the Codex worker maps them (codex-worker.ts outcome).
-  for (const failure of [
-    "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
-    "Quota exceeded. Check your plan and billing details.",
-  ]) {
-    const started = [];
-    const step = (key) => ({
-      key,
-      deadlineMs: 60_000,
-      run: async () => {
-        started.push(key);
-        return { kind: "done" };
-      },
-    });
-    const runner = new ObjectiveRunner(
-      newObjective(1, new Date()),
-      {
-        steps: () => [step("item:a:work"), step("item:b:work")],
-        status: () => "building",
-      },
-      mkdtempSync(join(tmpdir(), "factory-scope-")),
-      { write() {} },
-      { id: "run", finished: 0, resumeAt: 0 },
+  // What the pinned Codex 0.160.0 reported for each failure (turn.failed's
+  // message, and its session record's token_count and task_complete), with
+  // a local stand-in for the API giving its status, body and rate-limit
+  // headers.
+  const cases = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/codex-0.160.0-failures.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const failure = (name) => {
+    const home = mkdtempSync(join(tmpdir(), "factory-codex-home-"));
+    const day = join(home, "sessions", "2026", "10", "25");
+    mkdirSync(day, { recursive: true });
+    writeFileSync(
+      join(day, "rollout-2026-10-25T00-03-02-thread.jsonl"),
+      cases[name].rollout.map((entry) => `${JSON.stringify(entry)}\n`).join(""),
     );
-    const held = providerOutcome(codexFailure(failure));
-    runner.apply("item:a:work", held);
-    assert.equal(runner.state.holds.length, 1, failure);
-    assert.equal(runner.state.holds[0].item, undefined, "an Objective hold");
-    runner.tick();
-    assert.deepEqual(started, [], "item b waits too");
-    // b, already running, meets the same failure: still one question.
-    runner.apply("item:b:work", held);
-    assert.equal(runner.state.holds.length, 1);
-  }
+    return codexFailure(cases[name].message, codexTelemetry(home, "thread"));
+  };
+  // The full window's reset, never the local time the message names.
+  const limited = failure("usage limit");
+  assert.equal(limited.outcome, "retry");
+  assert.deepEqual(limited.wait, {
+    kind: "reset",
+    at: "2026-10-25T00:57:59.000Z",
+    provider: "codex",
+  });
+  // A full window with no reset: the wait/switch question asks.
+  const unknown = failure("usage limit without a reset");
+  assert.equal(unknown.outcome, "retry");
+  assert.deepEqual(unknown.wait, { kind: "reset", provider: "codex" });
+  assert.equal(failure("context window").tooLarge, true);
+  // Unclassified, the same text is only a retry.
+  const bare = codexFailure(cases["usage limit"].message);
+  assert.equal(bare.outcome, "retry");
+  assert.equal(bare.wait, undefined);
+  // The Codex worker maps a login hold (codex-worker.ts outcome) to one
+  // Objective question.
+  const login = failure("expired login");
+  assert.equal(login.outcome, "hold");
+  const started = [];
+  const step = (key) => ({
+    key,
+    deadlineMs: 60_000,
+    run: async () => {
+      started.push(key);
+      return { kind: "done" };
+    },
+  });
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date()),
+    {
+      steps: () => [step("item:a:work"), step("item:b:work")],
+      status: () => "building",
+    },
+    mkdtempSync(join(tmpdir(), "factory-scope-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+  );
+  const held = providerOutcome(login);
+  runner.apply("item:a:work", held);
+  assert.equal(runner.state.holds.length, 1);
+  assert.equal(runner.state.holds[0].item, undefined, "an Objective hold");
+  assert.match(runner.state.holds[0].question, /codex login/);
+  runner.tick();
+  assert.deepEqual(started, [], "item b waits too");
+  // b, already running, meets the same failure: still one question.
+  runner.apply("item:b:work", held);
+  assert.equal(runner.state.holds.length, 1);
 });
 
 test("a deferred question asks right after the covering one; stack layers and bare retries respect item holds", async () => {

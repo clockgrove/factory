@@ -46,7 +46,7 @@ CASE_TABLE_main=(
   "cancel|M|20|a lasting 403 on merge holds the step (fault.lasting-403); with #1879 a 404 on a PR read right after creation retries (fault.lag-404); cancel with the PR open: one cancel comment, PR closed, branch deleted, issue closed not planned (queue.cancel-open-pr)"
   "media|M|30|two candidate sets, 'repair' at select, new sets, a pick; the asset lands as Git LFS (media.select-repair)"
   "attach|M|8|with #1878: another repository's attachment URL holds before any token is sent (security.foreign-attachment)"
-  "crash|C|40|repository C: one installation at a time (holder.second-refused, take-over, release, restart); sampled crash points armed one at a time across live Objectives: plan:post, deliver:push, deliver:pr-create, deliver:merge, report:comment, report:close, sync:remind and sync:cancel, before and after (crash.*): every Objective done or cancelled once with no duplicate; two 60 s network cuts, no hold (netcut.*)"
+  "crash|C|40|repository C: one installation at a time (holder.second-refused, take-over, release, restart); a second installation on repository M's Project is refused (holder.project-refused); sampled crash points armed one at a time across live Objectives: plan:post, deliver:push, deliver:pr-create, deliver:merge, report:comment, report:close, sync:remind and sync:cancel, before and after (crash.*): every Objective done or cancelled once with no duplicate; two 60 s network cuts, no hold (netcut.*)"
 )
 CASE_TABLE_edge=(
   "reset|E|30|repository M: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
@@ -138,7 +138,7 @@ required_checks() {
     media) echo media.select-repair ;;
     attach) echo security.foreign-attachment ;;
     crash)
-      echo 'holder.second-refused holder.take-over holder.release holder.restart netcut.plan netcut.ci'
+      echo 'holder.project-refused holder.second-refused holder.take-over holder.release holder.restart netcut.plan netcut.ci'
       local point; for point in $CRASH_LIFECYCLE $CRASH_REMIND $CRASH_CANCEL; do echo "crash.$point"; done ;;
     reset) echo reset.clean-dir ;;
     archived) echo queue.archived-card ;;
@@ -297,7 +297,7 @@ cleanup() {
   cancel_left
   # Q's serve is the user service the prod case installed: uninstall it.
   [ -s "$RUN_DIR/inst/Q/env" ] && (inst Q; q_uninstall)
-  local i p jobs=(); for i in C H M E P; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
+  local i p jobs=(); for i in C H X M E P; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
   for p in "${jobs[@]}"; do wait "$p" || record suite.stop FAIL "a serve could not be stopped" "$START_S"; done
   for i in M E P; do proxy_stop $i; done
   local s; while read -r p s; do kill_exact "$p" "$s" TERM || true; done <"$RUN_DIR/pids"
@@ -351,8 +351,11 @@ setup_main() {
     write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8 "c['queue']['projectId']='$C_PROJECT_ID'"
     inst_define C $C_REPO "$STATE_BASE/config-c.json"
     inst_define H $C_REPO "$STATE_BASE/config-c.json"
+    # X: repository C configured on repository M's Project, which M serves.
+    write_config "$STATE_BASE/config-x.json" $C_REPO "$STATE_BASE/checkout-c" 8
+    inst_define X $C_REPO "$STATE_BASE/config-x.json"
     printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
-    cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"
+    cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"; cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/X/extra_env"
   fi
   inst M
   [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }

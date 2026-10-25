@@ -18,6 +18,7 @@ import {
   HolderRefusal,
   holderChanged,
   holderText,
+  projectHolder,
   releaseHolder,
   takeHolder,
 } from "./holder.js";
@@ -37,6 +38,7 @@ import {
   providerWorker,
   providerWorkflow,
 } from "./providers/selection.js";
+import { projectRepositories } from "./queue.js";
 import {
   type RefusalCode,
   type RequestResult,
@@ -142,6 +144,7 @@ export async function serveInstallation(
   let frozen: Frozen | undefined;
   let freeze: ((provider: string) => Frozen | undefined) | undefined;
   let log: RunLog | undefined;
+  let repositories: HolderContext["repositories"] | undefined;
   if (existsSync(configPath(repository))) {
     let config: CoreConfig;
     try {
@@ -161,6 +164,7 @@ export async function serveInstallation(
       config.repository,
       process.env.FACTORY_GITHUB_API,
     ).redacting(config.secrets);
+    repositories = (signal) => projectRepositories(github, config, signal);
     // One log per service run: the sync's events go to the run's files too.
     log = new RunLog(paths.logs, newRunId(), config.capture, config.secrets);
     sync = new GitHubSync(github, config, log, limits);
@@ -217,11 +221,13 @@ export async function serveInstallation(
         ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
       },
     });
-  if (!loaded) return await serveWith();
-  const context = {
+  if (!loaded || !repositories) return await serveWith();
+  const context: HolderContext = {
     checkout: loaded.checkout,
     repository: loaded.repository,
     root: paths.root,
+    project: loaded.queue.projectId,
+    repositories,
   };
   // One stop for this whole run: SIGTERM, SIGINT, or a take-over seen at a
   // check. The signal keeps it, so a stop is never lost between the wait
@@ -253,6 +259,17 @@ export async function serveInstallation(
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
   }
+}
+
+/** The repository and its Project, as the start's holder checks need them (holder.ts). */
+export interface HolderContext {
+  checkout: string;
+  repository: string;
+  root: string;
+  /** The Project's id, for messages. */
+  project: string;
+  /** The Project's other repositories (queue.ts projectRepositories). */
+  repositories(signal: AbortSignal): Promise<string[]>;
 }
 
 /**
@@ -323,6 +340,9 @@ const UNCHECKED_POLLS = 10;
 /** Exit code for that stop: systemd restarts on it (EX_TEMPFAIL). */
 const UNCHECKED_EXIT = 75;
 
+/** How long a start waits for the Project's repositories before it starts unchecked. */
+const PROJECT_START_MS = 5000;
+
 /** Attempts to confirm the record at a start, about 4 minutes in all. */
 const START_ATTEMPTS = 8;
 
@@ -336,13 +356,15 @@ class Unconfirmed extends Error {}
  * a code systemd restarts on rather than waiting unseen. `signal` stops
  * the wait (undefined). Another holder, a ruleset that refuses the record,
  * or an origin that doesn't name the repository is a ConfigurationError
- * that names the fix.
+ * that names the fix. So is another installation's record on another
+ * repository of the Project (`projectCheck`), checked first.
  */
-async function holderFor(
-  context: { checkout: string; repository: string; root: string },
+export async function holderFor(
+  context: HolderContext,
   takeOver: boolean,
   signal: AbortSignal,
 ): Promise<Holder | undefined> {
+  await projectCheck(context, signal);
   let last = "";
   for (
     let attempt = 1, wait = 2000;
@@ -383,6 +405,38 @@ async function holderFor(
   throw new Unconfirmed(
     `couldn't check which installation serves ${context.repository} after ${START_ATTEMPTS} tries (${last}); exiting so the service starts again`,
   );
+}
+
+/**
+ * Refuse the start (ConfigurationError) while another installation serves
+ * a repository on the Project. The Project is an input, never a
+ * precondition: a read that fails or takes over PROJECT_START_MS, or a
+ * repository whose record can't be read, is logged and the start goes on.
+ */
+async function projectCheck(
+  context: HolderContext,
+  signal: AbortSignal,
+): Promise<void> {
+  let found: Awaited<ReturnType<typeof projectHolder>>;
+  try {
+    found = await projectHolder(
+      context,
+      await context.repositories(
+        AbortSignal.any([signal, AbortSignal.timeout(PROJECT_START_MS)]),
+      ),
+    );
+  } catch (error) {
+    found = { unread: [`the Project (${errorMessage(error).split("\n")[0]})`] };
+  }
+  const { holder, unread } = found;
+  if (holder)
+    throw new ConfigurationError(
+      `Project ${context.project} is served by another installation, on ${holder.repository}: ${holderText(holder.record)}. Only one installation may serve a Project. Stop that one first. If it is stopped for good (its machine is gone, or its state was wiped), take ${holder.repository} over on a machine set up for it, factory serve --repo ${holder.repository} --take-over, then stop that cleanly, which frees it.`,
+    );
+  if (unread.length && !signal.aborted)
+    process.stderr.write(
+      `factory: couldn't check which installation serves Project ${context.project}: can't read ${unread.join(", ")}; starting anyway\n`,
+    );
 }
 
 export interface FollowOptions {

@@ -1,7 +1,8 @@
 # The main suite's lane on the run's second repository (C_REPO): one installation in
 # the repository at a time, then sampled crash points armed across live
 # Objectives, with two network cuts. Runs as one background job (lane_c).
-#   holder   installation C serves; H is refused; H takes over with --take-over and C stops; H's clean stop frees the repository
+#   holder   X (repository C on repository M's Project, which M serves) is refused before it takes C;
+#            installation C serves; H is refused; H takes over with --take-over and C stops; H's clean stop frees the repository
 #   crash    every serve runs in a network namespace (lib/netns-serve.sh) and is
 #            armed with the next exact point (FACTORY_CRASH_AT); a death starts
 #            the next point immediately, against one shared deadline. CQ first
@@ -22,7 +23,26 @@ wait_exit() { local end=$(( $(now) + $1 )); [ "$end" -gt "$STOP_AT" ] && end=$ST
 # A bounded command's seconds, never zero (timeout 0 would disable its limit).
 c_budget() { local s=$(( $1 - $(now) )); [ "$s" -gt 0 ] || return 1; [ "$s" -le "$2" ] || s=$2; echo "$s"; }
 
+# Single player per Project (PRD 8): while M serves repository M, an
+# installation for repository C pointed at M's Project exits 78 naming
+# repository M, before it takes C's record. C has no record yet, so the
+# refusal can only be the Project's.
+m_ready() { [ -n "$(timeout 30 git ls-remote "https://github.com/$M_REPO.git" refs/factory/holder 2>/dev/null)" ] && awk '$3=="M"{f=1} END{exit !f}' "$RUN_DIR/issues"; }
+c_project_refused() {
+  local CASE=holder t0; t0=$(now)
+  wait_for 300 m_ready || { record holder.project-refused FAIL "repository M had no holder record or queued Objective to refuse against" "$t0"; return 0; }
+  sleep 15   # the queued card reaches the Project's open items
+  inst X; serve_up || return 1
+  wait_exit 120; local rc; rc=$(cat "$SERVE_DIR/exit" 2>/dev/null)
+  local named=0; grep -qF "is served by another installation, on $M_REPO" "$SERVE_DIR/out.log" 2>/dev/null && named=1
+  local sha; sha=$(holder_sha) || return 1
+  serve_exited || serve_down
+  [ "$rc" = 78 ] && [ $named = 1 ] && [ -z "$sha" ]
+  rec_if holder.project-refused $? "X (repository C on M's Project) exited ${rc:-not at all} in 120 s; names $M_REPO: $named; C's holder record after: '${sha:-none}'" "$t0"
+}
+
 c_holder() {
+  c_project_refused || return 1
   local CASE=holder t0; t0=$(now)
   inst C; serve_up || return 1
   wait_for 90 c_holder_present

@@ -1411,3 +1411,100 @@ test("a failed check holds naming each problem with recheck; recheck checks the 
     /## Goal\n\nShip the parser\./,
   );
 });
+
+test("the spend ceiling holds before the next model step, per Objective and per day, and more grants as much again", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { newObjective } = await import("../dist/state.js");
+  const { DaySpend, readDay } = await import("../dist/spend.js");
+  const root = mkdtempSync(join(tmpdir(), "factory-spend-"));
+  // Shared by every Objective of the service run, as serve shares it.
+  const run = {
+    id: "run",
+    finished: 0,
+    resumeAt: 0,
+    spend: new DaySpend(root),
+  };
+  const config = {
+    autonomy: {
+      spend: { perObjective: { tokens: 1000 }, perDay: { cents: 150 } },
+    },
+  };
+  const started = [];
+  // One planner step at a time; each call spends 600 tokens and $0.50.
+  const objective = (issue) =>
+    new ObjectiveRunner(
+      newObjective(issue, new Date(), {
+        provider: "codex",
+        selectedBy: "defaultProvider",
+        digest: "x",
+        config,
+      }),
+      {
+        steps: (state) =>
+          ["plan:1", "plan:2", "plan:3"]
+            .filter((key) => !state.done[key])
+            .slice(0, 1)
+            .map((key) => ({
+              key,
+              resource: "planner",
+              deadlineMs: 60_000,
+              run: async (context) => {
+                started.push(`${issue} ${key}`);
+                context.log({
+                  event: "model-usage",
+                  tokens: { total: 600 },
+                  costUsd: 0.5,
+                });
+                return { kind: "done" };
+              },
+            })),
+        status: () => "planning",
+      },
+      root,
+      { write() {} },
+      run,
+    );
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  const a = objective(31);
+  for (let i = 0; i < 3; i++) {
+    a.tick();
+    await settle();
+  }
+  // 1,200 tokens reached the Objective's 1,000: plan:3 asks before it runs.
+  assert.deepEqual(started, ["31 plan:1", "31 plan:2"]);
+  assert.deepEqual(a.state.spend, { tokens: 1200, cents: 100 });
+  const [held] = a.state.holds;
+  assert.equal(held.step, "plan:3");
+  assert.match(held.question, /this Objective's 1,200 tokens of 1,000 tokens/);
+  assert.deepEqual(
+    held.options.map((option) => option.answer),
+    ["more", "cancel"],
+  );
+  // `more` allows as much again; plan:3 runs and reaches the day's $1.50.
+  assert.equal(
+    a.transact(() => a.answer("more", undefined, "op", undefined, held.id)),
+    null,
+  );
+  assert.equal(a.state.answers["plan:3"], undefined, "the engine's answer");
+  a.tick();
+  await settle();
+  assert.deepEqual(started.at(-1), "31 plan:3");
+  assert.equal(readDay(root).cents, 150);
+  // The day spans Objectives: another one holds before its first call.
+  const b = objective(32);
+  b.tick();
+  await settle();
+  assert.equal(started.length, 3);
+  assert.match(b.state.holds[0].question, /today's \(UTC\) \$1\.50 of \$1\.50/);
+  assert.equal(
+    b.transact(() =>
+      b.answer("more", undefined, "op", undefined, b.state.holds[0].id),
+    ),
+    null,
+  );
+  b.tick();
+  await settle();
+  assert.equal(started.at(-1), "32 plan:1");
+});

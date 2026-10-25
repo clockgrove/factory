@@ -23,24 +23,26 @@ Part of [the design](../DESIGN.md).
 - **Repository:**
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;
-  - required status checks exist.
+  - required status checks exist;
+  - no ruleset or classic protection requires an approving review that the login can't bypass (`warn`: every Factory PR waits for someone else to approve it). A ruleset counts when GitHub reports `current_user_can_bypass: never` for the login; classic protection counts unless the login is in its bypass list, and only when the login may read it. The fix is a bypass for the login, or no required reviews.
 - **Branch protection:** setup recommends "require branches to be up to date", and Factory never changes repository settings.
 - **Validation environment:** `readiness.validationEnvironment` says how validation differs from hosted CI: the network, the sandbox, the bootstrap install, `sandbox.environment`'s names, the final and CI-only commands, and the package scripts that need a network validation lacks.
 
 Installation options, each setting one key:
 
-| Option                                                                                         | Key                                              |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives` |
-| `--concurrency`, `--workers`, `--validations`, `--planners`, `--memory-mib`                    | `execution.*` (`memoryMiB`)                      |
-| `--worker-mib`, `--validation-mib`, `--planner-mib`                                            | `execution.reservations.*`                       |
-| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                          |
-| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                   |
-| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                  |
-| `--sandbox-network off\|package-install\|host`, `--package-store DIR`                          | `sandbox.network`, `sandbox.packageStore`        |
-| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`   |
-| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                              |
-| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                      |
+| Option                                                                                         | Key                                                        |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives`           |
+| `--concurrency`, `--workers`, `--validations`, `--planners`, `--memory-mib`                    | `execution.*` (`memoryMiB`)                                |
+| `--worker-mib`, `--validation-mib`, `--planner-mib`                                            | `execution.reservations.*`                                 |
+| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                                    |
+| `--objective-tokens`, `--objective-cents`, `--day-tokens`, `--day-cents`                       | `autonomy.spend.perObjective.*`, `autonomy.spend.perDay.*` |
+| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                             |
+| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                            |
+| `--sandbox-network off\|package-install\|host`, `--package-store DIR`                          | `sandbox.network`, `sandbox.packageStore`                  |
+| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`             |
+| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                                        |
+| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                                |
 
 An option marked `...` repeats, and the values given replace the whole list.
 

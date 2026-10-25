@@ -39,7 +39,13 @@ import {
   readQueue,
   unqueueIssue,
 } from "./queue.js";
-import { type RequestResult, refused, writeRequest } from "./requests.js";
+import {
+  QUEUE_MODES,
+  type Request,
+  type RequestResult,
+  refused,
+  writeRequest,
+} from "./requests.js";
 import { resetting, statusRecordOf } from "./reset.js";
 import type {
   Hold,
@@ -215,6 +221,47 @@ const COMMAND = /^\/factory\s+(\S+)(?:\s+([\s\S]*))?$/;
  * names the hold it answers.
  */
 const ANSWER_OPTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
+
+/**
+ * The request a writer's `/factory` comment on Objective `issue` makes:
+ * `/factory queue pause|drain|resume` sets the whole queue's mode, as
+ * `factory queue` does; `cancel` cancels; `retry` with no question open
+ * retries; anything else answers a question.
+ */
+export function commentRequest(
+  issue: number,
+  comment: Pick<UncheckedComment, "body" | "createdAt">,
+  holding: boolean,
+): Request | undefined {
+  const command = comment.body.match(COMMAND);
+  if (!command) return undefined;
+  const answer = command[1]!.toLowerCase();
+  let rest = command[2]?.trim() ?? "";
+  const action = rest.toLowerCase();
+  if (answer === "queue" && Object.hasOwn(QUEUE_MODES, action))
+    return { kind: "queue", issue, mode: QUEUE_MODES[action]! };
+  let question: string | undefined;
+  for (
+    let option = ANSWER_OPTION.exec(rest);
+    option;
+    option = ANSWER_OPTION.exec(rest)
+  ) {
+    question = option[1];
+    rest = option[2]?.trim() ?? "";
+  }
+  const text = rest;
+  if (answer === "cancel") return { kind: "cancel", issue };
+  if (answer === "retry" && !holding && !question)
+    return { kind: "retry", issue };
+  return {
+    kind: "answer",
+    issue,
+    answer,
+    ...(text ? { text } : {}),
+    writtenAt: comment.createdAt,
+    ...(question ? { question } : {}),
+  };
+}
 
 /**
  * GitHub is input and display, never a precondition: every call here runs in
@@ -1570,38 +1617,15 @@ export class GitHubSync {
     holding: boolean,
     sync: SyncView,
   ): void {
-    const command = comment.body.match(COMMAND);
-    if (!command) return;
-    const answer = command[1]!.toLowerCase();
-    let rest = command[2]?.trim() ?? "";
-    let question: string | undefined;
-    for (
-      let option = ANSWER_OPTION.exec(rest);
-      option;
-      option = ANSWER_OPTION.exec(rest)
-    ) {
-      question = option[1];
-      rest = option[2]?.trim() ?? "";
-    }
-    const text = rest;
-    writeRequest(
-      sync.requestsDir,
-      answer === "cancel"
-        ? { kind: "cancel", issue }
-        : answer === "retry" && !holding && !question
-          ? { kind: "retry", issue }
-          : {
-              kind: "answer",
-              issue,
-              answer,
-              ...(text ? { text } : {}),
-              writtenAt: comment.createdAt,
-              ...(question ? { question } : {}),
-            },
-      comment.login,
-      `comment-${comment.id}`,
-      "github",
-    );
+    const request = commentRequest(issue, comment, holding);
+    if (request)
+      writeRequest(
+        sync.requestsDir,
+        request,
+        comment.login,
+        `comment-${comment.id}`,
+        "github",
+      );
   }
 
   /** Reply to each `/factory` comment with what happened. */

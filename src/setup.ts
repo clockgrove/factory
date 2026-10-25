@@ -82,6 +82,16 @@ const CONFIG_OPTIONS: Record<string, Option> = {
     key: "autonomy.allowances.resultRereviews",
     read: "number",
   },
+  "objective-tokens": {
+    key: "autonomy.spend.perObjective.tokens",
+    read: "number",
+  },
+  "objective-cents": {
+    key: "autonomy.spend.perObjective.cents",
+    read: "number",
+  },
+  "day-tokens": { key: "autonomy.spend.perDay.tokens", read: "number" },
+  "day-cents": { key: "autonomy.spend.perDay.cents", read: "number" },
   "required-env": { key: "autonomy.requiredEnvironment", read: "list" },
   delivery: { key: "delivery.kind", read: "text" },
   "sandbox-network": { key: "sandbox.network", read: "text" },

@@ -6,7 +6,7 @@ import { finalShown, requeued } from "../github-sync.js";
 import { configOf, Refusal } from "../host.js";
 import type { Paths } from "../paths.js";
 import { readCards } from "../queue.js";
-import type { QueueMode } from "../requests.js";
+import { QUEUE_MODES } from "../requests.js";
 import { findState, loadQueueControl, TERMINAL } from "../state.js";
 import { type Args, type Command, request } from "./shared.js";
 
@@ -24,12 +24,6 @@ export const spec: Command = {
       : `--json belongs to factory queue list; use factory queue ${action}`;
   },
   run: ({ paths, repository, args }) => queueCommand(paths, repository, args),
-};
-
-const QUEUE_MODES: Record<string, QueueMode> = {
-  pause: "paused",
-  drain: "draining",
-  resume: "running",
 };
 
 /** `factory queue list|pause|resume|drain`. */

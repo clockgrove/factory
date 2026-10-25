@@ -1,4 +1,4 @@
-# The main suite's lane on clockgrove/factory-drill-2: one installation in
+# The main suite's lane on the run's second repository (C_REPO): one installation in
 # the repository at a time, then sampled crash points armed across live
 # Objectives, with two network cuts. Runs as one background job (lane_c).
 #   holder   installation C serves; H is refused; H takes over with --take-over and C stops; H's clean stop frees the repository

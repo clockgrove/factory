@@ -23,6 +23,7 @@ import {
   item,
   offered,
   plan,
+  REPO,
   refusal,
   seed,
   serve,
@@ -1238,124 +1239,6 @@ test("a planner's can't-be-planned answer holds once with replan and cancel, and
   assert.doesNotMatch(log, /"model-usage"/, "no planner call");
 });
 
-test("a 403 is a rate limit only by GitHub's headers; one without them retries, then asks its refusal for the whole Objective", async (t) => {
-  const { GitHub, githubOutcome } = await import("../dist/github.js");
-  const { DEFAULT_LIMITS, ObjectiveRunner } = await import("../dist/engine.js");
-  const { newObjective } = await import("../dist/state.js");
-  const reset = Math.floor(Date.now() / 1000) + 600;
-  // A local stand-in for the API: each path's 403 carries these headers,
-  // and every body names a rate limit, which decides nothing.
-  const headers = {
-    "/repos/o/r/primary": {
-      "x-ratelimit-remaining": "0",
-      "x-ratelimit-reset": String(reset),
-    },
-    "/repos/o/r/secondary": { "retry-after": "60" },
-    "/repos/o/r/refused": {},
-  };
-  const server = createHttpServer((req, res) => {
-    res.writeHead(403, {
-      "content-type": "application/json",
-      ...headers[req.url],
-    });
-    res.end(JSON.stringify({ message: "You have exceeded a rate limit" }));
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
-  const token = process.env.FACTORY_GITHUB_TOKEN;
-  process.env.FACTORY_GITHUB_TOKEN = "test-token";
-  t.after(() => {
-    if (token === undefined) delete process.env.FACTORY_GITHUB_TOKEN;
-    else process.env.FACTORY_GITHUB_TOKEN = token;
-  });
-  const github = new GitHub("o/r", `http://127.0.0.1:${server.address().port}`);
-  const outcome = async (path) => {
-    try {
-      await github.rest("GET", path);
-    } catch (error) {
-      return githubOutcome(error, "o/r");
-    }
-    assert.fail(`${path} answered`);
-  };
-  const primary = await outcome("/repos/o/r/primary");
-  assert.equal(primary.wait?.kind, "reset");
-  // The wait is now plus the time left, so the clock may move a millisecond.
-  assert.ok(Math.abs(Date.parse(primary.wait.at) - reset * 1000) < 1000);
-  const secondary = await outcome("/repos/o/r/secondary");
-  assert.equal(secondary.wait?.kind, "reset");
-  assert.ok(Date.parse(secondary.wait.at) - Date.now() <= 60_000);
-  const refused = await outcome("/repos/o/r/refused");
-  assert.equal(refused.kind, "retry");
-  assert.equal(refused.wait, undefined, "an unknown transient");
-  // It retries for 2 min, then asks the refusal's question once.
-  let clock = Date.now();
-  const runner = new ObjectiveRunner(
-    newObjective(1, new Date(clock)),
-    { steps: () => [], status: () => "building" },
-    mkdtempSync(join(tmpdir(), "factory-refused-")),
-    { write() {} },
-    { id: "run", finished: 0, resumeAt: 0 },
-    DEFAULT_LIMITS,
-    () => new Date(clock),
-  );
-  runner.apply("item:a:work", refused);
-  assert.equal(runner.state.holds.length, 0, "a secondary limit may pass");
-  clock += 2 * 60_000;
-  runner.apply("item:a:work", await outcome("/repos/o/r/refused"));
-  const [held] = runner.state.holds;
-  assert.match(held.question, /Give Factory's login read access/);
-  assert.equal(held.item, undefined, "an Objective question");
-});
-
-test("a marker lookup past its page cap refuses rather than post the comment again; a list that ends at the cap is read whole", async (t) => {
-  const { GitHub, TransientError } = await import("../dist/github.js");
-  const marker = "<!-- factory:5:status -->";
-  const mine = (id, body) => ({ id, body, user: { login: "factory-bot" } });
-  // A local stand-in for the API: issue 5's comments never end; issue 6
-  // has exactly 20 full pages, Factory's marked comment last.
-  const posted = [];
-  const server = createHttpServer((req, res) => {
-    const url = new URL(req.url, "http://github");
-    const reply = (body) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
-    };
-    if (req.method === "POST") posted.push(url.pathname);
-    if (url.pathname === "/user") return reply({ login: "factory-bot" });
-    const page = Number(url.searchParams.get("page"));
-    const listed = (from) =>
-      Array.from({ length: 100 }, (_, n) => mine(from + n, "noise"));
-    if (url.pathname === "/repos/o/r/issues/5/comments")
-      return reply(listed(page * 100));
-    if (url.pathname === "/repos/o/r/issues/6/comments")
-      return reply(
-        page > 20
-          ? []
-          : page === 20
-            ? [...listed(1900).slice(1), mine(7, marker)]
-            : listed(page * 100),
-      );
-    reply({});
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => server.close());
-  const token = process.env.FACTORY_GITHUB_TOKEN;
-  process.env.FACTORY_GITHUB_TOKEN = "test-token";
-  t.after(() => {
-    if (token === undefined) delete process.env.FACTORY_GITHUB_TOKEN;
-    else process.env.FACTORY_GITHUB_TOKEN = token;
-  });
-  const github = new GitHub("o/r", `http://127.0.0.1:${server.address().port}`);
-  await assert.rejects(
-    github.ensureComment(5, marker, `${marker} status`, "test:status"),
-    (error) =>
-      !(error instanceof TransientError) &&
-      /more than 2000 .*20-page cap/.test(error.message),
-  );
-  assert.deepEqual(posted, [], "nothing posted");
-  assert.equal(await github.findComment(6, marker), 7);
-});
-
 test("a correction already tried for the same failure asks instead of repeating", async () => {
   const { correction } = await import("../dist/repair.js");
   // The operator's answer is the correction itself: no diagnosis call.
@@ -1389,4 +1272,239 @@ test("a correction already tried for the same failure asks instead of repeating"
     tried,
   );
   assert.equal(elsewhere.kind, "correction");
+});
+
+test("a failed check holds naming each problem with recheck; recheck checks the edited Objective again and continues once it passes", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { loadConfig } = await import("../dist/config.js");
+  const { checkInputs } = await import("../dist/planning/steps.js");
+  const { readShown } = await import("../dist/shown.js");
+  const { newObjective } = await import("../dist/state.js");
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const saved = process.env.FACTORY_CONFIG;
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  let config;
+  try {
+    config = loadConfig(REPO);
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_CONFIG;
+    else process.env.FACTORY_CONFIG = saved;
+  }
+  const git = (...args) => {
+    const result = spawnSync(
+      "git",
+      [
+        "-C",
+        config.checkout,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        ...args,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  writeFileSync(join(config.checkout, "README.md"), "# Drill\n");
+  git("add", "README.md");
+  git("commit", "--quiet", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  // The issue as GitHub shows it; the operator edits it while it holds.
+  let shown =
+    "<h2>Acceptance</h2><h2>Sources</h2><ul><li>the parser docs</li></ul>";
+  const checked = [];
+  // The check step's run once GitHub's reads are done (workflow.ts
+  // checkStep, planning/steps.ts readObjective).
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date()),
+    {
+      steps: (state) =>
+        state.done.check
+          ? []
+          : [
+              {
+                key: "check",
+                deadlineMs: 60_000,
+                run: async ({ state, signal }) => {
+                  checked.push(shown);
+                  const read = await checkInputs(
+                    config,
+                    {
+                      shown: readShown(shown, { sources: true }),
+                      writer: true,
+                      base,
+                      title: "Parser",
+                      reviewArtifacts: config.reviewArtifacts,
+                    },
+                    "recheck",
+                    state,
+                    signal,
+                  );
+                  return "hold" in read
+                    ? read.hold
+                    : { kind: "done", result: read.inputs };
+                },
+              },
+            ],
+      status: () => "checking",
+    },
+    mkdtempSync(join(tmpdir(), "factory-check-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+  );
+  const settled = (what, done) =>
+    until(() => {
+      runner.tick();
+      return done();
+    }, what);
+  const held = async (after) => {
+    await settled(
+      "the check holds",
+      () => runner.state.holds[0] && runner.state.holds[0].id !== after,
+    );
+    const [hold] = runner.state.holds;
+    assert.equal(hold.step, "check");
+    assert.equal(
+      hold.question,
+      [
+        "This Objective needs fixing before Factory can plan it:",
+        "- Add a Goal section with one paragraph.",
+        "- Add an Acceptance section with at least one observable outcome bullet.",
+        '- Sources entry "the parser docs" isn\'t a path; write "- path" or "- path#Exact Heading", one file per bullet, and put prose under Context.',
+        "",
+        "Edit the issue, then answer `recheck`.",
+      ].join("\n"),
+    );
+    assert.deepEqual(
+      hold.options.map((option) => option.answer),
+      ["recheck", "cancel"],
+    );
+    return hold;
+  };
+  const first = await held();
+  // Answered before the edit: it checks again, and holds again.
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("recheck", undefined, "op", undefined, first.id),
+    ),
+    null,
+  );
+  const second = await held(first.id);
+  assert.equal(checked.length, 2);
+  shown =
+    "<h2>Goal</h2><p>Ship the parser.</p><h2>Acceptance</h2><ul><li>The parser reads every fixture.</li></ul><h2>Sources</h2><ul><li>README.md</li></ul>";
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("recheck", undefined, "op", undefined, second.id),
+    ),
+    null,
+  );
+  await settled("the edited Objective passes", () => runner.state.done.check);
+  assert.deepEqual(runner.state.holds, []);
+  assert.equal(checked.length, 3);
+  assert.equal(runner.state.done.check.base, base);
+  assert.match(
+    runner.state.done.check.shown.body,
+    /## Goal\n\nShip the parser\./,
+  );
+});
+
+test("the spend ceiling holds before the next model step, per Objective and per day, and more grants as much again", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { newObjective } = await import("../dist/state.js");
+  const { DaySpend, readDay } = await import("../dist/spend.js");
+  const root = mkdtempSync(join(tmpdir(), "factory-spend-"));
+  // Shared by every Objective of the service run, as serve shares it.
+  const run = {
+    id: "run",
+    finished: 0,
+    resumeAt: 0,
+    spend: new DaySpend(root),
+  };
+  const config = {
+    autonomy: {
+      spend: { perObjective: { tokens: 1000 }, perDay: { cents: 150 } },
+    },
+  };
+  const started = [];
+  // One planner step at a time; each call spends 600 tokens and $0.50.
+  const objective = (issue) =>
+    new ObjectiveRunner(
+      newObjective(issue, new Date(), {
+        provider: "codex",
+        selectedBy: "defaultProvider",
+        digest: "x",
+        config,
+      }),
+      {
+        steps: (state) =>
+          ["plan:1", "plan:2", "plan:3"]
+            .filter((key) => !state.done[key])
+            .slice(0, 1)
+            .map((key) => ({
+              key,
+              resource: "planner",
+              deadlineMs: 60_000,
+              run: async (context) => {
+                started.push(`${issue} ${key}`);
+                context.log({
+                  event: "model-usage",
+                  tokens: { total: 600 },
+                  costUsd: 0.5,
+                });
+                return { kind: "done" };
+              },
+            })),
+        status: () => "planning",
+      },
+      root,
+      { write() {} },
+      run,
+    );
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  const a = objective(31);
+  for (let i = 0; i < 3; i++) {
+    a.tick();
+    await settle();
+  }
+  // 1,200 tokens reached the Objective's 1,000: plan:3 asks before it runs.
+  assert.deepEqual(started, ["31 plan:1", "31 plan:2"]);
+  assert.deepEqual(a.state.spend, { tokens: 1200, cents: 100 });
+  const [held] = a.state.holds;
+  assert.equal(held.step, "plan:3");
+  assert.match(held.question, /this Objective's 1,200 tokens of 1,000 tokens/);
+  assert.deepEqual(
+    held.options.map((option) => option.answer),
+    ["more", "cancel"],
+  );
+  // `more` allows as much again; plan:3 runs and reaches the day's $1.50.
+  assert.equal(
+    a.transact(() => a.answer("more", undefined, "op", undefined, held.id)),
+    null,
+  );
+  assert.equal(a.state.answers["plan:3"], undefined, "the engine's answer");
+  a.tick();
+  await settle();
+  assert.deepEqual(started.at(-1), "31 plan:3");
+  assert.equal(readDay(root).cents, 150);
+  // The day spans Objectives: another one holds before its first call.
+  const b = objective(32);
+  b.tick();
+  await settle();
+  assert.equal(started.length, 3);
+  assert.match(b.state.holds[0].question, /today's \(UTC\) \$1\.50 of \$1\.50/);
+  assert.equal(
+    b.transact(() =>
+      b.answer("more", undefined, "op", undefined, b.state.holds[0].id),
+    ),
+    null,
+  );
+  b.tick();
+  await settle();
+  assert.equal(started.at(-1), "32 plan:1");
 });

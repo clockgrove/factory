@@ -186,7 +186,7 @@ hold_pick() { python3 -c 'import json,sys;h=json.loads(sys.argv[1] or "null") or
 #           (at most AUTO_DECIDE_MAX per Objective)
 #   more    answer `more` when it is the recommended answer (an allowance reached by the suite's own answers)
 HOLD_POLICY=${HOLD_POLICY-d2 review}
-auto_answer() { # N -> 0 when it answered at least one open hold
+auto_answer() { # N -> 0 when it answered an open hold or has an answer in flight; 1 when it can answer none
   local n=$1 choices choice id step pick arg text marker at seconds count rc=1
   local fields=() args=()
   choices=$(st auto-answers "$n" "$HOLD_POLICY" "${AUTO_REVIEW_DECISIONS:-[]}") || return 1
@@ -209,8 +209,9 @@ PY
       [ "$count" -lt "${AUTO_DECIDE_MAX:-4}" ] || continue
     fi
     # A CLI exit of zero can mean only "queued". Wait for the service's
-    # structured request result before recording an answer as accepted.
-    [ "$(st answer-state "$n" "$choice")" = pending ] && continue
+    # structured request result before recording an answer as accepted;
+    # one the service hasn't applied yet is in flight, not unanswerable.
+    [ "$(st answer-state "$n" "$choice")" = pending ] && { rc=0; continue; }
     seconds=$(left); [ "$seconds" -gt 0 ] || break
     [ "$seconds" -le 60 ] || seconds=60
     args=(); [ -z "$arg" ] || args+=("$arg")
@@ -221,8 +222,8 @@ PY
       continue
     fi
     if [ "$(st answer-state "$n" "$choice" "$at")" != accepted ]; then
-      log "#$n answer $pick${arg:+ $arg} is not confirmed applied ($id at $step)"
-      continue
+      log "#$n answer $pick${arg:+ $arg} is not confirmed applied yet ($id at $step)"
+      rc=0; continue
     fi
     printf '%s\n' "$choice" >"$marker"
     echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$n"
@@ -321,16 +322,24 @@ new_issue() {
 }
 # queue_issue N [PROVIDER]: queue a filed issue: on the Project card, or with
 # `factory run N --provider P` (the follower is stopped; the run goes on).
+# Adding the card and setting it Queued both repeat safely, so a GitHub
+# failure is tried again; one that lasts fails here, never as a silent wait.
 queue_issue() {
-  if [ -n "${2:-}" ]; then cli_t 30 run "$1" --provider "$2" >>"$RUN_DIR/run.$1.out" 2>&1; log "factory run #$1 --provider $2 (follower stopped: rc $?)"
-  else gh_enqueue "$1" >/dev/null && log "queued #$1"; fi
+  if [ -n "${2:-}" ]; then cli_t 30 run "$1" --provider "$2" >>"$RUN_DIR/run.$1.out" 2>&1; log "factory run #$1 --provider $2 (follower stopped: rc $?)"; return 0; fi
+  local try
+  for try in 1 2 3; do
+    gh_enqueue "$1" >/dev/null 2>"$RUN_DIR/enqueue.$1.err" && { log "queued #$1"; return 0; }
+    log "queueing #$1 failed (try $try): $(head -c 300 "$RUN_DIR/enqueue.$1.err")"
+    sleep $(( try * 5 ))
+  done
+  return 1
 }
 # new_objective TEMPLATE TITLE [PROVIDER=P] [KEY=VALUE...] -> issue number, queued.
 new_objective() {
   local tpl=$1 title=$2 prov=""; shift 2
   [[ ${1:-} == PROVIDER=* ]] && { prov=${1#PROVIDER=}; shift; }
   local n; n=$(new_issue "$tpl" "$title" "$@") || return 1
-  queue_issue "$n" "$prov"
+  queue_issue "$n" "$prov" || return 1
   echo "$n"
 }
 uid() { python3 -c 'import random,string;print("Q"+"".join(random.choice(string.ascii_lowercase) for _ in range(4)))'; }

@@ -7,14 +7,7 @@
  * Project fields) are never changed by setup: a different value is a
  * conflict, refused before anything is written.
  */
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   type CapacityRecommendation,
@@ -31,6 +24,7 @@ import { PLANNERS, WORKERS } from "./providers/config.js";
 import { defaultModels } from "./providers/selection.js";
 import { projectProblems } from "./queue.js";
 import { type Readiness, readiness } from "./readiness.js";
+import { writeAtomic } from "./state.js";
 import {
   boundCredentials,
   credentialFiles,
@@ -88,6 +82,16 @@ const CONFIG_OPTIONS: Record<string, Option> = {
     key: "autonomy.allowances.resultRereviews",
     read: "number",
   },
+  "objective-tokens": {
+    key: "autonomy.spend.perObjective.tokens",
+    read: "number",
+  },
+  "objective-cents": {
+    key: "autonomy.spend.perObjective.cents",
+    read: "number",
+  },
+  "day-tokens": { key: "autonomy.spend.perDay.tokens", read: "number" },
+  "day-cents": { key: "autonomy.spend.perDay.cents", read: "number" },
   "required-env": { key: "autonomy.requiredEnvironment", read: "list" },
   delivery: { key: "delivery.kind", read: "text" },
   "sandbox-network": { key: "sandbox.network", read: "text" },
@@ -331,9 +335,7 @@ export async function setup(
   } else {
     const save = (body: string) => {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      const temporary = `${path}.${process.pid}.tmp`;
-      writeFileSync(temporary, body, { mode: 0o600 });
-      renameSync(temporary, path);
+      writeAtomic(path, body);
     };
     save(`${JSON.stringify(raw, null, 2)}\n`);
     const problems = loads(repository);

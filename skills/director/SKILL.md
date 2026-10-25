@@ -148,7 +148,7 @@ Feedback in this conversation ("item 3 edits the wrong file") is the operator's 
 - **Declines a worker's discovery:** a worker that finds work the plan lacks proposes it as an amendment, and its Work Item waits for the outcome. `factory decline-discovery ISSUE --item ITEM --reason TEXT` settles it as declined, and the item carries on with its result as collected; the planning revision stays spent. Only on request.
 - **Applies after the Objective is done:** a successor Objective in a new issue.
 - **Hold this Objective:** `factory pause ISSUE` starts no step until `resume`; `factory drain ISSUE` lets started Work Items finish and starts no new one. Only on request.
-- **Hold the whole queue:** `factory queue pause` starts no step anywhere and admits nothing; `queue drain` admits nothing new while admitted Objectives carry on; `queue resume` undoes either. Only on request.
+- **Hold the whole queue:** `factory queue pause` starts no step anywhere and admits nothing; `queue drain` admits nothing new while admitted Objectives carry on; `queue resume` undoes either. Only on request. A writer's `/factory queue pause|drain|resume` comment on a running Objective's issue sets the same mode, so `queue.mode` may change without the CLI; its `by` names who set it last.
 - **Stop this Objective now:** `factory cancel ISSUE`, only on request.
 
 When feedback fits none of these, or two pieces conflict, ask instead of choosing.

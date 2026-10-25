@@ -22,6 +22,17 @@ import { deliveryChange, profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
 import {
+  amountOf,
+  charge,
+  type Day,
+  type DaySpend,
+  dayOf,
+  grantSpend,
+  reached,
+  spendLimits,
+  spendQuestion,
+} from "./spend.js";
+import {
   type Answer,
   answerForm,
   answersOf,
@@ -430,7 +441,14 @@ export interface ServiceRun {
   finished: number;
   /** Interrupted attempts wait until then (a crash loop, see `serve`); 0 when they resume at once. */
   resumeAt: number;
+  /** Steps across the service the last death made suspects (`ObjectiveRunner.interrupted`). */
+  suspects?: number;
+  /** The installation's model spend today (spend.ts); absent, only the Objective's own is counted. */
+  spend?: DaySpend;
 }
+
+/** Deaths in a row an attempt runs at, other steps finishing between, before its step holds. */
+const SUSPECT_CRASHES = 3;
 
 /**
  * Host-wide caps shared by every Objective in the service: a step takes a
@@ -695,9 +713,11 @@ export class ObjectiveRunner {
    * the service's death, or by a save that failed after the step finished.
    * That is never the step's error: it runs again at once, with no backoff,
    * even while a question that stops it is open, unless the service is in a
-   * crash loop (`ServiceRun.resumeAt`). An interrupted attempt of a step
-   * that is no longer next is dropped. Any other step waits while a
-   * question that stops it is open (`heldBy`).
+   * crash loop (`ServiceRun.resumeAt`), or the service died under it again
+   * and again (`interrupted`): then it asks, as soon as no question stops
+   * it. An interrupted attempt of a step that is no longer next is
+   * dropped. Any other step waits while a question that stops it is open
+   * (`heldBy`).
    */
   tick(allow: (key: string) => boolean = () => true): void {
     const steps = this.workflow.steps(this.state);
@@ -711,14 +731,9 @@ export class ObjectiveRunner {
     const now = this.now().getTime();
     for (const step of steps) {
       if (this.running.has(step.key)) continue;
-      // A question saved while another stopped the step: ask it now.
-      const asking = this.state.asking[step.key];
-      if (asking && !this.state.attempts[step.key]) {
-        if (!this.heldBy(step.key))
-          this.transact(() => {
-            delete this.state.asking[step.key];
-            this.hold(step.key, asking);
-          });
+      const interrupted = this.state.attempts[step.key]?.interrupted ?? 0;
+      if (interrupted >= SUSPECT_CRASHES && !step.neverAsks) {
+        if (!this.heldBy(step.key)) this.suspect(step.key, interrupted);
         continue;
       }
       if (this.running.size >= this.limits.concurrency) return;
@@ -803,6 +818,34 @@ export class ObjectiveRunner {
         });
         continue;
       }
+      // A model step past the spend ceiling asks before it starts
+      // (spend.ts): `more` grants as much again. Calls running finish.
+      const day =
+        (step.resource === "planner" || step.resource === "worker") &&
+        !this.state.attempts[step.key] &&
+        Object.keys(spendLimits(this.state)).length
+          ? this.today()
+          : undefined;
+      if (day && reached(this.state, day).length) {
+        this.transact(() => {
+          this.hold(step.key, {
+            ...hold(spendQuestion(this.state, day), [
+              {
+                answer: MORE,
+                family: "retry",
+                consequence:
+                  "Allows as much again of each spend limit reached, and model calls go on.",
+              },
+              "cancel",
+            ]),
+            scope: "objective",
+          });
+          const question = this.state.holds.at(-1);
+          if (question?.step === step.key)
+            asked(this.state, question.id, "spend");
+        });
+        continue;
+      }
       if (step.resource && !hostLimits.acquire(step.resource)) continue;
       try {
         this.start(step);
@@ -810,6 +853,35 @@ export class ObjectiveRunner {
         if (step.resource) hostLimits.release(step.resource);
         throw error;
       }
+    }
+  }
+
+  /** The installation's spend today; nothing without its ledger. */
+  private today(): Day {
+    return (
+      this.run.spend?.today() ?? {
+        day: dayOf(this.now()),
+        tokens: 0,
+        cents: 0,
+      }
+    );
+  }
+
+  /**
+   * Charge a model call to the Objective and the day (spend.ts). A charge
+   * that can't be saved is logged; the call's own event already is.
+   */
+  private charge(event: Record<string, unknown>): void {
+    const amount = amountOf(event);
+    if (!amount.tokens && !amount.cents) return;
+    try {
+      this.run.spend?.charge(amount);
+      if (!this.stopped) this.transact(() => charge(this.state, amount));
+    } catch (error) {
+      this.log.write(this.state.issue, {
+        event: "spend-unsaved",
+        error: String(error),
+      });
     }
   }
 
@@ -821,13 +893,15 @@ export class ObjectiveRunner {
       const runs = this.state.stepRuns;
       const n = (runs[step.key]?.n ?? 0) + 1;
       attemptId = `${step.key}#${n}`;
-      // An interrupted attempt is the one this reruns.
+      // An interrupted attempt is the one this reruns, and keeps its count.
+      const interrupted = this.state.attempts[step.key]?.interrupted;
       parent = this.state.attempts[step.key]?.id ?? runs[step.key]?.parent;
       runs[step.key] = { n };
       this.state.attempts[step.key] = {
         startedAt: this.now().toISOString(),
         run: this.run.id,
         id: attemptId,
+        ...(interrupted ? { interrupted } : {}),
       };
     });
     crashPoint(`engine:${step.key}:started`);
@@ -840,12 +914,14 @@ export class ObjectiveRunner {
       state: structuredClone(this.state),
       ...(answer ? { answer } : {}),
       signal: controller.signal,
-      log: (event) =>
+      log: (event) => {
         this.log.write(this.state.issue, {
           step: step.key,
           attemptId,
           ...event,
-        }),
+        });
+        if (event.event === "model-usage") this.charge(event);
+      },
       runFile: (kind) =>
         this.log.runFile(this.state.issue, `${attemptId}.${kind}`),
       keep: (facts) => {
@@ -1099,7 +1175,6 @@ export class ObjectiveRunner {
           delete state.done[cleared];
           delete state.answers[cleared];
           delete state.attempts[cleared];
-          delete state.asking[cleared];
           if (cleared !== outcome.target) delete state.retries[cleared];
         }
         this.abortRunning(outcome.clear);
@@ -1286,17 +1361,38 @@ export class ObjectiveRunner {
   }
 
   /**
-   * The service died while this interrupted step ran, again and again, and
-   * other steps finished in between (see `serve`): ask before running it
-   * again. Cleanup after the end never asks: the crash loop's delay covers it.
+   * The service died while the attempts of run `run` ran (`serve`): each
+   * counts the death, after the first only when the run finished a step
+   * (`progressed`), so the count is the deaths in a row the attempt ran at
+   * with other steps finishing between. At SUSPECT_CRASHES its step asks
+   * before it runs again (`tick`); cleanup after the end never asks: the
+   * crash loop's delay covers it. Returns the attempts that reached it.
    */
-  suspect(key: string, question: string): void {
-    const step = this.workflow.steps(this.state).find((s) => s.key === key);
-    if (step?.neverAsks || this.running.has(key) || !this.state.attempts[key])
-      return;
+  interrupted(run: string, progressed: boolean): number {
+    const hit = Object.values(this.state.attempts).filter(
+      (attempt) => attempt.run === run,
+    );
+    if (!hit.length) return 0;
+    this.transact(() => {
+      for (const attempt of hit)
+        attempt.interrupted = progressed ? (attempt.interrupted ?? 0) + 1 : 1;
+    });
+    return hit.filter(
+      (attempt) => (attempt.interrupted ?? 0) >= SUSPECT_CRASHES,
+    ).length;
+  }
+
+  /** Hold the step the service kept dying under (`interrupted`), with `retry` and `cancel`. */
+  private suspect(key: string, deaths: number): void {
+    const others = (this.run.suspects ?? 1) - 1;
     this.transact(() => {
       delete this.state.attempts[key];
-      this.hold(key, failure(question), true);
+      this.hold(
+        key,
+        failure(
+          `The service died ${deaths} times in a row while step ${key} ran, and other steps finished in between, so this step may be what stops it (for example, by running the host out of memory).${others > 0 ? ` ${others} other step${others > 1 ? "s" : ""} ran at every one of those deaths too, and each holds with a question like this one.` : ""} \`retry\` runs it again; or cancel.`,
+        ),
+      );
     });
     this.log.write(this.state.issue, { step: key, event: "suspect" });
   }
@@ -1348,15 +1444,12 @@ export class ObjectiveRunner {
    * is open (the Objective's, or its item's) can't run until that one is
    * answered, and then must not wait longer to ask: its retry comes due at
    * once, so it runs again right after the answer and asks then (an
-   * Objective-wide cause the answer fixed asks nothing). A question that
-   * running the step again wouldn't ask (`saved`: a crash-loop suspect) is
-   * saved in `asking` instead, and asked before the step runs (`tick`). A
-   * failure offers `replan` where the workflow can plan again.
+   * Objective-wide cause the answer fixed asks nothing). A failure offers
+   * `replan` where the workflow can plan again.
    */
   private hold(
     key: string,
     asked: Omit<Extract<Outcome, { kind: "hold" }>, "kind" | "keep">,
-    saved = false,
   ): boolean {
     const state = this.state;
     const now = this.now().toISOString();
@@ -1368,17 +1461,8 @@ export class ObjectiveRunner {
         hold.item === undefined || (item !== undefined && hold.item === item),
     );
     if (open && open.step !== key) {
-      if (saved)
-        state.asking[key] = {
-          question,
-          options: asked.options,
-          ...(scope ? { scope } : {}),
-          ...(cause === "failure" ? { cause } : {}),
-        };
-      else {
-        const retry = state.retries[key];
-        if (retry) retry.nextAt = now;
-      }
+      const retry = state.retries[key];
+      if (retry) retry.nextAt = now;
       return false;
     }
     // A bare `switch` is one option per configured provider; cancel always
@@ -1645,6 +1729,7 @@ export class ObjectiveRunner {
             if (other.wait?.kind === "reset" && other.wait.provider)
               delete this.state.retries[key];
       } else if (granting === "repairs") grantOverrun(this.state, hold.step);
+      else if (granting === "spend") grantSpend(this.state, this.today());
       else {
         // A rereview's `more` grants and revalidates. Each `revalidate` is
         // charged here, against the live state, so two at once can't both
@@ -1847,7 +1932,6 @@ export class ObjectiveRunner {
     this.state.holds = [];
     this.state.attempts = {};
     this.state.retries = {};
-    this.state.asking = {};
     this.state.ended = { at: this.now().toISOString(), by };
     // Stop running steps only once the cancel is saved.
     this.afterSave.push(() => {

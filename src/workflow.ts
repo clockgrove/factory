@@ -245,14 +245,12 @@ const cleanup: Step = {
 
 /**
  * Whether the Objective has started: a step past the check (and the
- * predecessors' wait and a re-run's cleanup) is done, waiting, asking or
- * running. The one rule for queue order and for withdrawal before start.
+ * predecessors' wait and a re-run's cleanup) is done, waiting or running. The one rule for queue order and for withdrawal before start.
  */
 export function started(state: ObjectiveState): boolean {
   return [
     ...Object.keys(state.done),
     ...Object.keys(state.retries),
-    ...Object.keys(state.asking),
     ...Object.keys(state.attempts),
   ].some(
     (key) => key !== PREDECESSORS && key !== "check" && key !== RERUN_CLEANUP,

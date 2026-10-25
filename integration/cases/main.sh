@@ -1,4 +1,4 @@
-# The main suite's cases on installation M (clockgrove/factory-drill, strict
+# The main suite's cases on installation M (the run's repository M_REPO, strict
 # protection on main): one long-lived serve that every case shares. Each case
 # runs in its own background subshell, owns its Objectives and its proxy
 # rules, and never stops the serve. Functions are case_<name>; CASES_M lists them.
@@ -264,6 +264,12 @@ pr_or_settled() { has_open_pr "$1" || settled "$1" && return 0; [[ $(st phase "$
 case_media() {
   local t0 n reps=0 picks=0 sets=(); t0=$(now)
   local HOLD_POLICY="d2 review decide more"
+  # Final review may ask a person to judge the binary assets (criteria 1, the
+  # model, and 2, the preview, in cube.md's order): the suite's operator
+  # accepts them, since this case checks selection, repair and LFS delivery.
+  local reason="Accepted by the integration suite's operator: the selected set passed its own test; this check covers selection, repair and Git LFS delivery, not asset geometry."
+  local AUTO_REVIEW_DECISIONS
+  AUTO_REVIEW_DECISIONS=$(python3 -c 'import json,sys;print(json.dumps([{"step":"final-review","answer":"accept","arg":a,"text":sys.argv[1]} for a in ("1","2")]))' "$reason")
   local id; id=$(uid)
   n=$(new_objective cube "media select and repair" ID="$id") || return
   local end=$(( $(now) + 2400 ))

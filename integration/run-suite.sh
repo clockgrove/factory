@@ -1,7 +1,13 @@
 #!/bin/bash
 # Factory integration tests: real GitHub, real providers, on demand.
 #
-#   run-suite.sh [--suite main|edge|prd] [--build DIR] [--state-base DIR] [--only a,b] [--dry-run]
+#   run-suite.sh [--suite main|edge|prd] [--build DIR] [--state-base DIR] [--only a,b] [--capture] [--keep-repos] [--dry-run]
+#
+# Each run creates its own private repositories under REPO_OWNER from
+# fixtures/baseline/ and deletes them when it passes (a failed run keeps them
+# for inspection; --keep-repos always does; later runs sweep them after 24 h).
+# --capture records every model call's body for diagnosis (config capture):
+# the run's state dir then holds prompts and answers, so keep it private.
 #
 # One parallel wave: every case of the suite starts at once and runs
 # concurrently. The suite enforces its own wall clock: at 55 min it stops
@@ -12,18 +18,20 @@
 set -uo pipefail
 {   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""
-M_REPO=clockgrove/factory-drill; C_REPO=clockgrove/factory-drill-2
+BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
+REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill" (cards of both repositories)
-# The prd suite's factory-drill-2 installation queues on this Project (#1974 gives it its own).
+# The prd suite's repository C installation queues on this Project (#1974 gives it its own).
 Q_PROJECT_ID=${FACTORY_DRILL2_PROJECT_ID:-$PROJECT_ID}
-usage() { sed -n 2,11p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n 2,17p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITE_NAME=${2:?}; shift 2 ;;
     --build) BUILD=$(realpath "${2:?}"); shift 2 ;;
     --state-base) STATE_BASE=$(realpath -m "${2:?}"); shift 2 ;;
     --only) ONLY=${2:?}; shift 2 ;;
+    --capture) CAPTURE=1; shift ;;
+    --keep-repos) KEEP_REPOS=1; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
@@ -40,11 +48,11 @@ CASE_TABLE_main=(
   "cancel|M|20|a lasting 403 on merge holds the step (fault.lasting-403); with #1879 a 404 on a PR read right after creation retries (fault.lag-404); cancel with the PR open: one cancel comment, PR closed, branch deleted, issue closed not planned (queue.cancel-open-pr)"
   "media|M|30|two candidate sets, 'repair' at select, new sets, a pick; the asset lands as Git LFS (media.select-repair)"
   "attach|M|8|with #1878: another repository's attachment URL holds before any token is sent (security.foreign-attachment)"
-  "crash|C|40|factory-drill-2: one installation at a time (holder.second-refused, take-over, release, restart); sampled crash points armed one at a time across live Objectives: plan:post, deliver:push, deliver:pr-create, deliver:merge, report:comment, report:close, sync:remind and sync:cancel, before and after (crash.*): every Objective done or cancelled once with no duplicate; two 60 s network cuts, no hold (netcut.*)"
+  "crash|C|40|repository C: one installation at a time (holder.second-refused, take-over, release, restart); sampled crash points armed one at a time across live Objectives: plan:post, deliver:push, deliver:pr-create, deliver:merge, report:comment, report:close, sync:remind and sync:cancel, before and after (crash.*): every Objective done or cancelled once with no duplicate; two 60 s network cuts, no hold (netcut.*)"
 )
 CASE_TABLE_edge=(
-  "reset|E|30|factory-drill: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
-  "archived|E|10|factory-drill: 'factory run N' on an issue whose Project card is archived admits it (queue.archived-card)"
+  "reset|E|30|repository M: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
+  "archived|E|10|repository M: 'factory run N' on an issue whose Project card is archived admits it (queue.archived-card)"
 )
 CASE_TABLE_prd=(
   "propose|P|15|factory propose from an intent and from a roadmap section; an approved draft creates its issues once, with blocked-by links (propose.*)"
@@ -56,7 +64,7 @@ CASE_TABLE_prd=(
   "paths|P|40|two Objectives owning the same file take turns (queue.paths-take-turns)"
   "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"
   "hostnet|P|25|sandbox.network host: final validation reaches a service on the host's loopback (worker.host-network)"
-  "prod|Q|45|factory-drill-2 at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory in a later run; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
+  "prod|Q|45|repository C at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory in a later run; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
 )
 case "$SUITE_NAME" in main|edge|prd) ;; *) echo "unknown suite: $SUITE_NAME (main, edge, prd)" >&2; exit 2 ;; esac
 declare -n TABLE="CASE_TABLE_$SUITE_NAME"
@@ -68,15 +76,20 @@ done
 SEL=()
 for row in "${TABLE[@]}"; do IFS='|' read -r c _ _ _ <<<"$row"; [ -n "$ONLY" ] && [[ ",$ONLY," != *",$c,"* ]] && continue; SEL+=("$row"); done
 [ ${#SEL[@]} -gt 0 ] || { echo "no cases selected" >&2; exit 2; }
+# Repository C exists only for a selected case on the crash lane or the prd suite's lane Q.
+NEEDS_C=""; for row in "${SEL[@]}"; do IFS='|' read -r _ lane _ _ <<<"$row"; [[ $lane == [CQ] ]] && NEEDS_C=1; done
 
 RUN_ID=$(TZ=America/Los_Angeles date +%Y-%m-%dT%H%M%S%Z); SFX=$(TZ=America/Los_Angeles date +%m%d%H%M)
+# This run's repositories: M (installation M, or E in the edge suite) and C (the crash lane).
+REPO_STEM=fd-$(TZ=America/Los_Angeles date +%Y%m%d-%H%M%S)
+M_REPO=$REPO_OWNER/$REPO_STEM-m; C_REPO=$REPO_OWNER/$REPO_STEM-c
 RUNS=/tmp/factory-integration-runs; mkdir -p "$RUNS/results"
 STATE_BASE=${STATE_BASE:-/tmp/factory-integration/$RUN_ID}
 START_S=$(date +%s); HARD_STOP_AT=$(( START_S + 60 * 60 )); STOP_AT=$(( HARD_STOP_AT - 300 ))
 export HARD_STOP_AT STOP_AT
 if [ -n "$DRY" ]; then RUN_DIR=$(mktemp -d "$RUNS/.dry.XXXX"); else RUN_DIR="$RUNS/$RUN_ID"; mkdir -p "$RUN_DIR"; fi
-mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"
-source "$SUITE/lib/common.sh"; source "$SUITE/lib/gh.sh"; source "$SUITE/lib/serve.sh"
+mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"; : >"$RUN_DIR/repos"
+source "$SUITE/lib/common.sh"; source "$SUITE/lib/gh.sh"; source "$SUITE/lib/serve.sh"; source "$SUITE/lib/repos.sh"
 source "$SUITE/cases/main.sh"; source "$SUITE/cases/crash.sh"; source "$SUITE/cases/edge.sh"; source "$SUITE/cases/prd.sh"
 commit=$(git -C "$BUILD" log -1 --format='%h %s' 2>/dev/null | cut -c1-80)
 
@@ -91,7 +104,8 @@ budget() {
 }
 if [ -n "$DRY" ]; then
   echo "DRY RUN ($SUITE_NAME): nothing is started, queued or written."
-  echo "Build: $BUILD ($commit)"; echo "State: $STATE_BASE (fresh per run)"; echo
+  echo "Build: $BUILD ($commit)"; echo "State: $STATE_BASE (fresh per run)"
+  echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
   for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  ~%2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
   echo; budget
   rm -rf "$RUN_DIR"; exit 0
@@ -165,8 +179,8 @@ check_complete() {
 # planner decision (it must ask its question).
 write_config() { # FILE REPO CHECKOUT MAX_ACTIVE [PY_EXPR...]
   local f=$1; shift
-  python3 - "$f" "$@" <<'PY'
-import json, sys
+  SUITE_CAPTURE=$CAPTURE python3 - "$f" "$@" <<'PY'
+import json, os, sys
 f, repo, checkout, active, *more = sys.argv[1:]
 fast = {"model": "gpt-6-luna", "effort": "low", "serviceTier": "fast"}
 haiku = {"model": "claude-haiku-5-5", "effort": "low"}
@@ -181,6 +195,8 @@ c = {
   },
   "defaultProvider": "codex",
 }
+if os.environ.get("SUITE_CAPTURE"):
+  c["capture"] = {"enabled": True}
 for e in more: exec(e, {"c": c})
 json.dump(c, open(f, "w"), indent=2)
 PY
@@ -198,13 +214,14 @@ write_results() {
   {
     echo "# Integration run $RUN_ID ($SUITE_NAME)"; echo
     echo "Wall time: **$(( (end_s - START_S) / 60 )) min $(( (end_s - START_S) % 60 )) s** (limit 60), from $(TZ=America/Los_Angeles date -d @"$START_S" '+%-I:%M %p') to $(TZ=America/Los_Angeles date -d @"$end_s" '+%-I:%M %p') PDT${INTERRUPTED:+. **Interrupted**}."; echo
-    echo "- Build: $BUILD ($commit)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"; echo
+    echo "- Build: $BUILD ($commit)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
+    echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ') (${REPOS_NOTE:-none created})"; echo
     echo "**Totals:** ${tot%, }."; echo
     echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{d=$4-$3; printf "| %s | %s | +%dm%02ds | +%dm%02ds | %dm %02ds |\n", $1, $2, $3/60, $3%60, $4/60, $4%60, d/60, d%60}' "$RUN_DIR/cases.tsv"
     echo; echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
-    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"drill-2 ":"", $1, $2}' "$RUN_DIR/issues")"; }
+    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":"", $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2
 }
@@ -253,7 +270,7 @@ end_state() {
   local nm rv open="" prs repo ok=0
   nm=$(gh api "repos/$M_REPO" --jq .name) || ok=1
   rv=$(gh_human_gate) || ok=1
-  local repos="$M_REPO"; [ "$SUITE_NAME" = edge ] || repos="$repos $C_REPO"
+  local repos="$M_REPO"; [ -n "$NEEDS_C" ] && repos="$repos $C_REPO"
   for repo in $repos; do
     if prs=$(gh api "repos/$repo/pulls?state=open&per_page=100" --jq '.[].number'); then
       [ -z "$prs" ] || open="$open $repo:$(tr '\n' ',' <<<"$prs")"
@@ -264,8 +281,8 @@ end_state() {
   if units=$(run_bounded 5 systemctl --user list-units --all --no-legend 'factory-*'); then
     units=$(awk 'NF{n++} END{print n+0}' <<<"$units")
   else ok=1; fi
-  [ "$nm" = factory-drill ] && [ "$rv" = false ] && [ -z "$open" ] && [ "$serves" = 0 ] && [ "$units" = 0 ] || ok=1
-  rec_if suite.end-state "$ok" "factory-drill named '$nm'; review gate '$rv'; open PRs [${open}]; serves left $serves; factory units $units; read failures=$ok" "$t0"
+  [ "$nm" = "${M_REPO#*/}" ] && [ "$rv" = false ] && [ -z "$open" ] && [ "$serves" = 0 ] && [ "$units" = 0 ] || ok=1
+  rec_if suite.end-state "$ok" "$M_REPO named '$nm'; review gate '$rv'; open PRs [${open}]; serves left $serves; factory units $units; read failures=$ok" "$t0"
 }
 cleanup() {
   local code=$?
@@ -286,9 +303,15 @@ cleanup() {
   for p in "${jobs[@]}"; do wait "$p" || record suite.stop FAIL "a serve could not be stopped" "$START_S"; done
   for i in M E P; do proxy_stop $i; done
   local s; while read -r p s; do kill_exact "$p" "$s" TERM || true; done <"$RUN_DIR/pids"
-  end_state
+  [ -s "$RUN_DIR/repos" ] && end_state
   check_complete || code=1
   [ "$(now)" -lt "$HARD_STOP_AT" ] || { record suite.deadline FAIL "run exceeded its 60-minute wall-clock limit" "$START_S"; code=1; }
+  # A passing run deletes its repositories; a failed one keeps them to inspect.
+  local r kept=""
+  if [ -z "$KEEP_REPOS" ] && [ "$code" = 0 ]; then
+    while read -r r; do [ -n "$r" ] && { repo_delete "$r" || kept="$kept $r"; }; done <"$RUN_DIR/repos"
+    REPOS_NOTE="deleted$([ -n "$kept" ] && echo "; could not delete:$kept")"
+  else REPOS_NOTE="kept for inspection ($([ -n "$KEEP_REPOS" ] && echo "--keep-repos" || echo "the run failed"); swept after 24 h)"; fi
   write_results
   exit $code
 }
@@ -301,10 +324,10 @@ for tool in node python3 timeout flock unshare pasta systemctl; do
 done
 git lfs version >/dev/null || { echo "git-lfs is required" >&2; exit 3; }
 [ -c /dev/net/tun ] || { echo "network-cut cases need /dev/net/tun" >&2; exit 3; }
-for repo in "$M_REPO" "$C_REPO"; do
-  permissions=$(gh api "repos/$repo" --jq '.permissions | (.push == true and .admin == true)') || { echo "gh cannot access $repo" >&2; exit 3; }
-  [ "$permissions" = true ] || { echo "gh needs write/admin access to scratch repository $repo" >&2; exit 3; }
-done
+# Each run creates and deletes its repositories: an owner role and the delete_repo scope.
+login=$(gh api user --jq .login) || { echo "gh is not logged in" >&2; exit 3; }
+[ "$(gh api "orgs/$REPO_OWNER/memberships/$login" --jq .role 2>/dev/null)" = admin ] || { echo "gh login $login must be an owner of $REPO_OWNER to create its run repositories" >&2; exit 3; }
+gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | grep -qw delete_repo || { echo "the gh token needs the delete_repo scope (gh auth refresh -s delete_repo)" >&2; exit 3; }
 log "suite $SUITE_NAME, build $BUILD ($commit), state $STATE_BASE"
 [ ! -e "$STATE_BASE" ] || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
 for r in $M_REPO $C_REPO; do s=$(running_serves "$r"); [ -n "$s" ] && { echo "refused: a serve runs for $r: $s" >&2; exit 3; }; done
@@ -312,26 +335,23 @@ trap 'INTERRUPTED=1; exit 130' INT TERM
 trap cleanup EXIT
 mkdir -p "$STATE_BASE"
 SETUP0=$(date +%s)
+setup_repos() {
+  repos_sweep
+  repo_create "${M_REPO#*/}" || return 1
+  [ -z "$NEEDS_C" ] || repo_create "${C_REPO#*/}"
+}
 setup_main() {
-  clone $M_REPO "$STATE_BASE/checkout-m" & local m=$!
-  clone $C_REPO "$STATE_BASE/checkout-c" & local c=$!
-  wait "$m" || return 1; wait "$c" || return 1
+  clone $M_REPO "$STATE_BASE/checkout-m" || return 1
   write_config "$STATE_BASE/config-m.json" $M_REPO "$STATE_BASE/checkout-m" 12 'c["delivery"]={"kind":"native-stack"}' 'c.setdefault("autonomy",{})["allowances"]={"planningRevisions":2}'
-  write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8
   inst_define M $M_REPO "$STATE_BASE/config-m.json"
-  inst_define C $C_REPO "$STATE_BASE/config-c.json"
-  inst_define H $C_REPO "$STATE_BASE/config-c.json"
-  # factory-drill-2 starts from factory-drill's main when it is empty.
-  if ! gh api "repos/$C_REPO/contents/package.json" >/dev/null 2>&1; then
-    log "seeding $C_REPO from $M_REPO main"
-    (cd "$STATE_BASE/checkout-m" && git lfs fetch --all -q origin && git push -q "https://github.com/$C_REPO.git" origin/main:refs/heads/main \
-      && git -c lfs.allowincompletepush=true lfs push --all "https://github.com/$C_REPO.git" >/dev/null 2>&1)
-    (cd "$STATE_BASE/checkout-c" && git fetch -q origin && git checkout -q -B main origin/main)
+  if [ -n "$NEEDS_C" ]; then
+    clone $C_REPO "$STATE_BASE/checkout-c" || return 1
+    write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8
+    inst_define C $C_REPO "$STATE_BASE/config-c.json"
+    inst_define H $C_REPO "$STATE_BASE/config-c.json"
+    printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
+    cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"
   fi
-  # A holder record a crashed earlier run left would refuse this run's fresh installations.
-  local r; for r in $M_REPO $C_REPO; do
-    [ -n "$(git ls-remote "https://github.com/$r.git" refs/factory/holder 2>/dev/null)" ] && { log "removing $r's leftover holder record"; git -C "$STATE_BASE/checkout-m" push -q "https://github.com/$r.git" :refs/factory/holder; }
-  done
   inst M
   [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }
   local open; open=$(gh pr list -R $M_REPO --state open --json number --jq length)
@@ -339,13 +359,12 @@ setup_main() {
   # M: one serve for the whole wave, behind the fault proxy.
   proxy_start M 18611
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/M/extra_env"
-  printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
-  cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"
   serve_up || return 1
   serve_ready
 }
 # The serve's own record names its PID: the CLI sees a running service from then on.
 serve_ready() { wait_for 90 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"pid\"))' '$ROOT/service.json' 2>/dev/null)\" = $(serve_pid) ]"; }
+setup_repos || { log "setup failed: could not create this run's repositories"; exit 1; }
 case $SUITE_NAME in
   main) setup_main ;; edge) setup_edge ;; prd) setup_prd ;;
 esac || { log "setup failed"; exit 1; }

@@ -33,7 +33,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    - the tools on the PATH;
    - each provider's SDK and login;
    - GitHub access and push;
-   - merge commits, required checks, and a recommendation to require branches to be up to date;
+   - merge commits, required checks, required reviews Factory's login can't bypass, and a recommendation to require branches to be up to date;
    - which installation serves the repository, if any.
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
@@ -91,7 +91,7 @@ Sections are level-two or level-three headings (the issue form renders `###`). T
 - **Context**: optional prose and links. Not parsed; the planner reads it with the rest of the issue.
 - **Sources**: optional. Files every worker must receive verbatim; see below.
 - **Constraints** or **Non-goals**: optional limits workers must respect.
-- **May change**: optional, once. The protected paths a worker may change: anything under `.github/`, a CODEOWNERS file, or other CI configuration ([Security](reference/security.md)). Each bullet is exactly one backticked repository path, such as ``- `.github/workflows/ci.yml` ``. Naming a path anywhere else allows nothing.
+- **May change**: optional, once. The protected paths a worker may change: anything under `.github/`, a CODEOWNERS file, other CI configuration, or the playbook ([Security](reference/security.md)). Each bullet is exactly one backticked repository path, such as ``- `.github/workflows/ci.yml` ``. Naming a path anywhere else allows nothing.
 
 Any other heading is read as prose. Each section above may appear once; a second copy is refused with "merge the two sections into one".
 
@@ -295,6 +295,19 @@ How much an Objective may correct itself before asking. These are frozen with it
 
 Running out holds with `more`, `replan` and `cancel`. An amendment past `planningRevisions` holds with `more` (allow as many again and plan it), `refuse` (reject it) and `cancel`.
 
+### Spend ceiling
+
+Model spend can have a limit per Objective and per day, in tokens, list cost or both. No limit is set by default. These are frozen with the Objective's configuration.
+
+| Setting (`autonomy.spend`) | Counts                                                                    |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `perObjective.tokens`      | tokens of this Objective's model calls                                    |
+| `perObjective.cents`       | their list cost, in whole cents                                           |
+| `perDay.tokens`            | tokens of every Objective's model calls in this installation, per UTC day |
+| `perDay.cents`             | their list cost, in whole cents, per UTC day                              |
+
+`factory setup --objective-tokens N --objective-cents N --day-tokens N --day-cents N` sets them. When a limit is reached, the Objective holds before its next model call with `more` (allow as much again) and `cancel`; calls already running finish. A cost limit counts only calls whose provider reports a cost. `factory status` shows each Objective's spend against its limits, and the spend today.
+
 ## Amend a plan
 
 An accepted plan can grow while it runs. An amendment revises the plan for work it lacks, passes the plan checks and a new independent plan review, and, once accepted, is the plan from then on, posted as the plan comment. Each one uses a planning revision (see [Allowances](#allowances)). One amendment is planned at a time, and no other step starts while it is pending.
@@ -312,6 +325,7 @@ factory cancel N                          # ends it, closes its PRs and the issu
 factory reset N                           # rebuild its state from GitHub: its plan comment, PRs and report
 ```
 
+- **Pause from a phone.** Comment `/factory queue pause` on any running Objective's issue (it needs write access to the repository) and the whole queue pauses within one queue poll: no new step starts, running calls finish, and nothing is lost. `/factory queue resume` there, or `factory queue resume` on the machine, resumes it; the latest pause or resume from either place wins. While it is paused, each running Objective's status comment says so and who paused it.
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
 - **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.

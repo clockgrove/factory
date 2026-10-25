@@ -187,11 +187,11 @@ export function declaration(
 }
 
 /**
- * The protected paths (CI configuration, `.github/`, CODEOWNERS) the
- * Objective lets a worker change: its one "May change" section, each entry
- * a list item that is exactly one code element naming a repository path,
- * as an Acceptance command is written. Any other entry is a problem. A
- * path named anywhere else in the Objective allows nothing.
+ * The protected paths (CI configuration, `.github/`, CODEOWNERS, the
+ * playbook) the Objective lets a worker change: its one "May change"
+ * section, each entry a list item that is exactly one code element naming
+ * a repository path, as an Acceptance command is written. Any other entry
+ * is a problem. A path named anywhere else in the Objective allows nothing.
  */
 export function mayChange(blocks: readonly ObjectiveBlock[]): {
   paths: string[];

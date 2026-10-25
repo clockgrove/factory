@@ -1,33 +1,33 @@
 # The PRD suite (run-suite.sh --suite prd): requirements no main or edge case
-# shows live. Two lanes, every case at once:
-#   P  clockgrove/factory-drill, installation P behind the fault proxy, the
-#      suite's fast models, sandbox.network host and one CI-only command;
-#   Q  clockgrove/factory-drill-2, installation Q written by `factory setup`
-#      with production defaults and run by `setup --background` as a user
+# shows live. Two lanes on the run's own repositories, every case at once:
+#   P  repository M, installation P behind the fault proxy, the suite's fast
+#      models, sandbox.network host and one CI-only command;
+#   Q  repository C, installation Q written by `factory setup` with
+#      production defaults and run by `setup --background` as a user
 #      service: one lane case, `prod`, at production models and concurrency.
 # Functions are case_<name>, as in main.sh.
 
 HOSTNET_PORT=18650
 
 setup_prd() {
-  clone $M_REPO "$STATE_BASE/checkout-p" & local p=$!
-  clone $C_REPO "$STATE_BASE/checkout-q" & local q=$!
-  wait "$p" || return 1; wait "$q" || return 1
-  write_config "$STATE_BASE/config-p.json" $M_REPO "$STATE_BASE/checkout-p" 12 \
+  clone $M_REPO "$STATE_BASE/checkout-p" || return 1
+  clone $C_REPO "$STATE_BASE/checkout-q" || return 1
+  # Repository M's main also holds what lane P's cases read there: the
+  # workflows that file issues and comments as github-actions[bot] (a
+  # non-writer), and the roadmap `propose --source` drafts from.
+  local co="$STATE_BASE/checkout-p"
+  mkdir -p "$co/.github/workflows" "$co/drill"
+  cp "$SUITE/fixtures/repo/drill-issue.yml" "$SUITE/fixtures/repo/drill-comment.yml" "$co/.github/workflows/"
+  cp "$SUITE/fixtures/repo/ROADMAP.md" "$co/drill/ROADMAP.md"
+  git -C "$co" add .github/workflows/drill-issue.yml .github/workflows/drill-comment.yml drill/ROADMAP.md &&
+    git -C "$co" -c user.name="Factory integration" -c user.email=factory-integration@users.noreply.github.com \
+      commit -q -m "Drill: the prd suite's fixtures" && git -C "$co" push -q origin HEAD:main || return 1
+  write_config "$STATE_BASE/config-p.json" $M_REPO "$co" 12 \
     'c["sandbox"]={"network":"host"}' 'c["finalValidation"]={"ciOnlyCommands":["npm run ci-only"]}'
   inst_define P $M_REPO "$STATE_BASE/config-p.json"
   inst_define Q $C_REPO "$STATE_BASE/config-q.json"
-  local r; for r in $M_REPO $C_REPO; do
-    [ -n "$(git ls-remote "https://github.com/$r.git" refs/factory/holder 2>/dev/null)" ] && { log "removing $r's leftover holder record"; git -C "$STATE_BASE/checkout-p" push -q "https://github.com/$r.git" :refs/factory/holder; }
-  done
   inst P
   [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }
-  # propose --source reads the roadmap at the default branch.
-  if [ -z "$(gh_file drill/ROADMAP.md)" ]; then
-    gh api -X PUT "repos/$REPO/contents/drill/ROADMAP.md" -f message="Drill: the suite's roadmap" \
-      -f content="$(base64 -w0 <"$SUITE/fixtures/repo/ROADMAP.md")" >/dev/null || return 1
-    log "wrote drill/ROADMAP.md on $REPO main"
-  fi
   proxy_start P 18613
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/P/extra_env"
   : >"$RUN_DIR/inst/Q/extra_env"

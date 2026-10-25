@@ -74,3 +74,24 @@ test("a capture refusal of the candidate sets is the correction: stage them agai
   );
   assert.equal(asked.length, 0);
 });
+
+// The media case: the operator's `repair` at selection went to the
+// diagnosis, which can't see the candidates and asked a person for them.
+test("the operator's repair at selection is the correction, quoting their text, every time", async () => {
+  const asked = [];
+  const sentBack = {
+    kind: "failure",
+    detail:
+      "The operator asked for new candidates: Make both candidate sets again, with different colours.",
+    newCandidates: {
+      text: "Make both candidate sets again, with different colours.",
+    },
+  };
+  const first = await correction(input([], asked, sentBack));
+  assert.equal(first.kind, "correction", JSON.stringify(first));
+  assert.equal(first.correction.source, "selection");
+  assert.match(first.correction.correction, /with different colours/);
+  const again = await correction(input([first.correction], asked, sentBack));
+  assert.equal(again.kind, "correction", JSON.stringify(again));
+  assert.equal(asked.length, 0);
+});

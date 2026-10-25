@@ -90,15 +90,26 @@ export async function selectStep(
   if (read.kind === "invalid")
     return { ...question, question: `${read.problem}\n\n${question.question}` };
   if (read.kind === "repair") {
-    const finding = `The operator asked for new candidates${answer?.text ? `: ${answer.text}` : "."}`;
+    const text = answer?.text;
     // The new attempt sees the sets the answer is about: capture replaces these.
     const sentBack = await keepSentBack(
       mediaDirectory(workDir, item.id),
       work.sets,
     );
-    return repairOutcome(item, "select", finding, context.state, place, {
-      keep: facts({ sentBack: sentBack.length ? sentBack : null }, item.id),
-    });
+    return repairOutcome(
+      item,
+      "select",
+      {
+        kind: "failure",
+        detail: `The operator asked for new candidates${text ? `: ${text}` : "."}`,
+        newCandidates: text ? { text } : {},
+      },
+      context.state,
+      place,
+      {
+        keep: facts({ sentBack: sentBack.length ? sentBack : null }, item.id),
+      },
+    );
   }
   const made = await materializeSelection({
     checkout: deps.config.checkout,

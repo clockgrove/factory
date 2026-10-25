@@ -25,7 +25,7 @@ npm run integration -- --build ../other-checkout     # test another build (its d
 ## Prerequisites
 
 - No standing scratch repository. Each run creates its own private repositories under the scratch owner (`REPO_OWNER` in `run-suite.sh`), `fd-<time>-m` (installation M, or E in the edge suite) and, in the main suite, `fd-<time>-c` (the crash lane). Each one's main is `fixtures/baseline/` as one commit: a small Node.js project whose CI runs `npm test`, Git LFS rules for media, strict branch protection on main ("require branches to be up to date", check `test`) and no required review. A passing run deletes them; a failed run keeps them to inspect (as does `--keep-repos`), and a later run deletes those after 24 hours.
-- Project "Factory drill" with Factory's single-select field `Factory`; the run's repositories queue on it.
+- Project "Factory drill" with Factory's single-select field `Factory` and number field `Factory order`: repository M queues on it. One installation serves a Project, so each run that needs repository C also creates a Project for it, with the same two fields, titled like its repositories and deleted with them.
 - A `gh` login that is an owner of the scratch owner organization, with the `delete_repo` scope (`gh auth refresh -s delete_repo`); Codex and Claude logins (subscription, no API key); `pasta` and `unshare` for the network namespace; `git-lfs`.
 
 Each run makes fresh state directories under `/tmp/factory-integration/<time>/` and writes its own configuration there. An existing `--state-base` is refused. Plumbing runs on the fastest model and lowest effort each provider offers, and the cases whose check is a planner decision use the production planner.

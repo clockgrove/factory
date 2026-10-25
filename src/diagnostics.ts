@@ -11,14 +11,11 @@ import { join } from "node:path";
 import { displayTime, duration, redactDeep } from "./display.js";
 import { itemOf } from "./engine.js";
 import {
-  completeLines,
   type LogEvent,
   logFiles,
-  parseLines,
-  readFrom,
   readRunFile,
   runOfFile,
-  sizeOf,
+  streamFile,
   untilInterrupted,
 } from "./log.js";
 import { captureFile, readContained } from "./paths.js";
@@ -72,9 +69,6 @@ export interface Entry {
   event: LogEvent;
 }
 
-/** Bytes read per chunk; a line longer than the cap is skipped. */
-const CHUNK = 1024 * 1024;
-const MAX_LINE = 16 * 1024 * 1024;
 /** Text cut in timeline lines. */
 const TEXT = 200;
 /** Steps the summary lists as slowest. */
@@ -91,51 +85,6 @@ export function chosenFiles(
   if (choice.kind === "run")
     return files.filter((file) => runOfFile(file) === choice.id);
   return files.slice(-1);
-}
-
-/**
- * Read `file` from byte `from` in chunks, passing each complete event to
- * `visit`; returns the offset after the last complete line, where a follow
- * carries on.
- */
-export function streamFile(
-  file: string,
-  from: number,
-  visit: (event: LogEvent) => void,
-): number {
-  const size = sizeOf(file);
-  let position = from;
-  let done = from;
-  let rest = Buffer.alloc(0);
-  let skipping = false;
-  while (position < size) {
-    const chunk = readFrom(file, position, Math.min(size, position + CHUNK));
-    if (!chunk.length) break;
-    position += chunk.length;
-    let bytes = rest.length ? Buffer.concat([rest, chunk]) : chunk;
-    if (skipping) {
-      // Inside an overlong line: drop it through its newline.
-      const end = bytes.indexOf(10);
-      if (end < 0) {
-        done += bytes.length;
-        rest = Buffer.alloc(0);
-        continue;
-      }
-      done += end + 1;
-      bytes = bytes.subarray(end + 1);
-      skipping = false;
-    }
-    const complete = completeLines(bytes);
-    for (const event of parseLines(complete.toString("utf8"))) visit(event);
-    done += complete.length;
-    rest = Buffer.from(bytes.subarray(complete.length));
-    if (rest.length > MAX_LINE) {
-      done += rest.length;
-      rest = Buffer.alloc(0);
-      skipping = true;
-    }
-  }
-  return done;
 }
 
 /** Stream `file` from `from` like streamFile, each event redacted and marked with its run. */

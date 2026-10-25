@@ -1266,7 +1266,13 @@ export async function serve(options: ServeOptions): Promise<number> {
   try {
     const housekeeping = (): void => {
       try {
-        rotateLogs(paths.logs, runId);
+        // Paths rotation couldn't remove wait for the next pass.
+        const failed = rotateLogs(paths.logs, runId);
+        if (failed.length)
+          log.write(0, {
+            event: "housekeeping-failed",
+            error: `${failed[0]}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ""}`,
+          });
         sweepResults(paths.requests);
       } catch (error) {
         log.write(0, { event: "housekeeping-failed", error: String(error) });

@@ -31,6 +31,8 @@ case_reset() {
   if [ "$refused" != 1 ] || [ "$(st status "$d")" != done ] || [ "$(gh_open_pr "$b")" != "$pr" ]; then record reset.clean-dir FAIL "setup: #$d $(st status "$d"), #$b PR '$pr', merge refusal observed $refused" "$t0"; prule_clear; return; fi
   local prs_d m_d prs_b; prs_d=$(PULLS_TTL=0 gh_prs "$d"); m_d=$(gh_markers "$d"); prs_b=$(PULLS_TTL=0 gh_prs "$b")
   wait_for 600 test -e "$RUN_DIR/archived.done"   # the archived case needs the serve first
+  # Past the case's deadline the shared serve could not come back up.
+  stopping && { record reset.clean-dir FAIL "out of time before the reset: #$d done, #$b PR #$pr open" "$t0"; prule_clear; return; }
   serve_down
   local n; for n in "$d" "$b"; do rm -rf "$ROOT/objectives/$n.json" "$ROOT/objectives/finished/$n.json" "$ROOT/work/$n"; done
   git -C "$(cfg_get 'c["checkout"]')" worktree prune

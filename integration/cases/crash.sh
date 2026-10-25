@@ -246,10 +246,8 @@ PY
 }
 
 lane_c() {
-  local lane_start suite_stop=$STOP_AT; lane_start=$(now)
-  local STOP_AT=$(( lane_start + 45 * 60 ))
-  # Bash dynamic scope gives all wait, CLI and serve helpers this tighter bound.
-  [ "$STOP_AT" -le "$suite_stop" ] || STOP_AT=$suite_stop
+  local lane_start; lane_start=$(now)
+  # STOP_AT is the lane's deadline (run_case: its table minutes); remote calls share it.
   local HARD_STOP_AT=$STOP_AT
   if ! c_holder; then local CASE=holder; record holder.setup FAIL "holder steps failed to start a serve" "$lane_start"; fi
   c_crash

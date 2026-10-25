@@ -251,6 +251,27 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
 }
 
 /**
+ * The ids `id` depends on, directly or through other items, depth first in
+ * dependency order. A dependency that names no item is skipped.
+ */
+export function ancestors(
+  items: readonly Pick<WorkItem, "id" | "dependencies">[],
+  id: string,
+): Set<string> {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const found = new Set<string>();
+  const visit = (from: string): void => {
+    for (const dependency of byId.get(from)?.dependencies ?? [])
+      if (byId.has(dependency) && !found.has(dependency)) {
+        found.add(dependency);
+        visit(dependency);
+      }
+  };
+  visit(id);
+  return found;
+}
+
+/**
  * Stable topological order of the items: ties follow plan order. Items in a
  * cycle, or with unknown dependencies, are left out and returned in `cycle`.
  */
@@ -571,17 +592,10 @@ function checkCoverageShape(
         item.id,
       );
     if (item.kind === "qa" && integrated) {
-      const ancestors = new Set<string>();
-      const visit = (id: string): void => {
-        if (ancestors.has(id)) return;
-        ancestors.add(id);
-        for (const dependency of byId.get(id)?.dependencies ?? [])
-          visit(dependency);
-      };
-      for (const dependency of item.dependencies) visit(dependency);
+      const reached = ancestors(items, item.id);
       const outside = items.filter(
         (candidate) =>
-          (candidate.kind ?? "work") === "work" && !ancestors.has(candidate.id),
+          (candidate.kind ?? "work") === "work" && !reached.has(candidate.id),
       );
       if (outside.length)
         found(

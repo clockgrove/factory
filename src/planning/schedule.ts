@@ -1,4 +1,4 @@
-import { ownsPath } from "./graph.js";
+import { ancestors, ownsPath } from "./graph.js";
 import type { Plan, WorkItem } from "./types.js";
 
 /**
@@ -164,14 +164,14 @@ export function peerNotes<Note extends RoutedNote>(
   notesByItem: ReadonlyMap<string, readonly Note[]>,
   item: WorkItem,
 ): (Note & { from: string })[] {
-  const ancestors = dependencyClosure(plan, item);
+  const upstream = ancestors(plan.items, item.id);
   const routed: (Note & { from: string })[] = [];
   for (const producer of plan.items) {
     if (producer.id === item.id) continue;
     for (const note of notesByItem.get(producer.id) ?? []) {
       if (note.kind === "verification" || note.kind === "design") continue;
       if (
-        ancestors.has(producer.id) ||
+        upstream.has(producer.id) ||
         note.consumers.includes(item.id) ||
         note.paths.some((path) => ownsPath(path, item.ownedPaths))
       )
@@ -196,20 +196,4 @@ export function objectiveNotes<Note extends RoutedNote>(
       from: producer.id,
     })),
   );
-}
-
-/** Every item `item` depends on, directly or transitively. */
-function dependencyClosure(
-  plan: Pick<Plan, "items">,
-  item: WorkItem,
-): Set<string> {
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const seen = new Set<string>();
-  const pending = [...item.dependencies];
-  for (let id = pending.pop(); id !== undefined; id = pending.pop()) {
-    if (seen.has(id)) continue;
-    seen.add(id);
-    pending.push(...(byId.get(id)?.dependencies ?? []));
-  }
-  return seen;
 }

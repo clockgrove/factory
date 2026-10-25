@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isObject } from "../checked.js";
-import type { CoreConfig } from "../config.js";
+import type { CoreConfig, SandboxConfig } from "../config.js";
 import { ADOPTS, hold, type Step, type Workflow } from "../engine.js";
 import { deliveryChange, profilesLacking } from "../planning/plan.js";
 import type { Plan } from "../planning/types.js";
@@ -92,6 +92,7 @@ export interface ProfileWorker {
 export function profileWorker(
   provider: ProviderConfig,
   worktreeRead: boolean,
+  sandboxNetwork: SandboxConfig["network"],
 ): ProfileWorker {
   const worker = resolvedProvider(provider).worker;
   switch (worker.kind) {
@@ -110,7 +111,7 @@ export function profileWorker(
         model: settings.model,
         effort: settings.effort,
         tools: claudeWorkerTools(settings, worktreeRead),
-        network: "off",
+        network: sandboxNetwork === "host" ? "host" : "off",
       };
     }
     case "copilot":

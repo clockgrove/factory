@@ -15,7 +15,9 @@
  * - Approve: the file's SHA-256 must match, its fields are checked again,
  *   and each issue is created once: found first by its marker on its
  *   body's first line, among the issues Factory's login opened since the
- *   draft was made (docs/reference/steps.md#Idempotence). Once every issue exists, each
+ *   draft was made, and those numbered past what the issue list shows yet,
+ *   so an approval seconds after another finds its issues
+ *   (docs/reference/steps.md#Idempotence). Once every issue exists, each
  *   dependency becomes a blocked-by link, read before it is added. The CLI
  *   keeps no state of its own.
  */
@@ -591,8 +593,8 @@ export interface Published {
  * Publish the reviewed draft's Objectives as issues, each once, then link
  * each dependency as blocked-by. An approval run again (after a crash, or
  * by hand) finds the issues it created, by their markers, among the issues
- * Factory's login opened since the draft was made, and adds only what is
- * missing.
+ * Factory's login opened since the draft was made or numbered past what
+ * the issue list shows yet, and adds only what is missing.
  */
 export async function approveProposal(
   file: string,
@@ -611,11 +613,19 @@ export async function approveProposal(
     );
   try {
     const signal = AbortSignal.timeout(10 * 60_000);
-    const found = await github.issuesByLabel(
+    const listed = await github.issuesByLabel(
       undefined,
       new Date(Date.parse(proposal.createdAt) - CLOCK_SKEW_MS).toISOString(),
       signal,
     );
+    // An approval just before this one may not be in the list yet (#1991).
+    const numbers = new Set(listed.map((issue) => issue.number));
+    const found = [
+      ...listed,
+      ...(await github.issuesPastList(signal)).filter(
+        (issue) => !numbers.has(issue.number),
+      ),
+    ];
     const issues = new Map<string, IssueSummary>();
     for (const objective of proposal.objectives) {
       const existing = await github.markedIssue(

@@ -133,13 +133,35 @@ export type Collection =
       notes: HandoffNote[];
       discovery?: WorkDiscovery;
     }
-  /** The worker's result is wrong; the finding goes back to it. */
-  | { kind: "repair"; finding: string; discovery?: WorkDiscovery }
+  /**
+   * The worker's result is wrong; the finding goes back to it. `staging`:
+   * Factory's own file was refused, the handoff notes or the discovery
+   * proposal (repair.ts `stagingRefusalCorrection`).
+   */
+  | {
+      kind: "repair";
+      finding: string;
+      discovery?: WorkDiscovery;
+      staging?: CollectedStaging;
+    }
   | Held
   | { kind: "retry"; reason: string };
 
-/** A deterministic problem with the worker's result. */
-class WorkFinding extends Error {}
+/**
+ * The private staging files collection reads and can refuse, and the
+ * candidate sets (`candidates`) media capture reads before it.
+ */
+export type CollectedStaging = "handoff" | "discovery" | "candidates";
+
+/** A deterministic problem with the worker's result; `staging`: in that private staging file. */
+class WorkFinding extends Error {
+  constructor(
+    message: string,
+    readonly staging?: CollectedStaging,
+  ) {
+    super(message);
+  }
+}
 
 /** A check that ends collection with something other than a repair. */
 class CollectionStop extends Error {
@@ -170,7 +192,11 @@ export async function collect(input: CollectInput): Promise<Collection> {
     return await collectResult(input);
   } catch (error) {
     if (error instanceof WorkFinding)
-      return { kind: "repair", finding: error.message };
+      return {
+        kind: "repair",
+        finding: error.message,
+        ...(error.staging ? { staging: error.staging } : {}),
+      };
     if (error instanceof CollectionStop) return error.outcome;
     throw error;
   }
@@ -199,6 +225,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
     if (!(await untracked(".factory-handoff.json")))
       throw new WorkFinding(
         "Handoff manifest must be untracked private staging",
+        "handoff",
       );
     const stopped = await scanStaging(input, [
       { name: ".factory-handoff.json", bytes: await readFile(handoffPath) },
@@ -210,6 +237,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   if (discovery && !(await untracked(".factory-discovery.json")))
     throw new WorkFinding(
       "Discovery manifest must be untracked private staging",
+      "discovery",
     );
   // A collection interrupted after its own commit, or a repair continuing
   // from Factory's earlier commit, is undone to the staged candidate and
@@ -447,19 +475,22 @@ async function readHandoff(
   if (!stat.isFile() || (await realpath(path)) !== resolve(path))
     throw new WorkFinding(
       "Handoff manifest must be a regular private staging file",
+      "handoff",
     );
   if (stat.size > 256 * 1024)
-    throw new WorkFinding("Handoff manifest exceeds 256 KiB");
+    throw new WorkFinding("Handoff manifest exceeds 256 KiB", "handoff");
   let value: unknown;
   try {
     value = JSON.parse(await readFile(path, "utf8"));
   } catch (error) {
     throw new WorkFinding(
       `Handoff manifest is not JSON: ${errorMessage(error)}`,
+      "handoff",
     );
   }
   const decoded = decodeHandoff(value, peers, criterionCount);
-  if (!Array.isArray(decoded)) throw new WorkFinding(decoded.problem);
+  if (!Array.isArray(decoded))
+    throw new WorkFinding(decoded.problem, "handoff");
   return decoded;
 }
 
@@ -470,6 +501,7 @@ async function readDiscovery(path: string): Promise<WorkDiscovery | undefined> {
   if (!stat.isFile() || (await realpath(path)) !== resolve(path))
     throw new WorkFinding(
       "Discovery manifest must be a regular private staging file",
+      "discovery",
     );
   let value: WorkDiscovery;
   try {
@@ -477,11 +509,12 @@ async function readDiscovery(path: string): Promise<WorkDiscovery | undefined> {
   } catch (error) {
     throw new WorkFinding(
       `Discovery manifest is not JSON: ${errorMessage(error)}`,
+      "discovery",
     );
   }
   // The one rule, shared with amendment intake.
   const problem = workDiscoveryProblem(value);
-  if (problem) throw new WorkFinding(problem);
+  if (problem) throw new WorkFinding(problem, "discovery");
   return {
     scope: value.scope,
     reason: value.reason,
@@ -1173,7 +1206,10 @@ function noteFieldProblems(note: Record<string, unknown>): string[] {
       const invalid = note.paths.findIndex((path) => !filePath(path));
       if (invalid >= 0)
         problems.push(
-          `paths[${invalid}] is not a literal repository file path (no directory, .git or .factory- staging path)`,
+          typeof note.paths[invalid] === "string" &&
+            privateStagingPath(note.paths[invalid])
+            ? `paths[${invalid}] (${note.paths[invalid]}) is Factory's private staging, which no note may cite: cite the repository file instead (for a staged media member, its destination)`
+            : `paths[${invalid}] is not a literal repository file path (no directory, .git or .factory- staging path)`,
         );
       if (new Set(note.paths).size !== note.paths.length)
         problems.push("paths has duplicate entries");

@@ -74,8 +74,8 @@ No mocks, fake services, fake providers or scripted responses.
 
 - Tests use real Git repositories, processes and files, and the real `factory serve`.
 - **CI tests** are quick: no mocks and no GitHub, and they may spawn processes. The full CI run takes about 3 minutes; keep it there.
-- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered: a local one in `test/crash.test.mjs`, a GitHub one by the integration tests, which find it from its `crashPoint()` call.
-- **Integration tests** ([integration/](integration/README.md)) are thorough and run on demand, never in CI, against the scratch repository `clockgrove/factory-drill` with real providers. They kill the service at every crash point, cut the network and stop a model mid-turn. They run as bounded groups, each with an expected duration; a run over about 1 hour needs the maintainer's approval. A milestone passes only if its groups finish with no duplicate effect and every hold had a working answer.
+- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered: a local one in `test/crash.test.mjs`; the integration tests sample the GitHub writes that could duplicate or orphan an effect.
+- **Integration tests** ([integration/](integration/README.md)) are thorough and run on demand, never in CI, against scratch repositories with real providers. They kill the service at sampled crash points, cut the network and stop a model mid-turn. A suite runs all its cases at once and stops itself within 60 minutes. A milestone passes only if the main suite finishes with no duplicate effect and every hold had a working answer.
 - Don't add unit tests of private helpers or provider/profile matrices.
 
 ## Model contracts

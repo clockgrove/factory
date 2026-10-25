@@ -5,6 +5,9 @@
   st.py ROOT phase N             status, or "hold:<step>" while a question is open (the oldest)
   st.py ROOT hold N [STEPGLOB]   the oldest open hold (matching STEPGLOB) as JSON, or null
   st.py ROOT holds N             every open hold as a JSON list, oldest first
+  st.py ROOT active N STEPGLOB  current attempts as [{step, startedAt, run, id}]
+  st.py ROOT auto-answers N POLICY [DECISIONS]  authorized answer options as JSON lines
+  st.py ROOT answer-state N CHOICE [SINCE]  accepted, refused, pending or none, from structured records
   st.py ROOT has N PATH          1 when the dotted path exists (even holding null), else 0
   st.py ROOT maxconc STEPGLOB N...  most steps matching STEPGLOB running at once across
                                  Objectives N..., from their start/outcome log events
@@ -13,6 +16,8 @@
   st.py ROOT applied N KIND      how many applied requests have KIND in their id/message (JSON count)
   st.py ROOT events N [K=V...]   count log events of Objective N matching every K=V
                                  (V may end in * for a prefix, or start with * for a suffix)
+  st.py ROOT at N first|last [K=V...]  the time of the first or last log event matching every K=V
+                                 (as events), or "" when none
   st.py ROOT started N STEPGLOB  1 when a "start" event exists for a step matching the glob
   st.py ROOT retries N STEPGLOB  max retry count over steps matching the glob (0 when none)
   st.py ROOT starts-since N ISO STEPGLOB  start events at or after ISO for steps matching the glob
@@ -23,6 +28,7 @@ Holds: a build saves a list `holds` (STATE_VERSION 2); an older one saves
 one `hold`. Both read the same here.
 """
 import fnmatch
+import datetime
 import glob
 import json
 import os
@@ -75,6 +81,70 @@ def with_answers(h):
     return h
 
 
+def auto_answers(d, policy, decisions):
+    """Policies choose actual options; criterion overrides require an exact fixture decision."""
+    for h in holds_of(d):
+        options = h.get("options") or []
+        step = h.get("step", "")
+        chosen, text = None, None
+        if "review" in policy and (step.endswith(":review") or step == "final-review"):
+            for option in options:
+                decision = next((entry for entry in decisions
+                                 if entry.get("step") == step
+                                 and entry.get("answer") == option.get("answer")
+                                 and entry.get("arg") == option.get("arg")), None)
+                if decision and option.get("answer") in ("accept", "refuse"):
+                    chosen, text = option, decision.get("text")
+                    break
+        if chosen is None and "more" in policy:
+            chosen = next((o for o in options if o.get("answer") == "more"
+                           and o.get("recommended") and o.get("family") == "retry"), None)
+        if chosen is None and "decide" in policy and step.startswith("decide:"):
+            chosen = next((o for o in options if o.get("answer") == "answer"
+                           and o.get("family") == "answer"), None)
+            text = ("Choose an implementation detail within the Objective's written goal, acceptance "
+                    "criteria, Sources and existing command authority. Do not add authority, relax "
+                    "acceptance or drop capabilities; keep the question open if that is required.")
+        if chosen is None and "d2" in policy and h.get("cause") == "failure":
+            if {o.get("answer") for o in options} == {"retry", "cancel"}:
+                chosen = next(o for o in options if o.get("answer") == "retry")
+        if chosen is None or (chosen.get("needsText") and not (text or "").strip()):
+            continue
+        result = {"id": h["id"], "step": step, "answer": chosen["answer"]}
+        if "arg" in chosen:
+            result["arg"] = chosen["arg"]
+        if text:
+            result["text"] = text
+        yield result
+
+
+def answer_state(root, n, choice, since=None):
+    def matches(request):
+        return (request.get("kind") == "answer" and request.get("issue") == int(n)
+                and request.get("question") == choice["id"]
+                and all(request.get(key) == choice.get(key) for key in ("answer", "arg", "text")))
+
+    after = datetime.datetime.fromisoformat(since.replace("Z", "+00:00")) if since else None
+    found = "none"
+    for event in events(root, n):
+        if event.get("event") != "request" or not matches(event.get("request") or {}):
+            continue
+        if after and datetime.datetime.fromisoformat(event["at"].replace("Z", "+00:00")) < after:
+            continue
+        found = "accepted" if event.get("message") == "ok" and not event.get("code") else "refused"
+    if found != "none":
+        return found
+    for path in glob.glob(os.path.join(root, "requests", "*.json")):
+        try:
+            with open(path) as file:
+                request = json.load(file)
+        except FileNotFoundError:
+            continue
+        if matches(request.get("request") or {}):
+            return "pending"
+    return "none"
+
+
 def match(value, want):
     value = "" if value is None else str(value)
     if want.endswith("*") and not want.startswith("*"):
@@ -99,7 +169,7 @@ def walk(obj):
 def main():
     root, cmd, n = sys.argv[1], sys.argv[2], sys.argv[3]
     rest = sys.argv[4:]
-    d = load(root, n) if cmd not in ("events", "started", "unreadable", "maxconc", "starts-since") else None
+    d = load(root, n) if cmd not in ("events", "at", "started", "unreadable", "maxconc", "starts-since") else None
     if cmd == "status":
         print("none" if d is None else ("unreadable" if d == "unreadable" else d.get("status")))
     elif cmd == "phase":
@@ -114,6 +184,16 @@ def main():
         print(json.dumps(hs[0] if hs else None))
     elif cmd == "holds":
         print(json.dumps(holds_of(d)))
+    elif cmd == "active":
+        attempts = d.get("attempts", {}) if isinstance(d, dict) else {}
+        print(json.dumps([dict(attempt, step=step) for step, attempt in attempts.items()
+                          if fnmatch.fnmatchcase(step, rest[0])]))
+    elif cmd == "auto-answers":
+        decisions = json.loads(rest[1]) if len(rest) > 1 else []
+        for choice in auto_answers(d, rest[0].split(), decisions):
+            print(json.dumps(choice))
+    elif cmd == "answer-state":
+        print(answer_state(root, n, json.loads(rest[0]), rest[1] if len(rest) > 1 else None))
     elif cmd == "has":
         cur, ok = d if isinstance(d, dict) else None, True
         for part in rest[0].split("."):
@@ -152,6 +232,11 @@ def main():
     elif cmd == "events":
         conds = [c.split("=", 1) for c in rest]
         print(sum(1 for e in events(root, n) if all(match(e.get(k), v) for k, v in conds)))
+    elif cmd == "at":
+        conds = [c.split("=", 1) for c in rest[1:]]
+        times = sorted(str(e["at"]) for e in events(root, n)
+                       if "at" in e and all(match(e.get(k), v) for k, v in conds))
+        print((times[0] if rest[0] == "first" else times[-1]) if times else "")
     elif cmd == "started":
         print(1 if any(e.get("event") == "start" and fnmatch.fnmatchcase(str(e.get("step")), rest[0]) for e in events(root, n)) else 0)
     elif cmd == "starts-since":

@@ -33,7 +33,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    - the tools on the PATH;
    - each provider's SDK and login;
    - GitHub access and push;
-   - merge commits, required checks, and a recommendation to require branches to be up to date;
+   - merge commits, required checks, required reviews, and a recommendation to require branches to be up to date;
    - which installation serves the repository, if any.
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
@@ -295,6 +295,19 @@ How much an Objective may correct itself before asking. These are frozen with it
 
 Running out holds with `more`, `replan` and `cancel`. An amendment past `planningRevisions` holds with `more` (allow as many again and plan it), `refuse` (reject it) and `cancel`.
 
+### Spend ceiling
+
+Model spend can have a limit per Objective and per day, in tokens, list cost or both. No limit is set by default. These are frozen with the Objective's configuration.
+
+| Setting (`autonomy.spend`) | Counts                                                                    |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `perObjective.tokens`      | tokens of this Objective's model calls                                    |
+| `perObjective.cents`       | their list cost, in whole cents                                           |
+| `perDay.tokens`            | tokens of every Objective's model calls in this installation, per UTC day |
+| `perDay.cents`             | their list cost, in whole cents, per UTC day                              |
+
+`factory setup --objective-tokens N --objective-cents N --day-tokens N --day-cents N` sets them. When a limit is reached, the Objective holds before its next model call with `more` (allow as much again) and `cancel`; calls already running finish. A cost limit counts only calls whose provider reports a cost. `factory status` shows each Objective's spend against its limits, and the spend today.
+
 ## Amend a plan
 
 An accepted plan can grow while it runs. An amendment revises the plan for work it lacks, passes the plan checks and a new independent plan review, and, once accepted, is the plan from then on, posted as the plan comment. Each one uses a planning revision (see [Allowances](#allowances)). One amendment is planned at a time, and no other step starts while it is pending.
@@ -312,6 +325,7 @@ factory cancel N                          # ends it, closes its PRs and the issu
 factory reset N                           # rebuild its state from GitHub: its plan comment, PRs and report
 ```
 
+- **Pause from a phone.** Comment `/factory queue pause` on any running Objective's issue (it needs write access to the repository) and the whole queue pauses within one queue poll: no new step starts, running calls finish, and nothing is lost. `/factory queue resume` there, or `factory queue resume` on the machine, resumes it; the latest pause or resume from either place wins. While it is paused, each running Objective's status comment says so and who paused it.
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
 - **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.
@@ -320,7 +334,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 
 ## Sandbox and security
 
-- **The sandbox.** Every command a worker causes (validation, setup and probes) runs in bubblewrap: a read-only host, a private HOME and /tmp, no host credentials or sockets, and no network. The exception is the dependency install, which reaches the network when `sandbox.network` is `package-install`. A Codex worker's own shell runs in Codex's sandbox under the same limits, with network `off` or `host`.
+- **The sandbox.** Every command a worker causes (validation, setup and probes) runs in bubblewrap: a read-only host, a private HOME and /tmp, no host credentials or sockets, and no network. The exception is the dependency install, which reaches the network when `sandbox.network` is `package-install`. Where validation needs a service on the host (a database, a browser), `sandbox.network: host` (`factory setup --sandbox-network host`) runs every sandboxed command, a Claude worker's shell included, on the host's network; [Security](reference/security.md) lists what that exposes. A Codex worker's own shell runs in Codex's sandbox under the same limits, with network `off` or `host`.
 - **Opting out.** `sandbox.required: false`, written by hand in the configuration, is your explicit choice to run without the sandbox on a host without bubblewrap: validation commands (a Work Item's validation, final validation, QA and a Claude or Copilot worker's Validate) then run unsandboxed with your file access, and setup warns. The same setting lets Factory run as root, except a Claude worker's own shell, which never runs without the sandbox or as root. Leave it unset unless the host can't have bubblewrap.
 - **Credentials stay with the service.** Workers never see them. Only the variables in `policy.allowedSecretNames` reach a worker, and their values are redacted from everything Factory writes.
 - **Checked before every push.** Every blob a result adds is searched for those secret values. A match pushes nothing and holds.
@@ -341,9 +355,13 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Repository memory.** Factory records what each finished Objective learned, and shows the relevant records, as advisory data, to planning, workers and reviews of every Objective. The planner may also look up memory, files and tracked paths before it plans. `planning.context.memory: false` turns memory off for the installation; the lookups stay.
 - **Dream.** `factory dream` proposes a playbook from settled Objectives; `--preview` only shows the input it would read. `--file PATH --approve SHA256` or `--reject SHA256` decides a proposal, and `--show` shows the playbook in force.
 
-## One installation per repository
+## One installation per repository and Project
 
-One installation serves a repository at a time, on one machine. Factory records which one in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
+One installation serves a repository at a time, on one machine, and one installation serves a Project: of two repositories that share a Project, only one is served at a time. Factory records which installation serves a repository in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository, or the other repository on the Project and the installation that holds it, and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
+
+The Project check runs when the installation starts: it reads the repositories of the Project's open issues from GitHub, then each one's record. If GitHub can't list them within a few seconds, or a record can't be read, the installation starts anyway and logs it.
+
+When another installation serves the Project, stop it first. If it can't stop cleanly, because its machine is gone or its state was wiped, take its repository over on a machine set up for that repository (`factory serve --repo OTHER/NAME --take-over`), then stop that one cleanly, which frees it.
 
 To move to another machine:
 
@@ -356,7 +374,7 @@ To move to another machine:
 
 3. On the new machine, run `factory reset N` for each Objective that was in flight (see A new machine in [Stopping and recovery](#stopping-and-recovery)). The new installation has no state for them, so until then it doesn't run them or answer their questions; `factory queue list` lists them as inert with that command.
 
-Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again.
+Take over only from an installation that is really stopped. A running one stops at its next check of the record, up to one queue poll later (30 s by default). An installation that can't check the record for 10 polls in a row stops too, and resumes once it can check again. `--take-over` takes a repository, never a Project: a take-over of a repository on a Project another installation serves is refused like any other start.
 
 ## Upgrade
 

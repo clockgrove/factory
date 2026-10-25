@@ -19,6 +19,7 @@ import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
 import { installationPaths } from "./paths.js";
+import { hostVersion, nodePin, nodeSatisfies } from "./planning/executables.js";
 import { networkToolOfCommand } from "./planning/facts.js";
 import {
   CLAUDE_LOGIN_CREDENTIALS,
@@ -70,6 +71,7 @@ export async function readiness(
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
+    ...(await nodeVersionCheck(config.checkout)),
     ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
   ];
@@ -211,6 +213,41 @@ function hostChecks(
       });
   }
   return checks;
+}
+
+/** Whether the PATH's node satisfies the checkout's Node pin, when it has one. */
+async function nodeVersionCheck(checkout: string): Promise<ReadinessCheck[]> {
+  const pin = await nodePin(async (path) => {
+    try {
+      return readFileSync(join(checkout, path), "utf8");
+    } catch {
+      return undefined;
+    }
+  });
+  const node = executable("node");
+  if (!pin || !node) return [];
+  const version = await hostVersion(node, process.env.PATH ?? "/usr/bin:/bin");
+  if (version === undefined)
+    return [
+      {
+        name: "node version",
+        status: "warn",
+        detail: `\`node --version\` gave no exact version, so the Node pin ${pin.range} (${pin.source}) is not checked`,
+      },
+    ];
+  return [
+    nodeSatisfies(version, pin)
+      ? ok(
+          "node version",
+          `${version} satisfies the Node pin ${pin.range} (${pin.source})`,
+        )
+      : {
+          name: "node version",
+          status: "warn",
+          detail: `The target pins Node ${pin.range} (${pin.source}), but node on the PATH is ${version} (${node}); plans whose final commands run node, npm, npx or pnpm hold on it`,
+          fix: "Put a matching node first on the PATH the service runs with, or change the pin",
+        },
+  ];
 }
 
 /** A module the provider imports, resolvable from Factory. */
@@ -449,9 +486,22 @@ async function repositoryChecks(
         : {
             name: "required checks",
             status: "warn",
-            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes`,
+            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes and any checks that register on it pass`,
             fix: `Require the CI checks on ${branch} in a ruleset`,
           },
+    );
+    const reviews = await github.requiredReviews(branch);
+    const rules = reviews.map((review) => review.rule).join(" and ");
+    const count = Math.max(0, ...reviews.map((review) => review.count));
+    checks.push(
+      reviews.length
+        ? {
+            name: "required reviews",
+            status: "warn",
+            detail: `${branch} requires ${count} approving review${count === 1 ? "" : "s"} (${rules}), so every Factory PR waits for someone other than ${login} to approve it. A bypass doesn't help: GitHub still reports the PR blocked on the review`,
+            fix: `Require no approving reviews on ${branch}`,
+          }
+        : ok("required reviews", `${branch} requires no approving review`),
     );
     if (config.tracking.enabled) {
       const missing = await offeredTypes(github).then(
@@ -564,9 +614,11 @@ function validationEnvironment(
   const sandbox = sandboxStatus(config.sandbox);
   return {
     network:
-      config.sandbox.network === "package-install"
-        ? `package-install: only the script-disabled dependency install reaches the network${sandbox.installNetwork ? ` (${sandbox.installNetwork})` : ""}`
-        : "off: no command reaches the network",
+      config.sandbox.network === "host"
+        ? "host: every command shares the host's network, including its loopback services"
+        : config.sandbox.network === "package-install"
+          ? `package-install: only the script-disabled dependency install reaches the network${sandbox.installNetwork ? ` (${sandbox.installNetwork})` : ""}`
+          : "off: no command reaches the network",
     sandbox: `${sandbox.mode}: private HOME and /tmp, read-only host, no host credentials or sockets`,
     bootstrap: existsSync(join(config.checkout, "pnpm-lock.yaml"))
       ? "pnpm install --frozen-lockfile --ignore-scripts"

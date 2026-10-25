@@ -43,6 +43,7 @@ import {
   type ReviewArtifactSelector,
 } from "./review/artifacts.js";
 import { localRootRefusal, real } from "./sandbox.js";
+import type { SpendLimits } from "./spend.js";
 import { DEFAULT_COMMAND_TIMEOUT_SECONDS } from "./validate.js";
 
 /** The installation's configuration, checked once when it's loaded. */
@@ -102,6 +103,8 @@ export interface CoreConfig {
   autonomy: {
     /** What an Objective may spend before Factory asks (allowances.ts). */
     allowances: Allowances;
+    /** Model spend per Objective and per day before Factory asks (spend.ts); absent: no limit. */
+    spend?: SpendLimits;
     /**
      * Operator variables (names in policy.allowedSecretNames) that must be
      * set before planning starts; the check holds while one isn't.
@@ -208,8 +211,11 @@ export interface SandboxConfig {
    * only Factory's exact script-disabled dependency installs
    * (`pnpm install --frozen-lockfile --ignore-scripts`, `npm ci
    * --ignore-scripts`) reach it, to fetch packages a cold store lacks.
+   * `host`: every sandboxed command (validation, installs and a Claude
+   * worker's shell) shares the host's network namespace, for validation
+   * that needs a service on the host such as a database or a browser.
    */
-  network: "off" | "package-install";
+  network: "off" | "package-install" | "host";
   /**
    * A directory of its own for package-manager caches, shared by sandboxed
    * commands: the pnpm store and metadata cache and the npm cache. Only a
@@ -306,7 +312,7 @@ const sandboxEnvironment: Check<Record<string, string>> = (
 
 const sandboxSection = object({
   required: flag(true),
-  network: oneOf(["off", "package-install"] as const, "off"),
+  network: oneOf(["off", "package-install", "host"] as const, "off"),
   packageStore: optional<string>((value, path, problems) => {
     if (absolute(value)) return value;
     problems.push(`${path} must be an absolute, normalized directory path`);
@@ -463,6 +469,9 @@ const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const WITHHELD_NAME = /^(GH|GITHUB|GIT|SSH)_/i;
 
 /** `autonomy.requiredEnvironment`: distinct variable names a worker can get. */
+/** A spend limit: whole tokens, whole cents of list cost, or both. */
+const limit = object({ tokens: optional(whole(1)), cents: optional(whole(1)) });
+
 const environmentNames: Check<string[]> = (value, path, problems) => {
   const names = strings(value, path, problems);
   if (
@@ -557,6 +566,9 @@ export function loadConfig(repository: string): CoreConfig {
               whole(0, fallback),
             ]),
           ) as Record<keyof Allowances, Check<number>>,
+        ),
+        spend: optional(
+          object({ perObjective: optional(limit), perDay: optional(limit) }),
         ),
         requiredEnvironment: environmentNames,
       }),

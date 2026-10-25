@@ -2,6 +2,7 @@ import type { ProfileWorker } from "../providers/selection.js";
 import { errorMessage } from "../text.js";
 import {
   coverageCriterion,
+  MEDIA_ID_PATTERN,
   ownsPath,
   sourceLines,
   validValidationCommand,
@@ -281,7 +282,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
       items: {
         ...text,
         description:
-          "Literal repository-relative files or trailing-slash directory prefixes; no wildcard, absolute path, empty, dot, parent or whitespace-padded components.",
+          'Literal repository-relative files or trailing-slash directory prefixes, each named in full (a new file too: choose its name); no wildcard, placeholder, < > " |, absolute path, empty, dot, parent or whitespace-padded components.',
       },
     },
     newPackages: {
@@ -359,9 +360,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
           expectedOutputRoles: {
             type: "array",
             minItems: 1,
-            items: text,
+            items: { ...text, pattern: MEDIA_ID_PATTERN },
             description:
-              "Roles of staged media outputs, never code, tests or documentation categories.",
+              "Roles of staged media outputs, never code, tests or documentation categories. Each is an id of letters, digits, - and _ (such as model or preview-image): the worker's manifest names members by these exact roles.",
           },
           // Numeric bounds are not supported by every structured-output grammar.
           // A decimal pattern enforces positivity before strict safe-integer decoding.
@@ -499,11 +500,19 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
   };
   // Exit items the planner extracts from cited sources. Each names its exact
   // line range and is either proved like an Objective obligation or left out
-  // with a reason that cites Objective lines.
+  // with a reason that cites Objective lines. Only the Objective's pinned
+  // Sources hold them, never the Objective or context, which decoding
+  // refuses: with none, the list is empty.
+  const obligationSources = [...sources.keys()].filter(
+    (at) => sources[at]!.path !== "OBJECTIVE" && !sources[at]!.context,
+  );
   const sourceObligationsSchema: Schema = {
     type: "array",
+    ...(obligationSources.length ? {} : { maxItems: 0 }),
     items: strict({
-      sourceIndex: integer(sources.length),
+      sourceIndex: obligationSources.length
+        ? { type: "integer", enum: obligationSources }
+        : integer(sources.length),
       firstLineIndex: integer(),
       lastLineIndex: integer(),
       statement: {

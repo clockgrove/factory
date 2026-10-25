@@ -52,6 +52,8 @@ export interface WorkPromptInput {
   fixedScripts: readonly string[];
   /** The Objective's exact package-manager pin, when it has one. */
   packageManagerUpdate?: string;
+  /** The installation's finalValidation.ciOnlyCommands: never run in the sandbox. */
+  ciOnlyCommands?: readonly string[];
   repair?: RepairContext;
   /** A media item's repair: whether the previous attempt's candidate staging is still in the checkout (set by prepareWorkPrompt). */
   staging?: boolean;
@@ -431,6 +433,9 @@ function renderWorkPrompt(
     `\n\n${packageManagerInstructions(input.packageManagerUpdate)}` +
     (input.fixedScripts.length
       ? `\n\nFixed acceptance scripts and guarded hook names: ${input.fixedScripts.join(", ")}. Preserve existing bodies and pre/post hooks exactly as in the accepted base, or the established predecessor for scripts created earlier in this Objective; validation rejects changes. For an existing script, put new checks in files its body already runs. Create a script absent from both base and predecessor only for an exact source-declared acceptance command in this item's validation, with owned root package.json, no pre/post hooks and no nested npm/pnpm calls. Base observations, inference and model prose do not authorize scripts.`
+      : "") +
+    (input.ciOnlyCommands?.length
+      ? `\n\nCI-only commands, which need network and run only in CI: ${JSON.stringify(input.ciOnlyCommands)}. This checkout has no network, so never run them here; they fail offline. Leave them to CI.`
       : "");
   const mediaInstructions = mediaContract(item, assets, input.keptSelection);
   const inputInstructions = assets.length

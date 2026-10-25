@@ -9,7 +9,7 @@ import type { Args, Command } from "./shared.js";
 export const spec: Command = {
   args: "",
   flags: { provider: "value", "take-over": "switch" },
-  help: "Run the service (the only writer of state); new Objectives use --provider NAME, else defaultProvider. One installation serves a repository: another one is refused, naming it; --take-over takes the repository from an installation that is stopped for good",
+  help: "Run the service (the only writer of state); new Objectives use --provider NAME, else defaultProvider. One installation serves a repository and its Project: another one is refused, naming it; --take-over takes the repository from an installation that is stopped for good",
   run: ({ repository, paths, args }) => serveCommand(repository, paths, args),
 };
 

@@ -71,6 +71,21 @@ How much an Objective may correct itself unattended is `autonomy.allowances` (al
 - `status` shows each allowance as used/allowed, with grants, and repairs per repair path.
 - **`autonomy.requiredEnvironment`** names operator variables (each also in `policy.allowedSecretNames`, and none starting `GH_`, `GITHUB_`, `GIT_` or `SSH_`, which workers never receive) that must be set, non-empty, in the service's environment before planning. The check step tests them first; a missing one holds the whole Objective, naming only the missing names, with `retry` (after setting it and restarting the service) and `cancel`. Values are never read past that test, logged or shown.
 
+### Spend ceiling
+
+How much model spend an Objective may reach unattended is `autonomy.spend` (spend.ts), frozen with the rest of its configuration. No limit is set by default.
+
+| Setting (`autonomy.spend`) | What it counts                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| `perObjective.tokens`      | Tokens of every model call of this Objective.                                   |
+| `perObjective.cents`       | List cost of those calls, in whole cents.                                       |
+| `perDay.tokens`            | Tokens of every model call of every Objective of the installation, per UTC day. |
+| `perDay.cents`             | List cost of those calls, in whole cents, per UTC day.                          |
+
+- **Charged per call.** Each model call's `model-usage` event (see [Model usage](run-log.md#model-usage)) adds its total tokens and its reported cost to the Objective's `state.spend` and to the installation's day, `spend.json` in the state directory, which starts again at 0 on a new UTC day. A count the provider doesn't report adds nothing, so a cost limit counts only the calls of providers that report cost; a token limit counts every call that reports tokens. A replan keeps the spend.
+- **Reaching a limit holds.** Before a model step starts (a planner, reviewer or worker step: `resource` `planner` or `worker`), the engine compares each configured limit with what it has used. At or past one, the Objective holds before that step, Objective-wide, so no other step starts either; calls already running finish and are charged. The question names each limit reached with what it has used, and offers `more` (as much again of each limit reached) and `cancel`. The engine applies `more` itself: an Objective limit's grant lasts for the Objective, a day limit's for that day only (`state.spend.granted`, `state.spend.dayGranted`). An interrupted attempt passed the check when it started, so it runs again without asking. On a new UTC day an Objective held at the day limit stays held until answered; `more` then grants nothing and it goes on.
+- `status` shows each Objective's spend, and each limit as used of allowed with grants; and the installation's spend today.
+
 ### Execution profiles
 
 `execution.profiles.<id> = {provider, description, selectionHints?}` names a configured provider's worker the planner may assign to a Work Item. The planner and the plan review are offered the ids with their descriptions and each worker's kind, model, effort, tools and network (planning/steps.ts `offeredProfiles`, providers/selection.ts `profileWorker`), and every work item gets one with a reason. The item's worker runs on that provider's worker settings; planning, reviews and the rest stay on the Objective's provider, and a usage-limit `switch` moves only those, so a limit on a provider the Objective doesn't run on (a profile's) offers only `wait` and `cancel`. Without profiles every item runs on the Objective's provider.

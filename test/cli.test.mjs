@@ -184,6 +184,43 @@ test("pause, drain and resume, per Objective and for the queue, survive restarts
   await stopped(service);
 });
 
+test("a /factory queue comment pauses and resumes the same queue as the CLI", async () => {
+  const { commentRequest } = await import("../dist/github-sync.js");
+  const { writeRequest } = await import("../dist/requests.js");
+  const inst = installation();
+  seed(inst, 54);
+  // What the sync writes for a writer's comment on #54 (github-sync `request`).
+  const comment = (id, body) =>
+    writeRequest(
+      inst.requests,
+      commentRequest(54, { body, createdAt: new Date().toISOString() }, false),
+      "octo",
+      `comment-${id}`,
+      "github",
+    );
+  // Sent before the service starts, so it applies before #54's first step.
+  comment(1, "/factory queue pause");
+  const service = serve(inst);
+  await until(() => status(inst).queue.mode === "paused", "paused");
+  assert.equal(status(inst).queue.by, "octo");
+  // Kept on #54, so the sync replies there.
+  await until(
+    () => stateOf(inst, 54).appliedRequests.some((r) => r.id === "comment-1"),
+    "the reply recorded",
+  );
+  assert.match(
+    status(inst).objectives[0].nextAction.reason,
+    /paused by octo.*`\/factory queue resume`/,
+  );
+  // One queue mode: the CLI resumes what a comment paused, and back.
+  assert.equal(cli(inst, "queue", "resume").code, 0);
+  assert.equal(status(inst).queue.mode, "running");
+  assert.equal(cli(inst, "queue", "pause").code, 0);
+  comment(2, "/factory queue resume");
+  await until(() => status(inst).queue.mode === "running", "resumed");
+  await stopped(service);
+});
+
 test("unknown and misplaced options are refused with the fix", () => {
   const inst = installation();
   const cases = [

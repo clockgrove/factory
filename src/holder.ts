@@ -12,6 +12,11 @@
  * record names someone else, until a deliberate `--take-over`. There is no
  * heartbeat or expiry: a sleeping machine never loses the repository by
  * accident, and the one that took over is told at its next check.
+ *
+ * The Project is single player too: before it takes the record, `serve`
+ * reads the record of each other repository on the Project
+ * (`projectHolder`), through origin's scheme, host and credentials, and is
+ * refused while one names another installation.
  */
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -20,7 +25,7 @@ import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
-import { gitEnvironment, remoteGit } from "./git.js";
+import { gitEnvironment, remoteGit, siblingUrl } from "./git.js";
 import { errorMessage } from "./text.js";
 
 export const HOLDER_REF = "refs/factory/holder";
@@ -148,18 +153,19 @@ function listedSha(listed: string): string | undefined {
   return undefined;
 }
 
-/** The holder record on origin, read with `ls-remote` (no REST call). */
-async function readHolder(context: Context): Promise<Read> {
-  const sha = listedSha(
-    await remote(context, ["ls-remote", "origin", HOLDER_REF]),
-  );
+/**
+ * The holder record on origin, or on `from` (another repository's URL),
+ * read with `ls-remote` (no REST call).
+ */
+async function readHolder(context: Context, from = "origin"): Promise<Read> {
+  const sha = listedSha(await remote(context, ["ls-remote", from, HOLDER_REF]));
   if (!sha) return {};
   await remote(context, [
     "fetch",
     "--quiet",
     "--no-tags",
     "--no-write-fetch-head",
-    "origin",
+    from,
     HOLDER_REF,
   ]);
   const message = await local(context, ["log", "-1", "--format=%B", sha]);
@@ -285,6 +291,36 @@ export async function currentHolder(
         mine: record.installation === installationId(context.root, false),
       }
     : undefined;
+}
+
+/** Another installation's record on another repository of the Project. */
+export interface ProjectHolder {
+  repository: string;
+  record: HolderRecord;
+}
+
+/**
+ * Single player per Project: the first of the Project's other
+ * `repositories` whose holder record names another installation. A
+ * repository whose record can't be read is in `unread`, with the reason.
+ */
+export async function projectHolder(
+  context: Context,
+  repositories: readonly string[],
+): Promise<{ holder?: ProjectHolder; unread: string[] }> {
+  const installation = installationId(context.root)!;
+  const unread: string[] = [];
+  for (const repository of repositories) {
+    try {
+      const url = await siblingUrl(context.checkout, repository);
+      const { record } = await readHolder(context, url);
+      if (record && record.installation !== installation)
+        return { holder: { repository, record }, unread };
+    } catch (error) {
+      unread.push(`${repository} (${errorMessage(error).split("\n")[0]})`);
+    }
+  }
+  return { unread };
 }
 
 /**

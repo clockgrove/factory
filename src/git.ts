@@ -634,6 +634,32 @@ export async function originBound(
 }
 
 /**
+ * The URL of `other`, another GitHub repository, reached like origin:
+ * origin's fetch URL (after insteadOf) with `other`'s owner and name, so
+ * the operator's GitHub credentials serve it. Use it with `remoteGit`,
+ * which checks origin first.
+ */
+export async function siblingUrl(
+  checkout: string,
+  other: string,
+): Promise<string> {
+  const origin = (
+    await operatorGit(checkout, ["remote", "get-url", "origin"])
+  ).trim();
+  const scp = /^git@github\.com:/i.exec(origin)?.[0];
+  let url: string;
+  if (scp) url = `${scp}${other}.git`;
+  else {
+    const parsed = new URL(origin);
+    parsed.pathname = `/${other}.git`;
+    url = parsed.href;
+  }
+  if (remoteRepository(url) !== other.toLowerCase())
+    throw new Error(`Can't reach ${other} the way origin is reached`);
+  return url;
+}
+
+/**
  * Fetch the target and return its default branch head, through
  * `remoteGit`: origin must still name `repository`.
  *

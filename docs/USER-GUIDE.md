@@ -72,6 +72,7 @@ factory setup --repo OWNER/NAME --provider codex --codex-network host --reviewer
 - **Usage limits.** When a provider hits its usage limit, the hold offers `wait` and `switch NAME`, which moves the Objective to another configured provider.
 - **Choosing at start:** `factory run N --provider NAME` picks the provider for one Objective; `factory serve --provider NAME` picks it for all new work.
 - **Configuration changes.** A change to the configuration holds a running Objective once, with `adopt` (continue on the new configuration), `switch NAME` and `cancel`. Once an Objective has a plan, a change to `delivery.kind` can't be adopted: cancel the Objective and queue it again, or set it back, restart and answer `retry`. Host settings (limits, sandbox caps, the queue) change without asking.
+- **Managed workers.** The OpenAI Agents and Claude Managed Agents workers are in the code but **parked**: they aren't live-qualified, so don't configure them yet.
 
 ## Write an Objective
 

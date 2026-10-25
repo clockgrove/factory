@@ -340,6 +340,7 @@ export async function workStep(
         keepAll,
       );
 
+    const spent = fact(state, "spend", item.id);
     // A repair continues the item's worker conversation when it can.
     const conversation = retained(
       state,
@@ -360,7 +361,7 @@ export async function workStep(
         changes: () => changedFiles(worktree, signal),
       },
     );
-    const { session, ...result } = await worker
+    const { spend, session, ...result } = await worker
       .run({
         worktree,
         prompt: prepared.prompt,
@@ -376,6 +377,8 @@ export async function workStep(
         activity: activity.report,
         output: activity.output,
         runFile: context.runFile,
+        ...(spent ? { spend: spent } : {}),
+        ...(context.answer ? { answer: context.answer } : {}),
       })
       .finally(async () => {
         // What the worktree holds at the end, shell edits included.
@@ -384,6 +387,8 @@ export async function workStep(
       });
     if (conversation)
       context.keep(facts({ workSession: session ?? null }, item.id));
+    // A paid worker's spend outlives retries, restarts and repairs.
+    if (spend) keepAll = { ...keepAll, ...facts({ spend }, item.id) };
     if (result.kind !== "finished") return withKeep(result, keepAll);
     finished = {
       finalResponse: result.finalResponse,

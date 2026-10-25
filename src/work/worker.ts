@@ -10,7 +10,21 @@ import { type RunFile, redact } from "../log.js";
 import type { WorkItem } from "../planning/types.js";
 import type { Conversation, Session } from "../providers/session.js";
 import type { PromptFacts } from "../providers/usage.js";
-import type { HoldOption, Wait } from "../state.js";
+import type { Answer, HoldOption, Wait } from "../state.js";
+
+/**
+ * What a paid worker has spent on one Work Item across attempts and
+ * repairs, kept in state (`state.kept`) so a ceiling holds across retries
+ * and restarts. `allotments` counts the operator's grants of another
+ * ceiling; `grantedAt` is the answer that granted the last one.
+ */
+export interface WorkerSpend {
+  runs: number;
+  cents: number;
+  tokens: number;
+  allotments: number;
+  grantedAt?: string;
+}
 
 export interface WorkerInput {
   /** The kept worktree for this item; a repair continues in it. */
@@ -33,12 +47,16 @@ export interface WorkerInput {
   activity(event: WorkerActivity): void;
   /**
    * The provider's own stream, each event as it came (an SDK event or
-   * message): the attempt's transcript gets it
+   * message, a hosted session event): the attempt's transcript gets it
    * redacted and bounded (ActivityLog). Streamed deltas are left out.
    */
   output(event: unknown): void;
   /** The attempt's private files (engine.ts StepContext.runFile), for its own Validate's failed output. */
   runFile(kind: string): RunFile;
+  /** The Work Item's spend so far, for workers that bill per run. */
+  spend?: WorkerSpend;
+  /** The answer to this step's last hold, such as `more`. */
+  answer?: Answer;
   /**
    * The item's worker conversation (providers/session.ts): a repair may
    * continue it with only its delta. `prompt` is still the whole request.
@@ -65,6 +83,8 @@ export type WorkerResult = (
       scope?: HoldScope;
     }
 ) & {
+  /** The Work Item's spend after this run, kept in state. */
+  spend?: WorkerSpend;
   /** The conversation to keep after a finished run; absent: none to continue. */
   session?: Session;
 };

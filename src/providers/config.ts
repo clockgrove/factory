@@ -30,7 +30,13 @@ import {
 export const PLANNERS = ["codex", "claude", "copilot"] as const;
 export type PlannerKind = (typeof PLANNERS)[number];
 
-export const WORKERS = ["codex", "claude", "copilot"] as const;
+export const WORKERS = [
+  "codex",
+  "claude",
+  "copilot",
+  "openai-agents",
+  "claude-managed-agents",
+] as const;
 export type WorkerKind = (typeof WORKERS)[number];
 
 /** A worker's settings: `kind` plus the adapter's own fields, checked here. */
@@ -48,6 +54,34 @@ export type WorkerConfig =
       tools: string[];
       /** Seconds without a Copilot event before the run counts as idle. */
       idleSeconds: number;
+    }
+  | {
+      kind: "openai-agents";
+      model: string;
+      effort: "low" | "medium" | "high";
+      containerSize: "small" | "medium" | "large";
+      /** The controller variable (or service credential) holding the API key. */
+      apiKeyEnv: string;
+      timeoutSeconds: number;
+      /** Hosted runs per Work Item before Factory asks (`more` grants as many again). */
+      maxRuns: number;
+      /** Tokens per Work Item, across runs, before Factory asks. */
+      itemBudgetTokens?: number;
+    }
+  | {
+      kind: "claude-managed-agents";
+      agentId: string;
+      agentVersion: number;
+      environmentId: string;
+      workspaceId: string;
+      credentialEnv: string;
+      /** A positive whole-cent list-cost ceiling per session. */
+      budgetCents?: string;
+      timeoutSeconds: number;
+      /** Hosted runs per Work Item before Factory asks (`more` grants as many again). */
+      maxRuns: number;
+      /** List cost per Work Item, across runs, before Factory asks. */
+      itemBudgetCents?: number;
     };
 
 /** A planner with the model choices given; each adapter has defaults. */
@@ -128,7 +162,18 @@ export const COPILOT_TOOLS = [
   "Validate",
 ];
 
+/** A hosted run's limit: well inside the work step's 2-hour deadline. */
+export const MAX_HOSTED_SECONDS = 6000;
+
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** An environment variable's name. */
+const envName: Check<string> = (value, path, problems) => {
+  if (typeof value === "string" && /^[A-Z_][A-Z0-9_]*$/.test(value))
+    return value;
+  problems.push(`${path} must be a name matching ^[A-Z_][A-Z0-9_]*$`);
+  return "";
+};
 
 /**
  * The `providers` and `defaultProvider` settings, with problems appended.
@@ -247,6 +292,12 @@ function modelsSpec(planner: PlannerKind): Spec {
   };
 }
 
+/** Hosted runs end before the work step's 2-hour deadline. */
+const HOSTED = {
+  timeoutSeconds: whole(1, 3600, MAX_HOSTED_SECONDS),
+  maxRuns: whole(1, 3, 100),
+};
+
 /** Each worker kind's settings. */
 const WORKER_SPECS: Record<WorkerKind, Spec> = {
   codex: {
@@ -289,6 +340,33 @@ const WORKER_SPECS: Record<WorkerKind, Spec> = {
         ? COPILOT_TOOLS
         : names(COPILOT_TOOLS, false)(value, path, problems),
     idleSeconds: whole(1, 15 * 60),
+  },
+  "openai-agents": {
+    kind: text(),
+    model: text(),
+    effort: oneOf(["low", "medium", "high"] as const),
+    containerSize: oneOf(["small", "medium", "large"] as const),
+    apiKeyEnv: envName,
+    ...HOSTED,
+    itemBudgetTokens: optional(whole(1)),
+  },
+  "claude-managed-agents": {
+    kind: text(),
+    agentId: text(),
+    agentVersion: whole(1),
+    environmentId: text(),
+    workspaceId: text(),
+    credentialEnv: envName,
+    budgetCents: optional((value, path, problems) => {
+      if (typeof value === "string" && /^[1-9][0-9]*$/.test(value))
+        return value;
+      problems.push(
+        `${path} must be a positive whole-cent string, such as "500"`,
+      );
+      return "";
+    }),
+    ...HOSTED,
+    itemBudgetCents: optional(whole(1)),
   },
 };
 

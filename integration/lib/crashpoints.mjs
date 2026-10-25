@@ -45,8 +45,8 @@ if (!ts) {
 
 // Families with their own groups and scenarios, never the GitHub list:
 // step boundaries (queue, plan, exec), state saves, knowledge and dream
-// (knowledge).
-const LOCAL = [/^engine:\*:/, /^state:/, /^knowledge:/, /^dream:/];
+// (knowledge), managed provider sessions (providers).
+const LOCAL = [/^engine:\*:/, /^state:/, /^knowledge:/, /^dream:/, /^managed:/];
 
 function files(dir, out = []) {
   let entries;

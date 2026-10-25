@@ -136,6 +136,10 @@ function credentialNames(config: CoreConfig): Set<string> {
   const readable = new Set<string>(CLAUDE_LOGIN_CREDENTIALS);
   if (copilotConfigured(config.providers))
     for (const name of COPILOT_SECRETS) readable.add(name);
+  for (const { worker } of Object.values(config.providers))
+    if (worker.kind === "openai-agents") readable.add(worker.apiKeyEnv);
+    else if (worker.kind === "claude-managed-agents")
+      readable.add(worker.credentialEnv);
   return readable;
 }
 

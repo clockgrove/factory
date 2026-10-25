@@ -371,6 +371,28 @@ async function providerChecks(
             ),
       );
     }
+    const credential =
+      worker.kind === "openai-agents"
+        ? worker.apiKeyEnv
+        : worker.kind === "claude-managed-agents"
+          ? worker.credentialEnv
+          : undefined;
+    if (credential) {
+      const present = !!process.env[credential] || loaded(credential, bound);
+      checks.push(
+        present
+          ? ok(
+              `provider ${name}: ${worker.kind} worker`,
+              `${credential} is set`,
+            )
+          : {
+              name: `provider ${name}: ${worker.kind} worker`,
+              status: "blocked",
+              detail: `${credential} is not in the environment or the service's credentials`,
+              fix: `Set ${credential} for the service`,
+            },
+      );
+    }
   }
   return checks;
 }

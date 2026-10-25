@@ -138,7 +138,8 @@ export function overrunQuestion(
 
 /**
  * The engine's open allowance questions, by hold id (`state.kept`): what
- * their `more` grants. Any other `more` (a planning round) is its step's.
+ * their `more` grants. Any other `more` (a planning round, a managed
+ * worker's spend) is its step's.
  */
 const ASKED = "allowances:asked";
 

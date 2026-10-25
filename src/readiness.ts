@@ -19,6 +19,7 @@ import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
 import { installationPaths } from "./paths.js";
+import { hostVersion, nodePin, nodeSatisfies } from "./planning/executables.js";
 import { networkToolOfCommand } from "./planning/facts.js";
 import {
   CLAUDE_LOGIN_CREDENTIALS,
@@ -70,6 +71,7 @@ export async function readiness(
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
+    ...(await nodeVersionCheck(config.checkout)),
     ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
   ];
@@ -211,6 +213,41 @@ function hostChecks(
       });
   }
   return checks;
+}
+
+/** Whether the PATH's node satisfies the checkout's Node pin, when it has one. */
+async function nodeVersionCheck(checkout: string): Promise<ReadinessCheck[]> {
+  const pin = await nodePin(async (path) => {
+    try {
+      return readFileSync(join(checkout, path), "utf8");
+    } catch {
+      return undefined;
+    }
+  });
+  const node = executable("node");
+  if (!pin || !node) return [];
+  const version = await hostVersion(node, process.env.PATH ?? "/usr/bin:/bin");
+  if (version === undefined)
+    return [
+      {
+        name: "node version",
+        status: "warn",
+        detail: `\`node --version\` gave no exact version, so the Node pin ${pin.range} (${pin.source}) is not checked`,
+      },
+    ];
+  return [
+    nodeSatisfies(version, pin)
+      ? ok(
+          "node version",
+          `${version} satisfies the Node pin ${pin.range} (${pin.source})`,
+        )
+      : {
+          name: "node version",
+          status: "warn",
+          detail: `The target pins Node ${pin.range} (${pin.source}), but node on the PATH is ${version} (${node}); plans whose final commands run node, npm, npx or pnpm hold on it`,
+          fix: "Put a matching node first on the PATH the service runs with, or change the pin",
+        },
+  ];
 }
 
 /** A module the provider imports, resolvable from Factory. */

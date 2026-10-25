@@ -36,7 +36,7 @@ The GitHub Project is the source of truth for what is queued.
 
 ## Check at queue time
 
-When the service first sees a queued Objective, it waits for its predecessors (see [Predecessors](#predecessors)), then runs the Objective checks at once (first, that every `autonomy.requiredEnvironment` variable is set: see [Allowances](state.md#allowances)), whether or not a slot is free, within the host-wide `github` cap (`queue.maxActiveObjectives` checks and re-run cleanups at once, in queue order): template sections, pinned Sources that resolve at the default branch, no duplicate headings, and declarations that parse. Planning uses the same function. A checked Objective then waits for a slot.
+When the service first sees a queued Objective, it waits for its predecessors (see [Predecessors](#predecessors)), then runs the Objective checks at once (first, that every `autonomy.requiredEnvironment` variable is set: see [Allowances](state.md#allowances)), whether or not a slot is free, within the host-wide `github` cap (`queue.maxActiveObjectives` checks and re-run cleanups at once, in queue order): template sections, pinned Sources that resolve at the default branch, no duplicate headings, declarations that parse, and the final commands' programs on the host: each is on the PATH, a pinned npm or pnpm is that exact version, and, for a command that runs node, npm, npx or pnpm, the host's node satisfies the Node pin at the default branch (see [Setup](setup.md)). Planning uses the same function. A checked Objective then waits for a slot.
 
 A failed check is a hold. It names each problem and how to fix it, and Status goes to "Needs you". Edit the issue and answer `recheck` to check it again.
 

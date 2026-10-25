@@ -17,6 +17,7 @@ import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { TransientError } from "../dist/github.js";
 import { checkObjective } from "../dist/objective.js";
+import { observeLocalExecutables } from "../dist/planning/executables.js";
 import {
   BaseFiles,
   finalCommands,
@@ -568,6 +569,40 @@ test("the default branch is origin's HEAD, none without one, and a git failure i
   await assert.rejects(
     new BaseFiles(join(directory, "gone"), "HEAD").defaultBranch(),
     TransientError,
+  );
+});
+
+test("the plan check flags a host node outside the target's Node pin, passing over an alias", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-node-pin-"));
+  const git = (...args) =>
+    assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);
+  git("init", "--quiet", "--initial-branch=main");
+  const host = process.versions.node;
+  const pinned = async (engines) => {
+    writeFileSync(join(directory, ".nvmrc"), "lts/*\n");
+    writeFileSync(
+      join(directory, "package.json"),
+      JSON.stringify({ engines: { node: engines } }),
+    );
+    git("add", "-A");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", engines);
+    return observeLocalExecutables({
+      checkout: directory,
+      base: "HEAD",
+      blocks: [],
+      finalCommands: ["npm test"],
+    });
+  };
+  const mismatch = await pinned("<1");
+  assert.deepEqual(mismatch.problems, [
+    `Final command \`npm test\`: The target pins Node <1 (package.json engines.node), but node on this host is ${host} (${mismatch.observations.observations.find((o) => o.executable === "node").path}). Put a matching node first on the service's PATH, or change the pin.`,
+  ]);
+  const match = await pinned(`>=${host}`);
+  assert.deepEqual(match.problems, []);
+  assert.equal(
+    match.observations.observations.find((o) => o.executable === "node")
+      .version,
+    host,
   );
 });
 

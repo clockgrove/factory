@@ -316,6 +316,7 @@ export async function workStep(
         .conventions,
       fixedScripts: scripts.map((script) => script.name),
       ...(pin ? { packageManagerUpdate: pin } : {}),
+      ciOnlyCommands: config.finalValidation.ciOnlyCommands,
       ...(repair ? { repair: repair.context } : {}),
       mediaInputs: [
         ...inputs.value,

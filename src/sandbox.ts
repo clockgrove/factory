@@ -515,36 +515,37 @@ function probeSandbox(): SandboxAvailability {
     encoding: "utf8",
     timeout: 10_000,
   });
-  const probe = spawnSync(
-    executable,
-    [
-      ...ISOLATION,
-      ...systemMounts(),
-      "--proc",
-      "/proc",
-      "--dev",
-      "/dev",
-      "--tmpfs",
-      "/tmp",
-      "--",
-      "/bin/sh",
-      "-c",
-      "exit 0",
-    ],
-    { encoding: "utf8", timeout: 10_000, env: {} },
-  );
-  if (probe.status === 0) {
-    const help = spawnSync(executable, ["--help"], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
+  const start = (size: string[]) =>
+    spawnSync(
+      executable,
+      [
+        ...ISOLATION,
+        ...systemMounts(),
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        ...size,
+        "--tmpfs",
+        "/tmp",
+        "--",
+        "/bin/sh",
+        "-c",
+        "exit 0",
+      ],
+      { encoding: "utf8", timeout: 10_000, env: {} },
+    );
+  // A bubblewrap that can't size a tmpfs (before 0.9) refuses `--size`:
+  // the probe runs again without it.
+  const sized = start(["--size", "1048576"]);
+  const probe = sized.status === 0 ? sized : start([]);
+  if (probe.status === 0)
     return {
       available: true,
       executable,
       version: version.stdout.trim() || "unknown",
-      tmpfsSize: /^\s*--size\b/m.test(`${help.stdout}${help.stderr}`),
+      tmpfsSize: probe === sized,
     };
-  }
   return {
     available: false,
     installed: true,

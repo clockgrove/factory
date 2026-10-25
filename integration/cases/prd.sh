@@ -73,7 +73,7 @@ p_bot_issue() {
   local since; since=$(iso)
   gh workflow run drill-issue.yml --repo "$REPO" -f title="$1" -f body="$(cat "$2")" >/dev/null || return 1
   local end=$(( $(now) + 240 )) n=""
-  while [ "$(now)" -lt "$end" ] && [ -z "$n" ]; do
+  while [ "$(now)" -lt "$end" ] && [ -z "$n" ] && ! stopping; do
     sleep 10
     n=$(gh api "repos/$REPO/issues?creator=github-actions%5Bbot%5D&since=$since&state=open&per_page=50" \
       --jq ".[]|select(.title==\"$1\")|.number" 2>/dev/null | head -1)
@@ -360,19 +360,6 @@ cur = best = 0
 for _, d in sorted(edges): cur += d; best = max(best, cur)
 print(best)' "$@"
 }
-# q_wait N: until N settles, answering by HOLD_POLICY; at once on a hold the
-# policy can't answer (prod.no-holds fails on it), so the checks after it
-# still run in the time left.
-q_wait() {
-  local p
-  while ! settled "$1"; do
-    p=$(st phase "$1")
-    if [[ $p == hold:* ]]; then auto_answer "$1" || return 1; sleep 3; continue; fi
-    stopping && return 1
-    sleep 4
-  done
-}
-
 # PRD 1, 10, 12, 13, 14 at production settings: `factory setup` writes the
 # configuration with no model call and `--background` runs it; a pause from
 # GitHub admits nothing until resume; checked Objectives plan in Project
@@ -417,7 +404,9 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   [ "$paused" = paused ] && [ "$resumed" = running ] && [ "$admitted_paused" = 0 ] && [ "$starts_paused" = 0 ] && [ "$(marker_count "$m1" "reply:comment-$pc")" = 1 ] && [ "$(marker_count "$m1" "reply:comment-$rcm")" = 1 ]
   rec_if queue.pause-github $? "'/factory queue pause' on #$n1: mode $paused, replies x$(marker_count "$m1" "reply:comment-$pc"); queued while paused admitted: $admitted_paused; #$n1 steps started while paused (after 45 s): $starts_paused; '/factory queue resume': mode $resumed, replies x$(marker_count "$m1" "reply:comment-$rcm")" "$t0"
 
-  for x in "$n1" "$c" "$b" "$a"; do q_wait "$x"; done
+  # A hold the policy can't answer ends a wait at once (prod.no-holds fails on
+  # it), so the checks after it still run in the time left.
+  for x in "$n1" "$c" "$b" "$a"; do wait_phase "$x" 'done|cancelled|failed' "$(left)" >/dev/null; done
   sleep 20
   # Order and the cap of 3: every queued card is admitted at once and checked
   # with no slot; planning and building take one of 3 slots, in Project order

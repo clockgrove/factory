@@ -12,7 +12,8 @@
 # the run's state dir then holds prompts and answers, so keep it private.
 #
 # One parallel wave: every case of the suite starts at once and runs
-# concurrently. The suite enforces its own wall clock: at 55 min it stops
+# concurrently, each within its own budget (the cases table's minutes). The
+# suite enforces its own wall clock: at 55 min it stops
 # starting anything, stops its cases, cancels unsettled Objectives, then runs
 # cleanup and the report, so a run never passes 60 min.
 # Results: .runs/results/<PDT timestamp>.md; exit 1 on any FAIL, 3 when it
@@ -23,7 +24,7 @@ SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
 REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
-usage() { sed -n 2,19p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n 2,20p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITE_NAME=${2:?}; shift 2 ;;
@@ -42,8 +43,9 @@ done
 case "$PROVIDER" in codex) OTHER_PROVIDER=claude ;; claude) OTHER_PROVIDER=codex ;; *) echo "unknown provider: $PROVIDER (codex, claude)" >&2; exit 2 ;; esac
 PLAN_PROVIDER=$PROVIDER-plan
 
-# Cases: NAME LANE MINUTES WHAT. Minutes are each case's expected duration from
-# the wave's start; every case runs concurrently, so the wave takes the longest.
+# Cases: NAME LANE MINUTES WHAT. Minutes are each case's budget: its deadline is
+# its start plus these minutes, never past the wave's stop, and every wait in
+# the case ends there. Every case runs concurrently, so the wave takes the longest.
 CASE_TABLE_main=(
   "codex|M|30|${PROVIDER^} end to end on a two-layer native stack under strict protection: plan, work, PRs, CI, review, merge, update-branch, report, done once (happy.codex, stack.strict); the provider child killed in planning and in work retries with error count 0 (model-kill.*); a closing phrase in actual PR text closes no decoy issue (security.fixes-keyword)"
   "claude|M|25|${OTHER_PROVIDER^} end to end through 'factory run N --provider $OTHER_PROVIDER', followed to done: every model call on $OTHER_PROVIDER, card Done (happy.claude, queue.run-command)"
@@ -102,7 +104,7 @@ budget() {
   echo "  setup: build check, fresh state dirs, configs, clones, scratch repo checks   <= 5 min"
   local w=0 row c lane mins what
   for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; [ "$mins" -gt "$w" ] && w=$mins; done
-  echo "  wave: ${#SEL[@]} case(s) at once; the longest expects $w min                <= 45 min (hard stop at 55)"
+  echo "  wave: ${#SEL[@]} case(s) at once, each stopped at its budget; the longest $w min <= 45 min (hard stop at 55)"
   echo "  end: cancel what is left, end checks, cleanup, report                       <= 5 min"
   echo "  expected total: ~$(( w + 9 )) min (limit 60)"
 }
@@ -110,7 +112,7 @@ if [ -n "$DRY" ]; then
   echo "DRY RUN ($SUITE_NAME): nothing is started, queued or written."
   echo "Build: $BUILD ($commit)"; echo "Provider: $PROVIDER"; echo "State: $STATE_BASE (fresh per run)"
   echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
-  for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  ~%2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
+  for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  %2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
   echo; budget
   rm -rf "$RUN_DIR"; exit 0
 fi
@@ -385,18 +387,25 @@ esac || { log "setup failed"; exit 1; }
 record_setup() { local CASE=suite; record suite.setup PASS "setup took $(( $(date +%s) - SETUP0 )) s" "$SETUP0"; }; record_setup
 
 # ---------- the wave ----------
-run_case() { # NAME LANE
-  local c=$1 lane=$2 t0; t0=$(( $(date +%s) - START_S ))
+run_case() { # NAME LANE MINUTES
+  local c=$1 lane=$2 mins=$3 t0; t0=$(( $(date +%s) - START_S ))
   ( CASE=$c
+    # The case's deadline: its minutes from now, never past the wave's stop.
+    # Every wait, CLI call and loop clock in the case reads STOP_AT.
+    local wave_stop=$STOP_AT; STOP_AT=$(( $(now) + mins * 60 ))
+    [ "$STOP_AT" -le "$wave_stop" ] || STOP_AT=$wave_stop
     case $lane in C) lane_c ;; *) inst "$lane"; SERVE_DIR=$(serve_dir_of "$lane"); case_$c ;; esac
-    local rc=$?
+    local rc=$? over=""
+    [ "$(now)" -lt "$STOP_AT" ] || over="; out of time (budget $mins min)"
+    # Cancelling what the case left may use the wave's time.
+    STOP_AT=$wave_stop
     [ "$lane" = C ] || case_settle
-    rec_if "case.$c" "$rc" "case returned $rc" "$START_S"
+    rec_if "case.$c" "$rc" "case returned $rc$over" "$START_S"
     printf '%s\t%s\t%s\t%s\n' "$c" "$lane" "$t0" "$(( $(date +%s) - START_S ))" >>"$RUN_DIR/cases.tsv"
   ) &
   local p=$!; CASE_PIDS+=("$p $(starttime $p)")
 }
-for row in "${SEL[@]}"; do IFS='|' read -r c lane _ _ <<<"$row"; run_case "$c" "$lane"; done
+for row in "${SEL[@]}"; do IFS='|' read -r c lane mins _ <<<"$row"; run_case "$c" "$lane" "$mins"; done
 log "wave: ${#SEL[@]} cases started; hard stop at $(TZ=America/Los_Angeles date -d @"$STOP_AT" '+%-I:%M %p')"
 # Supervise: the shared serve stays up (a death is a finding, and it restarts); stop at 55 min.
 case $SUITE_NAME in main) SUP=M ;; edge) SUP=E ;; prd) SUP=P ;; esac

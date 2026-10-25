@@ -1149,10 +1149,7 @@ class Analysis {
     const reason = str(end?.reason);
     const id = str(start.attemptId);
     const parentId = str(start.parentAttemptId);
-    const error =
-      outcome === "retry" &&
-      (wait === "error" ||
-        (!wait && (reason?.startsWith("error") || reason === "deadline")));
+    const error = outcome === "retry" && wait === "error";
     this.attempts.push({
       run: String(start.run),
       step,

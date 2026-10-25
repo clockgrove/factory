@@ -575,6 +575,14 @@ export class CodexPlanner implements Planner {
         ),
         namespaceRefused(home.pidFile),
       );
+    // The SDK's signal follows the call's only while the turn runs: when its
+    // stream ends the SDK strips codex's listeners, Node's own exit cleanup
+    // among them, so a later abort would emit an error nothing handles.
+    const sdkAbort = new AbortController();
+    const forwardAbort = () => sdkAbort.abort(watchdog.signal.reason);
+    if (watchdog.signal.aborted) forwardAbort();
+    else
+      watchdog.signal.addEventListener("abort", forwardAbort, { once: true });
     // An abort ends codex and every command it started (namespacedLauncher).
     const group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
@@ -623,7 +631,7 @@ export class CodexPlanner implements Planner {
       // The SDK spawns the launcher with only our env; the abort kills its group.
       ({ events } = await thread.runStreamed(input, {
         outputSchema: call.schema,
-        signal: watchdog.signal,
+        signal: sdkAbort.signal,
       }));
       // The stream has no counts until the turn ends: the session record
       // gives the context and the responses as they happen.
@@ -760,6 +768,7 @@ export class CodexPlanner implements Planner {
       // A failed codex process: its standard error ends the message.
       throw overflowed(failure(withStderr(error, stderr)), turn);
     } finally {
+      watchdog.signal.removeEventListener("abort", forwardAbort);
       clearInterval(reading);
       watchdog.stop();
       // Closing the stream ends the SDK's read; group.end kills codex.

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
+import { redactDeep } from "./display.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
   type NotedRequest,
@@ -12,7 +13,6 @@ import {
   type Transport,
   transport,
 } from "./github-trace.js";
-import { redact } from "./log.js";
 import { errorMessage } from "./text.js";
 
 const run = promisify(execFile);
@@ -1988,15 +1988,4 @@ function asyncMergeOf(value: unknown): AsyncMerge {
       ? { message: details.message.slice(0, 500) }
       : {}),
   };
-}
-
-/** Every string inside `value`, redacted; the shape is kept. */
-function redactDeep(value: unknown, secrets: readonly string[]): unknown {
-  if (typeof value === "string") return redact(value, secrets);
-  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets));
-  if (value && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, redactDeep(v, secrets)]),
-    );
-  return value;
 }

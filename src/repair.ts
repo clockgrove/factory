@@ -11,8 +11,9 @@
  * receipt: a refused candidate set is repaired with new candidates like
  * any other result. A refusal of the handoff notes, the discovery
  * proposal or the staged candidate sets, Factory's own files whose content
- * the diagnosis never gets, is
- * the correction itself unless the same refusal already failed. The step returns the correction as its `repair` finding; the
+ * the diagnosis never gets, is the correction itself unless the same
+ * refusal already failed; so is the operator's `repair` at selection, every
+ * time. The step returns the correction as its `repair` finding; the
  * engine keeps the repair allowances (allowances.ts).
  *
  * The diagnosis may instead blame a predecessor (`predecessor`): a Work
@@ -50,6 +51,8 @@ export type RepairFinding =
       detail: string;
       /** Collection refused this private staging file (`stagingRefusalCorrection`). */
       staging?: CollectedStaging;
+      /** The operator's `repair` at selection, with their text (`newCandidatesCorrection`). */
+      newCandidates?: { text?: string };
     }
   /**
    * The change was moved onto a new base: its PR conflicted with its base,
@@ -59,7 +62,12 @@ export type RepairFinding =
   | { kind: "conflict"; detail: string };
 
 export interface Correction {
-  source: "review-findings" | "staging-refusal" | "diagnosis" | "operator";
+  source:
+    | "review-findings"
+    | "staging-refusal"
+    | "selection"
+    | "diagnosis"
+    | "operator";
   /** The failure, bounded for the brief and the state file. */
   failure: string;
   diagnosis: string;
@@ -135,9 +143,37 @@ export async function correction(
       correction: input.operatorAnswer.trim(),
     });
   const direct =
-    reviewFindingsCorrection(input) ?? stagingRefusalCorrection(input);
+    newCandidatesCorrection(input.finding) ??
+    reviewFindingsCorrection(input) ??
+    stagingRefusalCorrection(input);
   if (direct) return direct;
   return diagnose(input, failure);
+}
+
+/**
+ * The operator's `repair` at selection (work/step-select.ts) as the
+ * correction, with no diagnosis call: new sets are made in Factory's
+ * staging, which no owned path names, and the operator already said what
+ * to change. It is Factory's correction quoting their text, not their
+ * words, and each such answer is a new request, never a repeat.
+ */
+function newCandidatesCorrection(
+  finding: RepairFinding,
+): CorrectionResult | undefined {
+  if (finding.kind !== "failure" || !finding.newCandidates) return undefined;
+  const asked = finding.newCandidates.text?.trim();
+  const correction: Correction = {
+    source: "selection",
+    failure: bounded(finding.detail),
+    diagnosis:
+      "The operator sent the candidate sets back at selection for new ones.",
+    correction: `Make every candidate set again, different from the sets sent back, and stage them under .factory-media/ as the media instructions say. Leave each candidate destination as it is at the base: Factory writes the selected set there.${asked ? ` The operator's request: ${asked}` : ""}`,
+  };
+  return {
+    kind: "correction",
+    correction,
+    finding: correctionFinding(correction),
+  };
 }
 
 /** The repair finding a correction renders as, for the worker's brief. */

@@ -189,7 +189,8 @@ hold_pick() { python3 -c 'import json,sys;h=json.loads(sys.argv[1] or "null") or
 #   more    answer `more` when it is the recommended answer (an allowance reached by the suite's own answers)
 HOLD_POLICY=${HOLD_POLICY-d2 review}
 # auto_answer N -> 0 when it answered an open hold or has an answer in flight;
-# 2 when HOLD_POLICY (and AUTO_REVIEW_DECISIONS) has no answer left for any open hold; else 1.
+# 2 when a hold is open, HOLD_POLICY (and AUTO_REVIEW_DECISIONS) has no answer
+# left for any, and no answer of the case's own is waiting to be applied; else 1.
 auto_answer() {
   local n=$1 choices choice id step pick arg text marker at seconds count rc=1 offered=""
   local fields=() args=()
@@ -235,8 +236,11 @@ PY
     echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$n"
     log "#$n auto-answered $pick${arg:+ $arg} (question $id at $step)"; rc=0
   done <<<"$choices"
-  [ -n "$offered" ] || return 2
-  return $rc
+  [ -n "$offered" ] && return $rc
+  # Unanswerable only while a hold stands (it may have cleared since the
+  # read) and no answer the case sent itself (answer_t) is still queued.
+  [ "$(st holds "$n")" != "[]" ] && [ "$(st pending "$n")" = 0 ] || return 1
+  return 2
 }
 # wait_phase N REGEX SECS: poll the state until the phase matches (status, or
 # "hold:<step>" while a question is open), answering by HOLD_POLICY. Never past
@@ -250,7 +254,8 @@ wait_phase() {
     p=$(st phase "$n")
     if [[ $p =~ $want ]]; then echo "$p"; return 0; fi
     a=1; [[ $p == hold:* ]] && { auto_answer "$n"; a=$?; }
-    [ "$a" = 2 ] && [[ $want != *hold* ]] && { echo "held:${p#hold:}"; return 1; }
+    # Held only if the same hold still shows after the policy had its turn.
+    [ "$a" = 2 ] && [[ $want != *hold* ]] && [ "$(st phase "$n")" = "$p" ] && { echo "held:${p#hold:}"; return 1; }
     stopping && { echo "stopped:$p"; return 1; }
     [ "$(now)" -ge "$end" ] && { echo "timeout:$p"; return 1; }
     if [ "$a" = 0 ]; then sleep 3; else sleep 4; fi

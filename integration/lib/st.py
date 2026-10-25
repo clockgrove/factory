@@ -148,6 +148,21 @@ def answer_state(root, n, choice, since=None):
     return "none"
 
 
+def pending_answers(root, n, d):
+    """Answer requests for N's open holds the service hasn't applied yet."""
+    ids = {h.get("id") for h in holds_of(d)}
+    count = 0
+    for path in glob.glob(os.path.join(root, "requests", "*.json")):
+        try:
+            with open(path) as file:
+                request = json.load(file).get("request") or {}
+        except (FileNotFoundError, ValueError):
+            continue
+        if request.get("kind") == "answer" and request.get("issue") == int(n) and request.get("question") in ids:
+            count += 1
+    return count
+
+
 def match(value, want):
     value = "" if value is None else str(value)
     if want.endswith("*") and not want.startswith("*"):
@@ -187,6 +202,8 @@ def main():
         print(json.dumps(hs[0] if hs else None))
     elif cmd == "holds":
         print(json.dumps(holds_of(d)))
+    elif cmd == "pending":
+        print(pending_answers(root, n, d))
     elif cmd == "active":
         attempts = d.get("attempts", {}) if isinstance(d, dict) else {}
         print(json.dumps([dict(attempt, step=step) for step, attempt in attempts.items()

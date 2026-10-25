@@ -1307,6 +1307,55 @@ test("a 403 is a rate limit only by GitHub's headers; one without them retries, 
   assert.equal(held.item, undefined, "an Objective question");
 });
 
+test("a marker lookup past its page cap refuses rather than post the comment again; a list that ends at the cap is read whole", async (t) => {
+  const { GitHub, TransientError } = await import("../dist/github.js");
+  const marker = "<!-- factory:5:status -->";
+  const mine = (id, body) => ({ id, body, user: { login: "factory-bot" } });
+  // A local stand-in for the API: issue 5's comments never end; issue 6
+  // has exactly 20 full pages, Factory's marked comment last.
+  const posted = [];
+  const server = createHttpServer((req, res) => {
+    const url = new URL(req.url, "http://github");
+    const reply = (body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === "POST") posted.push(url.pathname);
+    if (url.pathname === "/user") return reply({ login: "factory-bot" });
+    const page = Number(url.searchParams.get("page"));
+    const listed = (from) =>
+      Array.from({ length: 100 }, (_, n) => mine(from + n, "noise"));
+    if (url.pathname === "/repos/o/r/issues/5/comments")
+      return reply(listed(page * 100));
+    if (url.pathname === "/repos/o/r/issues/6/comments")
+      return reply(
+        page > 20
+          ? []
+          : page === 20
+            ? [...listed(1900).slice(1), mine(7, marker)]
+            : listed(page * 100),
+      );
+    reply({});
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const token = process.env.FACTORY_GITHUB_TOKEN;
+  process.env.FACTORY_GITHUB_TOKEN = "test-token";
+  t.after(() => {
+    if (token === undefined) delete process.env.FACTORY_GITHUB_TOKEN;
+    else process.env.FACTORY_GITHUB_TOKEN = token;
+  });
+  const github = new GitHub("o/r", `http://127.0.0.1:${server.address().port}`);
+  await assert.rejects(
+    github.ensureComment(5, marker, `${marker} status`, "test:status"),
+    (error) =>
+      !(error instanceof TransientError) &&
+      /more than 2000 .*20-page cap/.test(error.message),
+  );
+  assert.deepEqual(posted, [], "nothing posted");
+  assert.equal(await github.findComment(6, marker), 7);
+});
+
 test("a correction already tried for the same failure asks instead of repeating", async () => {
   const { correction } = await import("../dist/repair.js");
   // The operator's answer is the correction itself: no diagnosis call.

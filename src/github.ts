@@ -512,19 +512,12 @@ export class GitHub {
     since?: string,
     signal?: AbortSignal,
   ): Promise<IssueComment[]> {
-    const all: IssueComment[] = [];
-    const from = since ? `since=${encodeURIComponent(since)}&` : "";
-    for (let page = 1; page <= 20; page++) {
-      const batch = await this.rest<IssueComment[]>(
-        "GET",
-        `/repos/${this.repository}/issues/${issue}/comments?${from}per_page=100&page=${page}`,
-        undefined,
-        signal,
-      );
-      all.push(...batch);
-      if (batch.length < 100) break;
-    }
-    return all;
+    return this.pages<IssueComment>(
+      `/repos/${this.repository}/issues/${issue}/comments${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+      signal,
+      undefined,
+      20,
+    );
   }
 
   async issue(
@@ -800,8 +793,7 @@ export class GitHub {
    * Issues (with `label`, when given) that Factory's login opened, updated
    * from `since` on, newest first: one bounded, paginated list that stops
    * at the first page reaching issues created before `since`. Past
-   * `maxPages` pages it throws, so a lookup never misses an issue and
-   * makes it again.
+   * `maxPages` pages it throws (see `pages`).
    */
   async issuesByLabel(
     label: string | undefined,
@@ -822,15 +814,11 @@ export class GitHub {
       `/repos/${this.repository}/issues?${query}`,
       signal,
       undefined,
-      maxPages + 1,
+      maxPages,
       (listed) =>
         !since ||
         !(Date.parse(listed.at(-1)?.created_at ?? "") < Date.parse(since)),
     );
-    if (found.length > maxPages * 100)
-      throw new Error(
-        `More than ${maxPages * 100} issues${label ? ` labelled ${label}` : ""} were updated since ${since}: too many to look up`,
-      );
     return found.filter((issue) => issue.pull_request === undefined);
   }
 
@@ -1057,7 +1045,12 @@ export class GitHub {
     return { data: result.data, errors };
   }
 
-  /** Every item of a paginated list of 100 per page, up to `maxPages` pages. */
+  /**
+   * Every item of a paginated list of 100 per page, up to `maxPages` pages.
+   * A list that goes on past them throws (not transient: asking again
+   * finds as many), so a lookup by marker never misses what it looks for
+   * and makes it again.
+   */
   async pages<T>(
     path: string,
     signal?: AbortSignal,
@@ -1068,7 +1061,7 @@ export class GitHub {
   ): Promise<T[]> {
     const all: T[] = [];
     const join = path.includes("?") ? "&" : "?";
-    for (let page = 1; page <= maxPages; page++) {
+    for (let page = 1; ; page++) {
       const listed = pick(
         await this.rest<unknown>(
           "GET",
@@ -1079,10 +1072,16 @@ export class GitHub {
       );
       if (!Array.isArray(listed))
         throw new TransientError(`GitHub GET ${path}: not a list`);
+      if (page > maxPages) {
+        if (listed.length)
+          throw new Error(
+            `GitHub GET ${path}: more than ${maxPages * 100} to look up, past the ${maxPages}-page cap`,
+          );
+        return all;
+      }
       all.push(...(listed as T[]));
-      if (listed.length < 100 || !more(listed as T[])) break;
+      if (listed.length < 100 || !more(listed as T[])) return all;
     }
-    return all;
   }
 
   // ── Pull request delivery (delivery.ts) ─────────────────────────────────

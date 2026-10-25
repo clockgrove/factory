@@ -1,18 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
-  closeSync,
-  fsyncSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isObject } from "./checked.js";
 import type { DreamWrite } from "./knowledge/dream.js";
+import { writeAtomic } from "./state.js";
 
 /**
  * Operator requests: the CLI writes one file per request, and the service
@@ -46,8 +43,12 @@ export type Request =
   | { kind: "propose-amendment"; issue: number; proposal: unknown }
   /** `factory decline-discovery N --item ITEM --reason R` (planning/amendments.ts `declineDiscovery`). */
   | { kind: "decline-discovery"; issue: number; item: string; reason: string }
-  /** Queue-wide control (issue 0); it survives restarts. */
-  | { kind: "queue"; issue: 0; mode: QueueMode }
+  /**
+   * Queue-wide control; it survives restarts. Issue 0 from the CLI; from a
+   * `/factory queue` comment, the Objective it was written on, which the
+   * reply goes to.
+   */
+  | { kind: "queue"; issue: number; mode: QueueMode }
   | RunRequest
   | DreamRequest;
 
@@ -71,6 +72,13 @@ export type DreamRequest = { kind: "dream"; issue: 0; write: DreamWrite };
 
 /** The queue's mode: `paused` admits and starts nothing; `draining` admits nothing new. */
 export type QueueMode = "running" | "paused" | "draining";
+
+/** The queue actions, as `factory queue` and a `/factory queue` comment name them. */
+export const QUEUE_MODES: Record<string, QueueMode> = {
+  pause: "paused",
+  drain: "draining",
+  resume: "running",
+};
 
 /**
  * Stable refusal codes. Tools decide on the code, never the message. The
@@ -180,15 +188,7 @@ export function writeRequest(
     ...(source ? { source } : {}),
     request,
   };
-  const temporary = join(dir, `.${id}.tmp`);
-  const fd = openSync(temporary, "w", 0o600);
-  try {
-    writeSync(fd, JSON.stringify(stored));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, join(dir, `${id}.json`));
+  writeAtomic(join(dir, `${id}.json`), JSON.stringify(stored));
   return id;
 }
 
@@ -251,9 +251,6 @@ const FIELDS: Record<
     text: optionalText,
     writtenAt: optionalText,
     question: optionalText,
-    reviewArtifacts: (value) =>
-      value === undefined ||
-      (Array.isArray(value) && value.every((one) => typeof one === "string")),
   },
   cancel: {},
   retry: { question: optionalText },
@@ -296,11 +293,15 @@ function requestProblem(value: unknown, id: string): string | undefined {
   const kind = request.kind as Request["kind"];
   const fields = Object.hasOwn(FIELDS, kind) ? FIELDS[kind] : undefined;
   if (!fields) return `its kind ${JSON.stringify(kind)} isn't a request`;
-  const installationWide = kind === "queue" || kind === "dream";
+  const installationWide = kind === "dream";
   if (
     installationWide
       ? request.issue !== 0
-      : !(Number.isSafeInteger(request.issue) && (request.issue as number) > 0)
+      : !(
+          Number.isSafeInteger(request.issue) &&
+          ((request.issue as number) > 0 ||
+            (kind === "queue" && request.issue === 0))
+        )
   )
     return `its issue ${JSON.stringify(request.issue)} isn't ${installationWide ? "0" : "an issue number"}`;
   for (const [key, check] of Object.entries(fields))

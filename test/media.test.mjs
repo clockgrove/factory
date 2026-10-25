@@ -12,6 +12,8 @@ import { test } from "node:test";
 import { hydrateTree, materializeSelection } from "../dist/media.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
+import { repairPath } from "../dist/repair.js";
+import { aboutMedia } from "../dist/work/step-deliver.js";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -247,5 +249,63 @@ test("validation holds when a selected destination holds plain bytes instead of 
   assert.deepEqual(
     held.options.map((option) => option.answer),
     ["retry", "replan", "cancel"],
+  );
+});
+
+test("a refused candidate set is repaired from its staging or receipt, and only cited evidence drops the selection", () => {
+  const media = item(["assets/badge/"]);
+  const receipt = "Controller candidate receipt: badge";
+  // Candidates are staged outside the owned paths (#1922).
+  for (const path of [
+    ".factory-assets.json",
+    ".factory-media/candidate-a/badge.png",
+    receipt,
+    "assets/badge/a.png",
+  ])
+    assert.equal(repairPath(media, path), true, path);
+  for (const path of ["src/app.ts", "assets/badge/"])
+    assert.equal(repairPath(media, path), false, path);
+  const code = item(["src"], { expectedOutputRoles: undefined });
+  assert.equal(repairPath(code, ".factory-assets.json"), false);
+  assert.equal(repairPath(code, receipt), false);
+
+  const set = candidateSet(mkdtempSync(join(tmpdir(), "factory-set-")), [
+    "assets/badge/a.png",
+  ]);
+  const refused = (evidence) => ({
+    kind: "review",
+    tree: "t",
+    refused: [
+      {
+        source: "model",
+        criterion: "c",
+        detail: "assets/badge/a.png looks wrong",
+        evidence,
+      },
+    ],
+  });
+  assert.equal(
+    aboutMedia(media, set, refused([{ path: receipt, origin: "controller" }])),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused([{ path: "patch", file: "assets/badge/a.png", origin: "git" }]),
+    ),
+    true,
+  );
+  // Prose that names a destination is not evidence.
+  assert.equal(
+    aboutMedia(media, set, refused([{ path: "src/app.ts", origin: "git" }])),
+    false,
+  );
+  assert.equal(
+    aboutMedia(media, set, {
+      kind: "failure",
+      detail: "CI failed on assets/badge/a.png",
+    }),
+    false,
   );
 });

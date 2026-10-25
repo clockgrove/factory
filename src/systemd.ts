@@ -13,10 +13,8 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
@@ -25,6 +23,7 @@ import type { CoreConfig } from "./config.js";
 import type { Paths } from "./paths.js";
 import { CLAUDE_LOGIN_CREDENTIALS } from "./providers/claude.js";
 import { COPILOT_SECRETS, copilotConfigured } from "./providers/config.js";
+import { writeAtomic } from "./state.js";
 
 /** Exit code of a serve whose configuration doesn't load (EX_CONFIG): not restarted. */
 export const CONFIGURATION_EXIT = 78;
@@ -292,9 +291,7 @@ export function install(
   const changed = ours(paths) !== text;
   if (changed) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync(temporary, text, { mode: 0o600 });
-    renameSync(temporary, path);
+    writeAtomic(path, text);
     const reload = systemctl("daemon-reload");
     if (reload.status !== 0)
       throw new Error(`systemctl --user daemon-reload failed: ${reload.out}`);

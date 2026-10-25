@@ -75,16 +75,17 @@ const CI_DIRECTORIES = [
 ];
 
 /**
- * Whether `path` steers CI or review: anything under `.github/` (workflows,
- * CODEOWNERS, settings), a CODEOWNERS file anywhere, or another CI
- * system's configuration. A worker changes one only when the Objective's
- * May change section lists that path.
+ * Whether `path` steers CI, review or planning: anything under `.github/`
+ * (workflows, CODEOWNERS, settings), a CODEOWNERS file anywhere, another
+ * CI system's configuration, or the target's curated playbook. A worker
+ * changes one only when the Objective's May change section lists that path.
  */
-function protectedPath(path: string): boolean {
+function protectedPath(path: string, playbook: string): boolean {
   return (
     CI_DIRECTORIES.some((directory) => path.startsWith(directory)) ||
     CI_PATHS.includes(path) ||
-    basename(path) === "CODEOWNERS"
+    basename(path) === "CODEOWNERS" ||
+    path === playbook
   );
 }
 
@@ -111,6 +112,8 @@ export interface CollectInput {
   item: WorkItem;
   /** The accepted Objective's "May change" paths (objective.ts mayChange): the only protected paths a worker may change. */
   mayChange: readonly string[];
+  /** The target's curated playbook (planning.playbook), protected like CI configuration. */
+  playbook: string;
   sandbox: SandboxConfig;
   /** The worker's last message, carried by an empty-result finding. */
   finalResponse: string;
@@ -638,11 +641,12 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,
     );
   const guarded = paths.filter(
-    (path) => protectedPath(path) && !input.mayChange.includes(path),
+    (path) =>
+      protectedPath(path, input.playbook) && !input.mayChange.includes(path),
   );
   if (guarded.length)
     throw new WorkFinding(
-      `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. CI configuration, .github/ and CODEOWNERS change only when that section lists the exact path; undo these changes`,
+      `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. CI configuration, .github/, CODEOWNERS and the playbook change only when that section lists the exact path; undo these changes`,
     );
   // Every staged blob, and the work tree's copy where its bytes differ,
   // in one scan.

@@ -10,15 +10,16 @@ import {
   rmSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isObject } from "./checked.js";
 import { crashPoint } from "./crash.js";
-import type { HoldScope } from "./engine.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
+import type { Spend } from "./spend.js";
 
 /**
- * 8: a diagnosis fact's `applied` corrections are records, not their
+ * 9: an attempt counts the service's deaths it ran at (`interrupted`),
+ * and no question is saved per step (`asking`). 8: a diagnosis fact's `applied` corrections are records, not their
  * rendered findings (work/facts.ts). 6: a hold carries its answers as
  * `options`, each with its family and consequence. 5: a Work Item's
  * refused and replayed result is one `refused` fact, and its diagnosis
@@ -29,7 +30,7 @@ import type { QueueMode, RefusalCode } from "./requests.js";
  * `factory reset` rebuilds it from GitHub (reset.ts), with no open
  * question.
  */
-const STATE_VERSION = 8;
+const STATE_VERSION = 9;
 
 export type ObjectiveStatus =
   | "checking"
@@ -181,17 +182,6 @@ export interface Retry {
 }
 
 /**
- * A question the engine raised about a step (a crash-loop suspect) while
- * another question that stops it was open.
- */
-export interface PendingQuestion {
-  question: string;
-  options: HoldOption[];
-  scope?: HoldScope;
-  cause?: HoldCause;
-}
-
-/**
  * The configuration an Objective runs with, frozen at admission
  * (docs/reference/state.md#Frozen configuration): its provider, with that provider's
  * resolved settings, and every other key but the operational ones
@@ -222,12 +212,6 @@ export interface ObjectiveState {
   /** The latest answer per step, read by the step when it runs again. */
   answers: Record<string, Answer>;
   retries: Record<string, Retry>;
-  /**
-   * Questions saved per step, asked as soon as no open question stops the
-   * step, before it runs. Kept apart from `retries`, so no change to a
-   * retry drops one; cleared when asked, or when a repair clears the step.
-   */
-  asking: Record<string, PendingQuestion>;
   /** Facts steps keep across repairs (Outcome `keep`), by key. */
   kept: Record<string, unknown>;
   /**
@@ -250,9 +234,14 @@ export interface ObjectiveState {
   done: Record<string, unknown>;
   /**
    * Steps started and not yet finished, with the service run that started
-   * each. One found after a restart was interrupted, and runs again.
+   * each. One found after a restart was interrupted, and runs again; it
+   * counts the deaths in a row it ran at, other steps finishing between
+   * (`interrupted`, engine.ts `ObjectiveRunner.interrupted`).
    */
-  attempts: Record<string, { startedAt: string; run?: string; id?: string }>;
+  attempts: Record<
+    string,
+    { startedAt: string; run?: string; id?: string; interrupted?: number }
+  >;
   /**
    * Per step: attempts started so far (`n`; an attempt's id is
    * `<step>#<n>`), and the attempt its next one continues (`parent`: the
@@ -278,6 +267,11 @@ export interface ObjectiveState {
   control?: { mode: "paused" | "draining"; by: string; at: string };
   /** Per-capability data. Modules own their key. */
   modules: Record<string, unknown>;
+  /**
+   * Model spend so far, and the operator's grants past the spend ceiling
+   * (spend.ts). Absent until the first call reports any. A replan keeps it.
+   */
+  spend?: Spend;
   updatedAt: string;
   /** When this run was admitted: with the issue, it names the run. */
   startedAt?: string;
@@ -326,7 +320,6 @@ export function newObjective(
     holds: [],
     answers: {},
     retries: {},
-    asking: {},
     repairs: {},
     kept: {},
     done: {},
@@ -364,32 +357,33 @@ function statePath(dir: string, issue: number): string {
 }
 
 /**
- * Write the whole file: temporary file, fsync, rename, fsync the directory.
- * A crash at any point leaves the old file or the new one, never a mix.
+ * Write the whole file, owner-only: temporary file, fsync, rename, fsync
+ * the directory. A crash at any point leaves the old file or the new one,
+ * never a mix. `point` names the crash points before the rename and after.
  */
-export function saveState(dir: string, state: ObjectiveState): void {
-  mkdirSync(dir, { recursive: true });
-  writeWhole(dir, statePath(dir, state.issue), state, "state");
-}
-
-function writeWhole(
-  dir: string,
-  path: string,
-  state: ObjectiveState,
-  point?: string,
-): void {
+export function writeAtomic(path: string, text: string, point?: string): void {
   const temporary = `${path}.${process.pid}.tmp`;
   const fd = openSync(temporary, "w", 0o600);
   try {
-    writeSync(fd, `${JSON.stringify(state, null, 2)}\n`);
+    writeSync(fd, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   if (point) crashPoint(`${point}:before-rename`);
   renameSync(temporary, path);
-  syncDirectory(dir);
+  syncDirectory(dirname(path));
   if (point) crashPoint(`${point}:saved`);
+}
+
+/** Save the Objective's state whole (`writeAtomic`). */
+export function saveState(dir: string, state: ObjectiveState): void {
+  mkdirSync(dir, { recursive: true });
+  writeAtomic(
+    statePath(dir, state.issue),
+    `${JSON.stringify(state, null, 2)}\n`,
+    "state",
+  );
 }
 
 /** The queue-wide mode (`factory queue pause|drain|resume`), saved in the installation root. */
@@ -414,19 +408,9 @@ export function loadQueueControl(root: string): QueueControl {
   return { mode: "running" };
 }
 
-/** Save the queue mode whole: temporary file, fsync, rename. */
+/** Save the queue mode whole (`writeAtomic`). */
 export function saveQueueControl(root: string, control: QueueControl): void {
-  const path = join(root, QUEUE_FILE);
-  const temporary = `${path}.${process.pid}.tmp`;
-  const fd = openSync(temporary, "w", 0o600);
-  try {
-    writeSync(fd, `${JSON.stringify(control)}\n`);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, path);
-  syncDirectory(root);
+  writeAtomic(join(root, QUEUE_FILE), `${JSON.stringify(control)}\n`);
 }
 
 /** Remove the Objective's state: it was dequeued before it started. */
@@ -473,7 +457,7 @@ export function saveObservation(dir: string, state: ObjectiveState): string {
   mkdirSync(finished, { recursive: true });
   const run = runOf(state).replace(/[^\w.-]/g, "-");
   const path = join(finished, `${state.issue}@${run}${OBSERVATION}`);
-  writeWhole(finished, path, state);
+  writeAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
   return path;
 }
 
@@ -614,7 +598,6 @@ function stateProblem(value: unknown, issue: number): string | undefined {
   for (const key of [
     "answers",
     "retries",
-    "asking",
     "kept",
     "repairs",
     "done",
@@ -622,12 +605,12 @@ function stateProblem(value: unknown, issue: number): string | undefined {
     "modules",
   ])
     if (!isObject(value[key])) return `${key} isn't an object`;
-  for (const key of ["retries", "asking", "attempts"])
+  for (const key of ["retries", "attempts"])
     for (const [step, entry] of Object.entries(
       value[key] as Record<string, unknown>,
     ))
       if (!isObject(entry)) return `${key}.${step} isn't an object`;
-  for (const key of ["frozen", "control", "ended", "stepRuns"])
+  for (const key of ["frozen", "control", "ended", "stepRuns", "spend"])
     if (value[key] !== undefined && !isObject(value[key]))
       return `${key} isn't an object`;
   for (const key of [

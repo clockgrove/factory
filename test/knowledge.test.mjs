@@ -111,7 +111,7 @@ function seedDone(inst, issue, dir = inst.objectives) {
   writeFileSync(
     join(dir, `${issue}.json`),
     JSON.stringify({
-      version: 8,
+      version: 9,
       issue,
       status: "done",
       holds: [],
@@ -126,7 +126,6 @@ function seedDone(inst, issue, dir = inst.objectives) {
         },
       },
       retries: {},
-      asking: {},
       kept: {
         "plan:acceptedAt": "2026-10-01T00:00:00Z",
         "item:a:decisions": [

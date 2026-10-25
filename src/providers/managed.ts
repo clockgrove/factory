@@ -27,21 +27,16 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  closeSync,
   copyFileSync,
   createReadStream,
   createWriteStream,
-  fsyncSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -53,6 +48,7 @@ import { crashPoint } from "../crash.js";
 import { hold } from "../engine.js";
 import { validPath } from "../objective.js";
 import { ContainedError, copyContained } from "../paths.js";
+import { writeAtomic } from "../state.js";
 import { errorMessage } from "../text.js";
 import {
   targetOf,
@@ -164,18 +160,8 @@ function readMarker(worktree: string): Marker | undefined {
   }
 }
 
-/** Save the marker whole: temporary file, fsync, rename. */
 function saveMarker(worktree: string, marker: Marker): void {
-  const path = markerPath(worktree);
-  const temporary = `${path}.${process.pid}.tmp`;
-  const fd = openSync(temporary, "w", 0o600);
-  try {
-    writeSync(fd, JSON.stringify(marker));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, path);
+  writeAtomic(markerPath(worktree), JSON.stringify(marker));
 }
 
 /** Usage a run's hosted session reported. */

@@ -174,14 +174,13 @@ export function seed(inst, issue, status = "checking", fields = {}) {
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 8,
+      version: 9,
       issue,
       status,
       frozen: frozen(inst),
       holds: [],
       answers: {},
       retries: {},
-      asking: {},
       repairs: {},
       kept: {},
       // No blocked-by links: these tests start at the check.

@@ -63,6 +63,8 @@ export interface WorkPromptInput {
   mediaInputs?: readonly MediaInput[];
   /** A repair of a media item whose selection stands: the chosen set and its destinations. */
   keptSelection?: { set: string; destinations: readonly string[] };
+  /** A media item's repair that isn't about its candidates: the sets Factory kept, and their destinations. */
+  keptCandidates?: { sets: readonly string[]; destinations: readonly string[] };
   /**
    * Earlier items' advisory notes for this item, with the item that wrote
    * each and that item's accepted result commit, whose bytes of each cited
@@ -437,7 +439,12 @@ function renderWorkPrompt(
     (input.ciOnlyCommands?.length
       ? `\n\nCI-only commands, which need network and run only in CI: ${JSON.stringify(input.ciOnlyCommands)}. This checkout has no network, so never run them here; they fail offline. Leave them to CI.`
       : "");
-  const mediaInstructions = mediaContract(item, assets, input.keptSelection);
+  const mediaInstructions = mediaContract(
+    item,
+    assets,
+    input.keptSelection,
+    input.keptCandidates,
+  );
   const inputInstructions = assets.length
     ? `\n\nAuthorized read-only asset inputs, staged by Factory under .factory-inputs/assets (staged is each copy's checkout path; sha256 and bytes are Factory's record of it; a selected member's destination in this checkout may hold only its Git LFS pointer, so read the staged copy). Read them; do not edit, move or commit them: ${JSON.stringify(assets)}`
     : "";
@@ -492,15 +499,21 @@ function renderWorkPrompt(
  * The candidate contract a media item's worker follows: sets staged under
  * `.factory-media/`, described in `.factory-assets.json`, never written to
  * their destinations. media.ts captureAssets checks exactly this shape. A
- * repair whose selection stands stages nothing and leaves the destinations
- * alone: Factory writes the chosen set again on the repaired result.
+ * repair whose selection or kept candidates stand stages nothing and
+ * leaves the destinations alone: Factory writes the chosen set again on
+ * the repaired result.
  */
 function mediaContract(
   item: WorkItem,
   assets: readonly StagedInput[],
   kept: WorkPromptInput["keptSelection"],
+  candidates: WorkPromptInput["keptCandidates"],
 ): string {
   if (!needsSelection(item)) return "";
+  if (!kept && candidates?.sets.length) {
+    const destinations = candidates.destinations.join(", ");
+    return `\n\nMedia: Factory kept the candidate sets the previous attempt staged (${candidates.sets.join(", ")}), and this repair is not about them, so the operator still chooses from those. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets replace the kept ones. Do not write, remove or otherwise change ${destinations}: Factory writes the chosen set there after selection, they are not in this checkout, and a result that changes them is refused. Fix what the findings name in the owned code, tests and documentation.`;
+  }
   if (kept) {
     const destinations = kept.destinations.join(", ");
     return `\n\nMedia: the operator chose candidate set ${kept.set} for this item, and that choice stands for this repair. Factory writes the set's bytes at ${destinations} on top of your result before it validates, reviews and delivers it, as it did for the previous attempt; they are not in this checkout. Their read-only copies are staged under .factory-inputs/assets (origin selected) for reading. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets discard the operator's choice and ask the operator again. Do not write, remove or otherwise change ${destinations}: a result that changes them is refused. A check that needs those files at their destinations can fail in this checkout for that reason alone: report it rather than writing them there. Fix what the findings name in the owned code, tests and documentation.`;

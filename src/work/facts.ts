@@ -26,6 +26,12 @@ export interface ItemFacts {
   /** The head a merge check named for the stack layer below, to start on. */
   onto: string;
   finished: Finished;
+  /**
+   * The candidate sets capture kept, as Factory's copies, until the work
+   * step is done: a repair that isn't about them (a refused handoff note,
+   * an owned-path finding) keeps them, so the next attempt stages none.
+   */
+  candidates: CandidateSet[];
   selection: KeptSelection;
   /**
    * The candidate sets the operator sent back with a select `repair`, as

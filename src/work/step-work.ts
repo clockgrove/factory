@@ -136,6 +136,7 @@ export async function workStep(
   const keepBase = facts({ base, rebase: false, onto: null }, item.id);
   let finished = fact(state, "finished", item.id);
   let own = fact(state, "selection", item.id);
+  let candidates = fact(state, "candidates", item.id);
   // A conflict repair whose replay applied cleanly onto the change's own
   // base is mechanical: the replayed change is the result, collected,
   // validated and reviewed again with no worker run. A media item's
@@ -273,6 +274,14 @@ export async function workStep(
       own = undefined;
       keepAll = { ...keepAll, ...facts({ selection: null }, item.id) };
     }
+    // Likewise kept candidates: with a copy gone, this attempt stages anew.
+    if (candidates && !own) {
+      const lost = await Promise.all(candidates.map(missingMember));
+      if (lost.some(Boolean)) {
+        candidates = undefined;
+        keepAll = { ...keepAll, ...facts({ candidates: null }, item.id) };
+      }
+    }
     const inputs = await resolveInputs({
       checkout: config.checkout,
       repository: config.repository,
@@ -335,7 +344,20 @@ export async function workStep(
               destinations: own.selection.set.members.map((m) => m.destination),
             },
           }
-        : {}),
+        : candidates
+          ? {
+              keptCandidates: {
+                sets: candidates.map((set) => set.id),
+                destinations: [
+                  ...new Set(
+                    candidates.flatMap((set) =>
+                      set.members.map((m) => m.destination),
+                    ),
+                  ),
+                ],
+              },
+            }
+          : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
       ...(memory ? { memory } : {}),
       ...(instructions ? { profileInstructions: instructions } : {}),
@@ -424,6 +446,17 @@ export async function workStep(
       };
     finished = { ...finished, sets: own.sets };
   }
+  // Kept candidates stand in for capture, unless this attempt staged a new
+  // manifest: then capture replaces them.
+  if (!finished.sets && !own && candidates) {
+    const staged = await lstat(join(worktree, ".factory-assets.json")).then(
+      () => true,
+      () => false,
+    );
+    if (staged)
+      keepAll = { ...keepAll, ...facts({ candidates: null }, item.id) };
+    else finished = { ...finished, sets: candidates };
+  }
   if (!finished.sets) {
     const captured = await captureAssets({
       secretlintConfig: config.policy.secretlintConfig,
@@ -458,7 +491,11 @@ export async function workStep(
         keep: {
           ...keepAll,
           ...facts(
-            { finished: { ...finished, sets: captured.value }, sentBack: null },
+            {
+              finished: { ...finished, sets: captured.value },
+              candidates: captured.value,
+              sentBack: null,
+            },
             item.id,
           ),
         },
@@ -528,12 +565,16 @@ export async function workStep(
         ...(finished.validated ? { validated: finished.validated } : {}),
         sets,
       };
+      // The result carries the sets now; selection keeps the chosen one.
       return {
         kind: "done",
         result: done,
         keep: {
           ...keepAll,
-          ...facts({ finished: null, finding: null, refused: null }, item.id),
+          ...facts(
+            { finished: null, finding: null, refused: null, candidates: null },
+            item.id,
+          ),
         },
       };
     }

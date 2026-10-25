@@ -501,7 +501,7 @@ export class HedgedPlanner implements Planner {
     let sawEvent = false;
     return new Promise((resolve, reject) => {
       let settled = false;
-      let running = 0;
+      const running = [false, false];
       let hedged = false;
       let failure: unknown;
       const attempts: Promise<unknown>[] = [];
@@ -509,15 +509,18 @@ export class HedgedPlanner implements Planner {
         if (settled) return;
         settled = true;
         clearInterval(timer);
-        for (const controller of controllers)
-          controller.abort(new Error("hedged"));
+        // Only a running attempt is aborted: Codex's SDK leaves its child's
+        // abort listener behind after a turn, and an abort that reached it
+        // then would throw an uncaught AbortError.
+        for (const [n, controller] of controllers.entries())
+          if (running[n]) controller.abort(new Error("hedged"));
         // The first call's conversation directory is its own until it has
         // stopped: the step's next call must not open it before then.
         if (call.conversation) void Promise.allSettled(attempts).then(settle);
         else settle();
       };
       const start = (n: number) => {
-        running += 1;
+        running[n] = true;
         const attempt = this.inner
           .answer({
             ...call,
@@ -535,12 +538,15 @@ export class HedgedPlanner implements Planner {
             },
           })
           .then(
-            (answer) => finish(() => resolve(answer)),
+            (answer) => {
+              running[n] = false;
+              finish(() => resolve(answer));
+            },
             (error: unknown) => {
-              running -= 1;
+              running[n] = false;
               failure ??= error;
               // A failure ends the call unless the other attempt is running.
-              if (running === 0) finish(() => reject(failure));
+              if (!running.includes(true)) finish(() => reject(failure));
             },
           );
         attempts.push(attempt);

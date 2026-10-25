@@ -13,7 +13,7 @@ import { hydrateTree, materializeSelection } from "../dist/media.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { repairPath } from "../dist/repair.js";
-import { aboutMedia } from "../dist/work/step-deliver.js";
+import { aboutMedia, repairOutcome } from "../dist/work/step-deliver.js";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -332,4 +332,32 @@ test("a refused candidate set is repaired from its staging or receipt, and only 
     }),
     false,
   );
+});
+
+test("a repair keeps captured candidate sets unless it is about them, comes from selection, or starts fresh (#1987)", () => {
+  const media = item(["assets/badge/"]);
+  const key = "item:badge:candidates";
+  const state = { done: {}, kept: {} };
+  const kept = (from, finding, options = {}) =>
+    repairOutcome(media, from, finding, state, undefined, options).keep;
+  // A refused handoff note isn't about the sets: the next attempt keeps them.
+  const handoff = kept("work", {
+    kind: "failure",
+    detail: "Handoff manifest is not JSON",
+    staging: "handoff",
+  });
+  assert.equal(Object.hasOwn(handoff, key), false);
+  assert.equal(handoff["item:badge:finished"], null);
+  // A refusal of the candidates, the operator's answer at selection, or
+  // `fresh` drops them, so the next attempt stages new ones.
+  for (const keep of [
+    kept("work", {
+      kind: "failure",
+      detail: "Candidate set a misses role preview",
+      staging: "candidates",
+    }),
+    kept("select", "The operator asked for new candidates."),
+    kept("work", "Start again.", { fresh: true }),
+  ])
+    assert.equal(keep[key], null);
 });

@@ -531,6 +531,7 @@ export function repairOutcome(
           rebase: null,
           onto: null,
           selection: null,
+          candidates: null,
           sentBack: null,
           refused: null,
           diagnosis: null,
@@ -541,6 +542,12 @@ export function repairOutcome(
       )
     : {
         ...facts({ selection: media ? null : (own ?? null) }, item.id),
+        // Kept candidates go only with a finding about them, or the
+        // operator's answer at selection.
+        ...(from === "select" ||
+        (kept.kind === "failure" && kept.staging === "candidates")
+          ? facts({ candidates: null }, item.id)
+          : {}),
         ...(result ? refusedFact(item.id, result, refusesResult) : {}),
       };
   for (const layer of above)

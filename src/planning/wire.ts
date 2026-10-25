@@ -188,7 +188,7 @@ const CONTROLLER_GUARANTEES: { id: string; statement: string }[] = [
 
 /** Shared compilation/diagnosis meaning; no probe result or extra authority. */
 export const COMPILER_READINESS_GUIDANCE =
-  "Same-owner source-authorized setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this authorized sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice through decisionRequired.";
+  "Same-owner setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice through decisionRequired.";
 
 /**
  * A line-number reference next to a file name in an acceptance entry
@@ -386,10 +386,10 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
                 enum: [readiness],
                 description:
                   readiness === "available"
-                    ? "The owner can run its authorized prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
+                    ? "The owner can run its prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
                     : readiness === "prepare"
                       ? "An actual declared dependency supplies preparation; same-owner prerequisite commands do not use prepare."
-                      : "A source-required external environment prerequisite is missing: name its authorized probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
+                      : "A source-required external environment prerequisite is missing: name its probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
               },
               probeValidationIndex:
                 kind === "real"

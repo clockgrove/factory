@@ -968,7 +968,7 @@ function questionFor(
     );
   if (planned.question)
     return question(
-      `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`. If it needs a validation command the Objective doesn't list, \`allow <exact command>\` authorizes it.`,
+      `The planner needs a decision:\n\n${planned.question}\n\nAnswer with \`answer <your choice>\`.`,
       ASK,
     );
   if (asks.length && !fixes.length && !state.done[`review:${g}:${n}`])

@@ -222,18 +222,18 @@ const retiredOf = (plan: Plan) =>
 
 /**
  * Final validation's Work Item runs, for a plan with no final command
- * (neither the Objective nor the installation declares one): each Work
- * Item's own validation commands, intact and in dependency order, less
- * those the operator retired, so QA runs on the merged default branch
- * whenever the plan has a command. A list identical to one already listed
- * is left out. Empty when the plan has final commands.
+ * (the installation requires none): each work and QA item's own validation
+ * commands, intact and in dependency order, less those the operator
+ * retired, so QA runs on the merged default branch whenever the plan has a
+ * command. A list identical to one already listed is left out. Empty when
+ * the plan has final commands.
  */
 export function fallbackRuns(plan: Plan): WorkItem[] {
   if (plan.finalCommands.length) return [];
   const retired = retiredOf(plan);
   const listed = new Set<string>();
   return dependencyOrder(plan).flatMap((item) => {
-    if ((item.kind ?? "work") !== "work") return [];
+    if (!["work", "qa"].includes(item.kind ?? "work")) return [];
     const validation = item.validation.filter(
       (check) => !retired.has(check.command.trim()),
     );
@@ -246,17 +246,23 @@ export function fallbackRuns(plan: Plan): WorkItem[] {
 
 /**
  * The checks final validation runs on the merged default branch, less
- * those the operator retired: the plan's final commands, each once, or,
- * with none, the commands of its Work Item runs (`fallbackRuns`).
+ * those the operator retired: the plan's final commands, then its QA
+ * items' commands, each once, or, with no final command, the commands of
+ * its Work Item runs (`fallbackRuns`).
  */
 export function finalChecks(plan: Plan): string[] {
   if (!plan.finalCommands.length)
     return fallbackRuns(plan).flatMap((item) =>
       item.validation.map((check) => check.command),
     );
+  // The QA items' commands prove the Objective's command criteria: they
+  // run again on the final head, after the required commands.
   const retired = retiredOf(plan);
   const seen = new Set<string>();
-  return plan.finalCommands.filter((command) => {
+  const qa = dependencyOrder(plan).flatMap((item) =>
+    item.kind === "qa" ? item.validation.map((check) => check.command) : [],
+  );
+  return [...plan.finalCommands, ...qa].filter((command) => {
     const key = command.trim();
     if (retired.has(key) || seen.has(key)) return false;
     seen.add(key);

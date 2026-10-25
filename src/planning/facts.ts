@@ -628,8 +628,8 @@ function fixedPackageScripts(commands: readonly string[]): string[] {
 }
 
 /**
- * The package scripts the final commands run, as the base's root
- * package.json defines them. Validation keeps these bodies fixed, so the
+ * The package scripts `commands` run, as the base's root package.json
+ * defines them. Validation keeps these bodies fixed, so the
  * planner needs them to own the files a new check has to extend (#819).
  */
 export async function fixedScripts(
@@ -912,8 +912,13 @@ export async function buildFacts(
       files,
       await files.defaultBranch(),
     ),
+    // Every existing root script a validation command runs keeps its base
+    // body, so the planner sees each one it may run.
     fixedScripts: await fixedScripts(
-      finalCommands(args.requiredCommands),
+      [
+        ...finalCommands(args.requiredCommands),
+        ...(await packageCommands(files)),
+      ],
       files,
     ),
     coverageObligations: coverageObligations(args.shown.blocks),

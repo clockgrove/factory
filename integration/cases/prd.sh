@@ -143,10 +143,13 @@ EOF
   rec_if intake.recheck $? "#$n held naming the missing Source: $src; plan starts before recheck $planned_before, after $planned" "$t0"
   # Planning ends in an accepted plan or a question; the accepted plan never runs the CI-only command.
   wait_for 900 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' has $n done.plan)\" = 1 ] || [[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' phase $n)\" == hold:* ]]"
+  # Either the accepted plan leaves the command out, or planning asks the
+  # operator about it (a hold of the decide step); any other hold proves nothing.
   local accepted; accepted=$(st has "$n" done.plan)
+  local step; step=$(hold_field "$(st hold "$n")" step)
   local cmds; cmds=$(st validation-commands "$n" done.plan | sort -u | paste -sd'|')
-  { [ "$accepted" = 1 ] || [[ $(st phase "$n") == hold:* ]]; } && ! st validation-commands "$n" done.plan | grep -qx 'npm run ci-only'
-  rec_if toolchain.ci-only $? "#$n plan accepted: $accepted, phase $(st phase "$n"); accepted plan's validation commands: [${cmds}]" "$t0"
+  { [ "$accepted" = 1 ] || [[ $step == decide:* ]]; } && ! st validation-commands "$n" done.plan | grep -qx 'npm run ci-only'
+  rec_if toolchain.ci-only $? "#$n plan accepted: $accepted, hold step '${step}'; accepted plan's validation commands: [${cmds}]" "$t0"
   cancel_wait "$n" 300
 }
 

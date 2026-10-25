@@ -101,9 +101,9 @@ export type CoverageProof =
 export interface CoverageEnvironment {
   kind: "local" | "real";
   readiness: "available" | "prepare" | "missing";
-  /** Exact source-authorized probe in the owning item's validation commands. */
+  /** The probe: one of the owning item's validation commands. */
   probe: string;
-  /** Ordered source-authorized preparation in the same fresh checkout. */
+  /** Ordered preparation in the same fresh checkout. */
   prerequisites?: string[];
   /** Existing prerequisite item, never inferred setup authority. */
   preparedBy: string;

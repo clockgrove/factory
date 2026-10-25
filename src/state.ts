@@ -10,7 +10,7 @@ import {
   rmSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isObject } from "./checked.js";
 import { crashPoint } from "./crash.js";
 import type { HoldScope } from "./engine.js";
@@ -364,32 +364,33 @@ function statePath(dir: string, issue: number): string {
 }
 
 /**
- * Write the whole file: temporary file, fsync, rename, fsync the directory.
- * A crash at any point leaves the old file or the new one, never a mix.
+ * Write the whole file, owner-only: temporary file, fsync, rename, fsync
+ * the directory. A crash at any point leaves the old file or the new one,
+ * never a mix. `point` names the crash points before the rename and after.
  */
-export function saveState(dir: string, state: ObjectiveState): void {
-  mkdirSync(dir, { recursive: true });
-  writeWhole(dir, statePath(dir, state.issue), state, "state");
-}
-
-function writeWhole(
-  dir: string,
-  path: string,
-  state: ObjectiveState,
-  point?: string,
-): void {
+export function writeAtomic(path: string, text: string, point?: string): void {
   const temporary = `${path}.${process.pid}.tmp`;
   const fd = openSync(temporary, "w", 0o600);
   try {
-    writeSync(fd, `${JSON.stringify(state, null, 2)}\n`);
+    writeSync(fd, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   if (point) crashPoint(`${point}:before-rename`);
   renameSync(temporary, path);
-  syncDirectory(dir);
+  syncDirectory(dirname(path));
   if (point) crashPoint(`${point}:saved`);
+}
+
+/** Save the Objective's state whole (`writeAtomic`). */
+export function saveState(dir: string, state: ObjectiveState): void {
+  mkdirSync(dir, { recursive: true });
+  writeAtomic(
+    statePath(dir, state.issue),
+    `${JSON.stringify(state, null, 2)}\n`,
+    "state",
+  );
 }
 
 /** The queue-wide mode (`factory queue pause|drain|resume`), saved in the installation root. */
@@ -414,19 +415,9 @@ export function loadQueueControl(root: string): QueueControl {
   return { mode: "running" };
 }
 
-/** Save the queue mode whole: temporary file, fsync, rename. */
+/** Save the queue mode whole (`writeAtomic`). */
 export function saveQueueControl(root: string, control: QueueControl): void {
-  const path = join(root, QUEUE_FILE);
-  const temporary = `${path}.${process.pid}.tmp`;
-  const fd = openSync(temporary, "w", 0o600);
-  try {
-    writeSync(fd, `${JSON.stringify(control)}\n`);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, path);
-  syncDirectory(root);
+  writeAtomic(join(root, QUEUE_FILE), `${JSON.stringify(control)}\n`);
 }
 
 /** Remove the Objective's state: it was dequeued before it started. */
@@ -473,7 +464,7 @@ export function saveObservation(dir: string, state: ObjectiveState): string {
   mkdirSync(finished, { recursive: true });
   const run = runOf(state).replace(/[^\w.-]/g, "-");
   const path = join(finished, `${state.issue}@${run}${OBSERVATION}`);
-  writeWhole(finished, path, state);
+  writeAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
   return path;
 }
 

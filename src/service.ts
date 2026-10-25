@@ -3,7 +3,6 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -66,6 +65,7 @@ import {
   saveState,
   stateDigest,
   TERMINAL,
+  writeAtomic,
 } from "./state.js";
 import { carried } from "./tracking.js";
 import { built, RERUN, RERUN_CLEANUP, startedItems } from "./work/steps.js";
@@ -1752,8 +1752,7 @@ function writeServiceRecord(
   const path = join(root, "service.json");
   try {
     // Whole or not at all: the next start reads it to tell a crash.
-    writeFileSync(`${path}.tmp`, JSON.stringify(record));
-    renameSync(`${path}.tmp`, path);
+    writeAtomic(path, JSON.stringify(record));
   } catch {
     // Status falls back to the lock probe.
   }

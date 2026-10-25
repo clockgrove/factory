@@ -1,18 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
-  closeSync,
-  fsyncSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isObject } from "./checked.js";
 import type { DreamWrite } from "./knowledge/dream.js";
+import { writeAtomic } from "./state.js";
 
 /**
  * Operator requests: the CLI writes one file per request, and the service
@@ -180,15 +177,7 @@ export function writeRequest(
     ...(source ? { source } : {}),
     request,
   };
-  const temporary = join(dir, `.${id}.tmp`);
-  const fd = openSync(temporary, "w", 0o600);
-  try {
-    writeSync(fd, JSON.stringify(stored));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, join(dir, `${id}.json`));
+  writeAtomic(join(dir, `${id}.json`), JSON.stringify(stored));
   return id;
 }
 

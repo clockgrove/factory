@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -27,6 +28,7 @@ import {
   namespacedLauncher,
   namespaceRefused,
 } from "../sandbox.js";
+import { writeAtomic } from "../state.js";
 import { errorMessage } from "../text.js";
 import { CodexStderr, withStderr } from "./codex-stderr.js";
 import {
@@ -280,9 +282,10 @@ export function saveModelsCache(codexDir: string): void {
   try {
     const target = sharedModelsCache();
     mkdirSync(dirname(target), { recursive: true });
-    const temporary = `${target}.${process.pid}.tmp`;
-    copyFileSync(join(codexDir, "models_cache.json"), temporary);
-    renameSync(temporary, target);
+    writeAtomic(
+      target,
+      readFileSync(join(codexDir, "models_cache.json"), "utf8"),
+    );
   } catch {
     // Nothing fetched, or the cache directory is unwritable: not needed.
   }

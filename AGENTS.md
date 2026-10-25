@@ -4,6 +4,17 @@ These rules govern building Factory. The README and packaged skills govern using
 
 [The requirements](docs/PRD.md) say what Factory must do and when it is done; [the design](docs/DESIGN.md) says how.
 
+## Proportion
+
+Factory is a developer tool, not flight software. Build it like one.
+
+- **Make the core work.** The path from a queued Objective to merged PRs and a report, and the stability rules below, must hold. Everything else may have rough edges.
+- **Fix bugs when they're real.** Don't build for cases nobody has hit: a rare limit, an odd GitHub answer, an unusual config. When one shows up in real use, file a bug and fix it.
+- **Smallest mechanism that works.** No tie-break rules, caches, fallbacks or extra state for hypothetical races.
+- **Test the core, not the corners.** A test proves a core path or a bug that actually happened. No tests for rare limits. No local servers standing in for GitHub: the integration tests prove GitHub behaviour on real GitHub.
+- **Keep features; cut mechanism.** Over-engineering means a mechanism more complex than its job needs. It never means a feature Factory may want later: features stay.
+- **Decide, don't ask.** Routine calls are yours: merging main, one re-run, a small fix. Ask the maintainer about scope, product and spending.
+
 ## Stability rules
 
 Every change must keep these. Review checks them, not just the diff.

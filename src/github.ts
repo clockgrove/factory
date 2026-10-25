@@ -822,6 +822,41 @@ export class GitHub {
     return found.filter((issue) => issue.pull_request === undefined);
   }
 
+  /**
+   * Issues numbered after the newest one the repository's issue list shows,
+   * read by number until GitHub has none yet (at most `max`): the list can
+   * lag a create by seconds, and a read by number doesn't (#1991). Pull
+   * requests share the numbering and are left out.
+   */
+  async issuesPastList(
+    signal?: AbortSignal,
+    max = 20,
+  ): Promise<IssueSummary[]> {
+    const [newest] = await this.rest<{ number: number }[]>(
+      "GET",
+      `/repos/${this.repository}/issues?state=all&sort=created&direction=desc&per_page=1`,
+      undefined,
+      signal,
+    );
+    const found: IssueSummary[] = [];
+    for (let at = 1; at <= max; at++) {
+      let issue: IssueSummary & { pull_request?: unknown };
+      try {
+        issue = await this.rest(
+          "GET",
+          `/repos/${this.repository}/issues/${(newest?.number ?? 0) + at}`,
+          undefined,
+          signal,
+        );
+      } catch (error) {
+        if (issueGone(error)) break;
+        throw error;
+      }
+      if (issue.pull_request === undefined) found.push(issue);
+    }
+    return found;
+  }
+
   /** The issue among `found` whose body Factory marked with `marker`. */
   async markedIssue(
     found: readonly IssueSummary[],

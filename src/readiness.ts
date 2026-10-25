@@ -490,7 +490,7 @@ async function repositoryChecks(
             fix: `Require the CI checks on ${branch} in a ruleset`,
           },
     );
-    const reviews = await github.unbypassedReviews(branch, login);
+    const reviews = await github.requiredReviews(branch);
     const rules = reviews.map((review) => review.rule).join(" and ");
     const count = Math.max(0, ...reviews.map((review) => review.count));
     checks.push(
@@ -498,13 +498,10 @@ async function repositoryChecks(
         ? {
             name: "required reviews",
             status: "warn",
-            detail: `${branch} requires ${count} approving review${count === 1 ? "" : "s"} (${rules}) that ${login} can't bypass, so every Factory PR waits for someone other than ${login} to approve it`,
-            fix: `Give ${login} a bypass of the ${rules}, or require no approving reviews on ${branch}`,
+            detail: `${branch} requires ${count} approving review${count === 1 ? "" : "s"} (${rules}), so every Factory PR waits for someone other than ${login} to approve it. A bypass doesn't help: GitHub still reports the PR blocked on the review`,
+            fix: `Require no approving reviews on ${branch}`,
           }
-        : ok(
-            "required reviews",
-            `${branch} requires no approving review that ${login} can't bypass`,
-          ),
+        : ok("required reviews", `${branch} requires no approving review`),
     );
     if (config.tracking.enabled) {
       const missing = await offeredTypes(github).then(

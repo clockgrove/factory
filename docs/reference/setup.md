@@ -25,7 +25,7 @@ Part of [the design](../DESIGN.md).
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;
   - required status checks exist. None is a warning: a PR then merges once Factory's own validation passes and any checks that register on it pass.
-  - no ruleset or classic protection requires an approving review that the login can't bypass (`warn`: every Factory PR waits for someone else to approve it). A ruleset counts when GitHub reports `current_user_can_bypass: never` for the login; classic protection counts unless the login is in its bypass list, and only when the login may read it. The fix is a bypass for the login, or no required reviews.
+  - no ruleset or classic protection requires an approving review (`warn`: every Factory PR waits for someone else to approve it). A bypass for the login doesn't help: GitHub still reports the PR `BLOCKED` with `REVIEW_REQUIRED` to that login, so delivery waits all the same. Classic protection counts only when the login may read it. The fix is no required reviews.
 - **Branch protection:** setup recommends "require branches to be up to date", and Factory never changes repository settings.
 - **Validation environment:** `readiness.validationEnvironment` says how validation differs from hosted CI: the network, the sandbox, the bootstrap install, `sandbox.environment`'s names, the final and CI-only commands, and the package scripts that need a network validation lacks.
 

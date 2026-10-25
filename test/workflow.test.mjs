@@ -15,8 +15,13 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
+import { TransientError } from "../dist/github.js";
 import { checkObjective } from "../dist/objective.js";
-import { finalCommands, sectionText } from "../dist/planning/facts.js";
+import {
+  BaseFiles,
+  finalCommands,
+  sectionText,
+} from "../dist/planning/facts.js";
 import { ownedSince } from "../dist/planning/plan.js";
 import { repositoryView } from "../dist/planning/repository.js";
 import { readShown, shownDigest } from "../dist/shown.js";
@@ -654,6 +659,21 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
   await stopped(service);
+});
+
+test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-default-branch-"));
+  const git = (...args) =>
+    assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);
+  git("init", "--quiet", "--initial-branch=main");
+  const files = new BaseFiles(directory, "HEAD");
+  assert.equal(await files.defaultBranch(), undefined);
+  git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+  assert.equal(await files.defaultBranch(), "trunk");
+  await assert.rejects(
+    new BaseFiles(join(directory, "gone"), "HEAD").defaultBranch(),
+    TransientError,
+  );
 });
 
 test("overlapping owned paths take turns while busy, after an amendment, until the earlier Objective finishes; amendments plan meanwhile", async () => {

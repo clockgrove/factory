@@ -76,7 +76,7 @@ import {
   openParent,
   readContained,
 } from "./paths.js";
-import { isRecord, ownsPath } from "./planning/graph.js";
+import { ancestors, isRecord, ownsPath } from "./planning/graph.js";
 import type { Plan, SourceAssetBinding, WorkItem } from "./planning/types.js";
 import { localAssetPlace } from "./sandbox.js";
 import { errorMessage } from "./text.js";
@@ -1347,16 +1347,11 @@ export function validationMembers(
   item: WorkItem | undefined,
   selection: (itemId: string) => Selection | undefined,
 ): SelectedMember[] {
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const closure = new Set<string>();
-  const visit = (id: string) => {
-    if (closure.has(id)) return;
-    closure.add(id);
-    for (const dependency of byId.get(id)?.dependencies ?? [])
-      visit(dependency);
-  };
-  if (item) visit(item.id);
-  else for (const entry of plan.items) closure.add(entry.id);
+  const closure = new Set(
+    item
+      ? [item.id, ...ancestors(plan.items, item.id)]
+      : plan.items.map((entry) => entry.id),
+  );
   const members: SelectedMember[] = [];
   for (const id of closure) {
     const chosen = selection(id);

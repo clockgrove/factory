@@ -159,8 +159,12 @@ for (const point of HOLDER_POINTS) {
     }
     const crashing = serve(actor, point, [], flags);
     if (point.startsWith("holder:release")) {
-      // The release push comes at a clean stop.
-      await until(() => record(), "the installation takes it");
+      // The release push comes at a clean stop of a running service: a stop
+      // that comes while the record is still being taken keeps it instead.
+      await until(
+        () => record() && existsSync(join(actor.root, "service.json")),
+        "the installation serves",
+      );
       crashing.child.kill("SIGTERM");
     }
     const death = await exited(crashing, point);

@@ -2,9 +2,10 @@
 // the PR still shows the replaced head (GitHub catching up with the push)
 // and no record of pushing it survives (a reset, a moved stack layer), it
 // waits for GitHub; it never holds on its own commit as someone else's.
+// A push the remote refuses waits too, and asks only if the refusal lasts.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -36,7 +37,11 @@ function factoryCommit(directory, file, text) {
   return git(directory, "rev-parse", "HEAD");
 }
 
-test("a PR still showing the head Factory just replaced waits for GitHub, with no record of that push", async () => {
+/**
+ * An origin whose `factory/1/a` holds Factory's earlier result, a new
+ * result to publish, and a GitHub whose PR still shows the earlier head.
+ */
+function published() {
   const root = mkdtempSync(join(tmpdir(), "factory-publish-"));
   const bare = join(root, "origin.git");
   const checkout = join(root, "checkout");
@@ -99,6 +104,22 @@ test("a PR still showing the head Factory just replaced waits for GitHub, with n
     validation: { commands: [] },
     secrets: [],
   };
+  return {
+    bare,
+    checkout,
+    branch,
+    replaced,
+    base,
+    commit,
+    answers,
+    context,
+    input,
+  };
+}
+
+test("a PR still showing the head Factory just replaced waits for GitHub, with no record of that push", async () => {
+  const { checkout, branch, replaced, base, commit, answers, context, input } =
+    published();
   const result = await publish(context, input);
   assert.equal(result.kind, "retry", JSON.stringify(result));
   assert.match(result.reason, /does not show the pushed head/);
@@ -121,4 +142,23 @@ test("a PR still showing the head Factory just replaced waits for GitHub, with n
   const foreign = await publish(context, input);
   assert.equal(foreign.kind, "hold", JSON.stringify(foreign));
   assert.match(foreign.question, /a change Factory did not make/);
+});
+
+// The prd suite's lane Q: two Work Items pushed at once, GitHub answered
+// one with `[remote rejected] (failed)`, and the Objective held at once.
+test("a push the remote refuses with the branch unmoved retries, and asks only if it lasts", async () => {
+  const { bare, checkout, branch, replaced, context, input } = published();
+  const hook = join(bare, "hooks", "pre-receive");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+  chmodSync(hook, 0o755);
+  const result = await publish(context, input);
+  assert.equal(result.kind, "retry", JSON.stringify(result));
+  assert.match(result.reason, /refused Factory's push of factory\/1\/a/);
+  assert.equal(result.holdAfter.scope, "objective");
+  assert.match(result.holdAfter.question, /Allow Factory's login to push/);
+  // Nothing was pushed.
+  assert.equal(
+    git(checkout, "ls-remote", "origin", `refs/heads/${branch}`).split(/\s/)[0],
+    replaced,
+  );
 });

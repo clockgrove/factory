@@ -129,8 +129,8 @@ const answers = new WeakMap<
 >();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
 const FRESH_MS = 2 * 60_000;
-/** How long a 403 without rate-limit headers retries before it asks. */
-const REFUSED_MS = 2 * 60_000;
+/** How long a 403 without rate-limit headers, or a refused push, retries before it asks. */
+export const REFUSED_MS = 2 * 60_000;
 
 /**
  * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person

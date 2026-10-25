@@ -37,6 +37,7 @@ import {
   GitHubError,
   needing,
   type PullRequest,
+  REFUSED_MS,
   type Stack,
   TransientError,
   Unreadable,
@@ -565,14 +566,20 @@ async function pushBranch(
       throw new TransientError(`git push of ${branch}: ${message(error)}`);
     }
     // The ref was not updated. If the branch moved after it was read, read
-    // it again; if it did not, the remote refuses the push itself.
+    // it again; if it did not, the remote refused the push itself. That
+    // can pass (GitHub's `[remote rejected] (failed)` when two pushes land
+    // at once), so it retries and asks only once it outlasts REFUSED_MS,
+    // like a 403 (github.ts `githubOutcome`).
     if ((await remoteHead(context, branch)) !== remote)
       return retry(`Remote branch ${branch} moved during the push`);
-    return objectiveWide(
-      hold(
-        `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
-      ),
-    );
+    return {
+      ...retry(`The remote refused Factory's push of ${branch} (${refused})`),
+      holdAfter: {
+        ms: REFUSED_MS,
+        question: `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move, for ${REFUSED_MS / 60_000} minutes. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
+        scope: "objective",
+      },
+    };
   }
   crashPoint("deliver:push:after");
   // GitHub's reads of the new branch and commit may lag behind the push.

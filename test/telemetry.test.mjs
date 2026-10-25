@@ -543,13 +543,13 @@ test("watch --once and --json show each row's attempt, PR, tool targets and the 
   assert.equal(tail.at(-1).n, 29);
 });
 
-test("status --json details each Work Item's attempt, commits, last error, repair class and blocker, with the service's setup; analyze groups by attempt and call and breaks tokens down by model and child thread", () => {
+test("status --json details each Work Item's attempt, commits, last error, repair class, blocker and whether it runs, with the service's setup; analyze groups by attempt and call and breaks tokens down by model and child thread", () => {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   seed(inst, 69, "building", {
     done: {
       check: {},
-      plan: plan([item("a"), item("b", { dependencies: ["a"] })]),
+      plan: plan([item("a"), item("b", { dependencies: ["a"] }), item("c")]),
       "item:a:work": {
         base: "b0",
         commit: "c1",
@@ -576,9 +576,10 @@ test("status --json details each Work Item's attempt, commits, last error, repai
       },
     },
     stepRuns: { "item:a:review": { n: 2 } },
+    attempts: { "item:c:work": { startedAt: new Date().toISOString() } },
   });
   const [objective] = status(inst).objectives;
-  const [a, b] = objective.items;
+  const [a, b, c] = objective.items;
   assert.deepEqual(
     {
       attempt: a.attempt,
@@ -604,6 +605,31 @@ test("status --json details each Work Item's attempt, commits, last error, repai
     },
   );
   assert.equal(b.blocker, "waits for a to merge");
+  assert.deepEqual(
+    objective.items.map((row) => [row.id, row.running]),
+    [
+      ["a", false],
+      ["b", false],
+      ["c", true],
+    ],
+  );
+  // The live status comment lists running Work Items' workers only.
+  const reported = { at: new Date().toISOString(), counts: { turns: 1 } };
+  const comment = statusComment(
+    "<!-- marker -->",
+    {
+      view: objective,
+      calls: [],
+      running: [],
+      activity: { a: reported, c: reported },
+      decisions: [],
+    },
+    [],
+    { questions: true },
+    Date.now(),
+  ).body;
+  assert.match(comment, /\*\*Workers\*\*\n- `c`: active/);
+  assert.doesNotMatch(comment, /- `a`: active/);
   const shown = cli(inst, "status");
   assert.match(
     shown.out,

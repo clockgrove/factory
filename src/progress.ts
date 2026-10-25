@@ -373,7 +373,7 @@ function render(
         : []),
     );
   const running = view.items.filter(
-    (item) => input.activity[item.id] && item.phase.endsWith("(running)"),
+    (item) => input.activity[item.id] && item.running,
   );
   if (running.length) {
     lines.push("", "**Workers**");

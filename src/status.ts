@@ -52,6 +52,8 @@ export interface ItemRow {
    * done (`validated`, `merged`), else `pending`.
    */
   phase: string;
+  /** A step of it is running now (its `phase` reads `(running)`). */
+  running: boolean;
   pr: number | null;
   /** Repairs used across its repair paths. */
   repairs: number;
@@ -448,10 +450,11 @@ export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
     );
     const repaired = repairs.at(-1);
     const pending = !running && !hold && !waiting && !done.length;
+    const merged = mergeOf(state, item.id);
     return {
       id: item.id,
       kind: item.kind ?? "work",
-      phase: mergeOf(state, item.id)
+      phase: merged
         ? "merged"
         : running
           ? `${phase(running)} (running)`
@@ -462,6 +465,7 @@ export function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
               : done.length
                 ? (DONE_AS[phase(done.at(-1)!)] ?? phase(done.at(-1)!))
                 : "pending",
+      running: !merged && running !== undefined,
       pr: published?.pr ?? null,
       repairs: repairs.reduce((sum, [, repair]) => sum + repair.count, 0),
       hold: hold?.id ?? null,

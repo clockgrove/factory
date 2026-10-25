@@ -1,4 +1,4 @@
-# The main suite's cases on installation M (clockgrove/factory-drill, strict
+# The main suite's cases on installation M (the run's repository M_REPO, strict
 # protection on main): one long-lived serve that every case shares. Each case
 # runs in its own background subshell, owns its Objectives and its proxy
 # rules, and never stops the serve. Functions are case_<name>; CASES_M lists them.

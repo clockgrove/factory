@@ -178,7 +178,7 @@ end_cancelled() {
   [ "$s" = cancelled ] && [ "$op" = 0 ] && [ -z "$d" ] && [ "$iss" = "CLOSED NOT_PLANNED" ] && [ "$wt" = 0 ] && { [ "$br" = 0 ] || [ -n "${KEEP_BRANCH_OK:-}" ]; }
 }
 
-# ---------- the review gate on factory-drill's main ----------
+# ---------- the review gate on the run repository's main ----------
 # Changed only through these two direct calls on the protection sub-resource,
 # so the rest of main's protection stays as it was. The wave's end removes it.
 gate_on() {

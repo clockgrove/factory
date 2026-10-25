@@ -24,10 +24,9 @@ npm run integration -- --build ../other-checkout     # test another build (its d
 
 ## Prerequisites
 
-- `clockgrove/factory-drill`: a small Node.js project whose CI runs `npm test`, with Git LFS, strict branch protection on main ("require branches to be up to date") and no required review. `fixtures/review-image.mjs` and `fixtures/repo/*.yml` are what its main holds.
-- `clockgrove/factory-drill-2`: a second scratch repository; an empty one is filled from factory-drill's main at setup.
-- Project "Factory drill" with Factory's single-select field `Factory`; both repositories queue on it.
-- A `gh` login with admin on both repositories; Codex and Claude logins (subscription, no API key); `pasta` and `unshare` for the network namespace; `git-lfs`.
+- No standing scratch repository. Each run creates its own private repositories under the scratch owner (`REPO_OWNER` in `run-suite.sh`), `fd-<time>-m` (installation M, or E in the edge suite) and, in the main suite, `fd-<time>-c` (the crash lane). Each one's main is `fixtures/baseline/` as one commit: a small Node.js project whose CI runs `npm test`, Git LFS rules for media, strict branch protection on main ("require branches to be up to date", check `test`) and no required review. A passing run deletes them; a failed run keeps them to inspect (as does `--keep-repos`), and a later run deletes those after 24 hours.
+- Project "Factory drill" with Factory's single-select field `Factory`; the run's repositories queue on it.
+- A `gh` login that is an owner of the scratch owner organization, with the `delete_repo` scope (`gh auth refresh -s delete_repo`); Codex and Claude logins (subscription, no API key); `pasta` and `unshare` for the network namespace; `git-lfs`.
 
 Each run makes fresh state directories under `/tmp/factory-integration/<time>/` and writes its own configuration there. An existing `--state-base` is refused. Plumbing runs on the fastest model and lowest effort each provider offers, and the cases whose check is a planner decision use the production planner.
 
@@ -35,12 +34,12 @@ Each run makes fresh state directories under `/tmp/factory-integration/<time>/` 
 
 - The suite refuses to start while any `cli.js serve` for a scratch repository runs.
 - Processes are killed by exact PID after checking their start time, never by pattern. Children of a crashed serve are snapshotted while it runs and killed if they outlive it.
-- The EXIT/INT/TERM trap stops the cases, cancels unsettled Objectives, stops serves and proxies, checks the end state (factory-drill named factory-drill, no required review, no open PR, no serve or Factory unit left) and writes the results.
-- Branch protection is never changed. The fault proxy (`lib/gh-fault-proxy.mjs`) never logs headers or bodies; every secret the suite uses is a generated dummy. The suite never reads credential files or other processes' environments.
+- The EXIT/INT/TERM trap stops the cases, cancels unsettled Objectives, stops serves and proxies, checks the end state (the repository keeps its name, no required review, no open PR, no serve or Factory unit left), deletes the run's repositories when it passed, and writes the results.
+- The suite deletes only a repository whose description starts with "Factory integration run (transient)", the mark it gives the ones it creates, and changes branch protection only on those. The fault proxy (`lib/gh-fault-proxy.mjs`) never logs headers or bodies; every secret the suite uses is a generated dummy. The suite never reads credential files or other processes' environments.
 
 ## Layout
 
 - `run-suite.sh`: the cases table, setup, the wave, the 55-minute stop, cleanup and the results.
-- `cases/main.sh`: the cases on factory-drill's shared serve. `cases/crash.sh`: the factory-drill-2 lane. `cases/edge.sh`: the edge suite.
-- `lib/common.sh`: installations, results, CLI, answers, waits, proxy rules, templates. `lib/serve.sh`: serves. `lib/gh.sh`: the Project, markers, PRs and end checks. `lib/st.py` reads state and run logs by structure only. `lib/crashpoints.mjs` finds a build's `crashPoint()` sites. `lib/netns-serve.sh` runs a serve in a network namespace.
-- `objectives/`: Objective templates. `fixtures/`: files the scratch repository uses.
+- `cases/main.sh`: the cases on repository M's shared serve. `cases/crash.sh`: the repository C lane. `cases/edge.sh`: the edge suite.
+- `lib/common.sh`: installations, results, CLI, answers, waits, proxy rules, templates. `lib/serve.sh`: serves. `lib/gh.sh`: the Project, markers, PRs and end checks. `lib/repos.sh`: the run's repositories (create, delete, sweep). `lib/st.py` reads state and run logs by structure only. `lib/crashpoints.mjs` finds a build's `crashPoint()` sites. `lib/netns-serve.sh` runs a serve in a network namespace.
+- `objectives/`: Objective templates. `fixtures/baseline/`: the run repositories' starting tree.

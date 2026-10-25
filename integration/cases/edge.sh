@@ -1,13 +1,11 @@
-# The edge suite (run-suite.sh --suite edge) on clockgrove/factory-drill:
-# PRD requirements no main case covers. Installation E serves behind the fault proxy.
+# The edge suite (run-suite.sh --suite edge) on the run's own repository
+# (M_REPO): PRD requirements no main case covers. Installation E serves behind
+# the fault proxy.
 
 setup_edge() {
   clone $M_REPO "$STATE_BASE/checkout-e" || return 1
   write_config "$STATE_BASE/config-e.json" $M_REPO "$STATE_BASE/checkout-e" 6
   inst_define E $M_REPO "$STATE_BASE/config-e.json"
-  if [ -n "$(git ls-remote "https://github.com/$M_REPO.git" refs/factory/holder 2>/dev/null)" ]; then
-    git -C "$STATE_BASE/checkout-e" push -q origin :refs/factory/holder
-  fi
   inst E; proxy_start E 18612
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" >"$RUN_DIR/inst/E/extra_env"
   serve_up && serve_ready

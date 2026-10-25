@@ -211,8 +211,11 @@ export interface SandboxConfig {
    * only Factory's exact script-disabled dependency installs
    * (`pnpm install --frozen-lockfile --ignore-scripts`, `npm ci
    * --ignore-scripts`) reach it, to fetch packages a cold store lacks.
+   * `host`: every sandboxed command (validation, installs and a Claude
+   * worker's shell) shares the host's network namespace, for validation
+   * that needs a service on the host such as a database or a browser.
    */
-  network: "off" | "package-install";
+  network: "off" | "package-install" | "host";
   /**
    * A directory of its own for package-manager caches, shared by sandboxed
    * commands: the pnpm store and metadata cache and the npm cache. Only a
@@ -309,7 +312,7 @@ const sandboxEnvironment: Check<Record<string, string>> = (
 
 const sandboxSection = object({
   required: flag(true),
-  network: oneOf(["off", "package-install"] as const, "off"),
+  network: oneOf(["off", "package-install", "host"] as const, "off"),
   packageStore: optional<string>((value, path, problems) => {
     if (absolute(value)) return value;
     problems.push(`${path} must be an absolute, normalized directory path`);

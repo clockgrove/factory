@@ -47,7 +47,7 @@ case_reset() {
   end_done "$b"; local okb=$? rv; rv=$(st starts-since "$b" "$reset_at" 'review:*')
   [ "$(PULLS_TTL=0 gh_prs "$b" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = 1 ] && [ "$rv" -ge 1 ] || okb=1
   ev="$ev | mid-build #$b: reset exit $rb with PR #$pr open, plan reviews after reset $rv, PRs before $prs_b, after $(PULLS_TTL=0 gh_prs "$b"); $EVID"
-  [ $okd = 0 ] && [ $okb = 0 ]; rec_if reset.clean-dir $? "$ev" "$t0"
+  [ $okd = 0 ] && [ $okb = 0 ] && [ "$rd" = 0 ] && [ "$rb" = 0 ]; rec_if reset.clean-dir $? "$ev" "$t0"
 }
 
 # `factory run N` on an issue whose Project card is archived admits it.

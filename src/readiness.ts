@@ -486,7 +486,7 @@ async function repositoryChecks(
         : {
             name: "required checks",
             status: "warn",
-            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes`,
+            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes and any checks that register on it pass`,
             fix: `Require the CI checks on ${branch} in a ruleset`,
           },
     );
@@ -617,9 +617,11 @@ function validationEnvironment(
   const sandbox = sandboxStatus(config.sandbox);
   return {
     network:
-      config.sandbox.network === "package-install"
-        ? `package-install: only the script-disabled dependency install reaches the network${sandbox.installNetwork ? ` (${sandbox.installNetwork})` : ""}`
-        : "off: no command reaches the network",
+      config.sandbox.network === "host"
+        ? "host: every command shares the host's network, including its loopback services"
+        : config.sandbox.network === "package-install"
+          ? `package-install: only the script-disabled dependency install reaches the network${sandbox.installNetwork ? ` (${sandbox.installNetwork})` : ""}`
+          : "off: no command reaches the network",
     sandbox: `${sandbox.mode}: private HOME and /tmp, read-only host, no host credentials or sockets`,
     bootstrap: existsSync(join(config.checkout, "pnpm-lock.yaml"))
       ? "pnpm install --frozen-lockfile --ignore-scripts"

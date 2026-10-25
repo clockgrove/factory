@@ -17,6 +17,7 @@ import {
 import {
   ancestors,
   coverageCriterion,
+  MEDIA_ID,
   ownsPath,
   pathsOverlap,
   validateGraph,
@@ -411,6 +412,12 @@ async function mediaFindings(
     if (new Set(roles).size !== roles.length)
       found(
         `Work Item ${item.id} lists an expected output role twice; list each role once`,
+        item.id,
+      );
+    // Capture names members by these roles and refuses any other form.
+    for (const role of roles.filter((role) => !MEDIA_ID.test(role)))
+      found(
+        `Work Item ${item.id} expected output role ${JSON.stringify(role)} is not an id: use letters, digits, - and _ starting with a letter or digit (no spaces)`,
         item.id,
       );
     if (roles.length && (item.minimumAssetSets ?? 0) < 1)

@@ -76,7 +76,7 @@ import {
   openParent,
   readContained,
 } from "./paths.js";
-import { ancestors, isRecord, ownsPath } from "./planning/graph.js";
+import { ancestors, isRecord, MEDIA_ID, ownsPath } from "./planning/graph.js";
 import type { Plan, SourceAssetBinding, WorkItem } from "./planning/types.js";
 import { localAssetPlace } from "./sandbox.js";
 import { errorMessage } from "./text.js";
@@ -111,8 +111,14 @@ export type MediaOutcome<T> =
    * The worker's result is wrong; the finding goes back to the work step.
    * `keepsSelection`: a select repair that isn't about the chosen set's
    * content (a missing .gitattributes LFS rule), so the choice stands.
+   * `staging`: capture refused the staged candidate sets themselves.
    */
-  | { kind: "repair"; finding: string; keepsSelection?: true }
+  | {
+      kind: "repair";
+      finding: string;
+      keepsSelection?: true;
+      staging?: "candidates";
+    }
   | Held
   /** Transient; `repushed` is set once verifyOriginMedia has re-pushed, for the step to keep. */
   | { kind: "retry"; reason: string; repushed?: true };
@@ -209,7 +215,7 @@ const LFS = [
   "filter.lfs.required=true",
 ];
 /** Set and role ids; set ids are also hold answers. */
-const ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const ID = MEDIA_ID;
 /** Answers a select hold has besides the set ids (the engine adds `fresh`). */
 const RESERVED = new Set([
   "repair",
@@ -708,6 +714,7 @@ export async function captureAssets(input: {
       await forceRemove(candidates);
       return {
         kind: "repair",
+        staging: "candidates",
         finding: `Candidate sets refused: ${error.message}. Stage each set as regular files under a real .factory-media/ directory (at most ${MAX_MEMBER_BYTES} bytes a member, ${MAX_CAPTURE_BYTES} in all) and describe it in .factory-assets.json (at most ${MAX_MANIFEST_BYTES} bytes) as the media instructions say.`,
       };
     }
@@ -784,13 +791,16 @@ function readManifest(bytes: Buffer, item: WorkItem): DeclaredSet[] {
       if (
         !isRecord(member) ||
         !text(member.role) ||
-        !ID.test(member.role) ||
         !text(member.path) ||
         !text(member.mediaType) ||
         !text(member.destination)
       )
         throw new Finding(
           `Set ${id} has a member without role, path, mediaType and destination`,
+        );
+      if (!ID.test(member.role))
+        throw new Finding(
+          `Set ${id} member role ${JSON.stringify(member.role)} is not an id: use letters, digits, - and _ starting with a letter or digit (no spaces), the same in every set`,
         );
       const { role, path, destination } = member;
       if (roles.has(role))

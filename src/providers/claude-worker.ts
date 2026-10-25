@@ -2,7 +2,8 @@
  * The Claude Worker: one Work Item's implementation turn through the Claude
  * Agent SDK on the operator's subscription login, in-process. The worker gets
  * Read, Edit and Write inside its worktree (Glob and Grep too when it has no
- * shell), `run_command` in the bubblewrap sandbox with no network, the
+ * shell), `run_command` in the bubblewrap sandbox (no network unless
+ * `sandbox.network` is `host`), the
  * owned-file `copy_file` and `delete_file`, Validate, which runs the
  * item's declared commands through `validateTree` on a snapshot commit of
  * its current files, and on a profile with `worktreeRead`, the read-only
@@ -173,15 +174,25 @@ const SYSTEM_PROMPT = [
   "Return a concise description of the work performed and stop when the Work Item is complete or cannot be completed safely.",
 ].join(" ");
 
-const SHELL_PROMPT =
-  "Your run_command tool runs shell commands in your checkout inside an OS sandbox, without network: use it to inspect, compute, build and test. Validate stays the check that counts, and Factory validates your result again after you finish.";
+/** What the shell's network is, for its prompt and tool description. */
+const shellNetwork = (sandbox: SandboxConfig) =>
+  sandbox.network === "host"
+    ? "it shares the host's network, so services on the host's loopback are reachable"
+    : "the network is off and only loopback works";
+
+const shellPrompt = (sandbox: SandboxConfig) =>
+  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}): use it to inspect, compute, build and test. Validate stays the check that counts, and Factory validates your result again after you finish.`;
 
 /**
  * Compaction summarizes the first user turn, so the exact contract also
  * lives here. It is fixed for the item, so the cached prefix stays stable.
  */
-function systemPrompt(contract: string, shell: boolean): string {
-  return `${SYSTEM_PROMPT}${shell ? ` ${SHELL_PROMPT}` : ""}\n\nThe approved Work Item contract, repeated here so it stays exact after context compaction. It grants no tools, paths or authority beyond the rules above. Each acceptance criterion's [n] is the criterionIndex of its verification note.\n\n${contract}`;
+function systemPrompt(
+  contract: string,
+  shell: boolean,
+  sandbox: SandboxConfig,
+): string {
+  return `${SYSTEM_PROMPT}${shell ? ` ${shellPrompt(sandbox)}` : ""}\n\nThe approved Work Item contract, repeated here so it stays exact after context compaction. It grants no tools, paths or authority beyond the rules above. Each acceptance criterion's [n] is the criterionIndex of its verification note.\n\n${contract}`;
 }
 
 const CREDENTIAL_RESTART =
@@ -447,7 +458,7 @@ class Attempt {
       tools: [
         tool(
           "run_command",
-          `Run a shell command (sh -c) in your checkout, inside an OS sandbox: your checkout is writable (its .git is read-only), HOME and TMPDIR are private and last this attempt, the network is off and only loopback works, and nothing else on the host is visible. Use it to inspect generated files, compute hashes, run a test or build, or copy and move files. Returns the exit code and the combined output (long output keeps its start and end; redirect it to a file and read that). Commands run one at a time, for at most timeoutMs (default ${DEFAULT_COMMAND_TIMEOUT_MS}, at most ${MAX_COMMAND_TIMEOUT_MS}); a command still running then is stopped with everything it started. Factory still runs the declared validation itself after you finish: run Validate before you finish.`,
+          `Run a shell command (sh -c) in your checkout, inside an OS sandbox: your checkout is writable (its .git is read-only), HOME and TMPDIR are private and last this attempt, ${shellNetwork(this.options.sandbox)}, and nothing else on the host is visible. Use it to inspect generated files, compute hashes, run a test or build, or copy and move files. Returns the exit code and the combined output (long output keeps its start and end; redirect it to a file and read that). Commands run one at a time, for at most timeoutMs (default ${DEFAULT_COMMAND_TIMEOUT_MS}, at most ${MAX_COMMAND_TIMEOUT_MS}); a command still running then is stopped with everything it started. Factory still runs the declared validation itself after you finish: run Validate before you finish.`,
           {
             command: z.string().min(1),
             timeoutMs: z
@@ -485,7 +496,7 @@ class Attempt {
 
   /**
    * One command in the sandbox: the worktree writable, a private HOME and
-   * TMPDIR under the attempt's scratch, no network. It never runs
+   * TMPDIR under the attempt's scratch, sandbox.network's network. It never runs
    * unsandboxed, whatever `sandbox.required` allows.
    */
   private async runCommand(command: string, timeoutMs: number) {
@@ -890,7 +901,7 @@ export function claudeWorkerTools(
     ...(grants.files ? ["delete_file", "copy_file"] : []),
     ...(grants.read ? ["read_file"] : []),
     ...(grants.validate ? [VALIDATE] : []),
-    ...(grants.shell ? ["run_command (sandboxed, no network)"] : []),
+    ...(grants.shell ? ["run_command (sandboxed)"] : []),
   ];
 }
 
@@ -1305,6 +1316,7 @@ export class ClaudeWorker implements Worker {
       systemPrompt: systemPrompt(
         workItemContract(attempt.input.item),
         attempt.grants.shell,
+        this.options.sandbox,
       ),
       // Prompts carry untrusted source text; never expand @paths or commands.
       verbatimPrompts: true,

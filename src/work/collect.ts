@@ -211,14 +211,12 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   // A collection interrupted after its own commit, or a repair continuing
   // from Factory's earlier commit, is undone to the staged candidate and
   // checked again from the top.
-  // Its subject is the inert one, or the raw title an earlier Factory wrote.
   const head = await text("rev-parse", "HEAD");
   if (
     head !== base &&
     (await parent(worktree, signal)) === base &&
-    [collectionMessage(item), `Factory: ${item.title}`]
-      .map((subject) => `${FACTORY_EMAIL}\n${subject}`)
-      .includes(await text("log", "-1", "--format=%ae%n%s"))
+    (await text("log", "-1", "--format=%ae%n%s")) ===
+      `${FACTORY_EMAIL}\n${collectionMessage(item)}`
   )
     await git("reset", "--quiet", "--soft", base);
   if ((await text("rev-parse", "HEAD")) !== base)

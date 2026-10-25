@@ -85,6 +85,13 @@ Several Objectives move through these steps at once.
     - `factory setup` writes and checks the configuration, and checks that the machine is ready, without model calls.
     - `setup --background` runs Factory as a user service.
 
+14. **Unattended on a real target.** A real target runs fully automated: no human approval or review gate is required, and Factory asks only when it can't continue.
+    - **Spend ceiling.** Model spend has a limit per Objective and per day, in tokens or list cost. Reaching it holds with named answers (allow more, or cancel), never a silent stop.
+    - **Stop from a phone.** One GitHub action by a user with write access pauses the whole queue: no new step starts, running calls finish, and nothing is lost. Another resumes it. The CLI's `factory queue pause` and `resume` do the same.
+    - **Worker network.** Where validation needs local services (a database, a browser), the target's configuration can give workers host network access. It is off by default.
+    - **Toolchain.** The target's pinned toolchain and package manager are used, and commands marked CI-only never run on the machine.
+    - **Shared main.** Factory delivers onto a protected main that also takes people's PRs. It merges or updates around them and never force-pushes, and a conflict with a person's change is repaired, not looped on.
+
 ## Stability
 
 These hold for every run (the design gives each one a test):

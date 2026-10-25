@@ -237,7 +237,7 @@ export const ENGINEERING_STANDARD = `Engineering standard. Each rule names a def
 - No dead code, debug leftovers, placeholder assertions or unrelated changes.
 - Validate input once at the boundary, with the repository's parsers and validators; do not re-check what a callee validates or hand-roll a parser.
 - Scope configuration changes (timeouts, lint rules) to what needs them, never globally for one case.
-Where the repository's AGENTS.md or documented conventions differ, the repository wins.`;
+Where the repository's AGENTS.md, documented conventions or CI checks differ, the repository wins.`;
 
 /**
  * Design risks every worker answers and every Work Item result review checks:

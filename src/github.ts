@@ -129,8 +129,8 @@ const answers = new WeakMap<
 >();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
 const FRESH_MS = 2 * 60_000;
-/** How long a 403 without rate-limit headers retries before it asks. */
-const REFUSED_MS = 2 * 60_000;
+/** How long a 403 without rate-limit headers, or a refused push, retries before it asks. */
+export const REFUSED_MS = 2 * 60_000;
 
 /**
  * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
@@ -1516,6 +1516,58 @@ export class GitHub {
           ? false
           : undefined;
     return { names, strict };
+  }
+
+  /**
+   * The rules on `branch` that require approving reviews: each ruleset
+   * whose pull_request rule requires one, and the classic protection's
+   * required reviews. A bypass doesn't count: GitHub reports the PR BLOCKED
+   * with REVIEW_REQUIRED even to a login that may bypass the rule, so
+   * delivery waits all the same. A rule the login can't read is left out.
+   */
+  async requiredReviews(
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<{ rule: string; count: number }[]> {
+    const name = encodeURIComponent(branch);
+    const rules =
+      (await this.optional(() =>
+        this.pages<{
+          type?: string;
+          ruleset_id?: number;
+          parameters?: { required_approving_review_count?: unknown };
+        }>(this.repo(`rules/branches/${name}`), signal),
+      )) ?? [];
+    const found: { rule: string; count: number }[] = [];
+    for (const rule of rules) {
+      const count = rule.parameters?.required_approving_review_count;
+      if (rule.type !== "pull_request" || typeof count !== "number" || !count)
+        continue;
+      const ruleset = await this.optional(() =>
+        this.rest<{ name?: unknown }>(
+          "GET",
+          this.repo(`rulesets/${rule.ruleset_id}`),
+          undefined,
+          signal,
+        ),
+      );
+      found.push({
+        rule: `ruleset "${String(ruleset?.name ?? rule.ruleset_id)}"`,
+        count,
+      });
+    }
+    const count = (
+      await this.optional(() =>
+        this.rest<{
+          required_pull_request_reviews?: {
+            required_approving_review_count?: unknown;
+          };
+        }>("GET", this.repo(`branches/${name}/protection`), undefined, signal),
+      )
+    )?.required_pull_request_reviews?.required_approving_review_count;
+    if (typeof count === "number" && count > 0)
+      found.push({ rule: "branch protection", count });
+    return found;
   }
 
   /**

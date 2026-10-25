@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { satisfies, validRange } from "semver";
 import type { ObjectiveBlock } from "../shown.js";
 import { BaseFiles } from "./facts.js";
 import { packageManagerUpdate } from "./prompts.js";
@@ -12,11 +13,13 @@ const run = promisify(execFile);
 
 /**
  * Which host executables the Objective's final commands need, whether they
- * exist on this host, and whether a pinned npm/pnpm matches the host version.
- * The planner and plan reviewer get the observations; a missing tool or a
- * version mismatch is a problem the operator fixes on the host. Nothing here
- * runs a target command: the only processes started are `--version` probes of
- * host npm/pnpm, in an empty directory with no network.
+ * exist on this host, whether a pinned npm/pnpm matches the host version, and
+ * whether the host's node satisfies the target's Node pin when a command runs
+ * node, npm, npx or pnpm. The planner and plan reviewer get the observations;
+ * a missing tool or a version mismatch is a problem the operator fixes on the
+ * host. Nothing here runs a target command: the only processes started are
+ * `--version` probes of host node/npm/pnpm, in an empty directory with no
+ * network.
  */
 
 export type ExecutableStatus =
@@ -44,10 +47,66 @@ export interface LocalExecutables {
   finalCommands: string[];
   /** The npm/pnpm pin the host must match: the Objective's update, else the base pin. */
   packageManager?: string;
+  /** The base's Node pin the host's node must satisfy. */
+  node?: NodePin;
   observations: ExecutableObservation[];
 }
 
 const VERSION_PROBE_TIMEOUT_MS = 30_000;
+
+/** Final-command entrypoints that run the host's node. */
+const NODE_TOOLS = new Set(["node", "npm", "npx", "pnpm"]);
+
+/** A Node version pin and the file it came from. */
+export interface NodePin {
+  source: string;
+  range: string;
+}
+
+/**
+ * The target's Node pin: the first of `.nvmrc`, `.node-version`,
+ * `.tool-versions` (its `nodejs` or `node` line) and package.json
+ * `engines.node` that holds an exact version or a semver range. Aliases such
+ * as `lts/*` or `system` are not resolved: that file is passed over.
+ */
+export async function nodePin(
+  read: (path: string) => Promise<string | undefined>,
+): Promise<NodePin | undefined> {
+  const firstLine = (text: string | undefined) =>
+    text
+      ?.split("\n")
+      .map((line) => line.replace(/#.*/, "").trim())
+      .find(Boolean);
+  const toolVersions = (await read(".tool-versions"))
+    ?.split("\n")
+    .map((line) => line.replace(/#.*/, "").trim().split(/\s+/))
+    .find(([tool]) => tool === "nodejs" || tool === "node")?.[1];
+  let engines: unknown;
+  try {
+    engines = (
+      JSON.parse((await read("package.json")) ?? "{}") as {
+        engines?: { node?: unknown };
+      }
+    ).engines?.node;
+  } catch {
+    engines = undefined;
+  }
+  const candidates: [string, unknown][] = [
+    [".nvmrc", firstLine(await read(".nvmrc"))],
+    [".node-version", firstLine(await read(".node-version"))],
+    [".tool-versions", toolVersions],
+    ["package.json engines.node", engines],
+  ];
+  for (const [source, value] of candidates)
+    if (typeof value === "string" && value.trim() && validRange(value.trim()))
+      return { source, range: value.trim() };
+  return undefined;
+}
+
+/** Whether a host node version satisfies the pin. */
+export function nodeSatisfies(version: string, pin: NodePin): boolean {
+  return satisfies(version, pin.range);
+}
 
 const SHELL_KEYWORDS = new Set([
   "if",
@@ -212,11 +271,11 @@ function exactPin(
     : undefined;
 }
 
-/** The host's `--version` of an npm/pnpm, run in an empty directory with no network. */
-async function hostVersion(
+/** The host's `--version` of node, npm or pnpm, run in an empty directory with no network. */
+export async function hostVersion(
   executable: string,
   path: string,
-  signal: AbortSignal | undefined,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const home = await mkdtemp(join(tmpdir(), "factory-version-"));
   try {
@@ -235,7 +294,7 @@ async function hostVersion(
       },
       ...(signal ? { signal } : {}),
     });
-    const version = stdout.trim();
+    const version = stdout.trim().replace(/^v/, "");
     return /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(version)
       ? version
       : undefined;
@@ -247,7 +306,6 @@ async function hostVersion(
   }
 }
 
-/** The package.json packageManager at the base; undefined when absent or unreadable. */
 /**
  * Observe the host executables the final commands need. Problems are data:
  * each names the fix. Throws only a TransientError when git can't read the
@@ -265,8 +323,8 @@ export async function observeLocalExecutables(args: {
   const problems: string[] = [];
 
   const update = packageManagerUpdate(blocks);
-  const baseline = (await new BaseFiles(checkout, base, signal).packageJson())
-    .packageManager;
+  const files = new BaseFiles(checkout, base, signal);
+  const baseline = (await files.packageJson()).packageManager;
   if (update !== undefined) {
     const from = exactPin(baseline);
     if (!from || from.manager !== exactPin(update)?.manager)
@@ -280,8 +338,17 @@ export async function observeLocalExecutables(args: {
   const path = process.env.PATH ?? "/usr/bin:/bin";
   const targetRoot = `${realpath(checkout)}${sep}`;
   const pin = exactPin(policy);
+  const node = await nodePin((file) => files.text(file));
   const observations: ExecutableObservation[] = [];
   const versions = new Map<string, Promise<string | undefined>>();
+  const probe = (resolved: string) => {
+    let version = versions.get(resolved);
+    if (!version) {
+      version = hostVersion(realpath(resolved), path, signal);
+      versions.set(resolved, version);
+    }
+    return version;
+  };
   const reported = new Set<string>();
 
   for (const [commandIndex, command] of finalCommands.entries()) {
@@ -342,12 +409,7 @@ export async function observeLocalExecutables(args: {
         });
         continue;
       }
-      let probe = versions.get(resolved);
-      if (!probe) {
-        probe = hostVersion(realpath(resolved), path, signal);
-        versions.set(resolved, probe);
-      }
-      const version = await probe;
+      const version = await probe(resolved);
       if (version === undefined)
         observe({
           executable,
@@ -372,6 +434,33 @@ export async function observeLocalExecutables(args: {
           detail: `Resolves to ${resolved}, version ${version} matches the pin.`,
         });
     }
+    const host = lookup("node", path, targetRoot);
+    if (!node || host.status !== "ready" || !host.path) continue;
+    if (!names.some((name) => NODE_TOOLS.has(name))) continue;
+    const version = await probe(host.path);
+    if (version === undefined)
+      observe({
+        executable: "node",
+        status: "unverified",
+        path: host.path,
+        detail: `\`node --version\` gave no exact version, so the Node pin ${node.range} (${node.source}) is not checked.`,
+      });
+    else if (!nodeSatisfies(version, node))
+      observe({
+        executable: "node",
+        status: "version-mismatch",
+        path: host.path,
+        version,
+        detail: `The target pins Node ${node.range} (${node.source}), but node on this host is ${version} (${host.path}). Put a matching node first on the service's PATH, or change the pin.`,
+      });
+    else
+      observe({
+        executable: "node",
+        status: "ready",
+        path: host.path,
+        version,
+        detail: `Resolves to ${host.path}, version ${version} satisfies the Node pin ${node.range} (${node.source}).`,
+      });
   }
 
   return {
@@ -380,6 +469,7 @@ export async function observeLocalExecutables(args: {
       path,
       finalCommands,
       ...(typeof policy === "string" ? { packageManager: policy } : {}),
+      ...(node ? { node } : {}),
       observations,
     },
     problems,

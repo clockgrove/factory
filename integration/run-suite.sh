@@ -1,179 +1,381 @@
 #!/bin/bash
-# Factory integration tests: on demand, one entry point for every group.
+# Factory integration tests: real GitHub, real providers, on demand.
 #
-#   run-suite.sh [--only a,b] [--skip a,b] [--build DIR] [--state DIR]
-#                [--config FILE] [--repo OWNER/NAME] [--dry-run] [--approved-long]
-#                [--local-only] [--no-model] [--keep] [--allow-repo-changes]
+#   run-suite.sh [--suite main|edge] [--build DIR] [--state-base DIR] [--only a,b] [--capture] [--keep-repos] [--dry-run]
 #
-# Groups: queue plan exec stack media crash-points netcut model-kill
-#         bounded-cost knowledge stability holds operator followups reset
-#         providers recheck tracking bounded1 bounded2 bounded3
-# See README.md. A plan expected to take over 60 min needs --approved-long.
-# Results: .runs/results/<PDT timestamp>.md; exit 1 on any FAIL, 3 when
-# refused (a serve is running, or a long plan without approval), 2 on bad usage.
+# Each run creates its own private repositories under REPO_OWNER from
+# fixtures/baseline/ and deletes them when it passes (a failed run keeps them
+# for inspection; --keep-repos always does; later runs sweep them after 24 h).
+# --capture records every model call's body for diagnosis (config capture):
+# the run's state dir then holds prompts and answers, so keep it private.
+#
+# One parallel wave: every case of the suite starts at once and runs
+# concurrently. The suite enforces its own wall clock: at 55 min it stops
+# starting anything, stops its cases, cancels unsettled Objectives, then runs
+# cleanup and the report, so a run never passes 60 min.
+# Results: .runs/results/<PDT timestamp>.md; exit 1 on any FAIL, 3 when it
+# refuses to start (a serve already runs for a scratch repository), 2 on bad usage.
 set -uo pipefail
+{   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ALL_GROUPS="queue plan exec stack media crash-points netcut model-kill bounded-cost knowledge stability holds operator followups reset providers recheck tracking bounded1 bounded2 bounded3"
-LOCAL_GROUPS="knowledge"
-LONG_MINUTES=60
-
-RUNS=$SUITE/.runs
-BUILD=$(dirname "$SUITE")
-STATE=$RUNS/state
-REPO=clockgrove/factory-drill
-CONFIG=""; ONLY=""; SKIP=""; DRY=""; LOCAL_ONLY=""; NO_MODEL=""; KEEP=""; ALLOW_REPO_CHANGES=""; APPROVED_LONG=""
-usage() { sed -n 2,14p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+BUILD=$(dirname "$SUITE"); SUITE_NAME=main; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
+REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
+PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
+usage() { sed -n 2,17p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
-    --only) ONLY=${2:?}; shift 2 ;;
-    --skip) SKIP=${2:?}; shift 2 ;;
+    --suite) SUITE_NAME=${2:?}; shift 2 ;;
     --build) BUILD=$(realpath "${2:?}"); shift 2 ;;
-    --state) STATE=$(realpath -m "${2:?}"); shift 2 ;;
-    --config) CONFIG=$(realpath "${2:?}"); shift 2 ;;
-    --repo) REPO=${2:?}; shift 2 ;;
+    --state-base) STATE_BASE=$(realpath -m "${2:?}"); shift 2 ;;
+    --only) ONLY=${2:?}; shift 2 ;;
+    --capture) CAPTURE=1; shift ;;
+    --keep-repos) KEEP_REPOS=1; shift ;;
     --dry-run) DRY=1; shift ;;
-    --approved-long) APPROVED_LONG=1; shift ;;
-    --local-only) LOCAL_ONLY=1; shift ;;
-    --no-model) NO_MODEL=1; shift ;;
-    --keep) KEEP=1; shift ;;
-    --allow-repo-changes) ALLOW_REPO_CHANGES=1; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
 done
-OWNER=${REPO%%/*}; NAME=${REPO#*/}
-CONFIG=${CONFIG:-$HOME/.config/factory/$(echo "$REPO" | tr 'A-Z' 'a-z' | sed 's#/#__#').json}
-ROOT="$STATE/$(echo "$REPO" | tr 'A-Z' 'a-z' | sed 's#/#__#')"
-export LOCAL_ONLY NO_MODEL KEEP ALLOW_REPO_CHANGES
 
-[ -f "$BUILD/dist/cli.js" ] || { echo "no CLI at $BUILD/dist/cli.js (build it with npm run build)" >&2; exit 2; }
-if [ -f "$CONFIG" ]; then
-  cfg_repo=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("repository",""))' "$CONFIG")
-  [ "${cfg_repo,,}" = "${REPO,,}" ] || { echo "config $CONFIG is for '$cfg_repo', not $REPO" >&2; exit 2; }
-elif [ -z "$DRY" ]; then echo "no config at $CONFIG (pass --config)" >&2; exit 2; fi
-
-# Group selection, in suite order.
-GROUPS_SEL=()
-for g in $ALL_GROUPS; do
-  [ -n "$ONLY" ] && [[ ",$ONLY," != *",$g,"* ]] && continue
-  [[ ",$SKIP," == *",$g,"* ]] && continue
-  GROUPS_SEL+=("$g")
+# Cases: NAME LANE MINUTES WHAT. Minutes are each case's expected duration from
+# the wave's start; every case runs concurrently, so the wave takes the longest.
+CASE_TABLE_main=(
+  "codex|M|30|Codex end to end on a two-layer native stack under strict protection: plan, work, PRs, CI, review, merge, update-branch, report, done once (happy.codex, stack.strict); the provider child killed in planning and in work retries with error count 0 (model-kill.*); a closing phrase in actual PR text closes no decoy issue (security.fixes-keyword)"
+  "claude|M|25|Claude end to end through 'factory run N --provider claude', followed to done: every model call on claude, card Done (happy.claude, queue.run-command)"
+  "holds|M|25|a planner question asked once and answered by /factory comment; answers that decide nothing until the planning allowance asks 'more', which sends the kept answer once; then cancelled cleanly (holds.*, queue.cancel-held)"
+  "queue|M|8|admitted, then its card cleared during a slowed check: withdrawn, never planned (queue.withdraw)"
+  "cancel|M|20|a lasting 403 on merge holds the step (fault.lasting-403); with #1879 a 404 on a PR read right after creation retries (fault.lag-404); cancel with the PR open: one cancel comment, PR closed, branch deleted, issue closed not planned (queue.cancel-open-pr)"
+  "media|M|30|two candidate sets, 'repair' at select, new sets, a pick; the asset lands as Git LFS (media.select-repair)"
+  "attach|M|8|with #1878: another repository's attachment URL holds before any token is sent (security.foreign-attachment)"
+  "crash|C|40|repository C: one installation at a time (holder.second-refused, take-over, release, restart); sampled crash points armed one at a time across live Objectives: plan:post, deliver:push, deliver:pr-create, deliver:merge, report:comment, report:close, sync:remind and sync:cancel, before and after (crash.*): every Objective done or cancelled once with no duplicate; two 60 s network cuts, no hold (netcut.*)"
+)
+CASE_TABLE_edge=(
+  "reset|E|30|repository M: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
+  "archived|E|10|repository M: 'factory run N' on an issue whose Project card is archived admits it (queue.archived-card)"
+)
+case "$SUITE_NAME" in main|edge) ;; *) echo "unknown suite: $SUITE_NAME (main, edge)" >&2; exit 2 ;; esac
+declare -n TABLE="CASE_TABLE_$SUITE_NAME"
+for selected in ${ONLY//,/ }; do
+  found=""
+  for row in "${TABLE[@]}"; do [ "${row%%|*}" = "$selected" ] && found=1; done
+  [ -n "$found" ] || { echo "unknown case: $selected" >&2; exit 2; }
 done
-for g in ${ONLY//,/ } ${SKIP//,/ }; do [[ " $ALL_GROUPS " == *" $g "* ]] || { echo "unknown group: $g" >&2; exit 2; }; done
-[ ${#GROUPS_SEL[@]} -gt 0 ] || { echo "no groups selected" >&2; exit 2; }
-# Expected minutes of a group (its _minutes), 0 when --local-only skips it.
-group_minutes() {
-  if [ -n "$LOCAL_ONLY" ] && [[ " $LOCAL_GROUPS " != *" $1 "* ]]; then echo 0; else "$(fn "$1" minutes)"; fi
-}
+SEL=()
+for row in "${TABLE[@]}"; do IFS='|' read -r c _ _ _ <<<"$row"; [ -n "$ONLY" ] && [[ ",$ONLY," != *",$c,"* ]] && continue; SEL+=("$row"); done
+[ ${#SEL[@]} -gt 0 ] || { echo "no cases selected" >&2; exit 2; }
+# Repository C exists only for a selected case on the crash lane.
+NEEDS_C=""; for row in "${SEL[@]}"; do IFS='|' read -r _ lane _ _ <<<"$row"; [ "$lane" = C ] && NEEDS_C=1; done
 
-RUN_ID=$(TZ=America/Los_Angeles date +%Y-%m-%dT%H%M%S%Z)
-SFX=$(TZ=America/Los_Angeles date +%m%d%H%M)
-mkdir -p "$RUNS"
+RUN_ID=$(TZ=America/Los_Angeles date +%Y-%m-%dT%H%M%S%Z); SFX=$(TZ=America/Los_Angeles date +%m%d%H%M)
+# This run's repositories: M (installation M, or E in the edge suite) and C (the crash lane).
+REPO_STEM=fd-$(TZ=America/Los_Angeles date +%Y%m%d-%H%M%S)
+M_REPO=$REPO_OWNER/$REPO_STEM-m; C_REPO=$REPO_OWNER/$REPO_STEM-c
+RUNS=/tmp/factory-integration-runs; mkdir -p "$RUNS/results"
+STATE_BASE=${STATE_BASE:-/tmp/factory-integration/$RUN_ID}
+START_S=$(date +%s); HARD_STOP_AT=$(( START_S + 60 * 60 )); STOP_AT=$(( HARD_STOP_AT - 300 ))
+export HARD_STOP_AT STOP_AT
 if [ -n "$DRY" ]; then RUN_DIR=$(mktemp -d "$RUNS/.dry.XXXX"); else RUN_DIR="$RUNS/$RUN_ID"; mkdir -p "$RUN_DIR"; fi
-BASE_CFG="$RUN_DIR/config.json"; CUR_CFG=$BASE_CFG
-if [ -f "$CONFIG" ]; then cp "$CONFIG" "$BASE_CFG"; else printf '{"repository": "%s"}\n' "$REPO" >"$BASE_CFG"; fi
-: >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"
-source "$SUITE/lib/common.sh"
-source "$SUITE/lib/gh.sh"
-for g in $ALL_GROUPS; do source "$SUITE/groups/$g.sh"; done
-fn() { echo "${1//-/_}_$2"; }
-has_fn() { declare -F "$1" >/dev/null; }
-TOTAL_MIN=0; for g in "${GROUPS_SEL[@]}"; do TOTAL_MIN=$(( TOTAL_MIN + $(group_minutes "$g") )); done
-
+mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"; : >"$RUN_DIR/repos"; : >"$RUN_DIR/projects"
+source "$SUITE/lib/common.sh"; source "$SUITE/lib/gh.sh"; source "$SUITE/lib/serve.sh"; source "$SUITE/lib/repos.sh"
+source "$SUITE/cases/main.sh"; source "$SUITE/cases/crash.sh"; source "$SUITE/cases/edge.sh"
 commit=$(git -C "$BUILD" log -1 --format='%h %s' 2>/dev/null | cut -c1-80)
-header() {
-  echo "Build:  $BUILD ($commit)"
-  echo "State:  $STATE"
-  if [ -f "$CONFIG" ]; then echo "Config: $CONFIG -> scratch copy $BASE_CFG (FACTORY_CONFIG; the source is never written)"
-  else echo "Config: MISSING at $CONFIG (a real run needs it; pass --config)"; fi
-  echo "Repo:   $REPO"
-  echo "Groups: ${GROUPS_SEL[*]}${LOCAL_ONLY:+ (local-only)}${NO_MODEL:+ (no model calls)}"
-  if [ -n "$ALLOW_REPO_CHANGES" ]; then echo "Repo changes: ALLOWED (human gate, strict protection, scratch repo, rename; each restored)"
-  else echo "Repo changes: off (cases that need them are UNREACHABLE: needs approval)"; fi
-  echo "Answers: $(has_feature holds-v2 && echo 'bound (--question ID)' || echo 'unbound (older build)')"
-  echo "Expected: ~$TOTAL_MIN min$( [ "$TOTAL_MIN" -gt "$LONG_MINUTES" ] && { [ -n "$APPROVED_LONG" ] && echo " (over $LONG_MINUTES min: approved with --approved-long)" || echo " (over $LONG_MINUTES min: needs the maintainer's approval and --approved-long)"; })"
-}
 
-# ---------- dry run ----------
+budget() {
+  echo "Budget (wall clock from the start):"
+  echo "  setup: build check, fresh state dirs, configs, clones, scratch repo checks   <= 5 min"
+  local w=0 row c lane mins what
+  for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; [ "$mins" -gt "$w" ] && w=$mins; done
+  echo "  wave: ${#SEL[@]} case(s) at once; the longest expects $w min                <= 45 min (hard stop at 55)"
+  echo "  end: cancel what is left, end checks, cleanup, report                       <= 5 min"
+  echo "  expected total: ~$(( w + 9 )) min (limit 60)"
+}
 if [ -n "$DRY" ]; then
-  echo "DRY RUN: nothing is started, queued or written."; header
-  serves=$(running_serves); owner=$(state_owner)
-  if [ -n "$serves$owner" ]; then echo "Guard:  a real run would REFUSE now:"; [ -n "$serves" ] && sed 's/^/          /' <<<"$serves"; [ -n "$owner" ] && echo "          service.json pid $owner owns $ROOT"
-  else echo "Guard:  no serve for $REPO is running"; fi
-  for g in "${GROUPS_SEL[@]}"; do
-    echo; echo "== $g"
-    if [ -n "$LOCAL_ONLY" ] && [[ " $LOCAL_GROUPS " != *" $g "* ]]; then echo "   (skipped: no local-only parts)"; continue; fi
-    echo "   expect: ~$(group_minutes "$g") min"
-    echo "   needs:  $($(fn "$g" needs))"
-    echo "   cost:   $($(fn "$g" cost))"
-    $(fn "$g" plan) | sed 's/^/   /'
-  done
-  echo; echo "Total: ~$TOTAL_MIN min over ${#GROUPS_SEL[@]} group(s)."
-  if [ "$TOTAL_MIN" -gt "$LONG_MINUTES" ] && [ -z "$APPROVED_LONG" ]; then echo "A real run of this plan would REFUSE: over $LONG_MINUTES min needs the maintainer's approval, then --approved-long."; fi
+  echo "DRY RUN ($SUITE_NAME): nothing is started, queued or written."
+  echo "Build: $BUILD ($commit)"; echo "State: $STATE_BASE (fresh per run)"
+  echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
+  for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  ~%2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
+  echo; budget
   rm -rf "$RUN_DIR"; exit 0
 fi
-if [ "$TOTAL_MIN" -gt "$LONG_MINUTES" ] && [ -z "$APPROVED_LONG" ]; then
-  echo "refused: this plan is expected to take ~$TOTAL_MIN min (${GROUPS_SEL[*]}). Over $LONG_MINUTES min needs the maintainer's approval; then pass --approved-long, or pick fewer groups with --only." >&2
-  rm -rf "$RUN_DIR"; exit 3
-fi
+[ -f "$BUILD/dist/cli.js" ] || { echo "no CLI at $BUILD/dist/cli.js (npm run build)" >&2; exit 2; }
 
-# ---------- real run ----------
-STARTED=$(ts); START_S=$(now); CUR_GROUP=""; FINISHED=""
+# Every remote call shares the run's deadline, including commands in bash
+# predicates. Leave time for the final report even when an API stops replying.
+GH_BIN=$(command -v gh) || { echo "gh is required" >&2; exit 2; }
+GIT_BIN=$(command -v git) || { echo "git is required" >&2; exit 2; }
+export GH_BIN GIT_BIN
+run_bounded() {
+  local cap=$1 remaining; shift
+  remaining=$(( HARD_STOP_AT - $(date +%s) - 20 ))
+  [ "$remaining" -gt 0 ] || return 124
+  [ "$cap" -le "$remaining" ] || cap=$remaining
+  timeout --kill-after=2 "$cap" "$@"
+}
+gh() { run_bounded 30 "$GH_BIN" "$@"; }
+git() { run_bounded 120 "$GIT_BIN" "$@"; }
+export -f run_bounded gh git
+
+# A selected check must be present exactly once and pass. An omitted or
+# unreachable scenario is unfinished qualification, not a successful run.
+required_checks() {
+  case $1 in
+    codex) echo 'model-kill.plan model-kill.work happy.codex stack.predecessor-wait stack.strict security.fixes-keyword' ;;
+    claude) echo 'happy.claude queue.run-command' ;;
+    holds) echo 'holds.ask holds.answer-comment holds.more queue.cancel-held' ;;
+    queue) echo queue.withdraw ;;
+    cancel) echo 'fault.lasting-403 fault.lag-404 queue.cancel-open-pr' ;;
+    media) echo media.select-repair ;;
+    attach) echo security.foreign-attachment ;;
+    crash)
+      echo 'holder.second-refused holder.take-over holder.release holder.restart netcut.plan netcut.ci'
+      local point; for point in $CRASH_LIFECYCLE $CRASH_REMIND $CRASH_CANCEL; do echo "crash.$point"; done ;;
+    reset) echo reset.clean-dir ;;
+    archived) echo queue.archived-card ;;
+  esac
+}
+check_complete() {
+  local row c lane mins what check count passed ok=0
+  for row in "${SEL[@]}"; do
+    IFS='|' read -r c lane mins what <<<"$row"
+    for check in $(required_checks "$c") "case.$c"; do
+      read -r count passed < <(awk -F'\t' -v key="$check" '$1==key{n++; if($4=="PASS") p++} END{print n+0,p+0}' "$RUN_DIR/results.tsv")
+      if [ "$count" != 1 ] || [ "$passed" != 1 ]; then
+        local CASE=suite INST=$lane
+        record "incomplete.$check" FAIL "selected check has $count result(s), $passed PASS; exactly one PASS required" "$START_S"
+        ok=1
+      fi
+    done
+  done
+  awk -F'\t' 'NF && $4!="PASS"{bad=1} END{exit bad}' "$RUN_DIR/results.tsv" || ok=1
+  return "$ok"
+}
+
+# ---------- configuration ----------
+# Plumbing runs on the fastest model and lowest effort each provider offers;
+# `codex-plan` keeps the production planner, for the cases whose check is a
+# planner decision (it must ask its question).
+write_config() { # FILE REPO CHECKOUT MAX_ACTIVE [PY_EXPR...]
+  local f=$1; shift
+  SUITE_CAPTURE=$CAPTURE python3 - "$f" "$@" <<'PY'
+import json, os, sys
+f, repo, checkout, active, *more = sys.argv[1:]
+fast = {"model": "gpt-6-luna", "effort": "low", "serviceTier": "fast"}
+haiku = {"model": "claude-haiku-5-5", "effort": "low"}
+c = {
+  "repository": repo, "checkout": checkout,
+  "queue": {"projectId": "PVT_kwDOEvXlbc4BoR0S", "pollSeconds": 15, "maxActiveObjectives": int(active)},
+  "execution": {"concurrency": 4, "workers": 12, "validations": 6},
+  "providers": {
+    "codex": {"planner": "codex", "models": {"planner": fast, "reviewer": fast}, "worker": {"kind": "codex", **fast}},
+    "codex-plan": {"planner": "codex", "models": {"reviewer": fast, "planner": {"model": "gpt-6.1-sol", "effort": "high"}}, "worker": {"kind": "codex", **fast}},
+    "claude": {"planner": "claude", "models": {"planner": haiku, "reviewer": haiku}, "worker": {"kind": "claude", **haiku}},
+  },
+  "defaultProvider": "codex",
+}
+if os.environ.get("SUITE_CAPTURE"):
+  c["capture"] = {"enabled": True}
+for e in more: exec(e, {"c": c})
+json.dump(c, open(f, "w"), indent=2)
+PY
+}
+clone() { # REPO DIR
+  [ -d "$2/.git" ] || git clone -q "https://github.com/$1.git" "$2" || return 1
+  git -C "$2" lfs install --local >/dev/null 2>&1; git -C "$2" fetch -q origin
+}
+
+# ---------- the end: results, cleanup ----------
+FINISHED=""
 write_results() {
-  [ -n "$FINISHED" ] && return; FINISHED=1
-  mkdir -p "$RUNS/results"; local out="$RUNS/results/$RUN_ID.md" pass fail unr
-  pass=$(awk -F'\t' '$3=="PASS"' "$RUN_DIR/results.tsv" | wc -l); fail=$(awk -F'\t' '$3=="FAIL"' "$RUN_DIR/results.tsv" | wc -l)
-  unr=$(awk -F'\t' '$3=="UNREACHABLE"' "$RUN_DIR/results.tsv" | wc -l)
-  # PARKED: needs an API key (managed providers); BLOCKED-BY-DEFECT: a confirmed Factory defect stops it. Neither counts against a gate.
-  local park blk; park=$(awk -F'\t' '$3=="PARKED"' "$RUN_DIR/results.tsv" | wc -l); blk=$(awk -F'\t' '$3=="BLOCKED-BY-DEFECT"' "$RUN_DIR/results.tsv" | wc -l)
+  local out="$RUNS/results/$RUN_ID.md" end_s; end_s=$(date +%s)
+  local tot; tot=$(awk -F'\t' '{print $4}' "$RUN_DIR/results.tsv" | sort | uniq -c | awk '{printf "%s %s, ", $1, $2}')
   {
-    echo "# Integration run $RUN_ID"; echo
-    echo "Started $STARTED, ended $(ts) PDT ($(( ($(now) - START_S) / 60 )) min)${INTERRUPTED:+. **Interrupted** during $CUR_GROUP}."; echo
-    header | sed 's/^/- /'; echo "- Run dir (serve logs, scratch configs, Objective bodies): $RUN_DIR"; echo
-    echo "**Totals:** $pass PASS, $fail FAIL, $unr UNREACHABLE, $park PARKED, $blk BLOCKED-BY-DEFECT."; echo
-    echo "| Check | Group | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
-    awk -F'\t' '{gsub(/\|/,"\\|",$4); d=$5+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($3=="FAIL"?"**FAIL**":$3), $4, d/60, d%60}' "$RUN_DIR/results.tsv"
-    if [ -s "$RUN_DIR/issues" ]; then echo; echo "Objectives created: $(awk '{printf "#%s (%s) ", $1, $2}' "$RUN_DIR/issues")"; fi
+    echo "# Integration run $RUN_ID ($SUITE_NAME)"; echo
+    echo "Wall time: **$(( (end_s - START_S) / 60 )) min $(( (end_s - START_S) % 60 )) s** (limit 60), from $(TZ=America/Los_Angeles date -d @"$START_S" '+%-I:%M %p') to $(TZ=America/Los_Angeles date -d @"$end_s" '+%-I:%M %p') PDT${INTERRUPTED:+. **Interrupted**}."; echo
+    echo "- Build: $BUILD ($commit)"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
+    echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ')$([ -s "$RUN_DIR/projects" ] && echo ", Project #$(paste -sd' ' "$RUN_DIR/projects")") (${REPOS_NOTE:-none created})"; echo
+    echo "**Totals:** ${tot%, }."; echo
+    echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"
+    awk -F'\t' '{d=$4-$3; printf "| %s | %s | +%dm%02ds | +%dm%02ds | %dm %02ds |\n", $1, $2, $3/60, $3%60, $4/60, $4%60, d/60, d%60}' "$RUN_DIR/cases.tsv"
+    echo; echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
+    awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
+    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H")?"drill-2 ":"", $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2
+}
+CASE_PIDS=()
+stop_cases() {
+  touch "$RUN_DIR/stop"
+  local p s end=$(( $(now) + 10 ))
+  while [ "$(now)" -lt "$end" ]; do
+    local alive=0; for p in "${CASE_PIDS[@]}"; do read -r p s <<<"$p"; same_proc "$p" "$s" && alive=1; done
+    [ "$alive" = 0 ] && break; sleep 1
+  done
+  for p in "${CASE_PIDS[@]}"; do read -r p s <<<"$p"; same_proc "$p" "$s" && { log "stopping case process $p"; : >"$RUN_DIR/desc.case"; snap_desc "$p" "$RUN_DIR/desc.case"; kill_exact "$p" "$s" TERM; kill_desc_survivors "$RUN_DIR/desc.case"; }; done
+  for p in "${CASE_PIDS[@]}"; do read -r p s <<<"$p"; kill_exact "$p" "$s" KILL || true; wait "$p" 2>/dev/null || true; done
+}
+# Cancel every unsettled Objective of the run (each installation's serve must run).
+cancel_left() {
+  local n c i any="" p jobs=()
+  while read -r n c i; do
+    [ "$i" = H ] && continue
+    inst "$i"
+    case $(st status "$n") in
+      done|failed) ;;
+      none) (gh_card "$n" Cancelled >/dev/null 2>&1; gh issue close "$n" --repo "$REPO" --reason "not planned" >/dev/null 2>&1) & jobs+=("$!") ;;
+      *) (cli_t 30 cancel "$n" >/dev/null 2>&1) & jobs+=("$!"); any="$any $i:$n" ;;
+    esac
+  done <"$RUN_DIR/issues"
+  for p in "${jobs[@]}"; do wait "$p" || record suite.cancel FAIL "a cleanup cancellation request failed" "$START_S"; done
+  [ -n "$any" ] || return 0
+  log "cancelled at the end:$any"
+  local end=$(( $(now) + 90 )) left
+  [ "$end" -lt "$(( HARD_STOP_AT - 90 ))" ] || end=$(( HARD_STOP_AT - 90 ))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    left=""; for x in $any; do inst "${x%%:*}"; cancelled_clean "${x#*:}" || [ "$(st status "${x#*:}")" = done ] || left="$left $x"; done
+    [ -z "$left" ] && break; sleep 5
+  done
+  [ -z "${left:-}" ] || record suite.cancel FAIL "cleanup did not settle:$left" "$START_S"
+}
+end_state() {
+  local CASE=suite t0; t0=$(date +%s)
+  local name=M; [ "$SUITE_NAME" = main ] || name=E
+  if [ ! -s "$RUN_DIR/inst/$name/env" ]; then
+    record suite.end-state FAIL "setup did not create installation $name; end state is unproved" "$t0"
+    return
+  fi
+  [ "$SUITE_NAME" = main ] && inst M || inst E
+  local nm rv open="" prs repo ok=0
+  nm=$(gh api "repos/$M_REPO" --jq .name) || ok=1
+  rv=$(gh_human_gate) || ok=1
+  local repos="$M_REPO"; [ -n "$NEEDS_C" ] && repos="$repos $C_REPO"
+  for repo in $repos; do
+    if prs=$(gh api "repos/$repo/pulls?state=open&per_page=100" --jq '.[].number'); then
+      [ -z "$prs" ] || open="$open $repo:$(tr '\n' ',' <<<"$prs")"
+    else ok=1; fi
+  done
+  local serves; serves=$(for repo in $repos; do running_serves "$repo"; done | wc -l)
+  local units="unknown"
+  if units=$(run_bounded 5 systemctl --user list-units --all --no-legend 'factory-*'); then
+    units=$(awk 'NF{n++} END{print n+0}' <<<"$units")
+  else ok=1; fi
+  [ "$nm" = "${M_REPO#*/}" ] && [ "$rv" = false ] && [ -z "$open" ] && [ "$serves" = 0 ] && [ "$units" = 0 ] || ok=1
+  rec_if suite.end-state "$ok" "$M_REPO named '$nm'; review gate '$rv'; open PRs [${open}]; serves left $serves; factory units $units; read failures=$ok" "$t0"
 }
 cleanup() {
   local code=$?
   trap - EXIT INT TERM
-  [ -n "${INTERRUPTED:-}" ] && log "interrupted: cleaning up"
-  # Results first, so a cleanup that hangs or is killed still leaves them.
-  write_results; FINISHED=""
-  serve_stop 2>/dev/null
-  netcut_stop 2>/dev/null; bounded_cost_stop_proxy 2>/dev/null; stab_stop_proxy 2>/dev/null; fu_stop_proxy 2>/dev/null; proxy_stop_all 2>/dev/null; fu_stop_connect 2>/dev/null
-  [ -n "$CUR_GROUP" ] && settle_group "$CUR_GROUP" 2>/dev/null
-  serve_stop 2>/dev/null
-  restore_run
-  # Anything else this run started, by exact PID and start time.
-  local p s; while read -r p s; do same_proc "$p" "$s" && { kill -TERM "$p" 2>/dev/null; sleep 1; same_proc "$p" "$s" && kill -KILL "$p" 2>/dev/null; }; done <"$RUN_DIR/pids"
-  CUR_CFG=$BASE_CFG
+  [ -n "$FINISHED" ] && exit $code
+  FINISHED=1
+  STOP_AT=$(( HARD_STOP_AT - 30 )); export STOP_AT
+  stop_cases
+  # Serves up for the cancellations, then down.
+  if [ -d "$RUN_DIR/inst/C" ]; then
+    inst C; SERVE_DIR=$(serve_dir_of C)
+    if [ -n "$SERVE_DIR" ] && ! serve_alive && grep -q ' C$' "$RUN_DIR/issues"; then serve_up "" netns || record suite.restart FAIL "could not restart crash lane for cleanup" "$START_S"; fi
+  fi
+  cancel_left
+  local i p jobs=(); for i in C H M E; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
+  for p in "${jobs[@]}"; do wait "$p" || record suite.stop FAIL "a serve could not be stopped" "$START_S"; done
+  for i in M E; do proxy_stop $i; done
+  local s; while read -r p s; do kill_exact "$p" "$s" TERM || true; done <"$RUN_DIR/pids"
+  [ -s "$RUN_DIR/repos" ] && end_state
+  check_complete || code=1
+  [ "$(now)" -lt "$HARD_STOP_AT" ] || { record suite.deadline FAIL "run exceeded its 60-minute wall-clock limit" "$START_S"; code=1; }
+  # A passing run deletes its repositories; a failed one keeps them to inspect.
+  local r kept=""
+  if [ -z "$KEEP_REPOS" ] && [ "$code" = 0 ]; then
+    while read -r r; do [ -n "$r" ] && { repo_delete "$r" || kept="$kept $r"; }; done <"$RUN_DIR/repos"
+    while read -r r; do [ -n "$r" ] && { project_delete "$r" || kept="$kept Project #$r"; }; done <"$RUN_DIR/projects"
+    REPOS_NOTE="deleted$([ -n "$kept" ] && echo "; could not delete:$kept")"
+  else REPOS_NOTE="kept for inspection ($([ -n "$KEEP_REPOS" ] && echo "--keep-repos" || echo "the run failed"); swept after 24 h)"; fi
   write_results
   exit $code
 }
+
+# ---------- setup ----------
+# Refuse missing host/account prerequisites before creating issues or making
+# provider calls. These checks use the tools' own logins, never their files.
+for tool in node python3 timeout flock unshare pasta systemctl; do
+  command -v "$tool" >/dev/null || { echo "missing prerequisite: $tool" >&2; exit 3; }
+done
+git lfs version >/dev/null || { echo "git-lfs is required" >&2; exit 3; }
+[ -c /dev/net/tun ] || { echo "network-cut cases need /dev/net/tun" >&2; exit 3; }
+# Each run creates and deletes its repositories: an owner role and the delete_repo scope.
+login=$(gh api user --jq .login) || { echo "gh is not logged in" >&2; exit 3; }
+[ "$(gh api "orgs/$REPO_OWNER/memberships/$login" --jq .role 2>/dev/null)" = admin ] || { echo "gh login $login must be an owner of $REPO_OWNER to create its run repositories" >&2; exit 3; }
+gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | grep -qw delete_repo || { echo "the gh token needs the delete_repo scope (gh auth refresh -s delete_repo)" >&2; exit 3; }
+log "suite $SUITE_NAME, build $BUILD ($commit), state $STATE_BASE"
+[ ! -e "$STATE_BASE" ] || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
+for r in $M_REPO $C_REPO; do s=$(running_serves "$r"); [ -n "$s" ] && { echo "refused: a serve runs for $r: $s" >&2; exit 3; }; done
 trap 'INTERRUPTED=1; exit 130' INT TERM
 trap cleanup EXIT
+mkdir -p "$STATE_BASE"
+SETUP0=$(date +%s)
+C_PROJECT_ID=""
+setup_repos() {
+  repos_sweep; projects_sweep
+  repo_create "${M_REPO#*/}" || return 1
+  [ -z "$NEEDS_C" ] && return 0
+  repo_create "${C_REPO#*/}" || return 1
+  C_PROJECT_ID=$(project_create) && [ -n "$C_PROJECT_ID" ]
+}
+setup_main() {
+  clone $M_REPO "$STATE_BASE/checkout-m" || return 1
+  write_config "$STATE_BASE/config-m.json" $M_REPO "$STATE_BASE/checkout-m" 12 'c["delivery"]={"kind":"native-stack"}' 'c.setdefault("autonomy",{})["allowances"]={"planningRevisions":2}'
+  inst_define M $M_REPO "$STATE_BASE/config-m.json"
+  if [ -n "$NEEDS_C" ]; then
+    clone $C_REPO "$STATE_BASE/checkout-c" || return 1
+    write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8 "c['queue']['projectId']='$C_PROJECT_ID'"
+    inst_define C $C_REPO "$STATE_BASE/config-c.json"
+    inst_define H $C_REPO "$STATE_BASE/config-c.json"
+    printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
+    cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"
+  fi
+  inst M
+  [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }
+  local open; open=$(gh pr list -R $M_REPO --state open --json number --jq length)
+  [ "$open" = 0 ] || log "note: $M_REPO has $open open PRs at the start"
+  # M: one serve for the whole wave, behind the fault proxy.
+  proxy_start M 18611
+  printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/M/extra_env"
+  serve_up || return 1
+  serve_ready
+}
+# The serve's own record names its PID: the CLI sees a running service from then on.
+serve_ready() { wait_for 90 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"pid\"))' '$ROOT/service.json' 2>/dev/null)\" = $(serve_pid) ]"; }
+setup_repos || { log "setup failed: could not create this run's repositories"; exit 1; }
+if [ "$SUITE_NAME" = main ]; then setup_main || { log "setup failed"; exit 1; }
+else setup_edge || { log "setup failed"; exit 1; }; fi
+record_setup() { local CASE=suite; record suite.setup PASS "setup took $(( $(date +%s) - SETUP0 )) s" "$SETUP0"; }; record_setup
 
-header | tee "$RUN_DIR/header" >&2
-if [ -z "$LOCAL_ONLY" ]; then guard_serve || { FINISHED=1; exit 3; }
-else owner=$(state_owner); [ -n "$owner" ] && { log "refused: service.json pid $owner owns $ROOT"; FINISHED=1; exit 3; }; fi
-mkdir -p "$STATE"
-
-for g in "${GROUPS_SEL[@]}"; do
-  if [ -n "$LOCAL_ONLY" ] && [[ " $LOCAL_GROUPS " != *" $g "* ]]; then log "skip $g: no local-only parts"; continue; fi
-  CUR_GROUP=$g; SERVE_DIR=""
-  cfg_for_group "$g"
-  has_fn "$(fn "$g" cfg)" && $(fn "$g" cfg)
-  log "== group $g (config $CUR_CFG)"
-  $(fn "$g" run)
-  serve_stop
-  [ -z "$LOCAL_ONLY" ] && settle_group "$g"
-  restore_run; proxy_stop_all
-  CUR_CFG=$BASE_CFG; CUR_GROUP=""
+# ---------- the wave ----------
+run_case() { # NAME LANE
+  local c=$1 lane=$2 t0; t0=$(( $(date +%s) - START_S ))
+  ( CASE=$c
+    case $lane in M) inst M; SERVE_DIR=$(serve_dir_of M); case_$c ;; C) lane_c ;; E) inst E; SERVE_DIR=$(serve_dir_of E); case_$c ;; esac
+    local rc=$?
+    [ "$lane" = C ] || case_settle
+    rec_if "case.$c" "$rc" "case returned $rc" "$START_S"
+    printf '%s\t%s\t%s\t%s\n' "$c" "$lane" "$t0" "$(( $(date +%s) - START_S ))" >>"$RUN_DIR/cases.tsv"
+  ) &
+  local p=$!; CASE_PIDS+=("$p $(starttime $p)")
+}
+for row in "${SEL[@]}"; do IFS='|' read -r c lane _ _ <<<"$row"; run_case "$c" "$lane"; done
+log "wave: ${#SEL[@]} cases started; hard stop at $(TZ=America/Los_Angeles date -d @"$STOP_AT" '+%-I:%M %p')"
+# Supervise: the shared serve stays up (a death is a finding, and it restarts); stop at 55 min.
+SUP=""; [ "$SUITE_NAME" = main ] && SUP=M || SUP=E
+while :; do
+  alive=0; for p in "${CASE_PIDS[@]}"; do kill -0 "${p%% *}" 2>/dev/null && alive=1; done
+  [ $alive = 0 ] && break
+  [ "$(date +%s)" -ge "$STOP_AT" ] && { log "55 min: stopping the wave"; break; }
+  inst $SUP; SERVE_DIR=$(serve_dir_of $SUP)
+  if [ -n "$SERVE_DIR" ]; then
+    serve_tick
+    if serve_exited; then
+      ( CASE=suite; record "suite.serve-$SUP" FAIL "the shared serve exited $(cat "$SERVE_DIR/exit"): $(tail -c 400 "$SERVE_DIR/out.log" | tr '\n' ' ')" "$START_S" )
+      serve_up || true
+    fi
+  fi
+  sleep 5
 done
-write_results
-grep -q $'\tFAIL\t' "$RUN_DIR/results.tsv" && exit 1
 exit 0
+}

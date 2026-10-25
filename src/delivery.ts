@@ -37,6 +37,7 @@ import {
   GitHubError,
   needing,
   type PullRequest,
+  REFUSED_MS,
   type Stack,
   TransientError,
   Unreadable,
@@ -89,6 +90,11 @@ export interface Repair {
    * and let the worker resolve what conflicts, with no diagnosis.
    */
   conflict?: { onto?: string };
+  /**
+   * GitHub's checks failed on the result: result review gets the failure
+   * (work/facts.ts `checkFailures`), whichever step observed it.
+   */
+  checks?: true;
 }
 
 /**
@@ -393,7 +399,14 @@ export async function publish(
         merged: false,
       };
     }
-    if (await updates(context, pull.head.sha, earlier, bases))
+    // The branch holds the result now (pushed above, or already). A PR still
+    // showing a head Factory pushed before is GitHub catching up, whether
+    // or not a record of that push survives (a reset, a moved stack layer
+    // keeps none), on this read and every retry until it shows the result.
+    if (
+      (await updates(context, pull.head.sha, earlier, bases)) ||
+      (await factoryMade(context, pull.head.sha, defaultBranch, bases))
+    )
       return lagging(
         `PR #${pull.number} does not show the pushed head ${input.commit} yet`,
         `PR #${pull.number} still shows an earlier head (${pull.head.sha}), not the pushed ${input.commit}. Inspect it, then answer retry, or cancel.`,
@@ -553,14 +566,20 @@ async function pushBranch(
       throw new TransientError(`git push of ${branch}: ${message(error)}`);
     }
     // The ref was not updated. If the branch moved after it was read, read
-    // it again; if it did not, the remote refuses the push itself.
+    // it again; if it did not, the remote refused the push itself. That
+    // can pass (GitHub's `[remote rejected] (failed)` when two pushes land
+    // at once), so it retries and asks only once it outlasts REFUSED_MS,
+    // like a 403 (github.ts `githubOutcome`).
     if ((await remoteHead(context, branch)) !== remote)
       return retry(`Remote branch ${branch} moved during the push`);
-    return objectiveWide(
-      hold(
-        `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
-      ),
-    );
+    return {
+      ...retry(`The remote refused Factory's push of ${branch} (${refused})`),
+      holdAfter: {
+        ms: REFUSED_MS,
+        question: `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move, for ${REFUSED_MS / 60_000} minutes. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
+        scope: "objective",
+      },
+    };
   }
   crashPoint("deliver:push:after");
   // GitHub's reads of the new branch and commit may lag behind the push.
@@ -744,10 +763,12 @@ export type CiResult =
  * (#1637). Each plan-named check must pass by name. A PR BEHIND its base
  * under strict protection is updated by GitHub and observed again. A PR
  * made a draft, closed without merging, with only cancelled checks nothing
- * re-ran, with a needed check that never registered, or with no checks at
- * all, is a question (#1640). Checks queued or running are a transient
- * wait; an environment approval or a required review is a human gate the
- * engine waits on without a deadline (docs/reference/steps.md#Waits).
+ * re-ran, or with a needed check that never registered, is a question
+ * (#1640). One with no checks at all merges once the settle window passes
+ * with no Actions run on its head left unfinished or failed. Checks queued
+ * or running are a transient wait; an environment approval or a required
+ * review is a human gate the engine waits on without a deadline
+ * (docs/reference/steps.md#Waits).
  */
 export async function observeCi(
   context: DeliveryContext,
@@ -907,6 +928,7 @@ async function judge(
     }
     return {
       kind: "repair",
+      checks: true,
       finding: [
         `Checks failed on PR #${pr} at ${head}: ${listed(broken)}`,
         ...excerpts,
@@ -1214,10 +1236,12 @@ async function failureExcerpt(
  * may not have created its check suites yet, or a path filter or push-only
  * workflow never will. A fast check from another app does not end the
  * wait (#1687). Workflow runs on the head without jobs are waited for or
- * asked about. Otherwise wait CHECK_SETTLE_MS from the push. Past it, when
- * other checks passed and GitHub shows no unfinished or failed run, Actions
- * skipped the head and it merges; with no check at all, ask. Factory never
- * merges without registered checks on its own authority (#1640).
+ * asked about. Otherwise wait CHECK_SETTLE_MS from the push, so a head is
+ * never merged before Actions registers its checks (#1640). Past it, when
+ * GitHub shows no unfinished or failed workflow run, nothing will register:
+ * every check branch protection and the plan require has passed (judge
+ * waits for and holds on those), so it merges on Factory's validated head,
+ * with or without other checks. Ask when GitHub doesn't show its runs.
  */
 async function unregisteredChecks(
   context: DeliveryContext,
@@ -1230,33 +1254,27 @@ async function unregisteredChecks(
   const { github, signal } = context;
   const pr = pull.number;
   const pushedAt = await github.pushTime(pull.head.ref, head, signal);
-  let actions: "running" | "failed" | "completed" | "none" | undefined;
-  let approval = false;
-  if (others) {
-    const workflows = await github.workflowRuns(head, signal);
-    approval = Boolean(workflows?.some((run) => run?.status === "waiting"));
-    actions = !workflows
-      ? undefined
-      : workflows.some((run) => run?.status !== "completed")
-        ? "running"
-        : workflows.some(
-              (run) =>
-                !["success", "neutral", "skipped"].includes(
-                  String(run?.conclusion),
-                ),
-            )
-          ? "failed"
-          : workflows.length
-            ? "completed"
-            : "none";
-  }
+  const workflows = await github.workflowRuns(head, signal);
+  const approval = Boolean(workflows?.some((run) => run?.status === "waiting"));
+  const actions = !workflows
+    ? undefined
+    : workflows.some((run) => run?.status !== "completed")
+      ? "running"
+      : workflows.some(
+            (run) =>
+              !["success", "neutral", "skipped"].includes(
+                String(run?.conclusion),
+              ),
+          )
+        ? "failed"
+        : workflows.length
+          ? "completed"
+          : "none";
   if (actions === "failed")
     return hold(
       `Actions workflow runs on PR #${pr}'s head ${head} ended without jobs or success (a startup failure, or awaiting approval). Fix or approve them, then answer retry; or merge the PR by hand, then answer retry; or cancel.`,
     );
-  const question = others
-    ? `No Actions checks registered on PR #${pr}'s head ${head}, and GitHub does not show when it was pushed or its Actions runs. Inspect its checks, then answer retry; or merge the PR by hand, then answer retry; or cancel.`
-    : `No checks registered on PR #${pr}'s head ${head}: does a path filter or a push-only workflow skip it? Add or fix its checks, then answer retry; or merge the PR by hand, then answer retry; or cancel.`;
+  const question = `No ${others ? "Actions " : ""}checks registered on PR #${pr}'s head ${head}, and GitHub does not show when it was pushed or its Actions runs. Inspect its checks, then answer retry; or merge the PR by hand, then answer retry; or cancel.`;
   const pushed = Date.parse(pushedAt ?? "");
   // A run held for a concurrency group or a runner is a transient wait; one
   // held for an environment's approval waits on that person.
@@ -1284,7 +1302,7 @@ async function unregisteredChecks(
       question,
     );
   if (Date.now() - pushed >= CHECK_SETTLE_MS)
-    return others && actions ? undefined : hold(question);
+    return actions ? undefined : hold(question);
   return {
     kind: "retry",
     reason: `Awaiting ${others ? "Actions " : ""}checks to register on PR #${pr} (none since its push at ${pushedAt})`,

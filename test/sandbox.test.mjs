@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createServer } from "node:net";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { runSandboxed } from "../dist/sandbox.js";
 import { addWorktree, validationEnvironment } from "../dist/worktree.js";
@@ -83,4 +84,51 @@ test("validation reads Git with system aliases and a private sibling configurati
   assert.equal(tmp.exitCode, 0, tmp.stderr);
   const [blocks, size] = tmp.stdout.trim().split(" ").map(Number);
   assert.equal(blocks * size, 16 * 1024 * 1024);
+});
+
+test("sandbox.network host lets validation reach a service on the host's loopback; off does not", async (t) => {
+  const root = mkdtempSync("/tmp/factory-sandbox-");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const [checkout, home, temporary] = ["checkout", "home", "temporary"].map(
+    (name) => join(root, name),
+  );
+  for (const dir of [checkout, home, temporary]) mkdirSync(dir);
+  const server = createServer((socket) => socket.end("database\n"));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+  const run = (network) =>
+    runSandboxed(
+      `node -e 'require("net").connect(${port}, "127.0.0.1").on("data", (d) => process.stdout.write(d)).on("error", () => process.exit(7))'`,
+      {
+        cwd: checkout,
+        home,
+        temporary,
+        env: { PATH: `${dirname(process.execPath)}:/bin:/usr/bin` },
+        config: {
+          required: true,
+          network,
+          readOnlyPaths: [],
+          environment: {},
+          limits: {
+            tmpMiB: 16,
+            homeMiB: 64,
+            checkoutMiB: 16,
+            files: 1024,
+            candidateMiB: 16,
+            candidateFiles: 1024,
+            processes: 4096,
+          },
+        },
+        signal: AbortSignal.timeout(30_000),
+        timeoutMs: 20_000,
+      },
+    );
+  const host = await run("host");
+  assert.equal(host.kind, "ran", JSON.stringify(host));
+  assert.equal(host.exitCode, 0, host.stderr);
+  assert.equal(host.stdout, "database\n");
+  const off = await run("off");
+  assert.equal(off.kind, "ran", JSON.stringify(off));
+  assert.equal(off.exitCode, 7, off.stderr);
 });

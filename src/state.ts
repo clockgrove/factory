@@ -15,6 +15,7 @@ import { isObject } from "./checked.js";
 import { crashPoint } from "./crash.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
+import type { Spend } from "./spend.js";
 
 /**
  * 9: an attempt counts the service's deaths it ran at (`interrupted`),
@@ -266,6 +267,11 @@ export interface ObjectiveState {
   control?: { mode: "paused" | "draining"; by: string; at: string };
   /** Per-capability data. Modules own their key. */
   modules: Record<string, unknown>;
+  /**
+   * Model spend so far, and the operator's grants past the spend ceiling
+   * (spend.ts). Absent until the first call reports any. A replan keeps it.
+   */
+  spend?: Spend;
   updatedAt: string;
   /** When this run was admitted: with the issue, it names the run. */
   startedAt?: string;
@@ -604,7 +610,7 @@ function stateProblem(value: unknown, issue: number): string | undefined {
       value[key] as Record<string, unknown>,
     ))
       if (!isObject(entry)) return `${key}.${step} isn't an object`;
-  for (const key of ["frozen", "control", "ended", "stepRuns"])
+  for (const key of ["frozen", "control", "ended", "stepRuns", "spend"])
     if (value[key] !== undefined && !isObject(value[key]))
       return `${key} isn't an object`;
   for (const key of [

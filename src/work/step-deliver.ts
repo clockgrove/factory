@@ -135,7 +135,16 @@ export async function publishStep(
   // An empty change, or a pointer whose LFS object is missing: a fault in
   // the result itself, not a conflict, so no rebase.
   if (result.kind === "empty" || result.kind === "repair")
-    return repairOutcome(item, "publish", result.finding, context.state, place);
+    return repairOutcome(
+      item,
+      "publish",
+      result.finding,
+      context.state,
+      place,
+      {
+        media: result.kind === "repair",
+      },
+    );
   if (result.kind !== "published") return result;
   // What watch and diagnostics name the item's PR by.
   context.log({
@@ -351,11 +360,34 @@ export function deliveryRepair(
       keep: facts(
         {
           ...(repair.conflict?.onto ? { onto: repair.conflict.onto } : {}),
+          ...(repair.checks
+            ? {
+                checkFailures: keptCheckFailures(
+                  context.state,
+                  item.id,
+                  repair.finding,
+                ),
+              }
+            : {}),
           rebase: true,
         },
         item.id,
       ),
     },
+  );
+}
+
+/** The most CI check failures an item keeps for its result review. */
+const KEPT_CHECK_FAILURES = 3;
+
+/** Item `id`'s kept CI check failures with `finding` added, newest last. */
+export function keptCheckFailures(
+  state: ObjectiveState,
+  id: string,
+  finding: string,
+): string[] {
+  return [...(fact(state, "checkFailures", id) ?? []), finding].slice(
+    -KEPT_CHECK_FAILURES,
   );
 }
 
@@ -408,9 +440,11 @@ export function movedLayer(
  * moves onto the repaired layer's new head and replays its own change.
  *
  * An operator's selection stands across the repair (see KeptSelection)
- * unless the repair is about the media: it comes from the select step (the
- * operator's `repair`, or the selected set couldn't be written), or the
- * finding names a selected destination or cites the candidate receipt.
+ * unless the repair is about the media, decided from structured data only:
+ * it comes from the select step (the operator's `repair`, or the selected
+ * set couldn't be written), from publish's own Git LFS check (`media`), or
+ * a refused review criterion cites a selected destination or the candidate
+ * receipt.
  *
  * Every cleared work result (the item's and each layer's above) is kept
  * as the `refused` fact, so a rebase never drops the change.
@@ -439,6 +473,7 @@ export function repairOutcome(
     refusesResult = from !== "select" && from !== "publish",
     fresh = false,
     selection: standsFor,
+    media: mediaCheck = false,
   }: {
     /** Other facts the repair keeps. */
     keep?: Record<string, unknown>;
@@ -454,6 +489,8 @@ export function repairOutcome(
     fresh?: boolean;
     /** The select repair keeps this choice (a missing LFS rule): its media is not the finding. */
     selection?: KeptSelection;
+    /** The finding is Factory's own media check (publish's missing LFS objects). */
+    media?: boolean;
   } = {},
 ): Outcome {
   const kept: RepairFinding =
@@ -482,7 +519,8 @@ export function repairOutcome(
   const media =
     !standsFor &&
     (from === "select" ||
-      (own !== undefined && aboutMedia(item, own.selection.set, text, kept)));
+      (own !== undefined &&
+        (mediaCheck || aboutMedia(item, own.selection.set, kept))));
   // The result being cleared, when there is one: a repair from `work`
   // itself keeps the facts of the result before it.
   const result = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
@@ -533,30 +571,22 @@ export function repairOutcome(
 }
 
 /**
- * Whether a repair is about the selected media: the finding (or the kept
- * finding's detail) names one of the set's destinations, or a refused
- * review criterion cites one or the item's candidate receipt.
+ * Whether a review refusal is about the selected media: a refused
+ * criterion's evidence (its path or file) is the item's candidate receipt
+ * or one of the set's destinations. Finding prose is never searched.
  */
 export function aboutMedia(
   item: WorkItem,
   set: CandidateSet,
-  finding: string,
-  fact: RepairFinding | undefined,
+  fact: RepairFinding,
 ): boolean {
-  const cited =
-    fact?.kind === "review"
-      ? fact.refused.flatMap((r) =>
-          r.evidence.flatMap((e) => [e.path, e.file ?? ""]),
-        )
-      : [];
-  if (cited.includes(receiptPath(item.id))) return true;
-  const texts = [
-    finding,
-    ...cited,
-    fact && "detail" in fact ? fact.detail : "",
-  ];
-  return set.members.some((m) =>
-    texts.some((text) => text.includes(m.destination)),
+  if (fact.kind !== "review") return false;
+  const cited = new Set(
+    fact.refused.flatMap((r) => r.evidence.flatMap((e) => [e.path, e.file])),
+  );
+  return (
+    cited.has(receiptPath(item.id)) ||
+    set.members.some((m) => cited.has(m.destination))
   );
 }
 

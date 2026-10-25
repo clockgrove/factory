@@ -317,7 +317,11 @@ export function offeredProfiles(
       id,
       description,
       ...(selectionHints.length ? { selectionHints } : {}),
-      worker: profileWorker(config.providers[provider]!, worktreeRead === true),
+      worker: profileWorker(
+        config.providers[provider]!,
+        worktreeRead === true,
+        config.sandbox.network,
+      ),
     };
   });
 }
@@ -1243,6 +1247,21 @@ export async function readObjective(
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,
   };
+  return await checkInputs(config, inputs, again, state, signal);
+}
+
+/**
+ * The Objective checks on what GitHub shows of it, then its predecessors'
+ * evidence on `inputs.base`: the inputs planning reads, or the hold that
+ * names each problem and offers `again` once the issue is edited.
+ */
+export async function checkInputs(
+  config: CoreConfig,
+  inputs: ObjectiveInputs,
+  again: "recheck" | "replan",
+  state: ObjectiveState,
+  signal: AbortSignal,
+): Promise<{ inputs: ObjectiveInputs } | { hold: Outcome }> {
   const problems = await objectiveProblems(config, inputs, signal);
   if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
   // Planning reads a base that has its predecessors' accepted work.

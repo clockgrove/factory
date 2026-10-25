@@ -124,6 +124,69 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
   assert.equal(subject.replaceAll("‍", ""), "Factory: Fixes #4 for @octo");
 });
 
+test("a worker's change outside its Work Item's owned paths is refused at collection as a repair finding", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-owned-"));
+  const worktree = join(root, "worktree");
+  mkdirSync(worktree);
+  git(worktree, "init", "--quiet");
+  mkdirSync(join(worktree, "docs"));
+  writeFileSync(join(worktree, "README.md"), "base\n");
+  writeFileSync(join(worktree, "docs", "guide.md"), "base\n");
+  git(worktree, "add", ".");
+  git(
+    worktree,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    "base",
+  );
+  const base = git(worktree, "rev-parse", "HEAD");
+  // Owned: everything under src/, and README.md exactly. srcx/ only
+  // shares a prefix with src/; the guide is deleted, not added.
+  mkdirSync(join(worktree, "src"));
+  mkdirSync(join(worktree, "srcx"));
+  writeFileSync(join(worktree, "src", "parser.ts"), "export {};\n");
+  writeFileSync(join(worktree, "README.md"), "changed\n");
+  writeFileSync(join(worktree, "srcx", "a.ts"), "export {};\n");
+  writeFileSync(join(worktree, "notes.txt"), "stray\n");
+  rmSync(join(worktree, "docs", "guide.md"));
+  const work = item("parser", { ownedPaths: ["src/", "README.md"] });
+  const { sandbox } = configWith();
+  const run = () =>
+    collect({
+      worktree,
+      base,
+      plan: { items: [work] },
+      item: work,
+      mayChange: [],
+      sandbox,
+      finalResponse: "",
+      signal: AbortSignal.timeout(60_000),
+    });
+  const refused = await run();
+  assert.equal(refused.kind, "repair");
+  assert.equal(
+    refused.finding,
+    "Worker changed paths outside ownership: docs/guide.md, notes.txt, srcx/a.ts",
+  );
+  assert.equal(git(worktree, "rev-parse", "HEAD"), base, "nothing committed");
+  // Undone, the owned changes are collected.
+  git(worktree, "reset", "--quiet");
+  git(worktree, "checkout", "--quiet", "--", "docs/guide.md");
+  rmSync(join(worktree, "srcx"), { recursive: true });
+  rmSync(join(worktree, "notes.txt"));
+  const collected = await run();
+  assert.equal(collected.kind, "collected");
+  assert.deepEqual(
+    git(worktree, "show", "--name-only", "--format=", "HEAD").split("\n"),
+    ["README.md", "src/parser.ts"],
+  );
+});
+
 test("a worker's change to the configured playbook is refused unless the Objective's May change section lists it", async () => {
   const { worktree, base } = committedWorktree("factory-playbook-");
   mkdirSync(join(worktree, "docs"));

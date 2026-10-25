@@ -89,7 +89,13 @@ export function issueNumber(
 export async function request(paths: Paths, body: Request): Promise<number> {
   const result = await sent(paths, body);
   if (!result) return 0;
-  // Anything but "ok" is a refusal, even one that names no code.
+  // A reset answers with what its rebuild found; each refusal of it has a
+  // code, which `sent` threw.
+  if (body.kind === "reset") {
+    process.stdout.write(`${result.message}\n`);
+    return 0;
+  }
+  // Anything else but "ok" is a refusal, even one that names no code.
   if (result.message !== "ok") {
     process.stderr.write(`factory: ${result.message}\n`);
     return 1;

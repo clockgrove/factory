@@ -15,32 +15,35 @@ Part of [the design](../DESIGN.md).
 **Readiness** (readiness.ts) is one checklist, made with no model call and no change to the target or its settings (the Codex probe writes only its own temporary directories). Each check is `ok`, `warn` (it runs, but see the detail) or `blocked` (the service would hold on it), and every check that isn't `ok` names its fix.
 
 - **Host:**
-  - bubblewrap starts a sandbox, and with `package-install`, pasta is there;
+  - bubblewrap starts a sandbox, and with `package-install`, pasta is there; with `host`, the detail says what commands reach;
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - git, git lfs, node and each final command's program are on the PATH;
+  - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it;
   - a final command that needs the network is flagged.
 - **Providers:** each planner's and worker's SDK is installed and its login is present. Codex and Copilot logins are checked by presence. Claude's is the login the Claude SDK resolves, asked of it once per setup with no model call and a 30-second bound. A keychain, token, profile or cloud-provider login counts. An expired login whose refresh the server rejects is `blocked`, but one whose refresh fails for network reasons still reads `ok`. No answer is `warn`. Like any Claude client, the probe may refresh the operator's login and update `~/.claude.json`. A credential the background service loads at start counts by name, and one it can't read is `blocked` with the file to restore. Copilot's tokens and keys may be service credentials too (`--credential-file`), and its endpoint settings carry over from the setup shell. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
 - **Repository:**
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;
-  - required status checks exist.
+  - required status checks exist. None is a warning: a PR then merges once Factory's own validation passes and any checks that register on it pass.
+  - no ruleset or classic protection requires an approving review (`warn`: every Factory PR waits for someone else to approve it). A bypass for the login doesn't help: GitHub still reports the PR `BLOCKED` with `REVIEW_REQUIRED` to that login, so delivery waits all the same. Classic protection counts only when the login may read it. The fix is no required reviews.
 - **Branch protection:** setup recommends "require branches to be up to date", and Factory never changes repository settings.
 - **Validation environment:** `readiness.validationEnvironment` says how validation differs from hosted CI: the network, the sandbox, the bootstrap install, `sandbox.environment`'s names, the final and CI-only commands, and the package scripts that need a network validation lacks.
 
 Installation options, each setting one key:
 
-| Option                                                                                         | Key                                              |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives` |
-| `--concurrency`, `--workers`, `--validations`, `--planners`, `--memory-mib`                    | `execution.*` (`memoryMiB`)                      |
-| `--worker-mib`, `--validation-mib`, `--planner-mib`                                            | `execution.reservations.*`                       |
-| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                          |
-| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                   |
-| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                  |
-| `--sandbox-network off\|package-install`, `--package-store DIR`                                | `sandbox.network`, `sandbox.packageStore`        |
-| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`   |
-| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                              |
-| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                      |
+| Option                                                                                         | Key                                                        |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `--poll-seconds`, `--max-active`                                                               | `queue.pollSeconds`, `queue.maxActiveObjectives`           |
+| `--concurrency`, `--workers`, `--validations`, `--planners`, `--memory-mib`                    | `execution.*` (`memoryMiB`)                                |
+| `--worker-mib`, `--validation-mib`, `--planner-mib`                                            | `execution.reservations.*`                                 |
+| `--planning-revisions`, `--implementation-repairs`, `--per-path-repairs`, `--result-rereviews` | `autonomy.allowances.*`                                    |
+| `--objective-tokens`, `--objective-cents`, `--day-tokens`, `--day-cents`                       | `autonomy.spend.perObjective.*`, `autonomy.spend.perDay.*` |
+| `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                             |
+| `--delivery regular\|native-stack`                                                             | `delivery.kind`                                            |
+| `--sandbox-network off\|package-install\|host`, `--package-store DIR`                          | `sandbox.network`, `sandbox.packageStore`                  |
+| `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`             |
+| `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                                        |
+| `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                                |
 
 An option marked `...` repeats, and the values given replace the whole list.
 

@@ -296,6 +296,38 @@ test("checks of newly queued Objectives run within the host's cap", async () => 
   await stopped(service);
 });
 
+test("Objectives are taken in Project order: the order field ascending, a card without one last, ties by issue number", async () => {
+  const inst = installation();
+  // GitHub never answers, so the two checks the cap lets start stay
+  // running, and show which two came first in queue order.
+  configured(
+    inst,
+    `http://127.0.0.1:${await silentServer()}`,
+    {},
+    {
+      queue: { projectId: "PVT_none", pollSeconds: 5, maxActiveObjectives: 2 },
+    },
+  );
+  // #83 is first; #82 and #84 tie on the highest order, and #82 goes next,
+  // ahead of #81, which has none. By issue number alone #81 and #82 would
+  // start; with a card without an order first, #81 and #83; with ties to
+  // the higher issue, #83 and #84.
+  const orders = { 81: null, 82: 9, 83: 1, 84: 9 };
+  for (const [issue, order] of Object.entries(orders))
+    seed(inst, Number(issue), "checking", {
+      modules: { github: { itemId: `PVTI_${issue}`, order } },
+    });
+  const service = serve(inst);
+  const issues = Object.keys(orders).map(Number);
+  const running = () =>
+    issues.filter((issue) => stateOf(inst, issue).attempts.check);
+  await until(() => running().length === 2, "two checks running");
+  // Many ticks later, still the same two.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.deepEqual(running(), [82, 83]);
+  await stopped(service);
+});
+
 test("the one step running at three deaths, with progress between, holds", async () => {
   const inst = installation();
   const at = new Date().toISOString();

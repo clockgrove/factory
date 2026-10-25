@@ -7,7 +7,7 @@
 #   touch CTL_DIR/cut             cut the namespace's network for CUT_SECS (60)
 #   touch CTL_DIR/stop            SIGTERM serve (exact pid) and leave
 #
-# Env: BUILD REPO FACTORY_STATE_DIR FACTORY_CONFIG [EXTRA_ENV] [CUT_SECS].
+# Env: BUILD REPO [EXTRA_ENV] [SERVE_ARGS] [CUT_SECS].
 # Writes CTL_DIR/pid (serve), CTL_DIR/exit and CTL_DIR/cuts.log (PDT and UTC).
 set -u
 CTL=${1:?ctl dir}
@@ -20,7 +20,7 @@ cd "$BUILD"
 # pasta maps the caller to uid 0 and Factory refuses to plan as root: a nested
 # user namespace maps back to the host uid for serve only.
 unshare --user --map-user="$HOST_UID" --map-group="$HOST_GID" \
-  env ${EXTRA_ENV:-} node dist/cli.js serve --repo "$REPO" >"$CTL/out.log" 2>&1 &
+  env ${EXTRA_ENV:-} node dist/cli.js serve --repo "$REPO" ${SERVE_ARGS:-} >"$CTL/out.log" 2>&1 &
 pid=$!
 echo $pid >"$CTL/pid"
 log "serve pid $pid started; default route: $(ip route show default)"

@@ -21,6 +21,7 @@ import { retiredLines } from "../planning/plan.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
+import { type SkippedCheck, skippedLines } from "../validate.js";
 import type { PeerNote } from "../work/prompt.js";
 import type { ReviewArtifactGroup } from "./artifacts.js";
 import {
@@ -46,6 +47,8 @@ export function reviewObjective(input: {
   /** Each Work Item's merge commit, in merge order: the change under review. */
   merges: readonly string[];
   validation: PassedValidation;
+  /** The Work Item commands final validation skipped (work/finish.ts finalRuns). */
+  skipped: readonly SkippedCheck[];
   /**
    * Captures of the integrated tree: final validation's (no itemId), then
    * each merged Work Item's validate captures with its itemId, reused only
@@ -95,6 +98,7 @@ export function reviewObjective(input: {
       })),
       ...(input.qa ?? []).map(qaObservationRow),
       ...retiredRows(input.plan),
+      ...skippedRows(input.skipped),
     ],
     artifacts: input.artifacts ?? [],
   });
@@ -115,6 +119,27 @@ function retiredRows(plan: Plan) {
             scope:
               "The operator retired these validation commands: they no longer run, so they are no evidence either way. Criteria they proved are still judged, on other evidence.",
             retired,
+          }),
+          complete: true,
+        },
+      ]
+    : [];
+}
+
+/**
+ * The Work Item commands final validation skipped, as a controller row:
+ * they passed on their own item's tree, not on the integrated one.
+ */
+function skippedRows(skipped: readonly SkippedCheck[]) {
+  return skipped.length
+    ? [
+        {
+          origin: "controller" as const,
+          path: "Skipped commands",
+          content: JSON.stringify({
+            scope:
+              "Final validation skipped these Work Item commands: a merge of this Objective changed the package script each runs, so it can't run pinned to the script its Work Item validated. Each passed in its own Work Item's validation, not on the integrated tree, so they are no evidence about it either way. Criteria they proved are still judged, on other evidence.",
+            skipped: skippedLines(skipped),
           }),
           complete: true,
         },

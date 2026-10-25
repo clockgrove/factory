@@ -2,7 +2,7 @@
 // a worker may change, and what redaction covers.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -117,6 +117,67 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
   const subject = git(worktree, "log", "-1", "--format=%s");
   assert.doesNotMatch(subject, /#\d|@\w/);
   assert.equal(subject.replaceAll("‍", ""), "Factory: Fixes #4 for @octo");
+});
+
+test("one secret scan of every changed file names the file with a secret and passes the clean ones", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-secret-"));
+  const worktree = join(root, "worktree");
+  mkdirSync(worktree);
+  git(worktree, "init", "--quiet");
+  writeFileSync(join(worktree, "README.md"), "base\n");
+  git(worktree, "add", "README.md");
+  git(
+    worktree,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    "base",
+  );
+  const base = git(worktree, "rev-parse", "HEAD");
+  mkdirSync(join(worktree, "src", "deep"), { recursive: true });
+  for (const name of ["a.txt", "src/b.ts", "src/deep/c.json"])
+    writeFileSync(join(worktree, name), `clean ${name}\n`);
+  // Built here, so the test file holds no token. Its CRLF work-tree copy
+  // differs from the LF blob Git stages, so both are scanned.
+  const token = `ghp_${"A1b2C3d4E5".repeat(4).slice(0, 36)}`;
+  writeFileSync(join(worktree, ".gitattributes"), "*.ts text eol=lf\n");
+  writeFileSync(join(worktree, "src", "leak.ts"), `const t = "${token}";\r\n`);
+  const work = item("scan", {
+    ownedPaths: [".gitattributes", "a.txt", "src/"],
+  });
+  const { sandbox } = configWith();
+  const run = () =>
+    collect({
+      worktree,
+      base,
+      plan: { items: [work] },
+      item: work,
+      mayChange: [],
+      sandbox,
+      finalResponse: "",
+      signal: AbortSignal.timeout(60_000),
+    });
+  const held = await run();
+  assert.equal(held.kind, "hold");
+  // Only the leaking file, once, with the rule that found it.
+  assert.match(
+    held.question,
+    /suspected secret in "src\/leak\.ts" \(@secretlint\/secretlint-rule-github\)\. /,
+  );
+  assert.doesNotMatch(held.question, /a\.txt|b\.ts|c\.json|leak.*leak/);
+  // Without it, the clean files are collected.
+  git(worktree, "rm", "--quiet", "--cached", "src/leak.ts");
+  rmSync(join(worktree, "src", "leak.ts"));
+  const collected = await run();
+  assert.equal(collected.kind, "collected");
+  assert.deepEqual(
+    git(worktree, "show", "--name-only", "--format=", "HEAD").split("\n"),
+    [".gitattributes", "a.txt", "src/b.ts", "src/deep/c.json"],
+  );
 });
 
 test("redaction covers JWTs", () => {

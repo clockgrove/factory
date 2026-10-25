@@ -8,6 +8,7 @@ import type { CriterionDecision, ResultReview } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
 import type { RepairContext } from "./prompt.js";
+import type { WorkerSpend } from "./worker.js";
 
 /*
  * Facts that outlive retries, restarts and repairs (`state.kept`, written
@@ -38,6 +39,8 @@ export interface ItemFacts {
   refused: Refused;
   /** The media inputs the worker last got, for review. */
   inputs: MediaInput[];
+  /** A paid worker's spend so far. */
+  spend: WorkerSpend;
   /**
    * The correction diagnosed for repair `repair`, and every correction
    * diagnosed so far; `answered`: the question whose operator answer it

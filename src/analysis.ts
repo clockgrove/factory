@@ -1300,7 +1300,7 @@ class Analysis {
 const LIMITATIONS = [
   "Times overlap: each time figure is a union, so concurrent steps, calls and waits count once; never add them up.",
   "A count a provider doesn't report is unknown, not 0: tokens and cost sum only the calls that report them, and each figure says how many did. Cached input and reasoning output are parts of input and output, never extra tokens.",
-  "Cost is the provider's list cost when it reports one (Claude), not a bill; subscription use is unknown.",
+  "Cost is the provider's list cost when it reports one (Claude, Claude managed), not a bill; subscription use is unknown.",
   "nativeToolActivity (model-visible tool calls) and sdkOperations (the SDK's own items) are two views of the same work and are never added; one tool call can run many commands.",
   "Sequence numbers count per run file: a gap is a line lost to a failed write (log-health counts them too); a run with no run-end is still running, or died and no later start has seen it yet.",
   "A refused answer (stage semantic) is a call that succeeded and that Factory's checks then refused; it counts beside the call's outcome, not instead of it.",

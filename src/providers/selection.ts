@@ -38,6 +38,7 @@ import {
   CopilotWorker,
   DEFAULT_COPILOT_MODELS,
 } from "./copilot.js";
+import { ClaudeManagedWorker, OpenAIManagedWorker } from "./managed.js";
 import {
   HedgedPlanner,
   type ModelChoice,
@@ -79,12 +80,12 @@ export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
 /** What a profile's worker runs with, shown to the planner beside its description. */
 export interface ProfileWorker {
   kind: string;
-  model: string;
-  effort: string;
+  model?: string;
+  effort?: string;
   /** The tools the worker may use. */
   tools: string[];
   /** Whether the worker's own commands reach the network. */
-  network: "off" | "host";
+  network: "off" | "host" | "hosted";
 }
 
 /** A provider's worker as the planner sees it, adapter defaults filled in. */
@@ -119,6 +120,22 @@ export function profileWorker(
         effort: worker.effort,
         tools: worker.tools,
         network: "off",
+      };
+    case "openai-agents":
+      return {
+        kind: worker.kind,
+        model: worker.model,
+        effort: worker.effort,
+        tools: ["hosted container shell"],
+        network: "hosted",
+      };
+    case "claude-managed-agents":
+      return {
+        kind: worker.kind,
+        tools: [
+          `agent ${worker.agentId} version ${worker.agentVersion}'s tools`,
+        ],
+        network: "hosted",
       };
   }
 }
@@ -182,6 +199,10 @@ export function providerWorker(
             commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
           },
         });
+      case "openai-agents":
+        return new OpenAIManagedWorker(worker);
+      case "claude-managed-agents":
+        return new ClaudeManagedWorker(worker);
       default: {
         const { kind: _, network, ...model } = worker;
         return new CodexWorker({
@@ -244,7 +265,8 @@ export const OPERATIONAL: readonly string[] = [
   "tracking",
   // A validation command's time limit.
   "validation.commandTimeoutSeconds",
-  // A worker run's idle and turn limits.
+  // A worker run's time, idle and turn limits.
+  "provider.worker.timeoutSeconds",
   "provider.worker.idleSeconds",
   "provider.worker.settings.maxTurns",
   // Content capture observes calls; it changes no run.

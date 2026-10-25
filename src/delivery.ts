@@ -334,7 +334,7 @@ export async function publish(
       )),
     ];
     if (leaked.length) {
-      const finding = `The result writes the value of a secret Factory redacts (a policy.allowedSecretNames variable or a Copilot secret), as written or base64-encoded, into ${leaked.map((path) => JSON.stringify(path)).join(", ")}. Remove it from those files and never write a secret's value into the repository.`;
+      const finding = `The result writes the value of a secret Factory redacts (a policy.allowedSecretNames variable or a managed provider's credential), as written or base64-encoded, into ${leaked.map((path) => JSON.stringify(path)).join(", ")}. Remove it from those files and never write a secret's value into the repository.`;
       const digest = sha256(Buffer.from(`${input.commit}\n${finding}`)).slice(
         0,
         16,

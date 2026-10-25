@@ -11,7 +11,8 @@ HOSTNET_PORT=18650
 
 setup_prd() {
   clone $M_REPO "$STATE_BASE/checkout-p" || return 1
-  clone $C_REPO "$STATE_BASE/checkout-q" || return 1
+  # Repository C and installation Q exist only when lane Q's case runs.
+  if [ -n "$NEEDS_C" ]; then clone $C_REPO "$STATE_BASE/checkout-q" || return 1; fi
   # Repository M's main also holds what lane P's cases read there: the
   # workflows that file issues and comments as github-actions[bot] (a
   # non-writer), and the roadmap `propose --source` drafts from.
@@ -25,12 +26,12 @@ setup_prd() {
   write_config "$STATE_BASE/config-p.json" $M_REPO "$co" 12 \
     'c["sandbox"]={"network":"host"}' 'c["finalValidation"]={"ciOnlyCommands":["npm run ci-only"]}'
   inst_define P $M_REPO "$STATE_BASE/config-p.json"
-  inst_define Q $C_REPO "$STATE_BASE/config-q.json"
+  [ -z "$NEEDS_C" ] || inst_define Q $C_REPO "$STATE_BASE/config-q.json"
   inst P
   [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }
   proxy_start P 18613
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/P/extra_env"
-  : >"$RUN_DIR/inst/Q/extra_env"
+  [ -z "$NEEDS_C" ] || : >"$RUN_DIR/inst/Q/extra_env"
   serve_up && serve_ready
 }
 

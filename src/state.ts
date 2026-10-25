@@ -18,16 +18,18 @@ import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
 
 /**
- * 6: a hold carries its answers as `options`, each with its family and
- * consequence. 5: a Work Item's refused and replayed result is one
- * `refused` fact, and its diagnosis one `diagnosis` fact (work/facts.ts).
+ * 8: a diagnosis fact's `applied` corrections are records, not their
+ * rendered findings (work/facts.ts). 6: a hold carries its answers as
+ * `options`, each with its family and consequence. 5: a Work Item's
+ * refused and replayed result is one `refused` fact, and its diagnosis
+ * one `diagnosis` fact (work/facts.ts).
  * 4: a hold has a cause, an error retry is a wait class, cancel and the
  * end are one `ended` record (3: one frozen configuration in place of the
  * frozen provider). Another version is unreadable, with no migration;
  * `factory reset` rebuilds it from GitHub (reset.ts), with no open
  * question.
  */
-const STATE_VERSION = 7;
+const STATE_VERSION = 8;
 
 export type ObjectiveStatus =
   | "checking"

@@ -3,9 +3,9 @@ import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
-import { coverageCriterion, ownsPath } from "./graph.js";
+import { ownsPath } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
-import type { Plan, Retirement, WorkItem } from "./types.js";
+import type { Plan, WorkItem } from "./types.js";
 
 /*
  * The one reader of the accepted plan. The plan step saves it at
@@ -222,18 +222,18 @@ const retiredOf = (plan: Plan) =>
 
 /**
  * Final validation's Work Item runs, for a plan with no final command
- * (neither the Objective nor the installation declares one): each Work
- * Item's own validation commands, intact and in dependency order, less
- * those the operator retired, so QA runs on the merged default branch
- * whenever the plan has a command. A list identical to one already listed
- * is left out. Empty when the plan has final commands.
+ * (the installation requires none): each work and QA item's own validation
+ * commands, intact and in dependency order, less those the operator
+ * retired, so QA runs on the merged default branch whenever the plan has a
+ * command. A list identical to one already listed is left out. Empty when
+ * the plan has final commands.
  */
 export function fallbackRuns(plan: Plan): WorkItem[] {
   if (plan.finalCommands.length) return [];
   const retired = retiredOf(plan);
   const listed = new Set<string>();
   return dependencyOrder(plan).flatMap((item) => {
-    if ((item.kind ?? "work") !== "work") return [];
+    if (!["work", "qa"].includes(item.kind ?? "work")) return [];
     const validation = item.validation.filter(
       (check) => !retired.has(check.command.trim()),
     );
@@ -246,17 +246,23 @@ export function fallbackRuns(plan: Plan): WorkItem[] {
 
 /**
  * The checks final validation runs on the merged default branch, less
- * those the operator retired: the plan's final commands, each once, or,
- * with none, the commands of its Work Item runs (`fallbackRuns`).
+ * those the operator retired: the plan's final commands, then its QA
+ * items' commands, each once, or, with no final command, the commands of
+ * its Work Item runs (`fallbackRuns`).
  */
 export function finalChecks(plan: Plan): string[] {
   if (!plan.finalCommands.length)
     return fallbackRuns(plan).flatMap((item) =>
       item.validation.map((check) => check.command),
     );
+  // The QA items' commands prove the Objective's command criteria: they
+  // run again on the final head, after the required commands.
   const retired = retiredOf(plan);
   const seen = new Set<string>();
-  return plan.finalCommands.filter((command) => {
+  const qa = dependencyOrder(plan).flatMap((item) =>
+    item.kind === "qa" ? item.validation.map((check) => check.command) : [],
+  );
+  return [...plan.finalCommands, ...qa].filter((command) => {
     const key = command.trim();
     if (retired.has(key) || seen.has(key)) return false;
     seen.add(key);
@@ -265,31 +271,17 @@ export function finalChecks(plan: Plan): string[] {
 }
 
 /**
- * The Objective criteria retired command `entry` proved, by the
- * criterion's command. Review judges them on other evidence now.
- */
-export function provedBy(plan: Plan, entry: Retirement): string[] {
-  return [
-    ...new Set(
-      plan.coverage
-        .filter((coverage) => coverage.source.command === entry.command)
-        .map(coverageCriterion),
-    ),
-  ];
-}
-
-/**
  * The retirements as lines for the report and status: command, reason,
- * who and when, and the obligations it proved, which review judges now.
+ * who and when.
  */
 export function retiredLines(
   plan: Plan,
   time: (at: string) => string = (at) => at,
 ): string[] {
-  return (plan.retired ?? []).map((entry) => {
-    const proved = provedBy(plan, entry);
-    return `command \`${entry.command}\` (final validation): retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}${proved.length ? `. Judged by review instead: ${proved.join("; ")}` : ""}`;
-  });
+  return (plan.retired ?? []).map(
+    (entry) =>
+      `command \`${entry.command}\` (final validation): retired by ${entry.by} at ${time(entry.at)}: ${entry.reason}`,
+  );
 }
 
 /** The current planning generation and round, from the saved decisions. */

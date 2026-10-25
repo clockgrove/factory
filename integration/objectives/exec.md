@@ -5,4 +5,4 @@ Add `{{FN}}` in its own file `src/{{FN}}.js` as a named export, with its own tes
 ## Acceptance
 
 - {{SPEC}}
-- `npm test`
+- `npm test` passes.

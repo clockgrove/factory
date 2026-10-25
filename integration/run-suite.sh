@@ -54,7 +54,7 @@ CASE_TABLE_edge=(
 )
 CASE_TABLE_prd=(
   "propose|P|15|factory propose from an intent and from a roadmap section; an approved draft creates its issues once, with blocked-by links (propose.*)"
-  "recheck|P|15|a failed check names a CI-only final command and a missing Source; after the issue is fixed, 'recheck' plans (toolchain.ci-only, intake.recheck)"
+  "recheck|P|25|a failed check names a missing Source; after the issue is fixed, 'recheck' plans, and no plan validates with the CI-only command the Objective asks for (toolchain.ci-only, intake.recheck)"
   "outsider|P|15|an Objective github-actions[bot] filed waits for a writer's approve; the bot's own /factory approve is ignored; an edit after approval asks again (intake.non-writer)"
   "amend|P|30|an operator's amendment is planned and reviewed; an edit after planning holds and 'replan' plans again (plan.amendment, plan.replan)"
   "discovery|P|35|a worker's in-scope discovery becomes an amendment and is reviewed (plan.discovery)"

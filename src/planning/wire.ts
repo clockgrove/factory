@@ -188,7 +188,7 @@ const CONTROLLER_GUARANTEES: { id: string; statement: string }[] = [
 
 /** Shared compilation/diagnosis meaning; no probe result or extra authority. */
 export const COMPILER_READINESS_GUIDANCE =
-  "Same-owner source-authorized setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this authorized sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice through decisionRequired.";
+  "Same-owner setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice through decisionRequired.";
 
 /**
  * A line-number reference next to a file name in an acceptance entry
@@ -311,26 +311,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     validation: {
       type: "array",
       items: {
-        anyOf: [
-          strict({
-            kind: { type: "string", enum: ["source-line"] },
-            sourceIndex: integer(sources.length),
-            lineIndex: {
-              ...integer(),
-              description:
-                "A standalone executable command line or one complete backticked command bullet; never prose around a code span.",
-            },
-          }),
-          strict({
-            kind: { type: "string", enum: ["base-observed"] },
-            command: {
-              ...text,
-              description:
-                "For package.json, use the repository's authorized npm/pnpm invocation by an existing script name, not its JSON script body. For other tracked files, use an exact standalone executable command line, without Markdown wrappers or surrounding prose.",
-            },
-            source: text,
-          }),
-        ],
+        ...text,
+        description:
+          "One command line, exactly as validation runs it in the item's checkout: finite, offline, exit zero on success. A root package script runs by its npm/pnpm invocation, never its JSON body.",
       },
     },
     brief: { ...text, minLength: 1 },
@@ -403,10 +386,10 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
                 enum: [readiness],
                 description:
                   readiness === "available"
-                    ? "The owner can run its authorized prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
+                    ? "The owner can run its prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
                     : readiness === "prepare"
                       ? "An actual declared dependency supplies preparation; same-owner prerequisite commands do not use prepare."
-                      : "A source-required external environment prerequisite is missing: name its authorized probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
+                      : "A source-required external environment prerequisite is missing: name its probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
               },
               probeValidationIndex:
                 kind === "real"
@@ -1225,9 +1208,7 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
   });
   if (!Array.isArray(item.validation))
     throw new Refusal("Planner validation must be an array", id);
-  const validation = item.validation.map((value) =>
-    selectCommand(wire, object(value, "validation selection"), id),
-  );
+  const validation = item.validation.map((value) => selectCommand(value, id));
   const children = list("children");
   const resources = list("resources");
   const scheduling = schedulingHint(item.scheduling);
@@ -1342,53 +1323,14 @@ function schedulingHint(value: unknown): WorkItem["scheduling"] | undefined {
   };
 }
 
-/** A validation choice: a line of a pinned source, or a command observed at the base. */
-function selectCommand(
-  wire: Contract,
-  selection: ObjectValue,
-  id: string,
-): ValidationCommand {
-  if (selection.kind === "source-line") {
-    keys(selection, ["kind", "sourceIndex", "lineIndex"], "source line");
-    const source =
-      wire.sources[
-        index(selection.sourceIndex, wire.sources.length, "sourceIndex")
-      ]!;
-    const lines = source.content.split("\n");
-    let command = lines[
-      index(selection.lineIndex, lines.length, "lineIndex")
-    ]!.trim()
-      .replace(/^[-*]\s+/, "")
-      .trim();
-    if (command.startsWith("`")) {
-      const literal = /^`([^`]+)`$/.exec(command);
-      if (!literal)
-        throw new Refusal(
-          "Planner source line is prose around a code span; select a standalone command line",
-          id,
-        );
-      command = literal[1]!;
-    }
-    if (!validValidationCommand(command))
-      throw new Refusal(
-        "Planner source line is not an executable command line; select a line that is exactly one command",
-        id,
-      );
-    return { command, provenance: "source-declared", source: source.path };
-  }
-  keys(selection, ["kind", "command", "source"], "base-observed command");
-  if (
-    selection.kind !== "base-observed" ||
-    typeof selection.command !== "string" ||
-    !selection.command ||
-    typeof selection.source !== "string"
-  )
-    throw new Refusal("Planner base-observed command is invalid", id);
-  return {
-    command: selection.command,
-    provenance: "base-observed",
-    source: selection.source,
-  };
+/** A validation command: one command line as the planner wrote it. */
+function selectCommand(selection: unknown, id: string): ValidationCommand {
+  if (typeof selection !== "string" || !validValidationCommand(selection))
+    throw new Refusal(
+      "Planner validation entry is not one executable command line",
+      id,
+    );
+  return { command: selection.trim() };
 }
 
 /** An owner, proof and environment choice, checked against the decoded items. */

@@ -636,12 +636,9 @@ function movedLinks(worktree: string, linked: readonly LfsFile[]): string[] {
     .map((file) => file.path);
 }
 
+/** The commands the plan declared: its authority for a new script or an install. */
 const sourceDeclared = (items: readonly WorkItem[]) =>
-  items.flatMap((item) =>
-    item.validation
-      .filter((check) => check.provenance === "source-declared")
-      .map((check) => check.command),
-  );
+  items.flatMap((item) => item.validation.map((check) => check.command));
 
 // ---------------------------------------------------------------------------
 // Output
@@ -753,7 +750,7 @@ async function dependencyInputsChanged(
  * final checks (planning/plan.ts `finalChecks`). Only a bootstrap that runs
  * first installs, so the sequence starts with one exactly once: a bootstrap
  * the final checks list moves to the front, and otherwise the plan's
- * source-declared bootstrap leads. The plan's declared prerequisites run
+ * declared bootstrap leads. The plan's declared prerequisites run
  * first unless the final checks already start with them; when they do run
  * first, the bootstrap leads them.
  */
@@ -827,7 +824,7 @@ function preparationCommands(plan: Plan): string[] {
  * so a worker could make `npm test` pass by rewriting it. The script a
  * command runs, its pre and post hooks, pnpmfile hooks, .npmrc, the
  * workspace configuration and the lockfile rules stay as at the accepted
- * base, unless the Objective's source-declared commands, Package manager
+ * base, unless the plan's declared commands, the Package manager
  * update or Workspace package additions authorize a change.
  */
 interface PinAuthority {
@@ -1161,7 +1158,7 @@ async function checkPins(
   if (npmBootstrap) {
     if (!declared.has(PINNED_NPM_BOOTSTRAP))
       throw configuration(
-        "Package script validation blocked: npm bootstrap needs exact source-declared command authority",
+        "Package script validation blocked: npm bootstrap runs only when a plan validation command is exactly it",
       );
     if (pnpmBootstrap || selected.some((command) => /\bpnpm\b/.test(command)))
       throw configuration(
@@ -1239,7 +1236,7 @@ async function checkPins(
     )
   )
     throw configuration(
-      "Package script validation blocked: a new package.json needs exact source-declared command authority",
+      "Package script validation blocked: a new package.json runs only for a command the plan declared",
     );
   if (!after && (original || bootstrap || scriptCommands.length))
     throw candidate(
@@ -1278,7 +1275,7 @@ async function checkPins(
     const body = beforeScripts[name];
     if (typeof body !== "string" && !declared.has(command))
       throw configuration(
-        `Package script validation blocked: new script ${name} needs exact source-declared command authority`,
+        `Package script validation blocked: new script ${name} runs only for a command the plan declared`,
       );
     if (
       (typeof body === "string" && afterScripts[name] !== body) ||

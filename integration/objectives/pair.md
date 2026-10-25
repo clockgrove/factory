@@ -11,4 +11,4 @@ No other file changes.
 
 - `pairLeft{{ID}}("abc")` is `"a"` and `pairLeft{{ID}}("")` is `""`.
 - `pairRight{{ID}}("abc")` is `"c"` and `pairRight{{ID}}("")` is `""`.
-- `npm test`
+- `npm test` passes.

@@ -56,7 +56,7 @@ A change that needs a new kind of hold, lock, owner, archive, background loop or
 
 Factory is a general-purpose plugin. Keep adopter-specific behavior out of its source. Keep every capability: Objective → plan → Work Items → execution → validation → GitHub delivery → final acceptance, including media/LFS, all providers, and restart/cancel/status. Simplify mechanisms, never scope.
 
-Keep credentials, configuration and state outside targets. Preserve the sandbox, branch protection, owned paths, source and command authority from pinned Sources, independent acceptance review, and provider/resource limits. Contributor authority never transfers to workers or adopters. Private adopter content and raw prompts/logs stay private.
+Keep credentials, configuration and state outside targets. Preserve the sandbox, branch protection, owned paths, source authority from pinned Sources, independent acceptance review, and provider/resource limits. Contributor authority never transfers to workers or adopters. Private adopter content and raw prompts/logs stay private.
 
 ## State and effects
 

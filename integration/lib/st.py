@@ -200,6 +200,16 @@ def main():
             if isinstance(cur, dict) and part in cur: cur = cur[part]
             else: ok = False; break
         print(1 if ok else 0)
+    elif cmd == "validation-commands":
+        # The validation commands under one state path (done.plan: the accepted plan), one per line.
+        cur = d if isinstance(d, dict) else None
+        for part in rest[0].split("."):
+            cur = cur.get(part) if isinstance(cur, dict) else None
+        for node in walk(cur if isinstance(cur, dict) else {}):
+            if isinstance(node, dict) and isinstance(node.get("validation"), list):
+                for check in node["validation"]:
+                    if isinstance(check, dict) and isinstance(check.get("command"), str):
+                        print(check["command"])
     elif cmd == "maxconc":
         # n is the step glob here; the Objectives follow.
         edges = []

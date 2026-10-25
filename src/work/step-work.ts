@@ -293,8 +293,14 @@ export async function workStep(
     keepAll = { ...keepAll, ...facts({ inputs: inputs.value }, item.id) };
 
     const files = new BaseFiles(config.checkout, base, signal);
+    // Every existing script a plan or required command runs stays fixed.
     const scripts = await fixedScripts(
-      finalCommands(shown.blocks, config.finalValidation.requiredCommands),
+      [
+        ...finalCommands(config.finalValidation.requiredCommands),
+        ...plan.items.flatMap((planned) =>
+          planned.validation.map((v) => v.command),
+        ),
+      ],
       files,
     );
     const pin = packageManagerUpdate(shown.blocks);

@@ -18,15 +18,10 @@ import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { TransientError } from "../dist/github.js";
 import { checkObjective } from "../dist/objective.js";
 import { observeLocalExecutables } from "../dist/planning/executables.js";
-import {
-  BaseFiles,
-  finalCommands,
-  sectionText,
-} from "../dist/planning/facts.js";
+import { BaseFiles, finalCommands } from "../dist/planning/facts.js";
 import { ownedSince } from "../dist/planning/plan.js";
 import { repositoryView } from "../dist/planning/repository.js";
-import { readShown, shownDigest } from "../dist/shown.js";
-import { declarationProblems } from "../dist/validate.js";
+import { readShown } from "../dist/shown.js";
 import {
   children,
   cli,
@@ -278,14 +273,13 @@ test("an Objective with no final command still gets QA on the default branch: fi
             ownedPaths: ["b.txt"],
             dependencies: ["a"],
             validation: ["node gen.mjs", "node check.mjs", "node b.mjs"].map(
-              (command) => ({ command, provenance: "base-observed" }),
+              (command) => ({ command }),
             ),
           }),
           item("a", {
             ownedPaths: ["parser.txt"],
             validation: ["node check.mjs", "node leak.mjs"].map((command) => ({
               command,
-              provenance: "base-observed",
             })),
           }),
         ],
@@ -392,16 +386,12 @@ test("final validation names each Work Item command it skips because a later mer
         [
           item("a", {
             ownedPaths: ["a.txt"],
-            validation: [
-              { command: "npm run check", provenance: "base-observed" },
-            ],
+            validation: [{ command: "npm run check" }],
           }),
           item("b", {
             ownedPaths: ["package.json"],
             dependencies: ["a"],
-            validation: [
-              { command: "node b.mjs", provenance: "base-observed" },
-            ],
+            validation: [{ command: "node b.mjs" }],
           }),
         ],
         { base },
@@ -434,128 +424,6 @@ test("final validation names each Work Item command it skips because a later mer
   assert.equal(cli(inst, "cancel", "62").code, 0);
   await stopped(service);
 });
-
-// A non-writer's Objective: Factory reads its structure from GitHub's
-// rendering (body_html) and plans from that rendering as Markdown text; the
-// approval names their digest. The stand-in renders like GitHub (micromark
-// + GFM, a math block as GitHub's math-renderer), with raw HTML let
-// through, so attributes and comments reach the parser. Sections are
-// GitHub's headings (a <br> in one is a space), bullets its list items (a
-// shown "- `cmd`" line in a paragraph is not one), commands only list
-// items of one code element (not a paragraph, struck or bold code, or math),
-// paths and headings keep emphasis as `__`/`_` (a `_` anchor finds a `*`
-// heading), a blank form field is empty, and a non-writer's diagram and
-// math sources are placeholders.
-const HIDDEN_BODY = `## Goal
-Ship the parser.<!-- HIDDEN-COMMENT -->
-
-\\## Acceptance
-
-![HIDDEN-ALT](https://example.com/img/shot.png "HIDDEN-IMAGE-TITLE")
-
-See [docs](https://example.com/docs "HIDDEN-TITLE"), [ref][d] and <a href="https://e.com" title="HIDDEN-ATTR">x</a>.
-
-## Acceptance
-Run these:<br>- \`npm test\`<br>Never run:<br>- \`npm run deploy\`
-
-- [ ] parse works
-- \`npm run check\`
-- ~~The old \`--legacy\` flag still works~~
-- **\`npm run e2e\`**
-- <math-renderer class="js-inline-math">$O(n)$</math-renderer>
-- Release works; verify by hand:
-
-\`npm run release\`
-
-Note[^a].
-
-\`\`\`mermaid
-%% HIDDEN-COMMENT
-graph TD; HIDDEN-NODE[Build]-->B
-\`\`\`
-
-<math-renderer class="js-display-math">$$\\text{HIDDEN-MATH}$$</math-renderer>
-
-## Out of scope<br>never part of this
-- \`npm run deploy:prod\`
-
-## Sources
-- src/_internal.ts
-- src/__tests__/a.ts
-- pkg/__init__.py
-- docs/foo**bar**.md
-- docs/A&B.md
-- docs/PLAN.md#Heading [draft] *x* & y
-- docs/y.md#Step *y*
-
-### Package manager update
-
-_No response_
-
-[^a]: Shown note.
-[^z]: HIDDEN-FOOTNOTE
-
-[d]: https://example.com/ref "HIDDEN-REF-TITLE"`;
-const HIDDEN_HTML = micromark(HIDDEN_BODY, {
-  allowDangerousHtml: true,
-  extensions: [gfm()],
-  htmlExtensions: [gfmHtml()],
-});
-const SHOWN = `## Goal
-
-Ship the parser.
-
-\\## Acceptance
-
-[image: shot.png]
-
-See [docs](https://example.com/docs), [ref](https://example.com/ref) and [x](https://e.com).
-
-## Acceptance
-
-Run these:\\
-\\- \`npm test\`\\
-Never run:\\
-\\- \`npm run deploy\`
-
-- [ ] parse works
-- \`npm run check\`
-- ~~The old \`--legacy\` flag still works~~
-- **\`npm run e2e\`**
-- [math]
-- Release works; verify by hand:
-
-\`npm run release\`
-
-Note[1].
-
-[mermaid diagram]
-
-[math]
-
-Out of scope\\
-never part of this
-------------------
-
-- \`npm run deploy:prod\`
-
-## Sources
-
-- src/\\_internal.ts
-- src/**tests**/a.ts
-- pkg/**init**.py
-- docs/foo**bar**.md
-- docs/A\\&B.md
-- docs/PLAN.md#Heading \\[draft] *x* & y
-- docs/y.md#Step *y*
-
-### Package manager update
-
-_No response_
-
-## Footnotes
-
-1. Shown note.`;
 
 test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-default-branch-"));

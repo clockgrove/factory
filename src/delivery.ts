@@ -1555,7 +1555,7 @@ async function mergeCommitsHold(
 
 /**
  * A merged PR whose head is Factory's (judge checked it): its merge commit,
- * from the timeline. A person may have merged it by hand with any method.
+ * as GitHub names it. A person may have merged it by hand with any method.
  */
 async function confirmMerged(
   context: DeliveryContext,
@@ -1568,7 +1568,7 @@ async function confirmMerged(
   );
   if (!mergeSha)
     return lagging(
-      `PR #${pull.number} merge is not on its timeline yet`,
+      `GitHub doesn't show PR #${pull.number}'s merge commit yet`,
       `GitHub shows PR #${pull.number} merged but names no merge commit. Inspect it, then answer retry; or cancel.`,
     );
   return integrate(context, input.pr, input.integrated, mergeSha);
@@ -2130,7 +2130,7 @@ async function confirmUnit(
     if (!sha)
       return pin(
         lagging(
-          `PR #${pr} merge is not on its timeline yet`,
+          `GitHub doesn't show PR #${pr}'s merge commit yet`,
           `GitHub shows PR #${pr} merged but names no merge commit. Inspect it, then answer retry; or cancel.`,
         ),
         layer.input,

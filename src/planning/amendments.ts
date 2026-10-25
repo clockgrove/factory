@@ -78,10 +78,9 @@ import {
  *   `autonomy.allowances.planningRevisions`; past it, its planning asks
  *   for `more` first. A rejection or a replacement never refunds it, and
  *   widening an item leaves its spent repairs as they are. A replan accepts a new plan, which starts a new allowance.
- * - A rejected amendment is replaced only by a proposal whose seven
- *   discovery fields (scope, reason, evidence, ownership, acceptance,
- *   dependencies, worker) deep-equal the rejected one, with a new diagnosis
- *   and correction.
+ * - A rejected amendment is replaced only by a proposal that repeats its
+ *   discovery and worker, with the rejection as diagnosis and a new
+ *   correction (`rejectionStep` builds it).
  *
  * Proposals are kept one per key (`amend:<id>:proposal`, plan.ts
  * `proposalKey`), in the order they were taken in, each stamped with the
@@ -170,17 +169,6 @@ export function workDiscoveryProblem(value: unknown): string | undefined {
   }
   return undefined;
 }
-
-/** The fields a replacement repeats exactly. */
-const discoveryFields = (proposal: AmendmentProposal) => ({
-  scope: proposal.discovery.scope,
-  reason: proposal.discovery.reason,
-  evidence: proposal.discovery.evidence,
-  ownership: proposal.discovery.ownership,
-  acceptance: proposal.discovery.acceptance,
-  dependencies: proposal.discovery.dependencies,
-  worker: proposal.worker,
-});
 
 /** Where the Objective's amendments stand. */
 export interface AmendmentLedger {
@@ -297,7 +285,7 @@ export function proposalProblems(
       );
     return problems;
   }
-  const { amendmentId, diagnosis, correction } = proposal.replacement;
+  const { amendmentId, correction } = proposal.replacement;
   const rejected = ledger.rejected;
   if (!rejected || rejected.proposal.id !== amendmentId) {
     problems.push(
@@ -305,27 +293,10 @@ export function proposalProblems(
     );
     return problems;
   }
-  if (!discovery) {
-    const before = discoveryFields(rejected.proposal);
-    const after = discoveryFields(proposal);
-    const changed = (Object.keys(before) as (keyof typeof before)[]).filter(
-      (field) => !isDeepStrictEqual(after[field], before[field]),
-    );
-    if (changed.length)
-      problems.push(
-        `A replacement repeats the rejected discovery exactly; it differs in ${changed.join(", ")}. Put what changed in the correction`,
-      );
-  }
+  // rejectionStep builds a replacement from the rejected proposal: its
+  // discovery and worker, the rejection as diagnosis and the answer's
+  // required text as correction. Only the correction can repeat.
   if (
-    typeof diagnosis !== "string" ||
-    !diagnosis.trim() ||
-    typeof correction !== "string" ||
-    !correction.trim()
-  )
-    problems.push(
-      "A replacement needs a diagnosis of the rejection and the correction for the planner",
-    );
-  else if (
     rejected.proposal.replacement?.correction === correction ||
     rejected.corrections.includes(correction)
   )

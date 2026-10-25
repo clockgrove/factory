@@ -1,6 +1,7 @@
 import { ACCEPT } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { InputRecord } from "../media.js";
+import { ancestors } from "../planning/graph.js";
 import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
@@ -165,14 +166,7 @@ export async function dependencyResults(
   signal: AbortSignal,
 ): Promise<DependencyResult[]> {
   const plan = currentPlan(state)!;
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const closure = new Set<string>();
-  const visit = (id: string) => {
-    if (closure.has(id)) return;
-    closure.add(id);
-    for (const parent of byId.get(id)?.dependencies ?? []) visit(parent);
-  };
-  for (const id of item.dependencies) visit(id);
+  const closure = ancestors(plan.items, item.id);
   const results: DependencyResult[] = [];
   const contains = async (commit: string) =>
     (

@@ -15,6 +15,7 @@ import {
   unknownCheckNames,
 } from "./facts.js";
 import {
+  ancestors,
   coverageCriterion,
   ownsPath,
   pathsOverlap,
@@ -154,19 +155,6 @@ function graphLint(
   found: Found,
 ): void {
   const byId = new Map(draft.items.map((item) => [item.id, item]));
-  const ancestors = new Map<string, Set<string>>();
-  const ancestorsOf = (id: string): Set<string> => {
-    const known = ancestors.get(id);
-    if (known) return known;
-    const result = new Set<string>();
-    ancestors.set(id, result);
-    for (const dependency of byId.get(id)?.dependencies ?? []) {
-      if (!byId.has(dependency)) continue;
-      result.add(dependency);
-      for (const ancestor of ancestorsOf(dependency)) result.add(ancestor);
-    }
-    return result;
-  };
   for (const [at, left] of draft.items.entries())
     for (const right of draft.items.slice(at + 1)) {
       const shared = left.ownedPaths.flatMap((a) =>
@@ -174,8 +162,8 @@ function graphLint(
       );
       if (
         !shared.length ||
-        ancestorsOf(left.id).has(right.id) ||
-        ancestorsOf(right.id).has(left.id)
+        ancestors(draft.items, left.id).has(right.id) ||
+        ancestors(draft.items, right.id).has(left.id)
       )
         continue;
       found(
@@ -195,7 +183,7 @@ function graphLint(
       item.validation.length ||
         (item.children ?? []).some((child) => localEvidence(child, seen)) ||
         (item.kind === "qa" &&
-          [...ancestorsOf(item.id)].some(
+          [...ancestors(draft.items, item.id)].some(
             (ancestor) => byId.get(ancestor)!.validation.length,
           )),
     );
@@ -365,24 +353,6 @@ function recognizedObjectiveAttachment(value: string): boolean {
   }
 }
 
-/** The ids an item depends on, directly or through other items. */
-function dependencyClosure(
-  byId: ReadonlyMap<string, { dependencies: string[] }>,
-  id: string,
-): Set<string> {
-  const found = new Set<string>();
-  const pending = [id];
-  while (pending.length) {
-    const item = byId.get(pending.pop()!);
-    for (const dependency of item?.dependencies ?? [])
-      if (!found.has(dependency)) {
-        found.add(dependency);
-        pending.push(dependency);
-      }
-  }
-  return found;
-}
-
 /** A file name no rule singles out: a directory whose probe is routed has every file in it routed. */
 const LFS_PROBE = "factory-lfs-probe";
 
@@ -402,7 +372,7 @@ async function lfsFindings(
   const media = items.filter(
     (item) =>
       item.expectedOutputRoles?.length &&
-      ![item.id, ...dependencyClosure(byId, item.id)].some((id) =>
+      ![item.id, ...ancestors(items, item.id)].some((id) =>
         ownsPath(".gitattributes", byId.get(id)?.ownedPaths ?? []),
       ),
   );

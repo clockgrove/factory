@@ -76,7 +76,7 @@ import {
   openParent,
   readContained,
 } from "./paths.js";
-import { isRecord, ownsPath } from "./planning/graph.js";
+import { ancestors, isRecord, ownsPath } from "./planning/graph.js";
 import type { Plan, SourceAssetBinding, WorkItem } from "./planning/types.js";
 import { localAssetPlace } from "./sandbox.js";
 import { errorMessage } from "./text.js";
@@ -445,38 +445,16 @@ async function localSource(
   }
 }
 
-/**
- * Hosts an attachment may redirect to: GitHub, its content domain, and the
- * S3 buckets GitHub serves user, repository and release files from, by
- * exact name (bucket names are global, so no pattern on amazonaws.com).
- */
-const ATTACHMENT_BUCKETS = new Set(
-  [
-    "github-production-user-asset-6210df",
-    "github-production-repository-file-5c1aeb",
-    "github-production-repository-image-32fea6",
-    "github-production-release-asset-2e65be",
-    "github-production-upload-manifest-file-7fdce7",
-    "github-cloud",
-  ].map((bucket) => `${bucket}.s3.amazonaws.com`),
-);
-function attachmentHost(host: string): boolean {
-  return (
-    host === "github.com" ||
-    host.endsWith(".githubusercontent.com") ||
-    ATTACHMENT_BUCKETS.has(host)
-  );
-}
-
 /** A download that passed MAX_ATTACHMENT_BYTES. */
 class TooLarge extends Error {}
 
 /**
  * A GitHub attachment the Objective names, with the service's token sent
- * only to the URL itself, and only for a user attachment or one of the
- * configured repository's (another repository's holds); at most 5 redirects, only to GitHub content
- * hosts, never an HTML page, at most MAX_ATTACHMENT_BYTES, and 30 minutes
- * for the whole download.
+ * only on the first request, to the URL itself, and only for a user
+ * attachment or one of the configured repository's (another repository's
+ * holds); at most 5 redirects, each to https (GitHub chooses where its
+ * own redirect goes: storage it may move), never an HTML page, at most
+ * MAX_ATTACHMENT_BYTES, and 30 minutes for the whole download.
  */
 async function attachmentSource(
   request: InputsRequest,
@@ -525,7 +503,7 @@ async function attachmentSource(
     try {
       response = await fetch(url, {
         redirect: "manual",
-        headers: url === path ? { authorization: `Bearer ${token}` } : {},
+        headers: redirect === 0 ? { authorization: `Bearer ${token}` } : {},
         signal: deadline,
       });
     } catch (error) {
@@ -539,10 +517,8 @@ async function attachmentSource(
       const location = response.headers.get("location");
       if (!location) return refused("redirected without a location");
       const next = new URL(location, url);
-      if (next.protocol !== "https:" || !attachmentHost(next.hostname))
-        return refused(
-          `redirected outside GitHub's content hosts (${next.hostname})`,
-        );
+      if (next.protocol !== "https:")
+        return refused(`redirected to a URL that isn't https (${next.href})`);
       url = next.href;
       continue;
     }
@@ -1371,16 +1347,11 @@ export function validationMembers(
   item: WorkItem | undefined,
   selection: (itemId: string) => Selection | undefined,
 ): SelectedMember[] {
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const closure = new Set<string>();
-  const visit = (id: string) => {
-    if (closure.has(id)) return;
-    closure.add(id);
-    for (const dependency of byId.get(id)?.dependencies ?? [])
-      visit(dependency);
-  };
-  if (item) visit(item.id);
-  else for (const entry of plan.items) closure.add(entry.id);
+  const closure = new Set(
+    item
+      ? [item.id, ...ancestors(plan.items, item.id)]
+      : plan.items.map((entry) => entry.id),
+  );
   const members: SelectedMember[] = [];
   for (const id of closure) {
     const chosen = selection(id);

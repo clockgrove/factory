@@ -116,6 +116,35 @@ test("an aborted Codex run ends every command it started", async () => {
   );
 });
 
+test("a host that refuses Codex's namespace holds the call, with the launcher's standard error", () => {
+  // A user namespace with no mapping for its user can't make another, so
+  // the launcher's probe fails there and it exits 125 before codex runs.
+  // The prompt is larger than a pipe holds: the launcher must still read
+  // it, or the SDK's write fails with an EPIPE nothing handles.
+  const run = spawnSync(
+    "unshare",
+    [
+      "--user",
+      process.execPath,
+      "--input-type=module",
+      "-e",
+      `const { CodexPlanner } = await import(process.argv[1]);
+      try {
+        await new CodexPlanner().answer({ role: "planner", phase: "plan", prompt: "Plan. ".repeat(100_000), schema: { type: "object" }, signal: AbortSignal.timeout(60_000), log() {} });
+        console.log(JSON.stringify({ answered: true }));
+      } catch (error) {
+        console.log(JSON.stringify({ outcome: error.outcome, message: error.message }));
+      }`,
+      new URL("../dist/providers/codex.js", import.meta.url).href,
+    ],
+    { encoding: "utf8", timeout: 60_000 },
+  );
+  const result = JSON.parse(run.stdout || "{}");
+  assert.equal(result.outcome, "hold", `${run.stdout}${run.stderr}`);
+  assert.match(result.message, /own process namespace/);
+  assert.match(result.message, /unshare failed/);
+});
+
 /** Make `path` look 11 minutes old: past the age a live Git's lock can have. */
 function old(path) {
   const then = new Date(Date.now() - 11 * 60_000);

@@ -17,7 +17,7 @@
 
 import { readBlobs } from "./git.js";
 import { validPath } from "./objective.js";
-import { isRecord, ownsPath } from "./planning/graph.js";
+import { ancestors, isRecord, ownsPath } from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
 import type { Planner } from "./providers/planner.js";
 import { type RefusedCriterion, resultCriteria } from "./review/result.js";
@@ -79,8 +79,8 @@ export interface CorrectionInput {
   /** The failed result's commit. */
   commit: string;
   sources: readonly PinnedSource[];
-  /** The findings of this item's earlier repairs, oldest first. */
-  prior: readonly string[];
+  /** The corrections of this item's earlier repairs, oldest first. */
+  prior: readonly Correction[];
   /** The operator's answer to an earlier question: the correction itself. */
   operatorAnswer?: string;
   /**
@@ -130,12 +130,12 @@ function correctionFinding(correction: Correction): string {
 /** Whether `correction` already failed: the same failure and the same correction. */
 export function repeated(
   correction: Correction,
-  prior: readonly string[],
+  prior: readonly Correction[],
 ): boolean {
-  const head = `The previous attempt failed: ${correction.failure}\n`;
-  const tail = `\nRequired correction: ${correction.correction}`;
   return prior.some(
-    (finding) => finding.startsWith(head) && finding.endsWith(tail),
+    (tried) =>
+      tried.failure === correction.failure &&
+      tried.correction === correction.correction,
   );
 }
 
@@ -181,11 +181,7 @@ function reviewFindingsCorrection(
   const { finding, item, prior } = input;
   if (
     finding.kind !== "review" ||
-    prior.some((entry) =>
-      entry.startsWith(
-        `The previous attempt failed: ${REVIEW_FINDINGS_FAILURE}`,
-      ),
-    )
+    prior.some((tried) => tried.source === "review-findings")
   )
     return undefined;
   const reviewed = resultCriteria(input.plan, item);
@@ -388,16 +384,7 @@ interface DiagnosisAnswer {
  * ones a diagnosis may blame. A native-stack layer below is one of them.
  */
 function predecessors({ plan, item }: CorrectionInput): WorkItem[] {
-  const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
-  const seen = new Set<string>();
-  const visit = (id: string) => {
-    for (const dependency of byId.get(id)?.dependencies ?? [])
-      if (!seen.has(dependency)) {
-        seen.add(dependency);
-        visit(dependency);
-      }
-  };
-  visit(item.id);
+  const seen = ancestors(plan.items, item.id);
   return plan.items.filter(
     (entry) => seen.has(entry.id) && (entry.kind ?? "work") === "work",
   );
@@ -716,7 +703,7 @@ function renderDiagnosis(
     reviewedCriteria: resultCriteria(input.plan, item),
     base: input.base,
     commit: input.commit,
-    prior: input.prior,
+    prior: input.prior.map(correctionFinding),
     failure,
     ...(memory ? { repositoryMemory: memory } : {}),
     candidateFiles: files,

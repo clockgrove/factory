@@ -9,7 +9,7 @@ import {
   writeExport,
 } from "../capture-export.js";
 import { configOf, Refusal } from "../host.js";
-import { logFiles, runOfFile } from "../log.js";
+import { CAPTURE_OFF, logFiles, runOfFile } from "../log.js";
 import type { Paths } from "../paths.js";
 import { errorMessage } from "../text.js";
 import { type Args, type Command, issueCheck, issueOf } from "./shared.js";
@@ -77,6 +77,7 @@ async function exportCommand(
       "no_factory_state",
       `#${issue} has no run ${flags.run} in its run log; its runs: ${runs.join(", ")}.`,
     );
+  const config = configOf(repository);
   const prepared = prepareExport({
     logs: paths.logs,
     repository,
@@ -92,7 +93,10 @@ async function exportCommand(
       ? { invocations: [...new Set(args.lists.invocation)] }
       : {}),
     ...(flags.endpoint !== undefined ? { endpoint: flags.endpoint } : {}),
-    secrets: configOf(repository)?.secrets ?? [],
+    ...(flags.authorize !== undefined ? { authorize: flags.authorize } : {}),
+    maxBytesPerCall:
+      config?.capture.maxBytesPerCall ?? CAPTURE_OFF.maxBytesPerCall,
+    secrets: config?.secrets ?? [],
   });
   if (typeof prepared === "string")
     throw new Refusal("export_refused", prepared);

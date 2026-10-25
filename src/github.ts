@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { crashPoint } from "./crash.js";
+import { redactDeep } from "./display.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
   type NotedRequest,
@@ -12,7 +13,6 @@ import {
   type Transport,
   transport,
 } from "./github-trace.js";
-import { redact } from "./log.js";
 import { errorMessage } from "./text.js";
 
 const run = promisify(execFile);
@@ -24,8 +24,9 @@ export class TransientError extends Error {
     /** When GitHub said to come back, if it did. */
     readonly retryAfterMs?: number,
     /**
-     * A rate limit (429, or a 403 rate limit): `retryAfterMs` is when it
-     * resets. Otherwise it is only a backoff hint (a 5xx's retry-after).
+     * A rate limit (429, or a 403 with GitHub's rate-limit headers):
+     * `retryAfterMs` is when it resets. Otherwise it is only a backoff hint
+     * (a 5xx's retry-after).
      */
     readonly limited = false,
   ) {
@@ -128,17 +129,20 @@ const answers = new WeakMap<
 >();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
 const FRESH_MS = 2 * 60_000;
+/** How long a 403 without rate-limit headers retries before it asks. */
+const REFUSED_MS = 2 * 60_000;
 
 /**
  * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
- * must fix holds, at once: a rejected login (401), a refusal (403, or a
- * 404 of anything but an issue; rate limits, and a 403 or 404 of what
- * Factory just made, are TransientErrors: `GitHub.made`) naming the
- * permission the call needs (`needing`), and a missing issue (404).
- * A rate limit waits for its reset. Everything else (5xx, timeouts, 409,
- * 410, 422, GraphQL errors) may change, so it retries as an unknown
- * transient wait; a 5xx's retry-after only sets its backoff. Undefined
- * for an error that isn't GitHub's.
+ * must fix holds, at once: a rejected login (401), a refusal (a 404 of
+ * anything but an issue; rate limits, and a 403 or 404 of what Factory
+ * just made, are TransientErrors: `GitHub.made`) naming the permission
+ * the call needs (`needing`), and a missing issue (404). Any other 403
+ * asks the same after REFUSED_MS of retries, since a secondary rate limit
+ * can come without headers. A rate limit waits for its reset. Everything
+ * else (5xx, timeouts, 409, 410, 422, GraphQL errors) may change, so it
+ * retries as an unknown transient wait; a 5xx's retry-after only sets its
+ * backoff. Undefined for an error that isn't GitHub's.
  */
 export function githubOutcome(
   error: unknown,
@@ -181,12 +185,16 @@ export function githubOutcome(
         ["cancel", "retry"],
       ),
     );
-  if (error.status === 403 || error.status === 404)
-    return objectiveWide(
-      hold(
-        `${detail}. Give Factory's login ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`,
-      ),
-    );
+  const refused = `${detail}. Give Factory's login ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`;
+  // A 403 without rate-limit headers may be a secondary limit, which
+  // passes: it asks only once it outlasts one.
+  if (error.status === 403)
+    return {
+      kind: "retry",
+      reason: error.message,
+      holdAfter: { ms: REFUSED_MS, question: refused, scope: "objective" },
+    };
+  if (error.status === 404) return objectiveWide(hold(refused));
   return { kind: "retry", reason: error.message };
 }
 
@@ -504,19 +512,12 @@ export class GitHub {
     since?: string,
     signal?: AbortSignal,
   ): Promise<IssueComment[]> {
-    const all: IssueComment[] = [];
-    const from = since ? `since=${encodeURIComponent(since)}&` : "";
-    for (let page = 1; page <= 20; page++) {
-      const batch = await this.rest<IssueComment[]>(
-        "GET",
-        `/repos/${this.repository}/issues/${issue}/comments?${from}per_page=100&page=${page}`,
-        undefined,
-        signal,
-      );
-      all.push(...batch);
-      if (batch.length < 100) break;
-    }
-    return all;
+    return this.pages<IssueComment>(
+      `/repos/${this.repository}/issues/${issue}/comments${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+      signal,
+      undefined,
+      20,
+    );
   }
 
   async issue(
@@ -792,8 +793,7 @@ export class GitHub {
    * Issues (with `label`, when given) that Factory's login opened, updated
    * from `since` on, newest first: one bounded, paginated list that stops
    * at the first page reaching issues created before `since`. Past
-   * `maxPages` pages it throws, so a lookup never misses an issue and
-   * makes it again.
+   * `maxPages` pages it throws (see `pages`).
    */
   async issuesByLabel(
     label: string | undefined,
@@ -814,15 +814,11 @@ export class GitHub {
       `/repos/${this.repository}/issues?${query}`,
       signal,
       undefined,
-      maxPages + 1,
+      maxPages,
       (listed) =>
         !since ||
         !(Date.parse(listed.at(-1)?.created_at ?? "") < Date.parse(since)),
     );
-    if (found.length > maxPages * 100)
-      throw new Error(
-        `More than ${maxPages * 100} issues${label ? ` labelled ${label}` : ""} were updated since ${since}: too many to look up`,
-      );
     return found.filter((issue) => issue.pull_request === undefined);
   }
 
@@ -1049,7 +1045,12 @@ export class GitHub {
     return { data: result.data, errors };
   }
 
-  /** Every item of a paginated list of 100 per page, up to `maxPages` pages. */
+  /**
+   * Every item of a paginated list of 100 per page, up to `maxPages` pages.
+   * A list that goes on past them throws (not transient: asking again
+   * finds as many), so a lookup by marker never misses what it looks for
+   * and makes it again.
+   */
   async pages<T>(
     path: string,
     signal?: AbortSignal,
@@ -1060,7 +1061,7 @@ export class GitHub {
   ): Promise<T[]> {
     const all: T[] = [];
     const join = path.includes("?") ? "&" : "?";
-    for (let page = 1; page <= maxPages; page++) {
+    for (let page = 1; ; page++) {
       const listed = pick(
         await this.rest<unknown>(
           "GET",
@@ -1071,10 +1072,16 @@ export class GitHub {
       );
       if (!Array.isArray(listed))
         throw new TransientError(`GitHub GET ${path}: not a list`);
+      if (page > maxPages) {
+        if (listed.length)
+          throw new Error(
+            `GitHub GET ${path}: more than ${maxPages * 100} to look up, past the ${maxPages}-page cap`,
+          );
+        return all;
+      }
       all.push(...(listed as T[]));
-      if (listed.length < 100 || !more(listed as T[])) break;
+      if (listed.length < 100 || !more(listed as T[])) return all;
     }
-    return all;
   }
 
   // ── Pull request delivery (delivery.ts) ─────────────────────────────────
@@ -1616,25 +1623,35 @@ export class GitHub {
   }
 
   /**
-   * The merge commit of a merged PR, from its timeline (PR responses in the
-   * pinned API version may omit it). Undefined while the timeline does not
-   * show the merge yet.
+   * The merge commit of a merged PR, from GraphQL (PR responses in the
+   * pinned REST version may omit it). Undefined while GitHub does not show
+   * the PR merged with its commit yet.
    */
   async mergeCommitOf(
     number: number,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const events = await this.pages<{ event?: string; commit_id?: unknown }>(
-      this.repo(`issues/${number}/timeline`),
+    const data = await this.graphql<{
+      repository?: {
+        pullRequest?: {
+          merged?: boolean;
+          mergeCommit?: { oid?: unknown } | null;
+        } | null;
+      } | null;
+    }>(
+      `query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) { merged mergeCommit { oid } }
+        }
+      }`,
+      { owner: this.owner, name: this.name, number },
       signal,
     );
-    const merged = events.find(
-      (event) =>
-        event?.event === "merged" &&
-        typeof event.commit_id === "string" &&
-        /^[a-f0-9]{40}$/.test(event.commit_id),
-    );
-    return merged?.commit_id as string | undefined;
+    const pull = data.repository?.pullRequest;
+    const oid = pull?.mergeCommit?.oid;
+    return pull?.merged && typeof oid === "string" && /^[a-f0-9]{40}$/.test(oid)
+      ? oid
+      : undefined;
   }
 
   /** Up to five failure annotations of a check run, as `path:line message`. */
@@ -1811,11 +1828,13 @@ export class GitHub {
     }
     const retryAfter = Number(response.headers.get("retry-after"));
     const reset = Number(response.headers.get("x-ratelimit-reset"));
+    // GitHub marks a 403 rate limit (primary or secondary) by its headers;
+    // a 403 without them may still be a secondary limit (githubOutcome).
     const limited =
       response.status === 429 ||
       (response.status === 403 &&
         (response.headers.get("x-ratelimit-remaining") === "0" ||
-          /rate limit/i.test(text)));
+          response.headers.has("retry-after")));
     const expected =
       !limited && expectedStatuses.getStore()?.includes(response.status);
     if (!expected) {
@@ -1978,15 +1997,4 @@ function asyncMergeOf(value: unknown): AsyncMerge {
       ? { message: details.message.slice(0, 500) }
       : {}),
   };
-}
-
-/** Every string inside `value`, redacted; the shape is kept. */
-function redactDeep(value: unknown, secrets: readonly string[]): unknown {
-  if (typeof value === "string") return redact(value, secrets);
-  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets));
-  if (value && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, redactDeep(v, secrets)]),
-    );
-  return value;
 }

@@ -1,10 +1,16 @@
 // Crash tests kill the real service with SIGKILL at named crash points and
 // check that a restart finishes the work exactly once.
 import assert from "node:assert/strict";
-import { existsSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   cli,
+  closedPort,
+  configured,
+  exited,
+  githubOrigin,
   installation,
   seed,
   serve,
@@ -99,5 +105,77 @@ for (const point of CRASH_POINTS) {
         readdirSync(inst.requests).every((n) => !n.endsWith(".json")),
       "requests left unapplied",
     );
+  });
+}
+
+// The one-installation record (holder.ts) at each of its pushes: a crash
+// leaves the record as the push left it, the same installation restarted
+// with the same flags serves on, and a clean stop then frees the repository.
+const HOLDER_POINTS = ["take", "takeover", "release"].flatMap((push) => [
+  `holder:${push}:before`,
+  `holder:${push}:after`,
+]);
+
+for (const point of HOLDER_POINTS) {
+  test(`crash at ${point}, restart, the repository has one holder`, async () => {
+    const api = `http://127.0.0.1:${await closedPort()}`;
+    const first = installation();
+    configured(first, api);
+    // A second installation of the same repository, on the same origin.
+    const second = installation();
+    const bare = join(first.root, "origin.git");
+    mkdirSync(second.root, { recursive: true });
+    const git = (...args) => {
+      const result = spawnSync("git", args, { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    git("clone", "--quiet", bare, join(second.root, "checkout"));
+    githubOrigin(join(second.root, "checkout"), bare);
+    configured(second, api);
+    const record = () =>
+      git(
+        "--git-dir",
+        bare,
+        "for-each-ref",
+        "--format=%(objectname)",
+        "refs/factory/holder",
+      );
+    const holder = () =>
+      JSON.parse(git("--git-dir", bare, "log", "-1", "--format=%B", record()))
+        .installation;
+
+    const takeover = point.startsWith("holder:takeover");
+    const actor = takeover ? second : first;
+    const flags = takeover ? ["--take-over"] : [];
+    let firstId;
+    if (takeover) {
+      // The first installation holds and dies, which keeps its record.
+      const holding = serve(first);
+      await until(() => record(), "the first installation takes it");
+      firstId = holder();
+      holding.child.kill("SIGKILL");
+      await exited(holding, "the first installation");
+    }
+    const crashing = serve(actor, point, [], flags);
+    if (point.startsWith("holder:release")) {
+      // The release push comes at a clean stop of a running service: a stop
+      // that comes while the record is still being taken keeps it instead.
+      await until(
+        () => record() && existsSync(join(actor.root, "service.json")),
+        "the installation serves",
+      );
+      crashing.child.kill("SIGTERM");
+    }
+    const death = await exited(crashing, point);
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+
+    const restarted = serve(actor, undefined, [], flags);
+    await until(() => record(), "the restart holds the repository");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    assert.equal(restarted.child.exitCode, null, restarted.stderr());
+    if (takeover) assert.notEqual(holder(), firstId, "the take-over holds");
+    assert.equal((await stopped(restarted)).code, 0);
+    assert.equal(record(), "", "a clean stop frees the repository");
   });
 }

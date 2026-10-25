@@ -15,6 +15,7 @@ import {
   unknownCheckNames,
 } from "./facts.js";
 import {
+  ancestors,
   coverageCriterion,
   ownsPath,
   pathsOverlap,
@@ -57,7 +58,7 @@ export async function checkPlan(
   const { items } = draft;
   await commandFindings(items, facts, files, found);
   await boundaryFindings(items, facts, files, found);
-  graphLint(draft, facts.authorizedCommands, facts.coverageObligations, found);
+  graphLint(draft, facts.authorizedCommands, found);
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
@@ -93,73 +94,9 @@ async function commandFindings(
 
 // ── Boundaries ──────────────────────────────────────────────────────────
 
-/** A new migration number or test file named in acceptance text; a glob is never a file name. */
-const NUMBERED_SQL =
-  /(?<![\w./*?\]}-])((?:[\w.-]+\/)*\d{3,}[_-][\w.-]*\.sql)(?![\w*?-])/g;
-const NUMBERED_MIGRATION =
-  /(?<![\w./*?\]}-])((?:[\w.-]+\/)*migrat[\w.-]*\/(?:[\w.-]+\/)*\d{3,}[_-][\w.-]*\.(?:[cm]?[jt]s|py|rb|exs?|kt|java|go|rs))(?![\w*?-])/g;
-const TEST_FILE =
-  /(?<![\w./*?\]}-])((?:[\w.-]+\/)*(?:[\w.-]*\.(?:test|spec)\.[cm]?[jt]sx?|test_[\w.-]+\.py|[\w.-]+_test\.(?:py|go|rs|rb)))(?![\w*?-])/g;
-
-/** A new table named in acceptance, unless a negation just before it ("no new table"). */
-function namesNewTable(entry: string): boolean {
-  return [
-    ...entry.matchAll(
-      /\b(?:new|creates?|introduces?)\s+(?:[\w-]+\s+){0,2}tables?\b/gi,
-    ),
-  ].some(
-    (match) =>
-      !/\b(?:no|not|never|without)\b/i.test(
-        entry.slice(Math.max(0, match.index - 12), match.index),
-      ),
-  );
-}
-
-/** The base's migrations directories, as path prefixes. */
-function migrationDirs(paths: Iterable<string>): string[] {
-  const dirs = new Set<string>();
-  for (const path of paths) {
-    const parts = path.split("/").slice(0, -1);
-    const at = parts.findIndex((part) => /^migrations?$/i.test(part));
-    if (at >= 0) dirs.add(`${parts.slice(0, at + 1).join("/")}/`);
-  }
-  return [...dirs].sort();
-}
-
-/** Whether an item owns a migrations directory, or a path in one. */
-function ownsMigrations(
-  item: { ownedPaths: string[] } | undefined,
-  migrations: readonly string[],
-): boolean {
-  return Boolean(
-    item?.ownedPaths.some((owned) =>
-      migrations.some((dir) => pathsOverlap(owned, dir)),
-    ),
-  );
-}
-
-/** The ids an item depends on, directly or through other items. */
-function dependencyClosure(
-  byId: ReadonlyMap<string, { dependencies: string[] }>,
-  id: string,
-): Set<string> {
-  const found = new Set<string>();
-  const pending = [id];
-  while (pending.length) {
-    const item = byId.get(pending.pop()!);
-    for (const dependency of item?.dependencies ?? [])
-      if (!found.has(dependency)) {
-        found.add(dependency);
-        pending.push(dependency);
-      }
-  }
-  return found;
-}
-
 /**
- * The checks that need the base: network, validation-scope,
- * storage-ownership and new-file-name. Structural only: command words,
- * script bodies and file-name shapes.
+ * The checks that need the base's package scripts: network and
+ * validation-scope. Structural only: command words and script bodies.
  */
 async function boundaryFindings(
   items: readonly WorkItem[],
@@ -169,25 +106,8 @@ async function boundaryFindings(
 ): Promise<void> {
   const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
   const scripts = await files.scripts();
-  const paths = await files.paths();
-  const base = {
-    paths: new Set(paths),
-    names: new Set(paths.map((path) => path.replace(/^.*\//, ""))),
-  };
-  const migrations = migrationDirs(paths);
-  // A bare name could live in an owned directory that already holds a file of its type.
-  const holdsType = (directory: string, name: string) => {
-    const type = /\.[^.]+$/.exec(name)?.[0];
-    return (
-      type !== undefined &&
-      paths.some((path) => path.startsWith(directory) && path.endsWith(type))
-    );
-  };
-  // A name the Objective or a pinned source uses is fixed, not the worker's choice.
-  const fixedTexts = [facts.body, ...facts.sources.map((s) => s.content)];
   const authorized = facts.authorizedCommands;
-  const byId = new Map(items.map((item) => [item.id, item]));
-  for (const item of items) {
+  for (const item of items)
     for (const { command, provenance } of item.validation) {
       if (packageBootstrap(command) || ciOnly.has(ciOnlyKey(command))) continue;
       const tool = networkToolOfCommand(command, scripts);
@@ -208,42 +128,6 @@ async function boundaryFindings(
           item.id,
         );
     }
-    if (
-      migrations.length &&
-      (item.kind ?? "work") === "work" &&
-      item.acceptance.some(namesNewTable) &&
-      ![item.id, ...dependencyClosure(byId, item.id)].some((id) =>
-        ownsMigrations(byId.get(id), migrations),
-      )
-    )
-      found(
-        `Work Item ${item.id} acceptance names a new table, but neither it nor an item it depends on owns the base's migrations (${migrations.slice(0, 5).join(", ")}): add a migrations directory to its ownedPaths, with the module that writes the data, describing the migration by role (the worker names it), or depend on the item that owns it`,
-        item.id,
-      );
-    const named = new Set<string>();
-    for (const entry of item.acceptance)
-      for (const pattern of [NUMBERED_SQL, NUMBERED_MIGRATION, TEST_FILE])
-        for (const match of entry.matchAll(pattern)) named.add(match[1]!);
-    for (const file of named) {
-      if (file.includes("/") ? base.paths.has(file) : base.names.has(file))
-        continue;
-      if (
-        fixedTexts.some((text) => text.includes(file)) ||
-        item.ownedPaths.some((owned) =>
-          file.includes("/")
-            ? owned === file || (owned.endsWith("/") && file.startsWith(owned))
-            : owned.endsWith("/")
-              ? holdsType(owned, file)
-              : owned.replace(/^.*\//, "") === file,
-        )
-      )
-        continue;
-      found(
-        `Work Item ${item.id} acceptance names ${file}, which does not exist at the base: a new migration number or test file is the worker's choice, so describe it by role and data and leave the name out, or give its path in a directory the item owns`,
-        item.id,
-      );
-    }
-  }
 }
 
 // ── Graph lint ──────────────────────────────────────────────────────────
@@ -255,41 +139,22 @@ const NON_LOCAL_PROOFS = new Set([
   "published-ci",
 ]);
 
-/** Criteria about privacy, authority or accessibility: claims review judgement cannot prove. */
-const SAFETY_CLAIM =
-  /\b(?:privacy|private data|personal data|PII|redact\w*|unauthori[sz]ed|access control|accessibility|a11y|WCAG|screen[- ]reader)\b/i;
-
 const bounded = (entry: CoverageObligation): string => {
   const criterion = coverageCriterion(entry).replace(/\s+/g, " ").trim();
   return criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion;
 };
 
 /**
- * path-overlap, local-proof and safety-proof: items that may run
- * concurrently own disjoint paths, and every acceptance has local
- * executable evidence. Local evidence is checked only when the plan selects
+ * path-overlap and local-proof: items that may run concurrently own
+ * disjoint paths, and every acceptance has local executable evidence. Local evidence is checked only when the plan selects
  * some validation command, which shows the repository has one.
  */
 function graphLint(
   draft: Draft,
   authorized: readonly string[],
-  obligations: readonly CoverageObligation[],
   found: Found,
 ): void {
   const byId = new Map(draft.items.map((item) => [item.id, item]));
-  const ancestors = new Map<string, Set<string>>();
-  const ancestorsOf = (id: string): Set<string> => {
-    const known = ancestors.get(id);
-    if (known) return known;
-    const result = new Set<string>();
-    ancestors.set(id, result);
-    for (const dependency of byId.get(id)?.dependencies ?? []) {
-      if (!byId.has(dependency)) continue;
-      result.add(dependency);
-      for (const ancestor of ancestorsOf(dependency)) result.add(ancestor);
-    }
-    return result;
-  };
   for (const [at, left] of draft.items.entries())
     for (const right of draft.items.slice(at + 1)) {
       const shared = left.ownedPaths.flatMap((a) =>
@@ -297,8 +162,8 @@ function graphLint(
       );
       if (
         !shared.length ||
-        ancestorsOf(left.id).has(right.id) ||
-        ancestorsOf(right.id).has(left.id)
+        ancestors(draft.items, left.id).has(right.id) ||
+        ancestors(draft.items, right.id).has(left.id)
       )
         continue;
       found(
@@ -318,7 +183,7 @@ function graphLint(
       item.validation.length ||
         (item.children ?? []).some((child) => localEvidence(child, seen)) ||
         (item.kind === "qa" &&
-          [...ancestorsOf(item.id)].some(
+          [...ancestors(draft.items, item.id)].some(
             (ancestor) => byId.get(ancestor)!.validation.length,
           )),
     );
@@ -329,29 +194,9 @@ function graphLint(
         `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: select one of the authorized commands (${listCommands(authorized)}) that runs the tests it owns, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
         item.id,
       );
-  // An Objective command criterion is run by final validation.
-  const commands = new Set(
-    obligations.flatMap(({ source }) =>
-      source.path === "OBJECTIVE" && source.command ? [source.text] : [],
-    ),
-  );
   for (const entry of draft.coverage) {
     const kind = entry.proof?.kind;
-    if (!kind) continue;
-    const claim = coverageCriterion(entry).match(SAFETY_CLAIM)?.[0];
-    if (
-      claim &&
-      !(entry.source.path === "OBJECTIVE" && commands.has(entry.source.text)) &&
-      !/-command$/.test(kind) &&
-      kind !== "final-controller"
-    ) {
-      found(
-        `Coverage of "${bounded(entry)}" is a ${claim.toLowerCase()} claim proved only by ${kind}, which no command checks: have ${entry.itemId} deliver a test that names the claim, select a validation command that runs it, and prove the criterion with that command (result-command or integrated-command), or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
-        entry.itemId,
-      );
-      continue;
-    }
-    if (NON_LOCAL_PROOFS.has(kind) && !localEvidence(entry.itemId))
+    if (kind && NON_LOCAL_PROOFS.has(kind) && !localEvidence(entry.itemId))
       found(
         `Coverage of "${bounded(entry)}" is proved only by ${kind}, and its owner ${entry.itemId} runs no validation command: give the owner a local command that proves it, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
         entry.itemId,
@@ -527,7 +372,7 @@ async function lfsFindings(
   const media = items.filter(
     (item) =>
       item.expectedOutputRoles?.length &&
-      ![item.id, ...dependencyClosure(byId, item.id)].some((id) =>
+      ![item.id, ...ancestors(items, item.id)].some((id) =>
         ownsPath(".gitattributes", byId.get(id)?.ownedPaths ?? []),
       ),
   );

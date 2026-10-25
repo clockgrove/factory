@@ -12,6 +12,7 @@
  */
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { satisfies } from "semver";
 import { isScalar, parse, parseAllDocuments, visit } from "yaml";
 import { GitRefusal } from "./git.js";
 import { hostGit } from "./worktree.js";
@@ -238,95 +239,6 @@ function plainYaml(text: string, path: string): unknown[] | NetworkRefusal {
 }
 
 /**
- * `major.minor.patch` with no prerelease or build, as numbers: no whitespace,
- * `v` prefix or leading zeros.
- */
-function releaseVersion(value: string): number[] | undefined {
-  const found = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
-  return found ? found.slice(1).map(Number) : undefined;
-}
-
-function compareVersions(left: number[], right: number[]): number {
-  for (let index = 0; index < 3; index++) {
-    const difference = (left[index] ?? 0) - (right[index] ?? 0);
-    if (difference) return difference;
-  }
-  return 0;
-}
-
-/**
- * Whether a release version satisfies one comparator set of an npm range:
- * `^`, `~`, `>=`, `>`, `<=`, `<`, `=`, an exact version, or a partial
- * (`12`, `12.6`, `12.x`, `*`). Anything else is not read: unknown is refused.
- */
-function satisfiesComparators(version: number[], set: string): boolean {
-  for (const token of set.trim().split(/\s+/).filter(Boolean)) {
-    const found =
-      /^(\^|~|>=|<=|>|<|=)?v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?$/.exec(
-        token,
-      );
-    if (!found) return false;
-    const parts = found.slice(2, 5);
-    // The numbers before the first wildcard or missing part; a number after
-    // a wildcard (`1.x.3`) is not a range.
-    const given: number[] = [];
-    for (const part of parts) {
-      if (part === undefined || !/^\d+$/.test(part)) break;
-      given.push(Number(part));
-    }
-    if (parts.slice(given.length).some((part) => /^\d+$/.test(part ?? "")))
-      return false;
-    const low = [0, 1, 2].map((index) => given[index] ?? 0);
-    // The first version past everything sharing the first `length` parts.
-    const past = (length: number) =>
-      low.map((part, index) =>
-        index < length - 1 ? part : index === length - 1 ? part + 1 : 0,
-      );
-    const operator = found[1] ?? "";
-    const n = given.length;
-    let ok: boolean;
-    if (operator === ">=") ok = n === 0 || compareVersions(version, low) >= 0;
-    else if (operator === "<=")
-      ok =
-        n === 0 ||
-        (n === 3
-          ? compareVersions(version, low) <= 0
-          : compareVersions(version, past(n)) < 0);
-    else if (operator === ">")
-      ok =
-        n > 0 &&
-        (n === 3
-          ? compareVersions(version, low) > 0
-          : compareVersions(version, past(n)) >= 0);
-    else if (operator === "<") ok = n > 0 && compareVersions(version, low) < 0;
-    else {
-      // `=`, none, `^` and `~` are all a half-open interval from `low`.
-      let length = n;
-      if (operator === "^" && n > 0)
-        length = low[0] !== 0 || n === 1 ? 1 : low[1] !== 0 || n === 2 ? 2 : 3;
-      else if (operator === "~" && n > 0) length = n === 1 ? 1 : 2;
-      ok =
-        n === 0 ||
-        (compareVersions(version, low) >= 0 &&
-          compareVersions(version, past(length)) < 0);
-    }
-    if (!ok) return false;
-  }
-  return true;
-}
-
-/** Whether `version` is `range` or satisfies it; unknown is refused. */
-function satisfiesRange(version: unknown, range: string): boolean {
-  if (typeof version !== "string") return false;
-  if (version === range) return true;
-  const release = releaseVersion(version);
-  if (!release) return false;
-  return range
-    .split("||")
-    .some((set) => !/[-+]/.test(set) && satisfiesComparators(release, set));
-}
-
-/**
  * The package manager package.json pins, as the name pnpm records it under
  * `packageManagerDependencies` and what its locked version must satisfy: the
  * root `packageManager` (`name@version`, optionally `+sha...`), else
@@ -360,7 +272,8 @@ function pinnedPackageManager(
   const range = entry.version;
   return {
     name: entry.name,
-    accepts: (version) => satisfiesRange(version, range),
+    accepts: (version) =>
+      typeof version === "string" && satisfies(version, range),
   };
 }
 

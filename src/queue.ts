@@ -177,15 +177,18 @@ interface ItemsPage {
   } | null;
 }
 
-interface CardPage {
+type CardPage = Page<{
+  id: string;
+  isArchived: boolean;
+  project: { id: string };
+  option: Value;
+  order: Value;
+}>;
+
+/** One page of an issue's Project cards. */
+interface Page<T> {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
-  nodes: ({
-    id: string;
-    isArchived: boolean;
-    project: { id: string };
-    option: Value;
-    order: Value;
-  } | null)[];
+  nodes: (T | null)[];
 }
 
 interface Card {
@@ -618,7 +621,7 @@ export class QueueDisplay {
 }
 
 const RUN_ISSUE = `
-query($owner: String!, $name: String!, $issue: Int!, $field: String!) {
+query($owner: String!, $name: String!, $issue: Int!, $field: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
     issue(number: $issue) {
@@ -626,7 +629,8 @@ query($owner: String!, $name: String!, $issue: Int!, $field: String!) {
       number
       state
       repository { nameWithOwner }
-      projectItems(first: 50) {
+      projectItems(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isArchived
@@ -661,53 +665,61 @@ interface RunCard {
   option: Value;
 }
 
-/** Issue N of this repository and its cards on the queue's Project; undefined when it has none here. */
+/**
+ * Issue N of this repository and its cards on the queue's Project;
+ * undefined when it has none here. An issue on more Projects than a page
+ * is read on, page by page, until its card here shows or none is left.
+ */
 async function runIssue(
   github: GitHub,
   config: CoreConfig,
   issue: number,
   signal?: AbortSignal,
 ): Promise<{ id: string; open: boolean; cards: RunCard[] } | undefined> {
-  const { data } = await github.graphqlPartial<{
-    repository: {
-      nameWithOwner: string;
-      issue: {
-        id: string;
-        number: number;
-        state: string;
-        repository: { nameWithOwner: string };
-        projectItems: { nodes: (RunCard | null)[] };
+  let after: string | null = null;
+  for (;;) {
+    const { data } = await github.graphqlPartial<{
+      repository: {
+        nameWithOwner: string;
+        issue: {
+          id: string;
+          number: number;
+          state: string;
+          repository: { nameWithOwner: string };
+          projectItems: Page<RunCard>;
+        } | null;
       } | null;
-    } | null;
-  }>(
-    RUN_ISSUE,
-    {
-      owner: github.owner,
-      name: github.name,
-      issue,
-      field: config.queue.field,
-    },
-    signal,
-    (error) => error.type === "NOT_FOUND" && error.path?.[1] === "issue",
-  );
-  if (!data.repository)
-    throw new Error(`Repository ${config.repository} not found`);
-  github.sameRepository(data.repository.nameWithOwner);
-  const found = data.repository.issue;
-  // A pull request, or an issue transferred away, is no Objective here.
-  if (
-    found?.number !== issue ||
-    found.repository.nameWithOwner.toLowerCase() !==
-      config.repository.toLowerCase()
-  )
-    return undefined;
-  return {
-    id: found.id,
-    open: found.state === "OPEN",
-    cards: found.projectItems.nodes.filter(
+    }>(
+      RUN_ISSUE,
+      {
+        owner: github.owner,
+        name: github.name,
+        issue,
+        field: config.queue.field,
+        after,
+      },
+      signal,
+      (error) => error.type === "NOT_FOUND" && error.path?.[1] === "issue",
+    );
+    if (!data.repository)
+      throw new Error(`Repository ${config.repository} not found`);
+    github.sameRepository(data.repository.nameWithOwner);
+    const found = data.repository.issue;
+    // A pull request, or an issue transferred away, is no Objective here.
+    if (
+      found?.number !== issue ||
+      found.repository.nameWithOwner.toLowerCase() !==
+        config.repository.toLowerCase()
+    )
+      return undefined;
+    const items: Page<RunCard> = found.projectItems;
+    const cards = items.nodes.filter(
       (node): node is RunCard => node?.project.id === config.queue.projectId,
-    ),
-  };
+    );
+    if (cards.length || !items.pageInfo.hasNextPage)
+      return { id: found.id, open: found.state === "OPEN", cards };
+    after = items.pageInfo.endCursor;
+  }
 }
 
 /**
@@ -897,20 +909,41 @@ export async function projectProblems(
   return problems;
 }
 
-/** The Project's built-in status field and the option its "Auto-close issue" workflow closes on. */
+/**
+ * The Project's built-in status field and the option its "Auto-close
+ * issue" workflow closes on, by GitHub's default names: GitHub exposes no
+ * field or option attribute that marks them (the field is an ordinary
+ * single-select, and the workflow's settings aren't readable). A Project
+ * that renamed them only skips the move: the check after the reopen
+ * (planning/steps.ts `REOPENED`) still sees an issue the workflow closed
+ * again, and asks.
+ */
 const BUILT_IN_STATUS = "Status";
 const DONE = "Done";
 /** Options to move a card off Done to, in order of preference; else the first option not named Done. */
 const OFF_DONE = ["In Progress", "Todo"];
 
+interface StatusCard {
+  id: string;
+  isArchived: boolean;
+  project: { id: string };
+  value: { name?: string } | null;
+}
+
+interface StatusField {
+  id?: string;
+  options?: { id: string; name: string }[];
+}
+
 const BUILT_IN = `
-query($owner: String!, $name: String!, $issue: Int!, $project: ID!, $field: String!) {
+query($owner: String!, $name: String!, $issue: Int!, $project: ID!, $field: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
     issue(number: $issue) {
       number
       repository { nameWithOwner }
-      projectItems(first: 50) {
+      projectItems(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isArchived
@@ -947,49 +980,49 @@ export async function moveStatusOffDone(
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (config.queue.field === BUILT_IN_STATUS) return undefined;
-  const data = await github.graphql<{
-    repository: {
-      nameWithOwner: string;
-      issue: {
-        number: number;
-        repository: { nameWithOwner: string };
-        projectItems: {
-          nodes: ({
-            id: string;
-            isArchived: boolean;
-            project: { id: string };
-            value: { name?: string } | null;
-          } | null)[];
-        };
+  // An issue on more Projects than a page is read on until its card shows.
+  let after: string | null = null;
+  let item: StatusCard | null | undefined;
+  let field: StatusField | null | undefined;
+  do {
+    const data = await github.graphql<{
+      repository: {
+        nameWithOwner: string;
+        issue: {
+          number: number;
+          repository: { nameWithOwner: string };
+          projectItems: Page<StatusCard>;
+        } | null;
       } | null;
-    } | null;
-    node: {
-      field?: { id?: string; options?: { id: string; name: string }[] } | null;
-    } | null;
-  }>(
-    BUILT_IN,
-    {
-      owner: github.owner,
-      name: github.name,
-      issue,
-      project: config.queue.projectId,
-      field: BUILT_IN_STATUS,
-    },
-    signal,
-  );
-  if (data.repository) github.sameRepository(data.repository.nameWithOwner);
-  const found = data.repository?.issue;
-  // Never the Status of an issue transferred away.
-  if (
-    found?.number !== issue ||
-    found.repository.nameWithOwner.toLowerCase() !==
-      config.repository.toLowerCase()
-  )
-    return undefined;
-  const item = found.projectItems.nodes.find(
-    (n) => n?.project.id === config.queue.projectId && !n.isArchived,
-  );
-  const field = data.node?.field;
+      node: { field?: StatusField | null } | null;
+    }>(
+      BUILT_IN,
+      {
+        owner: github.owner,
+        name: github.name,
+        issue,
+        project: config.queue.projectId,
+        field: BUILT_IN_STATUS,
+        after,
+      },
+      signal,
+    );
+    if (data.repository) github.sameRepository(data.repository.nameWithOwner);
+    const found = data.repository?.issue;
+    // Never the Status of an issue transferred away.
+    if (
+      found?.number !== issue ||
+      found.repository.nameWithOwner.toLowerCase() !==
+        config.repository.toLowerCase()
+    )
+      return undefined;
+    const items: Page<StatusCard> = found.projectItems;
+    item = items.nodes.find(
+      (n) => n?.project.id === config.queue.projectId && !n.isArchived,
+    );
+    field = data.node?.field;
+    after = items.pageInfo.hasNextPage ? items.pageInfo.endCursor : null;
+  } while (!item && after);
   if (!item || item.value?.name !== DONE || !field?.id || !field.options)
     return undefined;
   const options = field.options.filter((o) => o.name !== DONE);

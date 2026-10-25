@@ -211,14 +211,12 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   // A collection interrupted after its own commit, or a repair continuing
   // from Factory's earlier commit, is undone to the staged candidate and
   // checked again from the top.
-  // Its subject is the inert one, or the raw title an earlier Factory wrote.
   const head = await text("rev-parse", "HEAD");
   if (
     head !== base &&
     (await parent(worktree, signal)) === base &&
-    [collectionMessage(item), `Factory: ${item.title}`]
-      .map((subject) => `${FACTORY_EMAIL}\n${subject}`)
-      .includes(await text("log", "-1", "--format=%ae%n%s"))
+    (await text("log", "-1", "--format=%ae%n%s")) ===
+      `${FACTORY_EMAIL}\n${collectionMessage(item)}`
   )
     await git("reset", "--quiet", "--soft", base);
   if ((await text("rev-parse", "HEAD")) !== base)
@@ -646,17 +644,19 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
     throw new WorkFinding(
       `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. CI configuration, .github/ and CODEOWNERS change only when that section lists the exact path; undo these changes`,
     );
-  const findings: SecretFinding[] = [];
-  for (const path of paths) {
-    await checkChangedPath(worktree, path);
-    const entry = await stagedEntry(worktree, path, signal);
-    if (!entry) continue; // Deletion has no new content to publish.
-    if (path === ".gitmodules" || !["100644", "100755"].includes(entry.mode))
-      throw new WorkFinding(
-        `Worker changed unsafe Git entry at ${JSON.stringify(path)}`,
-      );
-    const scanRoot = await mkdtemp(join(dirname(worktree), "secret-scan-"));
-    try {
+  // Every staged blob, and the work tree's copy where its bytes differ,
+  // in one scan.
+  const scanRoot = await mkdtemp(join(dirname(worktree), "secret-scan-"));
+  try {
+    const sources: { path: string; source: string }[] = [];
+    for (const path of paths) {
+      await checkChangedPath(worktree, path);
+      const entry = await stagedEntry(worktree, path, signal);
+      if (!entry) continue; // Deletion has no new content to publish.
+      if (path === ".gitmodules" || !["100644", "100755"].includes(entry.mode))
+        throw new WorkFinding(
+          `Worker changed unsafe Git entry at ${JSON.stringify(path)}`,
+        );
       const staged = join(scanRoot, "content", path);
       await mkdir(dirname(staged), { recursive: true, mode: 0o700 });
       const output = await open(staged, "wx", 0o600);
@@ -673,9 +673,8 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
         throw new Error(
           `Cannot read staged content at ${JSON.stringify(path)}`,
         );
-      let finding = await scanFile(input, path, staged, scanRoot);
+      sources.push({ path, source: staged });
       if (
-        !finding &&
         (
           await hostGit(worktree, ["hash-object", "--no-filters", "--", path], {
             signal,
@@ -684,13 +683,13 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
           .toString("utf8")
           .trim() !== entry.blob
       )
-        finding = await scanFile(input, path, join(worktree, path), scanRoot);
-      if (finding) findings.push(finding);
-    } finally {
-      await rm(scanRoot, { recursive: true, force: true });
+        sources.push({ path, source: join(worktree, path) });
     }
+    const findings = await scanFiles(input, sources, scanRoot);
+    if (findings.length) throw new CollectionStop(secretHold(findings));
+  } finally {
+    await rm(scanRoot, { recursive: true, force: true });
   }
-  if (findings.length) throw new CollectionStop(secretHold(findings));
   return paths;
 }
 
@@ -848,24 +847,36 @@ const RECOMMENDED_RULES = JSON.stringify({
 });
 
 /**
- * The scanner child: Secretlint's file API on one exact file, with no CLI
- * config discovery, globs or target ignore files. Exit 0 clean, 1 finding,
- * 2 unavailable. The engine is loaded from Factory's own installation by
+ * The scanner child: Secretlint's file API on each exact file named on
+ * standard input (a JSON array), one at a time with one engine, with no
+ * CLI config discovery, globs or target ignore files. It writes one line
+ * per file, `[0, output]` clean or `[1, output]` finding, and exits 0; it
+ * exits 2 when Secretlint can't run, after the lines of the files it
+ * checked. The engine is loaded from Factory's own installation by
  * absolute URL, never resolved from the scanned tree.
  */
-const SCANNER = `const [source, descriptor, engine] = process.argv.slice(1);
+const SCANNER = `const [descriptor, engine] = process.argv.slice(1);
 try {
+  let list = "";
+  for await (const chunk of process.stdin) list += chunk;
   const { createEngine } = await import(engine);
   const scanner = await createEngine({ configFileJSON: JSON.parse(descriptor), formatter: "compact", maskSecrets: true, color: false, terminalLink: false });
-  const result = await scanner.executeOnFiles({ filePathList: [source] });
-  if (result.output) process.stdout.write(result.output + "\\n");
-  process.exitCode = result.ok ? 0 : 1;
+  for (const source of JSON.parse(list)) {
+    const result = await scanner.executeOnFiles({ filePathList: [source] });
+    process.stdout.write(JSON.stringify([result.ok ? 0 : 1, result.output.slice(0, 8192)]) + "\\n");
+  }
 } catch {
   process.stderr.write("Secretlint scan unavailable\\n");
   process.exitCode = 2;
 }`;
 
+/**
+ * A hung scanner is killed: SCAN_TIMEOUT_MS covers its start, as when it
+ * scanned one file, and each file adds SCAN_FILE_MS, far more than
+ * Secretlint takes to read one.
+ */
 const SCAN_TIMEOUT_MS = 5 * 60_000;
+const SCAN_FILE_MS = 1_000;
 
 /** The operator's Secretlint rules, or a hold naming the fix. */
 async function scannerRules(config: string | undefined): Promise<string> {
@@ -884,15 +895,17 @@ async function scannerRules(config: string | undefined): Promise<string> {
 }
 
 /**
- * Scan one file. A finding names its rules; a scanner that can't run stops
- * collection with a retry.
+ * Scan `files` in one scanner child. Each finding names its file's
+ * `path` and rules; a path listed twice (a staged blob and its work-tree
+ * copy) gets its first finding. A scanner that can't run stops collection
+ * with a retry naming the file it couldn't check.
  */
-async function scanFile(
+async function scanFiles(
   input: Scanner,
-  path: string,
-  source: string,
+  files: readonly { path: string; source: string }[],
   scanRoot: string,
-): Promise<SecretFinding | undefined> {
+): Promise<SecretFinding[]> {
+  if (!files.length) return [];
   const result = await new Promise<{ code: number | null; output: string }>(
     (done) => {
       const child = spawn(
@@ -901,46 +914,59 @@ async function scanFile(
           "--input-type=module",
           "-e",
           SCANNER,
-          source,
           input.rules,
           import.meta.resolve("@secretlint/node"),
         ],
         {
           cwd: scanRoot,
           env: workerEnvironment(join(scanRoot, "empty-gh-config")),
-          stdio: ["ignore", "pipe", "pipe"],
-          timeout: SCAN_TIMEOUT_MS,
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: SCAN_TIMEOUT_MS + files.length * SCAN_FILE_MS,
           killSignal: "SIGKILL",
           signal: input.signal,
         },
       );
       let output = "";
       child.stdout.on("data", (chunk: Buffer) => {
-        if (output.length < 8192) output += chunk.toString("utf8");
+        output += chunk.toString("utf8");
       });
       child.stderr.resume();
+      child.stdin.on("error", () => {
+        // A scanner that exits early reports it by its exit code.
+      });
+      child.stdin.end(JSON.stringify(files.map((file) => file.source)));
       child.on("error", () => done({ code: null, output }));
       child.on("close", (code) => done({ code, output }));
     },
   );
   if (input.signal.aborted) throw input.signal.reason;
-  if (result.code !== 0 && result.code !== 1)
+  // Each complete line is one file's result; a killed child's last may be cut.
+  const results = result.output
+    .split("\n")
+    .slice(0, -1)
+    .map((line) => JSON.parse(line) as [0 | 1, string]);
+  if (result.code !== 0 || results.length !== files.length)
     throw new CollectionStop({
       kind: "retry",
-      reason: `Secretlint could not check ${JSON.stringify(path)}; publication stopped`,
+      reason: `Secretlint could not check ${JSON.stringify(files[Math.min(results.length, files.length - 1)]!.path)}; publication stopped`,
     });
-  if (result.code === 0) return undefined;
-  const named = [
-    ...new Set(
-      [...result.output.matchAll(/@secretlint\/secretlint-rule-[A-Za-z0-9-]+/g)]
-        .map((match) => match[0])
-        .filter((rule) => !rule.includes("-rule-preset-")),
-    ),
-  ];
-  return {
-    path,
-    rules: named.length ? named : ["Secretlint recommended rules"],
-  };
+  const findings: SecretFinding[] = [];
+  for (const [index, [found, output]] of results.entries()) {
+    const { path } = files[index]!;
+    if (!found || findings.some((finding) => finding.path === path)) continue;
+    const named = [
+      ...new Set(
+        [...output.matchAll(/@secretlint\/secretlint-rule-[A-Za-z0-9-]+/g)]
+          .map((match) => match[0])
+          .filter((rule) => !rule.includes("-rule-preset-")),
+      ),
+    ];
+    findings.push({
+      path,
+      rules: named.length ? named : ["Secretlint recommended rules"],
+    });
+  }
+  return findings;
 }
 
 /**
@@ -969,7 +995,7 @@ export async function scanStaging(
       rules: input.rules ?? (await scannerRules(input.secretlintConfig)),
       signal: input.signal,
     };
-    const findings: SecretFinding[] = [];
+    const files: { path: string; source: string }[] = [];
     for (const [index, entry] of entries.entries()) {
       let source: string;
       if ("path" in entry) source = entry.path;
@@ -978,9 +1004,9 @@ export async function scanStaging(
         await mkdir(dirname(source), { mode: 0o700 });
         await writeFile(source, entry.bytes, { mode: 0o600, flag: "wx" });
       }
-      const finding = await scanFile(scanner, entry.name, source, scanRoot);
-      if (finding) findings.push(finding);
+      files.push({ path: entry.name, source });
     }
+    const findings = await scanFiles(scanner, files, scanRoot);
     return findings.length ? secretHold(findings) : undefined;
   } catch (error) {
     if (error instanceof CollectionStop && error.outcome.kind !== "repair")

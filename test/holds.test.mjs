@@ -2,7 +2,14 @@
 // configuration changes, and which steps a question stops.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -643,46 +650,84 @@ test("an Objective question from an item step stops every item, once", async () 
   await stopped(service);
 });
 
-test("a Codex worker's login or quota hold on one item stops every item, once", async () => {
+test("a failed Codex turn's outcome comes from its session record; a login hold on one item stops every item, once", async () => {
   const { ObjectiveRunner } = await import("../dist/engine.js");
   const { codexFailure } = await import("../dist/providers/codex.js");
+  const { codexTelemetry } = await import(
+    "../dist/providers/codex-telemetry.js"
+  );
   const { providerOutcome } = await import("../dist/providers/planner.js");
   const { newObjective } = await import("../dist/state.js");
-  // The messages a failed Codex turn reports (codex.ts codexFailure), as
-  // the Codex worker maps them (codex-worker.ts outcome).
-  for (const failure of [
-    "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
-    "Quota exceeded. Check your plan and billing details.",
-  ]) {
-    const started = [];
-    const step = (key) => ({
-      key,
-      deadlineMs: 60_000,
-      run: async () => {
-        started.push(key);
-        return { kind: "done" };
-      },
-    });
-    const runner = new ObjectiveRunner(
-      newObjective(1, new Date()),
-      {
-        steps: () => [step("item:a:work"), step("item:b:work")],
-        status: () => "building",
-      },
-      mkdtempSync(join(tmpdir(), "factory-scope-")),
-      { write() {} },
-      { id: "run", finished: 0, resumeAt: 0 },
+  // What the pinned Codex 0.160.0 reported for each failure (turn.failed's
+  // message, and its session record's token_count and task_complete), with
+  // a local stand-in for the API giving its status, body and rate-limit
+  // headers.
+  const cases = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/codex-0.160.0-failures.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const failure = (name) => {
+    const home = mkdtempSync(join(tmpdir(), "factory-codex-home-"));
+    const day = join(home, "sessions", "2026", "10", "25");
+    mkdirSync(day, { recursive: true });
+    writeFileSync(
+      join(day, "rollout-2026-10-25T00-03-02-thread.jsonl"),
+      cases[name].rollout.map((entry) => `${JSON.stringify(entry)}\n`).join(""),
     );
-    const held = providerOutcome(codexFailure(failure));
-    runner.apply("item:a:work", held);
-    assert.equal(runner.state.holds.length, 1, failure);
-    assert.equal(runner.state.holds[0].item, undefined, "an Objective hold");
-    runner.tick();
-    assert.deepEqual(started, [], "item b waits too");
-    // b, already running, meets the same failure: still one question.
-    runner.apply("item:b:work", held);
-    assert.equal(runner.state.holds.length, 1);
-  }
+    return codexFailure(cases[name].message, codexTelemetry(home, "thread"));
+  };
+  // The full window's reset, never the local time the message names.
+  const limited = failure("usage limit");
+  assert.equal(limited.outcome, "retry");
+  assert.deepEqual(limited.wait, {
+    kind: "reset",
+    at: "2026-10-25T00:57:59.000Z",
+    provider: "codex",
+  });
+  // A full window with no reset: the wait/switch question asks.
+  const unknown = failure("usage limit without a reset");
+  assert.equal(unknown.outcome, "retry");
+  assert.deepEqual(unknown.wait, { kind: "reset", provider: "codex" });
+  assert.equal(failure("context window").tooLarge, true);
+  // Unclassified, the same text is only a retry.
+  const bare = codexFailure(cases["usage limit"].message);
+  assert.equal(bare.outcome, "retry");
+  assert.equal(bare.wait, undefined);
+  // The Codex worker maps a login hold (codex-worker.ts outcome) to one
+  // Objective question.
+  const login = failure("expired login");
+  assert.equal(login.outcome, "hold");
+  const started = [];
+  const step = (key) => ({
+    key,
+    deadlineMs: 60_000,
+    run: async () => {
+      started.push(key);
+      return { kind: "done" };
+    },
+  });
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date()),
+    {
+      steps: () => [step("item:a:work"), step("item:b:work")],
+      status: () => "building",
+    },
+    mkdtempSync(join(tmpdir(), "factory-scope-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+  );
+  const held = providerOutcome(login);
+  runner.apply("item:a:work", held);
+  assert.equal(runner.state.holds.length, 1);
+  assert.equal(runner.state.holds[0].item, undefined, "an Objective hold");
+  assert.match(runner.state.holds[0].question, /codex login/);
+  runner.tick();
+  assert.deepEqual(started, [], "item b waits too");
+  // b, already running, meets the same failure: still one question.
+  runner.apply("item:b:work", held);
+  assert.equal(runner.state.holds.length, 1);
 });
 
 test("a deferred question asks right after the covering one; stack layers and bare retries respect item holds", async () => {
@@ -1191,4 +1236,157 @@ test("a planner's can't-be-planned answer holds once with replan and cancel, and
     .map((file) => readFileSync(join(inst.logs, "71", file), "utf8"))
     .join("");
   assert.doesNotMatch(log, /"model-usage"/, "no planner call");
+});
+
+test("a 403 is a rate limit only by GitHub's headers; one without them retries, then asks its refusal for the whole Objective", async (t) => {
+  const { GitHub, githubOutcome } = await import("../dist/github.js");
+  const { DEFAULT_LIMITS, ObjectiveRunner } = await import("../dist/engine.js");
+  const { newObjective } = await import("../dist/state.js");
+  const reset = Math.floor(Date.now() / 1000) + 600;
+  // A local stand-in for the API: each path's 403 carries these headers,
+  // and every body names a rate limit, which decides nothing.
+  const headers = {
+    "/repos/o/r/primary": {
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": String(reset),
+    },
+    "/repos/o/r/secondary": { "retry-after": "60" },
+    "/repos/o/r/refused": {},
+  };
+  const server = createHttpServer((req, res) => {
+    res.writeHead(403, {
+      "content-type": "application/json",
+      ...headers[req.url],
+    });
+    res.end(JSON.stringify({ message: "You have exceeded a rate limit" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const token = process.env.FACTORY_GITHUB_TOKEN;
+  process.env.FACTORY_GITHUB_TOKEN = "test-token";
+  t.after(() => {
+    if (token === undefined) delete process.env.FACTORY_GITHUB_TOKEN;
+    else process.env.FACTORY_GITHUB_TOKEN = token;
+  });
+  const github = new GitHub("o/r", `http://127.0.0.1:${server.address().port}`);
+  const outcome = async (path) => {
+    try {
+      await github.rest("GET", path);
+    } catch (error) {
+      return githubOutcome(error, "o/r");
+    }
+    assert.fail(`${path} answered`);
+  };
+  const primary = await outcome("/repos/o/r/primary");
+  assert.equal(primary.wait?.kind, "reset");
+  // The wait is now plus the time left, so the clock may move a millisecond.
+  assert.ok(Math.abs(Date.parse(primary.wait.at) - reset * 1000) < 1000);
+  const secondary = await outcome("/repos/o/r/secondary");
+  assert.equal(secondary.wait?.kind, "reset");
+  assert.ok(Date.parse(secondary.wait.at) - Date.now() <= 60_000);
+  const refused = await outcome("/repos/o/r/refused");
+  assert.equal(refused.kind, "retry");
+  assert.equal(refused.wait, undefined, "an unknown transient");
+  // It retries for 2 min, then asks the refusal's question once.
+  let clock = Date.now();
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date(clock)),
+    { steps: () => [], status: () => "building" },
+    mkdtempSync(join(tmpdir(), "factory-refused-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+    DEFAULT_LIMITS,
+    () => new Date(clock),
+  );
+  runner.apply("item:a:work", refused);
+  assert.equal(runner.state.holds.length, 0, "a secondary limit may pass");
+  clock += 2 * 60_000;
+  runner.apply("item:a:work", await outcome("/repos/o/r/refused"));
+  const [held] = runner.state.holds;
+  assert.match(held.question, /Give Factory's login read access/);
+  assert.equal(held.item, undefined, "an Objective question");
+});
+
+test("a marker lookup past its page cap refuses rather than post the comment again; a list that ends at the cap is read whole", async (t) => {
+  const { GitHub, TransientError } = await import("../dist/github.js");
+  const marker = "<!-- factory:5:status -->";
+  const mine = (id, body) => ({ id, body, user: { login: "factory-bot" } });
+  // A local stand-in for the API: issue 5's comments never end; issue 6
+  // has exactly 20 full pages, Factory's marked comment last.
+  const posted = [];
+  const server = createHttpServer((req, res) => {
+    const url = new URL(req.url, "http://github");
+    const reply = (body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === "POST") posted.push(url.pathname);
+    if (url.pathname === "/user") return reply({ login: "factory-bot" });
+    const page = Number(url.searchParams.get("page"));
+    const listed = (from) =>
+      Array.from({ length: 100 }, (_, n) => mine(from + n, "noise"));
+    if (url.pathname === "/repos/o/r/issues/5/comments")
+      return reply(listed(page * 100));
+    if (url.pathname === "/repos/o/r/issues/6/comments")
+      return reply(
+        page > 20
+          ? []
+          : page === 20
+            ? [...listed(1900).slice(1), mine(7, marker)]
+            : listed(page * 100),
+      );
+    reply({});
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const token = process.env.FACTORY_GITHUB_TOKEN;
+  process.env.FACTORY_GITHUB_TOKEN = "test-token";
+  t.after(() => {
+    if (token === undefined) delete process.env.FACTORY_GITHUB_TOKEN;
+    else process.env.FACTORY_GITHUB_TOKEN = token;
+  });
+  const github = new GitHub("o/r", `http://127.0.0.1:${server.address().port}`);
+  await assert.rejects(
+    github.ensureComment(5, marker, `${marker} status`, "test:status"),
+    (error) =>
+      !(error instanceof TransientError) &&
+      /more than 2000 .*20-page cap/.test(error.message),
+  );
+  assert.deepEqual(posted, [], "nothing posted");
+  assert.equal(await github.findComment(6, marker), 7);
+});
+
+test("a correction already tried for the same failure asks instead of repeating", async () => {
+  const { correction } = await import("../dist/repair.js");
+  // The operator's answer is the correction itself: no diagnosis call.
+  const correct = (detail, answer, prior) =>
+    correction({
+      plan: plan([item("a")]),
+      item: item("a"),
+      finding: { kind: "failure", detail },
+      checkout: tmpdir(),
+      base: "b",
+      commit: "c",
+      sources: [],
+      prior,
+      operatorAnswer: answer,
+      signal: AbortSignal.timeout(10_000),
+      log() {},
+    });
+  const first = await correct("npm test: 1 failed", "Fix the sum", []);
+  assert.equal(first.kind, "correction");
+  assert.equal(first.correction.source, "operator");
+  const tried = [first.correction];
+  const again = await correct("npm test: 1 failed", "Fix the sum", tried);
+  assert.equal(again.kind, "question");
+  assert.match(again.question, /already failed for the same failure/);
+  // Another correction, or the same one for another failure, is new.
+  const other = await correct("npm test: 1 failed", "Fix the test", tried);
+  assert.equal(other.kind, "correction");
+  const elsewhere = await correct(
+    "npm run lint: 2 errors",
+    "Fix the sum",
+    tried,
+  );
+  assert.equal(elsewhere.kind, "correction");
 });

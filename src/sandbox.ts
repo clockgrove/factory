@@ -515,36 +515,37 @@ function probeSandbox(): SandboxAvailability {
     encoding: "utf8",
     timeout: 10_000,
   });
-  const probe = spawnSync(
-    executable,
-    [
-      ...ISOLATION,
-      ...systemMounts(),
-      "--proc",
-      "/proc",
-      "--dev",
-      "/dev",
-      "--tmpfs",
-      "/tmp",
-      "--",
-      "/bin/sh",
-      "-c",
-      "exit 0",
-    ],
-    { encoding: "utf8", timeout: 10_000, env: {} },
-  );
-  if (probe.status === 0) {
-    const help = spawnSync(executable, ["--help"], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
+  const start = (size: string[]) =>
+    spawnSync(
+      executable,
+      [
+        ...ISOLATION,
+        ...systemMounts(),
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        ...size,
+        "--tmpfs",
+        "/tmp",
+        "--",
+        "/bin/sh",
+        "-c",
+        "exit 0",
+      ],
+      { encoding: "utf8", timeout: 10_000, env: {} },
+    );
+  // A bubblewrap that can't size a tmpfs (before 0.9) refuses `--size`:
+  // the probe runs again without it.
+  const sized = start(["--size", "1048576"]);
+  const probe = sized.status === 0 ? sized : start([]);
+  if (probe.status === 0)
     return {
       available: true,
       executable,
       version: version.stdout.trim() || "unknown",
-      tmpfsSize: /^\s*--size\b/m.test(`${help.stdout}${help.stderr}`),
+      tmpfsSize: probe === sized,
     };
-  }
   return {
     available: false,
     installed: true,
@@ -960,17 +961,33 @@ process.once("exit", killWorkerProcesses);
 /** Quote one shell word. */
 const shellWord = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
+/** A namespacedLauncher's exit when the host refuses its namespace: the program never ran. */
+const NAMESPACE_REFUSED = 125;
+
+/** The file a namespacedLauncher with `pidFile` creates when the host refused its namespace. */
+const refusedMarker = (pidFile: string) => `${pidFile}.refused`;
+
+/** Whether the last run of the namespacedLauncher with `pidFile` found its namespace refused. */
+export function namespaceRefused(pidFile: string): boolean {
+  return existsSync(refusedMarker(pidFile));
+}
+
 /**
  * Write an executable launcher at `path` that runs `program` (with the
  * launcher's arguments) as the leader of a new process group, as the init
  * of a PID namespace of its own (`unshare --user --map-current-user --pid
  * --fork --kill-child --mount-proc`). Its process id, the group's, goes to
- * `pidFile` first. Killing the group, or the program ending, ends the
- * namespace, and the kernel then kills every process left in it, however
- * its commands regrouped or detached: an abort can't leave a command
- * running. The launcher ignores SIGTERM; LaunchedGroup kills it. `stderr`
- * appends the program's standard error to that file. Throws when
- * util-linux's `setsid` or `unshare` is missing.
+ * `pidFile` first. It tries the namespace with `true` before the program:
+ * a host that refuses it leaves the marker namespaceRefused reads (each
+ * run clears it first), reads its standard input to the end, so the
+ * caller's write of the prompt can't fail with EPIPE, and exits
+ * NAMESPACE_REFUSED. Killing the group, or the
+ * program ending, ends the namespace, and the kernel then kills every
+ * process left in it, however its commands regrouped or detached: an abort
+ * can't leave a command running. The launcher ignores SIGTERM;
+ * LaunchedGroup kills it. `stderr` appends the probe's and the program's
+ * standard error to that file. Throws when util-linux's `setsid` or
+ * `unshare` is missing.
  */
 export function namespacedLauncher(
   path: string,
@@ -990,9 +1007,12 @@ export function namespacedLauncher(
     );
   // Private like every telemetry file, whatever the umask.
   if (stderr) writeFileSync(stderr, "", { mode: 0o600, flag: "a" });
+  const namespace = `${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc`;
+  const errors = stderr ? ` 2>>${shellWord(stderr)}` : "";
+  const refused = shellWord(refusedMarker(pidFile));
   writeFileSync(
     path,
-    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nexec ${setsid} ${unshare} --user --map-current-user --pid --fork --kill-child --mount-proc ${shellWord(program)} "$@"${stderr ? ` 2>>${shellWord(stderr)}` : ""}\n`,
+    `#!/bin/sh\necho $$ > ${shellWord(pidFile)}\nrm -f ${refused}\n${namespace} true${errors} || { : > ${refused}; cat > /dev/null; exit ${NAMESPACE_REFUSED}; }\nexec ${setsid} ${namespace} ${shellWord(program)} "$@"${errors}\n`,
     { mode: 0o700, flag: "wx" },
   );
 }

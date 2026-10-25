@@ -119,11 +119,11 @@ export class BaseFiles {
     const scratch = await mkdtemp(join(tmpdir(), "factory-attributes-"));
     try {
       const index = { GIT_INDEX_FILE: join(scratch, "index") };
-      await this.git(["read-tree", this.base], index);
+      await this.git(["read-tree", this.base], { env: index });
       return lfsFiltered(
         await this.git(
           ["check-attr", "--cached", "-z", "filter", "--", ...paths],
-          index,
+          { env: index },
         ),
       );
     } finally {
@@ -159,33 +159,31 @@ export class BaseFiles {
   }
 
   /**
-   * The default branch's name, as origin's HEAD names it (every fetch of
-   * the default head sets it); undefined when the checkout has none.
+   * The default branch's name, as origin's HEAD names it (every fetch sets
+   * it from the remote's HEAD); undefined when the checkout has none.
    */
   async defaultBranch(): Promise<string | undefined> {
-    try {
-      const name = (
-        await this.git([
-          "symbolic-ref",
-          "--quiet",
-          "--short",
-          "refs/remotes/origin/HEAD",
-        ])
+    // --quiet: exit 1, silently, when origin/HEAD is missing or not symbolic.
+    const name = (
+      await this.git(
+        ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        { absentExit: 1 },
       )
-        .toString("utf8")
-        .trim();
-      return name.startsWith("origin/")
-        ? name.slice("origin/".length)
-        : undefined;
-    } catch (error) {
-      if (this.signal?.aborted) throw error;
-      return undefined;
-    }
+    )
+      .toString("utf8")
+      .trim();
+    return name.startsWith("origin/")
+      ? name.slice("origin/".length)
+      : undefined;
   }
 
+  /** A git command's output; `absentExit` is the exit that means "none" and reads as no output. */
   private async git(
     args: string[],
-    env: Record<string, string> = {},
+    {
+      env = {},
+      absentExit,
+    }: { env?: Record<string, string>; absentExit?: number } = {},
   ): Promise<Buffer> {
     try {
       const { stdout } = await run("git", ["-C", this.checkout, ...args], {
@@ -198,6 +196,11 @@ export class BaseFiles {
       return stdout;
     } catch (error) {
       if (this.signal?.aborted) throw this.signal.reason;
+      if (
+        absentExit !== undefined &&
+        (error as { code?: unknown }).code === absentExit
+      )
+        return Buffer.alloc(0);
       throw new TransientError(
         `git ${args[0]} at base ${this.base.slice(0, 12)} in ${this.checkout}: ${errorMessage(error)}`,
       );
@@ -472,9 +475,6 @@ const VALIDATION_ENVIRONMENT = {
 const NETWORK_TOOLS = new Set([
   "curl",
   "wget",
-  "npx",
-  "pnpx",
-  "bunx",
   "gh",
   "pip",
   "pip3",
@@ -488,23 +488,23 @@ const NETWORK_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   pnpm: new Set(["audit", "install", "i", "dlx", "fetch", "publish", "view"]),
   yarn: new Set(["audit", "install", "dlx", "npm"]),
   git: new Set(["fetch", "clone", "pull", "push", "ls-remote"]),
-  docker: new Set(["pull", "push", "build"]),
+  docker: new Set(["pull", "push"]),
   go: new Set(["get", "install"]),
 };
 
-/** The network tool a script body invokes, from its command words; never prose. */
-function networkToolIn(
-  body: string,
-  /** A segment known to run offline (the authorized bootstrap or a local bin). */
-  skip?: (segment: string) => boolean,
-): string | undefined {
+/**
+ * The network tool a script body invokes, from its command words; never
+ * prose. The authorized package bootstrap, the one command granted a
+ * network, is not one.
+ */
+function networkToolIn(body: string): string | undefined {
   for (const segment of body.split(/&&|\|\||[;|\n&(){}`]|\$\(/)) {
     const words = segment
       .trim()
       .split(/\s+/)
       .filter((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
     const tool = words[0]?.replace(/^.*\//, "");
-    if (!tool || skip?.(segment.trim())) continue;
+    if (!tool || packageBootstrap(segment.trim()) !== undefined) continue;
     if (NETWORK_TOOLS.has(tool)) return tool;
     const subcommand = words.slice(1).find((word) => !word.startsWith("-"));
     if (subcommand && NETWORK_SUBCOMMANDS[tool]?.has(subcommand))
@@ -513,30 +513,18 @@ function networkToolIn(
   return undefined;
 }
 
-/**
- * Segments that run offline: the authorized package bootstrap (the one
- * command granted a network) and npx/pnpx/bunx, which run a local bin.
- */
-function offlineSegment(segment: string): boolean {
-  if (packageBootstrap(segment) !== undefined) return true;
-  const first = segment
-    .split(/\s+/)
-    .find((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-  return first !== undefined && /^(?:npx|pnpx|bunx)$/.test(first);
-}
-
 /** The network tool a validation command reaches, directly or through root package scripts (to a fixed depth). */
 export function networkToolOfCommand(
   command: string,
   scripts: Record<string, unknown>,
   depth = 0,
 ): string | undefined {
-  const direct = networkToolIn(command, offlineSegment);
+  const direct = networkToolIn(command);
   if (direct) return direct;
   const invocation = packageScriptInvocation(command);
   const body = invocation ? scripts[invocation.name] : undefined;
   if (typeof body !== "string" || depth > 3) return undefined;
-  const own = networkToolIn(body, offlineSegment);
+  const own = networkToolIn(body);
   if (own) return own;
   for (const segment of body.split(/&&|\|\||[;|\n&]/))
     if (packageScriptInvocation(segment.trim())) {

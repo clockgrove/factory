@@ -8,10 +8,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  type ActivityCounts,
   addUsage,
   chosenFiles,
   count,
   emptyUsage,
+  foldActivity,
   itemOfEvent,
   num,
   originalText,
@@ -115,7 +117,7 @@ const size = (bytes: number | null) =>
  * that one's bodies, from any run. Returns why it can't, for a refusal.
  */
 export function captures(
-  options: AnalysisRead & { id?: string },
+  options: AnalysisRead & { id?: string; maxBytesPerCall: number },
   write: (text: string) => void,
 ): string | undefined {
   const { runs, rows } = captureRows(
@@ -126,7 +128,9 @@ export function captures(
       ? rows.find((candidate) => candidate.id === options.id)
       : undefined;
     const file = row && captureFile(options.issue, row.run, row.id);
-    const body = file && readCapture(options.logs, file, options.secrets);
+    const body =
+      file &&
+      readCapture(options.logs, file, options.secrets, options.maxBytesPerCall);
     if (!row || !body)
       return `#${options.issue} has no capture ${options.id}: \`factory diagnostics ${options.issue} --captures --all-runs\` lists them; retention removes a run's captures with its log.`;
     if (options.json) {
@@ -296,20 +300,6 @@ export interface CallGroup {
   sessions: Record<string, number>;
   maxSessionTurn: number;
   imageOutputs: { reportedCalls: number; total: number };
-  /** Codex calls' boundary telemetry (`codexBoundary`), summed over the calls that report it. */
-  codexBoundary: {
-    reportedCalls: number;
-    observedCalls: number;
-    requests: number;
-    failedRequests: number;
-    responsesCompleted: number;
-    zeroOutputResponses: number;
-    streamFailures: number;
-    httpRetries: number;
-    streamRetries: number;
-    retryDelayMs: number;
-    completionLost: number;
-  };
   /**
    * Tokens and cost by model as the providers break them down (Claude's
    * and Copilot's per-model usage, sub-agents included), else by the
@@ -441,16 +431,7 @@ export interface AnalysisReport {
     ms: number;
     byStep: Record<string, { commands: number; failed: number }>;
   };
-  activity: Record<
-    string,
-    {
-      turns: number;
-      toolsStarted: number;
-      edits: number;
-      commands: number;
-      commandsFailed: number;
-    }
-  >;
+  activity: Record<string, ActivityCounts>;
   /** The old formal history's checks, on step attempts (start paired with outcome). */
   history: {
     attempts: number;
@@ -552,19 +533,6 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
     sessions: {},
     maxSessionTurn: 0,
     imageOutputs: { reportedCalls: 0, total: 0 },
-    codexBoundary: {
-      reportedCalls: 0,
-      observedCalls: 0,
-      requests: 0,
-      failedRequests: 0,
-      responsesCompleted: 0,
-      zeroOutputResponses: 0,
-      streamFailures: 0,
-      httpRetries: 0,
-      streamRetries: 0,
-      retryDelayMs: 0,
-      completionLost: 0,
-    },
     models: {},
     descendants: {
       calls: 0,
@@ -728,22 +696,6 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
       "total",
     ] as const)
       d[key] += num(descendants[key]) ?? 0;
-  }
-  const boundary = event.codexBoundary as Record<string, unknown> | undefined;
-  if (boundary && typeof boundary === "object") {
-    const b = group.codexBoundary;
-    const retries = (boundary.retries ?? {}) as Record<string, unknown>;
-    b.reportedCalls += 1;
-    if (boundary.coverage === "observed") b.observedCalls += 1;
-    b.requests += num(boundary.requests) ?? 0;
-    b.failedRequests += num(boundary.failedRequests) ?? 0;
-    b.responsesCompleted += num(boundary.responsesCompleted) ?? 0;
-    b.zeroOutputResponses += num(boundary.zeroOutputResponses) ?? 0;
-    b.streamFailures += num(boundary.streamFailures) ?? 0;
-    b.httpRetries += num(retries.http) ?? 0;
-    b.streamRetries += num(retries.stream) ?? 0;
-    b.retryDelayMs += num(boundary.retryDelayMs) ?? 0;
-    if (boundary.completionLost === true) b.completionLost += 1;
   }
 }
 
@@ -1080,17 +1032,7 @@ class Analysis {
       }
       case "worker-activity": {
         const item = itemOfEvent(event) ?? "objective";
-        this.activity[item] ??= {
-          turns: 0,
-          toolsStarted: 0,
-          edits: 0,
-          commands: 0,
-          commandsFailed: 0,
-        };
-        const row = this.activity[item];
-        const counts = (event.counts ?? {}) as Record<string, unknown>;
-        for (const name of Object.keys(row) as (keyof typeof row)[])
-          row[name] += num(counts[name]) ?? 0;
+        this.activity[item] = foldActivity(event, this.activity[item]);
         break;
       }
       case "aborted":
@@ -1192,10 +1134,7 @@ class Analysis {
     const reason = str(end?.reason);
     const id = str(start.attemptId);
     const parentId = str(start.parentAttemptId);
-    const error =
-      outcome === "retry" &&
-      (wait === "error" ||
-        (!wait && (reason?.startsWith("error") || reason === "deadline")));
+    const error = outcome === "retry" && wait === "error";
     this.attempts.push({
       run: String(start.run),
       step,
@@ -1432,11 +1371,6 @@ function groupText(group: CallGroup, indent: string): string[] {
     ...(group.descendants.calls
       ? [
           `${indent}Codex child threads: ${group.descendants.threads} in ${group.descendants.calls} calls · ${count(group.descendants.total)} tokens (${count(group.descendants.input)} in, ${count(group.descendants.cached)} cached, ${count(group.descendants.output)} out, ${count(group.descendants.reasoning)} reasoning), not in the totals`,
-        ]
-      : []),
-    ...(group.codexBoundary.reportedCalls
-      ? [
-          `${indent}Codex boundary: observed in ${group.codexBoundary.observedCalls}/${group.codexBoundary.reportedCalls} calls · ${count(group.codexBoundary.requests)} requests (${group.codexBoundary.failedRequests} failed) · ${count(group.codexBoundary.responsesCompleted)} responses completed (${group.codexBoundary.zeroOutputResponses} with no output) · retries ${group.codexBoundary.httpRetries} HTTP, ${group.codexBoundary.streamRetries} stream (${duration(group.codexBoundary.retryDelayMs)} delay) · ${group.codexBoundary.streamFailures} stream failures · ${group.codexBoundary.completionLost} lost completions`,
         ]
       : []),
     `${indent}efficiency: ${

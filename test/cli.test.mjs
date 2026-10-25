@@ -729,7 +729,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   assert.equal(retained.code, 0, retained.err);
   assert.match(retained.out, /nothing sent/);
   assert.doesNotMatch(retained.out, /s3cret/);
-  const digest = /--authorize ([0-9a-f]{64})/.exec(retained.out)[1];
+  const digest = /--authorize (\S+)/.exec(retained.out)[1];
   const written = readFileSync(file, "utf8");
   assert.match(written, /review \[REDACTED\]/);
   assert.doesNotMatch(written, /ghp_|sk-a|s3cret/);
@@ -803,6 +803,12 @@ test("the run log: tail, follow, and status reads its end", async () => {
     "the digest binds the selection",
   );
   assert.equal(received.length, 0);
+  // The run goes on after the preview: the send is pinned to what it read.
+  appendFileSync(
+    join(inst.logs, "54", run),
+    `${JSON.stringify({ at: at(3500), step: "item:a:review", event: "model-usage", role: "reviewer", phase: "result-review", provider: "codex", model: "m1", outcome: "done", ms: 10 })}\n`,
+  );
+  assert.equal(JSON.parse((await exporting("--json")).out).spans, 2);
   const sent = await exporting(
     "--content",
     "retained",
@@ -815,6 +821,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   assert.equal(sent.code, 0, sent.err);
   assert.equal(JSON.parse(sent.out).status, "accepted");
+  assert.equal(JSON.parse(sent.out).spans, 1, "exactly the previewed call");
   assert.equal(received.length, 1);
   assert.equal(received[0].url, "/v1/traces");
   assert.equal(received[0].headers.authorization, "Bearer s3cret-token");

@@ -2,15 +2,28 @@
 // QA, and approval of a non-writer's Objective.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createHttpServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
+import { TransientError } from "../dist/github.js";
 import { checkObjective } from "../dist/objective.js";
-import { finalCommands, sectionText } from "../dist/planning/facts.js";
+import {
+  BaseFiles,
+  finalCommands,
+  sectionText,
+} from "../dist/planning/facts.js";
 import { ownedSince } from "../dist/planning/plan.js";
+import { repositoryView } from "../dist/planning/repository.js";
 import { readShown, shownDigest } from "../dist/shown.js";
 import { declarationProblems } from "../dist/validate.js";
 import {
@@ -448,6 +461,96 @@ test("an Objective with no final command still gets QA on the default branch: fi
   await stopped(service);
 });
 
+test("final validation names each Work Item command it skips because a later merge changed its package script", async () => {
+  const inst = installation();
+  mkdirSync(inst.root, { recursive: true });
+  const git = (cwd, ...args) => {
+    const result = spawnSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@t", ...args],
+      { cwd, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(inst.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
+  git(inst.root, "clone", "--quiet", "origin.git", "work");
+  const work = join(inst.root, "work");
+  const commit = (path, text, message) => {
+    writeFileSync(join(work, path), text);
+    git(work, "add", path);
+    git(work, "commit", "--quiet", "-m", message);
+    git(work, "push", "--quiet", "origin", "HEAD:main");
+    return git(work, "rev-parse", "HEAD");
+  };
+  const scripts = (check) =>
+    `${JSON.stringify({ name: "t", private: true, scripts: { check } })}\n`;
+  commit("b.mjs", "process.exit(0);\n", "b");
+  const base = commit("package.json", scripts("node b.mjs"), "base");
+  const merged = commit("a.txt", "a\n", "a merged");
+  // b's merge changes the script a validated.
+  const mergedB = commit("package.json", scripts("node b.mjs --b"), "b merged");
+  git(inst.root, "clone", "--quiet", "origin.git", "checkout");
+  githubOrigin(join(inst.root, "checkout"), join(inst.root, "origin.git"));
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const at = "2026-01-01T00:00:00.000Z";
+  const merge = (sha) => ({ mergeSha: sha, integratedSha: sha, at });
+  seed(inst, 62, "building", {
+    done: {
+      check: {
+        shown: readShown(
+          "<h2>Goal</h2><p>Check.</p><h2>Acceptance</h2><ul><li>It checks.</li></ul>",
+          { sources: false },
+        ),
+        title: "Check",
+      },
+      plan: plan(
+        [
+          item("a", {
+            ownedPaths: ["a.txt"],
+            validation: [
+              { command: "npm run check", provenance: "base-observed" },
+            ],
+          }),
+          item("b", {
+            ownedPaths: ["package.json"],
+            dependencies: ["a"],
+            validation: [
+              { command: "node b.mjs", provenance: "base-observed" },
+            ],
+          }),
+        ],
+        { base },
+      ),
+      ...Object.fromEntries(
+        ["a", "b"].flatMap((id) =>
+          ["work", "validate", "review", "publish", "ci"].map((step) => [
+            `item:${id}:${step}`,
+            {},
+          ]),
+        ),
+      ),
+      "item:a:merge": merge(merged),
+      "item:b:merge": merge(mergedB),
+    },
+    kept: { "plan:acceptedAt": at },
+  });
+  const service = serve(inst);
+  await until(() => stateOf(inst, 62).done.final, "final passes", 30_000);
+  const { final } = stateOf(inst, 62).done;
+  assert.deepEqual(final.commands, ["node b.mjs"]);
+  assert.deepEqual(final.skipped, [
+    { item: "a", command: "npm run check", changedBy: ["b"] },
+  ]);
+  // Status says it didn't run, and why.
+  assert.match(
+    cli(inst, "status", "62").out,
+    /Skipped by final validation: command `npm run check` \(Work Item a\): the merge of b changed its package script; Work Item a's own validation ran it/,
+  );
+  assert.equal(cli(inst, "cancel", "62").code, 0);
+  await stopped(service);
+});
+
 // A non-writer's Objective: Factory reads its structure from GitHub's
 // rendering (body_html) and plans from that rendering as Markdown text; the
 // approval names their digest. The stand-in renders like GitHub (micromark
@@ -646,6 +749,21 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
   await stopped(service);
+});
+
+test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-default-branch-"));
+  const git = (...args) =>
+    assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);
+  git("init", "--quiet", "--initial-branch=main");
+  const files = new BaseFiles(directory, "HEAD");
+  assert.equal(await files.defaultBranch(), undefined);
+  git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+  assert.equal(await files.defaultBranch(), "trunk");
+  await assert.rejects(
+    new BaseFiles(join(directory, "gone"), "HEAD").defaultBranch(),
+    TransientError,
+  );
 });
 
 test("overlapping owned paths take turns while busy, after an amendment, until the earlier Objective finishes; amendments plan meanwhile", async () => {
@@ -918,4 +1036,31 @@ test("an amendment's new paths rank by its acceptance: an earlier Objective wait
   for (const issue of [75, 77, 78, 81, 82, 83])
     assert.equal(cli(inst, "cancel", String(issue)).code, 0);
   await stopped(service);
+});
+
+test("the repository map says whether it lists every path, which makes the result review's tree inventory complete", async () => {
+  const checkout = mkdtempSync(join(tmpdir(), "factory-map-"));
+  const git = (...args) => {
+    const result = spawnSync("git", ["-C", checkout, ...args], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commit = () => {
+    git("add", "-A");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c");
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "--quiet");
+  writeFileSync(join(checkout, "a.txt"), "a\n");
+  const small = await repositoryView(checkout, commit(), true);
+  assert.equal(small.complete, true);
+  // More paths than the map's bound lists.
+  const dir = join(checkout, "d".repeat(80));
+  mkdirSync(dir);
+  for (let n = 0; n < 700; n++) writeFileSync(join(dir, `${n}.txt`), "a\n");
+  const large = await repositoryView(checkout, commit(), true);
+  assert.equal(large.complete, false);
+  assert.match(large.map, / more paths are not listed/);
 });

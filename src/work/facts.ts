@@ -42,14 +42,14 @@ export interface ItemFacts {
   /** A paid worker's spend so far. */
   spend: WorkerSpend;
   /**
-   * The correction diagnosed for repair `repair`, and every finding
+   * The correction diagnosed for repair `repair`, and every correction
    * diagnosed so far; `answered`: the question whose operator answer it
    * carries, so that answer is applied once.
    */
   diagnosis: {
     repair: number;
     context: RepairContext;
-    applied: string[];
+    applied: Correction[];
     answered?: string;
   };
   /** A validation command run once more on a tree the worker's own Validate passed. */

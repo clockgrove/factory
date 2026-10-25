@@ -1089,7 +1089,7 @@ async function materialize(
         origin: "controller",
         path: "Exact-tree inventory",
         content: view.map.replaceAll(`${REPOSITORY_DIRECTORY}/`, "candidate/"),
-        complete: !view.map.includes(" more paths are not listed"),
+        complete: view.complete,
       },
       ...excerptRows(excerpts),
     ],

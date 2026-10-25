@@ -250,7 +250,7 @@ factory export-captures N --endpoint https://collector.example.com [--content me
 factory export-captures N --endpoint https://collector.example.com --send --authorize DIGEST
 ```
 
-`metadata` (the default) reads no captured text; `retained` adds the captured request and response, redacted again. `--output ABSOLUTE_FILE` writes the preview's requests to a new local file instead. Headers come from `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS` and are never printed. Changing the selection, content, endpoint or headers needs a new preview. Plain HTTP is allowed only to a loopback collector.
+`metadata` (the default) reads no captured text; `retained` adds the captured request and response, redacted again. `--output ABSOLUTE_FILE` writes the preview's requests to a new local file instead. Headers come from `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS` and are never printed. Changing the selection, content, endpoint or headers needs a new preview. The digest pins the run files as the preview read them, so a run that is still going sends exactly the calls the preview listed. Plain HTTP is allowed only to a loopback collector.
 
 ## Answer questions
 

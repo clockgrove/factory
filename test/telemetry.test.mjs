@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
+  chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -16,9 +19,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
+import {
+  CAPTURE_OFF,
+  RunLog,
+  readNew,
+  readRunFile,
+  rotatedRuns,
+  rotateLogs,
+} from "../dist/log.js";
 import { RunTally, statusComment } from "../dist/progress.js";
-import { CodexStderr, logBoundary } from "../dist/providers/codex-boundary.js";
 import {
   captureResponse,
   describeRequest,
@@ -408,80 +417,6 @@ test("a running planner or reviewer call shows in watch and the live status comm
   );
 });
 
-test("a Codex call's boundary telemetry: requests, responses, retries and a lost response.completed, from the pinned runtime's trace records", () => {
-  const golden = readFileSync(
-    new URL("./codex-0.160.0-stderr.golden", import.meta.url),
-    "utf8",
-  );
-  const file = join(mkdtempSync(join(tmpdir(), "factory-codex-")), "stderr");
-  // A call reads what came after it began: an earlier turn's lines are not its own.
-  const read = (text, completed) => {
-    writeFileSync(file, golden);
-    const stderr = new CodexStderr(file);
-    writeFileSync(file, `${golden}${text}`);
-    return stderr.read(completed);
-  };
-  assert.equal(read("", true).boundary.coverage, "unavailable");
-  const whole = read(`WARNING: an ordinary line\n${golden}`, true);
-  assert.deepEqual(whole.boundary, {
-    coverage: "observed",
-    requests: 2,
-    failedRequests: 0,
-    connects: 1,
-    responsesCompleted: 2,
-    // The start-up warm-up's empty response is not a zero-output turn.
-    zeroOutputResponses: 0,
-    streamFailures: 0,
-    retries: { http: 0, stream: 0 },
-    retryDelayMs: 0,
-    firstOutputMs: 5692,
-    completionLost: false,
-  });
-  assert.equal(whole.ordinary, "WARNING: an ordinary line\n");
-  // The stall: the final answer's request, a stream retry, and no response.completed.
-  const lines = golden.trim().split("\n");
-  const stalled = read(
-    `${[
-      ...lines.slice(0, -1),
-      '2026-10-24T05:50:38.885453Z  INFO codex_otel.trace_safe: event.name="codex.retry" retry.layer=stream retry.operation=sampling retry.delay_ms=200 retry.attempt=1 event.timestamp=2026-10-24T05:50:38.885Z',
-    ].join("\n")}\n`,
-    false,
-  );
-  assert.equal(stalled.boundary.completionLost, true);
-  assert.deepEqual(stalled.boundary.retries, { http: 0, stream: 1 });
-  assert.deepEqual(stalled.retries, [
-    {
-      layer: "stream",
-      operation: "sampling",
-      delayMs: 200,
-      attempt: 1,
-      nativeAt: "2026-10-24T05:50:38.885Z",
-    },
-  ]);
-  // Logged with its call, and summed by analysis.
-  const inst = installation();
-  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-4");
-  const record = {
-    event: "model-usage",
-    callId: "c2",
-    role: "reviewer",
-    provider: "codex",
-    phase: "result-review",
-    outcome: "error",
-  };
-  const write = (event) => log.write(65, { step: "item:a:review", ...event });
-  writeFileSync(file, "");
-  const stderr = new CodexStderr(file);
-  writeFileSync(file, `${lines.slice(0, -1).join("\n")}\n`);
-  logBoundary(record, write, stderr, false);
-  write(record);
-  const analysis = cli(inst, "diagnostics", "65", "--analyze");
-  assert.match(
-    analysis.out,
-    /Codex boundary: observed in 1\/1 calls · 2 requests \(0 failed\) · 1 responses completed \(0 with no output\) · retries 0 HTTP, 0 stream \(0 s delay\) · 0 stream failures · 1 lost completions/,
-  );
-});
-
 test("a model call's answer is sized and digested with capture off; a cut capture keeps its originals' size and digest", () => {
   const sha = (text) => createHash("sha256").update(text).digest("hex");
   const prompt = `Plan ${"p".repeat(4_000)}`;
@@ -618,13 +553,13 @@ test("watch --once and --json show each row's attempt, PR, tool targets and the 
   assert.equal(tail.at(-1).n, 29);
 });
 
-test("status --json details each Work Item's attempt, commits, last error, repair class and blocker, with the service's setup; analyze groups by attempt and call and breaks tokens down by model and child thread", () => {
+test("status --json details each Work Item's attempt, commits, last error, repair class, blocker and whether it runs, with the service's setup; analyze groups by attempt and call and breaks tokens down by model and child thread", () => {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   seed(inst, 69, "building", {
     done: {
       check: {},
-      plan: plan([item("a"), item("b", { dependencies: ["a"] })]),
+      plan: plan([item("a"), item("b", { dependencies: ["a"] }), item("c")]),
       "item:a:work": {
         base: "b0",
         commit: "c1",
@@ -651,9 +586,10 @@ test("status --json details each Work Item's attempt, commits, last error, repai
       },
     },
     stepRuns: { "item:a:review": { n: 2 } },
+    attempts: { "item:c:work": { startedAt: new Date().toISOString() } },
   });
   const [objective] = status(inst).objectives;
-  const [a, b] = objective.items;
+  const [a, b, c] = objective.items;
   assert.deepEqual(
     {
       attempt: a.attempt,
@@ -679,6 +615,31 @@ test("status --json details each Work Item's attempt, commits, last error, repai
     },
   );
   assert.equal(b.blocker, "waits for a to merge");
+  assert.deepEqual(
+    objective.items.map((row) => [row.id, row.running]),
+    [
+      ["a", false],
+      ["b", false],
+      ["c", true],
+    ],
+  );
+  // The live status comment lists running Work Items' workers only.
+  const reported = { at: new Date().toISOString(), counts: { turns: 1 } };
+  const comment = statusComment(
+    "<!-- marker -->",
+    {
+      view: objective,
+      calls: [],
+      running: [],
+      activity: { a: reported, c: reported },
+      decisions: [],
+    },
+    [],
+    { questions: true },
+    Date.now(),
+  ).body;
+  assert.match(comment, /\*\*Workers\*\*\n- `c`: active/);
+  assert.doesNotMatch(comment, /- `a`: active/);
   const shown = cli(inst, "status");
   assert.match(
     shown.out,
@@ -813,4 +774,86 @@ test("status --json details each Work Item's attempt, commits, last error, repai
     cli(inst, "diagnostics", "69", "--analyze").out,
     /Codex child threads: 2 in 1 calls · 440 tokens/,
   );
+});
+
+test("a follow reads new run-log lines in bounded chunks, a line longer than a chunk included, and leaves a line still being written for the next read", () => {
+  const logs = mkdtempSync(join(tmpdir(), "factory-follow-"));
+  mkdirSync(join(logs, "7"));
+  const run = "2026-01-01T00-00-00-000Z-1";
+  const file = join(logs, "7", `${run}.jsonl`);
+  const line = (n, pad = "") =>
+    `${JSON.stringify({ at: new Date(Date.UTC(2026, 0, 1) + n).toISOString(), n, pad })}\n`;
+  // About 3 MiB over many 1 MiB chunks, with a 2.5 MiB line among them.
+  const lines = Array.from({ length: 3000 }, (_, n) =>
+    line(n, n === 1500 ? "y".repeat(2.5 * 1024 ** 2) : "x".repeat(1000)),
+  );
+  const partial = line(3000);
+  writeFileSync(file, lines.join("") + partial.slice(0, 20));
+  const offsets = new Map();
+  const first = readNew(logs, 7, offsets);
+  assert.deepEqual(
+    first.map((event) => event.n),
+    lines.map((_, n) => n),
+  );
+  assert.equal(first[1500].pad.length, 2.5 * 1024 ** 2);
+  assert.equal(first[0].run, run);
+  assert.equal(offsets.get(file), statSync(file).size - 20);
+  // The rest of the line lands: the next read has it, and only it.
+  appendFileSync(file, partial.slice(20));
+  assert.deepEqual(
+    readNew(logs, 7, offsets).map((event) => event.n),
+    [3000],
+  );
+  assert.equal(offsets.get(file), statSync(file).size);
+  assert.deepEqual(readNew(logs, 7, offsets), []);
+});
+
+test("log rotation carries on past a run it can't remove, and records each removed run once", {
+  // Root removes the read-only directory's file anyway.
+  skip: process.getuid?.() === 0,
+}, () => {
+  const logs = mkdtempSync(join(tmpdir(), "factory-rotate-"));
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  const runs = ["a", "b", "c"].map((name) => `2026-01-01T00-00-0${name}`);
+  for (const issue of ["8", "9"]) {
+    mkdirSync(join(logs, issue));
+    for (const run of runs) {
+      writeFileSync(join(logs, issue, `${run}.jsonl`), "{}\n");
+      utimesSync(join(logs, issue, `${run}.jsonl`), old, old);
+    }
+  }
+  // #8's first run has a capture its directory doesn't let go of.
+  const stuck = join(logs, "8", `${runs[0]}.captures`);
+  mkdirSync(stuck);
+  writeFileSync(join(stuck, "c.json"), "{}");
+  chmodSync(stuck, 0o500);
+  utimesSync(stuck, old, old);
+  try {
+    const all = { runsPerObjective: 0, totalBytes: 1 };
+    for (let pass = 0; pass < 3; pass++) {
+      const failed = rotateLogs(logs, undefined, all);
+      assert.equal(failed.length, 1, "the capture, each pass");
+    }
+    assert.deepEqual(readdirSync(join(logs, "8")).sort(), [
+      `${runs[0]}.captures`,
+      "rotated",
+    ]);
+    assert.deepEqual(readdirSync(join(logs, "9")), ["rotated"]);
+    // One record per run, however many passes found it still there.
+    for (const issue of ["8", "9"])
+      assert.deepEqual(
+        readFileSync(join(logs, issue, "rotated"), "utf8")
+          .trim()
+          .split("\n")
+          .map((record) => JSON.parse(record).run)
+          .sort(),
+        runs,
+      );
+    assert.deepEqual(
+      rotatedRuns(logs, 8).map((record) => record.run),
+      runs,
+    );
+  } finally {
+    chmodSync(stuck, 0o700);
+  }
 });

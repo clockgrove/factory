@@ -169,7 +169,7 @@ export async function repairContext(
       diagnosis: {
         repair: history.count,
         context: repairContextValue,
-        applied: [...applied, result.finding],
+        applied: [...applied, result.correction],
         ...(answered ? { answered: answered.holdId } : {}),
       },
     },
@@ -283,7 +283,7 @@ export function blameOutcome(
             diagnosis: {
               repair: (state.repairs?.[work]?.count ?? 0) + 1,
               context,
-              applied: [...(diagnosed?.applied ?? []), blame.finding],
+              applied: [...(diagnosed?.applied ?? []), blame.correction],
             },
           },
           predecessor.id,
@@ -296,7 +296,7 @@ export function blameOutcome(
             diagnosis: {
               repair: saved?.repair ?? 0,
               context: saved?.context ?? { finding: blame.correction.failure },
-              applied: [...(saved?.applied ?? []), blame.finding],
+              applied: [...(saved?.applied ?? []), blame.correction],
               ...(saved?.answered ? { answered: saved.answered } : {}),
             },
             ...(refused

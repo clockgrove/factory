@@ -157,7 +157,7 @@ const GENERATED_VALUES =
 
 /** Check 3: durable data needs storage the item owns. */
 const STORAGE_OWNERSHIP =
-  "An item whose acceptance needs durable data (a new table or persisted record) that has no storage at the base owns the migrations directory and the module that writes that data, or depends on the item that does. Factory refuses an item that names a new table, owns no migrations path and depends on none that does.";
+  "Storage that new durable data (a new table or persisted record) needs is owned by the item, with the module that writes the data, or by an item it depends on.";
 
 /** Check 5: a validation command follows the files it checks. */
 const VALIDATION_OWNERSHIP =
@@ -169,7 +169,7 @@ const CANDIDATE_SETS =
 
 /** Check 1: safety claims need local proof that names them. */
 const SAFETY_PROOF =
-  "Privacy, authority (authorization, permission) and accessibility criteria are not proved by review judgement, CI or a whole-suite command alone: the owner delivers a test that names the claim, and a validation command that runs it is the criterion's command proof. Factory refuses such a criterion proved by review or CI.";
+  "A privacy, authority (authorization, permission) or accessibility criterion is proved by a command: the owner delivers a test that names the claim, and a validation command that runs it is the criterion's proof; flag one proved only by review judgement, CI or a whole-suite command.";
 
 /** The numbered rubric; checks 1-9 are fix findings (except an open source scope question in check 1), check 10 is an operator decision. */
 export const GRAPH_REVIEW_CHECKS = `Check:

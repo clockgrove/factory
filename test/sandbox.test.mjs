@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { runSandboxed } from "../dist/sandbox.js";
 import { addWorktree, validationEnvironment } from "../dist/worktree.js";
 
-test("validation reads Git with system aliases and a private sibling configuration", async (t) => {
+test("validation reads Git with system aliases and a private sibling configuration, in a /tmp sized by its limit", async (t) => {
   const root = mkdtempSync("/tmp/factory-sandbox-");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const config = join(root, "config.json");
@@ -43,9 +43,8 @@ test("validation reads Git with system aliases and a private sibling configurati
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base");
   const directory = join(root, "item.validation");
   await addWorktree(checkout, directory, git("rev-parse", "HEAD"));
-  const result = await runSandboxed(
-    'test ! -e "$FACTORY_TEST_CONFIG" && git check-attr test -- a.txt',
-    {
+  const run = (command) =>
+    runSandboxed(command, {
       cwd: directory,
       home,
       temporary,
@@ -71,10 +70,17 @@ test("validation reads Git with system aliases and a private sibling configurati
       },
       signal: AbortSignal.timeout(30_000),
       timeoutMs: 20_000,
-    },
+    });
+  const result = await run(
+    'test ! -e "$FACTORY_TEST_CONFIG" && git check-attr test -- a.txt',
   );
   assert.equal(result.kind, "ran", JSON.stringify(result));
   assert.equal(result.sandboxed, true);
   assert.equal(result.exitCode, 0, result.stderr);
   assert.equal(result.stdout.trim(), "a.txt: test: value");
+  // The probe found this bubblewrap (0.9 or later) can size a tmpfs.
+  const tmp = await run("stat -f -c '%b %S' /tmp");
+  assert.equal(tmp.exitCode, 0, tmp.stderr);
+  const [blocks, size] = tmp.stdout.trim().split(" ").map(Number);
+  assert.equal(blocks * size, 16 * 1024 * 1024);
 });

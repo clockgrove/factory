@@ -500,10 +500,17 @@ export async function workStep(
         sets,
         signal,
       });
+      // About the candidates, like a capture refusal: the next attempt
+      // stages them again, since their staging is gone.
       if (outside)
-        return repairOutcome(item, "work", outside, context.state, place, {
-          keep: keepAll,
-        });
+        return repairOutcome(
+          item,
+          "work",
+          { kind: "failure", detail: outside, staging: "candidates" },
+          context.state,
+          place,
+          { keep: keepAll },
+        );
       const done: WorkResult = {
         base,
         commit: collected.commit,

@@ -66,5 +66,11 @@ test("a capture refusal of the candidate sets is the correction: stage them agai
   assert.equal(result.correction.source, "staging-refusal");
   assert.match(result.correction.correction, /stage every candidate set again/);
   assert.match(result.correction.correction, /owned files and tests/);
+  // The destinations are owned too, but Factory writes the selected set
+  // there: a worker told only to finish its owned files wrote them.
+  assert.match(
+    result.correction.correction,
+    /Leave each candidate destination as it is/,
+  );
   assert.equal(asked.length, 0);
 });

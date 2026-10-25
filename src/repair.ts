@@ -252,7 +252,7 @@ const STAGING_REFUSALS: Record<
   },
   candidates: {
     file: ".factory-media/ and .factory-assets.json",
-    redo: "Make and stage every candidate set again as the media instructions say (staging from an earlier attempt is gone), so the capture accepts them, and finish everything else the Work Item asks for (its owned files and tests).",
+    redo: "Make and stage every candidate set again under .factory-media/ as the media instructions say (staging from an earlier attempt is gone), so the capture accepts them. Leave each candidate destination as it is at the base: Factory writes the selected set there. Finish the rest of the Work Item (its other owned files and tests).",
   },
 };
 

@@ -477,29 +477,57 @@ function modelText(event: LogEvent): string {
     .join(" · ");
 }
 
-interface Activity {
+/** The counts a `worker-activity` event carries (work/worker.ts ActivityLog), each since the event before. */
+export interface ActivityCounts {
   turns: number;
   toolsStarted: number;
+  toolsFinished: number;
   edits: number;
   commands: number;
   commandsFailed: number;
+  compactions: number;
+}
+
+/** One `worker-activity` event's counts added to `into` (fresh zeros when absent); a count it lacks adds 0. */
+export function foldActivity(
+  event: LogEvent,
+  into?: ActivityCounts,
+): ActivityCounts {
+  const totals = into ?? {
+    turns: 0,
+    toolsStarted: 0,
+    toolsFinished: 0,
+    edits: 0,
+    commands: 0,
+    commandsFailed: 0,
+    compactions: 0,
+  };
+  const counts = (event.counts ?? {}) as Record<string, unknown>;
+  for (const name of Object.keys(totals) as (keyof ActivityCounts)[])
+    totals[name] += num(counts[name]) ?? 0;
+  return totals;
+}
+
+interface Activity {
+  counts: ActivityCounts;
   tools: Set<string>;
   paths: Set<string>;
   command?: string;
 }
 
 function activityText(item: string, activity: Activity): string {
-  const parts = [`activity ${item}: ${activity.turns} turns`];
-  if (activity.toolsStarted)
+  const counts = activity.counts;
+  const parts = [`activity ${item}: ${counts.turns} turns`];
+  if (counts.toolsStarted)
     parts.push(
-      `${activity.toolsStarted} tools${activity.tools.size ? ` (${[...activity.tools].slice(0, 8).join(", ")})` : ""}`,
+      `${counts.toolsStarted} tools${activity.tools.size ? ` (${[...activity.tools].slice(0, 8).join(", ")})` : ""}`,
     );
-  if (activity.edits)
+  if (counts.edits)
     parts.push(
-      `${activity.edits} edits${activity.paths.size ? ` (${[...activity.paths].slice(0, 8).join(", ")})` : ""}`,
+      `${counts.edits} edits${activity.paths.size ? ` (${[...activity.paths].slice(0, 8).join(", ")})` : ""}`,
     );
-  if (activity.commands) parts.push(`${activity.commands} commands`);
-  if (activity.commandsFailed) parts.push(`${activity.commandsFailed} failed`);
+  if (counts.commands) parts.push(`${counts.commands} commands`);
+  if (counts.commandsFailed) parts.push(`${counts.commandsFailed} failed`);
   if (activity.command) parts.push(`last $ ${activity.command}`);
   return parts.join(" · ");
 }
@@ -696,20 +724,11 @@ class Timeline {
 /** One `worker-activity` event added to a step's activity. */
 function fold(event: LogEvent, into?: Activity): Activity {
   const activity = into ?? {
-    turns: 0,
-    toolsStarted: 0,
-    edits: 0,
-    commands: 0,
-    commandsFailed: 0,
+    counts: foldActivity(event),
     tools: new Set<string>(),
     paths: new Set<string>(),
   };
-  const counts = (event.counts ?? {}) as Record<string, unknown>;
-  activity.turns += num(counts.turns) ?? 0;
-  activity.toolsStarted += num(counts.toolsStarted) ?? 0;
-  activity.edits += num(counts.edits) ?? 0;
-  activity.commands += num(counts.commands) ?? 0;
-  activity.commandsFailed += num(counts.commandsFailed) ?? 0;
+  if (into) foldActivity(event, into.counts);
   if (Array.isArray(event.tools))
     for (const tool of event.tools) activity.tools.add(String(tool));
   if (Array.isArray(event.paths))

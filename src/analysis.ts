@@ -8,10 +8,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  type ActivityCounts,
   addUsage,
   chosenFiles,
   count,
   emptyUsage,
+  foldActivity,
   itemOfEvent,
   num,
   originalText,
@@ -427,16 +429,7 @@ export interface AnalysisReport {
     ms: number;
     byStep: Record<string, { commands: number; failed: number }>;
   };
-  activity: Record<
-    string,
-    {
-      turns: number;
-      toolsStarted: number;
-      edits: number;
-      commands: number;
-      commandsFailed: number;
-    }
-  >;
+  activity: Record<string, ActivityCounts>;
   /** The old formal history's checks, on step attempts (start paired with outcome). */
   history: {
     attempts: number;
@@ -1037,17 +1030,7 @@ class Analysis {
       }
       case "worker-activity": {
         const item = itemOfEvent(event) ?? "objective";
-        this.activity[item] ??= {
-          turns: 0,
-          toolsStarted: 0,
-          edits: 0,
-          commands: 0,
-          commandsFailed: 0,
-        };
-        const row = this.activity[item];
-        const counts = (event.counts ?? {}) as Record<string, unknown>;
-        for (const name of Object.keys(row) as (keyof typeof row)[])
-          row[name] += num(counts[name]) ?? 0;
+        this.activity[item] = foldActivity(event, this.activity[item]);
         break;
       }
       case "aborted":

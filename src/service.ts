@@ -1350,7 +1350,11 @@ export async function serve(options: ServeOptions): Promise<number> {
  * Objectives, the one that owned its side of their first overlap first
  * goes first (the earlier issue on a tie), so an amendment never stops a
  * later Objective that already builds the paths it adds, and a later
- * amendment never reverses an order that stands (plan.ts `ownedSince`). An Objective with no
+ * amendment never reverses an order that stands (plan.ts `ownedSince`).
+ * One that has started building never waits on one that hasn't: a plan's
+ * acceptance is stamped before its plan comment posts and the service sees
+ * the plan only once it is saved, so a slow post can give a plan that shows
+ * up after the other Objective began building the earlier time (#1992). An Objective with no
  * accepted plan of its own (planning, resetting, or reviewing a rebuilt
  * plan) or with every item built never waits, but owns its paths until it
  * is done or cancelled, through final validation, final review and the
@@ -1381,7 +1385,8 @@ function pathOwners(owned: readonly Owned[]): Map<number, number> {
           };
         }
       if (!first) continue;
-      const [ahead, behind] = first.aFirst ? [a, b] : [b, a];
+      let [ahead, behind] = first.aFirst ? [a, b] : [b, a];
+      if (behind.building && !ahead.building) [ahead, behind] = [behind, ahead];
       if (behind.waits)
         waits.push({ from: behind.issue, to: ahead.issue, arose: first.arose });
     }
@@ -1420,6 +1425,8 @@ interface Owned {
    * does.
    */
   waits: boolean;
+  /** It has started a Work Item: one that hasn't never goes ahead of it. */
+  building: boolean;
   paths: { path: string; since: string }[];
 }
 
@@ -1430,6 +1437,7 @@ function ownedPaths(runner: ObjectiveRunner): Owned | undefined {
   return {
     issue: runner.state.issue,
     waits: Boolean(currentPlan(runner.state)) && !built(runner.state),
+    building: startedItems(runner.state).size > 0,
     paths: rankedPaths(owned.plan, owned.accepted),
   };
 }

@@ -878,6 +878,50 @@ test("an amendment's new paths rank by its acceptance: an earlier Objective wait
   await stopped(service);
 });
 
+test("a plan that shows up after another Objective started building the same path waits on it, though its acceptance is earlier (#1992)", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  const at = new Date().toISOString();
+  const seeded = new Date(Date.parse(at) - 60_000).toISOString();
+  // #91 builds src/o.ts: its work retried a minute ago and is due. #92's
+  // plan owns src/o.ts too and was stamped earlier (a slow plan post), but
+  // it has started nothing.
+  seed(inst, 91, "building", {
+    done: { check: {}, plan: plan([item("a", { ownedPaths: ["src/o.ts"] })]) },
+    kept: { "plan:acceptedAt": "2026-01-02T00:00:00.000Z" },
+    retries: {
+      "item:a:work": {
+        count: 0,
+        attempts: 1,
+        since: seeded,
+        nextAt: at,
+        lastError: "seeded",
+      },
+    },
+  });
+  seed(inst, 92, "building", {
+    done: { check: {}, plan: plan([item("b", { ownedPaths: ["src/o.ts"] })]) },
+    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
+  });
+  const waitsOn = (issue) =>
+    status(inst).objectives.find((each) => each.issue === issue).waitsOn;
+  const started = (issue, key) => {
+    const state = stateOf(inst, issue);
+    return (
+      key in state.attempts ||
+      (key in state.retries && state.retries[key].lastError !== "seeded")
+    );
+  };
+  const service = serve(inst);
+  await until(() => started(91, "item:a:work"), "#91's work goes on");
+  await until(() => waitsOn(92)?.paths === 91, "#92 waits on #91");
+  assert.equal(waitsOn(91), null);
+  assert.ok(!started(92, "item:b:work"), stateOf(inst, 92).attempts);
+  for (const issue of [91, 92])
+    assert.equal(cli(inst, "cancel", String(issue)).code, 0);
+  await stopped(service);
+});
+
 test("the repository map says whether it lists every path, which makes the result review's tree inventory complete", async () => {
   const checkout = mkdtempSync(join(tmpdir(), "factory-map-"));
   const git = (...args) => {

@@ -486,7 +486,7 @@ async function repositoryChecks(
         : {
             name: "required checks",
             status: "warn",
-            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes`,
+            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes and any checks that register on it pass`,
             fix: `Require the CI checks on ${branch} in a ruleset`,
           },
     );

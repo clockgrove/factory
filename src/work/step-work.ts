@@ -521,7 +521,11 @@ export async function workStep(
       return repairOutcome(
         item,
         "work",
-        collected.finding,
+        {
+          kind: "failure",
+          detail: collected.finding,
+          ...(collected.staging ? { staging: collected.staging } : {}),
+        },
         context.state,
         place,
         {

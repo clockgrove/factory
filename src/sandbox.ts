@@ -10,7 +10,8 @@
  * Factory's own configuration, data or state. Network is off; loopback
  * works. A verified package install may get outbound network in its own
  * namespace, through pasta, never the host's (package-network.ts decides
- * which install may).
+ * which install may). Only `sandbox.network: host` shares the host's
+ * network namespace, with every command.
  *
  * A setup failure is a configuration fault returned as data, never the
  * command's failure. Every process group started here is tracked, killed
@@ -686,11 +687,14 @@ export function sandboxStatus(config: SandboxConfig): {
         `sandbox.environment.${name} is an absolute path that no sandbox.readOnlyPaths entry covers, so commands cannot read it`,
     ),
   };
-  const network = !install
-    ? "network off for every command"
-    : install.available
-      ? `network only for verified package installs, in their own network namespace through ${install.executable}, without host loopback`
-      : `network off for every command: verified package installs run offline, because ${install.detail} (install passt to give them the network)`;
+  const network =
+    config.network === "host"
+      ? "every command shares the host's network: its loopback services, its local network, the internet and abstract Unix sockets"
+      : !install
+        ? "network off for every command"
+        : install.available
+          ? `network only for verified package installs, in their own network namespace through ${install.executable}, without host loopback`
+          : `network off for every command: verified package installs run offline, because ${install.detail} (install passt to give them the network)`;
   if (found.available && runsAsRoot() && config.required)
     return {
       mode: "unavailable",
@@ -1407,22 +1411,24 @@ function launch(
       );
     mounts.set(path, "ro");
   }
-  // A network grant runs in the sandbox's own namespace through pasta, or
-  // offline: never in the host's network namespace.
+  // The operator's opt-in: every command shares the host's network
+  // namespace. Otherwise a network grant runs in the sandbox's own
+  // namespace through pasta, or offline.
+  const host = config.network === "host";
   const online =
     options.network && options.packageInstall ? installNetwork() : undefined;
   const pasta = online?.available ? online : undefined;
   // An install without the network runs its package manager offline: it
   // installs from the store or fails at once, naming what is missing,
   // instead of waiting on registry lookups that cannot succeed.
-  if (options.packageInstall && !pasta) {
+  if (options.packageInstall && !pasta && !host) {
     env.npm_config_offline = "true";
     env.pnpm_config_offline = "true";
   }
-  // Name resolution through pasta's DNS forwarder, written where the host's
-  // /etc/resolv.conf leads (often outside /etc).
+  // Where the host's /etc/resolv.conf leads (often outside /etc): pasta's
+  // DNS forwarder is written there, and the host's file is mounted there.
   const resolver =
-    pasta && existsSync("/etc/resolv.conf")
+    (pasta || host) && existsSync("/etc/resolv.conf")
       ? realpathSync("/etc/resolv.conf")
       : undefined;
   // Process limit: RLIMIT_NPROC, set by util-linux prlimit inside the sandbox.
@@ -1454,6 +1460,7 @@ function launch(
       "--json-status-fd",
       "3",
       ...ISOLATION,
+      ...(host ? ["--share-net"] : []),
       ...systemMounts(),
       "--proc",
       "/proc",
@@ -1471,7 +1478,11 @@ function launch(
           );
         return [access === "rw" ? "--bind" : "--ro-bind", source, path];
       }),
-      ...(resolver ? ["--ro-bind-data", "5", resolver] : []),
+      ...(resolver
+        ? pasta
+          ? ["--ro-bind-data", "5", resolver]
+          : ["--ro-bind", resolver, resolver]
+        : []),
       // Mount points' parents live on the sandbox's own root: keep it
       // read-only, so only the mounts named writable take writes.
       "--remount-ro",

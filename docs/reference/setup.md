@@ -15,7 +15,7 @@ Part of [the design](../DESIGN.md).
 **Readiness** (readiness.ts) is one checklist, made with no model call and no change to the target or its settings (the Codex probe writes only its own temporary directories). Each check is `ok`, `warn` (it runs, but see the detail) or `blocked` (the service would hold on it), and every check that isn't `ok` names its fix.
 
 - **Host:**
-  - bubblewrap starts a sandbox, and with `package-install`, pasta is there;
+  - bubblewrap starts a sandbox, and with `package-install`, pasta is there; with `host`, the detail says what commands reach;
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - git, git lfs, node and each final command's program are on the PATH;
   - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it;
@@ -24,7 +24,7 @@ Part of [the design](../DESIGN.md).
 - **Repository:**
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;
-  - required status checks exist;
+  - required status checks exist. None is a warning: a PR then merges once Factory's own validation passes and any checks that register on it pass.
   - no ruleset or classic protection requires an approving review that the login can't bypass (`warn`: every Factory PR waits for someone else to approve it). A ruleset counts when GitHub reports `current_user_can_bypass: never` for the login; classic protection counts unless the login is in its bypass list, and only when the login may read it. The fix is a bypass for the login, or no required reviews.
 - **Branch protection:** setup recommends "require branches to be up to date", and Factory never changes repository settings.
 - **Validation environment:** `readiness.validationEnvironment` says how validation differs from hosted CI: the network, the sandbox, the bootstrap install, `sandbox.environment`'s names, the final and CI-only commands, and the package scripts that need a network validation lacks.
@@ -40,7 +40,7 @@ Installation options, each setting one key:
 | `--objective-tokens`, `--objective-cents`, `--day-tokens`, `--day-cents`                       | `autonomy.spend.perObjective.*`, `autonomy.spend.perDay.*` |
 | `--required-env NAME`...                                                                       | `autonomy.requiredEnvironment`                             |
 | `--delivery regular\|native-stack`                                                             | `delivery.kind`                                            |
-| `--sandbox-network off\|package-install`, `--package-store DIR`                                | `sandbox.network`, `sandbox.packageStore`                  |
+| `--sandbox-network off\|package-install\|host`, `--package-store DIR`                          | `sandbox.network`, `sandbox.packageStore`                  |
 | `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`             |
 | `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                                        |
 | `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                                |

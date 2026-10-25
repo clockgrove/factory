@@ -76,7 +76,7 @@ import {
   openParent,
   readContained,
 } from "./paths.js";
-import { ancestors, isRecord, ownsPath } from "./planning/graph.js";
+import { ancestors, isRecord, MEDIA_ID, ownsPath } from "./planning/graph.js";
 import type { Plan, SourceAssetBinding, WorkItem } from "./planning/types.js";
 import { localAssetPlace } from "./sandbox.js";
 import { errorMessage } from "./text.js";
@@ -209,7 +209,7 @@ const LFS = [
   "filter.lfs.required=true",
 ];
 /** Set and role ids; set ids are also hold answers. */
-const ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const ID = MEDIA_ID;
 /** Answers a select hold has besides the set ids (the engine adds `fresh`). */
 const RESERVED = new Set([
   "repair",
@@ -784,13 +784,16 @@ function readManifest(bytes: Buffer, item: WorkItem): DeclaredSet[] {
       if (
         !isRecord(member) ||
         !text(member.role) ||
-        !ID.test(member.role) ||
         !text(member.path) ||
         !text(member.mediaType) ||
         !text(member.destination)
       )
         throw new Finding(
           `Set ${id} has a member without role, path, mediaType and destination`,
+        );
+      if (!ID.test(member.role))
+        throw new Finding(
+          `Set ${id} member role ${JSON.stringify(member.role)} is not an id: use letters, digits, - and _ starting with a letter or digit (no spaces), the same in every set`,
         );
       const { role, path, destination } = member;
       if (roles.has(role))

@@ -10,7 +10,9 @@ now() { date +%s; }
 iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 iso_ms() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 iso_s() { python3 -c 'import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()))' "$1"; }
-# Seconds left before the wave stops (55 min after the start); never negative.
+# STOP_AT is the wave's stop (55 min after the start); inside a case, run_case
+# lowers it to the case's own deadline, so every wait below is bounded by it.
+# Seconds left before STOP_AT; never negative.
 left() { local l=$(( STOP_AT - $(now) )); [ "$l" -gt 0 ] && echo "$l" || echo 0; }
 stopping() { [ -e "$RUN_DIR/stop" ] || [ "$(now)" -ge "$STOP_AT" ]; }
 
@@ -186,8 +188,11 @@ hold_pick() { python3 -c 'import json,sys;h=json.loads(sys.argv[1] or "null") or
 #           (at most AUTO_DECIDE_MAX per Objective)
 #   more    answer `more` when it is the recommended answer (an allowance reached by the suite's own answers)
 HOLD_POLICY=${HOLD_POLICY-d2 review}
-auto_answer() { # N -> 0 when it answered an open hold or has an answer in flight; 1 when it can answer none
-  local n=$1 choices choice id step pick arg text marker at seconds count rc=1
+# auto_answer N -> 0 when it answered an open hold or has an answer in flight;
+# 2 when a hold is open, HOLD_POLICY (and AUTO_REVIEW_DECISIONS) has no answer
+# left for any, and no answer of the case's own is waiting to be applied; else 1.
+auto_answer() {
+  local n=$1 choices choice id step pick arg text marker at seconds count rc=1 offered=""
   local fields=() args=()
   choices=$(st auto-answers "$n" "$HOLD_POLICY" "${AUTO_REVIEW_DECISIONS:-[]}") || return 1
   while IFS= read -r choice; do
@@ -198,7 +203,8 @@ for k in ("id","step","answer","arg","text"): print(c.get(k,""),end="\0")
 print(hashlib.sha256(c["id"].encode()).hexdigest(),end="\0")' "$choice")
     id=${fields[0]}; step=${fields[1]}; pick=${fields[2]}; arg=${fields[3]}; text=${fields[4]}
     marker="$RUN_DIR/answered/$n.${fields[5]}"
-    [ -f "$marker" ] && continue
+    # Answered and accepted: the hold is still on its way out.
+    [ -f "$marker" ] && { offered=1; continue; }
     if [[ $step == decide:* ]]; then
       count=$(python3 - "$RUN_DIR/answered" "$n" <<'PY'
 import glob,json,os,sys
@@ -208,6 +214,7 @@ PY
 ) || return 1
       [ "$count" -lt "${AUTO_DECIDE_MAX:-4}" ] || continue
     fi
+    offered=1
     # A CLI exit of zero can mean only "queued". Wait for the service's
     # structured request result before recording an answer as accepted;
     # one the service hasn't applied yet is in flight, not unanswerable.
@@ -229,24 +236,32 @@ PY
     echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$n"
     log "#$n auto-answered $pick${arg:+ $arg} (question $id at $step)"; rc=0
   done <<<"$choices"
-  return $rc
+  [ -n "$offered" ] && return $rc
+  # Unanswerable only while a hold stands (it may have cleared since the
+  # read) and no answer the case sent itself (answer_t) is still queued.
+  [ "$(st holds "$n")" != "[]" ] && [ "$(st pending "$n")" = 0 ] || return 1
+  return 2
 }
 # wait_phase N REGEX SECS: poll the state until the phase matches (status, or
 # "hold:<step>" while a question is open), answering by HOLD_POLICY. Never past
-# the wave's stop. Prints the phase, or "timeout:<phase>" / "stopped:<phase>".
+# STOP_AT. Prints the phase, or "timeout:<phase>" / "stopped:<phase>". A wait
+# whose REGEX asks for no hold returns "held:<step>" at once on a hold
+# HOLD_POLICY can't answer: nothing else would, and it would starve the case.
 wait_phase() {
-  local n=$1 want=$2 secs=$3 end p
+  local n=$1 want=$2 secs=$3 end p a
   end=$(( $(now) + secs )); [ "$end" -gt "$STOP_AT" ] && end=$STOP_AT
   while :; do
     p=$(st phase "$n")
     if [[ $p =~ $want ]]; then echo "$p"; return 0; fi
-    if [[ $p == hold:* ]] && auto_answer "$n"; then sleep 3; continue; fi
+    a=1; [[ $p == hold:* ]] && { auto_answer "$n"; a=$?; }
+    # Held only if the same hold still shows after the policy had its turn.
+    [ "$a" = 2 ] && [[ $want != *hold* ]] && [ "$(st phase "$n")" = "$p" ] && { echo "held:${p#hold:}"; return 1; }
     stopping && { echo "stopped:$p"; return 1; }
     [ "$(now)" -ge "$end" ] && { echo "timeout:$p"; return 1; }
-    sleep 4
+    if [ "$a" = 0 ]; then sleep 3; else sleep 4; fi
   done
 }
-# wait_for SECS CMD...: poll a command until it succeeds (never past the stop).
+# wait_for SECS CMD...: poll a command until it succeeds (never past STOP_AT).
 wait_for() {
   local secs=$1; shift
   local end=$(( $(now) + secs )); [ "$end" -gt "$STOP_AT" ] && end=$STOP_AT

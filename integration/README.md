@@ -9,7 +9,7 @@ Factory has two kinds of tests:
 
 ```sh
 npm run build                                   # the suite runs dist/cli.js
-npm run integration -- --dry-run                     # every case, what it checks, its expected minutes and the budget
+npm run integration -- --dry-run                     # every case, what it checks, its minutes and the run's budget
 npm run integration                                  # the main suite
 npm run integration -- --suite edge                  # the edge suite: PRD requirements no main case covers
 npm run integration -- --suite prd                   # the PRD suite: the requirements docs/PRD.md's Done still needs shown live
@@ -22,7 +22,7 @@ npm run integration -- --build ../other-checkout     # test another build (its d
 
 **Provider.** `--provider codex|claude` (default `codex`) is the run's default provider: every case except the cross-provider `claude` case runs on it, and the cases whose check is a planner decision use its `-plan` variant (`codex-plan` or `claude-plan`). The `codex` case (`happy.codex`, `stack.strict`, `model-kill.*`) is the chosen provider's end-to-end stack run, and `model-kill.*` kills that provider's own child: `codex` by its `--cd`, `claude` (the Agent SDK's native binary) by its working directory. The `claude` case (`happy.claude`, `queue.run-command`) runs `factory run N --provider` with the other one, so a Claude run proves Codex there. Dry runs and the results file name the provider. A minor version qualifies only when main, edge and prd pass on both (see [RELEASING.md](../docs/RELEASING.md)).
 
-**Time limit.** A suite has 60 minutes of wall clock: at 55 minutes it stops its cases, cancels unsettled Objectives concurrently, then runs the end checks, cleanup and report. CLI and remote calls share the deadline. The crash lane advances through exact hooks against one shared deadline, with time reserved for terminal checks.
+**Time limit.** A suite has 60 minutes of wall clock: at 55 minutes it stops its cases, cancels unsettled Objectives concurrently, then runs the end checks, cleanup and report. Each case also has its own budget, its minutes in the cases table (`--dry-run` shows them): its deadline is its start plus those minutes, never past the 55-minute stop, and every wait, CLI call and polling loop in the case ends there. A case out of time records its unfinished checks as failed or leaves them unrecorded (`incomplete.*`), as at the suite's stop, and its unsettled Objectives are cancelled; the other cases keep their time. A wait for an Objective to end returns at once (`held:<step>`) when it holds on a question the case's hold policy can't answer; waits that expect a question still return it. Remote calls share the suite's deadline. The crash lane advances through exact hooks against its budget, with time reserved for terminal checks.
 
 **Results.** `/tmp/factory-integration-runs/results/<PDT timestamp>.md` has the total wall time, each case's start, end and duration, and every check with its result and evidence. The matching run directory holds serve logs, configurations, rendered Objectives and the journal. The suite exits 0 only when every selected check has exactly one PASS and every case completed. Failed, missing, duplicate or unreachable checks fail the run. Exit 1 means qualification failed, 2 means bad usage, and 3 means a prerequisite prevented a start.
 

@@ -1346,7 +1346,12 @@ export class ClaudePlanner implements Planner {
         throw new PlannerError("retry", idle.message, { kind: "error" });
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
-      throw error;
+      // Anything else, such as the SDK's child killed or exited, is a retry,
+      // as the worker's lost turn and a failed Codex call are.
+      throw new PlannerError(
+        "retry",
+        `Claude call failed: ${detail(errorMessage(error))}`,
+      );
     } finally {
       tools.response();
       record.nativeTools = tools.value;

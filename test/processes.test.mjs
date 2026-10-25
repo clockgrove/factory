@@ -1,7 +1,7 @@
 // Stopping processes, on real processes and real Git repositories: an
-// aborted Codex run leaves no command behind, an interrupted Git is stopped
-// with its children so they clean up, and the lock files a killed Git left
-// don't block the retry.
+// aborted Codex run leaves no command behind, a killed Claude planning
+// child is a retry, an interrupted Git is stopped with its children so they
+// clean up, and the lock files a killed Git left don't block the retry.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -143,6 +143,74 @@ test("a host that refuses Codex's namespace holds the call, with the launcher's 
   assert.equal(result.outcome, "hold", `${run.stdout}${run.stderr}`);
   assert.match(result.message, /own process namespace/);
   assert.match(result.message, /unshare failed/);
+});
+
+/** The Claude SDK's native child of process `parent`, once it runs. */
+function claudeChild(parent) {
+  for (const pid of readdirSync("/proc")) {
+    if (!/^\d+$/.test(pid)) continue;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+      const [command] = readFileSync(`/proc/${pid}/cmdline`, "utf8").split(
+        "\0",
+      );
+      if (ppid === parent && command.endsWith("/claude")) return Number(pid);
+    } catch {
+      // Gone meanwhile.
+    }
+  }
+  return undefined;
+}
+
+test("a killed Claude planning child is a retry, not a charged error, as a killed Codex one is", async () => {
+  // The integration suite's model-kill.plan: the SDK's own child, killed
+  // mid-call. Its home has no login, and it is killed as it starts: it never
+  // reaches a model.
+  const home = mkdtempSync(join(tmpdir(), "factory-claude-kill-"));
+  const runner = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `const { ClaudePlanner, DEFAULT_CLAUDE_MODELS } = await import(process.argv[1]);
+      try {
+        await new ClaudePlanner(DEFAULT_CLAUDE_MODELS).answer({ role: "planner", phase: "plan", prompt: "Plan.", schema: { type: "object" }, signal: AbortSignal.timeout(60_000), log() {} });
+        console.log(JSON.stringify({ answered: true }));
+      } catch (error) {
+        console.log(JSON.stringify({ outcome: error.outcome, wait: error.wait, message: error.message }));
+      }`,
+      new URL("../dist/providers/claude.js", import.meta.url).href,
+    ],
+    { env: { PATH: process.env.PATH, HOME: home }, stdio: "pipe" },
+  );
+  let output = "";
+  runner.stdout.on("data", (chunk) => {
+    output += chunk;
+  });
+  runner.stderr.on("data", (chunk) => {
+    output += chunk;
+  });
+  const exited = new Promise((done) => runner.once("exit", done));
+  let child;
+  try {
+    await until(
+      () => (child = claudeChild(runner.pid)) || runner.exitCode !== null,
+      30_000,
+      "the SDK's child to start",
+    );
+    assert.ok(child, output);
+    process.kill(child, "SIGKILL");
+    await exited;
+  } finally {
+    runner.kill("SIGKILL");
+  }
+  const result = JSON.parse(
+    output.split("\n").find((line) => line.startsWith("{")) ?? "{}",
+  );
+  assert.equal(result.outcome, "retry", output);
+  assert.equal(result.wait, undefined, output);
+  assert.match(result.message, /terminated by signal SIGKILL/);
 });
 
 /** Make `path` look 11 minutes old: past the age a live Git's lock can have. */

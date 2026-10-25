@@ -499,11 +499,19 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
   };
   // Exit items the planner extracts from cited sources. Each names its exact
   // line range and is either proved like an Objective obligation or left out
-  // with a reason that cites Objective lines.
+  // with a reason that cites Objective lines. Only the Objective's pinned
+  // Sources hold them, never the Objective or context, which decoding
+  // refuses: with none, the list is empty.
+  const obligationSources = [...sources.keys()].filter(
+    (at) => sources[at]!.path !== "OBJECTIVE" && !sources[at]!.context,
+  );
   const sourceObligationsSchema: Schema = {
     type: "array",
+    ...(obligationSources.length ? {} : { maxItems: 0 }),
     items: strict({
-      sourceIndex: integer(sources.length),
+      sourceIndex: obligationSources.length
+        ? { type: "integer", enum: obligationSources }
+        : integer(sources.length),
       firstLineIndex: integer(),
       lastLineIndex: integer(),
       statement: {

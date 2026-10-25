@@ -469,6 +469,7 @@ export async function workStep(
     plan,
     item,
     mayChange: mayChange(shown.blocks).paths,
+    playbook: config.planning.playbook,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,

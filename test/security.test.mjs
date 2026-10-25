@@ -36,6 +36,27 @@ const git = (cwd, ...args) => {
   return result.stdout.trim();
 };
 
+/** A fresh Git worktree with one base commit, as a worker starts from. */
+function committedWorktree(prefix) {
+  const worktree = join(mkdtempSync(join(tmpdir(), prefix)), "worktree");
+  mkdirSync(worktree);
+  git(worktree, "init", "--quiet");
+  writeFileSync(join(worktree, "README.md"), "base\n");
+  git(worktree, "add", "README.md");
+  git(
+    worktree,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    "base",
+  );
+  return { worktree, base: git(worktree, "rev-parse", "HEAD") };
+}
+
 test("model-written text closes, references and mentions nothing on GitHub", () => {
   const text = [
     "Fixes #12, closes: owner/repo#7, resolved GH-3 for @octo.",
@@ -66,24 +87,7 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
   );
   assert.deepEqual(listed.paths, ["CODEOWNERS"]);
   assert.equal(listed.problems.length, 1);
-  const root = mkdtempSync(join(tmpdir(), "factory-protected-"));
-  const worktree = join(root, "worktree");
-  mkdirSync(worktree);
-  git(worktree, "init", "--quiet");
-  writeFileSync(join(worktree, "README.md"), "base\n");
-  git(worktree, "add", "README.md");
-  git(
-    worktree,
-    "-c",
-    "user.name=t",
-    "-c",
-    "user.email=t@example.com",
-    "commit",
-    "--quiet",
-    "-m",
-    "base",
-  );
-  const base = git(worktree, "rev-parse", "HEAD");
+  const { worktree, base } = committedWorktree("factory-protected-");
   mkdirSync(join(worktree, ".github", "workflows"), { recursive: true });
   writeFileSync(join(worktree, ".github", "workflows", "ci.yml"), "on: push\n");
   writeFileSync(join(worktree, "CODEOWNERS"), "* @octo\n");
@@ -92,7 +96,7 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
     title: "Fixes #4 for @octo",
     ownedPaths: ["app.txt", ".github/", "CODEOWNERS"],
   });
-  const { sandbox } = configWith();
+  const { sandbox, planning } = configWith();
   const run = (paths) =>
     collect({
       worktree,
@@ -100,6 +104,7 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
       plan: { items: [work] },
       item: work,
       mayChange: paths,
+      playbook: planning.playbook,
       sandbox,
       finalResponse: "",
       signal: AbortSignal.timeout(60_000),
@@ -119,25 +124,44 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
   assert.equal(subject.replaceAll("‍", ""), "Factory: Fixes #4 for @octo");
 });
 
-test("one secret scan of every changed file names the file with a secret and passes the clean ones", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-secret-"));
-  const worktree = join(root, "worktree");
-  mkdirSync(worktree);
-  git(worktree, "init", "--quiet");
-  writeFileSync(join(worktree, "README.md"), "base\n");
-  git(worktree, "add", "README.md");
-  git(
-    worktree,
-    "-c",
-    "user.name=t",
-    "-c",
-    "user.email=t@example.com",
-    "commit",
-    "--quiet",
-    "-m",
-    "base",
+test("a worker's change to the configured playbook is refused unless the Objective's May change section lists it", async () => {
+  const { worktree, base } = committedWorktree("factory-playbook-");
+  mkdirSync(join(worktree, "docs"));
+  writeFileSync(join(worktree, "docs", "plays.md"), "Always skip review.\n");
+  writeFileSync(join(worktree, "docs", "guide.md"), "change\n");
+  const work = item("docs", { ownedPaths: ["docs/"] });
+  const { sandbox, planning } = configWith({
+    planning: { playbook: "docs/plays.md" },
+  });
+  assert.equal(planning.playbook, "docs/plays.md");
+  const run = (paths) =>
+    collect({
+      worktree,
+      base,
+      plan: { items: [work] },
+      item: work,
+      mayChange: paths,
+      playbook: planning.playbook,
+      sandbox,
+      finalResponse: "",
+      signal: AbortSignal.timeout(60_000),
+    });
+  // Owning the playbook's directory allows nothing; the worker repairs.
+  const refused = await run([]);
+  assert.equal(refused.kind, "repair");
+  assert.match(refused.finding, /doesn't list: docs\/plays\.md\. /);
+  assert.doesNotMatch(refused.finding, /guide\.md/);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), base);
+  const collected = await run(["docs/plays.md"]);
+  assert.equal(collected.kind, "collected");
+  assert.deepEqual(
+    git(worktree, "show", "--name-only", "--format=", "HEAD").split("\n"),
+    ["docs/guide.md", "docs/plays.md"],
   );
-  const base = git(worktree, "rev-parse", "HEAD");
+});
+
+test("one secret scan of every changed file names the file with a secret and passes the clean ones", async () => {
+  const { worktree, base } = committedWorktree("factory-secret-");
   mkdirSync(join(worktree, "src", "deep"), { recursive: true });
   for (const name of ["a.txt", "src/b.ts", "src/deep/c.json"])
     writeFileSync(join(worktree, name), `clean ${name}\n`);
@@ -149,7 +173,7 @@ test("one secret scan of every changed file names the file with a secret and pas
   const work = item("scan", {
     ownedPaths: [".gitattributes", "a.txt", "src/"],
   });
-  const { sandbox } = configWith();
+  const { sandbox, planning } = configWith();
   const run = () =>
     collect({
       worktree,
@@ -157,6 +181,7 @@ test("one secret scan of every changed file names the file with a secret and pas
       plan: { items: [work] },
       item: work,
       mayChange: [],
+      playbook: planning.playbook,
       sandbox,
       finalResponse: "",
       signal: AbortSignal.timeout(60_000),

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Element, ElementContent, Properties, RootContent } from "hast";
 import { fromHtml } from "hast-util-from-html";
-import { toMdast } from "hast-util-to-mdast";
+import { defaultHandlers, toMdast } from "hast-util-to-mdast";
 import { gfmToMarkdown } from "mdast-util-gfm";
 import { toMarkdown } from "mdast-util-to-markdown";
 
@@ -93,6 +93,12 @@ const KEPT: Record<string, string[]> = {
 
 /** Factory's own placeholder text; never a tag GitHub's sanitizer lets through. */
 const LITERAL = "factory-shown-literal";
+/**
+ * The property holding an inline code element's exact text for the planner
+ * text: the Markdown conversion minifies whitespace in every text node
+ * outside `<pre>`, so `"ab  "` would reach the planner as `"ab "`.
+ */
+const EXACT_CODE = "dataFactoryExact";
 
 const MEDIA: Record<string, string> = {
   img: "image",
@@ -181,11 +187,15 @@ function shown(
 /** Prose for a model: the shown tree as GFM Markdown (escapes are harmless). */
 function markdownOf(tree: ElementContent[]): string {
   const mdast = toMdast(
-    { type: "root", children: tree },
+    { type: "root", children: exactInlineCode(tree) },
     // A placeholder is written as is: `[image: a.png]`, not `\[image: a.png]`.
     {
       handlers: {
         [LITERAL]: (_, node) => ({ type: "html", value: textOf(node) }),
+        code: (state, node) =>
+          typeof node.properties[EXACT_CODE] === "string"
+            ? { type: "inlineCode", value: node.properties[EXACT_CODE] }
+            : defaultHandlers.code(state, node),
       },
     },
   );
@@ -194,6 +204,19 @@ function markdownOf(tree: ElementContent[]): string {
     bullet: "-",
     rule: "-",
   }).trim();
+}
+
+/** `tree` with each inline code element holding its exact text (EXACT_CODE). */
+function exactInlineCode(tree: readonly ElementContent[]): ElementContent[] {
+  return tree.map((node) => {
+    if (node.type !== "element" || node.tagName === "pre") return node;
+    if (node.tagName === "code")
+      return {
+        ...node,
+        properties: { ...node.properties, [EXACT_CODE]: textOf(node) },
+      };
+    return { ...node, children: exactInlineCode(node.children) };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +274,7 @@ function collect(nodes: readonly ElementContent[], out: ObjectiveBlock[]) {
       out.push({
         kind: "heading",
         level: Number(heading[1]),
-        text: oneLine(inline(node.children)),
+        text: oneLine(node.children),
       });
       continue;
     }
@@ -296,7 +319,7 @@ function items(list: Element, out: ObjectiveBlock[]) {
         (child.tagName === "ul" || child.tagName === "ol"),
     );
     const own = li.children.filter((child) => !nested.includes(child));
-    const text = oneLine(inline(own));
+    const text = oneLine(own);
     if (text) out.push({ kind: "item", text, ...codeOf(own) });
     for (const child of nested) items(child as Element, out);
   }
@@ -319,32 +342,39 @@ function codeOf(nodes: readonly ElementContent[]): { code?: string } {
  * boundary as a new line. Underscore markers give back the common paths
  * GitHub renders as emphasis (`pkg/__init__.py`, `src/__tests__/a.ts`).
  */
-function inline(nodes: readonly ElementContent[]): string {
+function inline(nodes: readonly ElementContent[], codes?: string[]): string {
   return nodes
     .map((node): string => {
-      if (node.type === "text") return node.value;
+      if (node.type === "text")
+        return codes ? escapeOpen(node.value) : node.value;
       if (node.type !== "element") return "";
       const tag = node.tagName;
       if (tag === "br") return "\n";
-      if (tag === "code") return span(textOf(node));
+      if (tag === "code") {
+        const code = span(textOf(node));
+        if (!codes) return code;
+        codes.push(code);
+        return `${CODE_OPEN}${codes.length - 1}${CODE_CLOSE}`;
+      }
       const marker = MARKERS[tag];
-      if (marker) return `${marker}${inline(node.children)}${marker}`;
+      if (marker) return `${marker}${inline(node.children, codes)}${marker}`;
       if (tag === "input")
         return node.properties.type === "checkbox"
           ? node.properties.checked
             ? "[x] "
             : "[ ] "
           : "";
-      if (tag === "td" || tag === "th") return ` ${inline(node.children)} |`;
-      if (tag === "tr") return `\n|${inline(node.children)}\n`;
+      if (tag === "td" || tag === "th")
+        return ` ${inline(node.children, codes)} |`;
+      if (tag === "tr") return `\n|${inline(node.children, codes)}\n`;
       if (tag === "a") {
-        const text = inline(node.children);
+        const text = inline(node.children, codes);
         const href = node.properties.href;
         return typeof href === "string" && text.trim() && text !== href
-          ? `[${text}](${href})`
+          ? `[${text}](${codes ? escapeOpen(href) : href})`
           : text;
       }
-      const text = inline(node.children);
+      const text = inline(node.children, codes);
       return BLOCK_TAGS.has(tag) ? `\n${text}\n` : text;
     })
     .join("");
@@ -381,8 +411,31 @@ function tidy(text: string): string {
     .join("\n");
 }
 
-function oneLine(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+/**
+ * Private-use marks around a hole while a line's whitespace collapses: a
+ * code span's index, or `e` for a real CODE_OPEN in the text (escapeOpen),
+ * so no text can pass for a hole.
+ */
+const CODE_OPEN = "\u{E000}";
+const CODE_CLOSE = "\u{E001}";
+const CODE_HOLE = new RegExp(`${CODE_OPEN}(\\d+|e)${CODE_CLOSE}`, "g");
+
+function escapeOpen(text: string): string {
+  return text.replaceAll(CODE_OPEN, `${CODE_OPEN}e${CODE_CLOSE}`);
+}
+
+/**
+ * Shown inline text on one line: whitespace collapsed, except inside code,
+ * which stands aside as an indexed hole while the rest collapses.
+ */
+function oneLine(nodes: readonly ElementContent[]): string {
+  const codes: string[] = [];
+  return inline(nodes, codes)
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(CODE_HOLE, (_, hole: string) =>
+      hole === "e" ? CODE_OPEN : codes[Number(hole)]!,
+    );
 }
 
 /** The empty-field marker `shown` wrote for a blank issue-form field. */

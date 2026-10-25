@@ -9,7 +9,11 @@
  * refused. A media item's candidate sets are staged outside its owned
  * paths, so its correction may instead name its staging or its candidate
  * receipt: a refused candidate set is repaired with new candidates like
- * any other result. The step returns the correction as its `repair` finding; the
+ * any other result. A refusal of the handoff notes, the discovery
+ * proposal or the staged candidate sets, Factory's own files whose content
+ * the diagnosis never gets, is the correction itself unless the same
+ * refusal already failed; so is the operator's `repair` at selection, every
+ * time. The step returns the correction as its `repair` finding; the
  * engine keeps the repair allowances (allowances.ts).
  *
  * The diagnosis may instead blame a predecessor (`predecessor`): a Work
@@ -30,7 +34,7 @@ import {
   resultCriteria,
 } from "./review/result.js";
 import { headAndTail } from "./text.js";
-import { privateStagingPath } from "./work/collect.js";
+import { type CollectedStaging, privateStagingPath } from "./work/collect.js";
 import { hostGit } from "./worktree.js";
 
 /** What went wrong with the result. */
@@ -42,7 +46,14 @@ export type RepairFinding =
    * names, URLs and excerpts GitHub supplied), a conflict, or a collection
    * refusal.
    */
-  | { kind: "failure"; detail: string }
+  | {
+      kind: "failure";
+      detail: string;
+      /** Collection refused this private staging file (`stagingRefusalCorrection`). */
+      staging?: CollectedStaging;
+      /** The operator's `repair` at selection, with their text (`newCandidatesCorrection`). */
+      newCandidates?: { text?: string };
+    }
   /**
    * The change was moved onto a new base: its PR conflicted with its base,
    * or the stack layer below it moved. A mechanical repair: the worker
@@ -51,7 +62,12 @@ export type RepairFinding =
   | { kind: "conflict"; detail: string };
 
 export interface Correction {
-  source: "review-findings" | "diagnosis" | "operator";
+  source:
+    | "review-findings"
+    | "staging-refusal"
+    | "selection"
+    | "diagnosis"
+    | "operator";
   /** The failure, bounded for the brief and the state file. */
   failure: string;
   diagnosis: string;
@@ -126,9 +142,38 @@ export async function correction(
       diagnosis: "The operator answered the diagnosis question.",
       correction: input.operatorAnswer.trim(),
     });
-  const direct = reviewFindingsCorrection(input);
+  const direct =
+    newCandidatesCorrection(input.finding) ??
+    reviewFindingsCorrection(input) ??
+    stagingRefusalCorrection(input);
   if (direct) return direct;
   return diagnose(input, failure);
+}
+
+/**
+ * The operator's `repair` at selection (work/step-select.ts) as the
+ * correction, with no diagnosis call: new sets are made in Factory's
+ * staging, which no owned path names, and the operator already said what
+ * to change. It is Factory's correction quoting their text, not their
+ * words, and each such answer is a new request, never a repeat.
+ */
+function newCandidatesCorrection(
+  finding: RepairFinding,
+): CorrectionResult | undefined {
+  if (finding.kind !== "failure" || !finding.newCandidates) return undefined;
+  const asked = finding.newCandidates.text?.trim();
+  const correction: Correction = {
+    source: "selection",
+    failure: bounded(finding.detail),
+    diagnosis:
+      "The operator sent the candidate sets back at selection for new ones.",
+    correction: `Make every candidate set again, different from the sets sent back, and stage them under .factory-media/ as the media instructions say. Leave each candidate destination as it is at the base: Factory writes the selected set there.${asked ? ` The operator's request: ${asked}` : ""}`,
+  };
+  return {
+    kind: "correction",
+    correction,
+    finding: correctionFinding(correction),
+  };
 }
 
 /** The repair finding a correction renders as, for the worker's brief. */
@@ -225,6 +270,47 @@ function reviewFindingsCorrection(
     )}`,
   });
   // A repeat goes to the diagnosis, which can decide differently.
+  return result.kind === "correction" ? result : undefined;
+}
+
+/** The private staging files whose refusal is the correction, and how to write each again. */
+const STAGING_REFUSALS: Record<
+  CollectedStaging,
+  { file: string; redo: string }
+> = {
+  handoff: {
+    file: ".factory-handoff.json",
+    redo: "Write .factory-handoff.json again in the exact schema the handoff instructions give, so collection accepts it; keep the result's own changes.",
+  },
+  discovery: {
+    file: ".factory-discovery.json",
+    redo: "Write .factory-discovery.json again as the discovery instructions say, or leave it out when nothing outside the item's scope is needed; keep the result's own changes.",
+  },
+  candidates: {
+    file: ".factory-media/ and .factory-assets.json",
+    redo: "Make and stage every candidate set again under .factory-media/ as the media instructions say (staging from an earlier attempt is gone), so the capture accepts them. Leave each candidate destination as it is at the base: Factory writes the selected set there. Finish the rest of the Work Item (its other owned files and tests).",
+  },
+};
+
+/**
+ * A refusal of the handoff notes, the discovery proposal or the staged
+ * candidate sets as the correction, with no diagnosis call: they are
+ * Factory's private staging, never owned paths and never in the diagnosis
+ * evidence, and the refusal names exactly what to fix. The same refusal
+ * again goes to the diagnosis.
+ */
+function stagingRefusalCorrection(
+  input: CorrectionInput,
+): CorrectionResult | undefined {
+  const { finding } = input;
+  if (finding.kind !== "failure" || !finding.staging) return undefined;
+  const { file, redo } = STAGING_REFUSALS[finding.staging];
+  const result = accepted(input, {
+    source: "staging-refusal",
+    failure: `Factory refused ${file} for the reason in the required correction below.`,
+    diagnosis: `Factory refused ${file}, its private staging outside the owned paths, so the fix is to write it again.`,
+    correction: `${redo} The refusal: ${bounded(finding.detail)}`,
+  });
   return result.kind === "correction" ? result : undefined;
 }
 

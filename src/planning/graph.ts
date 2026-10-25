@@ -13,12 +13,23 @@ import type {
  * would pass, so the planner fixes all of them in one round.
  */
 
-/** Ownership is literal Git-relative files or trailing-slash directory prefixes. */
+/**
+ * Candidate media set and role ids (media.ts capture; set ids are also
+ * select answers), as a schema pattern and a test.
+ */
+export const MEDIA_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]*$";
+export const MEDIA_ID = new RegExp(MEDIA_ID_PATTERN);
+
+/**
+ * Ownership is literal Git-relative files or trailing-slash directory
+ * prefixes, in characters every platform's checkout can write: no
+ * wildcard, and none of < > " | (so no placeholder such as <name>).
+ */
 function validOwnershipPath(path: string): boolean {
   const normalized = path.endsWith("/") ? path.slice(0, -1) : path;
   return (
     normalized.length > 0 &&
-    !/[\\*?]/.test(normalized) &&
+    !/[\\*?<>"|]/.test(normalized) &&
     normalized
       .split("/")
       .every(
@@ -333,7 +344,7 @@ function checkGraphShape(
     for (const path of item.ownedPaths)
       if (!validOwnershipPath(path))
         found(
-          `Work Item ${item.id} has invalid ownership path ${JSON.stringify(path)}; use a literal repository-relative file or directory ending in /. Wildcards * and ? are unsupported; do not use globs or normalize paths.`,
+          `Work Item ${item.id} has invalid ownership path ${JSON.stringify(path)}; use a literal repository-relative file or directory ending in /. Wildcards * and ? and the characters < > " | are unsupported; do not use globs or normalize paths, and name the file itself, not a placeholder for it.`,
           item.id,
         );
     const missing = [

@@ -317,7 +317,11 @@ export function offeredProfiles(
       id,
       description,
       ...(selectionHints.length ? { selectionHints } : {}),
-      worker: profileWorker(config.providers[provider]!, worktreeRead === true),
+      worker: profileWorker(
+        config.providers[provider]!,
+        worktreeRead === true,
+        config.sandbox.network,
+      ),
     };
   });
 }

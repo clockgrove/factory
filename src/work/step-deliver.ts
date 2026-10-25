@@ -360,11 +360,34 @@ export function deliveryRepair(
       keep: facts(
         {
           ...(repair.conflict?.onto ? { onto: repair.conflict.onto } : {}),
+          ...(repair.checks
+            ? {
+                checkFailures: keptCheckFailures(
+                  context.state,
+                  item.id,
+                  repair.finding,
+                ),
+              }
+            : {}),
           rebase: true,
         },
         item.id,
       ),
     },
+  );
+}
+
+/** The most CI check failures an item keeps for its result review. */
+const KEPT_CHECK_FAILURES = 3;
+
+/** Item `id`'s kept CI check failures with `finding` added, newest last. */
+export function keptCheckFailures(
+  state: ObjectiveState,
+  id: string,
+  finding: string,
+): string[] {
+  return [...(fact(state, "checkFailures", id) ?? []), finding].slice(
+    -KEPT_CHECK_FAILURES,
   );
 }
 

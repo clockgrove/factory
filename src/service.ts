@@ -431,7 +431,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       log.write(0, { event: "observation-unreadable", path, error });
       rmSync(path, { force: true });
     }
-  const record = startRecord(previous, startedAt, runId, runners, limits);
+  const record = startRecord(previous, startedAt, runId, limits);
   if (options.unconfigured) {
     record.problem = `No configuration at ${options.unconfigured}, so the service applies requests only and never reads the queue; run factory setup, then restart the service`;
     log.write(0, { event: "unconfigured", config: options.unconfigured });
@@ -456,52 +456,36 @@ export async function serve(options: ServeOptions): Promise<number> {
     ]);
     writeServiceRecord(paths.root, record, run, unreadable, stopped);
   };
-  // Saved before any hold below, so a crash in between never counts the
-  // same death twice.
+  // Saved before any death is counted below, so a crash in between never
+  // counts the same death twice.
   heartbeat();
-  // The last run died: its files end with that, as far as this start knows them
-  // (after the heartbeat that records the death).
-  if (previous?.runId && !previous.stopped && previous.runId !== runId)
+  // The last run died: its files end with that, as far as this start
+  // knows them (after the heartbeat that records the death). Rule 4: each
+  // attempt it ran counts its death (engine.ts `interrupted`), after the
+  // record, so no death counts twice; a step the service keeps dying under
+  // then asks. The dead run progressed if it finished a step: its
+  // heartbeat's count can trail a death, the saved states can't.
+  if (previous?.runId && !previous.stopped && previous.runId !== runId) {
+    const dead = previous.runId;
     endCrashedRun(
       paths.logs,
-      previous.runId,
+      dead,
       [...runners.keys(), ...unreadable.keys()],
       runId,
     );
-  // The evidence is spent before any question is visible: the steps to
-  // ask about are saved in the record first (`suspected`), so a death
-  // before their questions are saved asks them at the next start, and a
-  // reader who sees a question never sees the evidence behind it again.
-  const id = (r: { issue: number; step: string }) => `${r.issue} ${r.step}`;
-  const culprits = [
-    ...(previous?.suspected ?? []),
-    ...suspects(record.deaths),
-  ].filter((r, at, all) => all.findIndex((o) => id(o) === id(r)) === at);
-  if (culprits.length) {
-    // Another question needs three new deaths.
-    for (const death of record.deaths) death.spent = true;
-    record.suspected = culprits;
-    heartbeat();
-  }
-  for (const culprit of culprits)
-    try {
-      runners
-        .get(culprit.issue)
-        ?.suspect(
-          culprit.step,
-          `The service died ${SUSPECT_CRASHES} times in a row while step ${culprit.step} ran, and other steps finished in between, so this step may be what stops it (for example, by running the host out of memory).${culprits.length > 1 ? ` ${culprits.length - 1} other step${culprits.length > 2 ? "s" : ""} ran at every one of those deaths too, and each holds with a question like this one.` : ""} \`retry\` runs it again; or cancel.`,
-        );
-    } catch (error) {
-      log.write(culprit.issue, {
-        event: "suspect-failed",
-        error: String(error),
-      });
-    }
-  if (culprits.length) {
-    // Each question is asked, or saved to ask as soon as no open question
-    // stops the step (engine.ts `hold`).
-    delete record.suspected;
-    heartbeat();
+    const progressed =
+      (previous.finished ?? 0) > 0 ||
+      [...runners.values()].some((runner) => runner.state.finishedRun === dead);
+    run.suspects = 0;
+    for (const runner of runners.values())
+      try {
+        run.suspects += runner.interrupted(dead, progressed);
+      } catch (error) {
+        log.write(runner.state.issue, {
+          event: "suspect-failed",
+          error: String(error),
+        });
+      }
   }
   crashPoint("serve:loaded");
 
@@ -1593,16 +1577,13 @@ interface ServiceRecord {
   /**
    * The latest deaths (runs that ended without a clean stop), oldest
    * first, at most MAX_DEATHS. A clean stop empties it. The crash streak is
-   * its trailing deaths that lived less than STREAK_MS after resuming; the
-   * suspect evidence, its last SUSPECT_CRASHES deaths not yet spent.
+   * its trailing deaths that lived less than STREAK_MS after resuming.
    */
   deaths: Death[];
   /** When this run resumes interrupted steps; absent when it did at once. */
   resumeAt?: string;
   /** Step attempts that finished in this run. */
   finished: number;
-  /** Steps the spent evidence names, until their questions are saved. */
-  suspected?: Death["running"];
   /** Set by a clean stop. */
   stopped?: boolean;
   /** Objectives set aside as unreadable (`setAside`), with why: `status` shows them so. */
@@ -1624,12 +1605,6 @@ export interface Death {
   at: string;
   /** How long the run lived after resuming; null when its record didn't say. */
   lived: number | null;
-  /** The steps running when it died. */
-  running: { issue: number; step: string }[];
-  /** Whether the run finished any step. */
-  progressed: boolean;
-  /** Set once a suspect question used it as evidence. */
-  spent?: true;
 }
 
 /** Deaths kept: enough for any streak the resume delay still grows on. */
@@ -1650,8 +1625,6 @@ const STREAK_MS = 10 * 60 * 1000;
 /** Starts in a streak before interrupted steps are delayed: 30 s, doubling, up to MAX_RESUME_DELAY_MS. */
 const LOOP_STARTS = 3;
 const MAX_RESUME_DELAY_MS = 30 * 60 * 1000;
-/** Deaths in a row with a step running at each before that step holds. */
-const SUSPECT_CRASHES = 3;
 
 function readServiceRecord(root: string): Partial<ServiceRecord> | undefined {
   try {
@@ -1663,17 +1636,15 @@ function readServiceRecord(root: string): Partial<ServiceRecord> | undefined {
 
 /**
  * This run's record. A start after a run that didn't stop cleanly is a
- * crash restart: it records the steps that were running (the open attempts
- * that run started), and continues the crash streak if that run died within
- * STREAK_MS of resuming. From the third start in a streak, interrupted
- * steps resume after a delay: 30 s (the base backoff), doubling, up to
- * 30 min. A clean stop starts afresh.
+ * crash restart: it records the death, and continues the crash streak if
+ * that run died within STREAK_MS of resuming. From the third start in a
+ * streak, interrupted steps resume after a delay: 30 s (the base
+ * backoff), doubling, up to 30 min. A clean stop starts afresh.
  */
 function startRecord(
   previous: Partial<ServiceRecord> | undefined,
   startedAt: Date,
   runId: string,
-  runners: ReadonlyMap<number, ObjectiveRunner>,
   limits: EngineLimits,
 ): ServiceRecord {
   const now = startedAt.toISOString();
@@ -1684,21 +1655,7 @@ function startRecord(
   const deaths: Death[] = crashed
     ? [
         ...(previous.deaths ?? []),
-        {
-          at: now,
-          lived: Number.isFinite(lived) ? lived : null,
-          running: [...runners.values()].flatMap((runner) =>
-            Object.entries(runner.state.attempts)
-              .filter(([, attempt]) => attempt.run === previous.runId)
-              .map(([step]) => ({ issue: runner.state.issue, step })),
-          ),
-          // The heartbeat's count can trail a death; the saved states can't.
-          progressed:
-            (previous.finished ?? 0) > 0 ||
-            [...runners.values()].some(
-              (runner) => runner.state.finishedRun === previous.runId,
-            ),
-        },
+        { at: now, lived: Number.isFinite(lived) ? lived : null },
       ].slice(-MAX_DEATHS)
     : [];
   // This start is the streak's deaths plus one.
@@ -1723,24 +1680,6 @@ function startRecord(
     finished: 0,
     setAside: {},
   };
-}
-
-/**
- * Every step running at each of the last SUSPECT_CRASHES deaths, when
- * other steps finished in the runs between them: the strongest sign the
- * saved state gives that one of them stops the service. Each holds, so a
- * crash streak ends in questions within SUSPECT_CRASHES deaths however
- * many steps keep being interrupted together.
- */
-function suspects(deaths: Death[]): Death["running"] {
-  const last = deaths.slice(-SUSPECT_CRASHES);
-  if (last.length < SUSPECT_CRASHES || last.some((death) => death.spent))
-    return [];
-  if (!last.slice(1).every((death) => death.progressed)) return [];
-  const id = (r: { issue: number; step: string }) => `${r.issue} ${r.step}`;
-  return last[0]!.running.filter((r) =>
-    last.every((crash) => crash.running.some((o) => id(o) === id(r))),
-  );
 }
 
 function writeServiceRecord(

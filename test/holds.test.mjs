@@ -1305,3 +1305,38 @@ test("a 403 is a rate limit only by GitHub's headers; one without them retries, 
   assert.match(held.question, /Give Factory's login read access/);
   assert.equal(held.item, undefined, "an Objective question");
 });
+
+test("a correction already tried for the same failure asks instead of repeating", async () => {
+  const { correction } = await import("../dist/repair.js");
+  // The operator's answer is the correction itself: no diagnosis call.
+  const correct = (detail, answer, prior) =>
+    correction({
+      plan: plan([item("a")]),
+      item: item("a"),
+      finding: { kind: "failure", detail },
+      checkout: tmpdir(),
+      base: "b",
+      commit: "c",
+      sources: [],
+      prior,
+      operatorAnswer: answer,
+      signal: AbortSignal.timeout(10_000),
+      log() {},
+    });
+  const first = await correct("npm test: 1 failed", "Fix the sum", []);
+  assert.equal(first.kind, "correction");
+  assert.equal(first.correction.source, "operator");
+  const tried = [first.correction];
+  const again = await correct("npm test: 1 failed", "Fix the sum", tried);
+  assert.equal(again.kind, "question");
+  assert.match(again.question, /already failed for the same failure/);
+  // Another correction, or the same one for another failure, is new.
+  const other = await correct("npm test: 1 failed", "Fix the test", tried);
+  assert.equal(other.kind, "correction");
+  const elsewhere = await correct(
+    "npm run lint: 2 errors",
+    "Fix the sum",
+    tried,
+  );
+  assert.equal(elsewhere.kind, "correction");
+});

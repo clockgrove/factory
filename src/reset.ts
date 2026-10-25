@@ -568,7 +568,7 @@ export async function rebuildState(
     pulls[branch] = await github.pullsByHead(branch, signal);
     for (const pull of pulls[branch])
       if (pull.merged_at && !pull.merge_commit_sha) {
-        // A merged PR's commit can lag on its timeline: read again later,
+        // A merged PR's commit can lag on GitHub: read again later,
         // never take it as unmerged.
         const sha = await github.mergeCommitOf(pull.number, signal);
         if (!sha)

@@ -1624,25 +1624,35 @@ export class GitHub {
   }
 
   /**
-   * The merge commit of a merged PR, from its timeline (PR responses in the
-   * pinned API version may omit it). Undefined while the timeline does not
-   * show the merge yet.
+   * The merge commit of a merged PR, from GraphQL (PR responses in the
+   * pinned REST version may omit it). Undefined while GitHub does not show
+   * the PR merged with its commit yet.
    */
   async mergeCommitOf(
     number: number,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const events = await this.pages<{ event?: string; commit_id?: unknown }>(
-      this.repo(`issues/${number}/timeline`),
+    const data = await this.graphql<{
+      repository?: {
+        pullRequest?: {
+          merged?: boolean;
+          mergeCommit?: { oid?: unknown } | null;
+        } | null;
+      } | null;
+    }>(
+      `query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) { merged mergeCommit { oid } }
+        }
+      }`,
+      { owner: this.owner, name: this.name, number },
       signal,
     );
-    const merged = events.find(
-      (event) =>
-        event?.event === "merged" &&
-        typeof event.commit_id === "string" &&
-        /^[a-f0-9]{40}$/.test(event.commit_id),
-    );
-    return merged?.commit_id as string | undefined;
+    const pull = data.repository?.pullRequest;
+    const oid = pull?.mergeCommit?.oid;
+    return pull?.merged && typeof oid === "string" && /^[a-f0-9]{40}$/.test(oid)
+      ? oid
+      : undefined;
   }
 
   /** Up to five failure annotations of a check run, as `path:line message`. */

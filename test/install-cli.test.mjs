@@ -659,7 +659,7 @@ test("the installer reports a release that isn't published yet, to try again lat
     ],
     [
       "the tarball still uploading",
-      viewAssets({ name: tarball, state: "starter" }, { name: "SHA256SUMS" }),
+      viewAssets({ name: tarball, state: "open" }, { name: "SHA256SUMS" }),
       /doesn't have clockgrove-factory-\S+ yet/,
     ],
   ])

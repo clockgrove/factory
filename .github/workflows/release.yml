@@ -65,7 +65,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # X.Y.Z-suffix versions are prereleases, so the README's "latest" install skips them.
+          # X.Y.Z-suffix versions are prereleases, so the README's latest-release CLI install skips them.
           prerelease=()
           [[ "$version" == *-* ]] && prerelease=(--prerelease)
           gh release create "$GITHUB_REF_NAME" artifacts/*.tgz artifacts/SHA256SUMS \

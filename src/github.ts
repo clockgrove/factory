@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { isObject } from "./checked.js";
 import { crashPoint } from "./crash.js";
 import { redactDeep } from "./display.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
@@ -50,6 +51,8 @@ export class GitHubError extends Error {
    * missing, not a refusal; set by the client from the request's path.
    */
   missingIssue?: number;
+  /** Factory acted as its GitHub App: a refusal's fix is the App's. */
+  app?: boolean;
   constructor(
     message: string,
     readonly status: number,
@@ -175,7 +178,9 @@ export function githubOutcome(
   if (error.status === 401)
     return objectiveWide(
       hold(
-        `GitHub rejected Factory's login on ${repository} (${detail}). Log in again with \`gh auth login\` (or replace FACTORY_GITHUB_TOKEN), then answer retry; or cancel.`,
+        error.app
+          ? `GitHub rejected Factory's GitHub App on ${repository} (${detail}). Check that github.app.id names the App, that it is installed on ${repository} and not suspended, and that its private key (FACTORY_GITHUB_APP_KEY) is current, then restart the service and answer retry; or cancel.`
+          : `GitHub rejected Factory's login on ${repository} (${detail}). Log in again with \`gh auth login\` (or replace FACTORY_GITHUB_TOKEN), then answer retry; or cancel.`,
       ),
     );
   if (error.status === 404 && error.missingIssue !== undefined)
@@ -185,7 +190,7 @@ export function githubOutcome(
         ["cancel", "retry"],
       ),
     );
-  const refused = `${detail}. Give Factory's login ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`;
+  const refused = `${detail}. Give ${error.app ? "Factory's GitHub App" : "Factory's login"} ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`;
   // A 403 without rate-limit headers may be a secondary limit, which
   // passes: it asks only once it outlasts one.
   if (error.status === 403)
@@ -292,12 +297,46 @@ export interface AsyncMerge {
 }
 
 /**
- * A small GitHub client. The token comes from the GitHub CLI login and stays
- * in the service; workers never see it. Every request has a deadline, and
- * every failure is either a TransientError (retry) or a GitHubError.
+ * A small GitHub client. The token comes from the GitHub CLI login, or is
+ * the GitHub App's installation token (`AppIdentity`), and stays in the
+ * service; workers never see it. Every request has a deadline, and every
+ * failure is either a TransientError (retry) or a GitHubError.
  */
 /** How long a write-access answer counts (canWrite). */
 const WRITER_TTL_MS = 10 * 60_000;
+/**
+ * How long before an installation token expires (an hour after it is
+ * minted) a new one is minted: a remote Git call that took it still has
+ * it in time.
+ */
+const TOKEN_MARGIN_MS = 15 * 60_000;
+
+/**
+ * Factory's GitHub App (github-app.ts `factoryGitHub`): the client acts as
+ * the App's installation on the repository, with installation tokens.
+ */
+export interface AppIdentity {
+  /** The installation; read from the repository's when absent. */
+  installationId?: number;
+  /** A new JWT that authenticates as the App; throws when its private key is missing or doesn't load. */
+  jwt: () => string;
+}
+
+/** The App's installation as GitHub shows it (`GitHub.appInstallation`). */
+export interface AppInstallation {
+  id: number;
+  /** The App's slug: Factory acts as `<slug>[bot]`. */
+  slug: string;
+  /** What the installation grants, by permission name (`contents: write`). */
+  permissions: Record<string, string>;
+  suspended: boolean;
+}
+
+/** A commit's author (`git commit --author`). */
+export interface CommitAuthor {
+  name: string;
+  email: string;
+}
 
 /**
  * Statuses the running read's caller takes as an answer (a 404 for "no
@@ -318,6 +357,12 @@ export class GitHub {
   /** Requests outside a step or a sync job: the service run's own (`takeAmbient`). */
   private ambient = newTransport();
   private token: string | undefined;
+  /** When the installation token expires (App mode). */
+  private expires = 0;
+  /** The installation token being minted: requests meanwhile share it. */
+  private minting: Promise<string> | undefined;
+  private installed: AppInstallation | undefined;
+  private author: CommitAuthor | undefined;
   private secrets: readonly string[] = [];
   private self: string | undefined;
   private readonly writers = new Map<string, { ok: boolean; at: number }>();
@@ -329,7 +374,13 @@ export class GitHub {
   constructor(
     readonly repository: string,
     private readonly api = "https://api.github.com",
+    private readonly app?: AppIdentity,
   ) {}
+
+  /** Factory acts as its GitHub App, not a user's login. */
+  get isApp(): boolean {
+    return this.app !== undefined;
+  }
 
   /**
    * Redact these secret values (config.secrets) from every text Factory
@@ -428,8 +479,9 @@ export class GitHub {
     path: string,
     body?: unknown,
     signal?: AbortSignal,
+    headers?: Record<string, string>,
   ): Promise<T> {
-    const response = await this.send(method, path, body, signal);
+    const response = await this.send(method, path, body, signal, headers);
     if (response.status === 204) return undefined as T;
     const result = await this.body(response, method, path, signal, "json");
     // A resource Factory just created (an issue, a PR, a comment): GitHub
@@ -635,9 +687,17 @@ export class GitHub {
     );
   }
 
-  /** The login Factory acts as, read once per process. */
+  /**
+   * The login Factory acts as, read once per process: a GitHub App's is
+   * `<slug>[bot]`, as GitHub shows it on the comments, issues, PRs and
+   * commits the App makes (an installation token can't read GET /user).
+   */
   async login(signal?: AbortSignal): Promise<string> {
     if (this.self) return this.self;
+    if (this.app) {
+      this.self = `${(await this.appInstallation(signal)).slug}[bot]`;
+      return this.self;
+    }
     const user = await this.rest<{ login?: unknown }>(
       "GET",
       "/user",
@@ -648,6 +708,119 @@ export class GitHub {
       throw new TransientError("GitHub GET /user: no login");
     this.self = user.login;
     return this.self;
+  }
+
+  /**
+   * The author of the commits Factory makes, as a GitHub App: its bot,
+   * `<slug>[bot]` with the bot account's noreply address, so GitHub shows
+   * the commits as the App's. Undefined with a user's login, whose commits
+   * keep Factory's own author.
+   */
+  async commitAuthor(signal?: AbortSignal): Promise<CommitAuthor | undefined> {
+    if (!this.app) return undefined;
+    if (this.author) return this.author;
+    const login = await this.login(signal);
+    const bot = await this.rest<{ id?: unknown }>(
+      "GET",
+      `/users/${encodeURIComponent(login)}`,
+      undefined,
+      signal,
+    );
+    if (typeof bot?.id !== "number")
+      throw new TransientError(`GitHub GET /users/${login}: no id`);
+    this.author = {
+      name: login,
+      email: `${bot.id}+${login}@users.noreply.github.com`,
+    };
+    return this.author;
+  }
+
+  /**
+   * The GitHub App's installation, read once with the App's JWT: the one
+   * `installationId` names, else the one on the repository. Throws a
+   * GitHubError (401) naming the fix when the App isn't installed there.
+   */
+  async appInstallation(signal?: AbortSignal): Promise<AppInstallation> {
+    this.installed ??= await this.readInstallation(signal);
+    return this.installed;
+  }
+
+  /** `appInstallation`, read now. */
+  private async readInstallation(
+    signal?: AbortSignal,
+  ): Promise<AppInstallation> {
+    if (!this.app) throw new Error("Factory acts as a login, not a GitHub App");
+    const path =
+      this.app.installationId === undefined
+        ? this.repo("installation")
+        : `/app/installations/${this.app.installationId}`;
+    let found: {
+      id?: unknown;
+      app_slug?: unknown;
+      permissions?: unknown;
+      suspended_at?: unknown;
+    };
+    try {
+      found = await this.rest("GET", path, undefined, signal, this.asApp());
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404)
+        throw this.appRefusal(
+          `GitHub GET ${path}: 404: the GitHub App isn't installed on ${this.app.installationId === undefined ? this.repository : `installation ${this.app.installationId}`}`,
+        );
+      throw error;
+    }
+    if (typeof found?.id !== "number" || typeof found.app_slug !== "string")
+      throw new TransientError(
+        `GitHub GET ${path}: an installation Factory can't read`,
+      );
+    const permissions = isObject(found.permissions) ? found.permissions : {};
+    return {
+      id: found.id,
+      slug: found.app_slug,
+      permissions: Object.fromEntries(
+        Object.entries(permissions).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      ),
+      suspended: typeof found.suspended_at === "string",
+    };
+  }
+
+  /**
+   * The id of the GitHub App's installation on the repository, read with
+   * the App's JWT (never cached); undefined when it has none.
+   */
+  async repositoryInstallation(
+    signal?: AbortSignal,
+  ): Promise<number | undefined> {
+    const found = await this.optional(() =>
+      this.rest<{ id?: unknown }>(
+        "GET",
+        this.repo("installation"),
+        undefined,
+        signal,
+        this.asApp(),
+      ),
+    );
+    return typeof found?.id === "number" ? found.id : undefined;
+  }
+
+  /** The headers that authenticate a request as the GitHub App itself (a new JWT). */
+  private asApp(): Record<string, string> {
+    let jwt: string;
+    try {
+      jwt = this.app!.jwt();
+    } catch (error) {
+      throw this.appRefusal(`The GitHub App's JWT: ${errorMessage(error)}`);
+    }
+    return { authorization: `Bearer ${jwt}` };
+  }
+
+  /** A refusal of the GitHub App itself (its key, its installation): a person must fix it. */
+  private appRefusal(message: string): GitHubError {
+    const refused = new GitHubError(message, 401);
+    refused.app = true;
+    return refused;
   }
 
   /**
@@ -1074,7 +1247,7 @@ export class GitHub {
           true,
         );
       }
-      throw new GitHubError(`GitHub GraphQL: ${message}`, 200);
+      throw this.marked(new GitHubError(`GitHub GraphQL: ${message}`, 200));
     }
     if (!result.data) throw new TransientError("GitHub GraphQL: no data");
     return { data: result.data, errors };
@@ -1144,6 +1317,7 @@ export class GitHub {
     default_branch?: string;
     allow_merge_commit?: boolean;
     permissions?: { push?: unknown };
+    owner?: { type?: unknown } | null;
   }> {
     return this.rest("GET", this.repo(""), undefined, signal);
   }
@@ -1157,10 +1331,27 @@ export class GitHub {
     return repository.default_branch;
   }
 
-  /** Whether the login may push to the repository; undefined when GitHub doesn't say. */
+  /**
+   * Whether the login may push to the repository; undefined when GitHub
+   * doesn't say. A GitHub App may when its installation grants Contents:
+   * write, read now.
+   */
   async canPush(signal?: AbortSignal): Promise<boolean | undefined> {
+    if (this.app) {
+      const contents = (await this.readInstallation(signal)).permissions
+        .contents;
+      return contents === "write" || contents === "admin";
+    }
     const push = (await this.about(signal)).permissions?.push;
     return typeof push === "boolean" ? push : undefined;
+  }
+
+  /** Whether the repository's owner is an organization; undefined when GitHub doesn't say. */
+  async ownerIsOrganization(
+    signal?: AbortSignal,
+  ): Promise<boolean | undefined> {
+    const type = (await this.about(signal)).owner?.type;
+    return typeof type === "string" ? type === "Organization" : undefined;
   }
 
   /**
@@ -1462,6 +1653,61 @@ export class GitHub {
   }
 
   /**
+   * An Actions job's workflow run and the attempt it ran in (an Actions
+   * check run's id is its job's); undefined without Actions read access.
+   */
+  async workflowJob(
+    job: number,
+    signal?: AbortSignal,
+  ): Promise<{ run: number; attempt: number } | undefined> {
+    const read = await this.optional(() =>
+      this.rest<{ run_id?: unknown; run_attempt?: unknown }>(
+        "GET",
+        this.repo(`actions/jobs/${job}`),
+        undefined,
+        signal,
+      ),
+    );
+    if (typeof read?.run_id !== "number") return undefined;
+    return {
+      run: read.run_id,
+      attempt: typeof read.run_attempt === "number" ? read.run_attempt : 1,
+    };
+  }
+
+  /**
+   * A workflow run's latest attempt and its status; undefined without
+   * Actions read access.
+   */
+  async workflowRunAttempt(
+    run: number,
+    signal?: AbortSignal,
+  ): Promise<{ attempt: number; status: string } | undefined> {
+    const read = await this.optional(() =>
+      this.rest<{ run_attempt?: unknown; status?: unknown }>(
+        "GET",
+        this.repo(`actions/runs/${run}`),
+        undefined,
+        signal,
+      ),
+    );
+    if (typeof read?.run_attempt !== "number") return undefined;
+    return { attempt: read.run_attempt, status: String(read.status) };
+  }
+
+  /** Run a workflow run's failed jobs again, as its next attempt. */
+  async rerunFailedJobs(run: number, signal?: AbortSignal): Promise<void> {
+    const response = await this.send(
+      "POST",
+      this.repo(`actions/runs/${run}/rerun-failed-jobs`),
+      undefined,
+      signal,
+    );
+    // The 201's body says nothing Factory reads.
+    await response.body?.cancel().catch(() => undefined);
+  }
+
+  /**
    * The check names the repository requires on `branch`: its rulesets and
    * its classic branch protection (from the protection route, else from the
    * branch read, which shows them with read access).
@@ -1578,16 +1824,8 @@ export class GitHub {
       const count = rule.parameters?.required_approving_review_count;
       if (rule.type !== "pull_request" || typeof count !== "number" || !count)
         continue;
-      const ruleset = await this.optional(() =>
-        this.rest<{ name?: unknown }>(
-          "GET",
-          this.repo(`rulesets/${rule.ruleset_id}`),
-          undefined,
-          signal,
-        ),
-      );
       found.push({
-        rule: `ruleset "${String(ruleset?.name ?? rule.ruleset_id)}"`,
+        rule: await this.rulesetName(rule.ruleset_id, signal),
         count,
       });
     }
@@ -1603,6 +1841,62 @@ export class GitHub {
     if (typeof count === "number" && count > 0)
       found.push({ rule: "branch protection", count });
     return found;
+  }
+
+  /**
+   * The rules on `branch` that require a PR's review threads to be
+   * resolved before it merges: each ruleset whose pull_request rule
+   * requires it, and the classic protection's required conversation
+   * resolution. GitHub reports a PR with an unresolved one BLOCKED and
+   * refuses its merge. A rule the login can't read is left out.
+   */
+  async threadResolution(
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const name = encodeURIComponent(branch);
+    const rules =
+      (await this.optional(() =>
+        this.pages<{
+          type?: string;
+          ruleset_id?: number;
+          parameters?: { required_review_thread_resolution?: unknown };
+        }>(this.repo(`rules/branches/${name}`), signal),
+      )) ?? [];
+    const found: string[] = [];
+    for (const rule of rules)
+      if (
+        rule.type === "pull_request" &&
+        rule.parameters?.required_review_thread_resolution === true
+      )
+        found.push(await this.rulesetName(rule.ruleset_id, signal));
+    const classic = await this.optional(() =>
+      this.rest<{ required_conversation_resolution?: { enabled?: unknown } }>(
+        "GET",
+        this.repo(`branches/${name}/protection`),
+        undefined,
+        signal,
+      ),
+    );
+    if (classic?.required_conversation_resolution?.enabled === true)
+      found.push("branch protection");
+    return [...new Set(found)];
+  }
+
+  /** A ruleset as readiness and holds name it: by its name, else its id. */
+  private async rulesetName(
+    id: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const ruleset = await this.optional(() =>
+      this.rest<{ name?: unknown }>(
+        "GET",
+        this.repo(`rulesets/${id}`),
+        undefined,
+        signal,
+      ),
+    );
+    return `ruleset "${String(ruleset?.name ?? id)}"`;
   }
 
   /**
@@ -1707,6 +2001,64 @@ export class GitHub {
     if (!pull)
       throw new TransientError(`GitHub GraphQL shows no PR #${number} yet`);
     return pull;
+  }
+
+  /**
+   * A PR's unresolved review threads: each one's file and the link to its
+   * first comment.
+   */
+  async unresolvedThreads(
+    number: number,
+    signal?: AbortSignal,
+  ): Promise<{ path: string; url?: string }[]> {
+    const found: { path: string; url?: string }[] = [];
+    let after: string | null = null;
+    do {
+      const data: {
+        repository?: {
+          pullRequest?: {
+            reviewThreads?: {
+              nodes?: ({
+                isResolved?: unknown;
+                path?: unknown;
+                comments?: { nodes?: ({ url?: unknown } | null)[] } | null;
+              } | null)[];
+              pageInfo?: { hasNextPage?: unknown; endCursor?: unknown };
+            } | null;
+          } | null;
+        } | null;
+      } = await this.graphql(
+        `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                nodes { isResolved path comments(first: 1) { nodes { url } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        { owner: this.owner, name: this.name, number, after },
+        signal,
+      );
+      const threads = data.repository?.pullRequest?.reviewThreads;
+      if (!threads)
+        throw new TransientError(`GitHub GraphQL shows no PR #${number} yet`);
+      for (const thread of threads.nodes ?? []) {
+        if (!thread || thread.isResolved !== false) continue;
+        const url = thread.comments?.nodes?.[0]?.url;
+        found.push({
+          path: typeof thread.path === "string" ? thread.path : "",
+          ...(typeof url === "string" ? { url } : {}),
+        });
+      }
+      const { hasNextPage, endCursor } = threads.pageInfo ?? {};
+      after =
+        hasNextPage === true && typeof endCursor === "string"
+          ? endCursor
+          : null;
+    } while (after);
+    return found;
   }
 
   /**
@@ -1834,7 +2186,9 @@ export class GitHub {
     refreshed = false,
   ): Promise<Response> {
     if (this.renamed) throw this.renamed;
-    const token = await this.auth(refreshed);
+    // A request as the GitHub App itself carries its JWT instead.
+    const authorization =
+      headers.authorization ?? `Bearer ${await this.auth(refreshed)}`;
     const deadline = AbortSignal.timeout(TIMEOUT_MS);
     const sent =
       body === undefined
@@ -1854,7 +2208,7 @@ export class GitHub {
       response = await fetch(`${this.api}${path}`, {
         method,
         headers: {
-          authorization: `Bearer ${token}`,
+          authorization,
           accept: "application/vnd.github+json",
           "x-github-api-version": "2022-11-28",
           ...(body === undefined ? {} : { "content-type": "application/json" }),
@@ -1909,7 +2263,8 @@ export class GitHub {
       answer = undefined;
     }
     const detail = `GitHub ${method} ${path}: ${response.status} ${text.slice(0, 300)}`;
-    if (response.status === 401 && !refreshed) {
+    // A JWT is new for every request: only a token is minted again.
+    if (response.status === 401 && !refreshed && !headers.authorization) {
       note(counted, { ...answered, category: "credential" }, response);
       return this.send(method, path, body, signal, headers, true);
     }
@@ -1941,7 +2296,8 @@ export class GitHub {
         response,
       );
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
-    if (response.status === 401) throw new GitHubError(detail, 401, answer);
+    if (response.status === 401)
+      throw this.marked(new GitHubError(detail, 401, answer));
     if (limited)
       throw new TransientError(
         detail,
@@ -1995,15 +2351,25 @@ export class GitHub {
       ? /^(\d+)(?:[/?]|$)/.exec(path.slice(root.length + 8))
       : null;
     if (issue) failed.missingIssue = Number(issue[1]);
-    throw failed;
+    throw this.marked(failed);
   }
 
-  /** The service token, for downloads outside the REST API (media attachments). */
+  /** `error`, marked as the GitHub App's when Factory acts as one. */
+  private marked(error: GitHubError): GitHubError {
+    if (this.app) error.app = true;
+    return error;
+  }
+
+  /**
+   * The service token, for downloads outside the REST API (media
+   * attachments) and, as a GitHub App, remote Git (git.ts `remoteToken`).
+   */
   serviceToken(): Promise<string> {
     return this.auth(false);
   }
 
   private async auth(refresh: boolean): Promise<string> {
+    if (this.app) return this.installationToken(refresh);
     if (this.token && !refresh) return this.token;
     if (process.env.FACTORY_GITHUB_TOKEN) {
       this.token = process.env.FACTORY_GITHUB_TOKEN;
@@ -2029,6 +2395,41 @@ export class GitHub {
         "GitHub login unavailable (run `gh auth login`)",
         401,
       );
+    return this.token;
+  }
+
+  /**
+   * The GitHub App's installation token: kept until TOKEN_MARGIN_MS before
+   * it expires, and minted again then or after a 401 (`refresh`). Requests
+   * that need one while it is minted share that mint.
+   */
+  private installationToken(refresh: boolean): Promise<string> {
+    if (this.token && !refresh && Date.now() < this.expires - TOKEN_MARGIN_MS)
+      return Promise.resolve(this.token);
+    this.minting ??= this.mint().finally(() => {
+      this.minting = undefined;
+    });
+    return this.minting;
+  }
+
+  /** `POST /app/installations/{id}/access_tokens` with the App's JWT. */
+  private async mint(): Promise<string> {
+    const { id } = await this.appInstallation();
+    const made = await this.rest<{ token?: unknown; expires_at?: unknown }>(
+      "POST",
+      `/app/installations/${id}/access_tokens`,
+      undefined,
+      undefined,
+      this.asApp(),
+    );
+    if (typeof made?.token !== "string" || !made.token)
+      throw new TransientError(
+        `GitHub POST /app/installations/${id}/access_tokens: no token`,
+      );
+    const expires = Date.parse(String(made.expires_at));
+    this.token = made.token;
+    // GitHub's tokens last an hour; a time it doesn't give is taken as that.
+    this.expires = Number.isNaN(expires) ? Date.now() + 60 * 60_000 : expires;
     return this.token;
   }
 }

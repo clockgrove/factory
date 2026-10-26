@@ -62,6 +62,8 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
 
   docs/reference/setup.md#Setup lists every option and the key it sets.
 
+- **Who hears about holds:** the operator's GitHub login for `--operator LOGIN`. When Factory would act as that same login (readiness warns), offer its own GitHub App: `factory setup --repo OWNER/NAME --github-app-link --json` gives the registration link. The operator creates the App, generates its private key and installs it (on an organization, on All repositories; at the least, on the repository and every other repository of its Project, which Factory reads too), then gives its id and the key's path: `--github-app-id ID --github-app-key PATH`. Never read or show the key. The App is a new login, and an Objective in flight finds what it made by the login, so setup refuses it while any Objective has state: ask the operator to drain the queue (`factory queue drain`) and wait until none runs.
+
 Keep the configuration, credentials and state outside the target checkout. Setup refuses a configuration or state directory inside it.
 
 ## Run
@@ -75,7 +77,7 @@ factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FI
 - **Create:** the first run creates the configuration (mode 0600). A repeat with the same options changes nothing (`changed: []`).
 - **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
 - **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
-- **Background logins:** the service doesn't keep logins from the setup shell, and `--background` checks readiness without them. Codex needs `codex login` (an API key in the shell doesn't reach the service), GitHub needs `gh auth login`, and a Claude or Copilot token needs `--credential-file`.
+- **Background logins:** the service doesn't keep logins from the setup shell, and `--background` checks readiness without them. Codex needs `codex login` (an API key in the shell doesn't reach the service), GitHub needs `gh auth login` or a GitHub App's key given with `--github-app-key` (the service loads setup's copy), and a Claude or Copilot token needs `--credential-file`.
 
 ## Check the result
 

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { TransientError } from "./github.js";
+import { GitHubError, TransientError } from "./github.js";
 import { errorMessage } from "./text.js";
 
 const run = promisify(execFile);
@@ -385,7 +385,12 @@ export function lfsFiltered(output: Buffer): Set<string> {
 async function operatorGit(
   checkout: string,
   args: string[],
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    /** Added to this one call's environment (`tokenEnvironment`). */
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<string> {
   const { LANGUAGE: _language, LC_ALL: _all, ...env } = process.env;
   // No gc or maintenance that would outlive the call in the background.
@@ -401,7 +406,12 @@ async function operatorGit(
       ...args,
     ],
     {
-      env: { ...env, GIT_TERMINAL_PROMPT: "0", LC_MESSAGES: "C" },
+      env: {
+        ...env,
+        GIT_TERMINAL_PROMPT: "0",
+        LC_MESSAGES: "C",
+        ...options.env,
+      },
       encoding: "utf8",
       timeout: options.timeoutMs ?? MINUTE,
       maxBuffer: 16 * 1024 * 1024,
@@ -598,7 +608,8 @@ export async function originRefusal(
 
 /**
  * Git that reaches origin (fetch, push, ls-remote, LFS transfer), with the
- * operator's configuration and credentials, once `originProblem` finds
+ * operator's configuration and credentials (a GitHub App's token instead,
+ * `remoteToken`), once `originProblem` finds
  * origin still bound to `repository`; otherwise a GitRefusal that names
  * the fix, so the step holds instead of reaching the wrong place. Every
  * remote Git call goes through here.
@@ -626,11 +637,69 @@ export async function originBound(
 ): Promise<(args: string[], timeoutMs?: number) => Promise<string>> {
   const refusal = await originRefusal(checkout, repository, signal);
   if (refusal) throw refusal;
+  // A GitHub App's token is read here too, so its refusal escapes as well.
+  const token = remoteTokens.get(repository.toLowerCase());
+  const env = token ? tokenEnvironment(await token()) : undefined;
   return (args, timeoutMs = 5 * MINUTE) =>
     operatorGit(checkout, ["-c", "protocol.file.allow=never", ...args], {
       ...(signal ? { signal } : {}),
       timeoutMs,
+      ...(env ? { env } : {}),
     });
+}
+
+/**
+ * Per repository, the token its remote Git calls authenticate with in
+ * place of the operator's Git credentials: a GitHub App's installation
+ * token (github-app.ts `factoryGitHub`), read for each call.
+ */
+const remoteTokens = new Map<string, () => Promise<string>>();
+
+/** Authenticate `repository`'s remote Git calls with `token` (`remoteTokens`). */
+export function remoteToken(
+  repository: string,
+  token: () => Promise<string>,
+): void {
+  remoteTokens.set(repository.toLowerCase(), token);
+}
+
+/**
+ * Configuration for one Git call, as GIT_CONFIG_* entries after any the
+ * environment has (they outrank every file), that sends `token` to
+ * github.com as an installation token's basic authorization: the
+ * operator's credential helpers and extra headers for github.com are
+ * cleared first, so a refused token never falls back to them. Nothing is
+ * written to a configuration file, and only that call's environment has
+ * it: never a worker's or a sandboxed command's (worktree.ts
+ * `workerEnvironment`). An SSH origin doesn't use it.
+ */
+export function tokenEnvironment(token: string): NodeJS.ProcessEnv {
+  const first = Number(process.env.GIT_CONFIG_COUNT) || 0;
+  const header = Buffer.from(`x-access-token:${token}`).toString("base64");
+  const entries: [string, string][] = [
+    ["credential.https://github.com.helper", ""],
+    ["http.https://github.com/.extraheader", ""],
+    ["http.https://github.com/.extraheader", `AUTHORIZATION: basic ${header}`],
+  ];
+  const env: NodeJS.ProcessEnv = {
+    GIT_CONFIG_COUNT: String(first + entries.length),
+  };
+  entries.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${first + index}`] = key;
+    env[`GIT_CONFIG_VALUE_${first + index}`] = value;
+  });
+  return env;
+}
+
+/** Whether origin's push URL (after insteadOf) isn't https: Git then pushes with the host's SSH login. */
+export async function pushesOverSsh(checkout: string): Promise<boolean> {
+  const url = await operatorGit(checkout, [
+    "remote",
+    "get-url",
+    "--push",
+    "origin",
+  ]);
+  return !url.trim().startsWith("https://");
 }
 
 /**
@@ -743,7 +812,9 @@ async function fetchOnce(
       ])
     ).trim();
   } catch (error) {
-    if (error instanceof GitRefusal) throw error;
+    // The origin check's refusal, or a GitHub App's (its key, its installation).
+    if (error instanceof GitRefusal || error instanceof GitHubError)
+      throw error;
     throw new TransientError(
       `git fetch in ${checkout}: ${errorMessage(error)}`,
     );

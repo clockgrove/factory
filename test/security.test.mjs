@@ -1,8 +1,9 @@
 // Security surfaces: what model-written text can do on GitHub, which paths
-// a worker may change, and what redaction covers.
+// a worker may change, which a Claude review session may read, and what
+// redaction covers.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +13,7 @@ import { redact } from "../dist/log.js";
 import { inert } from "../dist/markdown.js";
 import { resolveInputs } from "../dist/media.js";
 import { mayChange } from "../dist/objective.js";
+import { treeReadCheck } from "../dist/providers/claude.js";
 import { shownBlocks } from "../dist/shown.js";
 import { collect } from "../dist/work/collect.js";
 import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
@@ -265,6 +267,74 @@ test("one secret scan of every changed file names the file with a secret and pas
   assert.deepEqual(
     git(worktree, "show", "--name-only", "--format=", "HEAD").split("\n"),
     [".gitattributes", "a.txt", "src/b.ts", "src/deep/c.json"],
+  );
+});
+
+test("a Claude review session reads its evidence root by any path into it, and a read outside is told where the root is", async () => {
+  const dir = tempDir("factory-tree-read-");
+  const root = join(dir, "item.review", "review-0123456789ab");
+  mkdirSync(join(root, "candidate"), { recursive: true });
+  writeFileSync(join(root, "candidate", "package.json"), "{}\n");
+  writeFileSync(join(dir, "outside.txt"), "x\n");
+  symlinkSync(join(dir, "outside.txt"), join(root, "candidate", "out.txt"));
+  // The same root reached through a link, as a symlinked state directory is.
+  const linked = join(dir, "linked");
+  symlinkSync(root, linked);
+  const logged = [];
+  const decide = async (tree, tool, input) =>
+    (
+      await treeReadCheck(tree, (event) => logged.push(event))(
+        { hook_event_name: "PreToolUse", tool_name: tool, tool_input: input },
+        "toolu_1",
+        { signal: AbortSignal.timeout(10_000) },
+      )
+    ).hookSpecificOutput;
+  // Inside: left to the CLI, which allows it.
+  for (const [tree, tool, input] of [
+    [root, "Read", { file_path: "candidate/package.json" }],
+    [root, "Read", { file_path: "./candidate/package.json" }],
+    [root, "Read", { file_path: join(root, "candidate/package.json") }],
+    [linked, "Read", { file_path: join(linked, "candidate/package.json") }],
+    [linked, "Read", { file_path: join(root, "candidate/package.json") }],
+    [root, "Glob", { pattern: "candidate/**/*.json" }],
+    [root, "Glob", { pattern: join(root, "candidate/**/*.json") }],
+    [root, "Glob", { pattern: "../candidate/*.json", path: "candidate" }],
+    [root, "Grep", { pattern: "x", path: "candidate" }],
+    // The answer is no read, whatever its fields.
+    [root, "StructuredOutput", { path: "/candidate/package.json" }],
+  ])
+    assert.equal(
+      await decide(tree, tool, input),
+      undefined,
+      `${tool} ${JSON.stringify(input)}`,
+    );
+  assert.deepEqual(logged, []);
+  // Outside, a link out of the root included: refused, naming the root.
+  const outside = [
+    ["Read", "file_path", "/candidate/package.json"],
+    ["Read", "file_path", "../../outside.txt"],
+    ["Read", "file_path", "candidate/out.txt"],
+    ["Read", "file_path", "~/candidate/package.json"],
+    ["Grep", "path", dir],
+    // A Glob's pattern, absolute or out of its path.
+    ["Glob", "pattern", "/candidate/**/*.json"],
+    ["Glob", "pattern", "../*"],
+  ];
+  for (const [tool, field, path] of outside) {
+    const decision = await decide(root, tool, { pattern: "x", [field]: path });
+    assert.equal(decision.permissionDecision, "deny", path);
+    assert.equal(
+      decision.permissionDecisionReason,
+      `${JSON.stringify(path)} is outside your working directory, ${root}, the only place you may read. Read the request's files there: by a path relative to it, or an absolute path under it.`,
+    );
+  }
+  assert.deepEqual(
+    logged,
+    outside.map(([tool, , path]) => ({
+      event: "tree-read-refused",
+      tool,
+      path,
+    })),
   );
 });
 

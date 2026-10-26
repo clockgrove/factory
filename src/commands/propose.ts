@@ -3,7 +3,7 @@
  */
 import { isAbsolute } from "node:path";
 import { MAX_ANSWER_TEXT } from "../engine.js";
-import { GitHub } from "../github.js";
+import { factoryGitHub } from "../github-app.js";
 import { configOf, Refusal, serviceLive } from "../host.js";
 import { newRunId, RunLog } from "../log.js";
 import type { Paths } from "../paths.js";
@@ -86,10 +86,7 @@ async function propose(
   const deps = {
     config,
     paths,
-    github: new GitHub(
-      config.repository,
-      process.env.FACTORY_GITHUB_API,
-    ).redacting(config.secrets),
+    github: factoryGitHub(config).redacting(config.secrets),
     log: (event: Record<string, unknown>) => log.write(0, event),
     out: (text: string) => process.stdout.write(text),
   };

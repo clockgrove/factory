@@ -23,7 +23,7 @@ You queue Objectives on a GitHub Project and answer Factory's questions from the
   - bubblewrap (`bwrap`) for the command sandbox, and passt (`pasta`) if dependency installs need the network;
   - your target's build and validation tools.
 - **Logins:**
-  - the GitHub CLI logged in with access to the target repository and its Project;
+  - the GitHub CLI logged in with access to the target repository and its Project, or a GitHub App Factory acts as, so its holds notify you (see [GitHub identity](docs/reference/setup.md#github-identity));
   - a Codex login for the default provider, or a Claude Code or GitHub Copilot login for those providers.
 - **A trusted target repository.** Workers run under your OS account inside the sandbox; the sandbox isn't a boundary against hostile code.
 

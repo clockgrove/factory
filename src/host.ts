@@ -10,7 +10,7 @@ import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { eventLine, redactDeep } from "./display.js";
 import { DEFAULT_LIMITS, type EngineLimits, hostLimits } from "./engine.js";
 import { GitRefusal } from "./git.js";
-import { GitHub } from "./github.js";
+import { factoryGitHub } from "./github-app.js";
 import { GitHubSync } from "./github-sync.js";
 import {
   type Holder,
@@ -160,10 +160,7 @@ export async function serveInstallation(
       provider: name,
       selectedBy: options.provider ? "--provider" : "defaultProvider",
     };
-    const github = new GitHub(
-      config.repository,
-      process.env.FACTORY_GITHUB_API,
-    ).redacting(config.secrets);
+    const github = factoryGitHub(config).redacting(config.secrets);
     repositories = (signal) => projectRepositories(github, config, signal);
     // One log per service run: the sync's events go to the run's files too.
     log = new RunLog(paths.logs, newRunId(), config.capture, config.secrets);

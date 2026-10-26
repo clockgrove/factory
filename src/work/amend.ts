@@ -13,6 +13,7 @@ import type { WorkItem } from "../planning/types.js";
 import type { HoldOption, ObjectiveState } from "../state.js";
 import type { Collection } from "./collect.js";
 import { fact, facts } from "./facts.js";
+import { refusedOf } from "./refused.js";
 import { mergedBlame } from "./repair-context.js";
 import { repairOutcome } from "./step-deliver.js";
 import { withKeep } from "./step-work.js";
@@ -184,6 +185,15 @@ export function discoveryOutcome(
         ),
       },
     };
+  // The files it cites are read from the worker's result: the one
+  // collected, the refused one it resubmitted unchanged, or the item's
+  // start when it left no change.
+  const commit =
+    collected.kind === "collected"
+      ? collected.commit
+      : collected.unchanged
+        ? refusedOf(state, item.id)?.commit
+        : fact(state, "base", item.id);
   return propose(
     state,
     {
@@ -193,6 +203,7 @@ export function discoveryOutcome(
       plan: String(state.kept[ACCEPTED_AT]),
       discovery,
       worker: { itemId: item.id, attempt },
+      ...(commit ? { commit } : {}),
     },
     held,
     (problems) =>
@@ -249,6 +260,9 @@ export function blameAmendment(
   const owned =
     currentPlan(state)!.items.find((entry) => entry.id === predecessor)
       ?.ownedPaths ?? [];
+  // The files it cites are read from the failed result, or the item's start.
+  const commit =
+    refusedOf(state, item.id)?.commit ?? fact(state, "base", item.id);
   return propose(
     state,
     {
@@ -266,6 +280,7 @@ export function blameAmendment(
         acceptance: [correction.correction],
         dependencies: [predecessor],
       },
+      ...(commit ? { commit } : {}),
     },
     keep,
     (problems) =>

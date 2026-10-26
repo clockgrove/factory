@@ -283,7 +283,8 @@ function main() {
       .map((dir) => join(dir, "factory"))
       .find((path) => existsSync(path));
     root = first && factoryAt(first, version);
-    if (root) return report("current", first, root);
+    // The launcher isn't moved to it, so a newer one is kept all the same.
+    if (root) return report("current", first, root, newer);
   }
   // With --prefix, the launcher's newer Factory may be the one an install
   // would replace.

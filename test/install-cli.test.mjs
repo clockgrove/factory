@@ -459,6 +459,31 @@ test(
     }),
 );
 
+test("a matching CLI on PATH is used, and the launcher kept on a newer release is reported", () =>
+  withRoot((root) => {
+    const { data, installed, bin, run } = versions(root);
+    assert.equal(run("9.8.8").status, 0);
+    rmSync(join(data, "9.8.7"), { recursive: true });
+    const own = prefixWith(join(root, "own"), "9.8.7");
+    const path = join(root, "path-bin");
+    mkdirSync(path);
+    symlinkSync(join(own, "dist", "cli.js"), join(path, "factory"));
+    // No gh or npm on PATH: any download or install would be refused.
+    const { status, report } = run("9.8.7", path);
+    assert.equal(status, 0, JSON.stringify(report));
+    assert.equal(report.status, "current");
+    assert.equal(report.cli, join(path, "factory"));
+    assert.deepEqual(report.launcher, {
+      cli: join(bin, "factory"),
+      version: "9.8.8",
+      kept: true,
+    });
+    assert.equal(
+      realpathSync(join(bin, "factory")),
+      realpathSync(join(installed["9.8.8"], "dist", "cli.js")),
+    );
+  }));
+
 test("with --prefix, the installer won't replace the launcher's newer release without --downgrade", () =>
   withRoot((root) => {
     const prefix = join(root, "prefix");
@@ -517,20 +542,38 @@ test("workers' PATH leaves out a launcher whose release was deleted, and no othe
 
 test("readiness warns of a launcher whose release was deleted", () =>
   withRoot((root) => {
-    const { data, bin, env, run } = versions(root);
+    const { data, bin, env, scripts, run } = versions(root);
     assert.equal(run("9.8.8").status, 0);
     const checks = (PATH) => launcherChecks({ ...env, PATH });
     assert.deepEqual(checks(`${bin}:/usr/bin`), []);
     rmSync(join(data, "9.8.8"), { recursive: true });
-    // On the PATH, or only at its default place: one warning.
-    for (const PATH of [`${bin}:/usr/bin`, "/usr/bin"]) {
+    // On the PATH under any name, or only at its default place: one warning.
+    for (const PATH of [`${bin}:/usr/bin`, `${bin}/:${bin}`, "/usr/bin"]) {
       const found = checks(PATH);
       assert.equal(found.length, 1, JSON.stringify(found));
       assert.equal(found[0].name, "launcher");
       assert.equal(found[0].status, "warn");
       assert.ok(found[0].detail.includes(join(bin, "factory")));
       assert.match(found[0].fix, /setup again/);
+      assert.doesNotMatch(found[0].fix, /--prefix/);
     }
+
+    // A --prefix launcher is fixed with that prefix.
+    const prefix = join(root, "prefix");
+    prefixWith(prefix, "9.8.8");
+    assert.equal(
+      install(["--prefix", prefix], { script: scripts["9.8.8"], env }).status,
+      0,
+    );
+    rmSync(join(prefix, "node_modules"), { recursive: true });
+    const found = checks(`${join(prefix, "bin")}:/usr/bin`);
+    assert.deepEqual(
+      found.map((check) => check.fix),
+      [
+        `Run the Factory plugin's setup again (in Claude Code or Codex) with its installer's --prefix ${prefix}: it installs the plugin's CLI and points the launcher at it`,
+        "Run the Factory plugin's setup again (in Claude Code or Codex): it installs the plugin's CLI and points the launcher at it",
+      ],
+    );
   }));
 
 test("the installer installs nothing from a tarball that fails its checksum", () =>

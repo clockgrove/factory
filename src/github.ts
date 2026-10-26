@@ -1484,20 +1484,24 @@ export class GitHub {
     };
   }
 
-  /** A workflow run's latest attempt; undefined without Actions read access. */
+  /**
+   * A workflow run's latest attempt and its status; undefined without
+   * Actions read access.
+   */
   async workflowRunAttempt(
     run: number,
     signal?: AbortSignal,
-  ): Promise<number | undefined> {
+  ): Promise<{ attempt: number; status: string } | undefined> {
     const read = await this.optional(() =>
-      this.rest<{ run_attempt?: unknown }>(
+      this.rest<{ run_attempt?: unknown; status?: unknown }>(
         "GET",
         this.repo(`actions/runs/${run}`),
         undefined,
         signal,
       ),
     );
-    return typeof read?.run_attempt === "number" ? read.run_attempt : undefined;
+    if (typeof read?.run_attempt !== "number") return undefined;
+    return { attempt: read.run_attempt, status: String(read.status) };
   }
 
   /** Run a workflow run's failed jobs again, as its next attempt. */

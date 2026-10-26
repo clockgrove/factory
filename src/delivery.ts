@@ -1236,6 +1236,7 @@ const RERUNNABLE = ["failure", "timed_out"];
  * failure is a repair all the same. Each workflow run is rerun at most
  * once per head: one GitHub shows rerun (the run's attempt), or the kept
  * rerun names, is not rerun again, and a rerun's own failure stands. A
+ * run whose other jobs still run is a wait: it is rerun once finished. A
  * rerun whose job GitHub still shows from the first attempt is a wait
  * that asks after GitHub's lag window. Undefined: the repair stands, also
  * without Actions read access or when GitHub refuses the rerun.
@@ -1260,13 +1261,22 @@ async function rerunFailed(
   }
   const kept = input.rerun?.head === head ? input.rerun : undefined;
   const fresh: number[] = [];
-  for (const run of runs)
-    if (
-      !kept?.runs.includes(run) &&
-      (await github.workflowRunAttempt(run, signal)) === 1
-    )
-      fresh.push(run);
+  let running = false;
+  for (const run of runs) {
+    if (kept?.runs.includes(run)) continue;
+    const latest = await github.workflowRunAttempt(run, signal);
+    if (latest?.attempt !== 1) continue;
+    // GitHub reruns a run's failed jobs only once the run has finished.
+    if (latest.status === "completed") fresh.push(run);
+    else running = true;
+  }
   const names = [...new Set(broken.map((check) => check.name))];
+  if (!fresh.length && running)
+    return {
+      kind: "retry",
+      reason: `Awaiting the workflow runs of ${bounded(names, ", ")} on PR #${input.pr} to finish before rerunning their failed jobs`,
+      afterMs: CI_POLL_MS,
+    };
   if (!fresh.length)
     return {
       ...retry(

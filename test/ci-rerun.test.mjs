@@ -28,13 +28,15 @@ function actions(id, name, conclusion) {
 
 /**
  * A GitHub whose open PR #7 is ready but for its checks: `runs` on HEAD,
- * each job's attempt in `jobs` (id → attempt), the run's latest attempt.
+ * each job's attempt in `jobs` (id → attempt), the run's latest attempt
+ * and its status.
  */
 function github({
   runs,
   statuses = [],
   jobs = {},
   attempt = 1,
+  status = "completed",
   refuse,
   actionsRead = true,
 }) {
@@ -64,7 +66,7 @@ function github({
     jobLogTail: async () => undefined,
     workflowJob: async (job) =>
       actionsRead ? { run: RUN, attempt: jobs[job] ?? 1 } : undefined,
-    workflowRunAttempt: async () => attempt,
+    workflowRunAttempt: async () => ({ attempt, status }),
     rerunFailedJobs: async (run) => {
       if (refuse) throw new GitHubError("refused", refuse);
       reruns.push(run);
@@ -105,6 +107,26 @@ test("a failed Actions job on its run's first attempt is rerun once, not repaire
     result.reason,
     /Rerunning the failed Actions jobs of tests, lint on PR #7/,
   );
+});
+
+test("a failed job whose workflow run still runs other jobs waits for the run, then is rerun", async () => {
+  const running = github({
+    runs: [
+      actions(1, "lint", "failure"),
+      { ...actions(2, "tests", null), status: "in_progress" },
+    ],
+    status: "in_progress",
+  });
+  const waited = await observe(running);
+  assert.equal(waited.kind, "retry");
+  assert.match(waited.reason, /to finish before rerunning/);
+  assert.equal(waited.holdAfter, undefined);
+  assert.deepEqual(running.reruns, []);
+  const finished = github({
+    runs: [actions(1, "lint", "failure"), actions(2, "tests", "success")],
+  });
+  assert.equal((await observe(finished)).kind, "rerun");
+  assert.deepEqual(finished.reruns, [RUN]);
 });
 
 test("a run already rerun is never rerun again: kept, or shown by GitHub after a restart", async () => {

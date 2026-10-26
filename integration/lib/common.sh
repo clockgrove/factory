@@ -33,6 +33,29 @@ ROOT=$STATE_BASE/$1/$key
 CUR_CFG=$3
 EOF
   mkdir -p "$STATE_BASE/$1"
+  # A configuration the suite wrote gets the suite's GitHub App now; the prod
+  # case's own setup gives it to the one it creates.
+  [ ! -e "$3" ] || app_setup "$1"
+}
+# app_setup NAME: with the suite's GitHub App (APP_ARGS, run-suite.sh), give
+# installation NAME the App, and the suite's login as its operator, through
+# `factory setup`; a refusal, or an App that can't act there, fails the run.
+app_setup() {
+  [ ${#APP_ARGS[@]} -gt 0 ] || return 0
+  ( inst "$1"
+    cli_t 180 setup "${APP_ARGS[@]}" --json >"$RUN_DIR/app-setup.$1.out" 2>"$RUN_DIR/app-setup.$1.err"
+    python3 - "$RUN_DIR/app-setup.$1.out" <<'PY'
+import json, sys
+try: d = json.load(open(sys.argv[1]))
+except ValueError: sys.exit("setup printed no report")
+app = [c for c in (d.get("readiness") or {}).get("checks", []) if c.get("name") == "GitHub App"]
+if d.get("status") == "refused" or not app or any(c.get("status") == "blocked" for c in app):
+  sys.exit(json.dumps({"status": d.get("status"), "problems": d.get("problems"), "app": app})[:600])
+PY
+  ) 2>>"$RUN_DIR/app-setup.$1.err" && return 0
+  local CASE=suite INST=$1
+  record suite.github-app FAIL "setup didn't give installation $1 the GitHub App: $(tail -c 600 "$RUN_DIR/app-setup.$1.err")" "$(now)"
+  return 1
 }
 # A replay (KEPT: the kept run's directory) reads the kept run's installations.
 inst() { source "${KEPT:-$RUN_DIR}/inst/$1/env"; }

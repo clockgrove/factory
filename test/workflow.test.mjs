@@ -2,15 +2,8 @@
 // QA, and approval of a non-writer's Objective.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { micromark } from "micromark";
@@ -39,6 +32,7 @@ import {
   stateOf,
   status,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -426,7 +420,7 @@ test("final validation names each Work Item command it skips because a later mer
 });
 
 test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "factory-default-branch-"));
+  const directory = tempDir("factory-default-branch-");
   const git = (...args) =>
     assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);
   git("init", "--quiet", "--initial-branch=main");
@@ -441,7 +435,7 @@ test("the default branch is origin's HEAD, none without one, and a git failure i
 });
 
 test("the plan check flags a host node outside the target's Node pin, passing over an alias", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "factory-node-pin-"));
+  const directory = tempDir("factory-node-pin-");
   const git = (...args) =>
     assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);
   git("init", "--quiet", "--initial-branch=main");
@@ -791,7 +785,7 @@ test("a plan that shows up after another Objective started building the same pat
 });
 
 test("the repository map says whether it lists every path, which makes the result review's tree inventory complete", async () => {
-  const checkout = mkdtempSync(join(tmpdir(), "factory-map-"));
+  const checkout = tempDir("factory-map-");
   const git = (...args) => {
     const result = spawnSync("git", ["-C", checkout, ...args], {
       encoding: "utf8",

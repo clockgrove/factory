@@ -51,6 +51,7 @@ import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
   SelfValidation,
+  UNOWNED_FIX,
   VALIDATION_TOOL_DESCRIPTION,
   VALIDATION_TOOL_NAME,
   worktreeGitlinks,
@@ -198,11 +199,11 @@ function systemPrompt(
 const CREDENTIAL_RESTART =
   "\n\nAn earlier session of this attempt stopped on a transient provider authentication error. Its uncommitted changes are already in your working tree: continue from them rather than starting over.";
 
-const VALIDATE_REQUEST =
-  "Run Validate on your final files, fix any failures, then give your final report.";
+export const VALIDATE_REQUEST = `Run Validate on your final files, fix any failures, then give your final report. ${UNOWNED_FIX}`;
 
-function continuation(validating: boolean): string {
-  return `You reached the turn limit before finishing. Continue the same task from where you stopped.${validating ? " Finish only after Validate passes on your final files," : " Finish the change,"} then review your own diff, then give your final report.`;
+/** `failed`: Validate's last run on the worker's current files failed. */
+export function continuation(validating: boolean, failed: boolean): string {
+  return `You reached the turn limit before finishing. Continue the same task from where you stopped.${validating ? " Finish only after Validate passes on your final files," : " Finish the change,"} then review your own diff, then give your final report.${failed ? ` Validate failed on your current files. ${UNOWNED_FIX}` : ""}`;
 }
 
 // Limits
@@ -1572,7 +1573,13 @@ export class ClaudeWorker implements Worker {
           // Unfinished work, not a failed attempt: the same conversation
           // and worktree continue.
           continuations += 1;
-          send(continuation(attempt.grants.validate));
+          send(
+            continuation(
+              attempt.grants.validate,
+              attempt.grants.validate &&
+                (await watchdog.race(attempt.validator.finalFailed())),
+            ),
+          );
           continue;
         }
         if (!error && handoffRefusals < MAX_HANDOFF_REFUSALS) {

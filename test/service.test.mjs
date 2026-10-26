@@ -5,13 +5,11 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -32,6 +30,7 @@ import {
   stateOf,
   status,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -552,7 +551,7 @@ test("a knowledge store that can't open never holds back retirement", async () =
 
 test("concurrent defaultHead calls in one checkout all see the moved default branch, and none fetches once origin moves", async () => {
   const { defaultHead, GitRefusal } = await import("../dist/git.js");
-  const dir = mkdtempSync(join(tmpdir(), "factory-fetch-"));
+  const dir = tempDir("factory-fetch-");
   const git = (cwd, ...args) => {
     const result = spawnSync(
       "git",

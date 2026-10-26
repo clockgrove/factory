@@ -7,19 +7,18 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pinnedGitExit } from "../dist/git.js";
 import { codexLauncher } from "../dist/providers/codex.js";
 import { LaunchedGroup, namespacedLauncher } from "../dist/sandbox.js";
 import { addWorktree, clearStaleLocks, hostGit } from "../dist/worktree.js";
+import { tempDir } from "./helpers.mjs";
 
 /** Process ids whose command line is exactly `sleep <seconds>`. */
 function sleeping(seconds) {
@@ -89,7 +88,7 @@ async function abortLeavesNothing(launcher, pidFile, args, env, cwd) {
 test("an aborted Codex run ends every command it started", async () => {
   // Codex itself, as workers and planning calls launch it, running a
   // command in its sandbox.
-  const root = mkdtempSync(join(tmpdir(), "factory-codex-abort-"));
+  const root = tempDir("factory-codex-abort-");
   const env = {
     PATH: process.env.PATH,
     HOME: root,
@@ -167,7 +166,7 @@ test("a killed Claude planning child is a retry, not a charged error, as a kille
   // The integration suite's model-kill.plan: the SDK's own child, killed
   // mid-call. Its home has no login, and it is killed as it starts: it never
   // reaches a model.
-  const home = mkdtempSync(join(tmpdir(), "factory-claude-kill-"));
+  const home = tempDir("factory-claude-kill-");
   const runner = spawn(
     process.execPath,
     [
@@ -219,9 +218,10 @@ function old(path) {
   utimesSync(path, then, then);
 }
 
-/** A repository with one commit, and its head. */
+/** A repository with one commit, and its head; its worktrees go beside it. */
 function repository() {
-  const checkout = mkdtempSync(join(tmpdir(), "factory-locks-"));
+  const checkout = join(tempDir("factory-locks-"), "checkout");
+  mkdirSync(checkout);
   const git = (...args) =>
     spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
   git("init", "-q", "-b", "main");

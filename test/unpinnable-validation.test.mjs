@@ -4,13 +4,13 @@
 // the item asked a person at validate after the work was built.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { validateTree } from "../dist/validate.js";
+import { tempDir } from "./helpers.mjs";
 
 const refused = [
   "npm test -- test/countCharQpgmlc.test.js",
@@ -54,7 +54,7 @@ function commit(directory, message) {
  * there, so none runs.
  */
 function repository() {
-  const directory = mkdtempSync(join(tmpdir(), "factory-unpinnable-"));
+  const directory = tempDir("factory-unpinnable-");
   git(directory, "init", "--quiet", "--initial-branch=main");
   writeFileSync(
     join(directory, "package.json"),

@@ -3,13 +3,13 @@
 // that path didn't own, and the item asked a person which path to use.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { validateGraph } from "../dist/planning/graph.js";
+import { tempDir } from "./helpers.mjs";
 
 const base = "0".repeat(40);
 
@@ -62,7 +62,7 @@ function git(directory, ...args) {
 
 /** A base commit holding `files`. */
 function baseWith(files) {
-  const directory = mkdtempSync(join(tmpdir(), "factory-owned-"));
+  const directory = tempDir("factory-owned-");
   git(directory, "init", "--quiet", "--initial-branch=main");
   for (const file of files) {
     mkdirSync(join(directory, file, ".."), { recursive: true });

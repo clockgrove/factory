@@ -4,8 +4,7 @@
 // command names no base, since Factory enforces owned paths itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -28,6 +27,7 @@ import {
   serve,
   stateOf,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -55,7 +55,7 @@ test("an item's validation compares with the commit it was built on, not a plan 
   process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
   const { sandbox } = loadConfig(REPO);
   delete process.env.FACTORY_CONFIG;
-  const checkout = mkdtempSync(join(tmpdir(), "factory-base-"));
+  const checkout = tempDir("factory-base-");
   git(checkout, "init", "--quiet");
   const planned = commit(checkout, "base.txt");
   // Another Objective merged, and this item was built on its merge.
@@ -111,10 +111,7 @@ test("final validation with no final command skips a Work Item's base-relative c
   const mergedB = pushed("sibling.txt");
   // A target's clone, outside the state directory validation seals, so
   // git in the sandbox reads its metadata.
-  const checkout = join(
-    mkdtempSync(join(tmpdir(), "factory-final-")),
-    "checkout",
-  );
+  const checkout = join(tempDir("factory-final-"), "checkout");
   git(inst.root, "clone", "--quiet", "origin.git", checkout);
   githubOrigin(checkout, join(inst.root, "origin.git"));
   configured(inst, `http://127.0.0.1:${await closedPort()}`, {}, { checkout });
@@ -189,7 +186,7 @@ test("final validation with no final command skips a Work Item's base-relative c
 });
 
 test("the plan check refuses a QA or integrated command that compares with the plan's base, and leaves a Work Item's own", async () => {
-  const target = mkdtempSync(join(tmpdir(), "factory-base-plan-"));
+  const target = tempDir("factory-base-plan-");
   git(target, "init", "--quiet");
   const base = commit(target, "base.txt");
   const scope = `git diff --exit-code $FACTORY_BASE_SHA HEAD -- . ':!src/a.js'`;

@@ -70,7 +70,7 @@ CASE_TABLE_prd=(
   "recheck|P|25|a failed check names a missing Source; after the issue is fixed, 'recheck' plans, and no plan validates with the CI-only command the Objective asks for (toolchain.ci-only, intake.recheck)"
   "outsider|P|15|an Objective github-actions[bot] filed waits for a writer's approve; the bot's own /factory approve is ignored; an edit after approval asks again (intake.non-writer)"
   "amend|P|30|an operator's amendment is planned and reviewed; an edit after planning holds and 'replan' plans again (plan.amendment, plan.replan)"
-  "discovery|P|35|a worker's in-scope discovery becomes an amendment and is reviewed (plan.discovery)"
+  "discovery|P|35|drained until its plan is accepted, then a person's test on main needs a file no Work Item owns: the worker's required in-scope discovery becomes an amendment and is reviewed (plan.discovery)"
   "scope|P|40|the base item's merge refused: it holds, the independent item merges, the dependent never starts; retry finishes it (holds.item-scope*)"
   "paths|P|40|two Objectives owning the same file take turns (queue.paths-take-turns)"
   "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"

@@ -4,11 +4,11 @@
 // Real Git, real lockfiles.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { installNetworkRefusal } from "../dist/package-network.js";
+import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -165,7 +165,7 @@ for (const [shape, manifest, basePin, candidatePin, refused] of [
   ],
 ]) {
   test(`a candidate lockfile pinning ${shape} is ${refused ? "refused" : "accepted"}`, async () => {
-    const directory = mkdtempSync(join(tmpdir(), "factory-package-network-"));
+    const directory = tempDir("factory-package-network-");
     git(directory, "init", "--quiet", "--initial-branch=main");
     const base = commit(
       directory,

@@ -5,14 +5,14 @@
 // the pinned Objective, and the planner, who writes no text, could not fix it.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildFacts } from "../dist/planning/facts.js";
 import { validateGraph } from "../dist/planning/graph.js";
 import { decodePlan } from "../dist/planning/wire.js";
 import { readShown } from "../dist/shown.js";
+import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -24,7 +24,7 @@ const CRITERION =
   '`padEndQjgwl(s, width)` puts spaces after `s` until it is `width` characters long: `padEndQjgwl("ab", 4)` is `"ab  "`.';
 
 test("a coverage entry carries the Objective criterion's exact text", async () => {
-  const checkout = mkdtempSync(join(tmpdir(), "factory-coverage-"));
+  const checkout = tempDir("factory-coverage-");
   git(checkout, "init", "--quiet", "--initial-branch=main");
   writeFileSync(join(checkout, "README.md"), "# Text\n");
   git(checkout, "add", ".");

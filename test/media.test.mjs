@@ -5,8 +5,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { hydrateTree, materializeSelection } from "../dist/media.js";
@@ -14,6 +13,7 @@ import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { repairPath } from "../dist/repair.js";
 import { aboutMedia, repairOutcome } from "../dist/work/step-deliver.js";
+import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -23,7 +23,7 @@ function git(directory, ...args) {
 
 /** A checkout whose work commit has `.gitattributes` routing PNGs through LFS. */
 function checkout() {
-  const root = mkdtempSync(join(tmpdir(), "factory-media-"));
+  const root = tempDir("factory-media-");
   const directory = join(root, "checkout");
   mkdirSync(directory);
   git(directory, "init", "--quiet", "--initial-branch=main");
@@ -293,9 +293,7 @@ test("a refused candidate set is repaired from its staging or receipt, and only 
   assert.equal(repairPath(code, ".factory-assets.json"), false);
   assert.equal(repairPath(code, receipt), false);
 
-  const set = candidateSet(mkdtempSync(join(tmpdir(), "factory-set-")), [
-    "assets/badge/a.png",
-  ]);
+  const set = candidateSet(tempDir("factory-set-"), ["assets/badge/a.png"]);
   const refused = (evidence) => ({
     kind: "review",
     tree: "t",

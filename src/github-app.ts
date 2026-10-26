@@ -125,7 +125,7 @@ export function appRegistrationLink(
 
 /** What the operator does with the link (`setup --github-app-link`, readiness). */
 export const APP_STEPS =
-  "Open it and create the App, generate a private key on its page, install it on the repository, then run factory setup --github-app-id ID --github-app-key PATH";
+  "Open it and create the App, generate a private key on its page, install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH";
 
 /** Whether `owner` is an organization, by GitHub's public read of the account (no login). */
 export async function organizationOwner(

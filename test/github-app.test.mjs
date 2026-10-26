@@ -479,6 +479,17 @@ test("a hold, the report and a cancel mention every operator once, at the end; w
   const report = reportComment(mark(5, "report", "run"), state, operators);
   assert.match(report, /\*\*Factory finished this Objective\.\*\*/);
   assert.ok(report.endsWith("\n\n@kirk @ops-2"));
+  // The checks a rerun of their failed Actions jobs passed come before them.
+  state.kept["item:a:ciRerun"] = {
+    head: "d".repeat(40),
+    checks: ["test"],
+    passed: true,
+  };
+  const flaky = reportComment(mark(5, "report", "run"), state, operators);
+  assert.match(
+    flaky,
+    /Possibly flaky CI checks[^\n]*\n- \*\*a\*\*: `test` at `dddddddddddd`\n\n@kirk @ops-2$/,
+  );
   assert.doesNotMatch(reportComment(mark(5, "report", "run"), state, []), /@/);
 });
 

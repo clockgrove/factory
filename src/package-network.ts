@@ -25,8 +25,7 @@ const CONFIGURATION = [
   ".pnpmfile.mjs",
   ".pnpmfile.js",
 ];
-/** Files that pin the packages an install fetches. */
-export const LOCKFILES = [
+const LOCKFILES = [
   "pnpm-lock.yaml",
   "package-lock.json",
   "npm-shrinkwrap.json",

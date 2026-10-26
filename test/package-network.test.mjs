@@ -193,11 +193,14 @@ for (const [shape, manifest, basePin, candidatePin, refused] of [
 test("readiness warns of a lockfile whose install has no network and no warm store", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  writeFileSync(join(inst.root, "checkout", "package-lock.json"), "{}");
   const check = (...args) =>
     JSON.parse(cli(inst, "setup", ...args, "--json").out).readiness.checks.find(
       (entry) => entry.name === "sandbox.network",
     );
+  // No bootstrap installs from a shrinkwrap.
+  writeFileSync(join(inst.root, "checkout", "npm-shrinkwrap.json"), "{}");
+  assert.equal(check(), undefined);
+  writeFileSync(join(inst.root, "checkout", "package-lock.json"), "{}");
   const off = check();
   assert.equal(off?.status, "warn", JSON.stringify(off));
   assert.match(off.detail, /package-lock\.json.*packageStore is unset/);

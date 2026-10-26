@@ -18,7 +18,6 @@ import { checkoutCredentialEntries } from "./git.js";
 import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
-import { LOCKFILES } from "./package-network.js";
 import { installationPaths } from "./paths.js";
 import { hostVersion, nodePin, nodeSatisfies } from "./planning/executables.js";
 import { networkToolOfCommand } from "./planning/facts.js";
@@ -111,6 +110,15 @@ function packageScripts(checkout: string): Record<string, unknown> {
   }
 }
 
+/** Whether path is a directory Factory can read with nothing in it. */
+function emptyDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory() && !readdirSync(path).length;
+  } catch {
+    return false;
+  }
+}
+
 /** The command's program: its first word that isn't a variable assignment. */
 const program = (command: string) =>
   command
@@ -180,15 +188,13 @@ function hostChecks(
           : `${store} is created at the first install`,
       ),
     );
-  // With the network off, the sandboxed install fetches nothing: a
-  // lockfile's packages come only from a store the operator warmed.
-  const lockfile = LOCKFILES.find((name) =>
+  // With the network off, the sandboxed install fetches nothing: the
+  // packages a bootstrap's lockfile names come only from a store the
+  // operator warmed.
+  const lockfile = ["pnpm-lock.yaml", "package-lock.json"].find((name) =>
     existsSync(join(config.checkout, name)),
   );
-  const cold =
-    !store ||
-    !existsSync(store) ||
-    (statSync(store).isDirectory() && !readdirSync(store).length);
+  const cold = !store || !existsSync(store) || emptyDirectory(store);
   if (
     lockfile &&
     cold &&

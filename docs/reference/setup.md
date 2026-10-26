@@ -17,7 +17,7 @@ Part of [the design](../DESIGN.md).
 - **Host:**
   - bubblewrap starts a sandbox, and with `package-install`, pasta is there; with `host`, the detail says what commands reach;
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
-  - with `sandbox.network` `off` and commands sandboxed, a checkout with a lockfile (`pnpm-lock.yaml`, `package-lock.json` or `npm-shrinkwrap.json`) has a `sandbox.packageStore` that isn't empty; otherwise it is `warn`, because validation's dependency install runs offline and the Objective holds on it;
+  - with `sandbox.network` `off` and commands sandboxed, a checkout with a bootstrap's lockfile (`pnpm-lock.yaml` or `package-lock.json`) has a `sandbox.packageStore` that isn't empty; otherwise it is `warn`, because validation's dependency install runs offline and the Objective holds on it;
   - git, git lfs, node and each final command's program are on the PATH;
   - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it;
   - a final command that needs the network is flagged.

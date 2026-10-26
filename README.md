@@ -31,10 +31,10 @@ Planning, review and workers use your providers' quota. An idle service makes no
 
 ## Install
 
-Factory has two parts, and both come from one release:
+Install the plugin, then run its setup skill. Factory has two parts, and both come from one release:
 
 - **The plugin** gives your agent host the `setup` and `director` skills.
-- **The CLI tarball** gives you `factory` and the bundled default Codex runtime. It works the same under any host.
+- **The CLI** gives you `factory` and the bundled default Codex runtime. It works the same under any host. The setup skill installs it for you.
 
 Pick the latest release:
 
@@ -62,11 +62,22 @@ claude plugin install factory@clockgrove
 
 In Claude Code the skills appear as `factory:setup` and `factory:director`.
 
-Claude Code may report that the plugin's packages were not installed, naming a `package-lock.json` entry that is a bundled copy. This is expected and harmless. The plugin is this repository at the release tag, so it carries the CLI's `package.json` and lockfile, and Claude Code [installs a plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies) only when none of them is bundled or linked. The skills need none of them: they run the `factory` CLI that you install from the tarball below.
+Claude Code may report that the plugin's packages were not installed, naming a `package-lock.json` entry that is a bundled copy. This is expected and harmless. The plugin is this repository at the release tag, so it carries the CLI's `package.json` and lockfile, and Claude Code [installs a plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies) only when none of them is bundled or linked. The skills need none of them: they run the `factory` CLI that setup installs.
 
-### CLI
+### Run setup
 
-Download the tarball and verify it:
+In Codex or Claude Code, ask Factory to set up your target (see [Use the plugin](#use-the-plugin)), or run `factory:setup` in Claude Code. Before anything else, setup installs the CLI of the plugin's own release when it is missing or another version:
+
+1. It downloads that release's `clockgrove-factory-VERSION.tgz` and `SHA256SUMS` into a fresh directory.
+2. It checks the tarball's SHA-256 and its build provenance with `gh attestation verify`, and stops with nothing installed if either fails.
+3. It installs the tarball with npm, together with the SDKs the Claude and Copilot providers need, into `~/.local/share/clockgrove-factory/VERSION` (under `XDG_DATA_HOME` when set), or into an absolute directory you name.
+4. It links the CLI as `bin/factory` in that directory, runs it for the rest of setup and gives you the one line that puts it on your shell's PATH. That `bin` holds only Factory's launcher, which Factory keeps off its workers' PATH.
+
+It needs the GitHub CLI logged in and network access. The installer is `skills/setup/install-cli.mjs` in the plugin; `node` runs it on its own too, and it prints JSON with the CLI's path.
+
+### Install the CLI by hand
+
+This is the fallback when setup can't install the CLI. Download the tarball and verify it:
 
 ```sh
 gh release download "v$VERSION" --repo clockgrove/factory \
@@ -97,11 +108,11 @@ Keep that CLI on the PATH of the terminal or agent that will operate Factory, an
 
 ### Check the installation
 
-Check that the CLI and the plugin come from the release you selected:
+Setup checks this for you. To check by hand that the CLI and the plugin come from the release you selected, list the CLI's installation directory (setup's default below, or the one you chose):
 
 ```sh
 command -v factory
-npm list --offline --prefix /absolute/private/factory-prefix @clockgrove/factory --depth=0
+npm list --offline --prefix "$HOME/.local/share/clockgrove-factory/$VERSION" @clockgrove/factory --depth=0
 codex plugin list --marketplace clockgrove --json  # Codex host
 claude plugin list --json                        # Claude Code host
 ```
@@ -115,7 +126,7 @@ Use the listing for your host. `factory help` lists the installed commands. A pa
 
    > Use Factory to set up OWNER/NAME with the clone at /absolute/clone and Project PVT_.... Do not start work.
 
-   The setup skill writes the configuration and reports a readiness checklist with the fix for anything missing. To run Objectives in the background, ask it to install the background service. See [setup](docs/USER-GUIDE.md#set-up).
+   The setup skill installs the CLI if it needs to (see [Run setup](#run-setup)), writes the configuration and reports a readiness checklist with the fix for anything missing. To run Objectives in the background, ask it to install the background service. See [setup](docs/USER-GUIDE.md#set-up).
 
 3. **Write an Objective.** Create an issue in the target from the [Objective template](docs/templates/objective.md): a goal, observable Acceptance bullets, and optional Context, Sources and Constraints. See [writing an Objective](docs/USER-GUIDE.md#write-an-objective).
 4. **Run it.** Set the issue's `Factory` field to Queued, or ask:

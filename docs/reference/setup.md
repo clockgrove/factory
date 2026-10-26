@@ -19,7 +19,8 @@ Part of [the design](../DESIGN.md).
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - with `sandbox.network` `off` and commands sandboxed, a checkout with a bootstrap's lockfile (`pnpm-lock.yaml` or `package-lock.json`) has a `sandbox.packageStore` that isn't empty; otherwise it is `warn`, because validation's dependency install runs offline and the Objective holds on it;
   - git, git lfs, node and each final command's program are on the PATH;
-  - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it;
+  - with mise managing the checkout (see [Toolchain from mise](#toolchain-from-mise)), `mise toolchain` says which tools came from mise and from which file. A configuration mise doesn't trust is `warn` with `mise trust FILE` as its fix, and a pinned tool that isn't installed is `warn` with `mise install` in the checkout. mise's shims directory on the PATH is `warn` too;
+  - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it. With mise managing the checkout, its fix (and the Objective check's) is `mise install` in the checkout, then `factory setup --background`;
   - a final command that needs the network is flagged.
 - **Providers:** each planner's and worker's SDK is installed and its login is present. Codex and Copilot logins are checked by presence. Claude's is the login the Claude SDK resolves, asked of it once per setup with no model call and a 30-second bound. A keychain, token, profile or cloud-provider login counts. An expired login whose refresh the server rejects is `blocked`, but one whose refresh fails for network reasons still reads `ok`. No answer is `warn`. Like any Claude client, the probe may refresh the operator's login and update `~/.claude.json`. A credential the background service loads at start counts by name, and one it can't read is `blocked` with the file to restore. Copilot's tokens and keys may be service credentials too (`--credential-file`), and its endpoint settings carry over from the setup shell. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
 - **Repository:**
@@ -87,7 +88,7 @@ Factory acts on GitHub as the GitHub CLI's login (or `FACTORY_GITHUB_TOKEN`), or
 The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.
 
 - **`--background`:** setup as above, checked as the service will run (setup.ts `setup`): its readiness counts the credentials the unit will load and leaves out the logins the unit doesn't keep from the setup shell (systemd.ts `unkeptLogins`): `CODEX_API_KEY`, `OPENAI_API_KEY`, `FACTORY_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `FACTORY_GITHUB_APP_KEY` and the credential names below. So the service's Codex login is `codex login`'s auth.json and its GitHub login is the one `gh auth login` stored, or its GitHub App's key. Only once its status is `configured` does it write the unit and enable and start it, then wait up to 30 s for the service to take its lock.
-  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations, Copilot endpoint settings (`COPILOT_API_URL`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`) and proxies.
+  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations, Copilot endpoint settings (`COPILOT_API_URL`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`) and proxies. With mise managing the checkout, the checkout's pinned tools come first on that PATH (see [Toolchain from mise](#toolchain-from-mise)).
   - It restarts on failure, except on exit 2 (usage) and 78 (a configuration that doesn't load).
   - `KillMode=mixed`: the service stops at its next tick, and then its children are killed.
   - Repeated with nothing changed, it leaves the running service alone. The service reads its configuration and credentials once, so it restarts when the unit changed (an upgrade, or a changed environment or credential list), when setup changed the configuration or the App's key, or when `--credential-file` is given.
@@ -98,6 +99,17 @@ The service runs as a systemd user unit (systemd.ts), one per installation. Each
 - **`--uninstall`:** stop the service and remove its unit. The configuration and state stay.
 
 Setup never touches a unit it didn't write: its first line is Factory's marker. A `factory serve` that's already running outside the unit blocks `--background`. Lingering off is a warning, because the service then stops at logout.
+
+### Toolchain from mise
+
+mise manages the checkout when the checkout has a mise configuration (`mise.toml`, `.mise.toml`, `mise.local.toml`, `.config/mise.toml`, `.config/mise/config.toml`, `.mise/config.toml`, `mise/config.toml` or `.tool-versions`) and `mise` is on the setup shell's PATH. Then setup (toolchain.ts) runs `mise ls --current --json` in the checkout, and `mise bin-paths TOOL@VERSION` for each installed tool a file in the checkout pins; a pin from the global configuration or a parent directory is the operator's own and doesn't count. `--background` puts those bin directories first on the unit's PATH, so the service, its validation and its workers run exactly the versions the repository pins, and readiness checks that PATH. Factory itself still runs on the node that ran setup.
+
+- **Untrusted:** mise refuses a configuration that can run code until it is trusted. Readiness names `mise trust FILE`, and the PATH stays the shell's.
+- **Not installed:** readiness names `mise install` in the checkout; the other pinned tools still come first.
+- **The pin moves:** setup reads the checkout's working tree, so bring the checkout up to date with the default branch, run `mise install` there, then `factory setup --background`. The unit's PATH changes, so the service restarts. Until then, readiness and the Objective check flag a node that misses the Node pin, and their fix says so.
+- **Without mise:** no mise on the PATH, or no configuration in the checkout, changes nothing.
+
+Factory never runs `mise install` or `mise trust`, and runs mise only in the configured checkout, with `MISE_YES=0` (see [Security](security.md#security)). Keep mise's shims directory, and `mise activate`, off the shell that runs `--background`: a shim picks its version from the directory a command runs in, a worktree a worker writes.
 
 **An unconfigured serve is visible.** Without a configuration file, serve applies requests only:
 

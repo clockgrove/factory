@@ -349,7 +349,7 @@ export function packageManagerVersionProbe(command: string): boolean {
 }
 
 /** The script forms {@link packageScriptInvocation} accepts, for messages. */
-const PACKAGE_SCRIPT_FORMS =
+export const PACKAGE_SCRIPT_FORMS =
   "`npm test`, `pnpm test`, `pnpm check`, `npm run NAME` or `pnpm run NAME`, with no other arguments";
 
 /** Supported root script forms; shell wrappers and package-manager flags are ambiguous. */
@@ -366,6 +366,20 @@ export function packageScriptInvocation(
   if (manager === "pnpm" && !match[2] && !["check", "test"].includes(name))
     return undefined;
   return { manager, name };
+}
+
+/**
+ * A command that runs npm or pnpm and is none of {@link PACKAGE_SCRIPT_FORMS},
+ * the script-disabled bootstrap or a version probe: validation can't keep
+ * its script fixed and refuses it, so the plan check refuses it first.
+ */
+export function unpinnablePackageCommand(command: string): boolean {
+  return (
+    /\b(?:npm|pnpm)\b/.test(command) &&
+    !packageBootstrap(command) &&
+    !packageManagerVersionProbe(command) &&
+    !packageScriptInvocation(command)
+  );
 }
 
 export function normalizedCommand(command: string): string {
@@ -518,7 +532,7 @@ function scopedCommands(
 /**
  * The root package scripts at the base in the forms validation runs (test
  * and check first), less CI-only and network ones: facts for the planner.
- * Any other command the plan writes runs as written.
+ * A command the plan writes without npm or pnpm runs as written.
  */
 async function packageCommands(
   files: BaseFiles,
@@ -582,7 +596,7 @@ function packageCommandInstructions(
   const scoped = commands.flatMap((command) =>
     scopes.has(command) ? [`\`${command}\` (${scopes.get(command)})`] : [],
   );
-  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself; any command line runs as written.${scoped.length ? `\nThese check only one directory; use one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
+  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself. Besides the script-disabled install, one that runs npm or pnpm must be exactly ${PACKAGE_SCRIPT_FORMS} (no \`--\`, no flags), since validation keeps that script fixed; a command without npm or pnpm runs as written.${scoped.length ? `\nThese check only one directory; use one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
 }
 
 /** The CI-only and package-script notes for the planner request, in that order. */
@@ -945,12 +959,7 @@ export async function objectiveCommandProblems(
   const files = new BaseFiles(checkout, base, options.signal);
   const { problems } = await planningSources(shown, files);
   for (const command of finalCommands(options.requiredCommands))
-    if (
-      /\b(?:npm|pnpm)\b/.test(command) &&
-      !packageBootstrap(command) &&
-      !packageManagerVersionProbe(command) &&
-      !packageScriptInvocation(command)
-    )
+    if (unpinnablePackageCommand(command))
       problems.push(
         `Required final-validation command ${command} runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}, so its script can't be kept fixed; correct it in the installation's finalValidation.requiredCommands.`,
       );

@@ -16,6 +16,7 @@ npm run integration -- --suite prd                   # the PRD suite: the requir
 npm run integration -- --provider claude             # the main suite on Claude (default: --provider codex)
 npm run integration -- --only claude,queue           # some cases
 npm run integration -- --build ../other-checkout     # test another build (its dist/cli.js)
+npm run integration -- --replay 2026-10-25T101058PDT --suite prd --only prod   # a kept run's checks again, nothing live
 ```
 
 `--dry-run` is the one list of cases. Each case runs its own Objectives; every case of a suite starts at once and they run concurrently.
@@ -25,6 +26,15 @@ npm run integration -- --build ../other-checkout     # test another build (its d
 **Time limit.** A suite has 60 minutes of wall clock: at 55 minutes it stops its cases, cancels unsettled Objectives concurrently, then runs the end checks, cleanup and report. Each case also has its own budget, its minutes in the cases table (`--dry-run` shows them): its deadline is its start plus those minutes, never past the 55-minute stop, and every wait, CLI call and polling loop in the case ends there. A case out of time records its unfinished checks as failed or leaves them unrecorded (`incomplete.*`), as at the suite's stop, and its unsettled Objectives are cancelled; the other cases keep their time. A wait for an Objective to end returns at once (`held:<step>`) when it holds on a question the case's hold policy can't answer; waits that expect a question still return it. Remote calls share the suite's deadline. The crash lane advances through exact hooks against its budget, with time reserved for terminal checks.
 
 **Results.** `/tmp/factory-integration-runs/results/<PDT timestamp>.md` has the total wall time, each case's start, end and duration, and every check with its result and evidence. The matching run directory holds serve logs, configurations, rendered Objectives and the journal. The suite exits 0 only when every selected check has exactly one PASS and every case completed. Failed, missing, duplicate or unreachable checks fail the run. Exit 1 means qualification failed, 2 means bad usage, and 3 means a prerequisite prevented a start.
+
+**Replay.** `--replay RUN_ID` (with that run's `--suite`, and optionally `--only`) proves a check fixed in code in seconds instead of a new live run. It re-evaluates the kept run's checks with this checkout's code over what the run left in `/tmp/factory-integration/RUN_ID/` (state, logs) and `/tmp/factory-integration-runs/RUN_ID/` (issues, journal), and writes a new results file headed "Replay of RUN_ID" with the same check names. It creates no repository, starts no serve, runs no CLI command, makes no GitHub call and no model call, and changes nothing in the kept run. A replayable check is one function over those files that the live case calls too, so the two can't drift apart; a case's `replay_<case>` finds its Objectives in the kept `issues` file (in filing order) and journal and calls it:
+
+- `model-kill.plan`, `model-kill.work`: the killed attempt's retry outcomes and charged errors (the attempt from the journal).
+- `netcut.plan`, `netcut.ci`: holds after each cut, over the window the live check used (the journal's cut and restore lines, written from this change on; an older run's serve `cuts.log` has the cut itself, but not the moment the suite saw the restore, so it isn't used).
+- `queue.order`, `queue.concurrency-3`, `exec.parallel-items`, `knowledge.memory`, `plan.discovery`.
+- `prod.no-holds`, `queue.paths-take-turns`: their state part (holds, the turns, every Objective done). Their end checks read GitHub, so a replay can fail them but never pass them: a passing state part is NOT-REPLAYABLE.
+
+Every other check is NOT-REPLAYABLE, never PASS: it reads live GitHub (PRs, comments, markers, cards, branch protection), drives the run (answers, crash points, the moment of a pause or a reset) or reads a command's exit. A replay reads the files as the run left them, after its own end-of-run cancellations, not as they stood when the live check ran. It exits 1 on any FAIL, and refuses (exit 2) a `--suite` other than the kept run's, which would find none of its lanes and pass empty.
 
 ## Prerequisites
 

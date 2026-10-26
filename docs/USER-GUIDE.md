@@ -11,7 +11,7 @@ Factory turns a GitHub issue (an Objective) into a reviewed plan of Work Items, 
 
 ## Set up
 
-You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), and the GitHub CLI logged in. See the [README](../README.md#requirements) for the full list and installation.
+You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), and the GitHub CLI logged in. See the [README](../README.md#requirements) for the full list and installation: you install the plugin, and its setup skill installs the matching `factory` CLI.
 
 1. **A clone for Factory.** Clone the target repository to a directory only Factory uses. Its origin must name the repository: Factory checks it before every fetch and push.
 2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`. Factory never creates them.
@@ -374,4 +374,4 @@ Take over only from an installation that is really stopped. A running one stops 
 
 ## Upgrade
 
-Install the new release tarball (see the README), then run `factory setup --repo OWNER/NAME --background` again. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.
+Update the plugin to the new release, then ask the setup skill to set up again: it installs the matching CLI, gives you the line that puts it on your PATH, and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.

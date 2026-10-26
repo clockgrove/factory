@@ -5,7 +5,7 @@ description: Use Factory on a specified target repository to propose, run, inspe
 
 # Factory director
 
-Drive Objectives on a target repository through the installed `factory` CLI. `factory help` lists the exact commands and is the authority over this skill. To change Factory itself, follow its contributor instructions.
+Drive Objectives on a target repository through the installed `factory` CLI. The `setup` skill installs it; when `factory` isn't on PATH, use that skill first. `factory help` lists the exact commands and is the authority over this skill. To change Factory itself, follow its contributor instructions.
 
 ## Rules
 

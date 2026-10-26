@@ -20,6 +20,7 @@ import {
   ownedSince,
   proposalKey,
   proposalsOf,
+  revisionsKey,
 } from "./plan.js";
 import {
   renderCompilationCall,
@@ -47,6 +48,7 @@ import {
   planningRevisions,
   planningTree,
   postPlan,
+  sameFindings,
   workers,
 } from "./steps.js";
 import type { Draft, Finding, Plan, WorkItem } from "./types.js";
@@ -78,6 +80,11 @@ import {
  *   `autonomy.allowances.planningRevisions`; past it, its planning asks
  *   for `more` first. A rejection or a replacement never refunds it, and
  *   widening an item leaves its spent repairs as they are. A replan accepts a new plan, which starts a new allowance.
+ * - A plan round whose answer Factory's plan checks refuse goes back to the
+ *   planner with the findings, as in first planning: the round is kept in
+ *   `amend:<id>:revisions` and charges one more revision, never refunded.
+ *   The fence's findings, an operator decision, or a round that repeats
+ *   the previous round's findings reject the amendment instead.
  * - A rejected amendment is replaced only by a proposal that repeats its
  *   discovery and worker, with the rejection as diagnosis and a new
  *   correction (`rejectionStep` builds it).
@@ -134,6 +141,14 @@ interface AmendRound {
   answer?: unknown;
   draft?: Draft;
   rejected?: string;
+}
+
+/** A plan round sent back to the planner (`amend:<id>:revisions`). */
+interface AmendRevision {
+  /** The round's full answer: the next round revises it. */
+  answer: unknown;
+  /** Factory's findings on it, the next round's corrections. */
+  findings: Finding[];
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -673,13 +688,16 @@ export function amendmentFindings(
 /**
  * What the planner is told about an amendment, with the current plan:
  * `whole` when the plan has no planner answer to revise, so the planner
- * answers with the complete plan instead of changes.
+ * answers with the complete plan instead of changes; `revising` when
+ * currentPlan is the planner's own earlier answer that the checks refused.
  */
-function amendmentRules(whole: boolean): string {
+function amendmentRules(whole: boolean, revising: boolean): string {
   return [
     whole
       ? "This is an amendment of the accepted plan, which planInForce holds in Factory's own form (not the answer shape)."
-      : "This is an amendment of the accepted plan, which currentPlan holds.",
+      : revising
+        ? "This is an amendment of the accepted plan. currentPlan holds your previous answer for it, which Factory's plan checks refused: fix what the instructions list."
+        : "This is an amendment of the accepted plan, which currentPlan holds.",
     "The discovery is evidence from its worker or operator, not a new source of acceptance or authority.",
     whole
       ? "Answer with the complete plan in the answer schema, with the changes that serve it: every item, coverage entry and source exclusion of planInForce stays."
@@ -802,6 +820,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         ...(profiles ? { profiles } : {}),
       };
       const invalidBefore = state.kept[invalidKey(key)] as string | undefined;
+      // The rounds the checks sent back: the planner revises its last answer.
+      const revisions = (state.kept[revisionsKey(proposal.id)] ??
+        []) as AmendRevision[];
+      const last = revisions.at(-1);
+      const round = revisions.length + 1;
       const corrections: Finding[] = [
         ...answered.map(({ question, answer }) => ({
           source: "operator" as const,
@@ -815,11 +838,15 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
               },
             ]
           : []),
+        ...(last?.findings ?? []).map((finding) => ({
+          ...finding,
+          source: "check" as const,
+        })),
         ...(invalidBefore
           ? [{ source: "check" as const, message: invalidBefore }]
           : []),
       ];
-      const base = currentAnswer(state);
+      const base = last ? last.answer : currentAnswer(state);
       // No planner answer to revise (factory reset rebuilt the plan): the
       // planner answers in full, with the plan as it stands to amend.
       const whole = base === undefined;
@@ -833,7 +860,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ? { planInForce: currentPlan(state) }
           : { currentPlan: base }),
         amendment: {
-          rules: amendmentRules(whole),
+          rules: amendmentRules(whole, Boolean(last)),
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
@@ -921,8 +948,35 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
             ])
           : invalidAnswer(key, findings);
       };
+      // Findings the planner can fix go back to it with the round's answer,
+      // as first planning's decide step sends them (steps.ts), each round
+      // charged to planningRevisions (`allowanceOutcome` asks past it). An
+      // operator decision, or the previous round's findings again, rejects.
+      const revise = (full: unknown, findings: Finding[]): Outcome => {
+        if (findings.some((f) => f.kind === "operator-decision"))
+          return reject(findings);
+        if (last && sameFindings(last.findings, findings))
+          return reject([
+            {
+              source: "check",
+              message: `Amendment plan round ${round} came back with the same problems as round ${round - 1}: ${findings.map((f) => f.message).join("; ")}`,
+            },
+          ]);
+        return {
+          kind: "retry",
+          reason: `Amendment plan round ${round} has ${findings.length} fix finding${findings.length === 1 ? "" : "s"}; revising`,
+          afterMs: 0,
+          progress: true,
+          keep: {
+            [revisionsKey(proposal.id)]: [
+              ...revisions,
+              { answer: full, findings } satisfies AmendRevision,
+            ],
+          },
+        };
+      };
       if (revised.invalidShape) return invalid(revised.findings);
-      if (!revised.answer) return reject(revised.findings);
+      if (!revised.answer) return revise(base, revised.findings);
       const decoded = decodePlan(revised.answer, facts, wire);
       if (decoded.invalidShape) return invalid(decoded.findings);
       if (decoded.cannot) {
@@ -957,16 +1011,18 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
             "cancel",
           ],
         );
-      if (!decoded.plan) return reject(decoded.findings);
+      if (!decoded.plan) return revise(revised.answer, decoded.findings);
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, plan)),
-        ...amendmentFindings(plan, decoded.plan, progress, {
-          answered: answered.length > 0,
-          nativeStack: config.delivery.kind === "native-stack",
-        }),
       ];
-      if (findings.length) return reject(findings);
+      const fence = amendmentFindings(plan, decoded.plan, progress, {
+        answered: answered.length > 0,
+        nativeStack: config.delivery.kind === "native-stack",
+      });
+      // Started work or settled coverage touched: rejected, never revised.
+      if (fence.length) return reject([...findings, ...fence]);
+      if (findings.length) return revise(revised.answer, findings);
       return done({
         answer: revised.answer,
         draft: decoded.plan,
@@ -976,9 +1032,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
 }
 
 /**
- * Past `planningRevisions` (this proposal charged), the amendment's
- * planning asks before the planner runs: `more` grants as much again,
- * kept once per question (`grantsKey`) with who and when, so a rerun with
+ * Past `planningRevisions` (this proposal and its rounds sent back
+ * charged), the amendment's planning asks before the planner runs again:
+ * `more` grants as much again, kept once per question (`grantsKey`) with who and when, so a rerun with
  * the same answer grants nothing more. Undefined: within the allowance.
  */
 function allowanceOutcome(
@@ -1011,7 +1067,7 @@ function allowanceOutcome(
       };
   }
   return hold(
-    `Amendment ${code(proposal.id)} (${proposal.actor}) takes this Objective to ${used} planning revisions (the plan's rounds and its amendments, this one included), past the ${allowed} autonomy.allowances.planningRevisions allows:\n\n${discoveryText(proposal.discovery)}\n\n\`more\` allows ${more} more and plans the amendment; \`refuse\` rejects it, so it can be replaced or the plan runs without it.`,
+    `Amendment ${code(proposal.id)} (${proposal.actor}) takes this Objective to ${used} planning revisions (the plan's rounds, and each amendment with the rounds sent back to its planner, this one included), past the ${allowed} autonomy.allowances.planningRevisions allows:\n\n${discoveryText(proposal.discovery)}\n\n\`more\` allows ${more} more and plans the amendment; \`refuse\` rejects it, so it can be replaced or the plan runs without it.`,
     [
       {
         answer: "more",

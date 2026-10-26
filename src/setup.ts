@@ -33,7 +33,7 @@ import { PLANNERS, WORKERS } from "./providers/config.js";
 import { defaultModels } from "./providers/selection.js";
 import { projectProblems } from "./queue.js";
 import { type Readiness, readiness } from "./readiness.js";
-import { writeAtomic } from "./state.js";
+import { listObjectives, writeAtomic } from "./state.js";
 import {
   boundCredentials,
   credentialFiles,
@@ -336,6 +336,7 @@ export async function setup(
           `--${bindings.join(", --")} can't be checked against a configuration that doesn't load; fix it first: ${errorMessage(error)}`,
         );
     }
+  const app = get(raw, "github.app.id");
   const conflicts: string[] = [];
   for (const [flag, option] of Object.entries(CONFIG_OPTIONS)) {
     const given = values[flag];
@@ -354,6 +355,15 @@ export async function setup(
     else set(option.key, value);
   }
   if (conflicts.length) return refused(path, created, ...conflicts);
+  // A running Objective finds its own comments, issues and PRs by
+  // Factory's login: as another, it would make them again.
+  const running = listObjectives(installationPaths(repository).objectives);
+  if (get(raw, "github.app.id") !== app && running.length)
+    return refused(
+      path,
+      created,
+      `--github-app-id changes who Factory acts as on GitHub, and ${running.map((issue) => `#${issue}`).join(", ")} still ${running.length === 1 ? "has" : "have"} state: each finds its own comments, issues and PRs by Factory's login. Drain the queue (factory queue drain), wait until no Objective runs, then repeat`,
+    );
   if (key !== undefined && get(raw, "github.app.id") === undefined)
     return refused(
       path,
@@ -604,9 +614,17 @@ export async function serviceSetup(
     };
   }
   const { "credential-file": given, ...rest } = values;
+  // The App's key is setup's copy, the one readiness checks.
+  if (given?.some((binding) => binding.startsWith(`${GITHUB_APP_KEY}=`)))
+    throw new SetupUsage(
+      `--credential-file takes no ${GITHUB_APP_KEY}: give the App's key with --github-app-key PATH, and the service loads setup's copy`,
+    );
   // Given bindings replace the unit's; otherwise its own are checked again.
   const bindings =
-    given ?? boundCredentials(paths).map(({ name, file }) => `${name}=${file}`);
+    given ??
+    boundCredentials(paths)
+      .filter(({ name }) => name !== GITHUB_APP_KEY)
+      .map(({ name, file }) => `${name}=${file}`);
   report.setup = await setup(
     repository,
     rest,
@@ -623,18 +641,14 @@ export async function serviceSetup(
   if (host) return { ...report, problems: [host] };
   try {
     const config = loadConfig(repository);
-    // The App's key setup keeps is the service's credential too, unless
-    // one is bound; the unit's own binding of it goes with the App.
-    const named = (binding: string) => binding.startsWith(`${GITHUB_APP_KEY}=`);
+    // The App's key setup keeps is the service's credential too, and goes
+    // with the App.
     const copy = appKeyFile(paths.root);
-    const bound = config.github.app
-      ? bindings.some(named) || !existsSync(copy)
-        ? bindings
-        : [...bindings, `${GITHUB_APP_KEY}=${copy}`]
-      : given
-        ? bindings
-        : bindings.filter((binding) => !named(binding));
-    const credentials = credentialFiles(bound, config);
+    const credentials = credentialFiles(
+      bindings,
+      config,
+      config.github.app && existsSync(copy) ? copy : undefined,
+    );
     const before = serviceState(repository, paths, await serving());
     if (before.serving && before.active !== "active")
       return {

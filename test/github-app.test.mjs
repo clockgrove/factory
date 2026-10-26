@@ -5,7 +5,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync, verify } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -582,6 +588,37 @@ test("setup keeps the App's key as an owner-only copy, never shown; readiness ch
   const [operators] = check(again, "operators");
   assert.equal(operators.status, "ok", JSON.stringify(operators));
   assert.match(operators.detail, /@kirk/);
+
+  // The service loads setup's copy, the key readiness checked: a bound
+  // key file is refused before anything runs.
+  const bound = await factory(
+    inst,
+    "setup",
+    "--background",
+    "--credential-file",
+    `FACTORY_GITHUB_APP_KEY=${pem}`,
+  );
+  assert.equal(bound.code, 2);
+  assert.match(bound.err, /takes no FACTORY_GITHUB_APP_KEY.*--github-app-key/);
+
+  // Another App while an Objective has state is refused; the same App
+  // changes nothing.
+  mkdirSync(join(inst.root, "objectives"), { recursive: true });
+  writeFileSync(join(inst.root, "objectives", "5.json"), "{}\n");
+  const other = JSON.parse(
+    (await factory(inst, "setup", "--github-app-id", "43", "--json")).out,
+  );
+  assert.equal(other.status, "refused");
+  assert.match(other.problems[0], /#5 still has state/);
+  assert.match(other.problems[0], /factory queue drain/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8")).github,
+    { app: { id: 42 } },
+  );
+  const same = JSON.parse(
+    (await factory(inst, "setup", "--github-app-id", "42", "--json")).out,
+  );
+  assert.deepEqual(same.changed, []);
 });
 
 test("readiness warns when no operator is set, or when Factory acts as the operator, and links the App registration", async () => {

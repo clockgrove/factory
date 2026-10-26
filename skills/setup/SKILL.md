@@ -43,7 +43,7 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
 
   docs/reference/setup.md#Setup lists every option and the key it sets.
 
-- **Who hears about holds:** the operator's GitHub login for `--operator LOGIN`. When Factory would act as that same login (readiness warns), offer its own GitHub App: `factory setup --repo OWNER/NAME --github-app-link --json` gives the registration link. The operator creates the App, generates its private key and installs it on the repository, then gives its id and the key's path: `--github-app-id ID --github-app-key PATH`. Never read or show the key.
+- **Who hears about holds:** the operator's GitHub login for `--operator LOGIN`. When Factory would act as that same login (readiness warns), offer its own GitHub App: `factory setup --repo OWNER/NAME --github-app-link --json` gives the registration link. The operator creates the App, generates its private key and installs it on the repository, then gives its id and the key's path: `--github-app-id ID --github-app-key PATH`. Never read or show the key. The App is a new login, and an Objective in flight finds what it made by the login, so setup refuses it while any Objective has state: ask the operator to drain the queue (`factory queue drain`) and wait until none runs.
 
 Keep the configuration, credentials and state outside the target checkout. Setup refuses a configuration or state directory inside it.
 

@@ -131,7 +131,11 @@ function quoted(value: string, exec = false): string {
   );
 }
 
-/** The names Factory reads from the service's credentials. */
+/**
+ * The names Factory reads from the service's credentials that
+ * `--credential-file` binds: all but the GitHub App's key, which is
+ * setup's copy (`credentialFiles`).
+ */
 function credentialNames(config: CoreConfig): Set<string> {
   const readable = new Set<string>(CLAUDE_LOGIN_CREDENTIALS);
   if (copilotConfigured(config.providers))
@@ -140,7 +144,6 @@ function credentialNames(config: CoreConfig): Set<string> {
     if (worker.kind === "openai-agents") readable.add(worker.apiKeyEnv);
     else if (worker.kind === "claude-managed-agents")
       readable.add(worker.credentialEnv);
-  if (config.github.app) readable.add(GITHUB_APP_KEY);
   return readable;
 }
 
@@ -165,19 +168,22 @@ export const unkeptLogins = (config: CoreConfig): string[] => [
 /**
  * `NAME=ABSOLUTE_FILE` bindings, checked: a name Factory reads from the
  * service's credentials, and a regular file only its owner can read. The
- * file is never read here.
+ * file is never read here. `appKey`, setup's copy of the GitHub App's
+ * key, is bound as GITHUB_APP_KEY.
  */
 export function credentialFiles(
   bindings: readonly string[],
   config: CoreConfig,
+  appKey?: string,
 ): Credential[] {
   const readable = credentialNames(config);
+  const own = appKey === undefined ? [] : [`${GITHUB_APP_KEY}=${appKey}`];
   const credentials: Credential[] = [];
-  for (const binding of bindings) {
+  for (const binding of [...bindings, ...own]) {
     const at = binding.indexOf("=");
     const name = binding.slice(0, at);
     const file = binding.slice(at + 1);
-    if (at < 1 || !readable.has(name))
+    if (at < 1 || !(readable.has(name) || own.includes(binding)))
       throw new Error(
         `--credential-file takes NAME=ABSOLUTE_FILE, where NAME is one Factory reads from the service's credentials: ${[...readable].join(", ")}`,
       );

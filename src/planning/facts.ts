@@ -409,7 +409,7 @@ export function listCommands(commands: readonly string[]): string {
 
 /**
  * How Factory validation differs from a hosted CI run, in the compact form the
- * planner receives. Keep this under ~800 bytes.
+ * planner receives. Keep this under ~1 KB.
  */
 const VALIDATION_ENVIRONMENT = {
   network:
@@ -419,6 +419,7 @@ const VALIDATION_ENVIRONMENT = {
   tests:
     "HOME and TMPDIR are private and empty, with no host credentials or user config",
   sandbox: "read-only host, private HOME and /tmp, no host sockets",
+  lfs: "every Git LFS file holds its real bytes before any command runs, in Work Item, QA, integrated and final validation alike; Factory fetches missing objects outside the sandbox, so commands read content, never pointers, and need not reach a network for it",
   ifNeeded:
     "leave out any command needing more, and ask through decisionRequired",
 } as const;

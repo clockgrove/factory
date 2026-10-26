@@ -177,7 +177,7 @@ const CONTROLLER_GUARANTEES: { id: string; statement: string }[] = [
   {
     id: "post-integration-hydration",
     statement:
-      "After target Final commands pass at the exact integrated default-branch commit and before Objective completion, Factory fresh-clones the target origin, checks out that exact commit, pulls Git LFS objects, and verifies every selected member against its captured SHA-256 digest and byte count.",
+      "After target Final commands pass at the exact integrated default-branch commit and before Objective completion, Factory fresh-clones the target origin, checks out that exact commit, pulls Git LFS objects, and verifies every selected member against its captured SHA-256 digest and byte count. This checks what origin serves. It is not the first LFS restore: every validation checkout, QA and Final included, already holds every Git LFS file's real bytes before its commands run.",
   },
   {
     id: "hydration-review-evidence",

@@ -8,12 +8,15 @@ import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { loadConfig } from "../dist/config.js";
+import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { hydrateTree, materializeSelection } from "../dist/media.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { repairPath } from "../dist/repair.js";
+import { validateTree } from "../dist/validate.js";
 import { aboutMedia, repairOutcome } from "../dist/work/step-deliver.js";
-import { tempDir } from "./helpers.mjs";
+import { configured, installation, REPO, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -274,6 +277,72 @@ test("validation holds when a selected destination holds plain bytes instead of 
     held.options.map((option) => option.answer),
     ["retry", "replan", "cancel"],
   );
+});
+
+// What the planner and graph reviewer are told (planning/facts.ts
+// VALIDATION_ENVIRONMENT lfs): QA and final checkouts hold LFS bytes too.
+test("final validation with no selected media runs its commands on every Git LFS file's real bytes, with no network", async () => {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  const { sandbox } = loadConfig(REPO);
+  delete process.env.FACTORY_CONFIG;
+  assert.equal(sandbox.network, "off");
+  const target = checkout();
+  // An earlier Objective's model: its pointer is committed and its object
+  // is in the local store, as after its delivery.
+  const bytes = Buffer.from("glTF cube bytes");
+  const oid = createHash("sha256").update(bytes).digest("hex");
+  const store = join(
+    target.directory,
+    ".git/lfs/objects",
+    oid.slice(0, 2),
+    oid.slice(2, 4),
+  );
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, oid), bytes);
+  mkdirSync(join(target.directory, "assets"));
+  writeFileSync(
+    join(target.directory, "assets/cube.png"),
+    `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${bytes.length}\n`,
+  );
+  git(target.directory, "add", "assets/cube.png");
+  git(
+    target.directory,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    "cube",
+  );
+  const head = git(target.directory, "rev-parse", "HEAD");
+  const log = new RunLog(
+    inst.logs,
+    "2026-01-01T00-00-00-000Z-1",
+    CAPTURE_OFF,
+    [],
+  );
+  const result = await validateTree({
+    checkout: target.directory,
+    repository: "drill/target",
+    directory: join(target.root, "final"),
+    commit: head,
+    plan: {
+      base: target.commit,
+      items: [],
+      finalCommands: [`test "$(cat assets/cube.png)" = "glTF cube bytes"`],
+    },
+    blocks: [],
+    sandbox,
+    commandTimeoutMs: 60_000,
+    signal: AbortSignal.timeout(120_000),
+    log: () => {},
+    runFile: (kind) => log.runFile(1, `final#1.${kind}`),
+  });
+  assert.equal(result.kind, "passed", JSON.stringify(result).slice(0, 800));
 });
 
 test("a refused candidate set is repaired from its staging or receipt, and only cited evidence drops the selection", () => {

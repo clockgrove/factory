@@ -239,6 +239,45 @@ test("logs keep the newest runs, each with its captures", async () => {
   );
 });
 
+test("a stop as the service starts is a clean stop, after its housekeeping", async () => {
+  const inst = installation();
+  const dir = join(inst.logs, "5");
+  mkdirSync(dir, { recursive: true });
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  for (let i = 0; i < 21; i++) {
+    const file = join(
+      dir,
+      `2026-01-01T00-00-${String(i).padStart(2, "0")}.jsonl`,
+    );
+    writeFileSync(file, "{}\n");
+    utimesSync(file, old, old);
+  }
+  // SIGTERM once the service holds its lock (`status` says running), before its loop.
+  inst.env.STOP_AT_MKDIR = inst.objectives;
+  const service = serve(inst, undefined, [
+    "--import",
+    new URL("./fixtures/stop-at-start.mjs", import.meta.url).href,
+  ]);
+  const { code, signal, stderr } = await exited(
+    service,
+    "the service stopped at start",
+  );
+  assert.deepEqual({ code, signal }, { code: 0, signal: null }, stderr);
+  // Its start's housekeeping ran: the oldest run is gone, and recorded.
+  assert.deepEqual(
+    readFileSync(join(dir, "rotated"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).run),
+    ["2026-01-01T00-00-00"],
+  );
+  // A clean stop: the next start counts no death.
+  assert.equal(
+    JSON.parse(readFileSync(join(inst.root, "service.json"), "utf8")).stopped,
+    true,
+  );
+});
+
 test("three deaths while two Objectives run hold neither; the restart backs off", async () => {
   const inst = installation();
   // GitHub never answers, so both checks are running whenever the service dies.

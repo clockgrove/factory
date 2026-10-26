@@ -221,22 +221,23 @@ export async function serveInstallation(
         ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
       },
     });
-  if (!loaded || !repositories) return await serveWith();
-  const context: HolderContext = {
-    checkout: loaded.checkout,
-    repository: loaded.repository,
-    root: paths.root,
-    project: loaded.queue.projectId,
-    repositories,
-  };
   // One stop for this whole run: SIGTERM, SIGINT, or a take-over seen at a
   // check. The signal keeps it, so a stop is never lost between the wait
-  // for the record and serve's own handlers.
+  // for the record, or serve taking its lock (status then says running),
+  // and serve's own handlers: it stops cleanly, after its housekeeping.
   const stopping = new AbortController();
   const onSignal = (): void => stopping.abort();
   process.once("SIGTERM", onSignal);
   process.once("SIGINT", onSignal);
   try {
+    if (!loaded || !repositories) return await serveWith(stopping.signal);
+    const context: HolderContext = {
+      checkout: loaded.checkout,
+      repository: loaded.repository,
+      root: paths.root,
+      project: loaded.queue.projectId,
+      repositories,
+    };
     let holder: Holder | undefined;
     try {
       holder = await holderFor(

@@ -75,6 +75,7 @@ CASE_TABLE_prd=(
   "paths|P|40|two Objectives owning the same file take turns (queue.paths-take-turns)"
   "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"
   "hostnet|P|25|sandbox.network host: final validation reaches a service on the host's loopback (worker.host-network)"
+  "toolchain|P|25|its own repository T pins Node (.nvmrc) and pnpm (packageManager), and installation T requires 'pnpm run toolchain': a host node outside the pin holds the plan check, naming the fix; after a person pins the host's node, 'recheck' plans, and final validation runs the command under that pin and manager (toolchain.pin)"
   "prod|Q|45|repository C at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; planning in Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory shown for a file an earlier Objective pinned; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
 )
 case "$SUITE_NAME" in main|edge|prd) ;; *) echo "unknown suite: $SUITE_NAME (main, edge, prd)" >&2; exit 2 ;; esac
@@ -164,6 +165,7 @@ required_checks() {
     paths) echo queue.paths-take-turns ;;
     shared) echo delivery.shared-main ;;
     hostnet) echo worker.host-network ;;
+    toolchain) echo toolchain.pin ;;
     prod) echo 'setup.config setup.background queue.pause-github queue.order queue.concurrency-3 exec.parallel-items prod.no-holds visibility.github visibility.cli knowledge.memory knowledge.dream' ;;
   esac
 }

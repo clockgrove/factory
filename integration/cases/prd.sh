@@ -5,6 +5,8 @@
 #   Q  repository C, installation Q written by `factory setup` with
 #      production defaults and run by `setup --background` as a user
 #      service: one lane case, `prod`, at production models and concurrency.
+# The `toolchain` case, a lane P row, makes its own repository T and
+# installation T (see t_setup).
 # Functions are case_<name>, as in main.sh.
 
 HOSTNET_PORT=18650
@@ -650,3 +652,121 @@ prod_checks() {
 }
 # A replay: the case filed N1, A, B, C in that order.
 replay_prod() { local n1 a b c; read -r n1 a b c <<<"$(case_issues | paste -sd' ')"; [ -z "$c" ] || prod_checks "$n1" "$c" "$b" "$a" "$(now)"; }
+
+# ---------- installation T: the toolchain case's own repository ----------
+# PRD 14 (Toolchain, #1968): the target pins Node (.nvmrc) and its package
+# manager (package.json packageManager), and the installation requires a
+# final command that runs it (finalValidation.requiredCommands), the only
+# commands Factory's plan check compares with the host's node and pnpm.
+# Lane P's repository and installation are shared and require none, so the
+# case (a lane P row) makes its own: repository T (fd-<time>-t, deleted with
+# the others), a Project for it, installation T and its serve.
+TOOLCHAIN_CMD="pnpm run toolchain"
+# t_setup PNPM_VERSION NODE_PIN: repository T from the baseline, pinning
+# pnpm@PNPM_VERSION and .nvmrc NODE_PIN, with the `toolchain` script
+# (fixtures/repo/toolchain.mjs); its Project; installation T; its serve up.
+t_setup() {
+  local name="$REPO_STEM-t" repo="$REPO_OWNER/$REPO_STEM-t" co="$STATE_BASE/checkout-t" pid
+  repo_create "$name" || return 1
+  pid=$(C_REPO=$repo project_create) && [ -n "$pid" ] || return 1
+  clone "$repo" "$co" || return 1
+  mkdir -p "$co/drill" && cp "$SUITE/fixtures/repo/toolchain.mjs" "$co/drill/toolchain.mjs" &&
+    cp "$SUITE/fixtures/repo/toolchain-ci.yml" "$co/.github/workflows/ci.yml" && printf '%s\n' "$2" >"$co/.nvmrc" || return 1
+  python3 - "$co/package.json" "$1" <<'PY' || return 1
+import json, sys
+path, version = sys.argv[1:]
+d = json.load(open(path))
+d.pop("engines", None)  # .nvmrc is the one Node pin
+d["packageManager"] = f"pnpm@{version}"
+d["scripts"]["toolchain"] = "node drill/toolchain.mjs"
+open(path, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+  git -C "$co" add -A && git -C "$co" -c user.name="Factory integration" -c user.email=factory-integration@users.noreply.github.com \
+    commit -q -m "Drill: pin Node and pnpm" && git -C "$co" push -q origin HEAD:main || return 1
+  write_config "$STATE_BASE/config-t.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'" \
+    "c['finalValidation']={'requiredCommands':['$TOOLCHAIN_CMD']}"
+  inst_define T "$repo" "$STATE_BASE/config-t.json"
+  printf '%s\n' "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/T/extra_env"
+  inst T
+  serve_up && serve_ready
+}
+# t_end [N]: settle N, then stop T's serve (never lane P's). A serve whose
+# Objective won't settle stays up for the run's end to cancel it (and its PID
+# is killed then).
+t_end() {
+  [ -z "${1:-}" ] || settled "$1" || cancel_wait "$1" 300
+  [ -n "${1:-}" ] && ! settled "$1" && return 0
+  SERVE_DIR=$(serve_dir_of T); serve_down
+}
+
+# PRD 14: the target's Node pin and package manager are used. Repository T
+# starts pinned to a Node major the host's node isn't (.nvmrc), and to the
+# host's exact pnpm: the plan check holds before planning, naming the pin, the
+# host's node and the fix. A person then pins the host's node on main and
+# answers `recheck`; the Objective plans, delivers, and final validation runs
+# `pnpm run toolchain`, which fails unless pnpm at the pinned version runs it
+# on a node that matches .nvmrc. Factory's rules decide each step: the hold is
+# its plan check, the final command is the installation's, and the script's
+# body is fixed at its base.
+case_toolchain() {
+  local t0 id node_v pnpm_v bad; t0=$(now); id=$(uid)
+  SERVE_DIR=""   # lane P's serve is not this case's to stop
+  node_v=$(node --version 2>/dev/null); node_v=${node_v#v}
+  pnpm_v=$(pnpm --version 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)
+  if ! [[ $node_v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [ -z "$pnpm_v" ]; then
+    record toolchain.pin FAIL "prerequisite: an exact node and pnpm on the PATH (node '$node_v', pnpm '$pnpm_v')" "$t0"; return 1
+  fi
+  bad=$(( ${node_v%%.*} - 2 ))
+  t_setup "$pnpm_v" "$bad" || { record toolchain.pin FAIL "couldn't make repository T and installation T: $(tail -3 "$RUN_DIR/journal" 2>/dev/null | paste -sd' ' | tail -c 300)" "$t0"; t_end; return 1; }
+  local HOLD_POLICY="d2 review decide more" n
+  n=$(new_objective toolchain "toolchain pin" FN="upper$id") || { record toolchain.pin FAIL "couldn't file or queue the Objective on $REPO" "$t0"; t_end; return 1; }
+  echo "$node_v $pnpm_v $bad" >"$RUN_DIR/toolchain-host.$n"
+  HOLD_POLICY="" wait_phase "$n" '^hold:' 600 >/dev/null
+  local hj; hj=$(st hold "$n" check); printf '%s\n' "$hj" >"$RUN_DIR/toolchain-hold.$n"
+  if [ "$hj" != null ] && [[ ,$(hold_field "$hj" answers), == *,recheck,* ]]; then
+    local sha person
+    sha=$(gh api "repos/$REPO/contents/.nvmrc?ref=main" --jq .sha) &&
+      person=$(gh api -X PUT "repos/$REPO/contents/.nvmrc" -f message="Person: pin Node $node_v" -f sha="$sha" \
+        -f content="$(printf '%s\n' "$node_v" | base64 -w0)" --jq .commit.sha) &&
+      log "T #$n: a person pinned Node $node_v on main as ${person:0:12}" && sleep 10 &&
+      answer_t 60 "$n" recheck --question "$(hold_field "$hj" id)" >/dev/null 2>&1
+    wait_phase "$n" 'done|cancelled|failed' "$(( $(left) - 60 ))" >/dev/null; sleep 10
+  fi
+  toolchain_check "$n" "$t0"
+  t_end "$n"
+}
+# toolchain_check N T0: from T's state, the case's records of the host's
+# versions and the plan check's hold (toolchain-host.N, toolchain-hold.N) and
+# T's checkout alone (also run-suite.sh --replay).
+toolchain_check() {
+  local n=$1 d=${KEPT:-$RUN_DIR} node_v pnpm_v bad
+  read -r node_v pnpm_v bad <"$d/toolchain-host.$n" 2>/dev/null
+  local hj; hj=$(cat "$d/toolchain-hold.$n" 2>/dev/null); [ -n "$hj" ] || hj=null
+  local planned; planned=$(st at "$n" first event=start 'step=plan*')
+  # The plan check: a hold of the check step, before any planning, offering
+  # recheck, whose problem names the pin, the host's node and the fix.
+  local flagged; flagged=$(python3 -c 'import json,sys
+h = json.loads(sys.argv[1] or "null") or {}
+bad, node, planned = sys.argv[2:5]
+q, asked = h.get("question") or "", h.get("askedAt") or ""
+answers = h.get("answers") or [o.get("answer") for o in h.get("options") or [] if isinstance(o, dict)]
+want = {"the check step": h.get("step") == "check", "recheck offered": "recheck" in answers,
+        "before planning": bool(asked) and (not planned or planned > asked),
+        f"pin Node {bad} (.nvmrc)": f"pins Node {bad} (.nvmrc)" in q, f"host node {node}": f"node on this host is {node} " in q,
+        "the fix": "Put a matching node first on the service'"'"'s PATH" in q}
+miss = [k for k, ok in want.items() if not ok]
+print("yes" if h and not miss else "no: " + (", ".join(miss) if h else "no check hold"))' "$hj" "$bad" "$node_v" "$planned")
+  # Validation: the required command ran, and passed, on the final head, which pins the host's node and pnpm.
+  local s cmds commit co nv pm ran=no
+  s=$(st status "$n"); cmds=$(st get "$n" done.final.commands); commit=$(st get "$n" done.final.commit | tr -d '"')
+  python3 -c 'import json,sys;sys.exit(0 if sys.argv[2] in (json.loads(sys.argv[1]) or []) else 1)' "$cmds" "$TOOLCHAIN_CMD" && ran=yes
+  co=$(cfg_get 'c["checkout"]' 2>/dev/null)
+  if [ -n "$commit" ] && [ "$commit" != null ]; then
+    nv=$(git -C "$co" show "$commit:.nvmrc" 2>/dev/null | tr -d '[:space:]')
+    pm=$(git -C "$co" show "$commit:package.json" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("packageManager",""))' 2>/dev/null)
+  fi
+  local why=""; [ "$s" = done ] || why="; $(st phase "$n"): $(hold_field "$(st hold "$n")" question | tr '\n' ' ' | cut -c1-300)"
+  [ -n "$node_v" ] && [ "$flagged" = yes ] && [ "$s" = done ] && [ "$ran" = yes ] && [ "$nv" = "$node_v" ] && [ "$pm" = "pnpm@$pnpm_v" ]
+  rec_if toolchain.pin $? "T #$n ($REPO): host node ${node_v:-?}, pnpm ${pnpm_v:-?}; plan check flagged .nvmrc $bad before planning, naming the fix: $flagged (hold $(hold_field "$hj" step) [$(hold_field "$hj" answers)], first plan start ${planned:-none}); after the person's pin and recheck: $s, final commands ${cmds} on ${commit:0:12} ('$TOOLCHAIN_CMD' passed: $ran) pinning .nvmrc ${nv:-?} and ${pm:-?}$why" "$2"
+}
+replay_toolchain() { [ -s "$KEPT/inst/T/env" ] || return 0; inst T; local n; n=$(case_issues | head -1); [ -z "$n" ] || toolchain_check "$n" "$(now)"; }

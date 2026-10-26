@@ -4,7 +4,7 @@ Add `{{FN}}` in its own file `src/{{FN}}.js` as a named export, with its own tes
 
 ## Context
 
-The drill's host serves a readiness file on its loopback interface; the final command below fetches it, so final validation needs the host network.
+The drill's host serves a readiness file on its loopback interface. Validation runs with the host's network, and the `curl` criterion below must reach that loopback service from it.
 
 ## Acceptance
 

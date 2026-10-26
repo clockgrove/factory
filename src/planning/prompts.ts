@@ -3,6 +3,7 @@ import { declaration, onlyEntry } from "../objective.js";
 import { type Rendered, rendered } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
+import { validationEnvironmentNote } from "./facts.js";
 import { REPOSITORY_DIRECTORY, type RepositoryView } from "./repository.js";
 import type { ReviewEvidence } from "./review.js";
 import {
@@ -14,10 +15,10 @@ import {
   PLANNER_CHECKLIST,
   QA_EVIDENCE_GUIDANCE,
   WORK_ITEM_ENTRY_SIGNAL,
-  WORK_ITEM_PLANNING_RULES,
-  WORK_ITEM_STANDARD,
   type WorkerCommandAccess,
   workerCapability,
+  workItemPlanningRules,
+  workItemStandard,
 } from "./rubric.js";
 import type {
   Draft,
@@ -305,7 +306,7 @@ export function renderCompilationCall(input: CompilationInput): Rendered {
       content,
     })),
   );
-  const instructions = `${WORK_ITEM_PLANNING_RULES}
+  const instructions = `${workItemPlanningRules(facts.hostNetwork === true)}
 ${input.workers ? `${workerCapability(input.workers)}\n` : ""}
 ${PLANNER_CHECKLIST}
 
@@ -521,8 +522,9 @@ export interface GraphReviewInput {
 /** The graph-review prompt. The answer schema is graphReviewSchema (review.ts). */
 export function renderGraphReviewCall(input: GraphReviewInput): Rendered {
   const { facts, repository, reviewArtifacts } = input;
+  const hostNetwork = facts.hostNetwork === true;
   const instructions = `${GRAPH_REVIEW_INTRO}
-${WORK_ITEM_STANDARD}
+${workItemStandard(hostNetwork)}
 ${input.workers ? `${workerCapability(input.workers)}\n` : ""}
 ${GRAPH_REVIEW_CHECKS}
 ${input.decisions.length ? "\nOperator planning decisions: the controller evidence FACTORY_OPERATOR_PLANNING_DECISIONS holds the operator's recorded answers to questions the planner or an earlier plan review asked. Each answer settles that choice within the Objective: check that the graph follows it, and do not ask it again as an operator decision. An answer grants no command, ownership, source or capability authority beyond the Objective.\n" : ""}
@@ -539,7 +541,7 @@ Each item is assigned an execution profile. Check that each assignment honors ex
 ${GRAPH_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
 
 Objective:\n`;
-  const evidence = `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}\nRoot package scripts at the base:\n${JSON.stringify(facts.packageCommands)}\nCI-only commands (validation never runs them):\n${JSON.stringify(facts.ciOnlyCommands)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
+  const evidence = `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}\nRoot package scripts at the base:\n${JSON.stringify(facts.packageCommands)}\nCI-only commands (validation never runs them):\n${JSON.stringify(facts.ciOnlyCommands)}\n${validationEnvironmentNote(hostNetwork)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
   // Everything above repeats across revisions of one Objective. The
   // candidate and its round scope follow, so the provider cache reuses the
   // prefix.

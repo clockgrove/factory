@@ -10,6 +10,7 @@ import { markdownLines } from "../markdown.js";
 import { checkObjective, type SourceRef, validPath } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
+import { HOST_VALIDATION_NETWORK } from "./rubric.js";
 import type {
   CoverageObligation,
   PinnedSource,
@@ -552,15 +553,12 @@ async function packageCommands(
 
 // ── Planner instructions ────────────────────────────────────────────────
 
-/** The planner's note on the validation environment; always present. */
-function validationEnvironmentInstructions(hostNetwork: boolean): string {
+/** The validation environment the planner and the graph reviewer are given. */
+export function validationEnvironmentNote(hostNetwork: boolean): string {
   const environment = hostNetwork
-    ? {
-        ...VALIDATION_ENVIRONMENT,
-        network: "the host's network (sandbox.network host)",
-      }
+    ? { ...VALIDATION_ENVIRONMENT, network: HOST_VALIDATION_NETWORK }
     : VALIDATION_ENVIRONMENT;
-  return `\n\nValidation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
+  return `Validation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
 }
 
 /** The planner's note on the installation's CI-only commands, after the environment note. */
@@ -569,7 +567,7 @@ function ciOnlyInstructions(
   hostNetwork: boolean,
 ): string {
   return (
-    validationEnvironmentInstructions(hostNetwork) +
+    `\n\n${validationEnvironmentNote(hostNetwork)}` +
     (ciOnlyCommands.length
       ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
       : "")

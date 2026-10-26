@@ -726,7 +726,7 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   cli_t 60 setup --stop --json >"$RUN_DIR/q.stop.out" 2>&1; local rst=$?
   cli_t 60 setup --check --json >/dev/null 2>&1; local rck=$?
   q_uninstall; local ru=$?
-  local units; units=$(run_bounded 5 systemctl --user list-units --all --no-legend 'factory-*' | grep -c .)
+  local units; units=$(run_bounded 5 systemctl --user list-units --all --no-legend 'factory-*' | grep -cF -- "$REPO_STEM")
   [ "$rst" = 0 ] && [ "$rck" != 0 ] && [ "$ru" = 0 ] && [ "$units" = 0 ]
   rec_if setup.background $? "setup --background exit $rb, --check exit $rc; --stop exit $rst, then --check exit $rck; --uninstall exit $ru; factory units left $units" "$t0"
 }

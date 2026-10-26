@@ -326,7 +326,8 @@ end_state() {
   local serves; serves=$(for repo in $repos; do running_serves "$repo"; done | wc -l)
   local units="unknown"
   if units=$(run_bounded 5 systemctl --user list-units --all --no-legend 'factory-*'); then
-    units=$(awk 'NF{n++} END{print n+0}' <<<"$units")
+    # Only this run's: the host may serve real installations too.
+    units=$(awk -v stem="$REPO_STEM" 'NF && index($0, stem){n++} END{print n+0}' <<<"$units")
   else ok=1; fi
   [ "$nm" = "${M_REPO#*/}" ] && [ "$rv" = false ] && [ -z "$open" ] && [ "$serves" = 0 ] && [ "$units" = 0 ] || ok=1
   rec_if suite.end-state "$ok" "$M_REPO named '$nm'; review gate '$rv'; open PRs [${open}]; serves left $serves; factory units $units; read failures=$ok" "$t0"

@@ -1,3 +1,4 @@
+import type { CiRerun } from "../delivery.js";
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { WorkDiscovery } from "../planning/amendments.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
@@ -94,6 +95,8 @@ export interface ItemFacts {
    * review gets them: what a check demands is the repository's convention.
    */
   checkFailures: string[];
+  /** The latest rerun of failed Actions jobs on the item's PR (delivery.ts `rerunFailed`), so none is rerun twice. */
+  ciRerun: CiRerun;
 }
 
 /** What the Objective's own steps keep, by name. */

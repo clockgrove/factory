@@ -1462,6 +1462,57 @@ export class GitHub {
   }
 
   /**
+   * An Actions job's workflow run and the attempt it ran in (an Actions
+   * check run's id is its job's); undefined without Actions read access.
+   */
+  async workflowJob(
+    job: number,
+    signal?: AbortSignal,
+  ): Promise<{ run: number; attempt: number } | undefined> {
+    const read = await this.optional(() =>
+      this.rest<{ run_id?: unknown; run_attempt?: unknown }>(
+        "GET",
+        this.repo(`actions/jobs/${job}`),
+        undefined,
+        signal,
+      ),
+    );
+    if (typeof read?.run_id !== "number") return undefined;
+    return {
+      run: read.run_id,
+      attempt: typeof read.run_attempt === "number" ? read.run_attempt : 1,
+    };
+  }
+
+  /** A workflow run's latest attempt; undefined without Actions read access. */
+  async workflowRunAttempt(
+    run: number,
+    signal?: AbortSignal,
+  ): Promise<number | undefined> {
+    const read = await this.optional(() =>
+      this.rest<{ run_attempt?: unknown }>(
+        "GET",
+        this.repo(`actions/runs/${run}`),
+        undefined,
+        signal,
+      ),
+    );
+    return typeof read?.run_attempt === "number" ? read.run_attempt : undefined;
+  }
+
+  /** Run a workflow run's failed jobs again, as its next attempt. */
+  async rerunFailedJobs(run: number, signal?: AbortSignal): Promise<void> {
+    const response = await this.send(
+      "POST",
+      this.repo(`actions/runs/${run}/rerun-failed-jobs`),
+      undefined,
+      signal,
+    );
+    // The 201's body says nothing Factory reads.
+    await response.body?.cancel().catch(() => undefined);
+  }
+
+  /**
    * The check names the repository requires on `branch`: its rulesets and
    * its classic branch protection (from the protection route, else from the
    * branch read, which shows them with read access).

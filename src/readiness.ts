@@ -44,6 +44,7 @@ import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { COPILOT_SECRETS } from "./providers/config.js";
 import { executable, sandboxStatus } from "./sandbox.js";
 import { errorMessage } from "./text.js";
+import { type MiseTool, type MiseToolchain, misePinFix } from "./toolchain.js";
 import { danglingLauncher } from "./worktree.js";
 
 export interface ReadinessCheck {
@@ -82,11 +83,17 @@ export async function readiness(
   github: GitHub,
   /** Credentials the service will load (`--credential-file`): present for it. */
   bound: readonly string[] = [],
+  /**
+   * The checkout's mise pins (toolchain.ts), when mise manages it, and
+   * whether they are on this PATH, the one `--background` gives the service.
+   */
+  mise?: { toolchain: MiseToolchain; service: boolean },
 ): Promise<Readiness> {
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
-    ...(await nodeVersionCheck(config.checkout)),
+    ...(mise ? miseChecks(config.checkout, mise.toolchain, mise.service) : []),
+    ...(await nodeVersionCheck(config.checkout, !!mise)),
     ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
   ];
@@ -299,8 +306,80 @@ export function launcherChecks(env: NodeJS.ProcessEnv): ReadinessCheck[] {
   });
 }
 
+/**
+ * Which tools come from the checkout's mise pins, and what keeps a pin
+ * off the service's PATH: an untrusted configuration or a tool that isn't
+ * installed. Factory never trusts or installs: each is the operator's fix.
+ */
+function miseChecks(
+  checkout: string,
+  toolchain: MiseToolchain,
+  service: boolean,
+): ReadinessCheck[] {
+  const name = "mise toolchain";
+  if (toolchain.status === "untrusted")
+    return [
+      {
+        name,
+        status: "warn",
+        detail: `mise doesn't trust ${toolchain.file}, so the service's PATH doesn't take the checkout's pins`,
+        fix: `If you trust it (a mise configuration can run code), run \`mise trust ${toolchain.file}\`, then repeat`,
+      },
+    ];
+  if (toolchain.status === "failed")
+    return [
+      {
+        name,
+        status: "warn",
+        detail: `mise can't resolve the checkout's pins (${toolchain.detail}), so the service's PATH doesn't take them`,
+        fix: `Run \`mise ls --current\` in ${checkout} and fix what it reports, then repeat`,
+      },
+    ];
+  const listed = (tools: readonly MiseTool[]) =>
+    tools.map((tool) => `${tool.name} ${tool.version}`).join(", ");
+  const sources = (tools: readonly MiseTool[]) =>
+    [...new Set(tools.map((tool) => tool.source))].join(", ");
+  const checks: ReadinessCheck[] = [];
+  if (toolchain.tools.length)
+    checks.push(
+      ok(
+        name,
+        `${listed(toolchain.tools)} from mise (${sources(toolchain.tools)}): ${
+          service
+            ? `first on the service's PATH (${toolchain.tools.flatMap((tool) => tool.bins).join(", ")})`
+            : "factory setup --background puts them first on the service's PATH"
+        }`,
+      ),
+    );
+  if (toolchain.missing.length)
+    checks.push({
+      name,
+      status: "warn",
+      detail: `${listed(toolchain.missing)}, pinned in ${sources(toolchain.missing)}, ${toolchain.missing.length === 1 ? "isn't" : "aren't"} installed, so the service runs ${toolchain.missing.length === 1 ? "that tool" : "those tools"} from the PATH instead`,
+      fix: `Run \`mise install\` in ${checkout}, then repeat`,
+    });
+  if (!checks.length)
+    checks.push(ok(name, `mise manages ${checkout} but pins no tool there`));
+  // A shim picks its version from the directory it runs in, which for a
+  // validation command is a worktree a worker writes.
+  const shims = (process.env.PATH ?? "")
+    .split(":")
+    .filter((entry) => /\/mise\/shims\/?$/.test(entry));
+  if (shims.length)
+    checks.push({
+      name,
+      status: "warn",
+      detail: `mise's shims (${shims.join(", ")}) are on the PATH the service runs with: a tool the checkout doesn't pin would resolve from the worktree a command runs in, which a worker writes`,
+      fix: "Remove the shims directory from the PATH of the shell that runs factory setup --background (and don't `mise activate` it there); the checkout's pins come first without it",
+    });
+  return checks;
+}
+
 /** Whether the PATH's node satisfies the checkout's Node pin, when it has one. */
-async function nodeVersionCheck(checkout: string): Promise<ReadinessCheck[]> {
+async function nodeVersionCheck(
+  checkout: string,
+  mise: boolean,
+): Promise<ReadinessCheck[]> {
   const pin = await nodePin(async (path) => {
     try {
       return readFileSync(join(checkout, path), "utf8");
@@ -329,7 +408,9 @@ async function nodeVersionCheck(checkout: string): Promise<ReadinessCheck[]> {
           name: "node version",
           status: "warn",
           detail: `The target pins Node ${pin.range} (${pin.source}), but node on the PATH is ${version} (${node}); plans whose final commands run node, npm, npx or pnpm hold on it`,
-          fix: "Put a matching node first on the PATH the service runs with, or change the pin",
+          fix: mise
+            ? `${misePinFix(checkout) ?? `Run \`mise install\` in ${checkout}, then factory setup --background`}; or change the pin`
+            : "Put a matching node first on the PATH the service runs with, or change the pin",
         },
   ];
 }

@@ -6,6 +6,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { satisfies, validRange } from "semver";
 import type { ObjectiveBlock } from "../shown.js";
+import { misePinFix } from "../toolchain.js";
 import { BaseFiles } from "./facts.js";
 import { packageManagerUpdate } from "./prompts.js";
 
@@ -339,6 +340,8 @@ export async function observeLocalExecutables(args: {
   const targetRoot = `${realpath(checkout)}${sep}`;
   const pin = exactPin(policy);
   const node = await nodePin((file) => files.text(file));
+  // With mise managing the checkout, a moved pin is installed with mise.
+  const mise = misePinFix(checkout);
   const observations: ExecutableObservation[] = [];
   const versions = new Map<string, Promise<string | undefined>>();
   const probe = (resolved: string) => {
@@ -423,7 +426,7 @@ export async function observeLocalExecutables(args: {
           status: "version-mismatch",
           path: resolved,
           version,
-          detail: `The pinned packageManager ${executable}@${pin.version} does not match ${executable} ${version} on this host (${resolved}). Install ${executable}@${pin.version} on the service's PATH (for example \`corepack enable\` or \`npm install -g ${executable}@${pin.version}\`), or change the pin.`,
+          detail: `The pinned packageManager ${executable}@${pin.version} does not match ${executable} ${version} on this host (${resolved}). ${mise ? `${mise}; or change the pin.` : `Install ${executable}@${pin.version} on the service's PATH (for example \`corepack enable\` or \`npm install -g ${executable}@${pin.version}\`), or change the pin.`}`,
         });
       else
         observe({
@@ -451,7 +454,7 @@ export async function observeLocalExecutables(args: {
         status: "version-mismatch",
         path: host.path,
         version,
-        detail: `The target pins Node ${node.range} (${node.source}), but node on this host is ${version} (${host.path}). Put a matching node first on the service's PATH, or change the pin.`,
+        detail: `The target pins Node ${node.range} (${node.source}), but node on this host is ${version} (${host.path}). ${mise ? `${mise}; or change the pin.` : "Put a matching node first on the service's PATH, or change the pin."}`,
       });
     else
       observe({

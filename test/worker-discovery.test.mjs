@@ -249,6 +249,8 @@ test("a collected in-scope discovery is proposed as amendment worker-<item>-<att
   assert.equal(proposal.plan, "2026-01-01T00:00:00.000Z");
   assert.deepEqual(proposal.discovery, discovery);
   assert.deepEqual(proposal.worker, { itemId: "feature", attempt: 1 });
+  // Its cited files are read from the worker's result.
+  assert.equal(proposal.commit, collected.commit);
   // Kept for the attempt, since collection deleted the file.
   assert.deepEqual(proposed.keep["item:feature:discovered"], {
     attempt: 1,
@@ -305,7 +307,7 @@ test("a no-change repair's discovery is proposed for the attempt that made it, a
   // The second attempt, after one repair of the work step.
   const proposed = discoveryOutcome(
     work,
-    contextOf(accepted(2)),
+    contextOf(accepted(2, { "item:feature:base": base })),
     undefined,
     stopped,
     {},
@@ -316,6 +318,8 @@ test("a no-change repair's discovery is proposed for the attempt that made it, a
     itemId: "feature",
     attempt: 2,
   });
+  // No change: its cited files are read from the item's start.
+  assert.equal(proposed.keep["amend:worker-feature-2:proposal"].commit, base);
 
   const backlog = { ...discovery, scope: "backlog" };
   ownedChange(worktree);
@@ -449,20 +453,31 @@ test("a fix needing a file no Work Item owns is Factory's correction to propose 
   writeFileSync(join(worktree, MANIFEST), JSON.stringify(discovery));
   const second = await collectIn(worktree, base, "", first.tree);
   assert.equal(second.kind, "repair");
+  assert.equal(second.unchanged, true);
   assert.deepEqual(second.discovery, discovery);
   const proposed = discoveryOutcome(
     work,
-    contextOf(accepted(2)),
+    contextOf(
+      accepted(2, {
+        "item:feature:base": base,
+        "item:feature:refused": {
+          commit: first.commit,
+          tree: first.tree,
+          notes: [],
+        },
+      }),
+    ),
     undefined,
     second,
     {},
   );
   assert.equal(proposed.kind, "retry");
   assert.equal(proposed.reason, "Proposed amendment worker-feature-2");
-  assert.deepEqual(proposed.keep["amend:worker-feature-2:proposal"].worker, {
-    itemId: "feature",
-    attempt: 2,
-  });
+  const proposal = proposed.keep["amend:worker-feature-2:proposal"];
+  assert.deepEqual(proposal.worker, { itemId: "feature", attempt: 2 });
+  // It resubmitted the refused result, which holds the src/feature.js its
+  // discovery names: the cited files are read there, not at its start.
+  assert.equal(proposal.commit, first.commit);
 });
 
 test("a file another Work Item owns is never discovered: the diagnosis is asked again, and asks the operator as before", async () => {

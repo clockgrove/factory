@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
@@ -110,6 +110,15 @@ function packageScripts(checkout: string): Record<string, unknown> {
   }
 }
 
+/** Whether path is a directory Factory can read with nothing in it. */
+function emptyDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory() && !readdirSync(path).length;
+  } catch {
+    return false;
+  }
+}
+
 /** The command's program: its first word that isn't a variable assignment. */
 const program = (command: string) =>
   command
@@ -179,6 +188,25 @@ function hostChecks(
           : `${store} is created at the first install`,
       ),
     );
+  // With the network off, the sandboxed install fetches nothing: the
+  // packages a bootstrap's lockfile names come only from a store the
+  // operator warmed.
+  const lockfile = ["pnpm-lock.yaml", "package-lock.json"].find((name) =>
+    existsSync(join(config.checkout, name)),
+  );
+  const cold = !store || !existsSync(store) || emptyDirectory(store);
+  if (
+    lockfile &&
+    cold &&
+    config.sandbox.network === "off" &&
+    sandbox.mode !== "unsandboxed"
+  )
+    checks.push({
+      name: "sandbox.network",
+      status: "warn",
+      detail: `The checkout has ${lockfile}, but sandbox.network is off and ${store ? `sandbox.packageStore ${store} is empty` : "sandbox.packageStore is unset"}, so validation's dependency install runs offline with no packages, and Objectives hold on it`,
+      fix: `Run \`factory setup --repo ${config.repository} --sandbox-network package-install\`, or warm sandbox.packageStore with the packages ${lockfile} names`,
+    });
   // The programs Factory runs itself, and those the final commands start.
   const programs = new Map<string, string>([
     ["git", "Factory's Git work"],

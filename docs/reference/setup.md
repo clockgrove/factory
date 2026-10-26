@@ -17,6 +17,7 @@ Part of [the design](../DESIGN.md).
 - **Host:**
   - bubblewrap starts a sandbox, and with `package-install`, pasta is there; with `host`, the detail says what commands reach;
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
+  - with `sandbox.network` `off` and commands sandboxed, a checkout with a bootstrap's lockfile (`pnpm-lock.yaml` or `package-lock.json`) has a `sandbox.packageStore` that isn't empty; otherwise it is `warn`, because validation's dependency install runs offline and the Objective holds on it;
   - git, git lfs, node and each final command's program are on the PATH;
   - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it;
   - a final command that needs the network is flagged.
@@ -76,7 +77,7 @@ The service runs as a systemd user unit (systemd.ts), one per installation. Each
   - Repeated with nothing changed, it leaves the running service alone. The service reads its configuration and credentials once, so it restarts when the unit changed (an upgrade, or a changed environment or credential list), when setup changed the configuration, or when `--credential-file` is given.
   - A service that exits or restarts before taking its lock blocks `--background` and names the journal.
 - **`--credential-file NAME=FILE`...** (with `--background`): each is a LoadCredential. NAME is one Factory reads from the service's credentials: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. FILE is an absolute path to a regular file, not a link, that only its owner can read, in a directory no one else can write. Setup never reads it, and readiness counts it as present. Without the option, the unit keeps its credentials, which are checked again.
-- **`--check`:** the unit's enabled and active state, whether the service holds its lock, the credential names, and whether the unit is current. Exit 0 only when it is running.
+- **`--check`:** the unit's enabled and active state, whether the service holds its lock, the credential names, and whether the unit is current: the unit setup would write with the node and environment the unit records, so a checking shell whose PATH or node differs from the service's doesn't count. A unit for another Factory (an upgrade), or whose node is gone (`missingNode`), is a warning. Exit 0 only when it is running.
 - **`--stop`:** stop the service and disable it, so it doesn't start at the next login. `--background` starts it again.
 - **`--uninstall`:** stop the service and remove its unit. The configuration and state stay.
 

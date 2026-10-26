@@ -5,7 +5,8 @@ import type { Finding, PinnedSource, PlannerDecision } from "./types.js";
  * The plan review's evidence and answer. The reviewer cites evidence rows by
  * index: the operator's recorded answers, the pinned sources, then the
  * controller's execution bounds, native prerequisites and local executable
- * observations when supplied. A finding is `fix` (the planner corrects the
+ * observations when supplied, and an amendment's discovery with the files it
+ * cites. A finding is `fix` (the planner corrects the
  * plan within the Objective as written) or `operator-decision` (the
  * correction needs a decision only the operator owns). An answer whose shape
  * is invalid is flagged `invalid` with the reason; the step retries with it
@@ -14,7 +15,8 @@ import type { Finding, PinnedSource, PlannerDecision } from "./types.js";
 
 /** One evidence row the reviewer can cite. Labels and source text never grant authority. */
 export interface ReviewEvidence {
-  origin: "source" | "controller";
+  /** `repository`: a file an amendment's discovery cites (amendments.ts `citedFiles`). */
+  origin: "source" | "controller" | "repository";
   path: string;
   /** A pinned source's exact heading; absent for the whole file. */
   heading?: string;
@@ -62,6 +64,8 @@ export function planningReviewEvidence(input: {
   localExecutables?: unknown;
   /** An amendment's discovery and the plan it amends. */
   amendment?: unknown;
+  /** The files an amendment's discovery cites. */
+  cited?: readonly { path: string; content: string; complete: boolean }[];
 }): ReviewEvidence[] {
   const controller = (path: string, value: unknown): ReviewEvidence[] =>
     value === undefined || value === null
@@ -102,6 +106,10 @@ export function planningReviewEvidence(input: {
       input.localExecutables,
     ),
     ...controller("FACTORY_AMENDMENT", input.amendment),
+    ...(input.cited ?? []).map((file) => ({
+      origin: "repository" as const,
+      ...file,
+    })),
   ];
 }
 

@@ -4,15 +4,32 @@
 // command names no base, since Factory enforces owned paths itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
+import { finalChecks } from "../dist/planning/plan.js";
+import { readShown } from "../dist/shown.js";
 import { validateTree } from "../dist/validate.js";
-import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
+import {
+  cli,
+  closedPort,
+  configured,
+  githubOrigin,
+  installation,
+  item,
+  plan,
+  REPO,
+  seed,
+  serve,
+  stateOf,
+  stopped,
+  tempDir,
+  until,
+} from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
   const result = spawnSync(
@@ -75,6 +92,97 @@ test("an item's validation compares with the commit it was built on, not a plan 
     runFile: (kind) => log.runFile(1, `item:a:validate#1.${kind}`),
   });
   assert.equal(result.kind, "passed", JSON.stringify(result).slice(0, 800));
+});
+
+test("final validation with no final command skips a Work Item's base-relative check on the integrated head, and runs the item's others", async () => {
+  const inst = installation();
+  mkdirSync(inst.root, { recursive: true });
+  git(inst.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
+  git(inst.root, "clone", "--quiet", "origin.git", "work");
+  const work = join(inst.root, "work");
+  const pushed = (file) => {
+    const sha = commit(work, file);
+    git(work, "push", "--quiet", "origin", "HEAD:main");
+    return sha;
+  };
+  const base = pushed("base.txt");
+  // a's merge, then its sibling b's: the head holds both items' files.
+  const merged = pushed("mine.txt");
+  const mergedB = pushed("sibling.txt");
+  // A target's clone, outside the state directory validation seals, so
+  // git in the sandbox reads its metadata.
+  const checkout = join(tempDir("factory-final-"), "checkout");
+  git(inst.root, "clone", "--quiet", "origin.git", checkout);
+  githubOrigin(checkout, join(inst.root, "origin.git"));
+  configured(inst, `http://127.0.0.1:${await closedPort()}`, {}, { checkout });
+  const at = "2026-01-01T00:00:00.000Z";
+  const merge = (sha) => ({ mergeSha: sha, integratedSha: sha, at });
+  const scope = `git diff --exit-code "$FACTORY_BASE_SHA" -- . ':!mine.txt'`;
+  seed(inst, 63, "building", {
+    done: {
+      check: {
+        shown: readShown(
+          "<h2>Goal</h2><p>Pair.</p><h2>Acceptance</h2><ul><li>Both files exist.</li></ul>",
+          { sources: false },
+        ),
+        title: "Pair",
+      },
+      plan: plan(
+        [
+          item("a", {
+            ownedPaths: ["mine.txt"],
+            validation: [
+              { command: scope },
+              { command: "git cat-file -e HEAD:mine.txt" },
+            ],
+          }),
+          item("b", {
+            ownedPaths: ["sibling.txt"],
+            dependencies: ["a"],
+            validation: [{ command: "git cat-file -e HEAD:sibling.txt" }],
+          }),
+        ],
+        { base },
+      ),
+      ...Object.fromEntries(
+        ["a", "b"].flatMap((id) =>
+          ["work", "validate", "review", "publish", "ci"].map((step) => [
+            `item:${id}:${step}`,
+            {},
+          ]),
+        ),
+      ),
+      "item:a:merge": merge(merged),
+      "item:b:merge": merge(mergedB),
+    },
+    kept: { "plan:acceptedAt": at },
+  });
+  const service = serve(inst);
+  await until(
+    () => stateOf(inst, 63).done.final || stateOf(inst, 63).holds.length,
+    "final settles",
+    30_000,
+  );
+  const { done, holds } = stateOf(inst, 63);
+  assert.deepEqual(
+    holds.map((held) => held.question),
+    [],
+  );
+  assert.deepEqual(done.final.commands, [
+    "git cat-file -e HEAD:mine.txt",
+    "git cat-file -e HEAD:sibling.txt",
+  ]);
+  assert.deepEqual(done.final.skipped, [
+    { item: "a", command: scope, baseRelative: true },
+  ]);
+  // What a retirement counts as left is what ran.
+  assert.deepEqual(finalChecks(done.plan), done.final.commands);
+  assert.match(
+    cli(inst, "status", "63").out,
+    /Skipped by final validation: command `git diff [^`]*` \(Work Item a\): it compares with the base, so it checks only its own item's change; Work Item a's own validation ran it/,
+  );
+  assert.equal(cli(inst, "cancel", "63").code, 0);
+  await stopped(service);
 });
 
 test("the plan check refuses a QA or integrated command that compares with the plan's base, and leaves a Work Item's own", async () => {

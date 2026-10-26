@@ -3,6 +3,7 @@ import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, itemsWith } from "../work/facts.js";
 import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
+import { namedBase } from "./facts.js";
 import { ownsPath } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
 import type { Plan, WorkItem } from "./types.js";
@@ -248,12 +249,15 @@ export function fallbackRuns(plan: Plan): WorkItem[] {
  * The checks final validation runs on the merged default branch, less
  * those the operator retired: the plan's final commands, then its QA
  * items' commands, each once, or, with no final command, the commands of
- * its Work Item runs (`fallbackRuns`).
+ * its Work Item runs (`fallbackRuns`) less those that compare with the
+ * base, which those runs skip (work/finish.ts finalRuns).
  */
 export function finalChecks(plan: Plan): string[] {
   if (!plan.finalCommands.length)
     return fallbackRuns(plan).flatMap((item) =>
-      item.validation.map((check) => check.command),
+      item.validation.flatMap(({ command }) =>
+        namedBase(command, plan.base) ? [] : [command],
+      ),
     );
   // The QA items' commands prove the Objective's command criteria: they
   // run again on the final head, after the required commands.

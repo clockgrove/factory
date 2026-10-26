@@ -3,7 +3,8 @@
 // amendment planner added the item that owns the file the worker
 // discovered but left it out of the integrated QA item's dependencies, and
 // the graph check rejected the whole amendment and asked a person. The
-// planner's answers are fixed here, in the shape that run's had.
+// planner's answers are fixed here, in the shape that run's had. The
+// independent review's fix findings go back to the planner the same way.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -349,5 +350,115 @@ test("an amendment's check findings still reject when they repeat, or come with 
     });
     assert.equal(refused.outcome.kind, "done");
     assert.match(state.done["amend:op-1:plan"].rejected, /refused/);
+  }
+});
+
+// A round the plan checks pass, and the review's answers on it.
+const withB = revision([work("b"), qa(["a", "b"])]);
+const restatesB = revision([
+  work("b", {
+    acceptance: ["b() returns 1, which the repository test checks."],
+  }),
+]);
+const VAGUE =
+  "Acceptance of b does not say that the repository test needing src/b.js passes";
+const reviewed = (kind) => ({
+  findings: [
+    { kind, itemIds: ["b"], evidenceIndices: [], detail: VAGUE, question: "" },
+  ],
+});
+
+test("an amendment's review fix finding goes back to its planner, and the corrected round is reviewed again and accepted", async () => {
+  const { checkout, state } = await building();
+  const { planner, asked } = scripted(withB, reviewed("fix"), restatesB, {
+    findings: [],
+  });
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+
+  // The review's fix finding sends round 1 back, charged.
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.equal(review.outcome.kind, "retry", JSON.stringify(review.outcome));
+  assert.equal(
+    review.outcome.reason,
+    "Amendment plan round 1 has 1 fix finding; revising",
+  );
+  assert.equal(state.done["amend:op-1:review"], undefined);
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.deepEqual(
+    kept.findings.map((f) => [f.source, f.kind]),
+    [["review", "fix"]],
+  );
+  assert.deepEqual(kept.answer, state.done["amend:op-1:plan"].answer);
+  assert.equal(planningRevisions(state).used, 2);
+
+  // Round 2 revises round 1's answer with the review's finding.
+  const second = await step(state, deps);
+  assert.equal(second.key, "amend:op-1:plan");
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.equal(asked[2].phase, "plan");
+  assert.ok(asked[2].prompt.includes(VAGUE));
+  assert.deepEqual(
+    state.done["amend:op-1:plan"].answer.items.find((item) => item.id === "b")
+      .acceptance,
+    ["b() returns 1, which the repository test checks."],
+  );
+
+  // It is reviewed again, and accepted.
+  const again = await step(state, deps);
+  assert.equal(again.key, "amend:op-1:review");
+  assert.equal(asked[3].phase, "graph-review");
+  assert.deepEqual(again.outcome, { kind: "done", result: {} });
+  const accept = await step(state, deps);
+  assert.equal(accept.key, "amend:op-1");
+  assert.equal(state.done["amend:op-1"].rejected, undefined);
+  assert.equal(posted.length, 1);
+  assert.equal(asked.length, 4);
+  assert.equal(planningRevisions(state).used, 2);
+});
+
+test("an amendment's review still rejects it on an operator decision, or on the same findings twice", async () => {
+  {
+    const { checkout, state } = await building();
+    const { planner } = scripted(withB, reviewed("operator-decision"));
+    const deps = depsOf(checkout, planner);
+    await step(state, deps);
+    const review = await step(state, deps);
+    assert.equal(review.outcome.kind, "done");
+    assert.ok(
+      review.outcome.result.rejected.startsWith(
+        `Independent amendment review: ${VAGUE}`,
+      ),
+    );
+    assert.equal(state.kept["amend:op-1:revisions"], undefined);
+    await step(state, deps);
+    assert.equal(
+      state.done["amend:op-1"].rejected,
+      review.outcome.result.rejected,
+    );
+  }
+  {
+    const { checkout, state } = await building();
+    const { planner } = scripted(
+      withB,
+      reviewed("fix"),
+      restatesB,
+      reviewed("fix"),
+    );
+    const deps = depsOf(checkout, planner);
+    await step(state, deps);
+    assert.equal((await step(state, deps)).outcome.kind, "retry");
+    await step(state, deps);
+    const again = await step(state, deps);
+    assert.equal(again.key, "amend:op-1:review");
+    assert.equal(again.outcome.kind, "done");
+    assert.ok(
+      state.done["amend:op-1:review"].rejected.startsWith(
+        `Independent amendment review: Amendment plan round 2 came back with the same problems as round 1: ${VAGUE}`,
+      ),
+    );
+    assert.equal(state.kept["amend:op-1:revisions"].length, 1);
   }
 });

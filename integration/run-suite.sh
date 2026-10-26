@@ -406,15 +406,15 @@ setup_repos() {
 setup_main() {
   clone $M_REPO "$STATE_BASE/checkout-m" || return 1
   write_config "$STATE_BASE/config-m.json" $M_REPO "$STATE_BASE/checkout-m" 12 'c["delivery"]={"kind":"native-stack"}' 'c.setdefault("autonomy",{})["allowances"]={"planningRevisions":2}'
-  inst_define M $M_REPO "$STATE_BASE/config-m.json"
+  inst_define M $M_REPO "$STATE_BASE/config-m.json" || return 1
   if [ -n "$NEEDS_C" ]; then
     clone $C_REPO "$STATE_BASE/checkout-c" || return 1
     write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8 "c['queue']['projectId']='$C_PROJECT_ID'"
-    inst_define C $C_REPO "$STATE_BASE/config-c.json"
-    inst_define H $C_REPO "$STATE_BASE/config-c.json"
+    inst_define C $C_REPO "$STATE_BASE/config-c.json" || return 1
+    inst_define H $C_REPO "$STATE_BASE/config-c.json" || return 1
     # X: repository C configured on repository M's Project, which M serves.
     write_config "$STATE_BASE/config-x.json" $C_REPO "$STATE_BASE/checkout-c" 8
-    inst_define X $C_REPO "$STATE_BASE/config-x.json"
+    inst_define X $C_REPO "$STATE_BASE/config-x.json" || return 1
     printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
     cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"; cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/X/extra_env"
   fi

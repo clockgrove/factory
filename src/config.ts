@@ -23,11 +23,11 @@ import {
   text,
   whole,
 } from "./checked.js";
+import { serviceCredential } from "./credentials.js";
 import { remoteRepository } from "./git.js";
 import { type PlanningContext, planningContext } from "./knowledge/settings.js";
 import { CAPTURE_OFF, type CaptureSettings } from "./log.js";
 import { stateRoot, within } from "./paths.js";
-import { serviceCredential } from "./providers/claude.js";
 import {
   COPILOT_REDACTED,
   copilotConfigured,

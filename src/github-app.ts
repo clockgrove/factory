@@ -7,8 +7,9 @@
  */
 import { createPrivateKey, sign } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type { CoreConfig } from "./config.js";
+import { serviceCredential } from "./credentials.js";
 import { remoteToken } from "./git.js";
 import { GitHub } from "./github.js";
 import { installationPaths } from "./paths.js";
@@ -32,13 +33,8 @@ export function appKeyFile(root: string): string {
  * undefined when none does. Throws when one is there but can't be read.
  */
 export function appKey(root: string): string | undefined {
-  const directory = process.env.CREDENTIALS_DIRECTORY;
-  const credential =
-    directory && isAbsolute(directory)
-      ? join(directory, GITHUB_APP_KEY)
-      : undefined;
-  if (credential && existsSync(credential))
-    return readFileSync(credential, "utf8");
+  const credential = serviceCredential(GITHUB_APP_KEY, { multiline: true });
+  if (credential) return credential;
   if (process.env[GITHUB_APP_KEY]) return process.env[GITHUB_APP_KEY];
   const copy = appKeyFile(root);
   return existsSync(copy) ? readFileSync(copy, "utf8") : undefined;
@@ -63,16 +59,17 @@ export function appJwt(id: number, key: string, now = Date.now()): string {
 
 /**
  * What Factory does as the App needs, by GitHub's permission name: its
- * branches, PRs, issues and comments, the checks and runs it waits on, the
- * workflow files a merged base may bring into its branches, and the
- * queue's Project, an organization's (`organization_projects`).
+ * branches, PRs, issues and comments, the checks and runs it waits on and
+ * a flaky run's failed jobs it reruns (`actions: write`), the workflow
+ * files a merged base may bring into its branches, and the queue's
+ * Project, an organization's (`organization_projects`).
  */
 export const APP_PERMISSIONS: Readonly<Record<string, "read" | "write">> = {
   contents: "write",
   issues: "write",
   pull_requests: "write",
   checks: "read",
-  actions: "read",
+  actions: "write",
   workflows: "write",
   metadata: "read",
   statuses: "read",
@@ -123,9 +120,17 @@ export function appRegistrationLink(
   return `${organization ? `https://github.com/organizations/${owner}/settings/apps/new` : "https://github.com/settings/apps/new"}?${query}`;
 }
 
-/** What the operator does with the link (`setup --github-app-link`, readiness). */
-export const APP_STEPS =
-  "Open it and create the App, generate a private key on its page, install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH";
+/**
+ * What the operator does with the link (`setup --github-app-link`,
+ * readiness). An installation token reaches only the repositories the App
+ * is installed on, and Factory reads every repository of the queue's
+ * Project (the one-installation-per-Project check): an organization's
+ * installation takes All repositories, so a repository added to the
+ * Project later is covered too.
+ */
+export function appSteps(organization: boolean): string {
+  return `Open it and create the App, generate a private key on its page, install it ${organization ? "on All repositories of the organization (at the least, on the repository and every other repository of its Project)" : "on the repository and every other repository of its Project"}, then run factory setup --github-app-id ID --github-app-key PATH`;
+}
 
 /** Whether `owner` is an organization, by GitHub's public read of the account (no login). */
 export async function organizationOwner(

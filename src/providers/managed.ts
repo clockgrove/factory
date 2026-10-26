@@ -45,6 +45,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { create, extract, list } from "tar";
 import { crashPoint } from "../crash.js";
+import { serviceCredential } from "../credentials.js";
 import { hold } from "../engine.js";
 import { validPath } from "../objective.js";
 import { ContainedError, copyContained } from "../paths.js";
@@ -58,7 +59,6 @@ import {
   type WorkerSpend,
 } from "../work/worker.js";
 import { hostGit } from "../worktree.js";
-import { serviceCredential } from "./claude.js";
 import { pathInsideRoot } from "./claude-worker.js";
 import type { WorkerConfig } from "./config.js";
 import { detail, PlannerError, providerOutcome } from "./planner.js";

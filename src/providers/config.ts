@@ -126,7 +126,7 @@ export const CLAUDE_TOOLS = [
 
 /**
  * The Copilot login's secrets: each read from the environment or, for a
- * supervised service, its loaded credentials (claude.ts serviceCredential).
+ * supervised service, its loaded credentials (credentials.ts serviceCredential).
  * They reach only the Copilot runtime (copilot.ts copilotEnvironment).
  */
 export const COPILOT_SECRETS = [

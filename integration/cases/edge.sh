@@ -5,7 +5,7 @@
 setup_edge() {
   clone $M_REPO "$STATE_BASE/checkout-e" || return 1
   write_config "$STATE_BASE/config-e.json" $M_REPO "$STATE_BASE/checkout-e" 6
-  inst_define E $M_REPO "$STATE_BASE/config-e.json"
+  inst_define E $M_REPO "$STATE_BASE/config-e.json" || return 1
   inst E; proxy_start E 18612
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" >"$RUN_DIR/inst/E/extra_env"
   serve_up && serve_ready

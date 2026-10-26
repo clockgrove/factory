@@ -18,9 +18,9 @@ import { isObject } from "./checked.js";
 import { configPath, loadConfig } from "./config.js";
 import { originRefusal } from "./git.js";
 import {
-  APP_STEPS,
   appKeyFile,
   appRegistrationLink,
+  appSteps,
   factoryGitHub,
   GITHUB_APP_KEY,
   keepAppKey,
@@ -707,12 +707,13 @@ export async function appLink(
   repository: string,
 ): Promise<{ link: string; next: string }> {
   const owner = repository.split("/")[0]!;
+  const organization = await organizationOwner(
+    owner,
+    process.env.FACTORY_GITHUB_API,
+  );
   return {
-    link: appRegistrationLink(
-      owner,
-      await organizationOwner(owner, process.env.FACTORY_GITHUB_API),
-    ),
-    next: APP_STEPS,
+    link: appRegistrationLink(owner, organization),
+    next: appSteps(organization),
   };
 }
 

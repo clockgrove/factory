@@ -17,16 +17,23 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { originBound } from "../dist/git.js";
 import { GitHubError, githubOutcome } from "../dist/github.js";
+import { publish } from "../dist/delivery.js";
 import {
   APP_PERMISSIONS,
   appJwt,
   appRegistrationLink,
+  appSteps,
   factoryGitHub,
   missingPermissions,
 } from "../dist/github-app.js";
-import { cancelComment, questionComment } from "../dist/github-sync.js";
+import {
+  cancelComment,
+  GitHubSync,
+  questionComment,
+} from "../dist/github-sync.js";
 import { redact } from "../dist/log.js";
 import { mark } from "../dist/markdown.js";
+import { postPlan } from "../dist/planning/steps.js";
 import { FACTORY_EMAIL, factoryCommit } from "../dist/work/collect.js";
 import { reportComment } from "../dist/work/finish.js";
 import { workerEnvironment } from "../dist/worktree.js";
@@ -34,11 +41,14 @@ import {
   CLI,
   children,
   configured,
+  githubOrigin,
   installation,
   item,
+  offered,
   plan,
   REPO,
   tempDir,
+  until,
 } from "./helpers.mjs";
 
 const pair = () =>
@@ -298,6 +308,37 @@ test("a configured installation id is read as itself; without a key, or not inst
   });
 });
 
+test("the App's key the service loaded as a credential comes first and is read whole; an empty one holds naming it", async () => {
+  const tokens = { minted: 0 };
+  const { api } = await fakeGitHub(appRoutes(tokens));
+  const credentials = tempDir("factory-app-credentials-");
+  const loaded = join(credentials, "FACTORY_GITHUB_APP_KEY");
+  writeFileSync(loaded, key.privateKey, { mode: 0o600 });
+  // Another key in the environment: only the credential's signs for App APP.
+  await withEnv(
+    {
+      ...appEnv(),
+      FACTORY_GITHUB_APP_KEY: pair().privateKey,
+      CREDENTIALS_DIRECTORY: credentials,
+    },
+    async () => {
+      const app = () =>
+        factoryGitHub({ repository: REPO, github: { app: { id: APP } } }, api);
+      assert.equal(await app().serviceToken(), "ghs_test1");
+      writeFileSync(loaded, "\n");
+      await assert.rejects(app().serviceToken(), (error) => {
+        assert.equal(error.app, true);
+        assert.match(
+          error.message,
+          /credential FACTORY_GITHUB_APP_KEY is empty or invalid/,
+        );
+        return true;
+      });
+      assert.equal(tokens.minted, 1);
+    },
+  );
+});
+
 test("remote Git gets the installation token for that one call only: no Git configuration, process or worker environment keeps it", async () => {
   const tokens = { minted: 0 };
   const { api } = await fakeGitHub(appRoutes(tokens));
@@ -441,6 +482,235 @@ test("a hold, the report and a cancel mention every operator once, at the end; w
   assert.doesNotMatch(reportComment(mark(5, "report", "run"), state, []), /@/);
 });
 
+/**
+ * `body` without what GitHub never reads a mention in: code spans and
+ * blocks, and HTML comments (Factory's markers and status record).
+ */
+const notified = (body) =>
+  body.replace(/(`+)[\s\S]*?\1/g, "").replace(/<!--[\s\S]*?-->/g, "");
+/** An @mention GitHub notifies (prose writes `&#64;`, inert adds a joiner). */
+const MENTION = /@[\w-]/;
+
+test("with operators set, the live status comment, the waiting note, reminders, the plan comment and PR bodies mention no one", async () => {
+  const operators = ["kirk", "ops-2"];
+  const issue = 5;
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+  const written = new Map();
+  const comment = async (on, marker, body) => {
+    written.set(marker, body);
+    const at = new Date().toISOString();
+    return {
+      id: written.size,
+      created_at: at,
+      updated_at: at,
+      html_url: `https://github.com/${REPO}/issues/${on}#issuecomment-${written.size}`,
+    };
+  };
+  const github = {
+    repository: REPO,
+    upsertComment: comment,
+    ensureComment: comment,
+    markedComment: async () => undefined,
+  };
+  // Every text the comments show names an operator too.
+  const accepted = plan(
+    [item("a", { title: "Tell @kirk", goal: "Ask @ops-2 first" })],
+    {
+      base: "b".repeat(40),
+      decisions: [{ answer: "go", text: "as @kirk said", by: "kirk" }],
+    },
+  );
+  const asked = (id, fields = {}) => ({
+    id,
+    step: "item:a:work",
+    item: "a",
+    question: `Which way, @kirk? (${id})`,
+    options: offered("retry", "cancel"),
+    cause: "question",
+    askedAt: old,
+    ...fields,
+  });
+  const gate = { kind: "gate", gate: "a review by @kirk" };
+  const state = {
+    version: 9,
+    issue,
+    status: "holding",
+    holds: [asked("shown", { shownAt: old }), asked("new")],
+    answers: {},
+    repairs: {},
+    kept: {},
+    attempts: {},
+    appliedRequests: [],
+    retries: {
+      "item:a:merge": {
+        count: 0,
+        since: old,
+        nextAt: old,
+        lastError: "@kirk",
+        wait: gate,
+      },
+      "item:a:ci": {
+        count: 0,
+        since: old,
+        nextAt: old,
+        lastError: "GitHub 502 for @ops-2",
+        cause: "GitHub 502 for @ops-2",
+      },
+    },
+    done: { plan: accepted },
+    modules: { github: { itemId: "I_5", commentsSince: old } },
+    startedAt: old,
+    updatedAt: old,
+  };
+  const runner = {
+    state,
+    settled: false,
+    blocked: () => false,
+    transact: (change) => change(),
+    shown: (id, at) => {
+      state.holds.find((hold) => hold.id === id).shownAt = at;
+    },
+  };
+  const sync = new GitHubSync(
+    github,
+    {
+      repository: REPO,
+      secrets: [],
+      operators,
+      progress: { enabled: true, includeQuestions: true },
+    },
+    { write: () => {} },
+    { noteAfterMs: 0, remindAfterMs: 0 },
+  );
+  // One tick's comment jobs for this Objective (github-sync.ts `tick`).
+  const module = state.modules.github;
+  sync.ask(runner);
+  sync.status(runner, {
+    logs: tempDir("factory-app-logs-"),
+    queue: { mode: "running" },
+    waitsOn: () => null,
+  });
+  sync.note(runner, module);
+  sync.remind(runner, module);
+  const question = mark(issue, "hold", "new");
+  const edited = [
+    mark(issue, "status", old),
+    mark(issue, "waiting", "note"),
+    mark(issue, "remind", `item:a:merge@${old}`),
+    mark(issue, "remind", "hold:shown"),
+  ];
+  await until(
+    () => [question, ...edited].every((marker) => written.has(marker)),
+    "every comment",
+  );
+  // The question is what GitHub notifies them of, once.
+  assert.ok(written.get(question).endsWith("\n\n@kirk @ops-2"));
+  for (const marker of edited)
+    assert.doesNotMatch(notified(written.get(marker)), MENTION, marker);
+  assert.match(written.get(edited[0]), /Which way/);
+
+  // The plan comment, and its data.
+  const posted = [];
+  await postPlan(
+    {
+      github: { upsertComment: async (...call) => posted.push(call[2]) },
+      config: { operators },
+    },
+    state,
+    accepted,
+    new AbortController().signal,
+    { accepted: old },
+  );
+  assert.equal(posted.length, 1);
+  assert.match(posted[0], /\*\*Factory's plan\*\*/);
+  assert.doesNotMatch(notified(posted[0]), MENTION);
+
+  // A Work Item's PR: its title and body. Another repository than the
+  // App tests', which bind REPO's remote Git to their App.
+  const repository = "drill/plain";
+  const root = tempDir("factory-app-pr-");
+  const bare = join(root, "origin.git");
+  const checkout = join(root, "checkout");
+  const git = (...args) => {
+    const run = spawnSync("git", args, { cwd: checkout, encoding: "utf8" });
+    assert.equal(run.status, 0, `git ${args.join(" ")}: ${run.stderr}`);
+    return run.stdout.trim();
+  };
+  for (const args of [
+    ["init", "--quiet", "--bare", "--initial-branch=main", bare],
+    ["clone", "--quiet", bare, checkout],
+  ])
+    assert.equal(spawnSync("git", args).status, 0);
+  githubOrigin(checkout, bare, repository);
+  const commit = (file, text) => {
+    writeFileSync(join(checkout, file), text);
+    git("add", file);
+    git(
+      "-c",
+      "user.name=Factory",
+      "-c",
+      `user.email=${FACTORY_EMAIL}`,
+      "commit",
+      "--quiet",
+      "-m",
+      `Factory: ${file}`,
+    );
+    return git("rev-parse", "HEAD");
+  };
+  git("checkout", "--quiet", "-b", "main");
+  const base = commit("README.md", "target\n");
+  git("push", "--quiet", "origin", "main");
+  const result = commit("a.js", "export const a = 1;\n");
+  const created = [];
+  const pulls = new Proxy(
+    {
+      repository,
+      defaultBranch: async () => "main",
+      made: () => {},
+      pullsByHead: async () => [],
+      createPull: async (pull) => {
+        created.push(pull);
+        return { number: 8 };
+      },
+    },
+    {
+      get: (target, name) => {
+        if (name in target) return target[name];
+        if (name === "then") return undefined;
+        throw new Error(`unexpected GitHub call: ${String(name)}`);
+      },
+    },
+  );
+  const published = await publish(
+    {
+      github: pulls,
+      checkout,
+      signal: new AbortController().signal,
+      config: { operators },
+    },
+    {
+      issue,
+      item: {
+        id: "a",
+        title: "Tell @kirk",
+        goal: "Ask @ops-2 first",
+        ownedPaths: ["a.js"],
+      },
+      base,
+      commit: result,
+      tree: git("rev-parse", `${result}^{tree}`),
+      pushedHeads: [],
+      validation: { commands: ["npm test"] },
+      secrets: [],
+    },
+  );
+  assert.equal(published.kind, "published", JSON.stringify(published));
+  assert.equal(created.length, 1);
+  assert.match(created[0].body, /Work Item: <code>a<\/code>/);
+  assert.doesNotMatch(created[0].title, MENTION);
+  assert.doesNotMatch(notified(created[0].body), MENTION);
+});
+
 test("the registration link prefills every permission for an organization or a user, with no webhook and a private App", () => {
   const org = new URL(appRegistrationLink("clockgrove", true));
   assert.equal(
@@ -456,6 +726,8 @@ test("the registration link prefills every permission for an organization or a u
     assert.equal(given[name], level, name);
   assert.equal(given.organization_projects, "write");
   assert.equal(given.workflows, "write");
+  // A flaky run's failed jobs are rerun (POST .../rerun-failed-jobs).
+  assert.equal(given.actions, "write");
   const user = new URL(appRegistrationLink("kirk", false));
   assert.equal(
     `${user.origin}${user.pathname}`,
@@ -468,6 +740,20 @@ test("the registration link prefills every permission for an organization or a u
     "issues: write",
     "workflows: write",
   ]);
+  assert.deepEqual(
+    missingPermissions({ ...APP_PERMISSIONS, actions: "read" }, true),
+    ["actions: write"],
+  );
+  // The App reads every repository of the Project: an organization's
+  // installation takes All repositories.
+  assert.match(
+    appSteps(true),
+    /install it on All repositories of the organization \(at the least, on the repository and every other repository of its Project\)/,
+  );
+  assert.match(
+    appSteps(false),
+    /install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH/,
+  );
   const { organization_projects: _projects, ...personal } = APP_PERMISSIONS;
   assert.deepEqual(missingPermissions(personal, false), []);
   assert.deepEqual(missingPermissions(personal, true), [
@@ -652,7 +938,8 @@ test("readiness warns when no operator is set, or when Factory acts as the opera
     shown.link,
     /^https:\/\/github\.com\/organizations\/drill\/settings\/apps\/new\?/,
   );
-  assert.match(shown.next, /install it on the repository/);
+  assert.equal(shown.next, appSteps(true));
+  assert.match(self.fix, /install it on All repositories of the organization/);
   const mixed = await factory(
     inst,
     "setup",

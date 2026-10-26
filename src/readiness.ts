@@ -12,14 +12,15 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type { CoreConfig } from "./config.js";
+import { credentialPath } from "./credentials.js";
 import { checkoutCredentialEntries, pushesOverSsh } from "./git.js";
 import { type AppInstallation, type GitHub, sameLogin } from "./github.js";
 import {
-  APP_STEPS,
   appKey,
   appRegistrationLink,
+  appSteps,
   GITHUB_APP_KEY,
   missingPermissions,
 } from "./github-app.js";
@@ -329,11 +330,7 @@ async function login(
 
 /** A credential systemd loaded for the service, by presence: never read here. */
 function loaded(name: string, bound: readonly string[]): boolean {
-  if (bound.includes(name)) return true;
-  const directory = process.env.CREDENTIALS_DIRECTORY;
-  return (
-    !!directory && isAbsolute(directory) && existsSync(join(directory, name))
-  );
+  return bound.includes(name) || credentialPath(name) !== undefined;
 }
 
 async function providerChecks(
@@ -471,7 +468,7 @@ async function appChecks(
       `App ${app.id} has no private key: not in the service's credentials, ${GITHUB_APP_KEY} or the installation`,
       "Generate a private key on the App's settings page, then run factory setup --github-app-key PATH",
     );
-  const install = `Install the App on ${config.repository} (the App's settings page, Install App), then repeat`;
+  const install = `Install the App on ${config.repository} and every other repository of its Project, or on an organization's All repositories (the App's settings page, Install App), then repeat`;
   let installation: AppInstallation;
   try {
     installation = await github.appInstallation();
@@ -568,7 +565,7 @@ async function operatorChecks(
       name,
       status: "warn",
       detail: `Factory acts as ${login}, which is the operator ${self}: GitHub doesn't notify an account of its own comments, so ${self} hears of no hold`,
-      fix: `Give Factory its own GitHub identity, a GitHub App: ${appRegistrationLink(github.owner, organization !== false)} ${APP_STEPS}`,
+      fix: `Give Factory its own GitHub identity, a GitHub App: ${appRegistrationLink(github.owner, organization !== false)} ${appSteps(organization !== false)}`,
     },
   ];
 }

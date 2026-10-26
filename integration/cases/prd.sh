@@ -29,8 +29,8 @@ setup_prd() {
       commit -q -m "Drill: the prd suite's fixtures" && git -C "$co" push -q origin HEAD:main || return 1
   write_config "$STATE_BASE/config-p.json" $M_REPO "$co" 12 \
     'c["sandbox"]={"network":"host"}' 'c["finalValidation"]={"ciOnlyCommands":["npm run ci-only"]}'
-  inst_define P $M_REPO "$STATE_BASE/config-p.json"
-  [ -z "$NEEDS_C" ] || inst_define Q $C_REPO "$STATE_BASE/config-q.json"
+  inst_define P $M_REPO "$STATE_BASE/config-p.json" || return 1
+  [ -z "$NEEDS_C" ] || inst_define Q $C_REPO "$STATE_BASE/config-q.json" || return 1
   inst P
   [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }
   proxy_start P 18613
@@ -537,7 +537,7 @@ JSON
       clone "$repo" "$co"
   } 2>>"$RUN_DIR/nocheck.setup.err" || return 1
   write_config "$STATE_BASE/config-n.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'"
-  inst_define N "$repo" "$STATE_BASE/config-n.json"
+  inst_define N "$repo" "$STATE_BASE/config-n.json" || return 1
   printf '%s\n' "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/N/extra_env"
   inst N; serve_up && serve_ready
 }
@@ -658,6 +658,7 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   local calls; calls=$(cat "$ROOT"/logs/*/*.jsonl 2>/dev/null | grep -c '"event":"model-usage"')
   [ "$rs" = 0 ] && [[ $sj == "configured "* ]] && [[ $sj != *absent ]] && [ "$calls" = 0 ]
   rec_if setup.config $? "factory setup exit $rs: status and node-version check: $sj; model calls $calls" "$t0"
+  app_given Q "$RUN_DIR/q.setup.out" || return
   cli_t 120 setup --background --json >"$RUN_DIR/q.background.out" 2>&1; local rb=$?
   cli_t 60 setup --check --json >"$RUN_DIR/q.check.out" 2>&1; local rc=$?
   [ "$rb" = 0 ] && [ "$rc" = 0 ]; local bg=$?
@@ -801,7 +802,7 @@ PY
     commit -q -m "Drill: pin Node and pnpm" && git -C "$co" push -q origin HEAD:main || return 1
   write_config "$STATE_BASE/config-t.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'" \
     "c['finalValidation']={'requiredCommands':['$TOOLCHAIN_CMD']}"
-  inst_define T "$repo" "$STATE_BASE/config-t.json"
+  inst_define T "$repo" "$STATE_BASE/config-t.json" || return 1
   printf '%s\n' "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/T/extra_env"
   inst T
   serve_up && serve_ready

@@ -366,9 +366,10 @@ const EVIDENCE_TOTAL_BYTES = 128_000;
 /**
  * Files an earlier answer asked for and the files the review cites are read
  * whole first, within their own bound. A larger blob is not read at all: it
- * is not source a diagnosis can use.
+ * is not source a diagnosis can use. An amendment's cited files share it
+ * (planning/amendments.ts `citedFiles`).
  */
-const EVIDENCE_NAMED_BYTES = 256_000;
+export const EVIDENCE_NAMED_BYTES = 256_000;
 
 interface CandidateFile {
   path: string;
@@ -682,7 +683,7 @@ async function heldRequests(
     ...answer.requestedFiles,
     ...(answer.path ? [answer.path] : []),
   ]);
-  const listed = await treeFiles(input);
+  const listed = await treeFiles(input.checkout, input.commit, input.signal);
   return [...asked].filter(
     (path) =>
       !requested.has(path) &&
@@ -710,14 +711,16 @@ async function notRegularFile(
   return entry !== undefined && !/^100(?:644|755) blob /.test(entry);
 }
 
-/** The regular files of the failed result, with their blob sizes and ids. */
-async function treeFiles(
-  input: CorrectionInput,
+/** The regular files of `commit` (the failed result), with their blob sizes and ids. */
+export async function treeFiles(
+  checkout: string,
+  commit: string,
+  signal?: AbortSignal,
 ): Promise<{ path: string; size: number; oid: string }[]> {
   const listing = await hostGit(
-    input.checkout,
-    ["ls-tree", "-r", "-l", "-z", input.commit],
-    { signal: input.signal },
+    checkout,
+    ["ls-tree", "-r", "-l", "-z", commit],
+    { signal },
   );
   return listing
     .toString("utf8")
@@ -730,6 +733,12 @@ async function treeFiles(
         ? [{ path: match[5]!, size: Number(match[4]), oid: match[3]! }]
         : [];
     });
+}
+
+/** Whether `text` names `path` literally; the text grants no ownership. */
+export function namesPath(text: string, path: string): boolean {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\w.\\-])${escaped}(?=$|[^\\w./\\-])`).test(text);
 }
 
 /**
@@ -773,16 +782,10 @@ async function candidateFiles(
       .split("\0")
       .filter(Boolean),
   );
-  // A path the failure text names literally; the text grants no ownership.
-  const named = (path: string): boolean => {
-    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?:^|[^\\w.\\-])${escaped}(?=$|[^\\w./\\-])`).test(
-      failure,
-    );
-  };
+  const named = (path: string): boolean => namesPath(failure, path);
   // A predecessor's file only when it is requested, cited or named: the
   // evidence for a blame, without crowding out the item's own files.
-  const owned = (await treeFiles(input))
+  const owned = (await treeFiles(input.checkout, input.commit, input.signal))
     .filter(
       (file) =>
         ownsPath(file.path, item.ownedPaths) ||

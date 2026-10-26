@@ -2,10 +2,14 @@ import { isDeepStrictEqual } from "node:util";
 import { grant } from "../allowances.js";
 import { isObject } from "../checked.js";
 import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import { readBlobs } from "../git.js";
 import { code, prose } from "../markdown.js";
+import { validPath } from "../objective.js";
 import { logRefused } from "../providers/usage.js";
+import { EVIDENCE_NAMED_BYTES, namesPath, treeFiles } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
 import { fact, facts } from "../work/facts.js";
+import { hostGit, hostGitExit } from "../worktree.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
 import { forgetting, plannerLookups } from "./lookup.js";
@@ -126,6 +130,12 @@ export interface AmendmentProposal {
   plan: string;
   /** The worker attempt that proposed it (itemAttempt). */
   worker?: { itemId: string; attempt: number };
+  /**
+   * The commit its discovery's cited files are read at (`citedFiles`): the
+   * proposing worker's collected result, or the start of the item that
+   * proposed. None: the plan's base.
+   */
+  commit?: string;
   /** A replacement of a rejected amendment, with the operator's diagnosis. */
   replacement?: { amendmentId: string; diagnosis: string; correction: string };
 }
@@ -160,6 +170,7 @@ function revisionsOf(state: ObjectiveState, id: string): AmendRevision[] {
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MINUTE = 60_000;
 const ANSWERS_KEY = (id: string) => `amend:${id}:answers`;
 
@@ -301,6 +312,11 @@ export function proposalProblems(
     problems.push(
       `The worker's discovery comes from an earlier attempt of ${proposal.worker.itemId} or an item the plan doesn't have; only its current attempt (${plan?.items.some((item) => item.id === proposal.worker!.itemId) ? itemAttempt(state, proposal.worker.itemId) : "none"}) may propose`,
     );
+  if (
+    proposal.commit !== undefined &&
+    (typeof proposal.commit !== "string" || !COMMIT.test(proposal.commit))
+  )
+    problems.push("An amendment's commit is a full commit id");
   if (!proposal.replacement) {
     if (ledger.rejected)
       problems.push(
@@ -467,6 +483,94 @@ export function discoveryText(discovery: WorkDiscovery): string {
   const list = (entries: string[]) =>
     entries.map((entry) => `\n- ${entry}`).join("");
   return `Reason: ${discovery.reason}\n\nEvidence:${list(discovery.evidence)}\n\nOwnership: ${discovery.ownership.map(code).join(", ")}\n\nAcceptance:${list(discovery.acceptance)}${discovery.dependencies.length ? `\n\nAfter: ${discovery.dependencies.map(code).join(", ")}` : ""}`;
+}
+
+/** A file a discovery cites; `complete` false: the content is a note saying why it isn't supplied. */
+export interface CitedFile {
+  path: string;
+  content: string;
+  complete: boolean;
+}
+
+/**
+ * The files a proposal's discovery cites, as its planner and review get
+ * them: the regular files its reason, evidence or acceptance names, then
+ * its ownership paths, read from Git at the proposal's commit (the plan's
+ * base when it has none, or Git no longer has it), never from a worktree.
+ * They are read whole within repair diagnosis's bound on named files
+ * (repair.ts `EVIDENCE_NAMED_BYTES`); one past what is left of it, one
+ * that isn't UTF-8 text, or a path the commit lacks is listed with a note.
+ */
+export async function citedFiles(
+  checkout: string,
+  proposal: AmendmentProposal,
+  base: string,
+  signal?: AbortSignal,
+): Promise<CitedFile[]> {
+  const { discovery } = proposal;
+  const at =
+    proposal.commit &&
+    (
+      await hostGitExit(
+        checkout,
+        ["cat-file", "-e", `${proposal.commit}^{commit}`],
+        { signal },
+      )
+    ).code === 0
+      ? proposal.commit
+      : base;
+  const listed = await treeFiles(checkout, at, signal);
+  const text = [
+    discovery.reason,
+    ...discovery.evidence,
+    ...discovery.acceptance,
+  ].join("\n");
+  const paths = [
+    ...listed
+      .filter((file) => namesPath(text, file.path))
+      .map((file) => file.path),
+    ...discovery.ownership.filter(validPath),
+  ].filter((path, index, all) => all.indexOf(path) === index);
+  const byPath = new Map(listed.map((file) => [file.path, file]));
+  let total = 0;
+  const files = paths.map((path): CitedFile & { oid?: string } => {
+    const file = byPath.get(path);
+    if (!file)
+      return {
+        path,
+        content: `[missing: no regular file at ${at.slice(0, 12)}]`,
+        complete: false,
+      };
+    if (total + file.size > EVIDENCE_NAMED_BYTES)
+      return {
+        path,
+        content: `[unavailable: ${file.size} bytes exceed what is left of the ${EVIDENCE_NAMED_BYTES}-byte bound on cited files]`,
+        complete: false,
+      };
+    total += file.size;
+    return { path, content: "", complete: true, oid: file.oid };
+  });
+  const bodies = await readBlobs(
+    (args, stdin) => hostGit(checkout, args, { input: stdin, signal }),
+    files.flatMap((file) => (file.oid ? [file.oid] : [])),
+  );
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  let next = 0;
+  return files.map(({ oid, ...file }) => {
+    if (!oid) return file;
+    const bytes = bodies[next++]!;
+    try {
+      // A NUL byte decodes, but marks a binary file.
+      if (bytes.includes(0)) throw new Error("binary");
+      return { ...file, content: decoder.decode(bytes) };
+    } catch {
+      return {
+        ...file,
+        content: "[unavailable: binary, not UTF-8 text]",
+        complete: false,
+      };
+    }
+  });
 }
 
 // ── The plan as amended ─────────────────────────────────────────────────
@@ -708,6 +812,7 @@ function amendmentRules(whole: boolean, revising: boolean): string {
         ? "This is an amendment of the accepted plan. currentPlan holds your previous answer for it, which Factory's plan checks or its independent review refused: fix what the instructions list."
         : "This is an amendment of the accepted plan, which currentPlan holds.",
     "The discovery is evidence from its worker or operator, not a new source of acceptance or authority.",
+    "citedFiles holds the files the discovery names, as they read where it was proposed; an entry with complete false holds a note saying why its content isn't supplied. Judge from what they hold, and never ask the operator what a supplied file holds.",
     whole
       ? "Answer with the complete plan in the answer schema, with the changes that serve it: every item, coverage entry and source exclusion of planInForce stays."
       : "Answer with only the changes that serve it. Keep every current item and every coverage entry and source exclusion.",
@@ -873,6 +978,12 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
+          citedFiles: await citedFiles(
+            config.checkout,
+            proposal,
+            inputs.base,
+            signal,
+          ),
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
         },
@@ -1164,6 +1275,7 @@ function amendReviewStep(
           ...(proposal.worker ? { worker: proposal.worker } : {}),
           previousPlan: acceptedPlan(state),
         },
+        cited: await citedFiles(config.checkout, proposal, inputs.base, signal),
       });
       const { workDir, repository } = await planningTree(
         deps,
@@ -1331,6 +1443,7 @@ function rejectionStep(
           plan: proposal.plan,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
+          ...(proposal.commit ? { commit: proposal.commit } : {}),
           replacement: {
             amendmentId: proposal.id,
             diagnosis: error,

@@ -5,13 +5,19 @@
 // the graph check rejected the whole amendment and asked a person. The
 // planner's answers are fixed here, in the shape that run's had. The
 // independent review's fix findings go back to the planner the same way.
+// Both get the files the discovery cites: live, without them, the planner
+// asked the operator what a cited test imports.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import { amendmentSteps } from "../dist/planning/amendments.js";
+import {
+  amendmentSteps,
+  citedFiles,
+  proposalProblems,
+} from "../dist/planning/amendments.js";
 import { buildFacts } from "../dist/planning/facts.js";
 import { planningRevisions } from "../dist/planning/steps.js";
 import { decodePlan } from "../dist/planning/wire.js";
@@ -461,4 +467,129 @@ test("an amendment's review still rejects it on an operator decision, or on the 
     );
     assert.equal(state.kept["amend:op-1:revisions"].length, 1);
   }
+});
+
+/** A commit on the checkout's main after the plan's base, with `files`. */
+function landed(checkout, files) {
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(checkout, path, ".."), { recursive: true });
+    writeFileSync(join(checkout, path), content);
+  }
+  git(checkout, "add", ".");
+  git(checkout, "commit", "--quiet", "-m", "landed");
+  return git(checkout, "rev-parse", "HEAD");
+}
+
+const COMPANION =
+  "const { b } = require('../src/b.js');\nif (b() !== 1) throw new Error('b');\n";
+
+test("an amendment's planner and review get the files its discovery cites, read at the commit it was proposed from", async () => {
+  const { checkout, state } = await building();
+  // The test landed after the plan's base: only the proposal's commit has it.
+  const commit = landed(checkout, { "test/b.test.js": COMPANION });
+  const proposal = state.kept["amend:op-1:proposal"];
+  proposal.commit = commit;
+  proposal.discovery = {
+    ...discovery,
+    evidence: ["npm test fails: test/b.test.js cannot find module ../src/b.js"],
+  };
+  const { planner, asked } = scripted(withB, { findings: [] });
+  const deps = depsOf(checkout, planner);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.equal((await step(state, deps)).key, "amend:op-1:review");
+
+  const named = { path: "test/b.test.js", content: COMPANION, complete: true };
+  // The ownership path the commit lacks is listed with a note.
+  const missing = {
+    path: "src/b.js",
+    content: `[missing: no regular file at ${commit.slice(0, 12)}]`,
+    complete: false,
+  };
+  const [planning, review] = asked;
+  assert.equal(planning.phase, "plan");
+  assert.ok(
+    planning.prompt.includes(
+      `"citedFiles":${JSON.stringify([named, missing])}`,
+    ),
+  );
+  assert.ok(
+    !planning.prompt.includes("export const a"),
+    "src/a.js isn't cited",
+  );
+  assert.equal(review.phase, "graph-review");
+  assert.ok(review.prompt.includes("if (b() !== 1) throw new Error('b');"));
+  for (const row of [named, missing])
+    assert.match(
+      review.prompt,
+      new RegExp(
+        `"origin":"repository","path":"${row.path}","complete":${row.complete}`,
+      ),
+    );
+  assert.ok(review.prompt.includes(missing.content));
+});
+
+test("cited files share a diagnosis's bound on named files, and a binary file or a commit Git doesn't have gets a note", async () => {
+  const { checkout, state } = await building();
+  const base = state.done.check.base;
+  const commit = landed(checkout, {
+    "docs/big.txt": "a".repeat(200_000),
+    "docs/more.txt": "b".repeat(100_000),
+    "docs/small.txt": "small\n",
+    "docs/image.bin": Buffer.from([0x89, 0x50, 0x00, 0x0a]),
+  });
+  const proposal = {
+    ...state.kept["amend:op-1:proposal"],
+    commit,
+    discovery: {
+      ...discovery,
+      evidence: [
+        "docs/big.txt, docs/more.txt, docs/small.txt and docs/image.bin say so",
+      ],
+    },
+  };
+  const signal = AbortSignal.timeout(60_000);
+  const cited = await citedFiles(checkout, proposal, base, signal);
+  assert.deepEqual(
+    cited.map(({ path, complete }) => [path, complete]),
+    [
+      ["docs/big.txt", true],
+      ["docs/image.bin", false],
+      ["docs/more.txt", false],
+      ["docs/small.txt", true],
+      ["src/b.js", false],
+    ],
+  );
+  assert.equal(cited[0].content.length, 200_000);
+  assert.equal(cited[1].content, "[unavailable: binary, not UTF-8 text]");
+  // Past what is left of the bound; a smaller file after it still fits.
+  assert.equal(
+    cited[2].content,
+    "[unavailable: 100000 bytes exceed what is left of the 256000-byte bound on cited files]",
+  );
+  assert.equal(cited[3].content, "small\n");
+  assert.equal(
+    cited[4].content,
+    `[missing: no regular file at ${commit.slice(0, 12)}]`,
+  );
+  // A commit Git doesn't have: read at the plan's base, which names none.
+  assert.deepEqual(
+    await citedFiles(
+      checkout,
+      { ...proposal, commit: "f".repeat(40) },
+      base,
+      signal,
+    ),
+    [
+      {
+        path: "src/b.js",
+        content: `[missing: no regular file at ${base.slice(0, 12)}]`,
+        complete: false,
+      },
+    ],
+  );
+  assert.ok(
+    proposalProblems({ ...proposal, commit: "HEAD" }, state).includes(
+      "An amendment's commit is a full commit id",
+    ),
+  );
 });

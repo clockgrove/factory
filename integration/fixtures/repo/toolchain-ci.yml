@@ -1,0 +1,20 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+# The toolchain case's repository (fixtures/baseline's ci.yml): package.json
+# pins pnpm, and CI still runs `npm test` with no package-manager cache.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm test

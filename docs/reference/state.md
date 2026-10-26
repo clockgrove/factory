@@ -59,7 +59,7 @@ How much an Objective may correct itself unattended is `autonomy.allowances` (al
 
 | Allowance               | Default | What it counts                                                                                                       |
 | ----------------------- | ------- | -------------------------------------------------------------------------------------------------------------------- |
-| `planningRevisions`     | 4       | Planning revision rounds of one generation, and amendments of the accepted plan.                                     |
+| `planningRevisions`     | 4       | Planning revision rounds of one generation, and amendments of the accepted plan with their revision rounds.          |
 | `implementationRepairs` | 6       | Repairs of Work Items' work, across the Objective; a mechanical merge conflict counts only against `perPath`.        |
 | `perPath`               | 3       | Repairs of one repair path: one target step, such as a Work Item's work or its publish.                              |
 | `resultRereviews`       | 1       | `revalidate` answers across the Objective: a refused result checked again, unchanged (see Result rereview in Holds). |

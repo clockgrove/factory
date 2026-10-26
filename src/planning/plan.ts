@@ -35,6 +35,9 @@ const PROPOSAL = /^amend:[^:]+:proposal$/;
 /** The `more` answers to amendment `id`'s allowance question, one per question (amendments.ts). */
 export const grantsKey = (id: string) => `amend:${id}:grants`;
 
+/** Amendment `id`'s plan rounds sent back to its planner with Factory's findings, one per round (amendments.ts). */
+export const revisionsKey = (id: string) => `amend:${id}:revisions`;
+
 export interface AmendmentGrant {
   holdId: string;
   grant: number;
@@ -47,6 +50,17 @@ export function amendmentGrants(state: ObjectiveState): number {
   return proposalsOf(state)
     .flatMap((p) => (state.kept[grantsKey(p.id)] ?? []) as AmendmentGrant[])
     .reduce((total, granted) => total + granted.grant, 0);
+}
+
+/** The planning revisions the amendments of the plan accepted now charged: one each, and one per round sent back to its planner. */
+export function amendmentRevisions(state: ObjectiveState): number {
+  return proposalsOf(state).reduce(
+    (total, p) =>
+      total +
+      1 +
+      ((state.kept[revisionsKey(p.id)] as unknown[] | undefined)?.length ?? 0),
+    0,
+  );
 }
 
 /** The proposals against the plan accepted now, oldest first; a replan leaves earlier ones behind. */

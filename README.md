@@ -62,6 +62,8 @@ claude plugin install factory@clockgrove
 
 In Claude Code the skills appear as `factory:setup` and `factory:director`.
 
+Claude Code may report that the plugin's packages were not installed, naming a `package-lock.json` entry that is a bundled copy. This is expected and harmless. The plugin is this repository at the release tag, so it carries the CLI's `package.json` and lockfile, and Claude Code [installs a plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies) only when none of them is bundled or linked. The skills need none of them: they run the `factory` CLI that you install from the tarball below.
+
 ### CLI
 
 Download the tarball and verify it:

@@ -87,13 +87,14 @@ sys.exit(0 if any(fnmatch.fnmatchcase(step, pattern) and attempt.get('run') == s
                  for step, attempt in state.get('attempts', {}).items()) else 1)
 PY
 }
-# Cut the network once while CA or CB plans, once while one waits for CI.
+# Cut the network once while CA or CB plans, once while one waits for CI. The
+# journal keeps each cut's window for a replay.
 c_netcut() {
   local n
   if [ -z "$CUT1" ]; then for n in ${CA:-} ${CB:-} ${CC:-}; do
-    if c_step_running "$n" 'plan:*'; then CUT1=$(iso); serve_cut plan && CUT1E=$(iso); return; fi; done; fi
+    if c_step_running "$n" 'plan:*'; then CUT1=$(iso); serve_cut plan && CUT1E=$(iso); log "network cut (plan) window $CUT1..$CUT1E"; return; fi; done; fi
   if [ -z "$CUT2" ]; then for n in ${CA:-} ${CB:-} ${CC:-}; do
-    if c_step_running "$n" 'item:*:ci'; then CUT2=$(iso); serve_cut ci && CUT2E=$(iso); return; fi; done; fi
+    if c_step_running "$n" 'item:*:ci'; then CUT2=$(iso); serve_cut ci && CUT2E=$(iso); log "network cut (ci) window $CUT2..$CUT2E"; return; fi; done; fi
 }
 # Pause requests apply before steps start. A clean stop of a paused queue
 # clears the intentional crash streak without advancing past unseen hooks.
@@ -217,14 +218,16 @@ c_crash() {
   local CASE=holder
   [ "$RESTARTS" -ge 1 ] && [ -z "$UNEXPECTED" ]; rec_if holder.restart $? "$RESTARTS restarts after a crash, none refused${UNEXPECTED:+; unexpected exits:$UNEXPECTED}" "$t0"
   local CASE=netcut
-  c_cut_check plan "$CUT1" "$CUT1E" "$t0"; c_cut_check ci "$CUT2" "$CUT2E" "$t0"
+  c_cut_check plan "$CUT1" "$CUT1E" "$t0" $CA $CB $CC; c_cut_check ci "$CUT2" "$CUT2E" "$t0" $CA $CB $CC
 }
-# No hold (planner questions aside) from a cut: none at a step of CA, CB or CC that ran during it, within 3 min of its end.
+# c_cut_check NAME FROM TO T0 ISSUE...: no hold (planner questions aside) from a
+# cut: none at a step of the ISSUEs that ran during it, within 3 min of its end.
+# From the logs alone (also run-suite.sh --replay).
 c_cut_check() {
-  local name=$1 a=$2 b=$3 t0=$4
+  local name=$1 a=$2 b=$3 t0=$4; shift 4
   [ -n "$a" ] || { record "netcut.$name" FAIL "no cut ($name): the moment didn't come while a serve ran" "$t0"; return; }
   [ -n "$b" ] || { record "netcut.$name" FAIL "the $name cut started at $a and was never restored" "$t0"; return; }
-  local h; h=$(python3 - "$ROOT" "$a" "$b" $CA $CB $CC <<'PY'
+  local h; h=$(python3 - "$ROOT" "$a" "$b" "$@" <<'PY'
 import datetime, glob, json, os, sys
 root, a, b = sys.argv[1:4]
 end = (datetime.datetime.fromisoformat(b.replace("Z", "+00:00")) + datetime.timedelta(minutes=3)).isoformat()[:19]
@@ -242,7 +245,17 @@ for issue in sys.argv[4:]:
 print(n)
 PY
 )
-  [ "$h" = 0 ]; rec_if "netcut.$name" $? "cut $a..$b: holds at steps that ran during it, within 3 min of its end: $h (#$CA $(st status "$CA"), #$CB $(st status "$CB"), #$CC $(st status "$CC"))" "$t0"
+  local x each=""; for x; do each="$each, #$x $(st status "$x")"; done
+  [ "$h" = 0 ]; rec_if "netcut.$name" $? "cut $a..$b: holds at steps that ran during it, within 3 min of its end: $h (${each#, })" "$t0"
+}
+# A replay: CQ, CA, CB, CC in the order the case filed them; each cut's window from the kept journal.
+replay_crash() {
+  local cq ca cb cc name a b; read -r cq ca cb cc <<<"$(case_issues | paste -sd' ')"
+  local CASE=netcut
+  for name in plan ci; do
+    read -r a b <<<"$(sed -n "s/.*\[crash\] network cut ($name) window \([^.]*\)\.\.\(.*\)$/\1 \2/p" "$KEPT/journal" | tail -1)"
+    [ -z "$a" ] || c_cut_check "$name" "$a" "$b" "$(now)" $ca $cb $cc
+  done
 }
 
 lane_c() {

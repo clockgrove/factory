@@ -43,6 +43,7 @@ import {
   packageBootstrap,
   packageManagerVersionProbe,
   packageScriptInvocation,
+  unpinnablePackageCommand,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
 import { dependencyOrder, fallbackRuns, finalChecks } from "./planning/plan.js";
@@ -1224,7 +1225,7 @@ async function checkPins(
     );
   const scriptCommands = packageScriptCommands(commands);
   const requests = scriptCommands.map(packageScriptInvocation);
-  if (requests.some((request) => !request))
+  if (commands.some(unpinnablePackageCommand))
     throw configuration(
       "Package script validation blocked: only root npm/pnpm test, pnpm check, or npm/pnpm run NAME can be pinned",
     );

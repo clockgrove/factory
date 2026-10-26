@@ -12,6 +12,7 @@ import {
   needsSelection,
   resentSet,
   resolveInputs,
+  restoreDestinations,
   sentBackDirectory,
   sentBackInputs,
 } from "../media.js";
@@ -505,12 +506,16 @@ export async function workStep(
   const sets = finished.sets ?? [];
   // The kept copies replace the worker's staging, manifest included: a
   // repair after a refused collection must not capture its stale manifest.
-  if (sets.length)
+  // The destinations are Factory's, so they go back to the base, whatever
+  // the worker wrote there or Factory's earlier collection commit holds.
+  if (sets.length) {
     await Promise.all(
       [".factory-media", ".factory-assets.json"].map((path) =>
         forceRemove(join(worktree, path)),
       ),
     );
+    await restoreDestinations({ worktree, base, sets, signal });
+  }
   const keepFinished = { ...keepAll, ...facts({ finished }, item.id) };
 
   const collected = await collect({

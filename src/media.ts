@@ -8,7 +8,8 @@
  * The flow, as the item steps call it:
  *
  *   work      resolveInputs → (prepareWorkPrompt stages them) → worker →
- *             captureAssets → collect → destinationFinding
+ *             captureAssets → restoreDestinations → collect →
+ *             destinationFinding
  *   select    selectionQuestion / readSelection → materializeSelection
  *   validate  validationMembers → hydrateTree (every LFS file of the fresh
  *             checkout) → commands → rewrittenMedia
@@ -891,10 +892,90 @@ function readManifest(bytes: Buffer, item: WorkItem): DeclaredSet[] {
   });
 }
 
+/** Each distinct destination of `sets`' members. */
+function destinationsOf(sets: readonly CandidateSet[]): string[] {
+  return [
+    ...new Set(sets.flatMap((set) => set.members.map((m) => m.destination))),
+  ];
+}
+
+/**
+ * Put each candidate destination of `sets` back as the base has it, before
+ * collection: one the base holds is checked out from it (an LFS pointer
+ * stays the committed pointer, since host Git skips the smudge), and one it
+ * lacks leaves the index and the worktree. Destinations are Factory's: only
+ * the selected set is written there, after selection. So a worker's write
+ * or deletion there is undone whatever HEAD is, Factory's earlier
+ * collection commit included, which collect resets to the base and stages
+ * again. Nothing else in the worktree changes, and nothing is hashed: both
+ * listings read stat data only. Returns the destinations that differed
+ * from the base.
+ *
+ * Step: call before collect, with the item's sets.
+ */
+export async function restoreDestinations(input: {
+  worktree: string;
+  base: string;
+  sets: readonly CandidateSet[];
+  signal: AbortSignal;
+}): Promise<string[]> {
+  const { worktree, base, signal } = input;
+  const git = (args: string[]) => hostGit(worktree, args, { signal });
+  const names = async (args: string[]) =>
+    (await git(args)).toString("utf8").split("\0").filter(Boolean);
+  const destinations = destinationsOf(input.sets);
+  if (!destinations.length) return [];
+  const listed = (
+    await Promise.all([
+      names([
+        "diff-index",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        base,
+        "--",
+        ...destinations,
+      ]),
+      names(["ls-files", "--others", "-z", "--", ...destinations]),
+    ])
+  ).flat();
+  // A path below a destination (a directory written there) counts as it.
+  const changed = destinations.filter((destination) =>
+    listed.some(
+      (path) => path === destination || path.startsWith(`${destination}/`),
+    ),
+  );
+  if (!changed.length) return [];
+  const atBase = new Set(
+    await names(["ls-tree", "-z", "--name-only", base, "--", ...changed]),
+  );
+  const restored = changed.filter((path) => atBase.has(path));
+  const absent = changed.filter((path) => !atBase.has(path));
+  if (restored.length)
+    await git(["checkout", "--quiet", base, "--", ...restored]);
+  if (absent.length) {
+    await git([
+      "rm",
+      "--quiet",
+      "-r",
+      "-f",
+      "--cached",
+      "--ignore-unmatch",
+      "--",
+      ...absent,
+    ]);
+    // Git's walk never follows a link, so a linked parent is left alone.
+    await git(["clean", "--quiet", "-f", "-d", "-x", "--", ...absent]);
+  }
+  return changed;
+}
+
 /**
  * Why the collected result is refused for touching a candidate
  * destination, or undefined. Only the selected set is ever written there,
- * by Factory; the worker may neither write nor delete one.
+ * by Factory; the worker may neither write nor delete one. With
+ * restoreDestinations before collect this is a guard: a result it refuses
+ * changed a destination Factory had just restored.
  *
  * Step: call after collect returns `collected`, with the captured sets.
  * A finding → repair to work.
@@ -906,11 +987,7 @@ export async function destinationFinding(input: {
   sets: readonly CandidateSet[];
   signal: AbortSignal;
 }): Promise<string | undefined> {
-  const destinations = [
-    ...new Set(
-      input.sets.flatMap((set) => set.members.map((m) => m.destination)),
-    ),
-  ];
+  const destinations = destinationsOf(input.sets);
   if (!destinations.length) return undefined;
   const changed = (
     await hostGit(
@@ -933,7 +1010,7 @@ export async function destinationFinding(input: {
     .split("\0")
     .filter(Boolean);
   return changed.length
-    ? `The result writes or deletes candidate destinations ${changed.join(", ")}. Factory writes the selected set there; leave final destinations as they are and stage candidates under .factory-media/.`
+    ? `The result writes or deletes candidate destinations ${changed.join(", ")}, which Factory restored to the base before collecting it. Do not write them: Factory writes the selected set there after selection. Stage candidates under .factory-media/.`
     : undefined;
 }
 

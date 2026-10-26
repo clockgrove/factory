@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/clockgrove/factory/main/assets/factory-mark.svg" alt="Factory mark" width="72" height="72">
+<img src="https://raw.githubusercontent.com/clockgrove/factory/main/plugin/assets/factory-mark.svg" alt="Factory mark" width="72" height="72">
 
 # Factory
 
@@ -62,7 +62,14 @@ claude plugin install factory@clockgrove
 
 In Claude Code the skills appear as `factory:setup` and `factory:director`.
 
-Claude Code may report that the plugin's packages were not installed, naming a `package-lock.json` entry that is a bundled copy. This is expected and harmless. The plugin is this repository at the release tag, so it carries the CLI's `package.json` and lockfile, and Claude Code [installs a plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies) only when none of them is bundled or linked. The skills need none of them: they run the `factory` CLI that setup installs.
+The plugin is the release's `plugin` directory: its manifests, skills and logo, with no npm package, so neither host installs packages for it. The skills run the `factory` CLI that setup installs.
+
+To move to another release, add the marketplace again at that release's tag. A host keeps the tag it was added with and refuses the same marketplace from another tag, so remove it first, which also removes the plugin (it keeps no data). Then install as above with the new `VERSION`, and run setup again (see [Upgrade](docs/USER-GUIDE.md#upgrade)):
+
+```sh
+codex plugin marketplace remove clockgrove   # Codex
+claude plugin marketplace remove clockgrove  # Claude Code
+```
 
 ### Run setup
 

@@ -10,7 +10,7 @@ Each version `X.Y.Z` has one annotated tag `vX.Y.Z` on `main` and one [GitHub Re
 - `SHA256SUMS` for that tarball;
 - a [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds) proving the tarball was built by the [Release workflow](../.github/workflows/release.yml) from the tagged commit.
 
-The Codex and Claude Code marketplace entries pin the same tag, so the plugin's skills and the CLI always come from one version. Factory is not published to the npm registry.
+The Codex and Claude Code marketplace entries pin the same tag, so the plugin's skills and the CLI always come from one version. Both install the tag's `plugin` directory, which holds only the plugin's manifests, skills and logo: a plugin root with the CLI's `package.json` and lockfile would make Claude Code [install them as the plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies). Factory is not published to the npm registry.
 
 A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelease, which the README's latest-release install skips. Tags `v*` cannot be moved or deleted. A published version is never rebuilt or replaced; fix problems in a new version.
 
@@ -22,7 +22,7 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
    node scripts/version.mjs set X.Y.Z
    ```
 
-   This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs. Format the changed JSON manifests with the repository formatter before review; the version helper can expand arrays that the formatter keeps inline. If production dependencies changed, run `npm run notices`. GitHub Release notes are generated from the merged pull requests; Git history retains the changes.
+   This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests in `plugin/` and both marketplace refs. Format the changed JSON manifests with the repository formatter before review; the version helper can expand arrays that the formatter keeps inline. If production dependencies changed, run `npm run notices`. GitHub Release notes are generated from the merged pull requests; Git history retains the changes.
 
 2. **Review the batch.** Merge the phase's diagnosed fixes through the normal protected pull request path with green Quality checks. Retain focused independent review for changes to credentials, isolation or persisted state. Refresh the release branch after the batch is complete, and independently review its exact candidate.
 

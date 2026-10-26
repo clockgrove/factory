@@ -67,16 +67,16 @@ test("the packed tarball installs offline and runs its own CLI", {
     );
     const installed = join(prefix, "node_modules", "@clockgrove", "factory");
     for (const path of [
-      ".codex-plugin/plugin.json",
-      ".claude-plugin/plugin.json",
-      "skills/director/SKILL.md",
-      "skills/setup/SKILL.md",
-      "skills/setup/install-cli.mjs",
+      "plugin/.codex-plugin/plugin.json",
+      "plugin/.claude-plugin/plugin.json",
+      "plugin/skills/director/SKILL.md",
+      "plugin/skills/setup/SKILL.md",
+      "plugin/skills/setup/install-cli.mjs",
+      "plugin/assets/factory-mark.svg",
       "docs/USER-GUIDE.md",
       "docs/DESIGN.md",
       "docs/reference/setup.md",
       "docs/templates/objective.md",
-      "assets/factory-mark.svg",
       "THIRD_PARTY_NOTICES.md",
     ])
       assert.ok(existsSync(join(installed, path)), `missing: ${path}`);

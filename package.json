@@ -25,14 +25,11 @@
   },
   "files": [
     "dist",
-    "skills",
-    "assets",
+    "plugin",
     "docs/USER-GUIDE.md",
     "docs/DESIGN.md",
     "docs/reference",
     "docs/templates",
-    ".codex-plugin",
-    ".claude-plugin/plugin.json",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"

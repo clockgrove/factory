@@ -21,9 +21,12 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 const project = resolve(import.meta.dirname, "..");
-const installer = join(project, "skills", "setup", "install-cli.mjs");
+const installer = join(project, "plugin", "skills", "setup", "install-cli.mjs");
 const version = JSON.parse(
-  readFileSync(join(project, ".claude-plugin", "plugin.json"), "utf8"),
+  readFileSync(
+    join(project, "plugin", ".claude-plugin", "plugin.json"),
+    "utf8",
+  ),
 ).version;
 const tarballName = (v) => `clockgrove-factory-${v}.tgz`;
 

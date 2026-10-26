@@ -1078,7 +1078,10 @@ export function sizeOf(path: string): number {
   }
 }
 
-/** Tokens, JWTs, bearer headers and the named secret values, line by line, as [REDACTED]. */
+/**
+ * Tokens, JWTs, bearer and basic headers, PEM private keys and the named
+ * secret values, line by line, as [REDACTED].
+ */
 export function redact(value: string, secrets: readonly string[] = []): string {
   let result = value
     .replace(
@@ -1089,7 +1092,11 @@ export function redact(value: string, secrets: readonly string[] = []): string {
       /\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g,
       "[REDACTED]",
     )
-    .replace(/(Authorization:\s*Bearer\s+)\S+/gi, "$1[REDACTED]");
+    .replace(/(Authorization:\s*(?:Bearer|Basic)\s+)\S+/gi, "$1[REDACTED]")
+    .replace(
+      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+      "[REDACTED]",
+    );
   for (const secret of secrets)
     for (const line of secret.split(/\r?\n/))
       if (line.length) result = result.split(line).join("[REDACTED]");

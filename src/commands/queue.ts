@@ -1,7 +1,7 @@
 /**
  * `factory queue`: its options, help and check, and what it does.
  */
-import { GitHub } from "../github.js";
+import { factoryGitHub } from "../github-app.js";
 import { finalShown, requeued } from "../github-sync.js";
 import { configOf, Refusal } from "../host.js";
 import type { Paths } from "../paths.js";
@@ -45,7 +45,7 @@ async function queueCommand(
       "no_configuration",
       `Factory has no configuration for ${repository}, so it can't read the Project.`,
     );
-  const github = new GitHub(config.repository, process.env.FACTORY_GITHUB_API);
+  const github = factoryGitHub(config);
   const { items, truncated, skipped } = await readCards(github, config);
   const control = loadQueueControl(paths.root);
   const { options } = config.queue;

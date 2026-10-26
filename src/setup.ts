@@ -17,7 +17,16 @@ import {
 import { isObject } from "./checked.js";
 import { configPath, loadConfig } from "./config.js";
 import { originRefusal } from "./git.js";
-import { GitHub } from "./github.js";
+import {
+  APP_STEPS,
+  appKeyFile,
+  appRegistrationLink,
+  factoryGitHub,
+  GITHUB_APP_KEY,
+  keepAppKey,
+  organizationOwner,
+  readAppKey,
+} from "./github-app.js";
 import { lockHeld } from "./lock.js";
 import { installationPaths } from "./paths.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
@@ -101,6 +110,12 @@ const CONFIG_OPTIONS: Record<string, Option> = {
   "required-command": { key: "finalValidation.requiredCommands", read: "list" },
   "ci-only-command": { key: "finalValidation.ciOnlyCommands", read: "list" },
   "allowed-secret": { key: "policy.allowedSecretNames", read: "list" },
+  "github-app-id": { key: "github.app.id", read: "number" },
+  "github-app-installation": {
+    key: "github.app.installationId",
+    read: "number",
+  },
+  operator: { key: "operators", read: "list" },
 };
 
 /**
@@ -148,6 +163,8 @@ export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   stop: "switch",
   uninstall: "switch",
   "credential-file": "list",
+  "github-app-key": "value",
+  "github-app-link": "switch",
   provider: "value",
   planner: "value",
   worker: "value",
@@ -270,6 +287,15 @@ export async function setup(
 ): Promise<SetupReport> {
   const path = configPath(repository);
   const created = !existsSync(path);
+  // The App's key is read and checked before anything is written.
+  const keyFile = values["github-app-key"]?.at(-1);
+  let key: string | undefined;
+  if (keyFile !== undefined)
+    try {
+      key = readAppKey(keyFile);
+    } catch (error) {
+      throw new SetupUsage(errorMessage(error));
+    }
   let original = "";
   let raw: Record<string, unknown> = { repository };
   if (!created) {
@@ -328,6 +354,12 @@ export async function setup(
     else set(option.key, value);
   }
   if (conflicts.length) return refused(path, created, ...conflicts);
+  if (key !== undefined && get(raw, "github.app.id") === undefined)
+    return refused(
+      path,
+      created,
+      "--github-app-key is the private key of the App github.app.id names: give --github-app-id too",
+    );
   providerOptions(raw, values, path, set);
   if (!created && !changed.length) {
     const problems = loads(repository);
@@ -346,6 +378,8 @@ export async function setup(
     }
   }
   const config = loadConfig(repository);
+  if (key !== undefined && keepAppKey(installationPaths(repository).root, key))
+    changed.push(GITHUB_APP_KEY);
   const problems: string[] = [];
   if (!existsSync(config.checkout))
     problems.push(
@@ -357,7 +391,7 @@ export async function setup(
   }
   if (service)
     for (const name of unkeptLogins(config)) delete process.env[name];
-  const github = new GitHub(repository, process.env.FACTORY_GITHUB_API);
+  const github = factoryGitHub(config);
   try {
     problems.push(...(await projectProblems(github, config)));
   } catch (error) {
@@ -588,7 +622,19 @@ export async function serviceSetup(
   const host = hostProblem();
   if (host) return { ...report, problems: [host] };
   try {
-    const credentials = credentialFiles(bindings, loadConfig(repository));
+    const config = loadConfig(repository);
+    // The App's key setup keeps is the service's credential too, unless
+    // one is bound; the unit's own binding of it goes with the App.
+    const named = (binding: string) => binding.startsWith(`${GITHUB_APP_KEY}=`);
+    const copy = appKeyFile(paths.root);
+    const bound = config.github.app
+      ? bindings.some(named) || !existsSync(copy)
+        ? bindings
+        : [...bindings, `${GITHUB_APP_KEY}=${copy}`]
+      : given
+        ? bindings
+        : bindings.filter((binding) => !named(binding));
+    const credentials = credentialFiles(bound, config);
     const before = serviceState(repository, paths, await serving());
     if (before.serving && before.active !== "active")
       return {
@@ -635,6 +681,24 @@ export async function serviceSetup(
     status: service.serving ? "running" : "starting",
     service,
     warnings,
+  };
+}
+
+/**
+ * `--github-app-link`: the link that registers Factory's GitHub App for
+ * the repository's owner with every permission it needs, and what to do
+ * next.
+ */
+export async function appLink(
+  repository: string,
+): Promise<{ link: string; next: string }> {
+  const owner = repository.split("/")[0]!;
+  return {
+    link: appRegistrationLink(
+      owner,
+      await organizationOwner(owner, process.env.FACTORY_GITHUB_API),
+    ),
+    next: APP_STEPS,
   };
 }
 

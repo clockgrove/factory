@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CoreConfig } from "./config.js";
+import { GITHUB_APP_KEY } from "./github-app.js";
 import type { Paths } from "./paths.js";
 import { CLAUDE_LOGIN_CREDENTIALS } from "./providers/claude.js";
 import { COPILOT_SECRETS, copilotConfigured } from "./providers/config.js";
@@ -139,6 +140,7 @@ function credentialNames(config: CoreConfig): Set<string> {
     if (worker.kind === "openai-agents") readable.add(worker.apiKeyEnv);
     else if (worker.kind === "claude-managed-agents")
       readable.add(worker.credentialEnv);
+  if (config.github.app) readable.add(GITHUB_APP_KEY);
   return readable;
 }
 
@@ -146,10 +148,11 @@ function credentialNames(config: CoreConfig): Set<string> {
  * The logins a shell may set that the unit doesn't keep: the service has
  * them only as its credentials (`--credential-file`), or not at all. The
  * Codex and GitHub keys are never kept, so the service logs in with Codex's
- * auth.json and the GitHub CLI's stored login.
+ * auth.json and the GitHub CLI's stored login, or its GitHub App's key.
  */
 export const unkeptLogins = (config: CoreConfig): string[] => [
   ...credentialNames(config),
+  GITHUB_APP_KEY,
   "CODEX_API_KEY",
   "OPENAI_API_KEY",
   "FACTORY_GITHUB_TOKEN",

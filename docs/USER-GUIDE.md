@@ -38,6 +38,8 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
 
+   So that you hear about every hold, name yourself with `--operator LOGIN` and give Factory a GitHub identity of its own: GitHub doesn't notify you of comments your own account posts. `factory setup --repo OWNER/NAME --github-app-link` prints the link that registers Factory's GitHub App; create it, generate its private key, install it on the repository, then add `--github-app-id ID --github-app-key PATH`. See [GitHub identity](reference/setup.md#github-identity).
+
 4. **Run the service.** Either run `factory serve --repo OWNER/NAME` in a terminal you keep open, or install it as a systemd user service:
 
    ```sh

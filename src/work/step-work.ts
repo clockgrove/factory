@@ -529,6 +529,7 @@ export async function workStep(
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,
+    author: await deps.github.commitAuthor(signal),
     signal,
   });
   const discovered = discoveryOutcome(

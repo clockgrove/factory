@@ -196,6 +196,19 @@ export interface CoreConfig {
    * between them. Operational: never frozen with an Objective.
    */
   sessions: SessionPolicy;
+  /**
+   * Factory's GitHub identity. `app` names its GitHub App (github-app.ts):
+   * Factory acts as the App's installation on the repository, found by
+   * the repository unless `installationId` names it. Absent, it acts as
+   * the GitHub CLI's login (or FACTORY_GITHUB_TOKEN). The App's private
+   * key is never here (github-app.ts GITHUB_APP_KEY). Operational.
+   */
+  github: { app?: { id: number; installationId?: number } };
+  /**
+   * The GitHub logins a hold, an Objective's report and a cancel mention,
+   * so GitHub notifies them. Operational.
+   */
+  operators: string[];
 }
 
 /** The operator's `sandbox` section, with defaults filled in. */
@@ -488,6 +501,22 @@ const environmentNames: Check<string[]> = (value, path, problems) => {
   return names;
 };
 
+/** A GitHub user's login: letters, digits and single hyphens inside, at most 39. */
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+
+/** `operators`: distinct GitHub logins, empty by default. */
+const logins: Check<string[]> = (value, path, problems) => {
+  const names = strings(value, path, problems);
+  if (
+    names.some((name) => !LOGIN.test(name)) ||
+    new Set(names.map((name) => name.toLowerCase())).size !== names.length
+  )
+    problems.push(
+      `${path} must be distinct GitHub logins (letters, digits and hyphens, without the @)`,
+    );
+  return names;
+};
+
 /**
  * `policy.secretlintConfig`: an absolute regular file, not a link, outside
  * the target checkout. Collection reads it.
@@ -614,6 +643,12 @@ export function loadConfig(repository: string): CoreConfig {
         maxTurns: whole(1, DEFAULT_SESSIONS.maxTurns, 100),
         maxIdleMinutes: whole(1, DEFAULT_SESSIONS.maxIdleMinutes, 24 * 60),
       }),
+      github: object({
+        app: optional(
+          object({ id: whole(1), installationId: optional(whole(1)) }),
+        ),
+      }),
+      operators: logins,
     },
     problems,
   );

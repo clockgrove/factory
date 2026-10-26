@@ -272,6 +272,9 @@ export const OPERATIONAL: readonly string[] = [
   "provider.worker.settings.maxTurns",
   // Content capture observes calls; it changes no run.
   "capture",
+  // Who Factory acts as on GitHub, and whom its holds notify.
+  "github",
+  "operators",
 ];
 
 /** An Objective's frozen configuration: the values and their digest. */

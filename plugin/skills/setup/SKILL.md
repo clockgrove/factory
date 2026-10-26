@@ -12,10 +12,10 @@ Set up Factory for one target repository with its `factory` CLI. `factory help` 
 The CLI must come from the same release as this plugin. Before anything else, run the installer that sits next to this `SKILL.md`, by its absolute path:
 
 ```sh
-node SKILL_DIRECTORY/install-cli.mjs [--prefix ABSOLUTE_DIR]
+node SKILL_DIRECTORY/install-cli.mjs [--prefix ABSOLUTE_DIR] [--downgrade]
 ```
 
-It reads the version from the plugin's own manifest and keeps a CLI of that version that is already installed. Otherwise it downloads that release's tarball and `SHA256SUMS`, checks the SHA-256 and the build provenance (`gh attestation verify`), and only then installs it with npm, with the Claude and Copilot SDKs. It needs `gh` logged in and the network. Pass `--prefix` only for an installation directory the operator names: absolute, and outside the target repository and any credential, configuration or state root. The default is a directory per version under `~/.local/share/clockgrove-factory` (under `XDG_DATA_HOME` when set), and the launcher `~/.local/share/clockgrove-factory/bin/factory`, which each install points at its own version.
+It reads the version from the plugin's own manifest and keeps a CLI of that version that is already installed. Otherwise it downloads that release's tarball and `SHA256SUMS`, checks the SHA-256 and the build provenance (`gh attestation verify`), and only then installs it with npm, with the Claude and Copilot SDKs. It needs `gh` logged in and the network. Pass `--prefix` only for an installation directory the operator names: absolute, and outside the target repository and any credential, configuration or state root. The default is a directory per version under `~/.local/share/clockgrove-factory` (under `XDG_DATA_HOME` when set), and the launcher `~/.local/share/clockgrove-factory/bin/factory`, which each install points at its own version, never at an older release than the one it runs unless `--downgrade` says so.
 
 Decide on its JSON:
 
@@ -28,7 +28,9 @@ Decide on its JSON:
 
   If the file has a line from an earlier setup naming a versioned `clockgrove-factory/X.Y.Z/bin`, offer to replace that line with this one. If they decline, give them the line. It takes effect in new login shells; an agent host started before it still lacks `factory` on its PATH until it restarts, so keep using `cli`.
 
-- `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
+- `launcher` present (`kept: true`): the launcher already runs `launcher.version`, a newer release than this plugin's `version`, so the installer left it there (`cli` is this plugin's release, installed beside it). The plugin in the other host (Claude Code or Codex, whichever this isn't) is on that newer release, and this host's plugin is behind. Stop setup here, and don't run `cli`: a background service set up with it would go back to the older release. Tell the operator which plugin is behind and how to update it: remove the `clockgrove` marketplace in this host, add it again at tag `v` + `launcher.version` and install the plugin (the README's Plugin section), then ask for setup again. Only if the operator says to go back to this plugin's release on purpose, run the installer again with `--downgrade`, which moves the launcher back.
+
+- `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. With `--prefix`, a launcher on a newer release in that prefix is refused the same way as `launcher` above: update this plugin, or `--downgrade` only on the operator's say. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
 
 ## Choose the outcome
 
@@ -78,6 +80,7 @@ Decide on the JSON, never the prose.
 - `status: "refused"` (exit 1): nothing was saved. `problems` says why: a bad value, or a binding conflict.
 - **Installation:** a `warn` named `installation` means another installation serves the repository, and this one's service is refused when it starts. Ask the operator to stop that one (`factory setup --repo OWNER/NAME --stop` on its machine, or stop its `factory serve`). Only if it is gone for good, because its machine is gone or its state was wiped, and the operator says so: run `factory serve --repo OWNER/NAME --take-over` once in the foreground, stop it once it serves, then run `factory setup --repo OWNER/NAME --background`, since the background service can't take over. Then reset the Objectives that were in flight, as in moving the service below.
 - **Project:** a service refused because another installation serves another repository on the same Project names that repository. Ask the operator to stop the installation that serves it. Only if it is gone for good, and the operator says so: on a machine set up for that repository, run `factory serve --repo OTHER/NAME --take-over` once in the foreground and stop it once it serves, which frees the Project; then start this one.
+- **Launcher:** a `warn` named `launcher` means a `factory` launcher links to a release whose directory was deleted, so it runs nothing (workers never get it either way). Run the installer above again, which points it at this plugin's release, then repeat the command.
 - **Branch protection:** a `warn` here recommends "require branches to be up to date". Factory never changes repository settings; that's the operator's call.
 - **Capacity:** `capacity` compares the configured slots and memory with the host. It is advice only; keep the operator's limits unless they ask to change them.
 

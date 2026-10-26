@@ -30,7 +30,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
 
    Setup writes `~/.config/factory/OWNER__NAME.json` (or `FACTORY_CONFIG`), checks that it loads, then checks the clone's origin and the Project fields. It also runs a readiness checklist with no model calls:
    - the sandbox;
-   - the tools on the PATH;
+   - the tools on the PATH, and the `factory` launcher still linking to an installed release;
    - each provider's SDK and login;
    - GitHub access and push;
    - merge commits, required checks, required reviews, and a recommendation to require branches to be up to date;
@@ -375,3 +375,5 @@ Take over only from an installation that is really stopped. A running one stops 
 ## Upgrade
 
 Update the plugin to the new release: remove its marketplace, add it again at the new tag and install the plugin (see [Plugin](../README.md#plugin)). Then ask the setup skill to set up again: it installs the matching CLI and points the `factory` launcher on your PATH at it (the PATH line doesn't change), and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.
+
+With the plugin in both Claude Code and Codex, update it in both. Setup from a plugin a release behind the launcher installs its own release but leaves the launcher on the newer one and stops, naming the plugin to update; the installer's `--downgrade` moves the launcher back when you mean to go back.

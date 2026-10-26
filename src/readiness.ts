@@ -30,6 +30,7 @@ import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { COPILOT_SECRETS } from "./providers/config.js";
 import { executable, sandboxStatus } from "./sandbox.js";
 import { errorMessage } from "./text.js";
+import { danglingLauncher } from "./worktree.js";
 
 export interface ReadinessCheck {
   /** What was checked, such as `sandbox` or `provider codex: worker login`. */
@@ -202,6 +203,7 @@ function hostChecks(
         }
       : ok("PATH", `Found ${[...programs.keys()].join(", ")} and git lfs`),
   );
+  checks.push(...launcherChecks(process.env));
   for (const command of config.finalValidation.requiredCommands) {
     const tool = networkToolOfCommand(command, scripts);
     if (tool)
@@ -213,6 +215,33 @@ function hostChecks(
       });
   }
   return checks;
+}
+
+/**
+ * A `warn` for each setup skill launcher whose version directory is gone, so
+ * `factory` there runs nothing: on the PATH, or at its default place under
+ * the data directory. Workers never get it either way.
+ */
+export function launcherChecks(env: NodeJS.ProcessEnv): ReadinessCheck[] {
+  const data =
+    env.XDG_DATA_HOME || join(env.HOME || homedir(), ".local", "share");
+  const directories = new Set([
+    ...(env.PATH ?? "").split(":"),
+    join(data, "clockgrove-factory", "bin"),
+  ]);
+  return [...directories].flatMap((directory) => {
+    const target = danglingLauncher(directory);
+    return target
+      ? [
+          {
+            name: "launcher",
+            status: "warn" as const,
+            detail: `${join(directory, "factory")} links to ${target}, which no longer exists, so \`factory\` there runs nothing`,
+            fix: "Run the Factory plugin's setup again (in Claude Code or Codex): it installs the plugin's CLI and points the launcher at it",
+          },
+        ]
+      : [];
+  });
 }
 
 /** Whether the PATH's node satisfies the checkout's Node pin, when it has one. */

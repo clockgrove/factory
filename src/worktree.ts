@@ -16,6 +16,7 @@ import {
   lstatSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   unlinkSync,
 } from "node:fs";
@@ -688,11 +689,50 @@ function cliPackage(cli: string): string | undefined {
   return typeof pkg.name === "string" ? pkg.name : undefined;
 }
 
+/** Where the setup skill's launcher links: Factory's CLI in an npm prefix. */
+const LAUNCHED_CLI = "/node_modules/@clockgrove/factory/dist/cli.js";
+const VERSION_DIRECTORY = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+/**
+ * The target of the setup skill's launcher in `directory` when that target
+ * is gone (its version directory was deleted), or undefined. Only the
+ * launcher's own layout counts: `directory` is a `bin` holding only a
+ * `factory` link to an absolute `PREFIX${LAUNCHED_CLI}`, where PREFIX is
+ * `bin`'s parent (an installer `--prefix`) or a version directory beside
+ * `bin` in a `clockgrove-factory` data root. Any other link that resolves to
+ * nothing is not Factory's to judge.
+ */
+export function danglingLauncher(directory: string): string | undefined {
+  try {
+    if (!isAbsolute(directory) || basename(directory) !== "bin")
+      return undefined;
+    const contents = readdirSync(directory);
+    if (contents.length !== 1 || contents[0] !== "factory") return undefined;
+    const link = join(directory, "factory");
+    if (!lstatSync(link).isSymbolicLink() || existsSync(link)) return undefined;
+    const target = readlinkSync(link);
+    if (!isAbsolute(target) || !target.endsWith(LAUNCHED_CLI)) return undefined;
+    const prefix = target.slice(0, -LAUNCHED_CLI.length);
+    const parent = realpathSync(dirname(directory));
+    const launched =
+      prefix === parent ||
+      (dirname(prefix) === parent &&
+        basename(parent) === "clockgrove-factory" &&
+        VERSION_DIRECTORY.test(basename(prefix)));
+    return launched ? target : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The PATH without Factory's launchers: a directory whose only entry is a
  * `factory` link to this installation's CLI or to another version of
  * Factory's. The setup skill's launcher directory moves to each new version
- * while a service of the one before still runs. Other tools stay.
+ * while a service of the one before still runs. Its launcher is left out
+ * even when the version it links to was deleted (`danglingLauncher`), since
+ * it runs nothing and its directory is one workers never see. Other tools
+ * stay.
  */
 export function workerToolchainPath(
   path: string | undefined,
@@ -710,6 +750,7 @@ export function workerToolchainPath(
   return path
     .split(":")
     .filter((entry) => {
+      if (danglingLauncher(entry)) return false;
       try {
         if (!isAbsolute(entry) || !existsSync(entry)) return true;
         const contents = readdirSync(entry);

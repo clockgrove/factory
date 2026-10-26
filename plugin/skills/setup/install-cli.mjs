@@ -1,6 +1,6 @@
 // Install the factory CLI that matches this plugin, for the setup skill.
 //
-//   node install-cli.mjs [--prefix ABSOLUTE_DIR] [--from DIR]
+//   node install-cli.mjs [--prefix ABSOLUTE_DIR] [--from DIR] [--downgrade]
 //
 // The version is the plugin's own, read from its manifests next to this
 // skill, so the plugin and the CLI come from one release. A prefix that
@@ -20,11 +20,19 @@
 // switches that link to its version with one rename, so the launcher always
 // runs the installed current version and the PATH line never changes.
 //
+// The launcher never goes back to an older release on its own: Claude Code
+// and Codex each carry the plugin, and one may be a release behind. When the
+// launcher runs a newer Factory than this plugin's, this plugin's version is
+// still installed in its own directory, but the launcher is kept and the
+// report says so (`launcher`), unless --downgrade asks to move it back. With
+// --prefix, where that newer Factory is the one installation would replace,
+// nothing is installed without --downgrade.
+//
 // Prints one JSON object on stdout: status "current" or "installed" (exit 0)
 // with the CLI's absolute path and the PATH line for the operator's shell
-// (null when that CLI's directory is on PATH already), or "refused" (exit 1)
-// with its problems. A release file that fails either check is never
-// installed.
+// (null when the launcher's directory is on PATH already), plus `launcher`
+// when the launcher was kept on a newer version; or "refused" (exit 1) with
+// its problems. A release file that fails either check is never installed.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -64,16 +72,62 @@ function pluginVersion() {
   return versions[0];
 }
 
-/** The Factory package's root, when `cli` runs Factory `version`. */
-function factoryAt(cli, version) {
+/** The Factory package `cli` runs: its root and version, or undefined. */
+function factoryOf(cli) {
   try {
     // An installed CLI links to <package root>/dist/cli.js.
     const root = dirname(dirname(realpathSync(cli)));
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-    return pkg.name === PACKAGE && pkg.version === version ? root : undefined;
+    return pkg.name === PACKAGE ? { root, version: pkg.version } : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The Factory package's root, when `cli` runs Factory `version`. */
+function factoryAt(cli, version) {
+  const found = factoryOf(cli);
+  return found?.version === version ? found.root : undefined;
+}
+
+/**
+ * Semantic version precedence of `a` over `b`: negative when `a` is older,
+ * zero when equal, positive when newer. A release follows its prereleases,
+ * whose identifiers compare numerically when both are numbers, a number
+ * before a word, and words in ASCII order.
+ */
+function compareVersions(a, b) {
+  const parts = (v) => {
+    const at = v.indexOf("-");
+    return {
+      core: (at < 0 ? v : v.slice(0, at)).split(".").map(Number),
+      pre: at < 0 ? [] : v.slice(at + 1).split("."),
+    };
+  };
+  const x = parts(a);
+  const y = parts(b);
+  for (let i = 0; i < 3; i++)
+    if (x.core[i] !== y.core[i]) return x.core[i] - y.core[i];
+  if (!x.pre.length || !y.pre.length) return y.pre.length - x.pre.length;
+  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i++) {
+    const [p, q] = [x.pre[i], y.pre[i]];
+    if (p === q) continue;
+    const [m, n] = [/^\d+$/.test(p), /^\d+$/.test(q)];
+    if (m && n) return Number(p) - Number(q);
+    if (m !== n) return m ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return x.pre.length - y.pre.length;
+}
+
+/** The launcher's Factory when it is a newer release than `version`. */
+function newerLauncher(cli, version) {
+  const found = factoryOf(cli);
+  return found &&
+    SEMVER.test(found.version) &&
+    compareVersions(found.version, version) > 0
+    ? found
+    : undefined;
 }
 
 /** Whether `sdk` resolves from the package at `root`, as Node finds it. */
@@ -178,7 +232,11 @@ function link(bin, root) {
 
 function main() {
   const { values } = parseArgs({
-    options: { prefix: { type: "string" }, from: { type: "string" } },
+    options: {
+      prefix: { type: "string" },
+      from: { type: "string" },
+      downgrade: { type: "boolean" },
+    },
   });
   const version = pluginVersion();
   const data = join(
@@ -190,20 +248,34 @@ function main() {
     throw new Refused(`--prefix must be an absolute directory: ${prefix}`);
   // The launcher's directory, the same for every version.
   const bin = join(values.prefix ?? data, "bin");
+  const launcher = join(bin, "factory");
   const paths = (process.env.PATH ?? "").split(delimiter);
-  const report = (status, cli, root) => ({
-    status,
-    version,
-    cli,
-    path: paths.includes(dirname(cli))
-      ? null
-      : `export PATH="${dirname(cli)}:$PATH"`,
-    sdks: Object.fromEntries(SDKS.map((sdk) => [sdk, hasSdk(root, sdk)])),
-  });
+  // `kept`: the newer Factory the launcher still runs.
+  const report = (status, cli, root, kept) => {
+    const onPath = kept ? launcher : cli;
+    return {
+      status,
+      version,
+      cli,
+      path: paths.includes(dirname(onPath))
+        ? null
+        : `export PATH="${dirname(onPath)}:$PATH"`,
+      sdks: Object.fromEntries(SDKS.map((sdk) => [sdk, hasSdk(root, sdk)])),
+      ...(kept && {
+        launcher: { cli: launcher, version: kept.version, kept: true },
+      }),
+    };
+  };
 
   const npmCli = join(prefix, "node_modules", ".bin", "factory");
+  // A launcher on a newer release stays there unless --downgrade.
+  const newer = values.downgrade ? undefined : newerLauncher(launcher, version);
+  const finish = (status, root) =>
+    newer
+      ? report(status, npmCli, root, newer)
+      : report(status, link(bin, root), root);
   let root = factoryAt(npmCli, version);
-  if (root) return report("current", link(bin, root), root);
+  if (root) return finish("current", root);
   if (!values.prefix) {
     // A matching CLI the operator installed elsewhere: the first on PATH.
     const first = paths
@@ -213,11 +285,17 @@ function main() {
     root = first && factoryAt(first, version);
     if (root) return report("current", first, root);
   }
+  // With --prefix, the launcher's newer Factory may be the one an install
+  // would replace.
+  if (newer && newer.root === factoryOf(npmCli)?.root)
+    throw new Refused(
+      `The launcher ${launcher} runs Factory ${newer.version} from ${prefix}, newer than this plugin's ${version}, and installing ${version} there would replace it. Update this plugin to ${newer.version}, or run the installer again with --downgrade to go back to ${version}`,
+    );
   install(version, prefix, values.from);
   root = factoryAt(npmCli, version);
   if (!root)
     throw new Refused(`npm install left no factory ${version} in ${prefix}`);
-  return report("installed", link(bin, root), root);
+  return finish("installed", root);
 }
 
 try {

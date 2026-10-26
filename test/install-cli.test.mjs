@@ -1,9 +1,10 @@
 // The setup skill's CLI installer: it installs the plugin's own version, keeps
 // a matching installation, and installs nothing from a release file that
 // fails verification. Its launcher follows the installed version under one
-// PATH line, and stays off workers' PATH. Nothing here reaches the network: a
-// fake gh stands in for the release download and the attestation check, and
-// npm runs offline.
+// PATH line, never back to an older release unless asked, and stays off
+// workers' PATH even once the release it runs is deleted, when readiness
+// warns of it. Nothing here reaches the network: a fake gh stands in for the
+// release download and the attestation check, and npm runs offline.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -23,6 +24,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { launcherChecks } from "../dist/readiness.js";
 import { workerToolchainPath } from "../dist/worktree.js";
 
 const project = resolve(import.meta.dirname, "..");
@@ -85,6 +87,29 @@ function release(root, v, content, digest) {
     digest ?? createHash("sha256").update(readFileSync(file)).digest("hex");
   writeFileSync(join(dir, "SHA256SUMS"), `${sum}  ./${tarballName(v)}\n`);
   return dir;
+}
+
+/** A minimal Factory package of version `v`, packed as npm does: its tarball. */
+function packed(root, v, env) {
+  const source = join(root, "source");
+  mkdirSync(join(source, "dist"), { recursive: true });
+  writeFileSync(
+    join(source, "package.json"),
+    JSON.stringify({
+      name: "@clockgrove/factory",
+      version: v,
+      bin: { factory: "./dist/cli.js" },
+    }),
+  );
+  writeFileSync(join(source, "dist", "cli.js"), "#!/usr/bin/env node\n");
+  const dir = join(root, "packed");
+  mkdirSync(dir);
+  execFileSync(
+    "npm",
+    ["pack", "--silent", "--ignore-scripts", "--pack-destination", dir],
+    { cwd: source, env, stdio: "pipe" },
+  );
+  return join(dir, tarballName(v));
 }
 
 function install(args, { script = installer, env = process.env } = {}) {
@@ -201,14 +226,13 @@ function pluginOf(root, v) {
 }
 
 /**
- * Default installs of 9.8.7 and 9.8.8 under `root`/data: their prefixes,
- * each holding that version, the shared launcher, and a run of the plugin
- * of version `v`.
+ * Default installs of `releases` (9.8.7 and 9.8.8) under `root`/data: their
+ * prefixes, each holding that version, the shared launcher, and a run of the
+ * plugin of version `v` with `args`.
  */
-function versions(root) {
+function versions(root, releases = ["9.8.7", "9.8.8"]) {
   const data = join(root, "data", "clockgrove-factory");
-  const each = (make) =>
-    Object.fromEntries(["9.8.7", "9.8.8"].map((v) => [v, make(v)]));
+  const each = (make) => Object.fromEntries(releases.map((v) => [v, make(v)]));
   const installed = each((v) => prefixWith(join(data, v), v));
   const scripts = each((v) => pluginOf(root, v));
   const env = {
@@ -220,8 +244,10 @@ function versions(root) {
     data,
     installed,
     bin: join(data, "bin"),
-    run: (v, path = env.PATH) =>
-      install([], { script: scripts[v], env: { ...env, PATH: path } }),
+    env,
+    scripts,
+    run: (v, path = env.PATH, args = []) =>
+      install(args, { script: scripts[v], env: { ...env, PATH: path } }),
   };
 }
 
@@ -230,7 +256,7 @@ test("the launcher follows each installed version under one PATH line", () =>
     const { data, installed, bin, run } = versions(root);
     const lines = new Set();
     for (const v of ["9.8.7", "9.8.8", "9.8.7"]) {
-      const { status, report } = run(v);
+      const { status, report } = run(v, undefined, ["--downgrade"]);
       assert.equal(status, 0, JSON.stringify(report));
       assert.equal(report.version, v);
       assert.equal(report.cli, join(bin, "factory"));
@@ -279,7 +305,7 @@ console.log(JSON.stringify({ reads, missing, crowded }));`,
     const closed = once(watcher, "close");
     for (let i = 0; i < 4; i++)
       for (const v of ["9.8.8", "9.8.7"]) {
-        const { status, report } = run(v);
+        const { status, report } = run(v, undefined, ["--downgrade"]);
         assert.equal(status, 0, JSON.stringify(report));
         assert.ok(realpathSync(report.cli).includes(`/${v}/`), report.cli);
       }
@@ -321,6 +347,190 @@ test("workers' PATH leaves out the launcher's directory, whichever version it ru
       workerToolchainPath(`${bin}:${tools}:/usr/bin`),
       `${tools}:/usr/bin`,
     );
+  }));
+
+test("the launcher moves to a newer or the same release, and back only with --downgrade", () =>
+  withRoot((root) => {
+    const { data, installed, bin, run } = versions(root);
+    const launcher = join(bin, "factory");
+    const runs = (v) => realpathSync(join(installed[v], "dist", "cli.js"));
+    assert.equal(run("9.8.7").status, 0);
+    for (const [v, args] of [
+      ["9.8.8", []],
+      ["9.8.8", []],
+      ["9.8.7", ["--downgrade"]],
+    ]) {
+      const { status, report } = run(v, undefined, args);
+      assert.equal(status, 0, JSON.stringify(report));
+      assert.equal(report.status, "current");
+      assert.equal(report.cli, launcher);
+      assert.equal(report.launcher, undefined);
+      assert.equal(realpathSync(launcher), runs(v));
+    }
+    assert.equal(run("9.8.8").status, 0);
+
+    // An older plugin's release is there, but the launcher stays newer.
+    const { status, report } = run("9.8.7");
+    assert.equal(status, 0, JSON.stringify(report));
+    assert.equal(report.status, "current");
+    assert.equal(report.version, "9.8.7");
+    assert.equal(
+      report.cli,
+      join(data, "9.8.7", "node_modules", ".bin", "factory"),
+    );
+    assert.equal(realpathSync(report.cli), runs("9.8.7"));
+    assert.equal(report.path, `export PATH="${bin}:$PATH"`);
+    assert.deepEqual(report.launcher, {
+      cli: launcher,
+      version: "9.8.8",
+      kept: true,
+    });
+    assert.equal(realpathSync(launcher), runs("9.8.8"));
+    assert.deepEqual(readdirSync(bin), ["factory"]);
+  }));
+
+test("the launcher's releases are ordered as semantic versions", () =>
+  withRoot((root) => {
+    const releases = [
+      "9.8.8-rc.1",
+      "9.8.8",
+      "9.8.9",
+      "9.8.10",
+      "9.8.11-rc.2",
+      "9.8.11-rc.10",
+      "9.8.11-beta",
+    ];
+    const { run } = versions(root, releases);
+    // Each run's plugin version, and the newer one the launcher keeps.
+    for (const [v, kept] of [
+      ["9.8.8-rc.1"],
+      ["9.8.8"],
+      ["9.8.10"],
+      ["9.8.9", "9.8.10"],
+      ["9.8.11-rc.2"],
+      ["9.8.11-rc.10"],
+      ["9.8.11-rc.2", "9.8.11-rc.10"],
+      ["9.8.11-beta", "9.8.11-rc.10"],
+      ["9.8.8", "9.8.11-rc.10"],
+    ]) {
+      const { status, report } = run(v);
+      assert.equal(status, 0, JSON.stringify(report));
+      assert.equal(report.launcher?.version, kept, `${v}: ${kept}`);
+    }
+  }));
+
+test(
+  "an older plugin's release is installed beside a launcher it leaves on a newer one",
+  { timeout: 120_000 },
+  () =>
+    withRoot((root) => {
+      const { data, installed, bin, env, scripts, run } = versions(root);
+      assert.equal(run("9.8.8").status, 0);
+      rmSync(join(data, "9.8.7"), { recursive: true });
+      const npmEnv = {
+        ...env,
+        npm_config_offline: "true",
+        npm_config_cache: join(root, "npm-cache"),
+      };
+      const files = release(root, "9.8.7", {
+        tarball: packed(root, "9.8.7", npmEnv),
+      });
+      const gh = fakeGh(root, 0);
+      const { status, report } = install(["--from", files], {
+        script: scripts["9.8.7"],
+        env: { ...npmEnv, PATH: `${gh.bin}:${process.env.PATH}` },
+      });
+      assert.equal(status, 0, JSON.stringify(report));
+      assert.equal(report.status, "installed");
+      assert.equal(
+        report.cli,
+        join(data, "9.8.7", "node_modules", ".bin", "factory"),
+      );
+      assert.equal(installedVersion(join(data, "9.8.7")), "9.8.7");
+      assert.deepEqual(report.launcher, {
+        cli: join(bin, "factory"),
+        version: "9.8.8",
+        kept: true,
+      });
+      assert.equal(
+        realpathSync(join(bin, "factory")),
+        realpathSync(join(installed["9.8.8"], "dist", "cli.js")),
+      );
+    }),
+);
+
+test("with --prefix, the installer won't replace the launcher's newer release without --downgrade", () =>
+  withRoot((root) => {
+    const prefix = join(root, "prefix");
+    prefixWith(prefix, "9.8.8");
+    const env = { ...process.env, XDG_DATA_HOME: join(root, "data") };
+    const newer = install(["--prefix", prefix], {
+      script: pluginOf(root, "9.8.8"),
+      env,
+    });
+    assert.equal(newer.status, 0, JSON.stringify(newer.report));
+    const gh = fakeGh(root, 0);
+    const { status, report } = install(["--prefix", prefix], {
+      script: pluginOf(root, "9.8.7"),
+      env: { ...env, PATH: `${gh.bin}:${process.env.PATH}` },
+    });
+    assert.equal(status, 1);
+    assert.equal(report.status, "refused");
+    assert.match(report.problems[0], /runs Factory 9\.8\.8 .*--downgrade/);
+    assert.equal(installedVersion(prefix), "9.8.8");
+    assert.equal(readFileSync(gh.log, "utf8"), "");
+  }));
+
+test("workers' PATH leaves out a launcher whose release was deleted, and no other broken link", () =>
+  withRoot((root) => {
+    const { data, bin, run } = versions(root);
+    assert.equal(run("9.8.8").status, 0);
+    rmSync(join(data, "9.8.8"), { recursive: true });
+    assert.equal(existsSync(join(bin, "factory")), false);
+    // A --prefix launcher whose package was removed.
+    const prefix = join(root, "prefix");
+    prefixWith(prefix, version);
+    assert.equal(install(["--prefix", prefix]).status, 0);
+    rmSync(join(prefix, "node_modules"), { recursive: true });
+    // Broken `factory` links alone in a bin, outside the launcher's layout.
+    const broken = (name, target) => {
+      const dir = join(root, name, "bin");
+      mkdirSync(dir, { recursive: true });
+      symlinkSync(target, join(dir, "factory"));
+      return dir;
+    };
+    const cli = ["node_modules", "@clockgrove", "factory", "dist", "cli.js"];
+    const kept = [
+      broken(
+        "elsewhere",
+        join(root, "gone", "clockgrove-factory", "9.8.8", ...cli),
+      ),
+      broken("other", join(root, "other", "missing")),
+      broken("relative", join("..", "9.8.8", ...cli)),
+      "/usr/bin",
+    ];
+    assert.equal(
+      workerToolchainPath([bin, join(prefix, "bin"), ...kept].join(":")),
+      kept.join(":"),
+    );
+  }));
+
+test("readiness warns of a launcher whose release was deleted", () =>
+  withRoot((root) => {
+    const { data, bin, env, run } = versions(root);
+    assert.equal(run("9.8.8").status, 0);
+    const checks = (PATH) => launcherChecks({ ...env, PATH });
+    assert.deepEqual(checks(`${bin}:/usr/bin`), []);
+    rmSync(join(data, "9.8.8"), { recursive: true });
+    // On the PATH, or only at its default place: one warning.
+    for (const PATH of [`${bin}:/usr/bin`, "/usr/bin"]) {
+      const found = checks(PATH);
+      assert.equal(found.length, 1, JSON.stringify(found));
+      assert.equal(found[0].name, "launcher");
+      assert.equal(found[0].status, "warn");
+      assert.ok(found[0].detail.includes(join(bin, "factory")));
+      assert.match(found[0].fix, /setup again/);
+    }
   }));
 
 test("the installer installs nothing from a tarball that fails its checksum", () =>
@@ -368,32 +578,13 @@ test(
   },
   () =>
     withRoot((root) => {
-      // A minimal Factory package of the plugin's version, packed as npm does.
-      const source = join(root, "source");
-      mkdirSync(join(source, "dist"), { recursive: true });
-      writeFileSync(
-        join(source, "package.json"),
-        JSON.stringify({
-          name: "@clockgrove/factory",
-          version,
-          bin: { factory: "./dist/cli.js" },
-        }),
-      );
-      writeFileSync(join(source, "dist", "cli.js"), "#!/usr/bin/env node\n");
-      const packed = join(root, "packed");
-      mkdirSync(packed);
       const env = {
         ...process.env,
         npm_config_offline: "true",
         npm_config_cache: join(root, "npm-cache"),
       };
-      execFileSync(
-        "npm",
-        ["pack", "--silent", "--ignore-scripts", "--pack-destination", packed],
-        { cwd: source, env, stdio: "pipe" },
-      );
       const files = release(root, version, {
-        tarball: join(packed, tarballName(version)),
+        tarball: packed(root, version, env),
       });
 
       const prefix = join(root, "prefix");

@@ -46,10 +46,10 @@ import { forgetting, lookupsKey, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
   amendmentGrants,
+  amendmentRevisions,
   currentPlan,
   generationInputs,
   position,
-  proposalsOf,
 } from "./plan.js";
 import {
   type PredecessorEvidence,
@@ -1003,13 +1003,14 @@ function questionFor(
 /**
  * Planning revisions of the current generation: the rounds before this
  * one, whatever started them (fixes, answers, grants), plus the amendments
- * of the plan it accepted; and what is allowed with every `more` granted,
- * to planning and to amendments alike.
+ * of the plan it accepted, each with the plan rounds its checks sent back
+ * (`amendmentRevisions`); and what is allowed with every `more` granted, to
+ * planning and to amendments alike.
  */
 export function planningRevisions(state: ObjectiveState): Usage {
   const { g, n } = position(state);
   return {
-    used: n - 1 + proposalsOf(state).length,
+    used: n - 1 + amendmentRevisions(state),
     allowed:
       allowances(state).planningRevisions +
       granted(state, g, n) +
@@ -1025,7 +1026,8 @@ function granted(state: ObjectiveState, g: number, n: number): number {
   return total;
 }
 
-function sameFindings(a: Finding[], b: Finding[]): boolean {
+/** Whether two rounds' findings say the same, in any order. */
+export function sameFindings(a: Finding[], b: Finding[]): boolean {
   const text = (list: Finding[]) =>
     list
       .map((f) => f.message)

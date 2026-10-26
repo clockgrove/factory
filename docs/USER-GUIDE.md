@@ -282,12 +282,12 @@ When the planner finds that no plan can meet the Objective as written (it contra
 
 How much an Objective may correct itself before asking. These are frozen with its configuration.
 
-| Setting (`autonomy.allowances`) | Default | Counts                                                        |
-| ------------------------------- | ------- | ------------------------------------------------------------- |
-| `planningRevisions`             | 4       | planning revision rounds, and amendments of the accepted plan |
-| `implementationRepairs`         | 6       | repairs of Work Items' work, across the Objective             |
-| `perPath`                       | 3       | repairs of one step (one Work Item's work, say)               |
-| `resultRereviews`               | 1       | `revalidate` answers                                          |
+| Setting (`autonomy.allowances`) | Default | Counts                                                                                   |
+| ------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `planningRevisions`             | 4       | planning revision rounds, and amendments of the accepted plan with their revision rounds |
+| `implementationRepairs`         | 6       | repairs of Work Items' work, across the Objective                                        |
+| `perPath`                       | 3       | repairs of one step (one Work Item's work, say)                                          |
+| `resultRereviews`               | 1       | `revalidate` answers                                                                     |
 
 Running out holds with `more`, `replan` and `cancel`. An amendment past `planningRevisions` holds with `more` (allow as many again and plan it), `refuse` (reject it) and `cancel`.
 
@@ -306,7 +306,7 @@ Model spend can have a limit per Objective and per day, in tokens, list cost or 
 
 ## Amend a plan
 
-An accepted plan can grow while it runs. An amendment revises the plan for work it lacks, passes the plan checks and a new independent plan review, and, once accepted, is the plan from then on, posted as the plan comment. Each one uses a planning revision (see [Allowances](#allowances)). One amendment is planned at a time, and no other step starts while it is pending.
+An accepted plan can grow while it runs. An amendment revises the plan for work it lacks, passes the plan checks and a new independent plan review, and, once accepted, is the plan from then on, posted as the plan comment. Each one uses a planning revision (see [Allowances](#allowances)). When the plan checks find a problem the planner can fix, its plan goes back to the planner for another round, which uses another revision; it is rejected when the problem touches work already started or comes back unchanged. One amendment is planned at a time, and no other step starts while it is pending.
 
 - **You propose one** with `factory propose-amendment N --file /absolute/amendment.json`. The file is a JSON object with `scope` (`"in-scope"`), `reason`, and lists of strings: `evidence`, `ownership` (the paths the work needs), `acceptance` (observable outcomes) and `dependencies` (known Work Item ids; may be empty). The service checks it and refuses with `amendment_refused`, naming each problem.
 - **A worker proposes one** when its work turns out to need more, such as a file no Work Item owns that the repository's tests require (when a repair's diagnosis finds that, Factory tells the worker to propose it): it writes `.factory-discovery.json` (the same fields) in its worktree, and an in-scope one is proposed at once while the item waits for the outcome. To go on without it, run `factory decline-discovery N --item ITEM --reason TEXT` while it is pending: the item carries on with its result as collected, and the revision stays spent. A backlog discovery is only logged.

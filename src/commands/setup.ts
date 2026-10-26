@@ -2,6 +2,7 @@
  * `factory setup`: its options, help and check, and what it does.
  */
 import {
+  appLink,
   SERVICE_MODES,
   SETUP_FLAGS,
   type ServiceReport,
@@ -16,7 +17,7 @@ import { type Args, type Command, usage } from "./shared.js";
 export const spec: Command = {
   args: "",
   flags: SETUP_FLAGS,
-  help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; see docs/reference/setup.md#Setup for every option",
+  help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; --github-app-link prints the link that registers Factory's GitHub App, and --github-app-id ID --github-app-key PATH makes Factory act as it; --operator LOGIN names whom holds mention; see docs/reference/setup.md#Setup for every option",
   run: ({ repository, args }) => setupCommand(repository, args),
 };
 
@@ -25,6 +26,22 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
   const values: Record<string, string[]> = { ...args.lists };
   for (const [flag, value] of Object.entries(args.flags))
     values[flag] = [value];
+  if (values["github-app-link"]) {
+    const others = Object.keys(values).filter(
+      (flag) => !["github-app-link", "json", "repo"].includes(flag),
+    );
+    if (others.length)
+      throw usage(
+        `--github-app-link takes no other option; drop --${others.join(", --")}`,
+      );
+    const { link, next } = await appLink(repository);
+    process.stdout.write(
+      args.flags.json !== undefined
+        ? `${JSON.stringify({ link, next })}\n`
+        : `Register Factory's GitHub App for ${repository.split("/")[0]}, with every permission it needs:\n${link}\n${next}.\n`,
+    );
+    return 0;
+  }
   const modes = SERVICE_MODES.filter((mode) => values[mode]);
   if (modes.length > 1) throw usage(`give one of --${modes.join(", --")}`);
   if (values["credential-file"] && modes[0] !== "background")

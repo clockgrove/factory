@@ -14,6 +14,8 @@
 # for inspection; --keep-repos always does; later runs sweep them after 24 h).
 # --capture records every model call's body for diagnosis (config capture):
 # the run's state dir then holds prompts and answers, so keep it private.
+# FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY (a key file) in the
+# environment run Factory as that GitHub App, with the gh login as operator.
 #
 # One parallel wave: every case of the suite starts at once and runs
 # concurrently, each within its own budget (the cases table's minutes). The
@@ -28,7 +30,7 @@ SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""; REPLAY=""; KEPT=""
 REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
-usage() { sed -n 2,24p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n 2,26p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITE_NAME=${2:?}; shift 2 ;;
@@ -377,7 +379,16 @@ git lfs version >/dev/null || { echo "git-lfs is required" >&2; exit 3; }
 login=$(gh api user --jq .login) || { echo "gh is not logged in" >&2; exit 3; }
 [ "$(gh api "orgs/$REPO_OWNER/memberships/$login" --jq .role 2>/dev/null)" = admin ] || { echo "gh login $login must be an owner of $REPO_OWNER to create its run repositories" >&2; exit 3; }
 gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | grep -qw delete_repo || { echo "the gh token needs the delete_repo scope (gh auth refresh -s delete_repo)" >&2; exit 3; }
-log "suite $SUITE_NAME, provider $PROVIDER, build $BUILD ($commit), state $STATE_BASE"
+# Factory acts as the suite's GitHub App when FACTORY_SUITE_APP_ID and
+# FACTORY_SUITE_APP_KEY (its private key's path) are set: every installation's
+# setup gives them (lib/common.sh app_setup), with the gh login as its operator.
+# The App is installed on all of REPO_OWNER's repositories, so the run's are too.
+APP_ARGS=()
+if [ -n "${FACTORY_SUITE_APP_ID:-}${FACTORY_SUITE_APP_KEY:-}" ]; then
+  [ -n "${FACTORY_SUITE_APP_ID:-}" ] && [ -f "${FACTORY_SUITE_APP_KEY:-}" ] || { echo "set FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY (a key file) together" >&2; exit 3; }
+  APP_ARGS=(--github-app-id "$FACTORY_SUITE_APP_ID" --github-app-key "$FACTORY_SUITE_APP_KEY" --operator "$login")
+fi
+log "suite $SUITE_NAME, provider $PROVIDER, build $BUILD ($commit), state $STATE_BASE${FACTORY_SUITE_APP_ID:+, as GitHub App $FACTORY_SUITE_APP_ID}"
 [ ! -e "$STATE_BASE" ] || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
 for r in $M_REPO $C_REPO; do s=$(running_serves "$r"); [ -n "$s" ] && { echo "refused: a serve runs for $r: $s" >&2; exit 3; }; done
 trap 'INTERRUPTED=1; exit 130' INT TERM
@@ -395,15 +406,15 @@ setup_repos() {
 setup_main() {
   clone $M_REPO "$STATE_BASE/checkout-m" || return 1
   write_config "$STATE_BASE/config-m.json" $M_REPO "$STATE_BASE/checkout-m" 12 'c["delivery"]={"kind":"native-stack"}' 'c.setdefault("autonomy",{})["allowances"]={"planningRevisions":2}'
-  inst_define M $M_REPO "$STATE_BASE/config-m.json"
+  inst_define M $M_REPO "$STATE_BASE/config-m.json" || return 1
   if [ -n "$NEEDS_C" ]; then
     clone $C_REPO "$STATE_BASE/checkout-c" || return 1
     write_config "$STATE_BASE/config-c.json" $C_REPO "$STATE_BASE/checkout-c" 8 "c['queue']['projectId']='$C_PROJECT_ID'"
-    inst_define C $C_REPO "$STATE_BASE/config-c.json"
-    inst_define H $C_REPO "$STATE_BASE/config-c.json"
+    inst_define C $C_REPO "$STATE_BASE/config-c.json" || return 1
+    inst_define H $C_REPO "$STATE_BASE/config-c.json" || return 1
     # X: repository C configured on repository M's Project, which M serves.
     write_config "$STATE_BASE/config-x.json" $C_REPO "$STATE_BASE/checkout-c" 8
-    inst_define X $C_REPO "$STATE_BASE/config-x.json"
+    inst_define X $C_REPO "$STATE_BASE/config-x.json" || return 1
     printf '%s\n' "FACTORY_BACKOFF_MS=5000" "FACTORY_REMIND_MS=120000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/C/extra_env"
     cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/H/extra_env"; cp "$RUN_DIR/inst/C/extra_env" "$RUN_DIR/inst/X/extra_env"
   fi

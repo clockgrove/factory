@@ -118,6 +118,7 @@ export async function selectStep(
     commit: work.commit,
     set: read.set,
     ref: selectionRef(state.issue, item.id),
+    author: await deps.github.commitAuthor(signal),
     signal,
     log: context.log,
   });

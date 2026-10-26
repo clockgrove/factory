@@ -38,6 +38,8 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
 
+   So that you hear about every hold, name yourself with `--operator LOGIN` and give Factory a GitHub identity of its own: GitHub doesn't notify you of comments your own account posts. `factory setup --repo OWNER/NAME --github-app-link` prints the link that registers Factory's GitHub App; create it, generate its private key, install it (on an organization, on All repositories; at the least, on the repository and every other repository of its Project), then add `--github-app-id ID --github-app-key PATH`. See [GitHub identity](reference/setup.md#github-identity).
+
 4. **Run the service.** Either run `factory serve --repo OWNER/NAME` in a terminal you keep open, or install it as a systemd user service:
 
    ```sh
@@ -355,7 +357,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 
 One installation serves a repository at a time, on one machine, and one installation serves a Project: of two repositories that share a Project, only one is served at a time. Factory records which installation serves a repository in `refs/factory/holder`, a ref in the repository that isn't a branch, so no branch list or PR shows it. A second installation, on another machine or in another state directory, is refused when it starts: it names the one that holds the repository, or the other repository on the Project and the installation that holds it, and does nothing on GitHub. Restarting the same installation, after a crash too, always continues.
 
-The Project check runs when the installation starts: it reads the repositories of the Project's open issues from GitHub, then each one's record. If GitHub can't list them within a few seconds, or a record can't be read, the installation starts anyway and logs it.
+The Project check runs when the installation starts: it reads the repositories of the Project's open issues from GitHub, then each one's record. If GitHub can't list them within a few seconds, or a record can't be read, the installation starts anyway and logs it. Factory acting as a GitHub App reads only the repositories the App is installed on, so install it on every repository of the Project: on an organization, choose All repositories, which also covers a repository added to the Project later.
 
 When another installation serves the Project, stop it first. If it can't stop cleanly, because its machine is gone or its state was wiped, take its repository over on a machine set up for that repository (`factory serve --repo OTHER/NAME --take-over`), then stop that one cleanly, which frees it.
 

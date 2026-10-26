@@ -405,6 +405,7 @@ test("readiness warns when the default branch requires review threads resolved",
   process.env.FACTORY_STATE_DIR = tempDir("factory-threads-state-");
   const answers = (resolution) =>
     fake({
+      isApp: false,
       login: async () => "factory-bot",
       checkIdentity: async () => {},
       canPush: async () => true,
@@ -418,6 +419,8 @@ test("readiness warns when the default branch requires review threads resolved",
     repository: REPO,
     checkout: tempDir("factory-threads-checkout-"),
     tracking: { enabled: false },
+    github: {},
+    operators: [],
   };
   const named = (checks) =>
     checks.find((check) => check.name === "review threads");

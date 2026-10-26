@@ -100,6 +100,18 @@ export function inert(text: string): string {
 }
 
 /**
+ * The operators' @mentions (config `operators`) as a closing paragraph, so
+ * GitHub notifies them of the comment it ends; empty without operators.
+ * Only a comment Factory posts once for them carries it: a hold, the
+ * report and the cancel comment.
+ */
+export function mentions(operators: readonly string[]): string {
+  return operators.length
+    ? `\n\n${operators.map((login) => `@${login}`).join(" ")}`
+    : "";
+}
+
+/**
  * Factory's hidden marker, `<!-- factory:<issue>:<kind>:<id> -->`, on the
  * first line of a comment or issue body it writes: found by it (by
  * Factory's own login only) before it writes again (docs/reference/steps.md#Idempotence).

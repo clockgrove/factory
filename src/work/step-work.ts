@@ -78,6 +78,9 @@ export async function workStep(
   const worktree = worktreePath(workDir, state.issue, item.id);
   const media = mediaDirectory(workDir, item.id);
   const sentBack = fact(state, "sentBack", item.id);
+  // Read before the worker runs: once it has finished, a failed read would
+  // lose its result, which is kept only with this step's outcome.
+  const author = await deps.github.commitAuthor(signal);
   // Its fact is gone (new sets captured, or `fresh`): so are the copies.
   if (!sentBack) await forceRemove(sentBackDirectory(media));
   // An item builds on the default branch as it is when it starts, which
@@ -529,6 +532,7 @@ export async function workStep(
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,
+    author,
     signal,
   });
   const discovered = discoveryOutcome(

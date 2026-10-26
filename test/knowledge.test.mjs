@@ -8,26 +8,31 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { githubOrigin, item, plan } from "./helpers.mjs";
+import {
+  children,
+  githubOrigin,
+  item,
+  plan,
+  spawnNode,
+  tempDir,
+} from "./helpers.mjs";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = "drill/target";
 
 /** A real installation: state directory, configuration and a target checkout. */
 function installation() {
-  const dir = mkdtempSync(join(tmpdir(), "factory-knowledge-"));
+  const dir = tempDir("factory-knowledge-");
   const checkout = join(dir, "checkout");
   mkdirSync(checkout);
   spawnSync("git", ["init", "-q", checkout]);
@@ -176,11 +181,6 @@ function seedDone(inst, issue, dir = inst.objectives) {
   );
 }
 
-const services = new Set();
-after(() => {
-  for (const child of services) child.kill("SIGKILL");
-});
-
 /** A local port nothing listens on. */
 async function closedPort() {
   const server = createServer();
@@ -198,7 +198,7 @@ async function closedPort() {
 async function serve(inst, crashAt) {
   const record = join(inst.root, "service.json");
   rmSync(record, { force: true });
-  const child = spawn(process.execPath, [CLI, "serve", "--repo", REPO], {
+  const child = spawnNode([CLI, "serve", "--repo", REPO], {
     env: {
       ...inst.env,
       ...(crashAt ? { FACTORY_CRASH_AT: crashAt } : {}),
@@ -208,10 +208,10 @@ async function serve(inst, crashAt) {
     },
     stdio: "ignore",
   });
-  services.add(child);
+  children.add(child);
   const exit = new Promise((resolve) =>
     child.on("exit", (code, signal) => {
-      services.delete(child);
+      children.delete(child);
       resolve(signal);
     }),
   );

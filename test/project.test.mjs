@@ -4,11 +4,10 @@
 // (a GraphQL read) is given where that read supplies it.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { REPO } from "./helpers.mjs";
+import { REPO, tempDir } from "./helpers.mjs";
 
 const OTHER = "drill/other";
 
@@ -23,7 +22,7 @@ const git = (...args) => {
  * bare repositories: REPO's and OTHER's by path, any other one missing.
  */
 function repositories() {
-  const dir = mkdtempSync(join(tmpdir(), "factory-project-"));
+  const dir = tempDir("factory-project-");
   const bare = (name) => join(dir, `${name}.git`);
   for (const name of ["target", "other"])
     git("init", "--quiet", "--bare", bare(name));

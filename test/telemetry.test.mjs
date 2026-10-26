@@ -8,14 +8,12 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -52,6 +50,7 @@ import {
   serve,
   status,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -95,7 +94,7 @@ test("an attempt file redacts a secret or token split across a long line's piece
 
 test("a worker attempt's transcript is kept redacted and bounded beside the run log, shown by diagnostics --logs, and rotated with its run", () => {
   const inst = installation();
-  const worktree = mkdtempSync(join(tmpdir(), "factory-tree-"));
+  const worktree = tempDir("factory-tree-");
   const run = "2026-01-01T00-00-00-000Z-1";
   const log = new RunLog(inst.logs, run, CAPTURE_OFF, [SECRET]);
   const step = { step: "item:a:work", attemptId: "item:a:work#1" };
@@ -198,7 +197,7 @@ test("a failed validation command's whole output is kept in its attempt file and
   process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
   const { sandbox } = loadConfig(REPO);
   delete process.env.FACTORY_CONFIG;
-  const checkout = mkdtempSync(join(tmpdir(), "factory-validate-"));
+  const checkout = tempDir("factory-validate-");
   git(checkout, "init", "--quiet");
   // 40,000 numbered lines with a secret at the end: far past the event's head and tail.
   writeFileSync(
@@ -477,7 +476,7 @@ test("a model call's answer is sized and digested with capture off; a cut captur
 
 test("watch --once and --json show each row's attempt, PR, tool targets and the worktree's changed files, shell edits included; log --tail reads long lines", async () => {
   const inst = installation();
-  const tree = mkdtempSync(join(tmpdir(), "factory-tree-"));
+  const tree = tempDir("factory-tree-");
   git(tree, "init", "--quiet");
   writeFileSync(join(tree, "a.ts"), "a\n");
   git(tree, "add", "a.ts");
@@ -777,7 +776,7 @@ test("status --json details each Work Item's attempt, commits, last error, repai
 });
 
 test("a follow reads new run-log lines in bounded chunks, a line longer than a chunk included, and leaves a line still being written for the next read", () => {
-  const logs = mkdtempSync(join(tmpdir(), "factory-follow-"));
+  const logs = tempDir("factory-follow-");
   mkdirSync(join(logs, "7"));
   const run = "2026-01-01T00-00-00-000Z-1";
   const file = join(logs, "7", `${run}.jsonl`);
@@ -812,7 +811,7 @@ test("log rotation carries on past a run it can't remove, and records each remov
   // Root removes the read-only directory's file anyway.
   skip: process.getuid?.() === 0,
 }, () => {
-  const logs = mkdtempSync(join(tmpdir(), "factory-rotate-"));
+  const logs = tempDir("factory-rotate-");
   const old = new Date(Date.now() - 60 * 60 * 1000);
   const runs = ["a", "b", "c"].map((name) => `2026-01-01T00-00-0${name}`);
   for (const issue of ["8", "9"]) {

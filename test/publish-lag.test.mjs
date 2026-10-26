@@ -6,15 +6,14 @@
 // so does the delete of a merged item's branch.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { publish } from "../dist/delivery.js";
 import { REFUSED_MS } from "../dist/github.js";
 import { FACTORY_EMAIL } from "../dist/work/collect.js";
 import { deleteBranches } from "../dist/work/step-deliver.js";
-import { githubOrigin, REPO } from "./helpers.mjs";
+import { githubOrigin, REPO, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -45,7 +44,7 @@ function factoryCommit(directory, file, text) {
  * result to publish, and a GitHub whose PR still shows the earlier head.
  */
 function published() {
-  const root = mkdtempSync(join(tmpdir(), "factory-publish-"));
+  const root = tempDir("factory-publish-");
   const bare = join(root, "origin.git");
   const checkout = join(root, "checkout");
   git(root, "init", "--quiet", "--bare", "--initial-branch=main", bare);

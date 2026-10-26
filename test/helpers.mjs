@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -22,7 +23,7 @@ export const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 export const REPO = "drill/target";
 
 export function installation() {
-  const stateDir = mkdtempSync(join(tmpdir(), "factory-test-"));
+  const stateDir = tempDir("factory-test-");
   const root = join(stateDir, REPO.replace("/", "__"));
   const env = {
     ...process.env,
@@ -40,18 +41,47 @@ export function installation() {
   };
 }
 
-// Every service a test starts is killed at the end, even when a test fails.
+// Every service a test starts is killed at the end, even when a test fails;
+// then the temporary directories they used are removed.
 export const children = new Set();
-after(() => {
-  for (const child of children) child.kill("SIGKILL");
+const directories = [];
+after(async () => {
+  const running = [...children].filter(
+    (child) => child.exitCode === null && child.signalCode === null,
+  );
+  const exits = running.map(
+    (child) => new Promise((resolve) => child.once("exit", resolve)),
+  );
+  for (const child of running) child.kill("SIGKILL");
+  await Promise.all(exits);
+  for (const dir of directories) rmSync(dir, { recursive: true, force: true });
 });
+
+/** A new directory under tmpdir(), removed when the test file ends. */
+export function tempDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  directories.push(dir);
+  return dir;
+}
+
+/**
+ * Spawn `node ...args`, killed if this test process dies first: after()
+ * never runs then, and Node can't set a parent-death signal, but setpriv can.
+ */
+export function spawnNode(args, options) {
+  return spawn(
+    "setpriv",
+    ["--pdeathsig", "KILL", process.execPath, ...args],
+    options,
+  );
+}
 
 /** Start `factory serve`. Resolves with its exit when it ends. */
 export function serve(inst, crashAt, nodeArgs = [], serveArgs = []) {
   const env = { ...inst.env };
   if (crashAt) env.FACTORY_CRASH_AT = crashAt;
   const args = [...nodeArgs, CLI, "serve", "--repo", REPO, ...serveArgs];
-  const child = spawn(process.execPath, args, {
+  const child = spawnNode(args, {
     env,
     stdio: ["ignore", "ignore", "pipe"],
   });

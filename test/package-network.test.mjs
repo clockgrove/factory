@@ -1,14 +1,21 @@
 // Which package manager a candidate's pnpm lockfile may pin and still keep
 // the registry network for its verified install: the exact version
 // packageManager names, or one inside devEngines.packageManager's range.
+// And setup's readiness when no network or warm store serves the install.
 // Real Git, real lockfiles.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { installNetworkRefusal } from "../dist/package-network.js";
-import { tempDir } from "./helpers.mjs";
+import {
+  cli,
+  closedPort,
+  configured,
+  installation,
+  tempDir,
+} from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -182,3 +189,30 @@ for (const [shape, manifest, basePin, candidatePin, refused] of [
     else assert.equal(refusal, undefined);
   });
 }
+
+test("readiness warns of a lockfile whose install has no network and no warm store", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const check = (...args) =>
+    JSON.parse(cli(inst, "setup", ...args, "--json").out).readiness.checks.find(
+      (entry) => entry.name === "sandbox.network",
+    );
+  // No bootstrap installs from a shrinkwrap.
+  writeFileSync(join(inst.root, "checkout", "npm-shrinkwrap.json"), "{}");
+  assert.equal(check(), undefined);
+  writeFileSync(join(inst.root, "checkout", "package-lock.json"), "{}");
+  const off = check();
+  assert.equal(off?.status, "warn", JSON.stringify(off));
+  assert.match(off.detail, /package-lock\.json.*packageStore is unset/);
+  assert.match(
+    off.fix,
+    /factory setup --repo drill\/target --sandbox-network package-install/,
+  );
+  assert.equal(check("--sandbox-network", "package-install"), undefined);
+  const store = join(inst.root, "store");
+  mkdirSync(store);
+  const empty = check("--sandbox-network", "off", "--package-store", store);
+  assert.match(empty?.detail ?? "", /packageStore \S+ is empty/);
+  writeFileSync(join(store, "index"), "");
+  assert.equal(check(), undefined);
+});

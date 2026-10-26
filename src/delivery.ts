@@ -803,7 +803,8 @@ export type CiResult =
  * under strict protection is updated by GitHub and observed again. A PR
  * made a draft, closed without merging, with only cancelled checks nothing
  * re-ran, or with a needed check that never registered, is a question
- * (#1640). One with no checks at all merges once the settle window passes
+ * (#1640), as is one BLOCKED on review threads its base requires resolved
+ * (#2053). One with no checks at all merges once the settle window passes
  * with no Actions run on its head left unfinished or failed. Checks queued
  * or running are a transient wait; an environment approval or a required
  * review is a human gate the engine waits on without a deadline
@@ -1032,6 +1033,17 @@ async function judge(
       ? `Awaiting checks and protection readiness on PR #${pr}${pending.length ? `: ${pending.join(", ")}` : ""}`
       : undefined;
   if (waiting) {
+    // Blocked with every check there: review threads the default branch
+    // requires resolved never resolve by waiting, so Factory asks at once
+    // (#2053).
+    if (
+      state.mergeStateStatus === "BLOCKED" &&
+      !pending.length &&
+      !named.length
+    ) {
+      const threads = await threadsHold(context, pr, defaultBranch);
+      if (threads) return threads;
+    }
     // Plan-named checks with no run on the head at all.
     const absent = named.filter((name) => !runs.some((r) => r.name === name));
     const renamed = await renamedChecks(
@@ -1122,6 +1134,36 @@ async function renamedChecks(
       gone.map((name) => JSON.stringify(name)),
       ", ",
     )} has not reported on PR #${at.pr}'s head ${at.head} and is no longer a job in ${at.baseBranch}'s GitHub workflows (at ${tip}), so it will never report. Restore the job under that name on ${at.baseBranch}, then answer retry; or cancel.`,
+  );
+}
+
+/**
+ * A PR with unresolved review threads that the default branch requires
+ * resolved (GitHub.threadResolution): GitHub blocks or refuses its merge
+ * until a person resolves them, so it is a question naming each thread.
+ * The default branch's rules apply to a native stack's every layer too:
+ * GitHub evaluates each PR of a stack against the stack's base. Undefined
+ * when none is unresolved, or no rule the login can read requires it.
+ * `refusal` is GitHub's refusal of the merge, when it came to one.
+ */
+async function threadsHold(
+  context: DeliveryContext,
+  pr: number,
+  defaultBranch: string,
+  refusal?: string,
+): Promise<Hold | undefined> {
+  const { github, signal } = context;
+  const threads = await github.unresolvedThreads(pr, signal);
+  if (!threads.length) return undefined;
+  const rules = await github.threadResolution(defaultBranch, signal);
+  if (!rules.length) return undefined;
+  return hold(
+    `PR #${pr} has ${threads.length} unresolved review thread${threads.length === 1 ? "" : "s"}, and ${defaultBranch} requires review threads to be resolved before a merge (${rules.join(" and ")})${refusal ? `, so GitHub refused the merge: ${refusal}` : ""}. Unresolved: ${bounded(
+      threads.map((thread) =>
+        thread.url ? `${thread.path} (${thread.url})` : thread.path,
+      ),
+      "; ",
+    )}. Resolve them on GitHub, then answer retry; or cancel.`,
   );
 }
 
@@ -1630,8 +1672,9 @@ let mergeTail: Promise<unknown> = Promise.resolve();
  * Merge the PR with a merge commit, or confirm a merge already made. The
  * readiness is judged again first (a conflict or failed check can appear
  * after the CI wait). The merge is sent with the head as its guard, so it
- * never merges another head. Afterwards the merge must be on the default
- * branch.
+ * never merges another head. A refusal while the PR has unresolved review
+ * threads its base requires resolved is a question naming them, at once.
+ * Afterwards the merge must be on the default branch.
  */
 export function merge(
   context: DeliveryContext,
@@ -1671,6 +1714,13 @@ async function mergeOnce(
     const after = await github.pull(pr, signal);
     if (after.merged) return confirmMerged(context, input, after);
     if (error.status === 403) throw needing(error, MERGE_PERMISSION);
+    const threads = await threadsHold(
+      context,
+      pr,
+      defaultBranch,
+      error.message,
+    );
+    if (threads) return threads;
     return lagging(
       `GitHub refused to merge PR #${pr} (HTTP ${error.status})`,
       `GitHub refused to merge PR #${pr} (not mergeable, or a repository rule): ${error.message}. Inspect the pull request, then answer retry; or cancel.`,
@@ -2054,6 +2104,13 @@ async function mergeUnitOnce(
     if (await allMerged(context, layers))
       return confirmUnit(context, layers, integrated);
     if (error.status === 403) throw needing(error, MERGE_PERMISSION);
+    const threads = await layerThreadsHold(
+      context,
+      layers,
+      defaultBranch,
+      error.message,
+    );
+    if (threads) return threads;
     return pin(
       lagging(
         `GitHub refused to merge the native stack through PR #${last.pull.number} (HTTP ${error.status})`,
@@ -2072,6 +2129,13 @@ async function mergeUnitOnce(
     // unexplained, retry (a fresh request) until the lag window, then ask.
     const again = await judgeLayers(context, input);
     if ("kind" in again) return again;
+    const threads = await layerThreadsHold(
+      context,
+      layers,
+      defaultBranch,
+      settled.message,
+    );
+    if (threads) return threads;
     const why = settled.message ? `: ${settled.message}` : "";
     return pin(
       lagging(
@@ -2238,6 +2302,25 @@ async function settleMerge(
     }
   }
   return current;
+}
+
+/** The first layer, bottom up, whose unresolved review threads block the stack's merge. */
+async function layerThreadsHold(
+  context: DeliveryContext,
+  layers: Layer[],
+  defaultBranch: string,
+  refusal: string | undefined,
+): Promise<LayerResult | undefined> {
+  for (const layer of layers) {
+    const threads = await threadsHold(
+      context,
+      layer.pull.number,
+      defaultBranch,
+      refusal,
+    );
+    if (threads) return pin(threads, layer.input);
+  }
+  return undefined;
 }
 
 /** Whether GitHub shows every layer merged. */

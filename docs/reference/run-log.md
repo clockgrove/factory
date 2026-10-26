@@ -87,7 +87,7 @@ A planner-seam call (planning, plan and result review, final review, diagnosis, 
 
 `factory watch` and the live status comment show each running call, until its `model-usage` or its step's outcome.
 
-A Claude call that reads a tree (Read, Grep and Glob in its working directory) refuses a path outside it itself, before the CLI, whose refusal names neither the path nor the directory: the model is told the path is outside and where the directory is, and the call logs `tree-read-refused` with the `tool` and `path` (providers/claude.ts `treeReadCheck`).
+A Claude call that reads a tree (Read, Grep and Glob in its working directory) refuses a path outside it (a Glob's pattern included) itself, before the CLI, whose refusal names neither the path nor the directory: the model is told the path is outside and where the directory is, and the call logs `tree-read-refused` with the `tool` and `path` (providers/claude.ts `treeReadCheck`).
 
 ### Codex standard error
 

@@ -652,8 +652,17 @@ export function treeReadCheck(
     )
       return {};
     const input = isRecord(hook.tool_input) ? hook.tool_input : {};
-    const path =
+    const at =
       hook.tool_name === "Read" ? input.file_path : (input.path ?? ".");
+    // A Glob's pattern is a path too: under `path`, or absolute.
+    const path =
+      hook.tool_name === "Glob" &&
+      typeof at === "string" &&
+      typeof input.pattern === "string"
+        ? isAbsolute(input.pattern)
+          ? input.pattern
+          : join(at, input.pattern)
+        : at;
     // The CLI rejects a malformed input itself, and expands a leading ~.
     if (
       typeof path !== "string" ||

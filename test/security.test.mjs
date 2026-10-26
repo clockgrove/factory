@@ -297,6 +297,8 @@ test("a Claude review session reads its evidence root by any path into it, and a
     [linked, "Read", { file_path: join(linked, "candidate/package.json") }],
     [linked, "Read", { file_path: join(root, "candidate/package.json") }],
     [root, "Glob", { pattern: "candidate/**/*.json" }],
+    [root, "Glob", { pattern: join(root, "candidate/**/*.json") }],
+    [root, "Glob", { pattern: "../candidate/*.json", path: "candidate" }],
     [root, "Grep", { pattern: "x", path: "candidate" }],
     // The answer is no read, whatever its fields.
     [root, "StructuredOutput", { path: "/candidate/package.json" }],
@@ -314,6 +316,9 @@ test("a Claude review session reads its evidence root by any path into it, and a
     ["Read", "file_path", "candidate/out.txt"],
     ["Read", "file_path", "~/candidate/package.json"],
     ["Grep", "path", dir],
+    // A Glob's pattern, absolute or out of its path.
+    ["Glob", "pattern", "/candidate/**/*.json"],
+    ["Glob", "pattern", "../*"],
   ];
   for (const [tool, field, path] of outside) {
     const decision = await decide(root, tool, { pattern: "x", [field]: path });

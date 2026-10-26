@@ -1,15 +1,19 @@
 // The setup skill's CLI installer: it installs the plugin's own version, keeps
 // a matching installation, and installs nothing from a release file that
-// fails verification. Nothing here reaches the network: a fake gh stands in
-// for the release download and the attestation check, and npm runs offline.
+// fails verification. Its launcher follows the installed version under one
+// PATH line, and stays off workers' PATH. Nothing here reaches the network: a
+// fake gh stands in for the release download and the attestation check, and
+// npm runs offline.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -19,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { workerToolchainPath } from "../dist/worktree.js";
 
 const project = resolve(import.meta.dirname, "..");
 const installer = join(project, "plugin", "skills", "setup", "install-cli.mjs");
@@ -177,6 +182,145 @@ test("with no prefix, the installer keeps a matching CLI on PATH and downloads n
     assert.equal(report.cli, join(bin, "factory"));
     assert.equal(report.path, null);
     assert.equal(existsSync(join(root, "data")), false);
+  }));
+
+/** A copy of the plugin whose manifests both name `v`; its installer's path. */
+function pluginOf(root, v) {
+  const plugin = join(root, `plugin-${v}`);
+  mkdirSync(join(plugin, "skills", "setup"), { recursive: true });
+  for (const dir of [".claude-plugin", ".codex-plugin"]) {
+    mkdirSync(join(plugin, dir));
+    writeFileSync(
+      join(plugin, dir, "plugin.json"),
+      JSON.stringify({ name: "factory", version: v }),
+    );
+  }
+  const script = join(plugin, "skills", "setup", "install-cli.mjs");
+  copyFileSync(installer, script);
+  return script;
+}
+
+/**
+ * Default installs of 9.8.7 and 9.8.8 under `root`/data: their prefixes,
+ * each holding that version, the shared launcher, and a run of the plugin
+ * of version `v`.
+ */
+function versions(root) {
+  const data = join(root, "data", "clockgrove-factory");
+  const each = (make) =>
+    Object.fromEntries(["9.8.7", "9.8.8"].map((v) => [v, make(v)]));
+  const installed = each((v) => prefixWith(join(data, v), v));
+  const scripts = each((v) => pluginOf(root, v));
+  const env = {
+    PATH: process.env.PATH,
+    HOME: join(root, "home"),
+    XDG_DATA_HOME: join(root, "data"),
+  };
+  return {
+    data,
+    installed,
+    bin: join(data, "bin"),
+    run: (v, path = env.PATH) =>
+      install([], { script: scripts[v], env: { ...env, PATH: path } }),
+  };
+}
+
+test("the launcher follows each installed version under one PATH line", () =>
+  withRoot((root) => {
+    const { data, installed, bin, run } = versions(root);
+    const lines = new Set();
+    for (const v of ["9.8.7", "9.8.8", "9.8.7"]) {
+      const { status, report } = run(v);
+      assert.equal(status, 0, JSON.stringify(report));
+      assert.equal(report.version, v);
+      assert.equal(report.cli, join(bin, "factory"));
+      assert.equal(
+        realpathSync(report.cli),
+        realpathSync(join(installed[v], "dist", "cli.js")),
+      );
+      // Only the launcher, in bin and beside it: no link left half-made.
+      assert.deepEqual(readdirSync(bin), ["factory"]);
+      assert.deepEqual(readdirSync(data).sort(), ["9.8.7", "9.8.8", "bin"]);
+      lines.add(report.path);
+    }
+    assert.deepEqual([...lines], [`export PATH="${bin}:$PATH"`]);
+  }));
+
+test("the launcher is never missing while it moves to another version", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-install-"));
+  try {
+    const { bin, run } = versions(root);
+    assert.equal(run("9.8.7").status, 0);
+    const stop = join(root, "stop");
+    // Resolve the launcher and list its directory until told to stop.
+    const watcher = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require("node:fs");
+const [cli, bin, stop] = process.argv.slice(1);
+let reads = 0, missing = 0, crowded = 0;
+while (!fs.existsSync(stop)) {
+  reads++;
+  try { fs.realpathSync(cli); } catch { missing++; }
+  if (fs.readdirSync(bin).length !== 1) crowded++;
+}
+console.log(JSON.stringify({ reads, missing, crowded }));`,
+        join(bin, "factory"),
+        bin,
+        stop,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    let out = "";
+    watcher.stdout.on("data", (chunk) => {
+      out += chunk;
+    });
+    const closed = once(watcher, "close");
+    for (let i = 0; i < 4; i++)
+      for (const v of ["9.8.8", "9.8.7"]) {
+        const { status, report } = run(v);
+        assert.equal(status, 0, JSON.stringify(report));
+        assert.ok(realpathSync(report.cli).includes(`/${v}/`), report.cli);
+      }
+    writeFileSync(stop, "");
+    await closed;
+    const seen = JSON.parse(out);
+    assert.ok(seen.reads > 0);
+    assert.deepEqual(
+      { missing: seen.missing, crowded: seen.crowded },
+      { missing: 0, crowded: 0 },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the installer gives no PATH line when the launcher's directory is on PATH", () =>
+  withRoot((root) => {
+    const { bin, run } = versions(root);
+    const { status, report } = run("9.8.8", `${bin}:${process.env.PATH}`);
+    assert.equal(status, 0, JSON.stringify(report));
+    assert.equal(report.cli, join(bin, "factory"));
+    assert.equal(report.path, null);
+  }));
+
+test("workers' PATH leaves out the launcher's directory, whichever version it runs", () =>
+  withRoot((root) => {
+    const { bin, run } = versions(root);
+    assert.equal(run("9.8.8").status, 0);
+    // A `factory` alone in its directory that isn't Factory's stays.
+    const other = join(root, "other");
+    mkdirSync(join(other, "dist"), { recursive: true });
+    writeFileSync(join(other, "package.json"), '{"name":"other"}');
+    writeFileSync(join(other, "dist", "cli.js"), "");
+    const tools = join(root, "tools");
+    mkdirSync(tools);
+    symlinkSync(join(other, "dist", "cli.js"), join(tools, "factory"));
+    assert.equal(
+      workerToolchainPath(`${bin}:${tools}:/usr/bin`),
+      `${tools}:/usr/bin`,
+    );
   }));
 
 test("the installer installs nothing from a tarball that fails its checksum", () =>

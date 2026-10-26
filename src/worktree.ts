@@ -678,9 +678,21 @@ export async function removeWorktree(
   await hostGit(checkout, ["worktree", "prune"], { signal });
 }
 
+/** The package name of a CLI at `<package>/dist/cli.js`, or undefined. */
+function cliPackage(cli: string): string | undefined {
+  if (basename(cli) !== "cli.js" || basename(dirname(cli)) !== "dist")
+    return undefined;
+  const pkg = JSON.parse(
+    readFileSync(join(dirname(dirname(cli)), "package.json"), "utf8"),
+  ) as { name?: unknown };
+  return typeof pkg.name === "string" ? pkg.name : undefined;
+}
+
 /**
- * The PATH without Factory's own launcher: a directory whose only entry is
- * a `factory` link to this installation's CLI. Other tools stay.
+ * The PATH without Factory's launchers: a directory whose only entry is a
+ * `factory` link to this installation's CLI or to another version of
+ * Factory's. The setup skill's launcher directory moves to each new version
+ * while a service of the one before still runs. Other tools stay.
  */
 export function workerToolchainPath(
   path: string | undefined,
@@ -689,6 +701,12 @@ export function workerToolchainPath(
   const launcher = fileURLToPath(new URL("./cli.js", import.meta.url));
   if (!existsSync(launcher)) return path;
   const real = realpathSync(launcher);
+  let name: string | undefined;
+  try {
+    name = cliPackage(real);
+  } catch {
+    // No readable package.json: only this installation's launcher is known.
+  }
   return path
     .split(":")
     .filter((entry) => {
@@ -698,7 +716,8 @@ export function workerToolchainPath(
         if (contents.length !== 1 || contents[0] !== "factory") return true;
         const candidate = join(entry, "factory");
         if (!lstatSync(candidate).isSymbolicLink()) return true;
-        return realpathSync(candidate) !== real;
+        const target = realpathSync(candidate);
+        return target !== real && (!name || cliPackage(target) !== name);
       } catch {
         // An entry Factory can't read is left as the operator set it.
         return true;

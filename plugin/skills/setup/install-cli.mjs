@@ -13,9 +13,12 @@
 // The default prefix is a per-version directory under the user's data
 // directory, outside any target repository and credential or state root.
 //
-// The CLI is linked as PREFIX/bin/factory, alone in its directory, so the
-// PATH line puts only Factory's launcher on PATH (and Factory keeps that
-// directory off its workers' PATH).
+// The CLI is linked as the launcher DATA/clockgrove-factory/bin/factory
+// (PREFIX/bin/factory with --prefix), alone in its directory, so the PATH
+// line puts only Factory's launcher on PATH (and Factory keeps a directory
+// holding only a Factory launcher off its workers' PATH). Each install
+// switches that link to its version with one rename, so the launcher always
+// runs the installed current version and the PATH line never changes.
 //
 // Prints one JSON object on stdout: status "current" or "installed" (exit 0)
 // with the CLI's absolute path and the PATH line for the operator's shell
@@ -152,9 +155,12 @@ function install(version, prefix, from) {
   }
 }
 
-/** Link PREFIX/bin/factory, alone in its directory, to the installed CLI. */
-function link(prefix, root) {
-  const bin = join(prefix, "bin");
+/**
+ * Point `bin`/factory, alone in its directory, at the installed CLI. The new
+ * link is made beside `bin` and renamed over the old one, so the launcher
+ * is never missing and `bin` never holds anything else.
+ */
+function link(bin, root) {
   mkdirSync(bin, { recursive: true });
   const target = join(root, "dist", "cli.js");
   const cli = join(bin, "factory");
@@ -163,7 +169,7 @@ function link(prefix, root) {
   } catch {
     // No link yet, or a broken one: replace it.
   }
-  const temporary = join(bin, `.factory-${process.pid}`);
+  const temporary = join(dirname(bin), `.factory-launcher-${process.pid}`);
   rmSync(temporary, { force: true });
   symlinkSync(target, temporary);
   renameSync(temporary, cli);
@@ -175,15 +181,15 @@ function main() {
     options: { prefix: { type: "string" }, from: { type: "string" } },
   });
   const version = pluginVersion();
-  const prefix =
-    values.prefix ??
-    join(
-      process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
-      "clockgrove-factory",
-      version,
-    );
+  const data = join(
+    process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+    "clockgrove-factory",
+  );
+  const prefix = values.prefix ?? join(data, version);
   if (!isAbsolute(prefix))
     throw new Refused(`--prefix must be an absolute directory: ${prefix}`);
+  // The launcher's directory, the same for every version.
+  const bin = join(values.prefix ?? data, "bin");
   const paths = (process.env.PATH ?? "").split(delimiter);
   const report = (status, cli, root) => ({
     status,
@@ -197,7 +203,7 @@ function main() {
 
   const npmCli = join(prefix, "node_modules", ".bin", "factory");
   let root = factoryAt(npmCli, version);
-  if (root) return report("current", link(prefix, root), root);
+  if (root) return report("current", link(bin, root), root);
   if (!values.prefix) {
     // A matching CLI the operator installed elsewhere: the first on PATH.
     const first = paths
@@ -211,7 +217,7 @@ function main() {
   root = factoryAt(npmCli, version);
   if (!root)
     throw new Refused(`npm install left no factory ${version} in ${prefix}`);
-  return report("installed", link(prefix, root), root);
+  return report("installed", link(bin, root), root);
 }
 
 try {

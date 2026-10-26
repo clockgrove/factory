@@ -15,11 +15,19 @@ The CLI must come from the same release as this plugin. Before anything else, ru
 node SKILL_DIRECTORY/install-cli.mjs [--prefix ABSOLUTE_DIR]
 ```
 
-It reads the version from the plugin's own manifest and keeps a CLI of that version that is already installed. Otherwise it downloads that release's tarball and `SHA256SUMS`, checks the SHA-256 and the build provenance (`gh attestation verify`), and only then installs it with npm, with the Claude and Copilot SDKs. It needs `gh` logged in and the network. Pass `--prefix` only for an installation directory the operator names: absolute, and outside the target repository and any credential, configuration or state root. The default is a directory per version under `~/.local/share/clockgrove-factory`.
+It reads the version from the plugin's own manifest and keeps a CLI of that version that is already installed. Otherwise it downloads that release's tarball and `SHA256SUMS`, checks the SHA-256 and the build provenance (`gh attestation verify`), and only then installs it with npm, with the Claude and Copilot SDKs. It needs `gh` logged in and the network. Pass `--prefix` only for an installation directory the operator names: absolute, and outside the target repository and any credential, configuration or state root. The default is a directory per version under `~/.local/share/clockgrove-factory` (under `XDG_DATA_HOME` when set), and the launcher `~/.local/share/clockgrove-factory/bin/factory`, which each install points at its own version.
 
 Decide on its JSON:
 
-- `status: "current"` or `"installed"` (exit 0): `cli` is the CLI's absolute path, `PREFIX/bin/factory` unless a matching CLI was already on PATH. Run it in place of `factory` in every command below. When `path` isn't null, give the operator that one line to add to their shell's startup file, so the CLI is on their PATH for the `director` skill. `sdks` says whether the Claude and Copilot SDKs are there; those providers need them.
+- `status: "current"` or `"installed"` (exit 0): `cli` is the CLI's absolute path: the launcher (`PREFIX/bin/factory` with `--prefix`), unless a matching CLI was already on PATH. Run it in place of `factory` in every command below. `sdks` says whether the Claude and Copilot SDKs are there; those providers need them.
+- `path` not null: the launcher's directory isn't on the operator's PATH, so the `director` skill can't run `factory`. `path` is the line that puts it there; it names no version, so it stays right across releases. Offer to add it to the startup file of the operator's login shell: `~/.profile`, or `~/.bash_profile` when that exists (bash then skips `~/.profile`), or `~/.zprofile` for zsh. Write the file only on their yes, and never add the line twice:
+
+  ```sh
+  grep -qxF 'PATH_LINE' FILE || printf '%s\n' 'PATH_LINE' >> FILE
+  ```
+
+  If the file has a line from an earlier setup naming a versioned `clockgrove-factory/X.Y.Z/bin`, offer to replace that line with this one. If they decline, give them the line. It takes effect in new login shells.
+
 - `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
 
 ## Choose the outcome

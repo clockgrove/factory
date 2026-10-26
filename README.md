@@ -78,7 +78,7 @@ In Codex or Claude Code, ask Factory to set up your target (see [Use the plugin]
 1. It downloads that release's `clockgrove-factory-VERSION.tgz` and `SHA256SUMS` into a fresh directory.
 2. It checks the tarball's SHA-256 and its build provenance with `gh attestation verify`, and stops with nothing installed if either fails.
 3. It installs the tarball with npm, together with the SDKs the Claude and Copilot providers need, into `~/.local/share/clockgrove-factory/VERSION` (under `XDG_DATA_HOME` when set), or into an absolute directory you name.
-4. It links the CLI as `bin/factory` in that directory, runs it for the rest of setup and gives you the one line that puts it on your shell's PATH. That `bin` holds only Factory's launcher, which Factory keeps off its workers' PATH.
+4. It points the launcher `~/.local/share/clockgrove-factory/bin/factory` (`bin/factory` in a directory you name) at that CLI, replacing the link in one step, and runs it for the rest of setup. When that `bin` isn't on your PATH, it offers to add the one line that puts it there to your shell's startup file. The line names no version, so it stays right at the next release; replace any line an earlier setup gave you that names a versioned `clockgrove-factory/VERSION/bin`. That `bin` holds only Factory's launcher, which Factory keeps off its workers' PATH.
 
 It needs the GitHub CLI logged in and network access. The installer is `skills/setup/install-cli.mjs` in the plugin; `node` runs it on its own too, and it prints JSON with the CLI's path.
 
@@ -111,7 +111,7 @@ npm install --prefix /absolute/private/factory-prefix "./clockgrove-factory-$VER
 npm list --prefix /absolute/private/factory-prefix @anthropic-ai/claude-agent-sdk @github/copilot-sdk
 ```
 
-Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory excludes its authenticated installation bin from worker PATH when it contains only its own launcher; controller discovery and validation commands retain the original PATH. Other protected PATH entries still require correction. Factory is distributed through GitHub Releases, not the npm registry.
+Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory excludes its authenticated installation bin from worker PATH when it contains only a Factory launcher (a `factory` link to Factory's CLI, of any version); controller discovery and validation commands retain the original PATH. Other protected PATH entries still require correction. Factory is distributed through GitHub Releases, not the npm registry.
 
 ### Check the installation
 

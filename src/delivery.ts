@@ -996,16 +996,18 @@ async function judge(
   // GitHub's readiness says: CLEAN can come before it registers (#626), and
   // a missing one makes the PR BLOCKED. Missing required checks are judged
   // before any gate, so one that never registers reaches the hold below
-  // instead of reading as a wait for a review.
+  // instead of reading as a wait for a review. They are the default
+  // branch's, for a native stack's every layer too: GitHub evaluates each
+  // PR of a stack against the stack's base, not the layer below (#2060).
   const reported = new Set<string>(
     [
       ...runs.map((run) => run.name),
       ...statuses.map((status) => status.context),
     ].filter((name): name is string => typeof name === "string" && !!name),
   );
-  const unreported = (await github.requiredChecks(baseBranch, signal)).filter(
-    (name) => !reported.has(name),
-  );
+  const unreported = (
+    await github.requiredChecks(defaultBranch, signal)
+  ).filter((name) => !reported.has(name));
   const pending = [
     ...new Set([
       ...runs
@@ -1062,12 +1064,16 @@ async function judge(
     if (missing.length) {
       const pushedAt = await github.pushTime(pull.head.ref, head, signal);
       const pushed = Number.isFinite(Date.parse(pushedAt ?? ""));
+      // The default branch requires them, a stack layer above its bottom too.
+      const requiring = absent.length
+        ? "the plan requires it"
+        : `${defaultBranch}'s branch protection requires it${baseBranch === defaultBranch ? "" : ", for every layer of a native stack"}`;
       settle = {
         ms: CHECK_SETTLE_MS,
         question: `Check ${bounded(
           missing.map((name) => JSON.stringify(name)),
           ", ",
-        )} has no run or status on PR #${pr}'s head ${head} ${CHECK_SETTLE_MS / MINUTE} minutes after ${pushed ? `its push at ${pushedAt}` : "Factory began waiting"}, though ${absent.length ? "the plan" : "branch protection"} requires it. Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
+        )} has no run or status on PR #${pr}'s head ${head} ${CHECK_SETTLE_MS / MINUTE} minutes after ${pushed ? `its push at ${pushedAt}` : "Factory began waiting"}, though ${requiring}. Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
         ...(pushed ? { since: pushedAt! } : {}),
       };
     }
@@ -1859,11 +1865,12 @@ interface Layer {
  * first) as one effect, or confirm the merge already made. A one-layer unit
  * is a regular merge.
  *
- * In order: every layer is judged again (each against the branch below it,
- * the bottom against the default branch), so a failed check or conflict is
- * pinned to its own layer; merge commits must be allowed; the stack is found
- * by its bottom PR, or created and checked; each layer must contain the
- * head of the layer below it (GitHub merges that head into a layer that
+ * In order: every layer is judged again (each based on the branch below it,
+ * the bottom on the default branch, and each by the default branch's
+ * rules), so a failed check or conflict is pinned to its own layer; merge
+ * commits must be allowed; the stack is found by its bottom PR, or created
+ * and checked; each layer must contain the head of the layer below it
+ * (GitHub merges that head into a layer that
  * doesn't, as it updates a BEHIND bottom layer; only a conflict is the
  * layer's repair); then GitHub merges it through the top PR at
  * Factory's top head. Every layer must then be merged at its own head with
@@ -2168,9 +2175,10 @@ async function mergeUnitOnce(
 }
 
 /**
- * Judge every layer (each against the branch below it, the bottom against
- * the default branch) before any wait, so a failure is pinned to its
- * layer: repairs first, then questions, then waits.
+ * Judge every layer (each based on the branch below it, the bottom on the
+ * default branch) before any wait, so a failure is pinned to its layer:
+ * repairs first, then questions, then waits. Every layer's required checks
+ * and review-thread rule are the default branch's, the stack's base.
  */
 async function judgeLayers(
   context: DeliveryContext,
@@ -2193,7 +2201,10 @@ async function judgeLayers(
   return { layers, defaultBranch };
 }
 
-/** Judge one layer against the branch below it; the bottom against the default branch. */
+/**
+ * Judge one layer as based on the branch below it, the bottom on the
+ * default branch; judge reads the rules from the default branch for each.
+ */
 function judgeLayer(
   context: DeliveryContext,
   input: PullInput[],

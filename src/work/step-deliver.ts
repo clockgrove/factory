@@ -11,6 +11,7 @@ import {
   REPUBLISH,
   RESET_BRANCH,
   type Repair,
+  type Rerun,
 } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateSet } from "../media.js";
@@ -177,6 +178,7 @@ export function pullInput(
   const plan = currentPlan(state)!;
   const published = state.done[stepKey(item.id, "publish")] as PublishResult;
   const branch = baseBranch(state.issue, place);
+  const rerun = fact(state, "ciRerun", item.id);
   return {
     issue: state.issue,
     item: item.id,
@@ -188,6 +190,7 @@ export function pullInput(
     ),
     ...(context.answer?.answer === REPUBLISH ? { republish: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
+    ...(rerun ? { rerun } : {}),
   };
 }
 
@@ -202,18 +205,68 @@ export async function ciStep(
     pullInput(context.state, item, context, place),
   );
   switch (result.kind) {
-    case "ready":
+    case "ready": {
+      const flaky = passedRerun(context, item, result.head);
       return {
         kind: "done",
         result: { head: result.head, merged: result.merged },
+        ...(flaky ? { keep: flaky } : {}),
       };
+    }
     case "repair":
       return deliveryRepair(item, context, place, result, "ci");
     case "republish":
       return republishOutcome(item, result.reason);
+    case "rerun":
+      return rerunOutcome(context, item, result);
     default:
       return result;
   }
+}
+
+/**
+ * Failed Actions jobs rerun before a repair (delivery.ts `rerunFailed`):
+ * logged, and kept so no workflow run is rerun twice on the same head.
+ */
+export function rerunOutcome(
+  context: StepContext,
+  item: WorkItem,
+  { rerun, reason, afterMs }: Rerun,
+): Outcome {
+  context.log({
+    event: "ci-rerun",
+    item: item.id,
+    head: rerun.head,
+    checks: rerun.checks,
+    runs: rerun.runs,
+  });
+  return {
+    kind: "retry",
+    reason,
+    afterMs,
+    keep: facts({ ciRerun: rerun }, item.id),
+  };
+}
+
+/**
+ * The item's checks passed on `head` after their failed Actions jobs were
+ * rerun there: a flake, logged once and kept `passed` for the report.
+ */
+export function passedRerun(
+  context: StepContext,
+  item: WorkItem,
+  head: string,
+): Record<string, unknown> | undefined {
+  const rerun = fact(context.state, "ciRerun", item.id);
+  if (rerun?.head !== head || rerun.passed) return undefined;
+  context.log({
+    event: "ci-flaky",
+    item: item.id,
+    head,
+    checks: rerun.checks,
+    runs: rerun.runs,
+  });
+  return facts({ ciRerun: { ...rerun, passed: true } }, item.id);
 }
 
 export async function mergeStep(
@@ -240,12 +293,15 @@ export async function mergeStep(
         integratedSha: result.integratedSha,
         at: new Date().toISOString(),
       };
-      return { kind: "done", result: done };
+      const flaky = passedRerun(context, item, ci.head);
+      return { kind: "done", result: done, ...(flaky ? { keep: flaky } : {}) };
     }
     case "repair":
       return deliveryRepair(item, context, place, result, "merge");
     case "republish":
       return republishOutcome(item, result.reason);
+    case "rerun":
+      return rerunOutcome(context, item, result);
     default:
       return result;
   }
@@ -324,7 +380,17 @@ export async function mergeStack(
         at: new Date().toISOString(),
         items: result.items,
       };
-      return { kind: "done", result: done };
+      const flaky = Object.assign(
+        {},
+        ...layers.map((input, at) =>
+          passedRerun(context, unit.items[at] as WorkItem, input.head),
+        ),
+      );
+      return {
+        kind: "done",
+        result: done,
+        ...(Object.keys(flaky).length ? { keep: flaky } : {}),
+      };
     }
     case "repair":
       return deliveryRepair(
@@ -336,6 +402,8 @@ export async function mergeStack(
       );
     case "republish":
       return republishOutcome(layer(result.item), result.reason);
+    case "rerun":
+      return rerunOutcome(context, layer(result.item), result);
     default: {
       const { item: _layer, ...outcome } = result;
       return outcome;

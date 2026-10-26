@@ -44,6 +44,13 @@ export const VALIDATION_TOOL_NAME = "run_validation";
 export const VALIDATION_TOOL_DESCRIPTION =
   "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.";
 
+/**
+ * What a failed check asks of a fix outside the owned paths: the worker's
+ * discovery (repair.ts `discover`), never a change or a report alone.
+ */
+export const UNOWNED_FIX =
+  "If the fix needs files outside your owned paths, do not change them: write an in-scope .factory-discovery.json naming them and stop.";
+
 /** Validate keeps the tail: failures report last. */
 const VALIDATION_OUTPUT_CHARS = 8_000;
 /** Enough of a note to see which criterion and sub-clauses it answers. */
@@ -113,6 +120,8 @@ export class SelfValidation {
   private queue: Promise<unknown> = Promise.resolve();
   private runs = 0;
   private readonly passedTrees = new Set<string>();
+  /** Trees whose last run failed. */
+  private readonly failedTrees = new Set<string>();
 
   /** `signal` stops a running validation: cancel, or the attempt ending. */
   constructor(
@@ -177,7 +186,7 @@ export class SelfValidation {
     const declared =
       result.kind === "passed"
         ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}`;
+        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}\n${UNOWNED_FIX}`;
     const parts = [
       result.produced ? `${declared}\n\n${result.produced}` : declared,
     ];
@@ -189,7 +198,10 @@ export class SelfValidation {
     if (passed && !handoff.passed)
       parts.unshift("Validation failed. Fix this before you finish.");
     // The handoff is outside the tree; the final check decodes it again.
-    if (passed) this.passedTrees.add(tree);
+    if (passed) {
+      this.passedTrees.add(tree);
+      this.failedTrees.delete(tree);
+    } else this.failedTrees.add(tree);
     input.log({
       event: "worker-validate",
       run,
@@ -259,6 +271,21 @@ export class SelfValidation {
         : false;
     } catch {
       return undefined;
+    }
+  }
+
+  /** Whether the last run on the files the worker has now failed. */
+  async finalFailed(): Promise<boolean> {
+    if (!this.failedTrees.size) return false;
+    try {
+      const snapped = await snapshot(
+        this.input.worktree,
+        this.options.sandbox,
+        this.input.signal,
+      );
+      return !("problem" in snapped) && this.failedTrees.has(snapped.tree);
+    } catch {
+      return false;
     }
   }
 }

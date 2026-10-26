@@ -146,7 +146,7 @@ function collector(): { findings: Finding[]; found: Found } {
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
-const strings = (value: unknown): value is string[] =>
+export const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((entry) => typeof entry === "string");
 
 /** Field types, so later checks can read the item safely. False when the item is unusable. */

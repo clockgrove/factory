@@ -91,7 +91,8 @@ test("a transient wait retries without counting errors, then asks, and wait wait
     "the question again once the grant is spent",
   );
   assert.ok(
-    stateOf(inst, 22).holds[0].askedAt >= granted.retries.check.grantedUntil,
+    Date.parse(stateOf(inst, 22).holds[0].askedAt) >=
+      Date.parse(granted.retries.check.grantedUntil),
     "no question again before the grant is spent",
   );
   assert.equal(cli(inst, "cancel", "22").code, 0);

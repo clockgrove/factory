@@ -434,7 +434,8 @@ async function providerChecks(
   return checks;
 }
 
-async function repositoryChecks(
+/** The repository's checks: access, branch rules, issue types and the installation serving it. */
+export async function repositoryChecks(
   config: CoreConfig,
   github: GitHub,
 ): Promise<ReadinessCheck[]> {
@@ -502,6 +503,20 @@ async function repositoryChecks(
             fix: `Require no approving reviews on ${branch}`,
           }
         : ok("required reviews", `${branch} requires no approving review`),
+    );
+    const resolution = await github.threadResolution(branch);
+    checks.push(
+      resolution.length
+        ? {
+            name: "review threads",
+            status: "warn",
+            detail: `${branch} requires review threads to be resolved (${resolution.join(" and ")}), so a review comment left unresolved on a Factory PR holds its merge with a question until someone resolves it`,
+            fix: `Resolve review threads on Factory PRs, or require no conversation resolution on ${branch}`,
+          }
+        : ok(
+            "review threads",
+            `${branch} requires no review thread resolution`,
+          ),
     );
     if (config.tracking.enabled) {
       const missing = await offeredTypes(github).then(

@@ -8,10 +8,12 @@ import {
   commandScope,
   listCommands,
   networkToolOfCommand,
+  PACKAGE_SCRIPT_FORMS,
   packageBootstrap,
   sectionText,
   unknownCheckMessage,
   unknownCheckNames,
+  unpinnablePackageCommand,
 } from "./facts.js";
 import {
   ancestors,
@@ -90,7 +92,11 @@ async function exportPathFindings(
 
 // ── Commands ────────────────────────────────────────────────────────────
 
-/** CI-only: a command the installation leaves to CI never runs in validation. */
+/**
+ * CI-only: a command the installation leaves to CI never runs in
+ * validation. Unpinnable: a package command whose script validation can't
+ * keep fixed is refused there, after the work is built.
+ */
 function commandFindings(
   items: readonly WorkItem[],
   facts: PlanningFacts,
@@ -98,10 +104,15 @@ function commandFindings(
 ): void {
   const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
   for (const item of items)
-    for (const check of item.validation)
-      if (ciOnly.has(ciOnlyKey(check.command)))
+    for (const { command } of item.validation)
+      if (ciOnly.has(ciOnlyKey(command)))
         found(
-          `Work Item ${item.id} validation runs ${check.command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
+          item.id,
+        );
+      else if (unpinnablePackageCommand(command))
+        found(
+          `Work Item ${item.id} validation runs ${command}, which runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}: validation pins only those root script forms, so it would refuse this command after the work is built. Use one of those forms (root package scripts: ${listCommands(facts.packageCommands)}), or run the tool directly without npm or pnpm`,
           item.id,
         );
 }

@@ -2,6 +2,10 @@
 # Factory integration tests: real GitHub, real providers, on demand.
 #
 #   run-suite.sh [--suite main|edge|prd] [--provider codex|claude] [--build DIR] [--state-base DIR] [--only a,b] [--capture] [--keep-repos] [--dry-run]
+#   run-suite.sh --replay RUN_ID [--suite S] [--only a,b]
+#
+# --replay re-evaluates a kept run's replayable checks with this checkout's code
+# over that run's state, logs and run files: nothing live, a new results file.
 #
 # --provider (default codex) is the provider every case runs on; the claude
 # case, the cross-provider one, runs 'factory run N --provider' with the other.
@@ -21,10 +25,10 @@
 set -uo pipefail
 {   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""
+BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""; REPLAY=""; KEPT=""
 REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
-usage() { sed -n 2,20p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n 2,24p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITE_NAME=${2:?}; shift 2 ;;
@@ -35,6 +39,7 @@ while [ $# -gt 0 ]; do
     --capture) CAPTURE=1; shift ;;
     --keep-repos) KEEP_REPOS=1; shift ;;
     --dry-run) DRY=1; shift ;;
+    --replay) REPLAY=${2:?}; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
@@ -116,11 +121,11 @@ if [ -n "$DRY" ]; then
   echo; budget
   rm -rf "$RUN_DIR"; exit 0
 fi
-[ -f "$BUILD/dist/cli.js" ] || { echo "no CLI at $BUILD/dist/cli.js (npm run build)" >&2; exit 2; }
+[ -f "$BUILD/dist/cli.js" ] || [ -n "$REPLAY" ] || { echo "no CLI at $BUILD/dist/cli.js (npm run build)" >&2; exit 2; }
 
 # Every remote call shares the run's deadline, including commands in bash
 # predicates. Leave time for the final report even when an API stops replying.
-GH_BIN=$(command -v gh) || { echo "gh is required" >&2; exit 2; }
+GH_BIN=$(command -v gh) || [ -n "$REPLAY" ] || { echo "gh is required" >&2; exit 2; }
 GIT_BIN=$(command -v git) || { echo "git is required" >&2; exit 2; }
 export GH_BIN GIT_BIN
 run_bounded() {
@@ -221,19 +226,48 @@ write_results() {
   local out="$RUNS/results/$RUN_ID.md" end_s; end_s=$(date +%s)
   local tot; tot=$(awk -F'\t' '{print $4}' "$RUN_DIR/results.tsv" | sort | uniq -c | awk '{printf "%s %s, ", $1, $2}')
   {
-    echo "# Integration run $RUN_ID ($SUITE_NAME)"; echo
+    echo "# Integration run $RUN_ID ($SUITE_NAME)${REPLAY:+: Replay of $REPLAY}"; echo
     echo "Wall time: **$(( (end_s - START_S) / 60 )) min $(( (end_s - START_S) % 60 )) s** (limit 60), from $(TZ=America/Los_Angeles date -d @"$START_S" '+%-I:%M %p') to $(TZ=America/Los_Angeles date -d @"$end_s" '+%-I:%M %p') PDT${INTERRUPTED:+. **Interrupted**}."; echo
-    echo "- Build: $BUILD ($commit)"; echo "- Provider: $PROVIDER"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
-    echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ')$([ -s "$RUN_DIR/projects" ] && echo ", Project #$(paste -sd' ' "$RUN_DIR/projects")") (${REPOS_NOTE:-none created})"; echo
+    if [ -n "$REPLAY" ]; then
+      echo "Replay of $REPLAY: this checkout's checks over the run's kept state, logs and run files ($KEPT). Nothing ran live; a NOT-REPLAYABLE check needs a live run."; echo
+      echo "- Suite code: $SUITE ($(git -C "$SUITE" log -1 --format='%h %s' | cut -c1-80))"; echo "- Run dir: $RUN_DIR"; echo
+    else
+      echo "- Build: $BUILD ($commit)"; echo "- Provider: $PROVIDER"; echo "- State: $STATE_BASE"; echo "- Run dir: $RUN_DIR"
+      echo "- Repositories: $(sed "s|^|$REPO_OWNER/|" "$RUN_DIR/repos" | paste -sd' ')$([ -s "$RUN_DIR/projects" ] && echo ", Project #$(paste -sd' ' "$RUN_DIR/projects")") (${REPOS_NOTE:-none created})"; echo
+    fi
     echo "**Totals:** ${tot%, }."; echo
-    echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"
-    awk -F'\t' '{d=$4-$3; printf "| %s | %s | +%dm%02ds | +%dm%02ds | %dm %02ds |\n", $1, $2, $3/60, $3%60, $4/60, $4%60, d/60, d%60}' "$RUN_DIR/cases.tsv"
-    echo; echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
+    if [ -s "$RUN_DIR/cases.tsv" ]; then
+      echo "## Cases"; echo; echo "| Case | Lane | Started | Ended | Duration |"; echo "|---|---|---|---|---|"
+      awk -F'\t' '{d=$4-$3; printf "| %s | %s | +%dm%02ds | +%dm%02ds | %dm %02ds |\n", $1, $2, $3/60, $3%60, $4/60, $4%60, d/60, d%60}' "$RUN_DIR/cases.tsv"; echo
+    fi
+    echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
     [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":"", $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2
 }
+
+# ---------- replay: a kept run's checks again, nothing live ----------
+# A case's replay_<case> (cases/*.sh) finds its Objectives in the kept run's
+# files and calls the check functions the live case calls. Every other selected
+# check is NOT-REPLAYABLE, never PASS.
+if [ -n "$REPLAY" ]; then
+  KEPT=$RUNS/$REPLAY
+  [ -d "$KEPT/inst" ] || { echo "no kept run at $KEPT" >&2; rm -rf "$RUN_DIR"; exit 2; }
+  # A replay under another suite finds none of its lanes and would pass empty.
+  kept_suite=$(sed -n '1s/^# Integration run [^ ]* (\([a-z]*\)).*/\1/p' "$RUNS/results/$REPLAY.md" 2>/dev/null)
+  [ "$kept_suite" = "$SUITE_NAME" ] || { echo "$REPLAY was a '${kept_suite:-unknown}' run; replay it with --suite ${kept_suite:-<its suite>}" >&2; rm -rf "$RUN_DIR"; exit 2; }
+  for row in "${SEL[@]}"; do
+    IFS='|' read -r c lane _ _ <<<"$row"
+    if [ -s "$KEPT/inst/$lane/env" ] && declare -F "replay_$c" >/dev/null; then ( CASE=$c; inst "$lane"; "replay_$c" ); fi
+    for check in $(required_checks "$c"); do
+      awk -F'\t' -v k="$check" '$1==k{f=1} END{exit !f}' "$RUN_DIR/results.tsv" ||
+        ( CASE=$c INST=$lane; record "$check" NOT-REPLAYABLE "not replayed: its evidence isn't all in the kept run (live GitHub, the run's own drive or a moment's timing)" "$START_S" )
+    done
+  done
+  write_results
+  awk -F'\t' '$4=="FAIL"{f=1} END{exit f}' "$RUN_DIR/results.tsv"; exit
+fi
 CASE_PIDS=()
 stop_cases() {
   touch "$RUN_DIR/stop"

@@ -7,11 +7,14 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { unitName, unitText } from "../dist/systemd.js";
 import {
   CLI,
   cli,
@@ -696,4 +699,60 @@ test("one installation serves a repository: another is refused, a restart resume
   const again = serve(first);
   await until(() => record(), "the first installation takes it again");
   await stopped(again);
+});
+
+// The unit is written, never loaded: systemctl only reports it inactive.
+test("setup --check judges the unit by the node and PATH it records: a shell with others is current, another Factory or a missing node isn't", () => {
+  const inst = installation();
+  const units = tempDir("factory-units-");
+  inst.env.XDG_CONFIG_HOME = units;
+  mkdirSync(inst.root, { recursive: true });
+  mkdirSync(join(units, "systemd", "user"), { recursive: true });
+  const path = join(
+    units,
+    "systemd",
+    "user",
+    unitName({ root: realpathSync(inst.root) }),
+  );
+  // Another node than the checking shell's, on the unit's PATH only.
+  const node = join(tempDir("factory-node-"), "node");
+  symlinkSync(process.execPath, node);
+  const runtime = {
+    node,
+    env: { PATH: `${dirname(node)}:/usr/bin:/bin`, HOME: inst.env.HOME },
+  };
+  assert.notEqual(inst.env.PATH, runtime.env.PATH);
+  const check = (text) => {
+    writeFileSync(path, text);
+    const report = JSON.parse(cli(inst, "setup", "--check", "--json").out);
+    assert.equal(report.service.installed, true, JSON.stringify(report));
+    return report;
+  };
+
+  const healthy = check(unitText(REPO, [], runtime));
+  assert.equal(healthy.service.current, true, JSON.stringify(healthy));
+  assert.equal(healthy.service.missingNode, undefined);
+  assert.doesNotMatch(healthy.warnings.join("\n"), /another Factory|missing/);
+
+  const upgraded = check(
+    unitText(REPO, [], runtime).replace(
+      realpathSync(CLI),
+      "/opt/factory-0.5.0/dist/cli.js",
+    ),
+  );
+  assert.equal(upgraded.service.current, false);
+  assert.match(
+    upgraded.warnings.join("\n"),
+    /The unit runs another Factory than this one/,
+  );
+
+  const gone = join(dirname(node), "gone", "node");
+  const missing = check(unitText(REPO, [], { ...runtime, node: gone }));
+  assert.equal(missing.service.current, false);
+  assert.equal(missing.service.missingNode, gone);
+  assert.match(
+    missing.warnings.join("\n"),
+    new RegExp(`The unit's node ${gone} is missing`),
+  );
+  assert.doesNotMatch(missing.warnings.join("\n"), /another Factory/);
 });

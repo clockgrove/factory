@@ -75,9 +75,21 @@ m_kill() {
   [ -n "$pid" ] || { record "$c" FAIL "not proved: no active $glob attempt with its own $PROVIDER child was killed for #$n" "$t0"; return; }
   log "#$n killed provider child $pid during $id (service run $run)"
   wait_for 300 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=retry 'step=$step' 'attemptId=$id') -gt 0 ]"
-  local after errors; after=$(st events "$n" event=outcome outcome=retry "step=$step" "attemptId=$id")
-  errors=$(st events "$n" event=outcome outcome=retry wait=error "step=$step" "attemptId=$id")
-  [ "$after" = 1 ] && [ "$errors" = 0 ]; rec_if "$c" $? "#$n killed $pid in $id: retry outcomes $after, charged errors $errors" "$t0"
+  m_kill_check "$c" "$n" "$step" "$id" "$pid" "$t0"
+}
+# m_kill_check CHECK N STEP ATTEMPT PID T0: from N's logs alone (also run-suite.sh --replay).
+m_kill_check() {
+  local after errors; after=$(st events "$2" event=outcome outcome=retry "step=$3" "attemptId=$4")
+  errors=$(st events "$2" event=outcome outcome=retry wait=error "step=$3" "attemptId=$4")
+  [ "$after" = 1 ] && [ "$errors" = 0 ]; rec_if "$1" $? "#$2 killed $5 in $4: retry outcomes $after, charged errors $errors" "$6"
+}
+# A replay: the attempts m_kill killed, from the kept journal (an attempt id is STEP#K).
+replay_codex() {
+  local n pid id c
+  while read -r n pid id; do
+    c=""; case ${id%#*} in plan*) c=model-kill.plan ;; item:*:work) c=model-kill.work ;; esac
+    [ -z "$c" ] || m_kill_check "$c" "$n" "${id%#*}" "$id" "$pid" "$(now)"
+  done < <(sed -n 's/.*\[codex\] #\([0-9]*\) killed provider child \([0-9]*\) during \([^ ]*\) .*/\1 \2 \3/p' "$KEPT/journal")
 }
 
 # The triggering closing phrase must occur in real PR text, with both its

@@ -32,7 +32,8 @@ CUR_CFG=$3
 EOF
   mkdir -p "$STATE_BASE/$1"
 }
-inst() { source "$RUN_DIR/inst/$1/env"; }
+# A replay (KEPT: the kept run's directory) reads the kept run's installations.
+inst() { source "${KEPT:-$RUN_DIR}/inst/$1/env"; }
 # The installation's live serve directory (the supervisor or the lane writes it).
 serve_dir_of() { cat "$RUN_DIR/inst/$1/serve_dir" 2>/dev/null; }
 
@@ -45,6 +46,14 @@ record() {
 }
 # rec_if CHECK COND_EXIT EVIDENCE T0: PASS when the condition (an exit code) is 0, else FAIL.
 rec_if() { if [ "$2" = 0 ]; then record "$1" PASS "$3" "$4"; else record "$1" FAIL "$3" "$4"; fi; }
+# rec_part CHECK KEPT LIVE EVIDENCE T0: a check whose evidence is partly the kept
+# state and logs (exit code KEPT) and partly live GitHub (exit code LIVE, empty in
+# a replay). A replay fails it on the kept part; it never passes it.
+rec_part() {
+  if [ -n "$3" ]; then [ "$2" = 0 ] && [ "$3" = 0 ]; rec_if "$1" $? "$4" "$5"
+  elif [ "$2" = 0 ]; then record "$1" NOT-REPLAYABLE "the kept part passes, the rest is live GitHub: $4" "$5"
+  else record "$1" FAIL "$4" "$5"; fi
+}
 
 # ---------- config (scratch copies only) ----------
 cfg_patch() {
@@ -358,8 +367,8 @@ new_objective() {
   echo "$n"
 }
 uid() { python3 -c 'import random,string;print("Q"+"".join(random.choice(string.ascii_lowercase) for _ in range(4)))'; }
-# The case's own Objectives (this installation).
-case_issues() { awk -v c="$CASE" -v i="$INST" '$2==c && $3==i {print $1}' "$RUN_DIR/issues" 2>/dev/null; }
+# The case's own Objectives (this installation), in the order it filed them.
+case_issues() { awk -v c="$CASE" -v i="$INST" '$2==c && $3==i {print $1}' "${KEPT:-$RUN_DIR}/issues" 2>/dev/null; }
 # case_settle: cancel this case's unsettled Objectives (the wave's end does the same for all).
 case_settle() {
   local n

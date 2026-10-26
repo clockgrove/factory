@@ -132,7 +132,39 @@ test("an upper stack layer waits for a check only the default branch requires", 
   );
   assert.match(
     waited.holdAfter.question,
-    /^Check "deploy" has no run or status on PR #8's head .*, though branch protection requires it\./,
+    /^Check "deploy" has no run or status on PR #8's head .*, though main's branch protection requires it, for every layer of a native stack\./,
+  );
+  assert.deepEqual(read, ["main"]);
+});
+
+test("a PR on the default branch names that branch as requiring the check", async () => {
+  const { checkout, head } = checkoutWithOrigin();
+  const read = [];
+  const answers = stackAnswers(head, read);
+  const pull = { sha: head, ref: "factory/1/a" };
+  answers.pull = async (number) => ({
+    number,
+    state: "open",
+    merged: false,
+    draft: false,
+    head: pull,
+    base: { ref: "main" },
+  });
+  answers.mergeState = async () => ({
+    headRefOid: head,
+    headRefName: pull.ref,
+    baseRefName: "main",
+    mergeStateStatus: "CLEAN",
+    reviewDecision: null,
+  });
+  const waited = await observeCi(
+    context(fake(answers), checkout),
+    layer("a", 7, head),
+  );
+  assert.equal(waited.kind, "retry", JSON.stringify(waited));
+  assert.match(
+    waited.holdAfter.question,
+    /^Check "deploy" has no run or status on PR #7's head .*, though main's branch protection requires it\. Trigger/,
   );
   assert.deepEqual(read, ["main"]);
 });

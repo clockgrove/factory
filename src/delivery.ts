@@ -1064,12 +1064,16 @@ async function judge(
     if (missing.length) {
       const pushedAt = await github.pushTime(pull.head.ref, head, signal);
       const pushed = Number.isFinite(Date.parse(pushedAt ?? ""));
+      // The default branch requires them, a stack layer above its bottom too.
+      const requiring = absent.length
+        ? "the plan requires it"
+        : `${defaultBranch}'s branch protection requires it${baseBranch === defaultBranch ? "" : ", for every layer of a native stack"}`;
       settle = {
         ms: CHECK_SETTLE_MS,
         question: `Check ${bounded(
           missing.map((name) => JSON.stringify(name)),
           ", ",
-        )} has no run or status on PR #${pr}'s head ${head} ${CHECK_SETTLE_MS / MINUTE} minutes after ${pushed ? `its push at ${pushedAt}` : "Factory began waiting"}, though ${absent.length ? "the plan" : "branch protection"} requires it. Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
+        )} has no run or status on PR #${pr}'s head ${head} ${CHECK_SETTLE_MS / MINUTE} minutes after ${pushed ? `its push at ${pushedAt}` : "Factory began waiting"}, though ${requiring}. Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
         ...(pushed ? { since: pushedAt! } : {}),
       };
     }

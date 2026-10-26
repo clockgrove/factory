@@ -33,7 +33,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    - the tools on the PATH;
    - each provider's SDK and login;
    - GitHub access and push;
-   - merge commits, required checks, required reviews, and a recommendation to require branches to be up to date;
+   - merge commits, required checks, required reviews, required review thread resolution, and a recommendation to require branches to be up to date;
    - which installation serves the repository, if any.
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).

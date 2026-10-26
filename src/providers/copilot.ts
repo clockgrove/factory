@@ -19,6 +19,7 @@ import type {
 import { isObject } from "../checked.js";
 import { serviceCredential } from "../credentials.js";
 import { runningBuild } from "../log.js";
+import { pathInsideRoot } from "../paths.js";
 import { errorMessage } from "../text.js";
 import { validationDeadlineMs } from "../validate.js";
 import {
@@ -36,7 +37,6 @@ import {
 } from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
 import { ACTIVE_TOOL_IDLE_MS } from "./claude.js";
-import { pathInsideRoot } from "./claude-worker.js";
 import { COPILOT_SECRETS } from "./config.js";
 import {
   callImages,

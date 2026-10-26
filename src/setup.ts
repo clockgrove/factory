@@ -724,10 +724,14 @@ function lingerWarning(service: ServiceState): string[] {
           "Lingering is off, so the service stops when you log out; `loginctl enable-linger` keeps it running",
         ]
       : []),
-    ...(service.installed && !service.current
+    ...(service.missingNode
       ? [
-          "The unit runs another Factory or environment than this one (an upgrade?); repeat factory setup --background to update and restart it",
+          `The unit's node ${service.missingNode} is missing; repeat factory setup --background from a shell whose node runs Factory to update and restart it`,
         ]
-      : []),
+      : service.installed && !service.current
+        ? [
+            "The unit runs another Factory than this one (an upgrade?); repeat factory setup --background to update and restart it",
+          ]
+        : []),
   ];
 }

@@ -26,7 +26,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
 import type {
@@ -40,7 +40,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
 import { errored, hold } from "../engine.js";
-import { openParent, within } from "../paths.js";
+import { openParent, pathInsideRoot, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
 import type { Plan } from "../planning/types.js";
 import { runSandboxed, sandboxAvailable } from "../sandbox.js";
@@ -238,49 +238,6 @@ function sdkModel(model: string): string {
 }
 
 // Paths
-
-/**
- * Follow a path one component at a time so a symlink or `..` can't escape
- * and a dangling final symlink is never taken for a safe new file. No
- * component, as written or after a link, may be `.git`: a worker that
- * repoints a `.git` file can make host Git run its own filter.
- */
-export function pathInsideRoot(path: string, root: string): boolean {
-  try {
-    if (!path || path.includes("\0")) return false;
-    const lexicalRoot = resolve(root);
-    const realRoot = realpathSync(root);
-    let remainder = path;
-    if (isAbsolute(path)) {
-      // Strip a literal prefix, so the walk sees every component as written.
-      const prefix = [lexicalRoot, realRoot]
-        .filter(
-          (candidate) =>
-            path === candidate || path.startsWith(`${candidate}${sep}`),
-        )
-        .sort((left, right) => right.length - left.length)[0];
-      if (!prefix) return false;
-      remainder = path.slice(prefix.length);
-    }
-    let current = realRoot;
-    for (const component of remainder.split(sep)) {
-      if (!component || component === ".") continue;
-      if (component === "..") current = dirname(current);
-      else {
-        const next = join(current, component);
-        const entry = lstatSync(next, { throwIfNoEntry: false });
-        // realpathSync rejects a dangling link, including a final Write
-        // destination that would redirect later.
-        current = entry?.isSymbolicLink() ? realpathSync(next) : next;
-      }
-      if (!within(current, realRoot)) return false;
-      if (relative(realRoot, current).split(sep).includes(".git")) return false;
-    }
-    return within(current, realRoot);
-  } catch {
-    return false;
-  }
-}
 
 function boundedGlob(pattern: unknown): boolean {
   return (

@@ -529,7 +529,8 @@ export function reportStep(deps: BuildDeps): Step {
 
 /**
  * The report: each Work Item's PR and merge, final validation and review,
- * the operator's decisions and retirements, and the operators' mentions.
+ * the checks a rerun passed, the operator's decisions and retirements,
+ * and the operators' mentions.
  */
 export function reportComment(
   marker: string,
@@ -554,7 +555,16 @@ export function reportComment(
     0,
   );
   const decided = decisionLines(decisionsOf(state));
-  return `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
+  // CI flakes: checks that failed, then passed on their one rerun.
+  const flaky = plan.items.flatMap((item) => {
+    const rerun = fact(state, "ciRerun", item.id);
+    return rerun?.passed
+      ? [
+          `- **${item.id}**: ${rerun.checks.map((check) => `\`${check}\``).join(", ")} at \`${rerun.head.slice(0, 12)}\``,
+        ]
+      : [];
+  });
+  return `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${flaky.length ? `\n\nPossibly flaky CI checks, which failed and then passed when Factory reran their failed Actions jobs once:\n${flaky.join("\n")}` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
     plan.retired?.length
       ? `\n\nRetired final validation commands:\n${retiredLines(plan)
           .map((line) => `- ${line}`)

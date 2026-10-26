@@ -48,7 +48,7 @@ import { crashPoint } from "../crash.js";
 import { serviceCredential } from "../credentials.js";
 import { hold } from "../engine.js";
 import { validPath } from "../objective.js";
-import { ContainedError, copyContained } from "../paths.js";
+import { ContainedError, copyContained, pathInsideRoot } from "../paths.js";
 import { writeAtomic } from "../state.js";
 import { errorMessage } from "../text.js";
 import {
@@ -59,7 +59,6 @@ import {
   type WorkerSpend,
 } from "../work/worker.js";
 import { hostGit } from "../worktree.js";
-import { pathInsideRoot } from "./claude-worker.js";
 import type { WorkerConfig } from "./config.js";
 import { detail, PlannerError, providerOutcome } from "./planner.js";
 import {

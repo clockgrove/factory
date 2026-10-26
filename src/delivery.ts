@@ -142,6 +142,30 @@ export interface Republish {
   reason: string;
 }
 
+/** Failed Actions jobs Factory reran on a PR's head, at most once per workflow run (#2054). */
+export interface CiRerun {
+  head: string;
+  /** The failed checks the rerun was for. */
+  checks: string[];
+  /** Their workflow runs. */
+  runs: number[];
+  at: string;
+  /** The checks passed on the rerun: logged, and named in the report. */
+  passed?: true;
+}
+
+/**
+ * Factory reran failed Actions jobs: a wait for their new attempt. The
+ * item step keeps `rerun` (work/facts.ts `ciRerun`), passes it back as
+ * PullInput.rerun, and logs it.
+ */
+export interface Rerun {
+  kind: "rerun";
+  reason: string;
+  afterMs: number;
+  rerun: CiRerun;
+}
+
 /** What every delivery call needs. */
 export interface DeliveryContext {
   github: GitHub;
@@ -754,6 +778,8 @@ export interface PullInput {
   republish?: boolean;
   /** The PR's base, as given to publish (see PublishInput.baseBranch). */
   baseBranch?: string;
+  /** The item's last rerun of failed Actions jobs, as kept. */
+  rerun?: CiRerun;
 }
 
 export type CiResult =
@@ -766,16 +792,19 @@ export type CiResult =
   | Retry
   | Repair
   | Hold
-  | Republish;
+  | Republish
+  | Rerun;
 
 /**
  * Whether the PR may merge. Every check on the exact head must settle; any
  * that failed, required or not, or a conflict with the base, is a repair
- * (#1637). Each plan-named check must pass by name. A PR BEHIND its base
+ * (#1637), once failed Actions jobs were rerun (rerunFailed). Each
+ * plan-named check must pass by name. A PR BEHIND its base
  * under strict protection is updated by GitHub and observed again. A PR
  * made a draft, closed without merging, with only cancelled checks nothing
  * re-ran, or with a needed check that never registered, is a question
- * (#1640). One with no checks at all merges once the settle window passes
+ * (#1640), as is one BLOCKED on review threads its base requires resolved
+ * (#2053). One with no checks at all merges once the settle window passes
  * with no Actions run on its head left unfinished or failed. Checks queued
  * or running are a transient wait; an environment approval or a required
  * review is a human gate the engine waits on without a deadline
@@ -865,7 +894,8 @@ type Judged =
   | Retry
   | Repair
   | Hold
-  | Republish;
+  | Republish
+  | Rerun;
 
 async function judge(
   context: DeliveryContext,
@@ -931,17 +961,20 @@ async function judge(
     (check) => !["cancelled", "stale"].includes(check.conclusion),
   );
   if (broken.length) {
+    const rerun = await rerunFailed(context, input, head, broken);
+    if (rerun) return rerun;
     // Why the first few failed, so a repair is not blind.
     const excerpts: string[] = [];
     for (const check of broken.slice(0, EXCERPTED_CHECKS)) {
       const excerpt = check.run && (await failureExcerpt(context, check.run));
       if (excerpt) excerpts.push(`${check.name}:\n${excerpt}`);
     }
+    const reran = input.rerun?.head === head ? input.rerun : undefined;
     return {
       kind: "repair",
       checks: true,
       finding: [
-        `Checks failed on PR #${pr} at ${head}: ${listed(broken)}`,
+        `Checks failed on PR #${pr} at ${head}: ${listed(broken)}${reran ? `. Factory reran the failed Actions jobs of ${bounded(reran.checks, ", ")} once on this head, and the failure stands` : ""}`,
         ...excerpts,
       ].join("\n\n"),
     };
@@ -1000,6 +1033,17 @@ async function judge(
       ? `Awaiting checks and protection readiness on PR #${pr}${pending.length ? `: ${pending.join(", ")}` : ""}`
       : undefined;
   if (waiting) {
+    // Blocked with every check there: review threads the default branch
+    // requires resolved never resolve by waiting, so Factory asks at once
+    // (#2053).
+    if (
+      state.mergeStateStatus === "BLOCKED" &&
+      !pending.length &&
+      !named.length
+    ) {
+      const threads = await threadsHold(context, pr, defaultBranch);
+      if (threads) return threads;
+    }
     // Plan-named checks with no run on the head at all.
     const absent = named.filter((name) => !runs.some((r) => r.name === name));
     const renamed = await renamedChecks(
@@ -1090,6 +1134,36 @@ async function renamedChecks(
       gone.map((name) => JSON.stringify(name)),
       ", ",
     )} has not reported on PR #${at.pr}'s head ${at.head} and is no longer a job in ${at.baseBranch}'s GitHub workflows (at ${tip}), so it will never report. Restore the job under that name on ${at.baseBranch}, then answer retry; or cancel.`,
+  );
+}
+
+/**
+ * A PR with unresolved review threads that the default branch requires
+ * resolved (GitHub.threadResolution): GitHub blocks or refuses its merge
+ * until a person resolves them, so it is a question naming each thread.
+ * The default branch's rules apply to a native stack's every layer too:
+ * GitHub evaluates each PR of a stack against the stack's base. Undefined
+ * when none is unresolved, or no rule the login can read requires it.
+ * `refusal` is GitHub's refusal of the merge, when it came to one.
+ */
+async function threadsHold(
+  context: DeliveryContext,
+  pr: number,
+  defaultBranch: string,
+  refusal?: string,
+): Promise<Hold | undefined> {
+  const { github, signal } = context;
+  const threads = await github.unresolvedThreads(pr, signal);
+  if (!threads.length) return undefined;
+  const rules = await github.threadResolution(defaultBranch, signal);
+  if (!rules.length) return undefined;
+  return hold(
+    `PR #${pr} has ${threads.length} unresolved review thread${threads.length === 1 ? "" : "s"}, and ${defaultBranch} requires review threads to be resolved before a merge (${rules.join(" and ")})${refusal ? `, so GitHub refused the merge: ${refusal}` : ""}. Unresolved: ${bounded(
+      threads.map((thread) =>
+        thread.url ? `${thread.path} (${thread.url})` : thread.path,
+      ),
+      "; ",
+    )}. Resolve them on GitHub, then answer retry; or cancel.`,
   );
 }
 
@@ -1191,6 +1265,97 @@ function failedChecks(
           : {}),
       });
   return failed;
+}
+
+/** Conclusions a run of the same job again may turn into a pass. */
+const RERUNNABLE = ["failure", "timed_out"];
+
+/**
+ * Before failed checks are a repair, rerun their failed Actions jobs once
+ * (#2054): a flaky job then passes, and only a failure that repeats goes
+ * to the worker. Only when every failed check is an Actions job that
+ * failed or timed out in its workflow run's first attempt: any other
+ * failure is a repair all the same. Each workflow run is rerun at most
+ * once per head: one GitHub shows rerun (the run's attempt), or the kept
+ * rerun names, is not rerun again, and a rerun's own failure stands. A
+ * run whose other jobs still run is a wait: it is rerun once finished. A
+ * rerun whose job GitHub still shows from the first attempt is a wait
+ * that asks after GitHub's lag window. Undefined: the repair stands, also
+ * without Actions read access or when GitHub refuses the rerun.
+ */
+async function rerunFailed(
+  context: DeliveryContext,
+  input: PullInput,
+  head: string,
+  broken: FailedCheck[],
+): Promise<Rerun | Retry | undefined> {
+  const { github, signal } = context;
+  const runs = new Set<number>();
+  for (const check of broken) {
+    if (
+      check.run?.app?.slug !== "github-actions" ||
+      !RERUNNABLE.includes(check.conclusion)
+    )
+      return undefined;
+    const job = await github.workflowJob(check.run.id, signal);
+    if (!job || job.attempt > 1) return undefined;
+    runs.add(job.run);
+  }
+  const kept = input.rerun?.head === head ? input.rerun : undefined;
+  const fresh: number[] = [];
+  let running = false;
+  for (const run of runs) {
+    if (kept?.runs.includes(run)) continue;
+    const latest = await github.workflowRunAttempt(run, signal);
+    if (latest?.attempt !== 1) continue;
+    // GitHub reruns a run's failed jobs only once the run has finished.
+    if (latest.status === "completed") fresh.push(run);
+    else running = true;
+  }
+  const names = [...new Set(broken.map((check) => check.name))];
+  if (!fresh.length && running)
+    return {
+      kind: "retry",
+      reason: `Awaiting the workflow runs of ${bounded(names, ", ")} on PR #${input.pr} to finish before rerunning their failed jobs`,
+      afterMs: CI_POLL_MS,
+    };
+  if (!fresh.length)
+    return {
+      ...retry(
+        `GitHub does not show the rerun of ${bounded(names, ", ")} on PR #${input.pr} yet`,
+      ),
+      holdAfter: {
+        ms: GITHUB_LAG_MS,
+        question: `The failed Actions jobs of ${bounded(names, ", ")} on PR #${input.pr} at ${head} were rerun, but GitHub still shows their first attempt's failure. Inspect the workflow runs, then answer retry; or cancel.`,
+        ...(kept ? { since: kept.at } : {}),
+      },
+    };
+  for (const run of fresh) {
+    crashPoint("deliver:ci-rerun:before");
+    try {
+      await github.rerunFailedJobs(run, signal);
+    } catch (error) {
+      // GitHub won't rerun this run (it limits reruns): the repair stands.
+      if (
+        error instanceof GitHubError &&
+        [404, 409, 422].includes(error.status)
+      )
+        return undefined;
+      throw needing(error, "Actions: write");
+    }
+    crashPoint("deliver:ci-rerun:after");
+  }
+  return {
+    kind: "rerun",
+    reason: `Rerunning the failed Actions jobs of ${bounded(names, ", ")} on PR #${input.pr} at ${head} once before a repair`,
+    afterMs: CI_POLL_MS,
+    rerun: {
+      head,
+      checks: [...new Set([...(kept?.checks ?? []), ...names])],
+      runs: [...new Set([...(kept?.runs ?? []), ...fresh])],
+      at: new Date().toISOString(),
+    },
+  };
 }
 
 /** A large matrix lists its first checks and counts the rest. */
@@ -1494,7 +1659,8 @@ export type MergeResult =
   | Retry
   | Repair
   | Hold
-  | Republish;
+  | Republish
+  | Rerun;
 
 const MERGE_PERMISSION =
   "Contents: write and Pull requests: write, and a bypass of any ruleset that blocks its merges";
@@ -1506,8 +1672,9 @@ let mergeTail: Promise<unknown> = Promise.resolve();
  * Merge the PR with a merge commit, or confirm a merge already made. The
  * readiness is judged again first (a conflict or failed check can appear
  * after the CI wait). The merge is sent with the head as its guard, so it
- * never merges another head. Afterwards the merge must be on the default
- * branch.
+ * never merges another head. A refusal while the PR has unresolved review
+ * threads its base requires resolved is a question naming them, at once.
+ * Afterwards the merge must be on the default branch.
  */
 export function merge(
   context: DeliveryContext,
@@ -1547,6 +1714,13 @@ async function mergeOnce(
     const after = await github.pull(pr, signal);
     if (after.merged) return confirmMerged(context, input, after);
     if (error.status === 403) throw needing(error, MERGE_PERMISSION);
+    const threads = await threadsHold(
+      context,
+      pr,
+      defaultBranch,
+      error.message,
+    );
+    if (threads) return threads;
     return lagging(
       `GitHub refused to merge PR #${pr} (HTTP ${error.status})`,
       `GitHub refused to merge PR #${pr} (not mergeable, or a repository rule): ${error.message}. Inspect the pull request, then answer retry; or cancel.`,
@@ -1657,7 +1831,7 @@ const STACK_PERMISSION =
 const WITHOUT_STACKS = `To deliver without native stacks instead, cancel, set the installation's delivery.kind to regular, restart the service and queue the Objective again`;
 
 /** A delivery result pinned to the layer (Work Item) it belongs to. */
-export type LayerResult = (Retry | Repair | Hold | Republish) & {
+export type LayerResult = (Retry | Repair | Hold | Republish | Rerun) & {
   item: string;
 };
 
@@ -1713,6 +1887,7 @@ interface Layer {
  *   layer GitHub can't update with its predecessor's head), which also
  *   clears the layers above it.
  * - `republish` → the republish repair of `item`.
+ * - `rerun` → a retry that keeps the rerun as `item`'s (see Rerun).
  * - `retry` and `hold` → returned as they are; `item` names the layer the
  *   wait or question is about (the top layer for the unit as a whole). A
  *   failed merge request, a refused stack creation and stack data Factory
@@ -1738,7 +1913,10 @@ export function mergeUnit(
   return result;
 }
 
-function pin(result: Retry | Repair | Hold | Republish, item: PullInput) {
+function pin(
+  result: Retry | Repair | Hold | Republish | Rerun,
+  item: PullInput,
+) {
   return { ...result, item: item.item };
 }
 
@@ -1810,8 +1988,8 @@ async function acceptUnit(
   };
 }
 
-/** Repairs first, so the layer at fault is repaired; then questions, then waits. */
-const PINNED_ORDER = ["repair", "republish", "hold", "retry"] as const;
+/** Repairs first, so the layer at fault is repaired; then questions, then waits (a rerun first, so it is kept). */
+const PINNED_ORDER = ["repair", "republish", "hold", "rerun", "retry"] as const;
 
 async function mergeUnitOnce(
   context: DeliveryContext,
@@ -1926,6 +2104,13 @@ async function mergeUnitOnce(
     if (await allMerged(context, layers))
       return confirmUnit(context, layers, integrated);
     if (error.status === 403) throw needing(error, MERGE_PERMISSION);
+    const threads = await layerThreadsHold(
+      context,
+      layers,
+      defaultBranch,
+      error.message,
+    );
+    if (threads) return threads;
     return pin(
       lagging(
         `GitHub refused to merge the native stack through PR #${last.pull.number} (HTTP ${error.status})`,
@@ -1944,6 +2129,13 @@ async function mergeUnitOnce(
     // unexplained, retry (a fresh request) until the lag window, then ask.
     const again = await judgeLayers(context, input);
     if ("kind" in again) return again;
+    const threads = await layerThreadsHold(
+      context,
+      layers,
+      defaultBranch,
+      settled.message,
+    );
+    if (threads) return threads;
     const why = settled.message ? `: ${settled.message}` : "";
     return pin(
       lagging(
@@ -2110,6 +2302,25 @@ async function settleMerge(
     }
   }
   return current;
+}
+
+/** The first layer, bottom up, whose unresolved review threads block the stack's merge. */
+async function layerThreadsHold(
+  context: DeliveryContext,
+  layers: Layer[],
+  defaultBranch: string,
+  refusal: string | undefined,
+): Promise<LayerResult | undefined> {
+  for (const layer of layers) {
+    const threads = await threadsHold(
+      context,
+      layer.pull.number,
+      defaultBranch,
+      refusal,
+    );
+    if (threads) return pin(threads, layer.input);
+  }
+  return undefined;
 }
 
 /** Whether GitHub shows every layer merged. */

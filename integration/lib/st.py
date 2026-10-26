@@ -25,9 +25,9 @@
   st.py ROOT retries N STEPGLOB  max retry count over steps matching the glob (0 when none)
   st.py ROOT starts-since N ISO STEPGLOB  start events at or after ISO for steps matching the glob
   st.py ROOT artifacts-kind N KIND   1 when any done step result holds {"kind": KIND}
-  st.py ROOT amendments N [ISO]  each amendment taken in (at or after ISO), oldest first, as
-                                 "ID STATUS": pending, accepted, rejected or continued, from
-                                 its result (planning/amendments.ts amendmentStatus)
+  st.py ROOT amendments N [ISO]  each kept amendment proposal taken in at or after ISO, oldest
+                                 first, as "ID STATUS": pending, accepted, rejected or continued,
+                                 from its own result alone (amend:<id>, amend:<id>:continue)
   st.py ROOT unreadable N        1 when service.json lists N as unreadable
 
 Holds: a build saves a list `holds` (STATE_VERSION 2); an older one saves
@@ -291,6 +291,10 @@ def main():
         print(1 if any(isinstance(x, dict) and x.get("kind") == rest[0] for x in walk(done)) else 0)
     elif cmd == "amendments":
         # Proposals are kept as amend:<id>:proposal; amend:<id> is the result.
+        # Unlike planning/amendments.ts amendmentStatus, this neither follows a
+        # replacement (<id>-r<n>) nor drops a proposal of an earlier plan:
+        # case_amend reads it before its edit's replan and never answers
+        # `replace`, so its proposal is the first one listed and has no chain.
         kept = (d or {}).get("kept") or {} if isinstance(d, dict) else {}
         done = (d or {}).get("done") or {} if isinstance(d, dict) else {}
         since = rest[0] if rest else ""

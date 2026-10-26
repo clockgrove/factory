@@ -67,14 +67,16 @@ for l in sys.stdin:
 p_ended() { st at "$1" last event=outcome outcome=done step=report; }
 # p_ignored N: /factory comments the service ignored on N (an author without write access).
 p_ignored() { echo $(( $(st events "$1" event=comment-ignored) + $(st events "$1" event=ignored) )); }
-# p_amend_ready N GLOB [ASKED]: amendment GLOB's review is done, N settled, or a
-# question HOLD_POLICY doesn't answer is open, other than ASKED (one the case
-# answered, on its way out); answers N's holds by HOLD_POLICY meanwhile (for wait_for).
+# p_amend_ready N GLOB [ASKED CHOICE SINCE]: amendment GLOB's review is done, N
+# settled, or a question HOLD_POLICY doesn't answer is open; answers N's holds by
+# HOLD_POLICY meanwhile (for wait_for). ASKED is a question the case answered
+# (CHOICE as `st answer-state` takes it, sent at SINCE): while it still shows,
+# it is on its way out, unless the service refused that answer (it keeps its id).
 p_amend_ready() {
   [ "$(st events "$1" event=outcome outcome=done "step=$2:review")" -gt 0 ] && return 0
   settled "$1" && return 0
   local hj; hj=$(st hold "$1"); [ "$hj" != null ] || return 1
-  [ -n "${3:-}" ] && [ "$(hold_field "$hj" id)" = "$3" ] && return 1
+  if [ -n "${3:-}" ] && [ "$(hold_field "$hj" id)" = "$3" ]; then [ "$(st answer-state "$1" "$4" "$5")" = refused ]; return; fi
   auto_answer "$1" >/dev/null; [ $? = 2 ]
 }
 # p_amendment N ISO: "ID STATUS" of the first amendment N took in at or after ISO (`st amendments`).
@@ -232,7 +234,7 @@ PY
     choice=$(python3 -c 'import json,sys;print(json.dumps({"id": sys.argv[1], "answer": "answer", "text": sys.argv[2]}))' "$qid" "$text")
     if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$n.out" 2>&1; then asked="answer refused"
     else
-      wait_for 600 p_amend_ready "$n" 'amend:*' "$qid"
+      wait_for 600 p_amend_ready "$n" 'amend:*' "$qid" "$choice" "$qa"
       local next; next=$(st hold "$n" 'amend:*:plan')
       if [ "$(st answer-state "$n" "$choice" "$qa")" = refused ]; then asked="answer refused"
       elif [ "$next" != null ] && [ "$(hold_field "$next" id)" != "$qid" ]; then asked="answered, asked again"
@@ -240,20 +242,21 @@ PY
     fi
   fi
   local rv; rv=$(st events "$n" event=outcome outcome=done 'step=amend:*:review'); local pl; pl=$(st starts-since "$n" "$at" 'amend:*:plan')
-  # The verdict is the amendment's result once reviewed, from Factory's
-  # ledger: the review may reject it (it adds files the Objective doesn't
-  # name), and `continue` runs the plan without it.
-  local amd verdict="no review: $(st phase "$n")"
-  if [ "$rv" -ge 1 ]; then
-    wait_for 180 p_amend_settled "$n" "$at"
-    read -r amd verdict <<<"$(p_amendment "$n" "$at")"; [ -n "$verdict" ] || verdict="reviewed, not in the ledger"
-  fi
-  if [ "$verdict" = rejected ]; then
+  # The verdict is the amendment's result in Factory's ledger, reviewed or
+  # not: the review may reject it (it adds files the Objective doesn't name),
+  # and so may its plan round, with no review (a planner that can't plan it,
+  # an answer it can't use, plan or fence findings). A rejection asks
+  # `continue`, which runs the plan without it.
+  if [ "$rv" -ge 1 ]; then wait_for 180 p_amend_settled "$n" "$at"; fi
+  local amd status verdict; read -r amd status <<<"$(p_amendment "$n" "$at")"
+  verdict=${status:-not in the ledger}; [ "$rv" -ge 1 ] || verdict="$verdict, no review ($(st phase "$n"))"
+  if [ "$status" = rejected ]; then
     wait_for 120 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' hold $n 'amend:$amd:continue')\" != null ]"
     local ah; ah=$(st hold "$n" "amend:$amd:continue")
     if [ "$ah" != null ]; then
       answer_t 60 "$n" continue --question "$(hold_field "$ah" id)" >/dev/null 2>&1
       wait_for 180 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' hold $n 'amend:*:continue')\" = null ]"
+      read -r _ status <<<"$(p_amendment "$n" "$at")"; verdict="$verdict, then ${status:-not in the ledger}"
     fi
   fi
   [ "$rc" = 0 ] && [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
@@ -278,14 +281,12 @@ PY
   settled "$n" || cancel_wait "$n" 300
 }
 
-# PRD 3: a worker's in-scope discovery becomes an amendment and is reviewed.
-# The plan's one Work Item covers a criterion on files it doesn't own, so its
-# worker can pass only by proposing them (the worker's discovery rule).
+# PRD 3: a worker's in-scope discovery becomes an amendment, is reviewed, and accepted.
 case_discovery() {
   local t0 id n; t0=$(now); id=$(uid)
   local HOLD_POLICY="d2 review decide more"
   n=$(new_objective discovery "worker discovery" ID="$id") || return
-  wait_for 2400 p_amend_ready "$n" 'amend:worker-*'
+  wait_for 2400 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=done 'step=amend:worker-*:review') -gt 0 ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = done ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = cancelled ]"
   discovery_check "$n" "$t0"
   # It may have finished without a discovery: Factory refuses to cancel a finished Objective.
   settled "$n" || cancel_wait "$n" 300

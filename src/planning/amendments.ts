@@ -132,8 +132,9 @@ export interface AmendmentProposal {
   worker?: { itemId: string; attempt: number };
   /**
    * The commit its discovery's cited files are read at (`citedFiles`): the
-   * proposing worker's collected result, or the start of the item that
-   * proposed. None: the plan's base.
+   * result the proposing item's worker left (collected, or the refused one
+   * resubmitted unchanged) or a blame's refused result, else that item's
+   * start. None: the plan's base.
    */
   commit?: string;
   /** A replacement of a rejected amendment, with the operator's diagnosis. */
@@ -966,6 +967,13 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const whole = base === undefined;
       const schema = (whole ? planSchema : revisionSchema)(facts, wire);
       const lookups = plannerLookups(state, key, inputs, config);
+      // Supplied files render once as literal blocks; a note stays inline.
+      const cited = await citedFiles(
+        config.checkout,
+        proposal,
+        inputs.base,
+        signal,
+      );
       const data = {
         ...planChoices(facts, wire),
         instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, !whole)}${await commandInstructions(facts, config.checkout, signal)}`,
@@ -978,12 +986,12 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
-          citedFiles: await citedFiles(
-            config.checkout,
-            proposal,
-            inputs.base,
-            signal,
-          ),
+          citedFiles: cited.map((file, at) => ({
+            ...file,
+            ...(file.complete
+              ? { content: { block: `cited file ${at}` } }
+              : {}),
+          })),
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
         },
@@ -1002,6 +1010,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         revising: !whole,
         repository,
         workers: workers(config),
+        citedFiles: cited.flatMap((file, at) =>
+          file.complete
+            ? [{ label: `cited file ${at}`, content: file.content }]
+            : [],
+        ),
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
         executionProfiles: Boolean(profiles),

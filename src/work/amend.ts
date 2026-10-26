@@ -185,12 +185,15 @@ export function discoveryOutcome(
         ),
       },
     };
-  // The files it cites are read from the worker's result, or from the
-  // item's start when it left no change.
+  // The files it cites are read from the worker's result: the one
+  // collected, the refused one it resubmitted unchanged, or the item's
+  // start when it left no change.
   const commit =
     collected.kind === "collected"
       ? collected.commit
-      : fact(state, "base", item.id);
+      : collected.unchanged
+        ? refusedOf(state, item.id)?.commit
+        : fact(state, "base", item.id);
   return propose(
     state,
     {

@@ -507,10 +507,15 @@ test("an amendment's planner and review get the files its discovery cites, read 
   };
   const [planning, review] = asked;
   assert.equal(planning.phase, "plan");
+  // A supplied file is a literal block; a note stays inline.
   assert.ok(
     planning.prompt.includes(
-      `"citedFiles":${JSON.stringify([named, missing])}`,
+      `"citedFiles":${JSON.stringify([{ ...named, content: { block: "cited file 0" } }, missing])}`,
     ),
+  );
+  assert.match(
+    planning.prompt,
+    /<<<BODY-[0-9a-f]{20} cited file 0>>>\nconst \{ b \} = require\('\.\.\/src\/b\.js'\);\nif \(b\(\) !== 1\) throw new Error\('b'\);\n\n<<<BODY-[0-9a-f]{20} end>>>/,
   );
   assert.ok(
     !planning.prompt.includes("export const a"),

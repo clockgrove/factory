@@ -453,20 +453,31 @@ test("a fix needing a file no Work Item owns is Factory's correction to propose 
   writeFileSync(join(worktree, MANIFEST), JSON.stringify(discovery));
   const second = await collectIn(worktree, base, "", first.tree);
   assert.equal(second.kind, "repair");
+  assert.equal(second.unchanged, true);
   assert.deepEqual(second.discovery, discovery);
   const proposed = discoveryOutcome(
     work,
-    contextOf(accepted(2)),
+    contextOf(
+      accepted(2, {
+        "item:feature:base": base,
+        "item:feature:refused": {
+          commit: first.commit,
+          tree: first.tree,
+          notes: [],
+        },
+      }),
+    ),
     undefined,
     second,
     {},
   );
   assert.equal(proposed.kind, "retry");
   assert.equal(proposed.reason, "Proposed amendment worker-feature-2");
-  assert.deepEqual(proposed.keep["amend:worker-feature-2:proposal"].worker, {
-    itemId: "feature",
-    attempt: 2,
-  });
+  const proposal = proposed.keep["amend:worker-feature-2:proposal"];
+  assert.deepEqual(proposal.worker, { itemId: "feature", attempt: 2 });
+  // It resubmitted the refused result, which holds the src/feature.js its
+  // discovery names: the cited files are read there, not at its start.
+  assert.equal(proposal.commit, first.commit);
 });
 
 test("a file another Work Item owns is never discovered: the diagnosis is asked again, and asks the operator as before", async () => {

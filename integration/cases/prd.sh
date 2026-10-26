@@ -349,20 +349,6 @@ p_control() {
   done
   return 1
 }
-# p_amend_ready N GLOB [ASKED CHOICE SINCE] is #2014's (case_amend), defined
-# above once it lands; until then this same one stands in. Amendment GLOB's
-# review is done, N settled, or a question HOLD_POLICY doesn't answer is open;
-# answers N's holds by HOLD_POLICY meanwhile (for wait_for). ASKED is a
-# question the case answered (CHOICE as `st answer-state` takes it, sent at
-# SINCE): while it still shows, it is on its way out, unless the service
-# refused that answer (it keeps its id).
-declare -F p_amend_ready >/dev/null || p_amend_ready() {
-  [ "$(st events "$1" event=outcome outcome=done "step=$2:review")" -gt 0 ] && return 0
-  settled "$1" && return 0
-  local hj; hj=$(st hold "$1"); [ "$hj" != null ] || return 1
-  if [ -n "${3:-}" ] && [ "$(hold_field "$hj" id)" = "$3" ]; then [ "$(st answer-state "$1" "$4" "$5")" = refused ]; return; fi
-  auto_answer "$1" >/dev/null; [ $? = 2 ]
-}
 # p_plan_ready N: N has an accepted plan, settled, or holds on a question
 # HOLD_POLICY doesn't answer; answers N's holds by HOLD_POLICY meanwhile (for wait_for).
 p_plan_ready() {

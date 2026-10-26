@@ -121,6 +121,14 @@ export interface ValidateInput {
   blocks: readonly ObjectiveBlock[];
   /** The commit a later item started from, when not the base: its new scripts stay fixed too. */
   predecessor?: string;
+  /**
+   * Item validation: the commit the candidate was built on, the commands'
+   * FACTORY_BASE_SHA, so a base-relative check sees only this item's
+   * change. Absent (QA and final validation, on the shared default
+   * branch): the plan's base, which no single commit can replace there;
+   * the plan check refuses integrated commands that use it.
+   */
+  base?: string;
   /** Final validation of one Work Item's commands: the declared Package manager update must have landed. */
   requirePackageManagerUpdate?: true;
   sandbox: SandboxConfig;
@@ -398,7 +406,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
             ...validationEnvironment(credentials),
             // Factory fetches by SHA and never moves the checkout's
             // remote-tracking branches, so base-relative checks use this (#1664).
-            FACTORY_BASE_SHA: plan.base,
+            FACTORY_BASE_SHA: input.base ?? plan.base,
           },
           config: input.sandbox,
           packageInstall: install,

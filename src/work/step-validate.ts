@@ -48,6 +48,7 @@ export async function validateStep(
     item,
     plan,
     blocks: acceptedInputs(state).shown.blocks,
+    base: work.base,
     ...(work.base !== plan.base ? { predecessor: work.base } : {}),
     reviewArtifacts: {
       configured: config.reviewArtifacts,

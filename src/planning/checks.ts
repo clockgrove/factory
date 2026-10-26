@@ -61,6 +61,7 @@ export async function checkPlan(
   await exportPathFindings(items, files, found);
   await boundaryFindings(items, facts, files, found);
   graphLint(draft, facts.packageCommands, found);
+  integratedBaseFindings(draft, facts.base, found);
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
@@ -143,6 +144,44 @@ async function boundaryFindings(
           item.id,
         );
     }
+}
+
+// ── Integrated base ─────────────────────────────────────────────────────
+
+/**
+ * base-relative: a command that runs on the shared default branch (a QA
+ * item's, or one an integrated-command proof runs) names no base. That
+ * branch holds other Objectives' merges before, between and after this
+ * one's, so no commit makes a diff from it this Objective's change; Factory
+ * enforces each item's owned paths itself (work/collect.ts).
+ */
+function integratedBaseFindings(
+  draft: Draft,
+  base: string,
+  found: Found,
+): void {
+  for (const item of draft.items) {
+    const proved = new Set(
+      draft.coverage.flatMap((entry) =>
+        entry.itemId === item.id && entry.proof?.kind === "integrated-command"
+          ? [entry.proof.validationIndex]
+          : [],
+      ),
+    );
+    for (const [index, { command }] of item.validation.entries()) {
+      if (item.kind !== "qa" && !proved.has(index)) continue;
+      const named = /\bFACTORY_BASE_SHA\b/.test(command)
+        ? "$FACTORY_BASE_SHA"
+        : command
+            .match(/\b[0-9a-f]{7,40}\b/gi)
+            ?.find((token) => base.startsWith(token.toLowerCase()));
+      if (named)
+        found(
+          `Work Item ${item.id} validation runs ${command}, which compares with the plan's base (${named}): integrated commands run on the shared default branch, which includes other Objectives' merges, so a diff from the base counts their changes too, and Factory itself enforces each item's owned paths. Drop the base-relative check and prove the behaviour with a command that exercises it, not the diff`,
+          item.id,
+        );
+    }
+  }
 }
 
 // ── Graph lint ──────────────────────────────────────────────────────────

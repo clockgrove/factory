@@ -399,7 +399,7 @@ export function listCommands(commands: readonly string[]): string {
 const VALIDATION_ENVIRONMENT = {
   network:
     "none except the exact script-disabled package install, which runs first",
-  refs: "remote-tracking branches may be stale; compare with $FACTORY_BASE_SHA",
+  refs: "remote-tracking branches may be stale; a Work Item's validation compares with $FACTORY_BASE_SHA, the commit its change was built on; integrated, QA and final commands run on the shared default branch, which holds other Objectives' merges, so they prove behaviour, never a diff: Factory enforces each item's owned paths",
   ci: "no hosted CI jobs, logs or secrets",
   tests:
     "HOME and TMPDIR are private and empty, with no host credentials or user config",

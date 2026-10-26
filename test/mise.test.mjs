@@ -69,7 +69,10 @@ esac
   mkdirSync(nodeBin, { recursive: true });
   symlinkSync(process.execPath, join(nodeBin, "node"));
   writeFileSync(join(root, "bins", `node@${NODE}`), `${nodeBin}\n`);
-  const pins = (checkout, { untrusted = false, pnpm = false } = {}) => {
+  const pins = (
+    checkout,
+    { untrusted = false, pnpm = false, system = false } = {},
+  ) => {
     const source = join(realpathSync(checkout), "mise.toml");
     const entry = (version, installed, path = source) => [
       {
@@ -88,6 +91,8 @@ esac
         // A global pin is the operator's own, not the checkout's.
         jq: entry("1.7.1", true, join(root, "config", "config.toml")),
         ...(pnpm ? { pnpm: entry("12.9.1", false) } : {}),
+        // `system` leaves the tool to the PATH: neither installed nor missing.
+        ...(system ? { python: entry("system", true) } : {}),
       }),
     );
     if (untrusted) writeFileSync(join(root, "untrusted"), "");
@@ -121,7 +126,11 @@ test("the checkout's mise pins resolve in the checkout, global pins and missing 
     assert.equal(miseManages(checkout), false);
     assert.equal(miseToolchain(checkout), undefined);
     assert.equal(misePinFix(checkout), undefined);
-    const source = mise.pins(checkout, { pnpm: true });
+    // A conf.d directory is a mise configuration too.
+    mkdirSync(join(checkout, ".config", "mise", "conf.d"), { recursive: true });
+    assert.equal(miseManages(checkout), true);
+    rmSync(join(checkout, ".config"), { recursive: true });
+    const source = mise.pins(checkout, { pnpm: true, system: true });
     writeFileSync(join(checkout, "mise.toml"), "[tools]\n");
     assert.equal(miseManages(checkout), true);
     const toolchain = miseToolchain(checkout);

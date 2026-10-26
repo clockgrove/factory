@@ -26,6 +26,7 @@ export const MISE_CONFIGS = [
   ".mise.local.toml",
   ".config/mise.toml",
   ".config/mise/config.toml",
+  ".config/mise/conf.d",
   ".mise/config.toml",
   "mise/config.toml",
   ".tool-versions",
@@ -143,6 +144,8 @@ export function miseToolchain(checkout: string): MiseToolchain | undefined {
         continue;
       const inside = relative(root, real(source));
       if (!inside || inside.startsWith("..") || isAbsolute(inside)) continue;
+      // `system` pins the PATH's own tool, which mise doesn't install.
+      if (entry.version === "system") continue;
       const tool: MiseTool = {
         name,
         version: entry.version,

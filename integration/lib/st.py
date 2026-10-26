@@ -25,6 +25,9 @@
   st.py ROOT retries N STEPGLOB  max retry count over steps matching the glob (0 when none)
   st.py ROOT starts-since N ISO STEPGLOB  start events at or after ISO for steps matching the glob
   st.py ROOT artifacts-kind N KIND   1 when any done step result holds {"kind": KIND}
+  st.py ROOT amendments N [ISO]  each amendment taken in (at or after ISO), oldest first, as
+                                 "ID STATUS": pending, accepted, rejected or continued, from
+                                 its result (planning/amendments.ts amendmentStatus)
   st.py ROOT unreadable N        1 when service.json lists N as unreadable
 
 Holds: a build saves a list `holds` (STATE_VERSION 2); an older one saves
@@ -286,6 +289,19 @@ def main():
     elif cmd == "artifacts-kind":
         done = (d or {}).get("done") or {} if isinstance(d, dict) else {}
         print(1 if any(isinstance(x, dict) and x.get("kind") == rest[0] for x in walk(done)) else 0)
+    elif cmd == "amendments":
+        # Proposals are kept as amend:<id>:proposal; amend:<id> is the result.
+        kept = (d or {}).get("kept") or {} if isinstance(d, dict) else {}
+        done = (d or {}).get("done") or {} if isinstance(d, dict) else {}
+        since = rest[0] if rest else ""
+        proposals = sorted((p for k, p in kept.items() if fnmatch.fnmatchcase(k, "amend:*:proposal")
+                            and isinstance(p, dict) and str(p.get("at", "")) >= since),
+                           key=lambda p: str(p.get("at", "")))
+        for p in proposals:
+            key = f"amend:{p.get('id')}"
+            result = done.get(key)
+            print(p.get("id"), "pending" if not isinstance(result, dict) else "accepted" if result.get("plan")
+                  else "continued" if f"{key}:continue" in done else "rejected")
     elif cmd == "unreadable":
         try:
             with open(os.path.join(root, "service.json")) as f:

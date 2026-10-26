@@ -8,7 +8,9 @@ log() { echo "$(ts) [${CASE:-suite}] $*" | tee -a "$RUN_DIR/journal" >&2; }
 st() { python3 "$SUITE/lib/st.py" "$ROOT" "$@"; }
 now() { date +%s; }
 iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-iso_ms() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+# Milliseconds, zero-padded like Factory's own times, so the two compare as strings
+# (uutils `date` prints %3N as unpadded nanoseconds: 01.015 s as "01.15204561").
+iso_ms() { python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z"))'; }
 iso_s() { python3 -c 'import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()))' "$1"; }
 # STOP_AT is the wave's stop (55 min after the start); inside a case, run_case
 # lowers it to the case's own deadline, so every wait below is bounded by it.

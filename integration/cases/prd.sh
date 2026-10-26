@@ -66,6 +66,28 @@ for l in sys.stdin:
 p_ended() { st at "$1" last event=outcome outcome=done step=report; }
 # p_ignored N: /factory comments the service ignored on N (an author without write access).
 p_ignored() { echo $(( $(st events "$1" event=comment-ignored) + $(st events "$1" event=ignored) )); }
+# p_amend_ready N GLOB [ASKED]: amendment GLOB's review is done, N settled, or a
+# question HOLD_POLICY doesn't answer is open, other than ASKED (one the case
+# answered, on its way out); answers N's holds by HOLD_POLICY meanwhile (for wait_for).
+p_amend_ready() {
+  [ "$(st events "$1" event=outcome outcome=done "step=$2:review")" -gt 0 ] && return 0
+  settled "$1" && return 0
+  local hj; hj=$(st hold "$1"); [ "$hj" != null ] || return 1
+  [ -n "${3:-}" ] && [ "$(hold_field "$hj" id)" = "$3" ] && return 1
+  auto_answer "$1" >/dev/null; [ $? = 2 ]
+}
+# p_amendment N ISO: "ID STATUS" of the first amendment N took in at or after ISO (`st amendments`).
+p_amendment() { st amendments "$1" "$2" | head -1; }
+# p_amend_settled N ISO: that amendment has a result (for wait_for).
+p_amend_settled() { [[ $(p_amendment "$1" "$2") != *" pending" ]]; }
+# p_hold_since N ISO: N's oldest open hold asked at or after ISO (its askedAt), as JSON, or null.
+p_hold_since() {
+  st holds "$1" | python3 -c 'import json,sys
+h = [x for x in json.load(sys.stdin) if str(x.get("askedAt", "")) >= sys.argv[1]]
+print(json.dumps(h[0] if h else None))' "$2"
+}
+# p_held_since N ISO: N settled, or a hold asked at or after ISO is open (for wait_for).
+p_held_since() { settled "$1" || [ "$(p_hold_since "$1" "$2")" != null ]; }
 # p_close N...: close issues the suite filed but never ran.
 p_close() { local n; for n; do gh issue close "$n" --repo "$REPO" --reason "not planned" >/dev/null 2>&1; done; }
 # p_bot_issue TITLE BODYFILE: file an issue as github-actions[bot] (drill-issue.yml) -> its number.
@@ -198,24 +220,54 @@ json.dump({"scope": "in-scope", "reason": f"Callers also need a case-insensitive
 PY
   local at; at=$(iso_ms)
   cli_t 60 propose-amendment "$n" --file "$f" >"$RUN_DIR/amend.$n.out" 2>&1; local rc=$?
-  wait_for 1200 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=done 'step=amend:*:review') -gt 0 ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = done ]"
+  # The Objective names none of the amendment's files, so its planner may ask
+  # whether to plan them: the operator who proposed it answers once, with
+  # that authority. A second question, or a refused answer, is the outcome.
+  wait_for 1200 p_amend_ready "$n" 'amend:*'
+  local asked=none hj; hj=$(st hold "$n" 'amend:*:plan')
+  if [ "$hj" != null ] && [[ ,$(hold_field "$hj" answers), == *,answer,* ]]; then
+    local qid text choice qa; qid=$(hold_field "$hj" id); qa=$(iso_ms)
+    text="In scope: I proposed this amendment and authorise its new files. Plan countCharFold$id in its own files src/countCharFold$id.js and test/countCharFold$id.test.js, owned by a new Work Item; the files the Objective names stay as they are."
+    choice=$(python3 -c 'import json,sys;print(json.dumps({"id": sys.argv[1], "answer": "answer", "text": sys.argv[2]}))' "$qid" "$text")
+    if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$n.out" 2>&1; then asked="answer refused"
+    else
+      wait_for 600 p_amend_ready "$n" 'amend:*' "$qid"
+      local next; next=$(st hold "$n" 'amend:*:plan')
+      if [ "$(st answer-state "$n" "$choice" "$qa")" = refused ]; then asked="answer refused"
+      elif [ "$next" != null ] && [ "$(hold_field "$next" id)" != "$qid" ]; then asked="answered, asked again"
+      else asked=answered; fi
+    fi
+  fi
   local rv; rv=$(st events "$n" event=outcome outcome=done 'step=amend:*:review'); local pl; pl=$(st starts-since "$n" "$at" 'amend:*:plan')
-  # The review may reject it (it adds files the Objective doesn't name):
-  # `continue` runs the plan without it, so the edit below meets no
-  # open amendment question.
-  local ah verdict=accepted; ah=$(st hold "$n" 'amend:*:continue')
-  if [ "$ah" != null ]; then
-    verdict=rejected
-    answer_t 60 "$n" continue --question "$(hold_field "$ah" id)" >/dev/null 2>&1
-    wait_for 180 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' hold $n 'amend:*:continue')\" = null ]"
+  # The verdict is the amendment's result once reviewed, from Factory's
+  # ledger: the review may reject it (it adds files the Objective doesn't
+  # name), and `continue` runs the plan without it.
+  local amd verdict="no review: $(st phase "$n")"
+  if [ "$rv" -ge 1 ]; then
+    wait_for 180 p_amend_settled "$n" "$at"
+    read -r amd verdict <<<"$(p_amendment "$n" "$at")"; [ -n "$verdict" ] || verdict="reviewed, not in the ledger"
+  fi
+  if [ "$verdict" = rejected ]; then
+    wait_for 120 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' hold $n 'amend:$amd:continue')\" != null ]"
+    local ah; ah=$(st hold "$n" "amend:$amd:continue")
+    if [ "$ah" != null ]; then
+      answer_t 60 "$n" continue --question "$(hold_field "$ah" id)" >/dev/null 2>&1
+      wait_for 180 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' hold $n 'amend:*:continue')\" = null ]"
+    fi
   fi
   [ "$rc" = 0 ] && [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
-  rec_if plan.amendment $? "#$n propose-amendment exit $rc: amendment plan starts $pl, reviews done $rv, $verdict" "$t0"
+  rec_if plan.amendment $? "#$n propose-amendment exit $rc: amendment plan starts $pl, planner question: $asked, reviews done $rv, $verdict" "$t0"
   if settled "$n"; then record plan.replan FAIL "#$n finished before the edit ($(st status "$n"))" "$t0"; return; fi
+  # An amendment question still open would be the hold the edit's wait finds.
+  local open; open=$(st hold "$n" 'amend:*')
+  if [ "$open" != null ]; then record plan.replan FAIL "#$n amendment question still open ($(hold_field "$open" step))" "$t0"; cancel_wait "$n" 300; return; fi
   local edited="$RUN_DIR/objectives/$CASE-amend-edit-$id.md"
   render happy "$edited" ID="$id" || return; printf '\n%s\n' "- \`countChar$id(\"aaa\", \"a\")\` is \`3\`." >>"$edited"
+  local ed; ed=$(iso_ms)
   gh issue edit "$n" --repo "$REPO" --body-file "$edited" >/dev/null
-  local p; p=$(HOLD_POLICY="" wait_phase "$n" '^hold:' 600); local hj; hj=$(st hold "$n")
+  # Only a hold asked after the edit (its askedAt) is the edit's.
+  wait_for 600 p_held_since "$n" "$ed"; hj=$(p_hold_since "$n" "$ed")
+  local p; if [ "$hj" != null ]; then p="hold:$(hold_field "$hj" step)"; else p="no hold since the edit: $(st phase "$n")"; fi
   local ra; ra=$(iso_ms)
   [[ ,$(hold_field "$hj" answers), == *,replan,* ]] && answer_t 60 "$n" replan --question "$(hold_field "$hj" id)" >/dev/null 2>&1
   wait_for 600 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' starts-since $n $ra 'plan*') -gt 0 ]"
@@ -225,12 +277,14 @@ PY
   cancel_wait "$n" 300
 }
 
-# PRD 3: a worker's in-scope discovery becomes an amendment, is reviewed, and accepted.
+# PRD 3: a worker's in-scope discovery becomes an amendment and is reviewed.
+# The plan's one Work Item covers a criterion on files it doesn't own, so its
+# worker can pass only by proposing them (the worker's discovery rule).
 case_discovery() {
   local t0 id n; t0=$(now); id=$(uid)
   local HOLD_POLICY="d2 review decide more"
   n=$(new_objective discovery "worker discovery" ID="$id") || return
-  wait_for 2400 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=done 'step=amend:worker-*:review') -gt 0 ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = done ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = cancelled ]"
+  wait_for 2400 p_amend_ready "$n" 'amend:worker-*'
   local pl rv; pl=$(st events "$n" event=start 'step=amend:worker-*:plan'); rv=$(st events "$n" event=outcome outcome=done 'step=amend:worker-*:review')
   [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
   rec_if plan.discovery $? "#$n: worker discovery amendment plan starts $pl, reviews done $rv ($(st phase "$n"))" "$t0"

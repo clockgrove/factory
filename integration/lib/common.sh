@@ -131,6 +131,8 @@ declare -gA FEAT_TOKEN=(
   [protected-paths]=namesPath
   [attachment-scope]='sends its GitHub token only to'
   [reset-rebuild]=reset:plan
+  [ci-rerun]=rerun-failed-jobs
+  [thread-hold]='unresolved review thread'
 )
 has_feature() {
   case $1 in

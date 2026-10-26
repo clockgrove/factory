@@ -66,6 +66,8 @@ CASE_TABLE_main=(
 CASE_TABLE_edge=(
   "reset|E|30|repository M: a delivered and a mid-build Objective (its PR open) lose their state and work files; 'factory reset' rebuilds each from GitHub: the delivered one stays done with no new PR or marker, the mid-build one runs plan review and finishes on its one PR (reset.clean-dir)"
   "archived|E|10|repository M: 'factory run N' on an issue whose Project card is archived admits it (queue.archived-card)"
+  "flake|E|30|its own repository F, whose required 'test' job fails on a pull request's first attempt only: Factory reruns the failed job once, it passes on attempt 2, the PR merges with no repair, and the run log and report record the flake (delivery.ci-rerun, #2054)"
+  "threads|E|30|its own repository R, whose default-branch ruleset requires review threads resolved: a line comment the suite posts on Factory's open PR holds within 10 min, naming the thread; resolved and answered retry, the PR merges (holds.review-threads, #2053)"
 )
 CASE_TABLE_prd=(
   "propose|P|15|factory propose from an intent and from a roadmap section; an approved draft creates its issues once, with blocked-by links (propose.*)"
@@ -159,6 +161,8 @@ required_checks() {
       local point; for point in $CRASH_LIFECYCLE $CRASH_REMIND $CRASH_CANCEL; do echo "crash.$point"; done ;;
     reset) echo reset.clean-dir ;;
     archived) echo queue.archived-card ;;
+    flake) echo delivery.ci-rerun ;;
+    threads) echo holds.review-threads ;;
     propose) echo 'propose.intent propose.roadmap' ;;
     recheck) echo 'toolchain.ci-only intake.recheck' ;;
     outsider) echo intake.non-writer ;;
@@ -248,7 +252,7 @@ write_results() {
     fi
     echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
-    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":($3=="N"?"N ":""), $1, $2}' "$RUN_DIR/issues")"; }
+    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":($3 ~ /^[NTFR]$/?$3" ":""), $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2
 }
@@ -349,7 +353,7 @@ cleanup() {
   cancel_left
   # Q's serve is the user service the prod case installed: uninstall it.
   [ -s "$RUN_DIR/inst/Q/env" ] && (inst Q; q_uninstall)
-  local i p jobs=(); for i in C H X M E P N; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
+  local i p jobs=(); for i in C H X M E P N F R; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
   for p in "${jobs[@]}"; do wait "$p" || record suite.stop FAIL "a serve could not be stopped" "$START_S"; done
   for i in M E P; do proxy_stop $i; done
   local s; while read -r p s; do kill_exact "$p" "$s" TERM || true; done <"$RUN_DIR/pids"

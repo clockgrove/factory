@@ -22,6 +22,11 @@
                                  report done or first hold after that (END empty while it still
                                  holds the slot), or "" when it never planned
   st.py ROOT started N STEPGLOB  1 when a "start" event exists for a step matching the glob
+  st.py ROOT work-attempts N     each Work Item work attempt, oldest first, as a JSON line: its
+                                 attempt id, item, outcome, whether the worker left a
+                                 .factory-discovery.json, the files it changed outside the item's
+                                 owned paths (the accepted plan's), and its transcript files
+  st.py ROOT worker-proposals N  each kept worker discovery proposal as "ID ITEM", oldest first
   st.py ROOT retries N STEPGLOB  max retry count over steps matching the glob (0 when none)
   st.py ROOT starts-since N ISO STEPGLOB  start events at or after ISO for steps matching the glob
   st.py ROOT artifacts-kind N KIND   1 when any done step result holds {"kind": KIND}
@@ -275,6 +280,44 @@ def main():
         end = next((str(e["at"]) for e in evs if start and str(e["at"]) >= start and (e.get("event") == "hold" or (
             e.get("event") == "outcome" and e.get("outcome") == "done" and e.get("step") == "report"))), "")
         print(f"{start} {end}".strip())
+    elif cmd == "work-attempts":
+        # From each attempt's last worker-activity sample (its `changed` files,
+        # untracked ones too) and outcome. Ownership as planning/graph.ts
+        # ownsPath: a scope ending in / owns what is under it, else that path.
+        items = (((d or {}).get("done") or {}).get("plan") or {}).get("items") or [] if isinstance(d, dict) else []
+        owned = {i.get("id"): i.get("ownedPaths") or [] for i in items if isinstance(i, dict)}
+        staging = (".factory-discovery.json", ".factory-handoff.json", ".factory-inputs", ".factory-assets.json", ".factory-media")
+        attempts = {}
+        for e in events(root, n):
+            step, aid = str(e.get("step")), e.get("attemptId")
+            if not (fnmatch.fnmatchcase(step, "item:*:work") and aid):
+                continue
+            a = attempts.setdefault(aid, {"attempt": aid, "item": step[len("item:"):-len(":work")],
+                                          "outcome": None, "changed": None, "transcript": None})
+            if e.get("event") == "worker-activity" and isinstance(e.get("changed"), dict):
+                a["changed"] = e["changed"].get("files") or []
+            elif e.get("event") == "transcript" and e.get("file"):
+                f = os.path.join(root, "logs", str(e["file"]))
+                a["transcript"] = sorted(glob.glob(glob.escape(f) + "*")) or [f]
+            elif e.get("event") == "outcome":
+                a["outcome"] = e.get("outcome")
+        for a in attempts.values():
+            changed = a.pop("changed")
+            scopes = owned.get(a["item"], [])
+            a["discovery"] = None if changed is None else ".factory-discovery.json" in changed
+            a["unowned"] = None if changed is None else [
+                p for p in changed
+                if not any(p == s or p.startswith(s + "/") for s in staging)
+                and not any(p.startswith(s) if s.endswith("/") else p == s for s in scopes)]
+            print(json.dumps(a))
+    elif cmd == "worker-proposals":
+        # Kept as amend:<id>:proposal; a worker's names its item (work/amend.ts discoveryOutcome).
+        kept = (d or {}).get("kept") or {} if isinstance(d, dict) else {}
+        props = sorted((p for k, p in kept.items() if fnmatch.fnmatchcase(k, "amend:*:proposal")
+                        and isinstance(p, dict) and isinstance(p.get("worker"), dict)),
+                       key=lambda p: str(p.get("at", "")))
+        for p in props:
+            print(p.get("id"), p["worker"].get("itemId"))
     elif cmd == "started":
         print(1 if any(e.get("event") == "start" and fnmatch.fnmatchcase(str(e.get("step")), rest[0]) for e in events(root, n)) else 0)
     elif cmd == "starts-since":

@@ -226,21 +226,130 @@ PY
   settled "$n" || cancel_wait "$n" 300
 }
 
-# PRD 3: a worker's in-scope discovery becomes an amendment, is reviewed, and accepted.
+# PRD 3, 14: a worker's in-scope discovery becomes an amendment and is
+# reviewed: one Factory's own rules require of the worker, which the
+# Objective never asks for and no planner can foresee. A plan reads the base
+# pinned at intake, while a Work Item builds on the default branch as it is
+# when it starts. So the Objective is drained before any Work Item starts,
+# its plan is accepted, and only then does a person land a test on main
+# (shared main) that, once src/discBase<id>.js exists, needs
+# src/discMore<id>.js, which no Work Item owns. On resume the item's
+# `npm test` fails on that existing, unowned test, and the worker's rule for
+# unowned changes (propose every required path in-scope and stop without
+# changing them) makes it a discovery. On main and in every other tree the
+# person's test is skipped, so it passes.
 case_discovery() {
   local t0 id n; t0=$(now); id=$(uid)
   local HOLD_POLICY="d2 review decide more"
   n=$(new_objective discovery "worker discovery" ID="$id") || return
-  wait_for 2400 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n event=outcome outcome=done 'step=amend:worker-*:review') -gt 0 ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = done ] || [ \$(python3 '$SUITE/lib/st.py' '$ROOT' status $n) = cancelled ]"
-  discovery_check "$n" "$t0"
-  # It may have finished without a discovery: Factory refuses to cancel a finished Objective.
+  # A drain needs Factory's state for N: it has it from admission, before planning starts.
+  wait_for 300 p_known "$n"
+  p_control "$n" drain draining || { record plan.discovery FAIL "#$n never drained ($(st phase "$n")): $(tail -c 300 "$RUN_DIR/control.$n.out" 2>/dev/null)" "$t0"; cancel_wait "$n"; return; }
+  log "#$n drained ($(st phase "$n"))"
+  wait_for 1500 p_plan_ready "$n"
+  if [ "$(st has "$n" done.plan)" != 1 ]; then record plan.discovery FAIL "#$n: no plan accepted while drained ($(st phase "$n"))" "$t0"; cancel_wait "$n"; return; fi
+  if started "$n" 'item:*:work'; then record plan.discovery FAIL "#$n gate missed: a Work Item started before the person's test landed ($(st phase "$n"))" "$t0"; cancel_wait "$n"; return; fi
+  local test="$RUN_DIR/disc-companion-$id.test.js" person
+  sed "s/{{ID}}/$id/g" "$SUITE/fixtures/repo/disc-companion.test.js" >"$test" || return
+  person=$(gh api -X PUT "repos/$REPO/contents/test/discCompanion$id.test.js" -f message="Person: a test of discMore$id beside discBase$id" \
+    -f content="$(base64 -w0 <"$test")" --jq .commit.sha) && [ -n "$person" ] || { record plan.discovery FAIL "#$n: couldn't land the person's test" "$t0"; cancel_wait "$n"; return; }
+  echo "$person" >"$RUN_DIR/discovery-person.$n"
+  log "#$n: a person's test/discCompanion$id.test.js landed on main as ${person:0:12}; plan accepted, no Work Item started"
+  p_control "$n" resume null || { record plan.discovery FAIL "#$n never resumed ($(st phase "$n")): $(tail -c 300 "$RUN_DIR/control.$n.out" 2>/dev/null)" "$t0"; cancel_wait "$n"; return; }
+  wait_for 1800 p_amend_ready "$n" 'amend:worker-*'
+  # The Objective's Constraints put that file in scope, in a Work Item of its
+  # own: its planner may still ask whether to plan it, answered once with that
+  # authority. A second question, or a refused answer, is the outcome.
+  local asked=none hj; hj=$(st hold "$n" 'amend:worker-*:plan')
+  if [ "$hj" != null ] && [[ ,$(hold_field "$hj" answers), == *,answer,* ]]; then
+    local qid text choice qa; qid=$(hold_field "$hj" id); qa=$(iso_ms)
+    text="In scope: the Objective's Constraints put a file that a test in the repository requires for discBase$id in scope, in a Work Item of its own. Plan the paths the worker's discovery names in a new Work Item; the files the Objective names stay as they are."
+    choice=$(python3 -c 'import json,sys;print(json.dumps({"id": sys.argv[1], "answer": "answer", "text": sys.argv[2]}))' "$qid" "$text")
+    if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$n.out" 2>&1; then asked="answer refused"
+    else
+      wait_for 600 p_amend_ready "$n" 'amend:worker-*' "$qid" "$choice" "$qa"
+      local next; next=$(st hold "$n" 'amend:worker-*:plan')
+      if [ "$(st answer-state "$n" "$choice" "$qa")" = refused ]; then asked="answer refused"
+      elif [ "$next" != null ] && [ "$(hold_field "$next" id)" != "$qid" ]; then asked="answered, asked again"
+      else asked=answered; fi
+    fi
+  fi
+  discovery_check "$n" "$t0" "planner question: $asked"
+  # The amendment's verdict doesn't matter here; whatever is left is cancelled.
   settled "$n" || cancel_wait "$n" 300
 }
-# discovery_check N T0: from N's logs alone (also run-suite.sh --replay).
+# p_known N: Factory has state for N.
+p_known() { [ "$(st status "$1")" != none ]; }
+# p_mode N: N's operator control mode (`factory pause|drain N`), or null.
+p_mode() { st get "$1" control.mode | tr -d '"'; }
+p_mode_is() { [ "$(p_mode "$1")" = "$2" ]; }
+# p_control N KIND MODE: `factory KIND N` until N's control mode is MODE, up to 3 tries.
+p_control() {
+  local try
+  for try in 1 2 3; do
+    p_mode_is "$1" "$3" && return 0
+    cli_t 60 "$2" "$1" >>"$RUN_DIR/control.$1.out" 2>&1
+    wait_for 60 p_mode_is "$1" "$3" && return 0
+    stopping && break
+  done
+  return 1
+}
+# p_amend_ready N GLOB [ASKED CHOICE SINCE] is #2014's (case_amend), defined
+# above once it lands; until then this same one stands in. Amendment GLOB's
+# review is done, N settled, or a question HOLD_POLICY doesn't answer is open;
+# answers N's holds by HOLD_POLICY meanwhile (for wait_for). ASKED is a
+# question the case answered (CHOICE as `st answer-state` takes it, sent at
+# SINCE): while it still shows, it is on its way out, unless the service
+# refused that answer (it keeps its id).
+declare -F p_amend_ready >/dev/null || p_amend_ready() {
+  [ "$(st events "$1" event=outcome outcome=done "step=$2:review")" -gt 0 ] && return 0
+  settled "$1" && return 0
+  local hj; hj=$(st hold "$1"); [ "$hj" != null ] || return 1
+  if [ -n "${3:-}" ] && [ "$(hold_field "$hj" id)" = "$3" ]; then [ "$(st answer-state "$1" "$4" "$5")" = refused ]; return; fi
+  auto_answer "$1" >/dev/null; [ $? = 2 ]
+}
+# p_plan_ready N: N has an accepted plan, settled, or holds on a question
+# HOLD_POLICY doesn't answer; answers N's holds by HOLD_POLICY meanwhile (for wait_for).
+p_plan_ready() {
+  [ "$(st has "$1" done.plan)" = 1 ] && return 0
+  settled "$1" && return 0
+  [[ $(st phase "$1") == hold:* ]] || return 1
+  auto_answer "$1" >/dev/null; [ $? = 2 ]
+}
+# discovery_check N T0 [EVIDENCE]: from N's state and logs, the case's record of
+# the person's commit (discovery-person.N) and the kept checkout alone (also
+# run-suite.sh --replay). The trigger is proved when the discovering item's kept
+# base (else the first item that worked) holds the person's commit; with no
+# worker amendment, each work attempt shows how the worker met its rule.
 discovery_check() {
-  local pl rv; pl=$(st events "$1" event=start 'step=amend:worker-*:plan'); rv=$(st events "$1" event=outcome outcome=done 'step=amend:worker-*:review')
-  [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
-  rec_if plan.discovery $? "#$1: worker discovery amendment plan starts $pl, reviews done $rv ($(st phase "$1"))" "$2"
+  local n=$1 pl rv; pl=$(st events "$n" event=start 'step=amend:worker-*:plan'); rv=$(st events "$n" event=outcome outcome=done 'step=amend:worker-*:review')
+  local tries; tries=$(st work-attempts "$n")
+  local person item base co why trig=1
+  person=$(cat "${KEPT:-$RUN_DIR}/discovery-person.$n" 2>/dev/null)
+  item=$(st worker-proposals "$n" | awk 'NR==1{print $2}')
+  [ -n "$item" ] || item=$(python3 -c 'import json,sys
+l = [json.loads(x) for x in sys.argv[1].splitlines() if x.strip()]
+print(l[0]["item"] if l else "")' "$tries")
+  [ -z "$item" ] || base=$(st get "$n" "kept.item:$item:base" | tr -d '"')
+  co=$(cfg_get 'c["checkout"]' 2>/dev/null)
+  if [ -z "$person" ]; then why="no person's commit recorded"
+  elif [ -z "$item" ] || [ -z "$base" ] || [ "$base" = null ]; then why="the person's commit ${person:0:12}: no Work Item kept a base"
+  elif ! git -C "$co" cat-file -e "$person^{commit}" 2>/dev/null; then why="the person's commit ${person:0:12}: not in the checkout $co"
+  elif git -C "$co" merge-base --is-ancestor "$person" "$base" 2>/dev/null; then trig=0; why="the person's commit ${person:0:12}: in $item's base ${base:0:12}"
+  else why="the person's commit ${person:0:12}: not in $item's base ${base:0:12}"; fi
+  local shown; shown=$(python3 -c 'import json,sys
+out = []
+for x in sys.argv[1].splitlines():
+    if not x.strip(): continue
+    a = json.loads(x)
+    yn = lambda v: "unknown" if v is None else ("yes" if v else "no")
+    out.append("%s %s, .factory-discovery.json %s, unowned files %s, transcript %s" % (
+        a["attempt"], a["outcome"] or "unfinished", yn(a["discovery"]),
+        "unknown" if a["unowned"] is None else (" ".join(a["unowned"]) or "none"),
+        (a["transcript"] or ["none"])[0]))
+print("; ".join(out) or "none")' "$tries")
+  [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ] && [ "$trig" = 0 ]
+  rec_if plan.discovery $? "#$n: worker discovery amendment plan starts $pl, reviews done $rv ($(st phase "$n")); $why; work attempts: $shown${3:+; $3}" "$2"
 }
 replay_discovery() { local n; n=$(case_issues | head -1); [ -z "$n" ] || discovery_check "$n" "$(now)"; }
 

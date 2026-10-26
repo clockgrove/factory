@@ -793,8 +793,10 @@ open(path, "w").write(json.dumps(d, indent=2) + "\n")
 PY
   # pnpm 12 resolves its own pinned version from pnpm-lock.yaml before any
   # command; with no lockfile it asks the registry, which Factory's offline
-  # validation sandbox can't reach. A real pnpm project commits one.
+  # validation sandbox can't reach. A real pnpm project commits one, and ignores
+  # node_modules/, where pnpm writes its state files even for `pnpm run`.
   ( cd "$co" && pnpm install --lockfile-only >/dev/null 2>&1 ) && [ -s "$co/pnpm-lock.yaml" ] || return 1
+  printf 'node_modules/\n' >>"$co/.gitignore" || return 1
   git -C "$co" add -A && git -C "$co" -c user.name="Factory integration" -c user.email=factory-integration@users.noreply.github.com \
     commit -q -m "Drill: pin Node and pnpm" && git -C "$co" push -q origin HEAD:main || return 1
   write_config "$STATE_BASE/config-t.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'" \

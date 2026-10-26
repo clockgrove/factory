@@ -59,6 +59,7 @@ factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FI
 - **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
 - **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
 - **Background logins:** the service doesn't keep logins from the setup shell, and `--background` checks readiness without them. Codex needs `codex login` (an API key in the shell doesn't reach the service), GitHub needs `gh auth login` or a GitHub App's key given with `--github-app-key` (the service loads setup's copy), and a Claude or Copilot token needs `--credential-file`.
+- **Toolchain:** the service runs the tools on the setup shell's PATH. When the clone pins its tools with mise (`mise.toml` or `.tool-versions`) and `mise` is on that PATH, `--background` puts the pinned versions first. Factory never runs `mise trust` or `mise install`: when readiness's `mise toolchain` check names one, give it to the operator to run in the clone. Never run either yourself, since trusting a mise configuration lets it run code.
 
 ## Check the result
 
@@ -67,7 +68,7 @@ Decide on the JSON, never the prose.
 - `status: "configured"` (exit 0): saved, it loads, and the target and host are ready.
 - `status: "blocked"` (exit 1): saved, but something isn't ready.
   - `problems` names the target's problems: the clone's origin, or the Project fields.
-  - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, provider logins, GitHub access, merge commits and required checks.
+  - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, the mise toolchain, provider logins, GitHub access, merge commits and required checks.
   - Give the operator one checklist of every `blocked` item with its fix. Then repeat the same command.
 - `status: "refused"` (exit 1): nothing was saved. `problems` says why: a bad value, or a binding conflict.
 - **Installation:** a `warn` named `installation` means another installation serves the repository, and this one's service is refused when it starts. Ask the operator to stop that one (`factory setup --repo OWNER/NAME --stop` on its machine, or stop its `factory serve`). Only if it is gone for good, because its machine is gone or its state was wiped, and the operator says so: run `factory serve --repo OWNER/NAME --take-over` once in the foreground, stop it once it serves, then run `factory setup --repo OWNER/NAME --background`, since the background service can't take over. Then reset the Objectives that were in flight, as in moving the service below.

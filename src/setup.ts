@@ -47,6 +47,7 @@ import {
   unkeptLogins,
 } from "./systemd.js";
 import { errorMessage } from "./text.js";
+import { miseToolchain, toolchainPath } from "./toolchain.js";
 
 /** How an option's value becomes the key's: loadConfig checks the result. */
 type Read = "text" | "number" | "list" | "names" | "env";
@@ -401,13 +402,25 @@ export async function setup(
   }
   if (service)
     for (const name of unkeptLogins(config)) delete process.env[name];
+  // The checkout's mise pins go first on the PATH the service runs with,
+  // which readiness then checks and the unit records (systemd.ts unitText).
+  const toolchain = existsSync(config.checkout)
+    ? miseToolchain(config.checkout)
+    : undefined;
+  if (service && toolchain?.status === "resolved" && toolchain.tools.length)
+    process.env.PATH = toolchainPath(process.env.PATH, toolchain.tools);
   const github = factoryGitHub(config);
   try {
     problems.push(...(await projectProblems(github, config)));
   } catch (error) {
     problems.push(`Can't read the queue's Project: ${errorMessage(error)}`);
   }
-  const ready = await readiness(config, github, service);
+  const ready = await readiness(
+    config,
+    github,
+    service,
+    toolchain && { toolchain, service: !!service },
+  );
   return {
     status: problems.length || !ready.ready ? "blocked" : "configured",
     config: path,

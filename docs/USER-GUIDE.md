@@ -47,6 +47,8 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    factory setup --repo OWNER/NAME --check
    ```
 
+   The service runs the tools on the PATH of the shell that ran `--background`. When the clone pins its tools with mise (`mise.toml` or `.tool-versions`) and `mise` is on that PATH, the pinned versions come first instead: run `mise trust` and `mise install` in the clone yourself, since Factory does neither, and readiness names whichever is missing. When the pin moves, run `mise install` there, then `--background` again. See [Toolchain from mise](reference/setup.md#toolchain-from-mise).
+
    The service restarts if it fails. `loginctl enable-linger` keeps it running after you log out. `--stop` stops and disables it, and `--uninstall` removes the unit (the configuration and state stay). After installing a new release, run `--background` again. See [reference/setup.md#Background service](reference/setup.md#background-service).
 
 State lives in `~/.local/state/factory/OWNER__NAME/` (or `FACTORY_STATE_DIR`). The configuration, the state and the clone stay separate, and Factory refuses a configuration or state directory inside the clone.

@@ -7,6 +7,7 @@ import {
   ciOnlyKey,
   commandScope,
   listCommands,
+  namedBase,
   networkToolOfCommand,
   PACKAGE_SCRIPT_FORMS,
   packageBootstrap,
@@ -181,11 +182,7 @@ function integratedBaseFindings(
     );
     for (const [index, { command }] of item.validation.entries()) {
       if (item.kind !== "qa" && !proved.has(index)) continue;
-      const named = /\bFACTORY_BASE_SHA\b/.test(command)
-        ? "$FACTORY_BASE_SHA"
-        : command
-            .match(/\b[0-9a-f]{7,40}\b/gi)
-            ?.find((token) => base.startsWith(token.toLowerCase()));
+      const named = namedBase(command, base);
       if (named)
         found(
           `Work Item ${item.id} validation runs ${command}, which compares with the plan's base (${named}): integrated commands run on the shared default branch, which includes other Objectives' merges, so a diff from the base counts their changes too, and Factory itself enforces each item's owned paths. Drop the base-relative check and prove the behaviour with a command that exercises it, not the diff`,

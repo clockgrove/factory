@@ -527,6 +527,20 @@ function scopedCommands(
   return scoped;
 }
 
+/**
+ * The base `command` compares with, as it names it: `$FACTORY_BASE_SHA`, or
+ * a SHA (7 to 40 hex digits) that `base` starts with. A command that names
+ * one is base-relative: it checks the change built on that base, so it
+ * holds for its own Work Item's tree, never for the shared default branch.
+ */
+export function namedBase(command: string, base: string): string | undefined {
+  return /\bFACTORY_BASE_SHA\b/.test(command)
+    ? "$FACTORY_BASE_SHA"
+    : command
+        .match(/\b[0-9a-f]{7,40}\b/gi)
+        ?.find((token) => base.startsWith(token.toLowerCase()));
+}
+
 // ── Package commands ────────────────────────────────────────────────────
 
 /**

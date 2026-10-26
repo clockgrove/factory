@@ -138,7 +138,7 @@ function skippedRows(skipped: readonly SkippedCheck[]) {
           path: "Skipped commands",
           content: JSON.stringify({
             scope:
-              "Final validation skipped these Work Item commands: a merge of this Objective changed the package script each runs, so it can't run pinned to the script its Work Item validated. Each passed in its own Work Item's validation, not on the integrated tree, so they are no evidence about it either way. Criteria they proved are still judged, on other evidence.",
+              "Final validation skipped these Work Item commands, each for the reason given: one that compares with the base checks only its own Work Item's change, and the integrated tree holds every other merge too; one whose package script a merge of this Objective changed can't run pinned to the script its Work Item validated. Each passed in its own Work Item's validation, not on the integrated tree, so they are no evidence about it either way. Criteria they proved are still judged, on other evidence.",
             skipped: skippedLines(skipped),
           }),
           complete: true,

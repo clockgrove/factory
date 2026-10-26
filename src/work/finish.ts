@@ -14,6 +14,7 @@ import { roleMemory } from "../knowledge/index.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
+import { namedBase } from "../planning/facts.js";
 import {
   acceptedInputs,
   currentPlan,
@@ -213,10 +214,12 @@ export async function finalValidation(
  * Final validation's runs on `head`: the final commands in one fresh
  * checkout, or, with none, each Work Item's own commands
  * (planning/plan.ts `fallbackRuns`), each in a fresh checkout as its
- * validate step ran them. A command whose package script a later merge
- * changed is skipped: its own item validated it, and the later item owns
- * the change; `skipped` names each such command. `item` names the run
- * that did not pass.
+ * validate step ran them. Two kinds of command are skipped, since their
+ * own item validated them: one that compares with the base (planning/facts.ts
+ * `namedBase`), which checks only its own item's change while `head` holds
+ * every merge since the plan's base, and one whose package script a later
+ * merge changed, which the later item owns. `skipped` names each such
+ * command. `item` names the run that did not pass.
  */
 async function finalRuns(
   context: StepContext,
@@ -268,26 +271,38 @@ async function finalRuns(
       state.done[stepKey(item.id, "work")] as WorkResult | undefined
     )?.base;
     const predecessor = start && start !== plan.base ? start : undefined;
+    const based = item.validation.filter((check) =>
+      namedBase(check.command, plan.base),
+    );
     const changed = await laterScriptChanges({
       checkout: config.checkout,
       base: plan.base,
       ...(predecessor ? { predecessor } : {}),
       head,
-      commands: item.validation.map((check) => check.command),
+      commands: item.validation
+        .filter((check) => !based.includes(check))
+        .map((check) => check.command),
       merges,
       signal,
     });
-    for (const { command, changedBy } of changed) {
-      context.log({
-        event: "final-check-skipped",
+    const skips: SkippedCheck[] = [
+      ...based.map(({ command }) => ({
+        item: item.id,
+        command,
+        baseRelative: true as const,
+      })),
+      ...changed.map(({ command, changedBy }) => ({
         item: item.id,
         command,
         changedBy,
-      });
-      skipped.push({ item: item.id, command, changedBy });
+      })),
+    ];
+    for (const skip of skips) {
+      context.log({ event: "final-check-skipped", ...skip });
+      skipped.push(skip);
     }
     const validation = item.validation.filter(
-      (check) => !changed.some((entry) => entry.command === check.command),
+      (check) => !skips.some((entry) => entry.command === check.command),
     );
     if (!validation.length) continue;
     const result = await run([item.id], {

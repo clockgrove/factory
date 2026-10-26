@@ -1043,19 +1043,19 @@ export async function laterScriptChanges(input: {
 
 /**
  * A Work Item command final validation skipped (work/finish.ts finalRuns):
- * merges of `changedBy` changed its package script.
+ * it compares with the base (`baseRelative`), or merges of `changedBy`
+ * changed its package script.
  */
-export interface SkippedCheck {
-  item: string;
-  command: string;
-  changedBy: string[];
-}
+export type SkippedCheck = { item: string; command: string } & (
+  | { baseRelative: true }
+  | { changedBy: string[] }
+);
 
 /** Each skipped command and why, for the report, status and final review. */
 export function skippedLines(skipped: readonly SkippedCheck[]): string[] {
   return skipped.map(
-    ({ item, command, changedBy }) =>
-      `command \`${command}\` (Work Item ${item}): the merge of ${changedBy.join(", ")} changed its package script; Work Item ${item}'s own validation ran it`,
+    (entry) =>
+      `command \`${entry.command}\` (Work Item ${entry.item}): ${"changedBy" in entry ? `the merge of ${entry.changedBy.join(", ")} changed its package script` : "it compares with the base, so it checks only its own item's change"}; Work Item ${entry.item}'s own validation ran it`,
   );
 }
 

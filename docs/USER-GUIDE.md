@@ -374,4 +374,4 @@ Take over only from an installation that is really stopped. A running one stops 
 
 ## Upgrade
 
-Update the plugin to the new release: remove its marketplace and add it again at the new tag (see [Plugin](../README.md#plugin)). Then ask the setup skill to set up again: it installs the matching CLI and points the `factory` launcher on your PATH at it (the PATH line doesn't change), and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.
+Update the plugin to the new release: remove its marketplace, add it again at the new tag and install the plugin (see [Plugin](../README.md#plugin)). Then ask the setup skill to set up again: it installs the matching CLI and points the `factory` launcher on your PATH at it (the PATH line doesn't change), and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.

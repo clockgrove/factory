@@ -20,13 +20,13 @@ It reads the version from the plugin's own manifest and keeps a CLI of that vers
 Decide on its JSON:
 
 - `status: "current"` or `"installed"` (exit 0): `cli` is the CLI's absolute path: the launcher (`PREFIX/bin/factory` with `--prefix`), unless a matching CLI was already on PATH. Run it in place of `factory` in every command below. `sdks` says whether the Claude and Copilot SDKs are there; those providers need them.
-- `path` not null: the launcher's directory isn't on the operator's PATH, so the `director` skill can't run `factory`. `path` is the line that puts it there; it names no version, so it stays right across releases. Offer to add it to the startup file of the operator's login shell: `~/.profile`, or `~/.bash_profile` when that exists (bash then skips `~/.profile`), or `~/.zprofile` for zsh. Write the file only on their yes, and never add the line twice:
+- `path` not null: the launcher's directory isn't on the operator's PATH, so the `director` skill can't run `factory`. `path` is the line that puts it there; it names no version, so it stays right across releases. Offer to add it to the startup file of the operator's login shell: `~/.profile`, or for bash the first of `~/.bash_profile` and `~/.bash_login` that exists (bash then reads no `~/.profile`), or `~/.zprofile` for zsh. Write the file only on their yes, and never add the line twice:
 
   ```sh
   grep -qxF 'PATH_LINE' FILE || printf '%s\n' 'PATH_LINE' >> FILE
   ```
 
-  If the file has a line from an earlier setup naming a versioned `clockgrove-factory/X.Y.Z/bin`, offer to replace that line with this one. If they decline, give them the line. It takes effect in new login shells.
+  If the file has a line from an earlier setup naming a versioned `clockgrove-factory/X.Y.Z/bin`, offer to replace that line with this one. If they decline, give them the line. It takes effect in new login shells; an agent host started before it still lacks `factory` on its PATH until it restarts, so keep using `cli`.
 
 - `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
 

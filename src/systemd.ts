@@ -75,10 +75,13 @@ export interface ServiceState {
   serving: boolean;
   credentials: string[];
   /**
-   * The unit runs this Factory with this environment: false after an
-   * upgrade or a changed environment, until `--background` again.
+   * The unit runs this Factory: it is the unit setup would write with the
+   * node and environment the unit records, not the checking shell's. False
+   * after an upgrade, or when that node is gone, until `--background` again.
    */
   current: boolean;
+  /** The node the unit runs, when it no longer exists. */
+  missingNode?: string;
   /** Whether the user manager outlives a logout (loginctl Linger). */
   linger: "yes" | "no" | "unknown";
 }
@@ -128,6 +131,35 @@ function quoted(value: string, exec = false): string {
   return JSON.stringify(
     (exec ? value.replaceAll("$", "$$$$") : value).replaceAll("%", "%%"),
   );
+}
+
+/** A value `quoted` wrote, as it was given. */
+function unquoted(text: string, exec = false): string {
+  const value = (JSON.parse(text) as string).replaceAll("%%", "%");
+  return exec ? value.replaceAll("$$", "$") : value;
+}
+
+/** The node and the kept environment a service runs with. */
+interface Runtime {
+  node: string;
+  env: NodeJS.ProcessEnv;
+}
+
+/** The runtime a unit's text records; undefined when it doesn't read. */
+function recorded(text: string): Runtime | undefined {
+  const exec = /^ExecStart=("(?:[^"\\]|\\.)*")/m.exec(text)?.[1];
+  if (!exec) return undefined;
+  try {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [line] of text.matchAll(/^Environment=.*$/gm)) {
+      const pair = unquoted(line.slice("Environment=".length));
+      const at = pair.indexOf("=");
+      env[pair.slice(0, at)] = pair.slice(at + 1);
+    }
+    return { node: unquoted(exec, true), env };
+  } catch {
+    return undefined;
+  }
 }
 
 /** The names Factory reads from the service's credentials. */
@@ -231,16 +263,18 @@ function ours(paths: Paths): string | undefined {
 const cli = () =>
   realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
 
-/** The unit for this installation, as setup writes it. */
+/**
+ * The unit for this installation, as setup writes it: by default with this
+ * process's node and the shell's environment.
+ */
 export function unitText(
   repository: string,
   credentials: readonly Credential[],
+  { node, env }: Runtime = { node: process.execPath, env: process.env },
 ): string {
-  const exec = [process.execPath, cli(), "serve", "--repo", repository];
+  const exec = [node, cli(), "serve", "--repo", repository];
   const environment = KEPT.flatMap((name) =>
-    process.env[name]
-      ? [`Environment=${quoted(`${name}=${process.env[name]}`)}`]
-      : [],
+    env[name] ? [`Environment=${quoted(`${name}=${env[name]}`)}`] : [],
   );
   return [
     `${MARKER}${JSON.stringify({ credentials })}`,
@@ -354,6 +388,11 @@ export function serviceState(
   const unit = unitName(paths);
   const text = ours(paths);
   const installed = !!text;
+  // The service runs with the unit's node and environment, which may differ
+  // from the checking shell's PATH and node; the unit is judged by its own.
+  const runtime = text ? recorded(text) : undefined;
+  const missingNode =
+    runtime && !existsSync(runtime.node) ? runtime.node : undefined;
   const linger = spawnSync(
     "loginctl",
     ["show-user", String(process.getuid?.()), "--property=Linger", "--value"],
@@ -367,7 +406,11 @@ export function serviceState(
     active: installed ? systemctl("is-active", unit).out : "inactive",
     serving,
     credentials: boundCredentials(paths).map(({ name }) => name),
-    current: text === unitText(repository, boundCredentials(paths)),
+    current:
+      !!runtime &&
+      !missingNode &&
+      text === unitText(repository, boundCredentials(paths), runtime),
+    ...(missingNode ? { missingNode } : {}),
     linger: linger === "yes" || linger === "no" ? linger : "unknown",
   };
 }

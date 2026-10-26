@@ -4,8 +4,7 @@
 // command names no base, since Factory enforces owned paths itself.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -13,7 +12,7 @@ import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { validateTree } from "../dist/validate.js";
-import { configured, installation, item, REPO } from "./helpers.mjs";
+import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
   const result = spawnSync(
@@ -39,7 +38,7 @@ test("an item's validation compares with the commit it was built on, not a plan 
   process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
   const { sandbox } = loadConfig(REPO);
   delete process.env.FACTORY_CONFIG;
-  const checkout = mkdtempSync(join(tmpdir(), "factory-base-"));
+  const checkout = tempDir("factory-base-");
   git(checkout, "init", "--quiet");
   const planned = commit(checkout, "base.txt");
   // Another Objective merged, and this item was built on its merge.
@@ -79,7 +78,7 @@ test("an item's validation compares with the commit it was built on, not a plan 
 });
 
 test("the plan check refuses a QA or integrated command that compares with the plan's base, and leaves a Work Item's own", async () => {
-  const target = mkdtempSync(join(tmpdir(), "factory-base-plan-"));
+  const target = tempDir("factory-base-plan-");
   git(target, "init", "--quiet");
   const base = commit(target, "base.txt");
   const scope = `git diff --exit-code $FACTORY_BASE_SHA HEAD -- . ':!src/a.js'`;

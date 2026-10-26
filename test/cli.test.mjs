@@ -6,13 +6,11 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -33,6 +31,7 @@ import {
   stateOf,
   status,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -572,7 +571,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   // --scorecard: #54 against a codex-direct session, with one of #54's
   // runs rotated away, which must show, never vanish.
-  const scratch = mkdtempSync(join(tmpdir(), "factory-scorecard-"));
+  const scratch = tempDir("factory-scorecard-");
   const stream = join(scratch, "direct.jsonl");
   writeFileSync(
     stream,
@@ -754,7 +753,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   assert.equal(shown.spans, 1);
   assert.equal(shown.authorizationDigest, null);
   assert.deepEqual(shown.headerNames, ["authorization"]);
-  const file = join(mkdtempSync(join(tmpdir(), "factory-export-")), "o.jsonl");
+  const file = join(tempDir("factory-export-"), "o.jsonl");
   const retained = await exporting(
     "--content",
     "retained",

@@ -5,24 +5,18 @@
 // API key.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { tempDir } from "./helpers.mjs";
 
 const MANAGED = fileURLToPath(
   new URL("../dist/providers/managed.js", import.meta.url),
 );
 
 function worktree() {
-  const dir = mkdtempSync(join(tmpdir(), "factory-managed-"));
+  const dir = tempDir("factory-managed-");
   const tree = join(dir, "item");
   const git = (...args) =>
     spawnSync("git", args, { cwd: tree, encoding: "utf8" });

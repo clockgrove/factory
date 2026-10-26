@@ -2,7 +2,7 @@
 // a worker may change, and what redaction covers.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,7 +14,7 @@ import { resolveInputs } from "../dist/media.js";
 import { mayChange } from "../dist/objective.js";
 import { shownBlocks } from "../dist/shown.js";
 import { collect } from "../dist/work/collect.js";
-import { configured, installation, item, REPO } from "./helpers.mjs";
+import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
 
 /** The loaded configuration of a fresh installation with these fields. */
 function configWith(fields = {}) {
@@ -38,7 +38,7 @@ const git = (cwd, ...args) => {
 
 /** A fresh Git worktree with one base commit, as a worker starts from. */
 function committedWorktree(prefix) {
-  const worktree = join(mkdtempSync(join(tmpdir(), prefix)), "worktree");
+  const worktree = join(tempDir(prefix), "worktree");
   mkdirSync(worktree);
   git(worktree, "init", "--quiet");
   writeFileSync(join(worktree, "README.md"), "base\n");
@@ -125,7 +125,7 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
 });
 
 test("a worker's change outside its Work Item's owned paths is refused at collection as a repair finding", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-owned-"));
+  const root = tempDir("factory-owned-");
   const worktree = join(root, "worktree");
   mkdirSync(worktree);
   git(worktree, "init", "--quiet");
@@ -275,7 +275,7 @@ test("redaction covers JWTs", () => {
 });
 
 test("readiness finds credentials in the checkout's own Git configuration", () => {
-  const checkout = mkdtempSync(join(tmpdir(), "factory-credentials-"));
+  const checkout = tempDir("factory-credentials-");
   assert.equal(checkoutCredentialEntries(checkout), undefined);
   git(checkout, "init", "--quiet");
   // Not credentials: a stored helper, an SSH user, a plain rewrite.
@@ -319,7 +319,7 @@ for (const path of [
     const outcome = await resolveInputs({
       checkout: tmpdir(),
       repository: REPO,
-      directory: mkdtempSync(join(tmpdir(), "factory-media-")),
+      directory: tempDir("factory-media-"),
       plan: { items: [work] },
       item: work,
       base: "HEAD",

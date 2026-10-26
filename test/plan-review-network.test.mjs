@@ -5,13 +5,13 @@
 // validation has no network, and the Objective held until its answers ran out.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildFacts } from "../dist/planning/facts.js";
 import { renderGraphReviewCall } from "../dist/planning/prompts.js";
 import { readShown } from "../dist/shown.js";
+import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -43,7 +43,7 @@ async function graphReviewPrompt(checkout, base, hostNetwork) {
 }
 
 test("the graph reviewer is told validation's network: the host's under sandbox.network host, none otherwise", async () => {
-  const checkout = mkdtempSync(join(tmpdir(), "factory-review-network-"));
+  const checkout = tempDir("factory-review-network-");
   git(checkout, "init", "--quiet", "--initial-branch=main");
   writeFileSync(join(checkout, "README.md"), "# Ready\n");
   git(checkout, "add", ".");

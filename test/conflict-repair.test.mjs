@@ -3,8 +3,7 @@
 // repair that refused the result still reads that tree as no change.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -12,7 +11,7 @@ import { collect } from "../dist/work/collect.js";
 import { fact } from "../dist/work/facts.js";
 import { refusedOf } from "../dist/work/refused.js";
 import { deliveryRepair } from "../dist/work/step-deliver.js";
-import { configured, installation, item, REPO } from "./helpers.mjs";
+import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
   const result = spawnSync(
@@ -38,7 +37,7 @@ function loaded() {
 }
 
 test("a conflict repair whose resolution is the result's own tree on the moved base is collected as a change", async () => {
-  const worktree = join(mkdtempSync(join(tmpdir(), "factory-conflict-")), "w");
+  const worktree = join(tempDir("factory-conflict-"), "w");
   const file = join(worktree, "src", "shared.js");
   mkdirSync(join(worktree, "src"), { recursive: true });
   git(worktree, "init", "--quiet");

@@ -2,13 +2,7 @@
 // configuration changes, and which steps a question stops.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +25,7 @@ import {
   stateOf,
   status,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -670,7 +665,7 @@ test("a failed Codex turn's outcome comes from its session record; a login hold 
     ),
   );
   const failure = (name) => {
-    const home = mkdtempSync(join(tmpdir(), "factory-codex-home-"));
+    const home = tempDir("factory-codex-home-");
     const day = join(home, "sessions", "2026", "10", "25");
     mkdirSync(day, { recursive: true });
     writeFileSync(
@@ -715,7 +710,7 @@ test("a failed Codex turn's outcome comes from its session record; a login hold 
       steps: () => [step("item:a:work"), step("item:b:work")],
       status: () => "building",
     },
-    mkdtempSync(join(tmpdir(), "factory-scope-")),
+    tempDir("factory-scope-"),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
   );
@@ -767,7 +762,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
       // c keeps a refused result it can check again.
       revalidatable: (_, key) => key === "item:c:work",
     },
-    mkdtempSync(join(tmpdir(), "factory-defer-")),
+    tempDir("factory-defer-"),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
   );
@@ -986,7 +981,7 @@ test("a replan answer is the workflow's, spent once applied, and the new plan st
         clear: Object.keys(current.done),
       }),
     },
-    mkdtempSync(join(tmpdir(), "factory-replan-")),
+    tempDir("factory-replan-"),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
   );
@@ -1351,7 +1346,7 @@ test("a failed check holds naming each problem with recheck; recheck checks the 
             ],
       status: () => "checking",
     },
-    mkdtempSync(join(tmpdir(), "factory-check-")),
+    tempDir("factory-check-"),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
   );
@@ -1416,7 +1411,7 @@ test("the spend ceiling holds before the next model step, per Objective and per 
   const { ObjectiveRunner } = await import("../dist/engine.js");
   const { newObjective } = await import("../dist/state.js");
   const { DaySpend, readDay } = await import("../dist/spend.js");
-  const root = mkdtempSync(join(tmpdir(), "factory-spend-"));
+  const root = tempDir("factory-spend-");
   // Shared by every Objective of the service run, as serve shares it.
   const run = {
     id: "run",

@@ -165,6 +165,7 @@ export class SelfValidation {
       sandbox: options.sandbox,
       commandTimeoutMs: options.commandTimeoutMs,
       returnTo: input.worktree,
+      base: input.base,
       predecessor: input.base !== options.plan.base ? input.base : undefined,
       signal,
       log: input.log,

@@ -263,7 +263,8 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   const paths = await checkStagedCandidate(input);
   // An empty result is still wrong, but a staged discovery is the worker's
   // account of why: it rides on the finding. A repair that left the refused
-  // tree as it was resubmits the refused result, so it is empty too.
+  // tree as it was resubmits the refused result, so it is empty too, on any
+  // base: what refused it judged the tree.
   const unchanged =
     paths.length > 0 &&
     input.refusedTree !== undefined &&

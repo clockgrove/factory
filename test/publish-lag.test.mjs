@@ -2,7 +2,8 @@
 // the PR still shows the replaced head (GitHub catching up with the push)
 // and no record of pushing it survives (a reset, a moved stack layer), it
 // waits for GitHub; it never holds on its own commit as someone else's.
-// A push the remote refuses waits too, and asks only if the refusal lasts.
+// A push the remote refuses waits too, and asks only if the refusal lasts;
+// so does the delete of a merged item's branch.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -10,7 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { publish } from "../dist/delivery.js";
+import { REFUSED_MS } from "../dist/github.js";
 import { FACTORY_EMAIL } from "../dist/work/collect.js";
+import { deleteBranches } from "../dist/work/step-deliver.js";
 import { githubOrigin, REPO } from "./helpers.mjs";
 
 function git(directory, ...args) {
@@ -161,4 +164,41 @@ test("a push the remote refuses with the branch unmoved retries, and asks only i
     git(checkout, "ls-remote", "origin", `refs/heads/${branch}`).split(/\s/)[0],
     replaced,
   );
+});
+
+// The prd suite's lane P: GitHub answered the delete of a merged item's
+// branch with `[remote rejected] (Internal Server Error)` once, and Factory
+// kept the branch for good.
+test("a branch delete the remote refuses once with the branch unmoved retries, then deletes", async () => {
+  const { bare, checkout, branch, replaced, context } = published();
+  const hook = join(bare, "hooks", "pre-receive");
+  writeFileSync(
+    hook,
+    "#!/bin/sh\n[ -e refused ] && exit 0\ntouch refused\necho 'Internal Server Error' >&2\nexit 1\n",
+  );
+  chmodSync(hook, 0o755);
+  const logged = [];
+  const step = {
+    state: { issue: 1 },
+    signal: context.signal,
+    log: (event) => logged.push(event),
+  };
+  const deps = { github: context.github, config: { checkout } };
+  const items = [{ id: "a", title: "A", ownedPaths: ["a.js"] }];
+  const refused = await deleteBranches(step, deps, items);
+  assert.equal(refused?.kind, "retry", JSON.stringify(refused));
+  assert.match(refused.reason, /refused Factory's delete of factory\/1\/a/);
+  assert.equal(refused.holdAfter.ms, REFUSED_MS);
+  assert.deepEqual(logged, []);
+  assert.equal(
+    git(checkout, "ls-remote", "origin", `refs/heads/${branch}`).split(/\s/)[0],
+    replaced,
+  );
+  // The merge step's retry finds the PR merged and deletes the branch.
+  assert.equal(await deleteBranches(step, deps, items), undefined);
+  assert.equal(
+    git(checkout, "ls-remote", "origin", `refs/heads/${branch}`),
+    "",
+  );
+  assert.deepEqual(logged, []);
 });

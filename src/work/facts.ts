@@ -153,10 +153,11 @@ export interface KeptSelection {
  * The item's last work result a repair cleared, kept on every repair that
  * clears one. A rebase replays its change (`commit`, `notes` for a replay
  * without a worker). Unless `replayOnly`, the repair refused it: its commit
- * is the diagnosis's evidence, collection reads its tree on the same base
- * as no change, and `revalidate` checks it again with its notes.
- * `replayOnly`: a media repair, which may rightly end on the same tree, or
- * a stack layer moved because the layer below is repaired.
+ * is the diagnosis's evidence, collection reads its tree again as no change
+ * (on any base: what refused it judged the tree), and `revalidate` checks
+ * it again with its notes.
+ * `replayOnly`: a media or conflict repair, which may rightly end on the
+ * same tree, or a stack layer moved because the layer below is repaired.
  */
 export interface Refused {
   commit: string;

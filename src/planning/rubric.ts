@@ -46,14 +46,26 @@ export function workerCapability(
     .join(" ")}`;
 }
 
+/** Validation's network under `sandbox.network: host`, as the planner and the graph reviewer read it. */
+export const HOST_VALIDATION_NETWORK =
+  "the host's network (sandbox.network host)";
+
+/** The Validation line's network rule: what a validation command can reach. */
+function validationNetworkRule(hostNetwork: boolean): string {
+  return hostNetwork
+    ? `Validation has ${HOST_VALIDATION_NETWORK}, including services on its loopback, so a command that reaches the network may run in it.`
+    : "A script that runs a network tool (an init, install, fetch or audit) fails in validation, which has no network: never select one.";
+}
+
 /** What every Work Item contains and leaves out; shared by the planner and the graph reviewer. */
-export const WORK_ITEM_STANDARD = `Work Item standard. A plan says what must be true when the work is done and what other items rely on. The worker decides how from the real code, and its result reviewer checks the result against that code. A result is reviewed only against its own item's fields, so each item is complete and checkable on its own.
+export function workItemStandard(hostNetwork: boolean): string {
+  return `Work Item standard. A plan says what must be true when the work is done and what other items rely on. The worker decides how from the real code, and its result reviewer checks the result against that code. A result is reviewed only against its own item's fields, so each item is complete and checkable on its own.
 A Work Item has:
 - Goal: one sentence, the outcome.
 - Contract: only what other items or users rely on (names, semantics, formats), stated once in the brief. Settle it up front, choosing a coherent contract where the sources leave the architecture open, and give it to each consumer's brief too: workers never see sibling briefs.
 - Acceptance: observable behaviour, invariants and refusal classes at the contract level. Each entry is one behaviour, checkable from outside the code, naming the public names, commands or inputs it concerns.
 - Evidence: the repository tests or commands that prove the acceptance, run by the item's validation. Every acceptance entry has local executable evidence: one of the item's validation commands, or a test the item owns that one of them runs. Final review and hosted or post-publication CI run nothing in Factory validation, so they are never the only proof; where proof truly needs an environment local validation lacks, ask through decisionRequired instead of deferring it. A prose claim, an unchecked summary file or a manual inspection is not evidence.
-- Validation: the commands this item's owned paths affect, plus the repository's standard check command when it declares one (for example a check or test script its AGENTS.md or CI names). Never copy every declared script onto every item. A script that runs a network tool (an init, install, fetch or audit) fails in validation, which has no network: never select one.
+- Validation: the commands this item's owned paths affect, plus the repository's standard check command when it declares one (for example a check or test script its AGENTS.md or CI names). Never copy every declared script onto every item. ${validationNetworkRule(hostNetwork)}
 - Constraints: what must not change or must not be used, from the Objective or the repository's rules, as non-goals.
 - Docs: what a reader needs documented, where the repository's AGENTS.md doc map or documented conventions put it (otherwise an existing docs/ location). A package README changes only for a user-facing usage change.
 - Design note: where the repository's AGENTS.md, a document it maps or a pinned source declares a design checklist, the brief answers each of its questions for this item in a short line (the settled decision or "not applicable" with the reason), so the worker and its reviewer start from the same design. Cite the checklist.
@@ -67,18 +79,21 @@ Keep these, because they raise result quality:
 Existing tests are protected by default: an item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why, and an exact-membership list grows by exactly the item's additions.
 Generated values: a worker that cannot run arbitrary commands learns only from its validation output and the checkout. Where an item must commit values only running code produces (hashes, snapshots, goldens, generated files), one of its validation commands produces them, or reports the actual values in its output or in a Git-ignored file under the item's owned paths, which comes back to the checkout; otherwise the worker cannot learn what to commit. If no command does, plan that capability in the item that owns the harness or tool (for example, the check reports the actual value on mismatch, or a generator writes the file), and have dependent items consume it.
 Size: one outcome per item. Split by independently verifiable capability, never by layer; each item includes its own tests and docs. About ${WORK_ITEM_ENTRY_SIGNAL} acceptance entries is a signal, not a target: above it, split the item or state why it is one outcome (Factory adds the reason to the brief).`;
+}
 
 /** The planner's job, how it works, and the rules for its output fields. */
-export const WORK_ITEM_PLANNING_RULES = `Compile this Objective into Work Items. The Objective is short prose: a goal, observable outcomes (its Acceptance), context, optional pinned Sources and constraints. It does not specify Work Items, their criteria, ownership or evidence: you plan those from the Objective, the pinned sources and the repository. The default join is QA validation on the integrated result and one independent final Objective review.
+export function workItemPlanningRules(hostNetwork: boolean): string {
+  return `Compile this Objective into Work Items. The Objective is short prose: a goal, observable outcomes (its Acceptance), context, optional pinned Sources and constraints. It does not specify Work Items, their criteria, ownership or evidence: you plan those from the Objective, the pinned sources and the repository. The default join is QA validation on the integrated result and one independent final Objective review.
 How to work (guidance, not a script):
 - Research first. Explore wide, then narrow, until you know what the plan rests on: the repository's conventions, the real producers and types the work consumes, the existing behaviour it changes and the constraints that apply. Tie each fact to the file it came from. These facts stay in this session; they are not part of your answer.
 - Then write the plan from the Objective and those facts only. Where you have not read something, state the outcome and leave the how to the worker, who reads the code.
 - Before submitting, check the plan against the checklist below, the judgments the graph reviewer will apply, and fix what it would flag.
-${WORK_ITEM_STANDARD}
+${workItemStandard(hostNetwork)}
 Rules for the plan as a whole:
 1. Grouping. Worker and review cost grow faster than an item, while separate items can run concurrently. Dependency edges go to the item that owns the exact interface needed, and independent sub-surfaces run in parallel: when an item needs one sub-surface of an upstream item, split the upstream item there. Spread coverage proofs across the items that own each claim, so no single test carries every criterion. Still keep cohesive work in one item when handoff, preparation, validation and review cost more than the overlap saves; configured concurrency is a ceiling, not a target. A settled contract needs no dependency: depend only on changed outputs, artifacts or preparation a consumer actually needs, and do not serialize independent work for a combined later check. Plan within the repository's documented budgets and layout rules; where an addition could exceed one, plan the structural change in the owning item.
 2. Product questions. When the Objective leaves a product or authority choice open (semantics a user can observe, what a policy means, a public interface, scope), do not decide it silently. Set decisionRequired to the obligation the choice affects with a question that states the specific choice, your recommendation and the consequences of each option, and still return your best graph built on that recommendation; Factory asks the operator before using it, and the answer arrives as an operator finding. A criterion the Objective as written forbids covering is also a decision. Choosing fixture or test values the sources call policy, internal names, file layout and other implementation details is your job, not a product question. Set decisionRequired to null when no such choice is open. Never encode a decision as a missing environment.
 3. Source obligations. The source sections the Objective pins under Sources can state exit items beyond the Acceptance outcomes: deliverables, behaviours, proofs or listed assertions the delivered result must meet. List every one in sourceObligations, located by its exact lines, and either cover it like an Acceptance criterion or mark it out of scope with a reason citing the Objective's constraints or out-of-scope lines; never skip one silently. Descriptive, background and how-to text is context, not an exit item, and an exit item an Acceptance criterion already states fully needs no entry. AGENTS.md, README.md and the Objective itself are not such sections unless the Objective lists them, and neither are repository files you read or cite as worker inputs: sourceIndex always names a pinned source. Return [] only when the cited sections state no exit items. When whether an exit item is in scope is a product choice the Objective leaves open, use rule 2.`;
+}
 
 /** What the graph reviewer judges, and why. */
 export const GRAPH_REVIEW_INTRO =

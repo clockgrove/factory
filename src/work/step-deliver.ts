@@ -233,7 +233,8 @@ export async function mergeStep(
   });
   switch (result.kind) {
     case "merged": {
-      await deleteBranches(context, deps, [item]);
+      const refused = await deleteBranches(context, deps, [item]);
+      if (refused) return refused;
       const done: MergeResult = {
         mergeSha: result.mergeSha,
         integratedSha: result.integratedSha,
@@ -253,13 +254,14 @@ export async function mergeStep(
 /**
  * Delete the merged items' branches (deleteFactoryBranch), bottom first:
  * each one's PR base is the item before it, the native-stack layer below.
- * A kept one is logged.
+ * A kept one is logged; a refused one is the merge step's retry, which
+ * finds the PR merged and deletes again.
  */
 export async function deleteBranches(
   context: StepContext,
   deps: BuildDeps,
   items: readonly WorkItem[],
-): Promise<void> {
+): Promise<Outcome | undefined> {
   const where = {
     github: deps.github,
     checkout: deps.config.checkout,
@@ -274,8 +276,11 @@ export async function deleteBranches(
       "deliver:branch-delete",
       below && itemBranch(context.state.issue, below.id),
     );
-    if (kept) context.log({ event: "branch-kept", branch, reason: kept });
+    if (typeof kept === "string")
+      context.log({ event: "branch-kept", branch, reason: kept });
+    else if (kept) return kept;
   }
+  return undefined;
 }
 
 /**
@@ -311,7 +316,8 @@ export async function mergeStack(
     case "merged": {
       // Lower layers' branches are the upper PRs' bases: they go only
       // once the whole unit merged.
-      await deleteBranches(context, deps, unit.items);
+      const refused = await deleteBranches(context, deps, unit.items);
+      if (refused) return refused;
       const done: MergeResult = {
         mergeSha: result.mergeSha,
         integratedSha: result.integratedSha,
@@ -341,7 +347,9 @@ export async function mergeStack(
  * Failed CI or a conflict: the worker repairs on the current base, and the
  * same PR gets the new head. A conflict is mechanical: the change moves onto
  * the base GitHub named (or the current start) and the worker resolves what
- * the replay left, with no diagnosis.
+ * the replay left, with no diagnosis. A conflict refuses nothing of the
+ * result, so its fact is `replayOnly`: a resolution may rightly end on the
+ * same tree (the base changed only what the result replaces).
  */
 export function deliveryRepair(
   item: WorkItem,
@@ -373,6 +381,7 @@ export function deliveryRepair(
         },
         item.id,
       ),
+      refusesResult: !repair.conflict,
     },
   );
 }
@@ -457,9 +466,10 @@ export function movedLayer(
  * (validate, review, CI, merge, a secret it writes), so the worker must
  * change it and the item's refused fact records it as refused. A select or
  * publish media repair (new candidates, a selection that couldn't be
- * written, LFS objects) may rightly end on the same tracked tree, so its
- * fact is `replayOnly`, and a correct fix is never "no change". The layers
- * above are moved, not refused: theirs is `replayOnly` too.
+ * written, LFS objects) or a conflict repair (`deliveryRepair`) may rightly
+ * end on the same tracked tree, so its fact is `replayOnly`, and a correct
+ * fix is never "no change". The layers above are moved, not refused: theirs
+ * is `replayOnly` too.
  */
 export function repairOutcome(
   item: WorkItem,

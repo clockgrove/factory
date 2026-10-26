@@ -10,6 +10,7 @@ import { markdownLines } from "../markdown.js";
 import { checkObjective, type SourceRef, validPath } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
+import { HOST_VALIDATION_NETWORK } from "./rubric.js";
 import type {
   CoverageObligation,
   PinnedSource,
@@ -348,7 +349,7 @@ export function packageManagerVersionProbe(command: string): boolean {
 }
 
 /** The script forms {@link packageScriptInvocation} accepts, for messages. */
-const PACKAGE_SCRIPT_FORMS =
+export const PACKAGE_SCRIPT_FORMS =
   "`npm test`, `pnpm test`, `pnpm check`, `npm run NAME` or `pnpm run NAME`, with no other arguments";
 
 /** Supported root script forms; shell wrappers and package-manager flags are ambiguous. */
@@ -365,6 +366,20 @@ export function packageScriptInvocation(
   if (manager === "pnpm" && !match[2] && !["check", "test"].includes(name))
     return undefined;
   return { manager, name };
+}
+
+/**
+ * A command that runs npm or pnpm and is none of {@link PACKAGE_SCRIPT_FORMS},
+ * the script-disabled bootstrap or a version probe: validation can't keep
+ * its script fixed and refuses it, so the plan check refuses it first.
+ */
+export function unpinnablePackageCommand(command: string): boolean {
+  return (
+    /\b(?:npm|pnpm)\b/.test(command) &&
+    !packageBootstrap(command) &&
+    !packageManagerVersionProbe(command) &&
+    !packageScriptInvocation(command)
+  );
 }
 
 export function normalizedCommand(command: string): string {
@@ -399,7 +414,7 @@ export function listCommands(commands: readonly string[]): string {
 const VALIDATION_ENVIRONMENT = {
   network:
     "none except the exact script-disabled package install, which runs first",
-  refs: "remote-tracking branches may be stale; compare with $FACTORY_BASE_SHA",
+  refs: "remote-tracking branches may be stale; a Work Item's validation compares with $FACTORY_BASE_SHA, the commit its change was built on; integrated, QA and final commands run on the shared default branch, which holds other Objectives' merges, so they prove behaviour, never a diff: Factory enforces each item's owned paths",
   ci: "no hosted CI jobs, logs or secrets",
   tests:
     "HOME and TMPDIR are private and empty, with no host credentials or user config",
@@ -517,7 +532,7 @@ function scopedCommands(
 /**
  * The root package scripts at the base in the forms validation runs (test
  * and check first), less CI-only and network ones: facts for the planner.
- * Any other command the plan writes runs as written.
+ * A command the plan writes without npm or pnpm runs as written.
  */
 async function packageCommands(
   files: BaseFiles,
@@ -552,15 +567,12 @@ async function packageCommands(
 
 // ── Planner instructions ────────────────────────────────────────────────
 
-/** The planner's note on the validation environment; always present. */
-function validationEnvironmentInstructions(hostNetwork: boolean): string {
+/** The validation environment the planner and the graph reviewer are given. */
+export function validationEnvironmentNote(hostNetwork: boolean): string {
   const environment = hostNetwork
-    ? {
-        ...VALIDATION_ENVIRONMENT,
-        network: "the host's network (sandbox.network host)",
-      }
+    ? { ...VALIDATION_ENVIRONMENT, network: HOST_VALIDATION_NETWORK }
     : VALIDATION_ENVIRONMENT;
-  return `\n\nValidation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
+  return `Validation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
 }
 
 /** The planner's note on the installation's CI-only commands, after the environment note. */
@@ -569,7 +581,7 @@ function ciOnlyInstructions(
   hostNetwork: boolean,
 ): string {
   return (
-    validationEnvironmentInstructions(hostNetwork) +
+    `\n\n${validationEnvironmentNote(hostNetwork)}` +
     (ciOnlyCommands.length
       ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
       : "")
@@ -584,7 +596,7 @@ function packageCommandInstructions(
   const scoped = commands.flatMap((command) =>
     scopes.has(command) ? [`\`${command}\` (${scopes.get(command)})`] : [],
   );
-  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself; any command line runs as written.${scoped.length ? `\nThese check only one directory; use one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
+  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself. Besides the script-disabled install, one that runs npm or pnpm must be exactly ${PACKAGE_SCRIPT_FORMS} (no \`--\`, no flags), since validation keeps that script fixed; a command without npm or pnpm runs as written.${scoped.length ? `\nThese check only one directory; use one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
 }
 
 /** The CI-only and package-script notes for the planner request, in that order. */
@@ -947,12 +959,7 @@ export async function objectiveCommandProblems(
   const files = new BaseFiles(checkout, base, options.signal);
   const { problems } = await planningSources(shown, files);
   for (const command of finalCommands(options.requiredCommands))
-    if (
-      /\b(?:npm|pnpm)\b/.test(command) &&
-      !packageBootstrap(command) &&
-      !packageManagerVersionProbe(command) &&
-      !packageScriptInvocation(command)
-    )
+    if (unpinnablePackageCommand(command))
       problems.push(
         `Required final-validation command ${command} runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}, so its script can't be kept fixed; correct it in the installation's finalValidation.requiredCommands.`,
       );

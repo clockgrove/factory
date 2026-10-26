@@ -8,10 +8,12 @@ import {
   commandScope,
   listCommands,
   networkToolOfCommand,
+  PACKAGE_SCRIPT_FORMS,
   packageBootstrap,
   sectionText,
   unknownCheckMessage,
   unknownCheckNames,
+  unpinnablePackageCommand,
 } from "./facts.js";
 import {
   ancestors,
@@ -61,6 +63,7 @@ export async function checkPlan(
   await exportPathFindings(items, files, found);
   await boundaryFindings(items, facts, files, found);
   graphLint(draft, facts.packageCommands, found);
+  integratedBaseFindings(draft, facts.base, found);
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
@@ -90,7 +93,11 @@ async function exportPathFindings(
 
 // ── Commands ────────────────────────────────────────────────────────────
 
-/** CI-only: a command the installation leaves to CI never runs in validation. */
+/**
+ * CI-only: a command the installation leaves to CI never runs in
+ * validation. Unpinnable: a package command whose script validation can't
+ * keep fixed is refused there, after the work is built.
+ */
 function commandFindings(
   items: readonly WorkItem[],
   facts: PlanningFacts,
@@ -98,10 +105,15 @@ function commandFindings(
 ): void {
   const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
   for (const item of items)
-    for (const check of item.validation)
-      if (ciOnly.has(ciOnlyKey(check.command)))
+    for (const { command } of item.validation)
+      if (ciOnly.has(ciOnlyKey(command)))
         found(
-          `Work Item ${item.id} validation runs ${check.command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
+          item.id,
+        );
+      else if (unpinnablePackageCommand(command))
+        found(
+          `Work Item ${item.id} validation runs ${command}, which runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}: validation pins only those root script forms, so it would refuse this command after the work is built. Use one of those forms (root package scripts: ${listCommands(facts.packageCommands)}), or run the tool directly without npm or pnpm`,
           item.id,
         );
 }
@@ -143,6 +155,44 @@ async function boundaryFindings(
           item.id,
         );
     }
+}
+
+// ── Integrated base ─────────────────────────────────────────────────────
+
+/**
+ * base-relative: a command that runs on the shared default branch (a QA
+ * item's, or one an integrated-command proof runs) names no base. That
+ * branch holds other Objectives' merges before, between and after this
+ * one's, so no commit makes a diff from it this Objective's change; Factory
+ * enforces each item's owned paths itself (work/collect.ts).
+ */
+function integratedBaseFindings(
+  draft: Draft,
+  base: string,
+  found: Found,
+): void {
+  for (const item of draft.items) {
+    const proved = new Set(
+      draft.coverage.flatMap((entry) =>
+        entry.itemId === item.id && entry.proof?.kind === "integrated-command"
+          ? [entry.proof.validationIndex]
+          : [],
+      ),
+    );
+    for (const [index, { command }] of item.validation.entries()) {
+      if (item.kind !== "qa" && !proved.has(index)) continue;
+      const named = /\bFACTORY_BASE_SHA\b/.test(command)
+        ? "$FACTORY_BASE_SHA"
+        : command
+            .match(/\b[0-9a-f]{7,40}\b/gi)
+            ?.find((token) => base.startsWith(token.toLowerCase()));
+      if (named)
+        found(
+          `Work Item ${item.id} validation runs ${command}, which compares with the plan's base (${named}): integrated commands run on the shared default branch, which includes other Objectives' merges, so a diff from the base counts their changes too, and Factory itself enforces each item's owned paths. Drop the base-relative check and prove the behaviour with a command that exercises it, not the diff`,
+          item.id,
+        );
+    }
+  }
 }
 
 // ── Graph lint ──────────────────────────────────────────────────────────

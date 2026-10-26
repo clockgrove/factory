@@ -603,7 +603,10 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
               branch,
               "cancel:branch-delete",
             );
-            if (kept) log({ event: "branch-kept", branch, reason: kept });
+            if (typeof kept === "string")
+              log({ event: "branch-kept", branch, reason: kept });
+            // A refused delete is left for the cleanup's retry.
+            else if (kept) left.push(`branch ${branch} (${kept.reason})`);
           });
       } else left.push(`the branches factory/${issue}/* (their PRs are open)`);
       // The Objective's issue closes as not planned, so the queue and the

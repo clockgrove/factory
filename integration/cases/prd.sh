@@ -36,19 +36,20 @@ setup_prd() {
 }
 
 # ---------- helpers ----------
-# p_items N: the accepted plan's Work Items, "ID DEP,DEP" per line, from `factory status --json`.
+# p_items N: the accepted plan's Work Items, "ID KIND DEP,DEP" per line (KIND work
+# when absent), from `factory status --json`.
 p_items() {
   cli_t 60 status "$1" --json 2>/dev/null | python3 -c 'import json,sys
 seen = {}
 def walk(o):
     if isinstance(o, dict):
         if isinstance(o.get("id"), str) and isinstance(o.get("dependencies"), list):
-            seen.setdefault(o["id"], o["dependencies"])
+            seen.setdefault(o["id"], (o.get("kind") or "work", o["dependencies"]))
         for v in o.values(): walk(v)
     elif isinstance(o, list):
         for v in o: walk(v)
 walk(json.load(sys.stdin))
-for i, d in seen.items(): print(i, ",".join(d) or "-")'
+for i, (k, d) in seen.items(): print(i, k, ",".join(d) or "-")'
 }
 # p_pr N ITEM [STATE]: the PR of Work Item ITEM (head factory/N/ITEM), optionally only in STATE.
 p_pr() {
@@ -172,7 +173,7 @@ EOF
   local cmds; cmds=$(st validation-commands "$n" done.plan | sort -u | paste -sd'|')
   { [ "$accepted" = 1 ] || [[ $step == decide:* ]]; } && ! st validation-commands "$n" done.plan | grep -qx 'npm run ci-only'
   rec_if toolchain.ci-only $? "#$n plan accepted: $accepted, hold step '${step}'; accepted plan's validation commands: [${cmds}]" "$t0"
-  cancel_wait "$n" 300
+  settled "$n" || cancel_wait "$n" 300
 }
 
 # PRD 2, 7: an Objective a non-writer filed waits for a writer's approve; the
@@ -199,7 +200,7 @@ case_outsider() {
   local p2; p2=$(HOLD_POLICY="" wait_phase "$n" '^hold:' 600)
   [ "$ignored" -ge 1 ] && [[ $still == hold:* ]] && [ "$planned" -ge 1 ] && [[ $p2 == hold:* ]]
   rec_if intake.non-writer $? "#$n by github-actions[bot]: $p [approve offered]; the bot's /factory approve ignored x$ignored, still $still; writer's approve: plan starts $planned; after an edit: $p2" "$t0"
-  cancel_wait "$n" 300
+  settled "$n" || cancel_wait "$n" 300
 }
 
 # PRD 3: an operator's amendment is planned and reviewed again; an edit after
@@ -274,7 +275,7 @@ PY
   local again; again=$(st starts-since "$n" "$ra" 'plan*')
   [[ $p == hold:* ]] && [ "$again" -ge 1 ]
   rec_if plan.replan $? "#$n edited after planning: $p [$(hold_field "$hj" answers)]; plan starts after replan $again" "$t0"
-  cancel_wait "$n" 300
+  settled "$n" || cancel_wait "$n" 300
 }
 
 # PRD 3: a worker's in-scope discovery becomes an amendment and is reviewed.
@@ -285,11 +286,17 @@ case_discovery() {
   local HOLD_POLICY="d2 review decide more"
   n=$(new_objective discovery "worker discovery" ID="$id") || return
   wait_for 2400 p_amend_ready "$n" 'amend:worker-*'
-  local pl rv; pl=$(st events "$n" event=start 'step=amend:worker-*:plan'); rv=$(st events "$n" event=outcome outcome=done 'step=amend:worker-*:review')
-  [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
-  rec_if plan.discovery $? "#$n: worker discovery amendment plan starts $pl, reviews done $rv ($(st phase "$n"))" "$t0"
-  cancel_wait "$n" 300
+  discovery_check "$n" "$t0"
+  # It may have finished without a discovery: Factory refuses to cancel a finished Objective.
+  settled "$n" || cancel_wait "$n" 300
 }
+# discovery_check N T0: from N's logs alone (also run-suite.sh --replay).
+discovery_check() {
+  local pl rv; pl=$(st events "$1" event=start 'step=amend:worker-*:plan'); rv=$(st events "$1" event=outcome outcome=done 'step=amend:worker-*:review')
+  [ "$pl" -ge 1 ] && [ "$rv" -ge 1 ]
+  rec_if plan.discovery $? "#$1: worker discovery amendment plan starts $pl, reviews done $rv ($(st phase "$1"))" "$2"
+}
+replay_discovery() { local n; n=$(case_issues | head -1); [ -z "$n" ] || discovery_check "$n" "$(now)"; }
 
 # PRD 7: a Work Item's question stops only that item and its dependents: with
 # the base's merge refused (lasting 403), the independent item merges and the
@@ -299,16 +306,19 @@ case_scope() {
   local HOLD_POLICY="d2 review decide more"
   n=$(new_objective scope3 "item question scope" ID="$id") || return
   wait_for 1500 started_or_answer "$n" 'item:*:work' || { record holds.item-scope FAIL "#$n never built ($(st phase "$n"))" "$t0"; cancel_wait "$n"; return; }
-  # The plan's roles: top depends on base; solo depends on nothing and nothing on it.
+  # The plan's roles among its three work items: top depends on base; solo
+  # depends on nothing and nothing on it. Any other item must be read-only QA
+  # (`npm test` passes may be proved by one after all three).
   local items base top solo; items=$(p_items "$n")
   read -r base top solo <<<"$(python3 -c 'import sys
 rows = [l.split() for l in sys.argv[1].splitlines() if l.strip()]
-deps = {i: ([] if d == "-" else d.split(",")) for i, d in rows}
+deps = {i: ([] if d == "-" else d.split(",")) for i, k, d in rows if k == "work"}
 tops = [i for i in deps if deps[i]]
 bases = sorted({d for i in tops for d in deps[i]})
 solos = [i for i in deps if not deps[i] and i not in bases]
-print(*(bases[:1] + tops[:1] + solos[:1])) if len(rows) == 3 and len(tops) == 1 and len(bases) == 1 and len(solos) == 1 else print()' "$items")"
-  [ -n "$solo" ] || { record holds.item-scope FAIL "#$n plan isn't base/top/solo: $(paste -sd';' <<<"$items")" "$t0"; record holds.item-scope-after FAIL "not reached" "$t0"; cancel_wait "$n"; return; }
+ok = len(deps) == 3 and len(tops) == 1 and len(bases) == 1 and len(solos) == 1 and all(k in ("work", "qa") for _, k, _ in rows)
+print(*(bases[:1] + tops[:1] + solos[:1])) if ok else print()' "$items")"
+  [ -n "$solo" ] || { record holds.item-scope FAIL "#$n plan isn't base/top/solo work items and QA (ID KIND DEPS): $(paste -sd';' <<<"$items")" "$t0"; record holds.item-scope-after FAIL "not reached" "$t0"; cancel_wait "$n"; return; }
   local pr=""; local end=$(( $(now) + 1500 ))
   while [ -z "$pr" ] && [ "$(now)" -lt "$end" ] && ! stopping; do pr=$(p_pr "$n" "$base" OPEN); [ -n "$pr" ] || sleep 10; done
   [ -n "$pr" ] || { record holds.item-scope FAIL "#$n: $base never opened a PR" "$t0"; cancel_wait "$n"; return; }
@@ -335,16 +345,22 @@ case_paths() {
   a=$(new_objective overlap "owned paths overlap A" ID="$id" FN="overlapA$id" SPEC="\`overlapA$id(s)\` returns \`s + \"!\"\`.") || return
   b=$(new_objective overlap "owned paths overlap B" ID="$id" FN="overlapB$id" SPEC="\`overlapB$id(s)\` returns \`\"?\" + s\`.") || return
   wait_phase "$a" 'done|cancelled|failed' 2400 >/dev/null; wait_phase "$b" 'done|cancelled|failed' 2400 >/dev/null
-  local wa wb ea eb; wa=$(st at "$a" first event=start 'step=item:*:work'); wb=$(st at "$b" first event=start 'step=item:*:work')
+  end_done "$a"; local oa=$? ea_="$EVID"; end_done "$b"; local ob=$?
+  paths_check "$a" "$b" "$t0" "$(( oa || ob ))" "$ea_ | $EVID"
+}
+# paths_check A B T0 [ENDS ENDS_EVIDENCE]: the turns and both done from the
+# state and logs; ENDS is end_done's exit over both (GitHub, live only).
+paths_check() {
+  local a=$1 b=$2 wa wb ea eb; wa=$(st at "$a" first event=start 'step=item:*:work'); wb=$(st at "$b" first event=start 'step=item:*:work')
   ea=$(p_ended "$a"); eb=$(p_ended "$b")
   local turns=1
   if [ -n "$wa" ] && [ -n "$wb" ]; then
     if [[ $wa < $wb ]]; then [ -n "$ea" ] && [[ ! $wb < $ea ]] && turns=0; else [ -n "$eb" ] && [[ ! $wa < $eb ]] && turns=0; fi
   fi
-  end_done "$a"; local oa=$? ea_="$EVID"; end_done "$b"; local ob=$?
-  [ "$turns" = 0 ] && [ $oa = 0 ] && [ $ob = 0 ]
-  rec_if queue.paths-take-turns $? "#$a work from $wa, ended $ea; #$b work from $wb, ended $eb; $ea_ | $EVID" "$t0"
+  [ "$turns" = 0 ] && [ "$(st status "$a")" = done ] && [ "$(st status "$b")" = done ]
+  rec_part queue.paths-take-turns $? "${4:-}" "#$a work from $wa, ended $ea; #$b work from $wb, ended $eb${5:+; $5}" "$3"
 }
+replay_paths() { local a b; read -r a b <<<"$(case_issues | paste -sd' ')"; [ -z "$b" ] || paths_check "$a" "$b" "$(now)"; }
 
 # PRD 14: shared main: a person's change to the same file lands on main while
 # Factory's PR is open; Factory repairs the conflict and merges, and the
@@ -419,7 +435,7 @@ print(best)' "$@"
 # GitHub admits nothing until resume; checked Objectives plan in Project
 # order, at most 3 at once; two independent Work Items build at once; nothing
 # asks a person; a check-in from GitHub alone shows the run; an Objective on a
-# file earlier planning read is shown repository memory; dream changes the
+# file an earlier Objective pinned is shown repository memory; dream changes the
 # playbook only on approval.
 case_prod() {
   local t0 id; t0=$(now); id=$(uid)
@@ -440,7 +456,10 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   [ $bg = 0 ] || { record setup.background FAIL "setup --background exit $rb, --check exit $rc" "$t0"; q_uninstall; return; }
 
   # The first Objective runs; a /factory queue pause comment on it stops admission.
-  local n1; n1=$(new_objective happy "production: first" ID="${id}a") || { q_uninstall; return; }
+  # It pins README.md's heading as a Source: its planning keeps that section
+  # as a reference record (source README.md#<heading>), which the order-3
+  # Objective's roles aren't supplied (knowledge.memory below).
+  local n1; n1=$(new_objective happy "production: first" ID="${id}a" EXTRA=$'\n\n## Sources\n\n- `README.md#Factory integration drill`') || { q_uninstall; return; }
   wait_for 600 bash -c "[ \$(python3 '$SUITE/lib/st.py' '$ROOT' events $n1 event=admitted) -gt 0 ]"
   local pc; pc=$(gh_comment "$n1" "/factory queue pause"); local pause_at; pause_at=$(iso_ms)
   wait_for 180 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"mode\"))' '$ROOT/queue.json' 2>/dev/null)\" = paused ]"
@@ -462,39 +481,22 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   # it), so the checks after it still run in the time left.
   for x in "$n1" "$c" "$b" "$a"; do wait_phase "$x" 'done|cancelled|failed' "$(left)" >/dev/null; done
   sleep 20
-  # Order and the cap of 3: every queued card is admitted at once and checked
-  # with no slot; planning and building take one of 3 slots, in Project order
-  # among the Objectives whose check is done (docs/reference/queue.md).
-  local ord=() late; for x in "$c" "$b" "$a"; do ord+=("$x,$(st at "$x" first event=outcome outcome=done step=check),$(st at "$x" first event=start 'step=plan:*')"); done
-  late=$(q_late "${ord[@]}")
-  [ -z "$late" ]
-  rec_if queue.order $? "#$c order 1, #$b order 2, #$a order 3 as issue,check done,first planning: ${ord[*]}; out of order: ${late:-none}" "$t0"
-  local sl=() cap; for x in "$n1" "$c" "$b" "$a"; do sl+=("$(st slot "$x")"); done
-  cap=$(q_overlap "${sl[@]}")
-  [ "$cap" = 3 ]
-  rec_if queue.concurrency-3 $? "most planning or building at once: $cap; slots (first planning to report or hold): #$n1 ${sl[0]:-none}, #$c ${sl[1]:-none}, #$b ${sl[2]:-none}, #$a ${sl[3]:-none}" "$t0"
-  local par; par=$(st maxconc 'item:*:work' "$c")
-  [ "$par" -ge 2 ]; rec_if exec.parallel-items $? "#$c's Work Items working at once: $par" "$t0"
-  local all=0 holds=0 ev=""; for x in "$n1" "$c" "$b" "$a"; do end_done "$x" || all=1; ev="$ev | $EVID"; holds=$(( holds + $(st events "$x" event=hold) )); done
-  [ $all = 0 ] && [ "$holds" = 0 ]; rec_if prod.no-holds $? "four Objectives at production settings, holds $holds$ev" "$t0"
+  local all=0 ev=""; for x in "$n1" "$c" "$b" "$a"; do end_done "$x" || all=1; ev="$ev | $EVID"; done
+  prod_checks "$n1" "$c" "$b" "$a" "$t0" "$all" "${ev# | }"
 
-  # A check-in from GitHub alone, and the CLI's detail.
+  # A check-in from GitHub alone, and the CLI's detail. Every Work Item of the
+  # accepted plan, a QA item too, has its own issue.
   local subs; subs=$(gh api "repos/$REPO/issues/$c/sub_issues" --jq '[.[]|{state, reason: .state_reason, wi: ([.labels[].name]|index("factory:work-item") != null)}]' 2>/dev/null)
   local mc; mc=$(gh_markers "$c"); local card; card=$(gh_card_value "$c")
+  local planned; planned=$(st get "$c" done.plan.items | python3 -c 'import json,sys;print(len(json.load(sys.stdin) or []))')
   local vis; vis=$(python3 -c 'import json,sys;s=json.loads(sys.argv[1] or "[]");print(len(s), all(x["wi"] and x["state"]=="closed" and x["reason"]=="completed" for x in s))' "$subs")
-  [ "$(marker_prefix_count "$mc" status)" -ge 1 ] && [[ $vis == "2 True" ]] && [ "$card" = Done ]
-  rec_if visibility.github $? "#$c: status comment markers $(marker_prefix_count "$mc" status); Work Item issues (count, all labelled and closed completed): $vis; card $card" "$t0"
+  [ "$(marker_prefix_count "$mc" status)" -ge 1 ] && [ "$planned" -ge 1 ] && [[ $vis == "$planned True" ]] && [ "$card" = Done ]
+  rec_if visibility.github $? "#$c: status comment markers $(marker_prefix_count "$mc" status); Work Item issues (count, all labelled and closed completed): $vis, of $planned planned; card $card" "$t0"
   local lg dg xg; cli_t 60 log "$c" --tail 20 >"$RUN_DIR/q.log.out" 2>&1; lg=$?
   cli_t 60 diagnostics "$c" --summary >"$RUN_DIR/q.diag.out" 2>&1; dg=$?
   cli_t 60 export-captures "$c" >"$RUN_DIR/q.export.out" 2>&1; xg=$?
   [ $lg = 0 ] && [ -s "$RUN_DIR/q.log.out" ] && [ $dg = 0 ] && [ -s "$RUN_DIR/q.diag.out" ] && [ $xg = 0 ]
   rec_if visibility.cli $? "factory log exit $lg, diagnostics --summary exit $dg, export-captures exit $xg" "$t0"
-
-  # Memory is path-scoped: the order-3 Objective also changes README.md, which
-  # every planning call before it recorded as a reference, so its roles were
-  # shown memory.
-  local mem shown0; mem=$(st events "$a" event=memory); shown0=$(st events "$a" event=memory shown=0)
-  [ "$(( mem - shown0 ))" -ge 1 ]; rec_if knowledge.memory $? "#$a (owns README.md): memory sections $mem, with entries shown $(( mem - shown0 ))" "$t0"
 
   # dream: a proposal changes nothing until it is approved.
   for x in "$n1" "$c" "$b" "$a"; do cli_t 120 dream --record --objective "$x" >/dev/null 2>&1; done
@@ -520,3 +522,35 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   [ "$rst" = 0 ] && [ "$rck" != 0 ] && [ "$ru" = 0 ] && [ "$units" = 0 ]
   rec_if setup.background $? "setup --background exit $rb, --check exit $rc; --stop exit $rst, then --check exit $rck; --uninstall exit $ru; factory units left $units" "$t0"
 }
+# prod_checks N1 C B A T0 [ENDS ENDS_EVIDENCE]: lane Q's checks from Q's state
+# and logs (also run-suite.sh --replay). C, B and A are Project order 1, 2 and 3;
+# ENDS is end_done's exit over all four (GitHub, live only).
+prod_checks() {
+  local n1=$1 c=$2 b=$3 a=$4 t0=$5 x
+  # Order and the cap of 3: every queued card is admitted at once and checked
+  # with no slot; planning and building take one of 3 slots, in Project order
+  # among the Objectives whose check is done (docs/reference/queue.md).
+  local ord=() late; for x in "$c" "$b" "$a"; do ord+=("$x,$(st at "$x" first event=outcome outcome=done step=check),$(st at "$x" first event=start 'step=plan:*')"); done
+  late=$(q_late "${ord[@]}")
+  [ -z "$late" ]
+  rec_if queue.order $? "#$c order 1, #$b order 2, #$a order 3 as issue,check done,first planning: ${ord[*]}; out of order: ${late:-none}" "$t0"
+  local sl=() cap; for x in "$n1" "$c" "$b" "$a"; do sl+=("$(st slot "$x")"); done
+  cap=$(q_overlap "${sl[@]}")
+  [ "$cap" = 3 ]
+  rec_if queue.concurrency-3 $? "most planning or building at once: $cap; slots (first planning to report or hold): #$n1 ${sl[0]:-none}, #$c ${sl[1]:-none}, #$b ${sl[2]:-none}, #$a ${sl[3]:-none}" "$t0"
+  local par; par=$(st maxconc 'item:*:work' "$c")
+  [ "$par" -ge 2 ]; rec_if exec.parallel-items $? "#$c's Work Items working at once: $par" "$t0"
+  local holds=0 h s each="" fin=0; for x in "$n1" "$c" "$b" "$a"; do
+    h=$(st events "$x" event=hold); s=$(st status "$x"); holds=$(( holds + h )); each="$each, #$x $s holds $h"; [ "$s" = done ] || fin=1
+  done
+  [ "$holds" = 0 ] && [ "$fin" = 0 ]
+  rec_part prod.no-holds $? "${6:-}" "four Objectives at production settings, holds $holds (${each#, })${7:+ | $7}" "$t0"
+  # Memory is path-scoped: the order-3 Objective also changes README.md, so its
+  # roles are shown the first Objective's README.md#<heading> reference. (Every
+  # planning call's whole README.md reference is left out: each role is
+  # supplied README.md itself, and memory drops a Source the role already has.)
+  local mem shown0; mem=$(st events "$a" event=memory); shown0=$(st events "$a" event=memory shown=0)
+  [ "$(( mem - shown0 ))" -ge 1 ]; rec_if knowledge.memory $? "#$a (owns README.md): memory sections $mem, with entries shown $(( mem - shown0 ))" "$t0"
+}
+# A replay: the case filed N1, A, B, C in that order.
+replay_prod() { local n1 a b c; read -r n1 a b c <<<"$(case_issues | paste -sd' ')"; [ -z "$c" ] || prod_checks "$n1" "$c" "$b" "$a" "$(now)"; }

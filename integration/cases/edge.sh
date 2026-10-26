@@ -92,7 +92,7 @@ e_target() {
       clone "$repo" "$co"
   } 2>>"$RUN_DIR/$s.setup.err" || return 1
   write_config "$STATE_BASE/config-$s.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'"
-  inst_define "$i" "$repo" "$STATE_BASE/config-$s.json"
+  inst_define "$i" "$repo" "$STATE_BASE/config-$s.json" || return 1
   printf '%s\n' "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/$i/extra_env"
   inst "$i"
 }

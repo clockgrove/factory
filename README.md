@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/clockgrove/factory/main/assets/factory-mark.svg" alt="Factory mark" width="72" height="72">
+<img src="https://raw.githubusercontent.com/clockgrove/factory/main/plugin/assets/factory-mark.svg" alt="Factory mark" width="72" height="72">
 
 # Factory
 
@@ -36,12 +36,6 @@ Install the plugin, then run its setup skill. Factory has two parts, and both co
 - **The plugin** gives your agent host the `setup` and `director` skills.
 - **The CLI** gives you `factory` and the bundled default Codex runtime. It works the same under any host. The setup skill installs it for you.
 
-Pick the latest release:
-
-```sh
-VERSION=$(gh release view --repo clockgrove/factory --json tagName --jq .tagName | sed 's/^v//')
-```
-
 ### Plugin
 
 Install the plugin for your host. Both hosts load the same skills.
@@ -49,20 +43,46 @@ Install the plugin for your host. Both hosts load the same skills.
 **Codex:**
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref "v$VERSION"
+codex plugin marketplace add clockgrove/factory
 codex plugin add factory@clockgrove
 ```
 
 **Claude Code**:
 
 ```sh
-claude plugin marketplace add "clockgrove/factory#v$VERSION"
+claude plugin marketplace add clockgrove/factory
 claude plugin install factory@clockgrove
 ```
 
 In Claude Code the skills appear as `factory:setup` and `factory:director`.
 
-Claude Code may report that the plugin's packages were not installed, naming a `package-lock.json` entry that is a bundled copy. This is expected and harmless. The plugin is this repository at the release tag, so it carries the CLI's `package.json` and lockfile, and Claude Code [installs a plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies) only when none of them is bundled or linked. The skills need none of them: they run the `factory` CLI that setup installs.
+The marketplace follows this repository's `main`, whose entry always names the latest release's tag, so you get the latest release. The plugin is that release's `plugin` directory: its manifests, skills and logo, with no npm package, so neither host installs packages for it. The skills run the `factory` CLI that setup installs.
+
+#### Upgrade the plugin
+
+Refresh the marketplace and update the plugin, then run setup again (see [Upgrade](docs/USER-GUIDE.md#upgrade)):
+
+```sh
+codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove      # Codex
+claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove  # Claude Code
+```
+
+Restart Claude Code afterwards to load the new skills. Codex's `marketplace upgrade` usually updates the plugin itself; `plugin add` installs the marketplace's release when it didn't. In the minutes a new release is being tagged, the update can fail and leave your release installed; run it again later. Setup reports a release whose files aren't published yet as `unpublished`, and asks you to try again in a few minutes.
+
+**Installed before 0.5.2?** Earlier releases added the marketplace at a release tag (`clockgrove/factory#vX.Y.Z` or `--ref vX.Y.Z`). A host keeps that tag, so the commands above leave the plugin where it is, and it refuses the same marketplace without the tag. Move once: remove the marketplace, which also removes the plugin (it keeps no data), then add it without a tag and install:
+
+```sh
+# Codex
+codex plugin marketplace remove clockgrove
+codex plugin marketplace add clockgrove/factory
+codex plugin add factory@clockgrove
+# Claude Code
+claude plugin marketplace remove clockgrove
+claude plugin marketplace add clockgrove/factory
+claude plugin install factory@clockgrove
+```
+
+To stay on one release instead, add the marketplace at its tag, as those releases did. A pinned marketplace doesn't upgrade; moving it to another release takes the same remove and add.
 
 ### Run setup
 
@@ -71,15 +91,16 @@ In Codex or Claude Code, ask Factory to set up your target (see [Use the plugin]
 1. It downloads that release's `clockgrove-factory-VERSION.tgz` and `SHA256SUMS` into a fresh directory.
 2. It checks the tarball's SHA-256 and its build provenance with `gh attestation verify`, and stops with nothing installed if either fails.
 3. It installs the tarball with npm, together with the SDKs the Claude and Copilot providers need, into `~/.local/share/clockgrove-factory/VERSION` (under `XDG_DATA_HOME` when set), or into an absolute directory you name.
-4. It links the CLI as `bin/factory` in that directory, runs it for the rest of setup and gives you the one line that puts it on your shell's PATH. That `bin` holds only Factory's launcher, which Factory keeps off its workers' PATH.
+4. It points the launcher `~/.local/share/clockgrove-factory/bin/factory` (`bin/factory` in a directory you name) at that CLI, replacing the link in one step, and runs it for the rest of setup. When that `bin` isn't on your PATH, it offers to add the one line that puts it there to your shell's startup file. The line names no version, so it stays right at the next release; replace any line an earlier setup gave you that names a versioned `clockgrove-factory/VERSION/bin`. That `bin` holds only Factory's launcher, which Factory keeps off its workers' PATH. The launcher never goes back to an older release on its own: setup from a plugin older than the release the launcher runs (say, Codex's plugin a release behind Claude Code's) installs its release beside it, leaves the launcher where it is and names the plugin to update; the installer's `--downgrade` moves it back on purpose.
 
 It needs the GitHub CLI logged in and network access. The installer is `skills/setup/install-cli.mjs` in the plugin; `node` runs it on its own too, and it prints JSON with the CLI's path.
 
 ### Install the CLI by hand
 
-This is the fallback when setup can't install the CLI. Download the tarball and verify it:
+This is the fallback when setup can't install the CLI. Set `VERSION` to your plugin's release (the latest, as below, unless you pinned one), then download the tarball and verify it:
 
 ```sh
+VERSION=$(gh release view --repo clockgrove/factory --json tagName --jq .tagName | sed 's/^v//')
 gh release download "v$VERSION" --repo clockgrove/factory \
   --pattern "clockgrove-factory-$VERSION.tgz" --pattern SHA256SUMS
 gh attestation verify "clockgrove-factory-$VERSION.tgz" --repo clockgrove/factory
@@ -104,11 +125,11 @@ npm install --prefix /absolute/private/factory-prefix "./clockgrove-factory-$VER
 npm list --prefix /absolute/private/factory-prefix @anthropic-ai/claude-agent-sdk @github/copilot-sdk
 ```
 
-Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory excludes its authenticated installation bin from worker PATH when it contains only its own launcher; controller discovery and validation commands retain the original PATH. Other protected PATH entries still require correction. Factory is distributed through GitHub Releases, not the npm registry.
+Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory excludes its authenticated installation bin from worker PATH when it contains only a Factory launcher (a `factory` link to Factory's CLI, of any version, or the setup skill's launcher whose release directory was deleted, which readiness warns of); controller discovery and validation commands retain the original PATH. Other protected PATH entries still require correction. Factory is distributed through GitHub Releases, not the npm registry.
 
 ### Check the installation
 
-Setup checks this for you. To check by hand that the CLI and the plugin come from the release you selected, list the CLI's installation directory (setup's default below, or the one you chose):
+Setup checks this for you. To check by hand that the CLI and the plugin come from one release, list the plugin (its `version`) and, with `VERSION` that release, the CLI's installation directory (setup's default below, or the one you chose):
 
 ```sh
 command -v factory

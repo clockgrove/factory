@@ -9,8 +9,9 @@
     {
       "name": "factory",
       "source": {
-        "source": "github",
-        "repo": "clockgrove/factory",
+        "source": "git-subdir",
+        "url": "https://github.com/clockgrove/factory.git",
+        "path": "plugin",
         "ref": "v0.5.1"
       },
       "description": "Run source-grounded development Objectives in a target repository.",

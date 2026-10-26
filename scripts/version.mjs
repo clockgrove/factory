@@ -15,7 +15,11 @@ const files = {
 
 // One plugin manifest and one marketplace per agent host. Each marketplace
 // pins the release tag, so a host's skills and the CLI share one version.
-const plugins = [".codex-plugin/plugin.json", ".claude-plugin/plugin.json"];
+// The plugin is the plugin/ directory, apart from the CLI's package.
+const plugins = [
+  "plugin/.codex-plugin/plugin.json",
+  "plugin/.claude-plugin/plugin.json",
+];
 const marketplaces = [
   ".agents/plugins/marketplace.json",
   ".claude-plugin/marketplace.json",

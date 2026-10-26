@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CoreConfig } from "./config.js";
+import { GITHUB_APP_KEY } from "./github-app.js";
 import type { Paths } from "./paths.js";
 import { CLAUDE_LOGIN_CREDENTIALS } from "./providers/claude.js";
 import { COPILOT_SECRETS, copilotConfigured } from "./providers/config.js";
@@ -162,7 +163,11 @@ function recorded(text: string): Runtime | undefined {
   }
 }
 
-/** The names Factory reads from the service's credentials. */
+/**
+ * The names Factory reads from the service's credentials that
+ * `--credential-file` binds: all but the GitHub App's key, which is
+ * setup's copy (`credentialFiles`).
+ */
 function credentialNames(config: CoreConfig): Set<string> {
   const readable = new Set<string>(CLAUDE_LOGIN_CREDENTIALS);
   if (copilotConfigured(config.providers))
@@ -178,10 +183,11 @@ function credentialNames(config: CoreConfig): Set<string> {
  * The logins a shell may set that the unit doesn't keep: the service has
  * them only as its credentials (`--credential-file`), or not at all. The
  * Codex and GitHub keys are never kept, so the service logs in with Codex's
- * auth.json and the GitHub CLI's stored login.
+ * auth.json and the GitHub CLI's stored login, or its GitHub App's key.
  */
 export const unkeptLogins = (config: CoreConfig): string[] => [
   ...credentialNames(config),
+  GITHUB_APP_KEY,
   "CODEX_API_KEY",
   "OPENAI_API_KEY",
   "FACTORY_GITHUB_TOKEN",
@@ -194,19 +200,22 @@ export const unkeptLogins = (config: CoreConfig): string[] => [
 /**
  * `NAME=ABSOLUTE_FILE` bindings, checked: a name Factory reads from the
  * service's credentials, and a regular file only its owner can read. The
- * file is never read here.
+ * file is never read here. `appKey`, setup's copy of the GitHub App's
+ * key, is bound as GITHUB_APP_KEY.
  */
 export function credentialFiles(
   bindings: readonly string[],
   config: CoreConfig,
+  appKey?: string,
 ): Credential[] {
   const readable = credentialNames(config);
+  const own = appKey === undefined ? [] : [`${GITHUB_APP_KEY}=${appKey}`];
   const credentials: Credential[] = [];
-  for (const binding of bindings) {
+  for (const binding of [...bindings, ...own]) {
     const at = binding.indexOf("=");
     const name = binding.slice(0, at);
     const file = binding.slice(at + 1);
-    if (at < 1 || !readable.has(name))
+    if (at < 1 || !(readable.has(name) || own.includes(binding)))
       throw new Error(
         `--credential-file takes NAME=ABSOLUTE_FILE, where NAME is one Factory reads from the service's credentials: ${[...readable].join(", ")}`,
       );

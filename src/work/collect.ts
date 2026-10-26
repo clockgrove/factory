@@ -23,6 +23,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
 import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
+import type { CommitAuthor } from "../github.js";
 import { inert } from "../markdown.js";
 import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
@@ -44,6 +45,21 @@ import {
 
 /** The committer email on every commit Factory writes. */
 export const FACTORY_EMAIL = "factory@users.noreply.github.com";
+
+/**
+ * `git commit` options for a commit Factory makes: committed as Factory
+ * (FACTORY_EMAIL, which tells its commits apart), and authored by
+ * `author` when it acts as a GitHub App (github.ts `commitAuthor`).
+ */
+export function factoryCommit(author: CommitAuthor | undefined): {
+  config: string[];
+  author: string[];
+} {
+  return {
+    config: ["-c", "user.name=Factory", "-c", `user.email=${FACTORY_EMAIL}`],
+    author: author ? [`--author=${author.name} <${author.email}>`] : [],
+  };
+}
 
 /** The commit message of a collected result; the title can't close or mention (markdown.ts inert). */
 function collectionMessage(item: Pick<WorkItem, "title">): string {
@@ -122,6 +138,8 @@ export interface CollectInput {
    * again is no change.
    */
   refusedTree?: string;
+  /** The collected commit's author as a GitHub App (`factoryCommit`). */
+  author?: CommitAuthor;
   signal: AbortSignal;
 }
 
@@ -248,7 +266,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   if (
     head !== base &&
     (await parent(worktree, signal)) === base &&
-    (await text("log", "-1", "--format=%ae%n%s")) ===
+    (await text("log", "-1", "--format=%ce%n%s")) ===
       `${FACTORY_EMAIL}\n${collectionMessage(item)}`
   )
     await git("reset", "--quiet", "--soft", base);
@@ -278,13 +296,12 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
       ...(unchanged ? { unchanged: true as const } : {}),
       ...(discovery ? { discovery } : {}),
     };
+  const commitAs = factoryCommit(input.author);
   await git(
-    "-c",
-    "user.name=Factory",
-    "-c",
-    `user.email=${FACTORY_EMAIL}`,
+    ...commitAs.config,
     "commit",
     "--quiet",
+    ...commitAs.author,
     "-m",
     collectionMessage(item),
   );

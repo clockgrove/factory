@@ -11,6 +11,7 @@ import {
 import { defaultHead } from "../git.js";
 import { GitHubError, issueGone, TransientError } from "../github.js";
 import { roleMemory } from "../knowledge/index.js";
+import { mentions } from "../markdown.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
@@ -29,7 +30,7 @@ import { moveStatusOffDone } from "../queue.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
 import { decisionLines, type ResultReview } from "../review/result.js";
-import { runOf, sinceRun } from "../state.js";
+import { type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { errorMessage } from "../text.js";
 import {
   laterScriptChanges,
@@ -511,52 +512,10 @@ export function reportStep(deps: BuildDeps): Step {
         const changed = await objectiveEdited(context, deps);
         if (changed) return changed;
       }
-      const plan = currentPlan(state)!;
-      const final = state.done.final as FinalResult;
-      const lines = plan.items.map((item) => {
-        const published = state.done[stepKey(item.id, "publish")] as
-          | PublishResult
-          | undefined;
-        const merged = mergeOf(state, item.id);
-        const checked =
-          item.kind === "qa"
-            ? (state.done[stepKey(item.id, "validate")] as QaResult | undefined)
-            : undefined;
-        return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
-      });
-      const repairs = Object.values(state.repairs ?? {}).reduce(
-        (sum, r) => sum + r.count,
-        0,
-      );
-      const decided = decisionLines(decisionsOf(state));
-      // CI flakes: checks that failed, then passed on their one rerun.
-      const flaky = plan.items.flatMap((item) => {
-        const rerun = fact(state, "ciRerun", item.id);
-        return rerun?.passed
-          ? [
-              `- **${item.id}**: ${rerun.checks.map((check) => `\`${check}\``).join(", ")} at \`${rerun.head.slice(0, 12)}\``,
-            ]
-          : [];
-      });
-      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${flaky.length ? `\n\nPossibly flaky CI checks, which failed and then passed when Factory reran their failed Actions jobs once:\n${flaky.join("\n")}` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
-        plan.retired?.length
-          ? `\n\nRetired final validation commands:\n${retiredLines(plan)
-              .map((line) => `- ${line}`)
-              .join("\n")}`
-          : ""
-      }${
-        final.skipped
-          ? `\n\nFinal validation skipped these commands:\n${skippedLines(
-              final.skipped,
-            )
-              .map((line) => `- ${line}`)
-              .join("\n")}`
-          : ""
-      }${final.media ? `\n\n${final.media}` : ""}`;
       await github.ensureComment(
         state.issue,
         marker,
-        body,
+        reportComment(marker, state, deps.config.operators),
         "report:comment",
         signal,
         sinceRun(state),
@@ -566,6 +525,60 @@ export function reportStep(deps: BuildDeps): Step {
       return { kind: "done" };
     },
   };
+}
+
+/**
+ * The report: each Work Item's PR and merge, final validation and review,
+ * the checks a rerun passed, the operator's decisions and retirements,
+ * and the operators' mentions.
+ */
+export function reportComment(
+  marker: string,
+  state: ObjectiveState,
+  operators: readonly string[],
+): string {
+  const plan = currentPlan(state)!;
+  const final = state.done.final as FinalResult;
+  const lines = plan.items.map((item) => {
+    const published = state.done[stepKey(item.id, "publish")] as
+      | PublishResult
+      | undefined;
+    const merged = mergeOf(state, item.id);
+    const checked =
+      item.kind === "qa"
+        ? (state.done[stepKey(item.id, "validate")] as QaResult | undefined)
+        : undefined;
+    return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
+  });
+  const repairs = Object.values(state.repairs ?? {}).reduce(
+    (sum, r) => sum + r.count,
+    0,
+  );
+  const decided = decisionLines(decisionsOf(state));
+  // CI flakes: checks that failed, then passed on their one rerun.
+  const flaky = plan.items.flatMap((item) => {
+    const rerun = fact(state, "ciRerun", item.id);
+    return rerun?.passed
+      ? [
+          `- **${item.id}**: ${rerun.checks.map((check) => `\`${check}\``).join(", ")} at \`${rerun.head.slice(0, 12)}\``,
+        ]
+      : [];
+  });
+  return `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${flaky.length ? `\n\nPossibly flaky CI checks, which failed and then passed when Factory reran their failed Actions jobs once:\n${flaky.join("\n")}` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
+    plan.retired?.length
+      ? `\n\nRetired final validation commands:\n${retiredLines(plan)
+          .map((line) => `- ${line}`)
+          .join("\n")}`
+      : ""
+  }${
+    final.skipped
+      ? `\n\nFinal validation skipped these commands:\n${skippedLines(
+          final.skipped,
+        )
+          .map((line) => `- ${line}`)
+          .join("\n")}`
+      : ""
+  }${final.media ? `\n\n${final.media}` : ""}${mentions(operators)}`;
 }
 
 /**

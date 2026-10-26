@@ -12,10 +12,18 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type { CoreConfig } from "./config.js";
-import { checkoutCredentialEntries } from "./git.js";
-import type { GitHub } from "./github.js";
+import { credentialPath } from "./credentials.js";
+import { checkoutCredentialEntries, pushesOverSsh } from "./git.js";
+import { type AppInstallation, type GitHub, sameLogin } from "./github.js";
+import {
+  appKey,
+  appRegistrationLink,
+  appSteps,
+  GITHUB_APP_KEY,
+  missingPermissions,
+} from "./github-app.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
 import { installationPaths } from "./paths.js";
@@ -350,11 +358,7 @@ async function login(
 
 /** A credential systemd loaded for the service, by presence: never read here. */
 function loaded(name: string, bound: readonly string[]): boolean {
-  if (bound.includes(name)) return true;
-  const directory = process.env.CREDENTIALS_DIRECTORY;
-  return (
-    !!directory && isAbsolute(directory) && existsSync(join(directory, name))
-  );
+  return bound.includes(name) || credentialPath(name) !== undefined;
 }
 
 async function providerChecks(
@@ -462,12 +466,147 @@ async function providerChecks(
   return checks;
 }
 
+/**
+ * A GitHub App's identity (github-app.ts): its private key is there, its
+ * installation covers the repository and isn't suspended, a token can be
+ * minted, and the installation grants every permission Factory needs.
+ * Empty without one.
+ */
+async function appChecks(
+  config: CoreConfig,
+  github: GitHub,
+): Promise<ReadinessCheck[]> {
+  const app = config.github.app;
+  if (!app) return [];
+  const name = "GitHub App";
+  const blocked = (detail: string, fix: string): ReadinessCheck[] => [
+    { name, status: "blocked", detail, fix },
+  ];
+  let key: string | undefined;
+  try {
+    key = appKey(installationPaths(config.repository).root);
+  } catch (error) {
+    return blocked(
+      `App ${app.id}'s private key can't be read: ${errorMessage(error)}`,
+      "Give it again with factory setup --github-app-key PATH",
+    );
+  }
+  if (!key)
+    return blocked(
+      `App ${app.id} has no private key: not in the service's credentials, ${GITHUB_APP_KEY} or the installation`,
+      "Generate a private key on the App's settings page, then run factory setup --github-app-key PATH",
+    );
+  const install = `Install the App on ${config.repository} and every other repository of its Project, or on an organization's All repositories (the App's settings page, Install App), then repeat`;
+  let installation: AppInstallation;
+  try {
+    installation = await github.appInstallation();
+    await github.serviceToken();
+  } catch (error) {
+    return blocked(
+      `App ${app.id} can't act on ${config.repository}: ${errorMessage(error)}`,
+      `Check that github.app.id is the App's id and its private key is the App's current one. ${install}`,
+    );
+  }
+  if (installation.suspended)
+    return blocked(
+      `App ${app.id}'s installation ${installation.id} is suspended`,
+      "Unsuspend it in the installation's settings, then repeat",
+    );
+  // Without an installationId the installation is the repository's own.
+  if (app.installationId !== undefined) {
+    let covering: number | undefined;
+    try {
+      covering = await github.repositoryInstallation();
+    } catch (error) {
+      return blocked(
+        `Can't read App ${app.id}'s installation on ${config.repository}: ${errorMessage(error)}`,
+        "Repeat once GitHub answers",
+      );
+    }
+    if (covering !== app.installationId)
+      return blocked(
+        covering === undefined
+          ? `App ${app.id} isn't installed on ${config.repository}`
+          : `Installation ${app.installationId} doesn't cover ${config.repository} (installation ${covering} does)`,
+        `${install}, or correct github.app.installationId`,
+      );
+  }
+  const missing = missingPermissions(
+    installation.permissions,
+    (await github.ownerIsOrganization().catch(() => undefined)) !== false,
+  );
+  const checks: ReadinessCheck[] = [
+    missing.length
+      ? {
+          name,
+          status: "blocked",
+          detail: `Installation ${installation.id} of ${installation.slug} lacks ${missing.join(", ")}`,
+          fix: "Grant them on the App's Permissions & events page, then accept them in the installation's settings, then repeat",
+        }
+      : ok(
+          name,
+          `Factory acts as ${installation.slug}[bot] (App ${app.id}, installation ${installation.id}), with every permission it needs`,
+        ),
+  ];
+  if (await pushesOverSsh(config.checkout).catch(() => false))
+    checks.push({
+      name,
+      status: "warn",
+      detail: `Origin's push URL isn't https, so Factory's pushes use this host's SSH login, not the App's token`,
+      fix: `Set origin to https://github.com/${config.repository}.git, so pushes go as the App`,
+    });
+  return checks;
+}
+
+/**
+ * Whom holds notify: the operators each hold, report and cancel mentions.
+ * None, or Factory's own login among them, means a hold reaches nobody:
+ * GitHub doesn't notify an account of its own comments.
+ */
+async function operatorChecks(
+  config: CoreConfig,
+  github: GitHub,
+  login: string,
+): Promise<ReadinessCheck[]> {
+  const name = "operators";
+  if (!config.operators.length)
+    return [
+      {
+        name,
+        status: "warn",
+        detail:
+          "No operator is set, so holds notify nobody: a hold, a report and a cancel mention no one",
+        fix: "Name who answers holds: factory setup --operator LOGIN (repeat it for each)",
+      },
+    ];
+  const self = config.operators.find((operator) => sameLogin(operator, login));
+  if (!self)
+    return [
+      ok(
+        name,
+        `Holds, reports and cancels mention ${config.operators.map((operator) => `@${operator}`).join(", ")}`,
+      ),
+    ];
+  const organization = await github.ownerIsOrganization().catch(() => true);
+  return [
+    {
+      name,
+      status: "warn",
+      detail: `Factory acts as ${login}, which is the operator ${self}: GitHub doesn't notify an account of its own comments, so ${self} hears of no hold`,
+      fix: `Give Factory its own GitHub identity, a GitHub App: ${appRegistrationLink(github.owner, organization !== false)} ${appSteps(organization !== false)}`,
+    },
+  ];
+}
+
 /** The repository's checks: access, branch rules, issue types and the installation serving it. */
 export async function repositoryChecks(
   config: CoreConfig,
   github: GitHub,
 ): Promise<ReadinessCheck[]> {
-  const checks: ReadinessCheck[] = [];
+  const apps = await appChecks(config, github);
+  if (apps.some((check) => check.status === "blocked")) return apps;
+  const checks: ReadinessCheck[] = [...apps];
+  const who = github.isApp ? "the GitHub App" : "the GitHub CLI login";
   let login: string;
   try {
     login = await github.login();
@@ -477,11 +616,14 @@ export async function repositoryChecks(
       {
         name: "GitHub",
         status: "blocked",
-        detail: `Can't read ${config.repository} with the GitHub CLI login: ${errorMessage(error)}`,
-        fix: "Run `gh auth login` (with the project scope) as the user the service runs as",
+        detail: `Can't read ${config.repository} with ${who}: ${errorMessage(error)}`,
+        fix: github.isApp
+          ? "Check the GitHub App's installation on the repository and its permissions"
+          : "Run `gh auth login` (with the project scope) as the user the service runs as",
       },
     ];
   }
+  checks.push(...(await operatorChecks(config, github, login)));
   try {
     const push = await github.canPush();
     checks.push(
@@ -557,7 +699,7 @@ export async function repositoryChecks(
               name: "issue types",
               status: "warn",
               detail: `Can't read ${config.repository}'s issue types: ${missing}`,
-              fix: "Factory's issues go without a type until it can; check the GitHub CLI login's access",
+              fix: `Factory's issues go without a type until it can; check ${who}'s access`,
             }
           : missing.length
             ? {
@@ -596,7 +738,7 @@ export async function repositoryChecks(
       name: "GitHub",
       status: "blocked",
       detail: `Can't read ${config.repository}'s settings: ${errorMessage(error)}`,
-      fix: "Check the GitHub CLI login's access, then repeat",
+      fix: `Check ${who}'s access, then repeat`,
     });
   }
   checks.push(await holderCheck(config));

@@ -1,13 +1,26 @@
 ---
 name: setup
-description: Set up Factory for a target repository, either configuration only or a verified background service that runs a queue of Objectives.
+description: Set up Factory for a target repository, either configuration only or a verified background service that runs a queue of Objectives. Installs the matching factory CLI first when it is missing or another version.
 ---
 
 # Factory setup
 
-Set up the installed `factory` CLI for one target repository. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own repository: setup refuses it, because Factory never runs on the code that runs it.
+Set up Factory for one target repository with its `factory` CLI. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own repository: setup refuses it, because Factory never runs on the code that runs it.
 
-Check that the installed CLI and the enabled plugin come from the same release (see the [installation checks](https://github.com/clockgrove/factory/blob/main/README.md#check-the-installation)). Report a mismatch before setup.
+## Install the CLI
+
+The CLI must come from the same release as this plugin. Before anything else, run the installer that sits next to this `SKILL.md`, by its absolute path:
+
+```sh
+node SKILL_DIRECTORY/install-cli.mjs [--prefix ABSOLUTE_DIR]
+```
+
+It reads the version from the plugin's own manifest and keeps a CLI of that version that is already installed. Otherwise it downloads that release's tarball and `SHA256SUMS`, checks the SHA-256 and the build provenance (`gh attestation verify`), and only then installs it with npm, with the Claude and Copilot SDKs. It needs `gh` logged in and the network. Pass `--prefix` only for an installation directory the operator names: absolute, and outside the target repository and any credential, configuration or state root. The default is a directory per version under `~/.local/share/clockgrove-factory`.
+
+Decide on its JSON:
+
+- `status: "current"` or `"installed"` (exit 0): `cli` is the CLI's absolute path, `PREFIX/bin/factory` unless a matching CLI was already on PATH. Run it in place of `factory` in every command below. When `path` isn't null, give the operator that one line to add to their shell's startup file, so the CLI is on their PATH for the `director` skill. `sdks` says whether the Claude and Copilot SDKs are there; those providers need them.
+- `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
 
 ## Choose the outcome
 
@@ -76,7 +89,7 @@ factory setup --repo OWNER/NAME --stop       # stop it and keep it from starting
 factory setup --repo OWNER/NAME --uninstall  # remove the unit; configuration and state stay
 ```
 
-After installing a new release, run `--background` again: it updates the unit and restarts the service. `--check` reports `service.current: false` until you do.
+After the plugin moves to a new release, run the installer again, then `--background` with the new `cli`: it updates the unit and restarts the service. `--check` reports `service.current: false` until you do.
 
 An idle service with an empty queue makes no model calls.
 

@@ -71,6 +71,7 @@ test("the packed tarball installs offline and runs its own CLI", {
       ".claude-plugin/plugin.json",
       "skills/director/SKILL.md",
       "skills/setup/SKILL.md",
+      "skills/setup/install-cli.mjs",
       "docs/USER-GUIDE.md",
       "docs/DESIGN.md",
       "docs/reference/setup.md",

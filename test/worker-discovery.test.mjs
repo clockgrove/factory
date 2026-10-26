@@ -9,18 +9,23 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { discoveryOutcome } from "../dist/work/amend.js";
 import { collect } from "../dist/work/collect.js";
-import { configured, installation, item, plan, REPO } from "./helpers.mjs";
+import {
+  configured,
+  installation,
+  item,
+  plan,
+  REPO,
+  tempDir,
+} from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
   const result = spawnSync(
@@ -61,7 +66,7 @@ const discovery = {
 
 /** A worktree on main with the person's test, as the worker starts from. */
 function personsMain() {
-  const worktree = join(mkdtempSync(join(tmpdir(), "factory-discovery-")), "w");
+  const worktree = join(tempDir("factory-discovery-"), "w");
   mkdirSync(join(worktree, "test"), { recursive: true });
   git(worktree, "init", "--quiet");
   writeFileSync(join(worktree, "README.md"), "base\n");

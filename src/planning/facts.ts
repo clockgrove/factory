@@ -611,7 +611,7 @@ function packageCommandInstructions(
   const scoped = commands.flatMap((command) =>
     scopes.has(command) ? [`\`${command}\` (${scopes.get(command)})`] : [],
   );
-  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself. Besides the script-disabled install, one that runs npm or pnpm must be exactly ${PACKAGE_SCRIPT_FORMS} (no \`--\`, no flags), since validation keeps that script fixed; a command without npm or pnpm runs as written.${scoped.length ? `\nThese check only one directory; use one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
+  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself. Besides the script-disabled install, one that runs npm or pnpm must be exactly ${PACKAGE_SCRIPT_FORMS} (no \`--\`, no flags), since validation keeps that script fixed; a command without npm or pnpm runs as written.${scoped.length ? `\nThese check only one directory; use one only for a work item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
 }
 
 /** The CI-only and package-script notes for the planner request, in that order. */

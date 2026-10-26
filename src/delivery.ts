@@ -486,16 +486,17 @@ async function factoryMade(
  * commit beyond the default branch is Factory's (factoryMade) goes, by a
  * push with a lease on the head read, so a commit pushed meanwhile keeps
  * it. A branch already gone (GitHub's auto-delete, or a run before a
- * crash) is done. Returns why a branch was kept; a refused delete never
- * blocks the step. A failure to reach origin throws, for a retry.
- * `baseBranch` is a stack layer's predecessor branch, as for publish.
+ * crash) is done. Returns why a branch was kept, or a retry when the
+ * remote refused the delete with the branch unmoved (refusedPush). A
+ * failure to reach origin throws, for a retry. `baseBranch` is a stack
+ * layer's predecessor branch, as for publish.
  */
 export async function deleteFactoryBranch(
   context: DeliveryContext,
   branch: string,
   point: string,
   baseBranch?: string,
-): Promise<string | undefined> {
+): Promise<string | Retry | undefined> {
   const remote = await remoteHead(context, branch);
   if (!remote) return undefined;
   const { defaultBranch, bases } = await acceptedBases(context, baseBranch);
@@ -520,8 +521,11 @@ export async function deleteFactoryBranch(
       throw new TransientError(
         `git push --delete ${branch}: ${message(error)}`,
       );
-    if (!(await remoteHead(context, branch))) return undefined;
-    return `the remote refused deleting ${branch} (${refused})`;
+    const head = await remoteHead(context, branch);
+    if (!head) return undefined;
+    if (head !== remote)
+      return `the remote refused deleting ${branch} (${refused})`;
+    return refusedPush(`Factory's delete of ${branch}`, refused);
   }
   crashPoint(`${point}:after`);
   return undefined;
@@ -566,20 +570,10 @@ async function pushBranch(
       throw new TransientError(`git push of ${branch}: ${message(error)}`);
     }
     // The ref was not updated. If the branch moved after it was read, read
-    // it again; if it did not, the remote refused the push itself. That
-    // can pass (GitHub's `[remote rejected] (failed)` when two pushes land
-    // at once), so it retries and asks only once it outlasts REFUSED_MS,
-    // like a 403 (github.ts `githubOutcome`).
+    // it again; if it did not, the remote refused the push itself.
     if ((await remoteHead(context, branch)) !== remote)
       return retry(`Remote branch ${branch} moved during the push`);
-    return {
-      ...retry(`The remote refused Factory's push of ${branch} (${refused})`),
-      holdAfter: {
-        ms: REFUSED_MS,
-        question: `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move, for ${REFUSED_MS / 60_000} minutes. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
-        scope: "objective",
-      },
-    };
+    return refusedPush(`Factory's push of ${branch}`, refused);
   }
   crashPoint("deliver:push:after");
   // GitHub's reads of the new branch and commit may lag behind the push.
@@ -590,6 +584,23 @@ async function pushBranch(
       `Remote branch ${branch} does not show the pushed ${commit} yet`,
     );
   return undefined;
+}
+
+/**
+ * The remote refused `push` although the branch did not move. That can
+ * pass (GitHub's `[remote rejected] (failed)` when two pushes land at
+ * once, or `(Internal Server Error)`), so it retries and asks only once it
+ * outlasts REFUSED_MS, like a 403 (github.ts `githubOutcome`).
+ */
+function refusedPush(push: string, refused: string): Retry {
+  return {
+    ...retry(`The remote refused ${push} (${refused})`),
+    holdAfter: {
+      ms: REFUSED_MS,
+      question: `The remote refused ${push} (${refused}) although the branch did not move, for ${REFUSED_MS / 60_000} minutes. Allow Factory's login to push, force-push and delete its own branches (factory/*), then answer retry; or cancel.`,
+      scope: "objective",
+    },
+  };
 }
 
 /** `! TAB from:to TAB [rejected] (reason)` lines of `git push --porcelain`. */

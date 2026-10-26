@@ -233,7 +233,8 @@ export async function mergeStep(
   });
   switch (result.kind) {
     case "merged": {
-      await deleteBranches(context, deps, [item]);
+      const refused = await deleteBranches(context, deps, [item]);
+      if (refused) return refused;
       const done: MergeResult = {
         mergeSha: result.mergeSha,
         integratedSha: result.integratedSha,
@@ -253,13 +254,14 @@ export async function mergeStep(
 /**
  * Delete the merged items' branches (deleteFactoryBranch), bottom first:
  * each one's PR base is the item before it, the native-stack layer below.
- * A kept one is logged.
+ * A kept one is logged; a refused one is the merge step's retry, which
+ * finds the PR merged and deletes again.
  */
 export async function deleteBranches(
   context: StepContext,
   deps: BuildDeps,
   items: readonly WorkItem[],
-): Promise<void> {
+): Promise<Outcome | undefined> {
   const where = {
     github: deps.github,
     checkout: deps.config.checkout,
@@ -274,8 +276,11 @@ export async function deleteBranches(
       "deliver:branch-delete",
       below && itemBranch(context.state.issue, below.id),
     );
-    if (kept) context.log({ event: "branch-kept", branch, reason: kept });
+    if (typeof kept === "string")
+      context.log({ event: "branch-kept", branch, reason: kept });
+    else if (kept) return kept;
   }
+  return undefined;
 }
 
 /**
@@ -311,7 +316,8 @@ export async function mergeStack(
     case "merged": {
       // Lower layers' branches are the upper PRs' bases: they go only
       // once the whole unit merged.
-      await deleteBranches(context, deps, unit.items);
+      const refused = await deleteBranches(context, deps, unit.items);
+      if (refused) return refused;
       const done: MergeResult = {
         mergeSha: result.mergeSha,
         integratedSha: result.integratedSha,

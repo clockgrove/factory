@@ -10,9 +10,9 @@ Each version `X.Y.Z` has one annotated tag `vX.Y.Z` on `main` and one [GitHub Re
 - `SHA256SUMS` for that tarball;
 - a [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds) proving the tarball was built by the [Release workflow](../.github/workflows/release.yml) from the tagged commit.
 
-The Codex and Claude Code marketplace entries pin the same tag, so the plugin's skills and the CLI always come from one version. Both install the tag's `plugin` directory, which holds only the plugin's manifests, skills and logo: a plugin root with the CLI's `package.json` and lockfile would make Claude Code [install them as the plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies). Factory is not published to the npm registry.
+The Codex and Claude Code marketplace entries pin the same tag, so the plugin's skills and the CLI always come from one version. Operators add the marketplace without a tag, so it follows `main`: merging a version moves every operator's next plugin upgrade to its tag. Both install the tag's `plugin` directory, which holds only the plugin's manifests, skills and logo: a plugin root with the CLI's `package.json` and lockfile would make Claude Code [install them as the plugin's packages](https://code.claude.com/docs/en/plugins/loading#node-js-package-dependencies). Factory is not published to the npm registry.
 
-A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelease, which the README's latest-release install skips. Tags `v*` cannot be moved or deleted. A published version is never rebuilt or replaced; fix problems in a new version.
+A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelease, which the README's latest-release CLI install skips. Its version merge still moves `main`'s marketplaces, so operators who upgrade the plugin get it. Tags `v*` cannot be moved or deleted. A published version is never rebuilt or replaced; fix problems in a new version.
 
 ## Publish a version
 
@@ -28,9 +28,9 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
 3. **Accept the phase.** Before merging `X.Y.0`, complete the release issue's recorded phase exits and independent completed-batch review. Confirm acceptance on the completed batch using meaningful affected tests and retained evidence where they still prove the required behavior. A minor version is qualified when every check of the [integration suites](../integration/README.md) (`main`, `edge` and `prd`) has passed live with `--provider codex` and with `--provider claude`, each pass with its retained results file. Evidence follows the code it tests: a pass on an earlier build still counts when Factory's code (`src/`) the check exercises is unchanged since, so changes to the suite, docs or fixtures never reset it. After a fix, re-run only the cases the change can affect (`--only`), on both providers; a full run of all three suites is not repeated for one fix. A failure that is the suite's own bug or a model choice Factory handled as designed is recorded on the release issue with its cause, not treated as a Factory defect. Copilot is not a release qualifier: it is outside the PRD's Done (maintainer decision, 2026-10-24, #1925). Beyond those suites, run a live check only for a specific remaining unproved changed behavior; a separate public fixture qualification is optional diagnosis, not an additional release or adopter-start gate. Retain the final reviewed source commit, tree, packed archive checksum, installation and outcome evidence for the distribution comparison. CI supplies the packed CLI integration check. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
 
-4. **Merge.** Merge through the normal protected path after the required phase exits pass. For a minor version, verify that the merged tree equals the retained phase-accepted tree before tagging.
+4. **Merge.** Merge through the normal protected path after the required phase exits pass. For a minor version, verify that the merged tree equals the retained phase-accepted tree before tagging. Merge only when you can tag at once: from the merge, `main`'s marketplaces name `vX.Y.Z`, and an operator's plugin upgrade fails (keeping their release) until the tag exists.
 
-5. **Tag.** Tag that verified merged commit:
+5. **Tag.** Right after the merge, tag that verified merged commit:
 
    ```sh
    git tag -a vX.Y.Z MERGED_COMMIT_SHA -m "Factory X.Y.Z"
@@ -40,6 +40,8 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
    Verify active protection against updates and deletion for that exact `refs/tags/vX.Y.Z`, with no bypass actors or exclusions. Preserve existing tag protections. Recheck the remote annotated tag and its peeled commit after pushing.
 
 The Release workflow then checks that the tag and every version identity agree and that the commit is on `main`. It runs lint, format, notices and Factory's tests, packs the tarball (`prepack` builds `dist`), installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with [automatically generated notes](https://cli.github.com/manual/gh_release_create) from the merged pull requests. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
+
+Until the Release is published, a plugin already upgraded to the tag can't install its CLI: setup reports the release `unpublished` and asks the operator to try again in a few minutes. So announce the release (on the release issue, or anywhere operators will upgrade from) only once the tag's Release workflow has passed and the Release lists the tarball and `SHA256SUMS`. If the workflow fails, that tag stays unpublished, so release the next patch version promptly.
 
 ## Verify a release
 

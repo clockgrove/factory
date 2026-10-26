@@ -28,7 +28,16 @@ Decide on its JSON:
 
   If the file has a line from an earlier setup naming a versioned `clockgrove-factory/X.Y.Z/bin`, offer to replace that line with this one. If they decline, give them the line. It takes effect in new login shells; an agent host started before it still lacks `factory` on its PATH until it restarts, so keep using `cli`.
 
-- `launcher` present (`kept: true`): the launcher already runs `launcher.version`, a newer release than this plugin's `version`, so the installer left it there (`cli` is this plugin's release, installed beside it). The plugin in the other host (Claude Code or Codex, whichever this isn't) is on that newer release, and this host's plugin is behind. Stop setup here, and don't run `cli`: a background service set up with it would go back to the older release. Tell the operator which plugin is behind and how to update it: remove the `clockgrove` marketplace in this host, add it again at tag `v` + `launcher.version` and install the plugin (the README's Plugin section), then ask for setup again. Only if the operator says to go back to this plugin's release on purpose, run the installer again with `--downgrade`, which moves the launcher back.
+- `launcher` present (`kept: true`): the launcher already runs `launcher.version`, a newer release than this plugin's `version`, so the installer left it there (`cli` is this plugin's release, installed beside it). The plugin in the other host (Claude Code or Codex, whichever this isn't) is on that newer release, and this host's plugin is behind. Stop setup here, and don't run `cli`: a background service set up with it would go back to the older release. Tell the operator which plugin is behind and how to update it in this host, then to ask for setup again (after restarting Claude Code, when that's the host):
+
+  ```sh
+  claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove   # Claude Code
+  codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove      # Codex
+  ```
+
+  If the plugin stays on its release, its marketplace was added at a release tag, as before 0.5.2, and a pinned marketplace doesn't move: the README's Plugin section has the one-time move (remove the marketplace, add `clockgrove/factory` without a tag, install the plugin). Only if the operator says to go back to this plugin's release on purpose, run the installer again with `--downgrade`, which moves the launcher back.
+
+- `status: "unpublished"` (exit 1): this plugin's release is tagged, but its GitHub Release isn't published yet (the Release workflow builds it in the minutes after the tag), so nothing was downloaded or installed. Tell the operator, with `problems`, and run the installer again in a few minutes, or when they ask. Don't install another way or another version meanwhile. If it stays unpublished for an hour, that release failed: stop, and tell the operator to update the plugin once a newer release is out.
 
 - `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. With `--prefix`, a launcher on a newer release in that prefix is refused the same way as `launcher` above: update this plugin, or `--downgrade` only on the operator's say. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
 

@@ -76,6 +76,36 @@ function fakeGh(root, status) {
   return { bin, log };
 }
 
+/**
+ * A gh that logs its arguments, answers `release view` with the shell
+ * command `view`, copies the files in `files` into a `release download`'s
+ * --dir and passes the attestation check.
+ */
+function releaseGh(root, view, files = root) {
+  const bin = join(root, "fake-bin");
+  mkdirSync(bin);
+  const log = join(root, "gh.log");
+  writeFileSync(log, "");
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/bin/sh
+echo "$*" >> '${log}'
+case "$1 $2" in
+"release view") ${view} ;;
+"release download")
+  while [ $# -gt 0 ]; do [ "$1" = --dir ] && dir=$2; shift; done
+  cp '${files}'/* "$dir"/ ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  return { bin, log };
+}
+
+/** A `release view` answer: the release with `assets` ({name, state}). */
+const viewAssets = (...assets) =>
+  `echo '${JSON.stringify({ assets: assets.map((asset) => ({ state: "uploaded", ...asset })) })}'`;
+
 /** Release files for `v` in a new directory, as the release workflow writes them. */
 function release(root, v, content, digest) {
   const dir = join(root, "release");
@@ -613,6 +643,97 @@ test("the installer installs nothing from a tarball that fails its attestation",
     );
     assert.equal(installedVersion(prefix), "0.0.1");
   }));
+
+test("the installer reports a release that isn't published yet, to try again later, and downloads nothing", () => {
+  const tarball = tarballName(version);
+  for (const [why, view, problem] of [
+    [
+      "no release for the tag",
+      "echo 'release not found' >&2; exit 1",
+      new RegExp(`no release v${version.replaceAll(".", "\\.")}\\.`),
+    ],
+    [
+      "no tarball yet",
+      viewAssets({ name: "SHA256SUMS" }),
+      new RegExp(`doesn't have ${tarball.replaceAll(".", "\\.")} yet`),
+    ],
+    [
+      "the tarball still uploading",
+      viewAssets({ name: tarball, state: "starter" }, { name: "SHA256SUMS" }),
+      /doesn't have clockgrove-factory-\S+ yet/,
+    ],
+  ])
+    withRoot((root) => {
+      const prefix = join(root, "prefix");
+      prefixWith(prefix, "0.0.1");
+      const gh = releaseGh(root, view);
+      const { status, report } = install(["--prefix", prefix], {
+        env: { ...process.env, PATH: `${gh.bin}:${process.env.PATH}` },
+      });
+      assert.equal(status, 1, why);
+      assert.equal(report.status, "unpublished", why);
+      assert.match(report.problems[0], /isn't published yet/, why);
+      assert.match(report.problems[0], problem, why);
+      assert.match(report.problems[0], /again in a few minutes/, why);
+      assert.equal(
+        readFileSync(gh.log, "utf8"),
+        `release view v${version} --repo clockgrove/factory --json assets\n`,
+        why,
+      );
+      assert.equal(installedVersion(prefix), "0.0.1", why);
+      assert.equal(existsSync(join(prefix, "bin")), false, why);
+    });
+});
+
+test("a release lookup that fails for another reason is refused, not unpublished", () =>
+  withRoot((root) => {
+    const prefix = join(root, "prefix");
+    prefixWith(prefix, "0.0.1");
+    const gh = releaseGh(root, "echo 'HTTP 401: Bad credentials' >&2; exit 1");
+    const { status, report } = install(["--prefix", prefix], {
+      env: { ...process.env, PATH: `${gh.bin}:${process.env.PATH}` },
+    });
+    assert.equal(status, 1);
+    assert.equal(report.status, "refused");
+    assert.match(report.problems[0], /gh is logged in/);
+    assert.doesNotMatch(readFileSync(gh.log, "utf8"), /release download/);
+    assert.equal(installedVersion(prefix), "0.0.1");
+  }));
+
+test(
+  "the installer downloads a published release with gh, then verifies and installs it",
+  { timeout: 120_000 },
+  () =>
+    withRoot((root) => {
+      const env = {
+        ...process.env,
+        npm_config_offline: "true",
+        npm_config_cache: join(root, "npm-cache"),
+      };
+      const files = release(root, version, {
+        tarball: packed(root, version, env),
+      });
+      const prefix = join(root, "prefix");
+      const gh = releaseGh(
+        root,
+        viewAssets({ name: tarballName(version) }, { name: "SHA256SUMS" }),
+        files,
+      );
+      const { status, report } = install(["--prefix", prefix], {
+        env: { ...env, PATH: `${gh.bin}:${process.env.PATH}` },
+      });
+      assert.equal(status, 0, JSON.stringify(report));
+      assert.equal(report.status, "installed");
+      assert.equal(installedVersion(prefix), version);
+      assert.deepEqual(
+        readFileSync(gh.log, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => line.split(" ").slice(0, 2).join(" ")),
+        ["release view", "release download", "attestation verify"],
+      );
+    }),
+);
 
 test(
   "the installer replaces a stale CLI with a verified release",

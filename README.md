@@ -36,12 +36,6 @@ Install the plugin, then run its setup skill. Factory has two parts, and both co
 - **The plugin** gives your agent host the `setup` and `director` skills.
 - **The CLI** gives you `factory` and the bundled default Codex runtime. It works the same under any host. The setup skill installs it for you.
 
-Pick the latest release:
-
-```sh
-VERSION=$(gh release view --repo clockgrove/factory --json tagName --jq .tagName | sed 's/^v//')
-```
-
 ### Plugin
 
 Install the plugin for your host. Both hosts load the same skills.
@@ -49,27 +43,46 @@ Install the plugin for your host. Both hosts load the same skills.
 **Codex:**
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref "v$VERSION"
+codex plugin marketplace add clockgrove/factory
 codex plugin add factory@clockgrove
 ```
 
 **Claude Code**:
 
 ```sh
-claude plugin marketplace add "clockgrove/factory#v$VERSION"
+claude plugin marketplace add clockgrove/factory
 claude plugin install factory@clockgrove
 ```
 
 In Claude Code the skills appear as `factory:setup` and `factory:director`.
 
-The plugin is the release's `plugin` directory: its manifests, skills and logo, with no npm package, so neither host installs packages for it. The skills run the `factory` CLI that setup installs.
+The marketplace follows this repository's `main`, whose entry always names the latest release's tag, so you get the latest release. The plugin is that release's `plugin` directory: its manifests, skills and logo, with no npm package, so neither host installs packages for it. The skills run the `factory` CLI that setup installs.
 
-To move to another release, add the marketplace again at that release's tag. A host keeps the tag it was added with and refuses the same marketplace from another tag, so remove it first, which also removes the plugin (it keeps no data). Then install as above with the new `VERSION`, and run setup again (see [Upgrade](docs/USER-GUIDE.md#upgrade)):
+#### Upgrade the plugin
+
+Refresh the marketplace and update the plugin, then run setup again (see [Upgrade](docs/USER-GUIDE.md#upgrade)):
 
 ```sh
-codex plugin marketplace remove clockgrove   # Codex
-claude plugin marketplace remove clockgrove  # Claude Code
+codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove      # Codex
+claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove  # Claude Code
 ```
+
+Restart Claude Code afterwards to load the new skills. Codex's `marketplace upgrade` usually updates the plugin itself; `plugin add` installs the marketplace's release when it didn't. In the minutes a new release is being tagged, the update can fail and leave your release installed; run it again later. Setup reports a release whose files aren't published yet as `unpublished`, and asks you to try again in a few minutes.
+
+**Installed before 0.5.2?** Earlier releases added the marketplace at a release tag (`clockgrove/factory#vX.Y.Z` or `--ref vX.Y.Z`). A host keeps that tag, so the commands above leave the plugin where it is, and it refuses the same marketplace without the tag. Move once: remove the marketplace, which also removes the plugin (it keeps no data), then add it without a tag and install:
+
+```sh
+# Codex
+codex plugin marketplace remove clockgrove
+codex plugin marketplace add clockgrove/factory
+codex plugin add factory@clockgrove
+# Claude Code
+claude plugin marketplace remove clockgrove
+claude plugin marketplace add clockgrove/factory
+claude plugin install factory@clockgrove
+```
+
+To stay on one release instead, add the marketplace at its tag, as those releases did. A pinned marketplace doesn't upgrade; moving it to another release takes the same remove and add.
 
 ### Run setup
 
@@ -84,9 +97,10 @@ It needs the GitHub CLI logged in and network access. The installer is `skills/s
 
 ### Install the CLI by hand
 
-This is the fallback when setup can't install the CLI. Download the tarball and verify it:
+This is the fallback when setup can't install the CLI. Set `VERSION` to your plugin's release (the latest, as below, unless you pinned one), then download the tarball and verify it:
 
 ```sh
+VERSION=$(gh release view --repo clockgrove/factory --json tagName --jq .tagName | sed 's/^v//')
 gh release download "v$VERSION" --repo clockgrove/factory \
   --pattern "clockgrove-factory-$VERSION.tgz" --pattern SHA256SUMS
 gh attestation verify "clockgrove-factory-$VERSION.tgz" --repo clockgrove/factory
@@ -115,7 +129,7 @@ Keep that CLI on the PATH of the terminal or agent that will operate Factory, an
 
 ### Check the installation
 
-Setup checks this for you. To check by hand that the CLI and the plugin come from the release you selected, list the CLI's installation directory (setup's default below, or the one you chose):
+Setup checks this for you. To check by hand that the CLI and the plugin come from one release, list the plugin (its `version`) and, with `VERSION` that release, the CLI's installation directory (setup's default below, or the one you chose):
 
 ```sh
 command -v factory

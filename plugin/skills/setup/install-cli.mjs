@@ -28,11 +28,18 @@
 // --prefix, where that newer Factory is the one installation would replace,
 // nothing is installed without --downgrade.
 //
+// A plugin can reach the operator before its release does: the marketplace
+// names the release's tag as soon as the version is merged, and the tag's
+// Release workflow publishes the tarball some minutes after the tag. Until
+// the GitHub Release has both files, the installer downloads nothing and
+// reports the release as unpublished, to try again in a few minutes.
+//
 // Prints one JSON object on stdout: status "current" or "installed" (exit 0)
 // with the CLI's absolute path and the PATH line for the operator's shell
 // (null when the launcher's directory is on PATH already), plus `launcher`
-// when the launcher was kept on a newer version; or "refused" (exit 1) with
-// its problems. A release file that fails either check is never installed.
+// when the launcher was kept on a newer version; "unpublished" (exit 1) when
+// the release isn't published yet; or "refused" (exit 1) with its problems.
+// A release file that fails either check is never installed.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -57,6 +64,8 @@ const MANIFESTS = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"];
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 class Refused extends Error {}
+/** The plugin's release isn't on GitHub Releases yet: try again later. */
+class Unpublished extends Refused {}
 
 /** The plugin's version: the manifests at its root agree on one. */
 function pluginVersion() {
@@ -161,6 +170,45 @@ function checkSum(dir, name) {
     );
 }
 
+/**
+ * Refuse, as unpublished, a release `version` that GitHub doesn't have yet
+ * with both `files` uploaded; and as a failure a lookup that fails otherwise.
+ */
+function checkPublished(version, files) {
+  const tag = `v${version}`;
+  const result = spawnSync(
+    "gh",
+    ["release", "view", tag, "--repo", REPOSITORY, "--json", "assets"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  process.stderr.write(result.stderr ?? "");
+  const retry = `Its Release workflow publishes it a few minutes after the tag: run setup again in a few minutes. If it stays unpublished for an hour, that release failed (https://github.com/${REPOSITORY}/releases): update the plugin once a newer release is out`;
+  if (result.status !== 0 && /release not found/i.test(result.stderr ?? ""))
+    throw new Unpublished(
+      `Factory ${version} isn't published yet: GitHub has no release ${tag}. ${retry}`,
+    );
+  if (result.error || result.status !== 0)
+    throw new Refused(
+      `Looking up release ${tag} failed (${result.error ? `gh: ${result.error.message}` : `gh exited ${result.status}`}); check that gh is logged in and can reach GitHub`,
+    );
+  let assets;
+  try {
+    assets = JSON.parse(result.stdout).assets ?? [];
+  } catch {
+    throw new Refused(`gh release view ${tag} printed no release`);
+  }
+  const uploaded = new Set(
+    assets
+      .filter(({ state }) => (state ?? "uploaded") === "uploaded")
+      .map(({ name }) => name),
+  );
+  const missing = files.filter((file) => !uploaded.has(file));
+  if (missing.length)
+    throw new Unpublished(
+      `Factory ${version} isn't published yet: release ${tag} doesn't have ${missing.join(" or ")} yet. ${retry}`,
+    );
+}
+
 /** Download, verify and install release `version` into `prefix`. */
 function install(version, prefix, from) {
   const name = `clockgrove-factory-${version}.tgz`;
@@ -170,6 +218,7 @@ function install(version, prefix, from) {
       for (const file of [name, "SHA256SUMS"])
         copyFileSync(resolve(from, file), join(dir, file));
     else {
+      checkPublished(version, [name, "SHA256SUMS"]);
       const failed = run(
         "gh",
         [
@@ -306,7 +355,10 @@ try {
   if (!(error instanceof Refused)) console.error(error);
   console.log(
     JSON.stringify(
-      { status: "refused", problems: [error?.message ?? String(error)] },
+      {
+        status: error instanceof Unpublished ? "unpublished" : "refused",
+        problems: [error?.message ?? String(error)],
+      },
       null,
       2,
     ),

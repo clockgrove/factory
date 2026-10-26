@@ -374,6 +374,15 @@ Take over only from an installation that is really stopped. A running one stops 
 
 ## Upgrade
 
-Update the plugin to the new release: remove its marketplace, add it again at the new tag and install the plugin (see [Plugin](../README.md#plugin)). Then ask the setup skill to set up again: it installs the matching CLI and points the `factory` launcher on your PATH at it (the PATH line doesn't change), and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.
+Update the plugin to the new release: refresh its marketplace and update it, then restart Claude Code (see [Upgrade the plugin](../README.md#upgrade-the-plugin)):
+
+```sh
+codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove      # Codex
+claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove  # Claude Code
+```
+
+A marketplace added at a release tag, as before 0.5.2, stays on that release: move it once (remove it, add `clockgrove/factory` without a tag and install the plugin, as the README shows). In the minutes a release is being tagged and published, the update can fail and keep your release, and setup can report the new release `unpublished`; try again in a few minutes.
+
+Then ask the setup skill to set up again: it installs the matching CLI and points the `factory` launcher on your PATH at it (the PATH line doesn't change), and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.
 
 With the plugin in both Claude Code and Codex, update it in both. Setup from a plugin a release behind the launcher installs its own release but leaves the launcher on the newer one and stops, naming the plugin to update; the installer's `--downgrade` moves the launcher back when you mean to go back.

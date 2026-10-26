@@ -33,10 +33,14 @@ case_reset() {
   wait_for 600 test -e "$RUN_DIR/archived.done"   # the archived case needs the serve first
   # The shared serve's restart needs time to stop it cleanly and come back up.
   [ "$(left)" -ge 120 ] || { record reset.clean-dir FAIL "out of time before the reset: #$d done, #$b PR #$pr open" "$t0"; prule_clear; return; }
+  # This restart is the case's own: the supervisor leaves the serve alone meanwhile.
+  touch "$RUN_DIR/serve-restarting"
   serve_down
   local n; for n in "$d" "$b"; do rm -rf "$ROOT/objectives/$n.json" "$ROOT/objectives/finished/$n.json" "$ROOT/work/$n"; done
   git -C "$(cfg_get 'c["checkout"]')" worktree prune
-  serve_up && serve_ready || return
+  serve_up && serve_ready; local up=$?
+  rm -f "$RUN_DIR/serve-restarting"
+  [ $up = 0 ] || return
   prule_clear
   local reset_at; reset_at=$(iso_ms)
   cli_t 120 reset "$d" >"$RUN_DIR/reset.$d.out" 2>&1; local rd=$?

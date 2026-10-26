@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { merge, observeCi } from "../dist/delivery.js";
+import { merge, mergeUnit, observeCi } from "../dist/delivery.js";
 import { GitHub, GitHubError } from "../dist/github.js";
 import { repositoryChecks } from "../dist/readiness.js";
 import { githubOrigin, REPO, tempDir } from "./helpers.mjs";
@@ -135,13 +135,44 @@ test("a pending check is waited for before the threads are read", async () => {
   assert.match(waited.reason, /: lint$/);
 });
 
-test("a merge GitHub refuses over unresolved review threads holds at once, with GitHub's refusal", async () => {
+test("a native-stack layer's threads are judged by the default branch's rules, the stack's base", async () => {
+  const answers = pullAnswers(
+    "BLOCKED",
+    [{ path: "src/a.js", url: THREAD }],
+    [],
+  );
+  const below = "factory/1/z";
+  const pull = await answers.pull();
+  answers.pull = async () => ({ ...pull, base: { ref: below } });
+  const state = await answers.mergeState();
+  answers.mergeState = async () => ({ ...state, baseRefName: below });
+  const read = [];
+  answers.threadResolution = async (branch) => {
+    read.push(branch);
+    return branch === "main" ? ['ruleset "main"'] : [];
+  };
+  const held = await observeCi(context(fake(answers)), {
+    ...input,
+    baseBranch: below,
+  });
+  assert.equal(held.kind, "hold", JSON.stringify(held));
+  assert.match(held.question, /main requires review threads to be resolved/);
+  assert.deepEqual(read, ["main"]);
+});
+
+/** A checkout whose origin is a GitHub URL for REPO, backed by a local bare repository. */
+function checkoutWithOrigin() {
   const root = tempDir("factory-threads-");
   const bare = join(root, "origin.git");
   const checkout = join(root, "checkout");
   git(root, "init", "--quiet", "--bare", "--initial-branch=main", bare);
   git(root, "clone", "--quiet", bare, checkout);
   githubOrigin(checkout, bare);
+  return checkout;
+}
+
+test("a merge GitHub refuses over unresolved review threads holds at once, with GitHub's refusal", async () => {
+  const checkout = checkoutWithOrigin();
   const answers = pullAnswers(
     "CLEAN",
     [{ path: "src/a.js", url: THREAD }],
@@ -164,6 +195,85 @@ test("a merge GitHub refuses over unresolved review threads holds at once, with 
   const lagged = await merge(context(fake(answers), checkout), input);
   assert.equal(lagged.kind, "retry", JSON.stringify(lagged));
   assert.match(lagged.holdAfter.question, /GitHub refused to merge PR #7/);
+});
+
+test("a native stack GitHub refuses over a layer's unresolved review threads holds on that layer", async () => {
+  const checkout = checkoutWithOrigin();
+  const LOWER = "b".repeat(40);
+  const UPPER = "c".repeat(40);
+  const pulls = {
+    7: { head: { sha: LOWER, ref: "factory/1/a" }, base: { ref: "main" } },
+    8: {
+      head: { sha: UPPER, ref: "factory/1/b" },
+      base: { ref: "factory/1/a" },
+    },
+  };
+  const read = [];
+  const answers = {
+    repository: REPO,
+    defaultBranch: async () => "main",
+    pull: async (number) => ({
+      number,
+      state: "open",
+      merged: false,
+      draft: false,
+      ...pulls[number],
+    }),
+    mergeState: async (number) => ({
+      headRefOid: pulls[number].head.sha,
+      headRefName: pulls[number].head.ref,
+      baseRefName: pulls[number].base.ref,
+      mergeStateStatus: "CLEAN",
+      reviewDecision: null,
+    }),
+    checkRuns: async (head) => [
+      {
+        id: 1,
+        name: "ci",
+        head_sha: head,
+        status: "completed",
+        conclusion: "success",
+        app: { id: 15368, slug: "github-actions" },
+      },
+    ],
+    commitStatuses: async () => [],
+    requiredChecks: async () => ["ci"],
+    mergeCommitsAllowed: async () => true,
+    compare: async () => "ahead",
+    findStack: async () => [{ number: 1, base: "main", pulls: [7, 8] }],
+    mergeAsync: async () => {
+      throw new GitHubError(
+        "Merge blocked: All comments must be resolved.",
+        405,
+      );
+    },
+    unresolvedThreads: async (number) =>
+      number === 8 ? [{ path: "src/b.js", url: THREAD }] : [],
+    threadResolution: async (branch) => {
+      read.push(branch);
+      return branch === "main" ? ['ruleset "main"'] : [];
+    },
+  };
+  const layer = (item, pr, head) => ({
+    issue: 1,
+    item,
+    pr,
+    head,
+    pushedHeads: [head],
+    requiredChecks: [],
+  });
+  const held = await mergeUnit(context(fake(answers), checkout), [
+    layer("a", 7, LOWER),
+    layer("b", 8, UPPER),
+  ]);
+  assert.equal(held.kind, "hold", JSON.stringify(held));
+  assert.equal(held.item, "b");
+  assert.match(
+    held.question,
+    /PR #8 has 1 unresolved review thread, and main requires .*, so GitHub refused the merge: Merge blocked/,
+  );
+  assert.ok(held.question.includes(`src/b.js (${THREAD})`), held.question);
+  assert.deepEqual(read, ["main"]);
 });
 
 // GitHub's own answers, from a local server: the rules a branch has, and a

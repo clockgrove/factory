@@ -54,12 +54,17 @@ test("a transient wait retries without counting errors, then asks, and wait wait
   });
   seed(inst, 22);
   const service = serve(inst);
-  await until(() => stateOf(inst, 22).retries.check?.attempts >= 3, "retries");
-  assert.deepEqual(stateOf(inst, 22).holds, [], "no hold before the budget");
-  assert.equal(stateOf(inst, 22).retries.check.count, 0, "waits aren't errors");
+  // The budget is wall-clock time, so a slow runner may first read the state
+  // after it is spent: the engine's own times say when it asked (#2033).
   await until(() => stateOf(inst, 22).holds.length, "the wait's question");
   const first = stateOf(inst, 22);
   const [asked] = first.holds;
+  assert.ok(first.retries.check.attempts >= 2, "it retried before it asked");
+  assert.equal(first.retries.check.count, 0, "waits aren't errors");
+  assert.ok(
+    Date.parse(asked.askedAt) - Date.parse(first.retries.check.since) >= 1500,
+    "no hold before the budget",
+  );
   assert.match(asked.question, /has been retrying since/);
   assert.match(asked.question, /Last error: GitHub GET/);
   assert.deepEqual(
@@ -84,6 +89,10 @@ test("a transient wait retries without counting errors, then asks, and wait wait
       stateOf(inst, 22).holds.length &&
       stateOf(inst, 22).holds[0].id !== asked.id,
     "the question again once the grant is spent",
+  );
+  assert.ok(
+    stateOf(inst, 22).holds[0].askedAt >= granted.retries.check.grantedUntil,
+    "no question again before the grant is spent",
   );
   assert.equal(cli(inst, "cancel", "22").code, 0);
   await stopped(service);

@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
@@ -18,6 +18,7 @@ import { checkoutCredentialEntries } from "./git.js";
 import type { GitHub } from "./github.js";
 import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
+import { LOCKFILES } from "./package-network.js";
 import { installationPaths } from "./paths.js";
 import { hostVersion, nodePin, nodeSatisfies } from "./planning/executables.js";
 import { networkToolOfCommand } from "./planning/facts.js";
@@ -179,6 +180,27 @@ function hostChecks(
           : `${store} is created at the first install`,
       ),
     );
+  // With the network off, the sandboxed install fetches nothing: a
+  // lockfile's packages come only from a store the operator warmed.
+  const lockfile = LOCKFILES.find((name) =>
+    existsSync(join(config.checkout, name)),
+  );
+  const cold =
+    !store ||
+    !existsSync(store) ||
+    (statSync(store).isDirectory() && !readdirSync(store).length);
+  if (
+    lockfile &&
+    cold &&
+    config.sandbox.network === "off" &&
+    sandbox.mode !== "unsandboxed"
+  )
+    checks.push({
+      name: "sandbox.network",
+      status: "warn",
+      detail: `The checkout has ${lockfile}, but sandbox.network is off and ${store ? `sandbox.packageStore ${store} is empty` : "sandbox.packageStore is unset"}, so validation's dependency install runs offline with no packages, and Objectives hold on it`,
+      fix: `Run \`factory setup --repo ${config.repository} --sandbox-network package-install\`, or warm sandbox.packageStore with the packages ${lockfile} names`,
+    });
   // The programs Factory runs itself, and those the final commands start.
   const programs = new Map<string, string>([
     ["git", "Factory's Git work"],

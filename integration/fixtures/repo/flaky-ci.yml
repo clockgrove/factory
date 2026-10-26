@@ -1,0 +1,26 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+# The flake case's repository (fixtures/baseline's ci.yml): the required
+# `test` job fails on a pull request's first attempt only, after `npm test`
+# passed, like a flaky check. A rerun of its failed jobs (attempt 2) passes.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm test
+      - name: Drill flake
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then
+            echo "Drill: this job fails on its first attempt only (attempt $GITHUB_RUN_ATTEMPT)"
+            exit 1
+          fi

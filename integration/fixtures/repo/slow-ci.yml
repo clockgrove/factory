@@ -1,0 +1,21 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+# The threads case's repository (fixtures/baseline's ci.yml): the required
+# `test` job takes a minute longer, so the review comment the suite posts as
+# soon as Factory's PR opens lands while the check is still pending.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: sleep 60
+      - run: npm test

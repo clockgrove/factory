@@ -8,6 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
+  HookCallback,
   Options,
   Query,
   SDKAssistantMessageError,
@@ -16,6 +17,7 @@ import type {
   SDKSystemMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { pathInsideRoot } from "../paths.js";
 import { isRecord } from "../planning/graph.js";
 import type { Wait } from "../state.js";
 import { errorMessage } from "../text.js";
@@ -570,6 +572,7 @@ function claudePlanningOptions(input: {
   tree: boolean;
   /** A retained conversation's turn in `dir`: the transcript is kept there, and continued when it resumes one. */
   retained?: { turn: Turn; dir: string };
+  log: PlannerCall["log"];
 }): Options {
   return {
     abortController: input.abortController,
@@ -583,11 +586,17 @@ function claudePlanningOptions(input: {
     },
     // No built-in tools, MCP servers, agents, plugins, skills or settings.
     // A tree review keeps only read-only file tools, allowed inside cwd alone
-    // (a symlink out of the tree is denied too).
+    // (a symlink out of the tree is denied too), and told where cwd is when
+    // it reads outside.
     tools: input.tree ? TREE_REVIEW_TOOLS : [],
     allowedTools: input.tree
       ? TREE_REVIEW_TOOLS.map((tool) => `${tool}(./**)`)
       : [],
+    ...(input.tree && {
+      hooks: {
+        PreToolUse: [{ hooks: [treeReadCheck(input.cwd, input.log)] }],
+      },
+    }),
     permissionMode: "dontAsk",
     mcpServers: {},
     strictMcpConfig: true,
@@ -622,6 +631,52 @@ function claudePlanningOptions(input: {
       ),
       ...(input.retained ? claudeSessionEnvironment(input.retained.dir) : {}),
     },
+  };
+}
+
+/**
+ * A tree session's check of each read, before the CLI's: a path outside
+ * `tree` is refused saying where the tree is, so the model reads it there.
+ * The CLI's own refusal names neither ("denied because Claude Code is
+ * running in don't ask mode"), and a result reviewer took it for a session
+ * without Read and held (#2042). A path inside goes on to the CLI's rules.
+ */
+export function treeReadCheck(
+  tree: string,
+  log: PlannerCall["log"],
+): HookCallback {
+  return async (hook) => {
+    if (
+      hook.hook_event_name !== "PreToolUse" ||
+      !TREE_REVIEW_TOOLS.includes(hook.tool_name)
+    )
+      return {};
+    const input = isRecord(hook.tool_input) ? hook.tool_input : {};
+    const at =
+      hook.tool_name === "Read" ? input.file_path : (input.path ?? ".");
+    // A Glob's pattern is a path too: under `path`, or absolute.
+    const path =
+      hook.tool_name === "Glob" &&
+      typeof at === "string" &&
+      typeof input.pattern === "string"
+        ? isAbsolute(input.pattern)
+          ? input.pattern
+          : join(at, input.pattern)
+        : at;
+    // The CLI rejects a malformed input itself, and expands a leading ~.
+    if (
+      typeof path !== "string" ||
+      (!/^~(?:\/|$)/.test(path) && pathInsideRoot(path, tree))
+    )
+      return {};
+    log({ event: "tree-read-refused", tool: hook.tool_name, path });
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `${JSON.stringify(path)} is outside your working directory, ${tree}, the only place you may read. Read the request's files there: by a path relative to it, or an absolute path under it.`,
+      },
+    };
   };
 }
 
@@ -1176,6 +1231,7 @@ export class ClaudePlanner implements Planner {
           abortController,
           tree,
           ...(retained ? { retained } : {}),
+          log: call.log,
         }),
       });
       const callStarted = Date.now();

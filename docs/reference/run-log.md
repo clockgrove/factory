@@ -87,6 +87,8 @@ A planner-seam call (planning, plan and result review, final review, diagnosis, 
 
 `factory watch` and the live status comment show each running call, until its `model-usage` or its step's outcome.
 
+A Claude call that reads a tree (Read, Grep and Glob in its working directory) refuses a path outside it (a Glob's pattern included) itself, before the CLI, whose refusal names neither the path nor the directory: the model is told the path is outside and where the directory is, and the call logs `tree-read-refused` with the `tool` and `path` (providers/claude.ts `treeReadCheck`).
+
 ### Codex standard error
 
 The launcher appends codex's standard error to `codex-stderr.log` in the call's private Codex home. When a Codex run throws, providers/codex-stderr.ts reads the non-blank lines written since the call began (their last 16 KiB) and appends them to the call's error message.

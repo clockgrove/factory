@@ -1578,16 +1578,8 @@ export class GitHub {
       const count = rule.parameters?.required_approving_review_count;
       if (rule.type !== "pull_request" || typeof count !== "number" || !count)
         continue;
-      const ruleset = await this.optional(() =>
-        this.rest<{ name?: unknown }>(
-          "GET",
-          this.repo(`rulesets/${rule.ruleset_id}`),
-          undefined,
-          signal,
-        ),
-      );
       found.push({
-        rule: `ruleset "${String(ruleset?.name ?? rule.ruleset_id)}"`,
+        rule: await this.rulesetName(rule.ruleset_id, signal),
         count,
       });
     }
@@ -1603,6 +1595,62 @@ export class GitHub {
     if (typeof count === "number" && count > 0)
       found.push({ rule: "branch protection", count });
     return found;
+  }
+
+  /**
+   * The rules on `branch` that require a PR's review threads to be
+   * resolved before it merges: each ruleset whose pull_request rule
+   * requires it, and the classic protection's required conversation
+   * resolution. GitHub reports a PR with an unresolved one BLOCKED and
+   * refuses its merge. A rule the login can't read is left out.
+   */
+  async threadResolution(
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const name = encodeURIComponent(branch);
+    const rules =
+      (await this.optional(() =>
+        this.pages<{
+          type?: string;
+          ruleset_id?: number;
+          parameters?: { required_review_thread_resolution?: unknown };
+        }>(this.repo(`rules/branches/${name}`), signal),
+      )) ?? [];
+    const found: string[] = [];
+    for (const rule of rules)
+      if (
+        rule.type === "pull_request" &&
+        rule.parameters?.required_review_thread_resolution === true
+      )
+        found.push(await this.rulesetName(rule.ruleset_id, signal));
+    const classic = await this.optional(() =>
+      this.rest<{ required_conversation_resolution?: { enabled?: unknown } }>(
+        "GET",
+        this.repo(`branches/${name}/protection`),
+        undefined,
+        signal,
+      ),
+    );
+    if (classic?.required_conversation_resolution?.enabled === true)
+      found.push("branch protection");
+    return [...new Set(found)];
+  }
+
+  /** A ruleset as readiness and holds name it: by its name, else its id. */
+  private async rulesetName(
+    id: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const ruleset = await this.optional(() =>
+      this.rest<{ name?: unknown }>(
+        "GET",
+        this.repo(`rulesets/${id}`),
+        undefined,
+        signal,
+      ),
+    );
+    return `ruleset "${String(ruleset?.name ?? id)}"`;
   }
 
   /**
@@ -1707,6 +1755,64 @@ export class GitHub {
     if (!pull)
       throw new TransientError(`GitHub GraphQL shows no PR #${number} yet`);
     return pull;
+  }
+
+  /**
+   * A PR's unresolved review threads: each one's file and the link to its
+   * first comment.
+   */
+  async unresolvedThreads(
+    number: number,
+    signal?: AbortSignal,
+  ): Promise<{ path: string; url?: string }[]> {
+    const found: { path: string; url?: string }[] = [];
+    let after: string | null = null;
+    do {
+      const data: {
+        repository?: {
+          pullRequest?: {
+            reviewThreads?: {
+              nodes?: ({
+                isResolved?: unknown;
+                path?: unknown;
+                comments?: { nodes?: ({ url?: unknown } | null)[] } | null;
+              } | null)[];
+              pageInfo?: { hasNextPage?: unknown; endCursor?: unknown };
+            } | null;
+          } | null;
+        } | null;
+      } = await this.graphql(
+        `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                nodes { isResolved path comments(first: 1) { nodes { url } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        { owner: this.owner, name: this.name, number, after },
+        signal,
+      );
+      const threads = data.repository?.pullRequest?.reviewThreads;
+      if (!threads)
+        throw new TransientError(`GitHub GraphQL shows no PR #${number} yet`);
+      for (const thread of threads.nodes ?? []) {
+        if (!thread || thread.isResolved !== false) continue;
+        const url = thread.comments?.nodes?.[0]?.url;
+        found.push({
+          path: typeof thread.path === "string" ? thread.path : "",
+          ...(typeof url === "string" ? { url } : {}),
+        });
+      }
+      const { hasNextPage, endCursor } = threads.pageInfo ?? {};
+      after =
+        hasNextPage === true && typeof endCursor === "string"
+          ? endCursor
+          : null;
+    } while (after);
+    return found;
   }
 
   /**

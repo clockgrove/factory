@@ -69,6 +69,7 @@ import {
   secretSearch,
   sha256,
 } from "./git.js";
+import type { CommitAuthor } from "./github.js";
 import { namesPath, validPath } from "./objective.js";
 import {
   ContainedError,
@@ -82,7 +83,7 @@ import type { Plan, SourceAssetBinding, WorkItem } from "./planning/types.js";
 import { localAssetPlace } from "./sandbox.js";
 import { errorMessage } from "./text.js";
 import {
-  FACTORY_EMAIL,
+  factoryCommit,
   privateStagingPath,
   scanStaging,
 } from "./work/collect.js";
@@ -1167,6 +1168,8 @@ export async function materializeSelection(input: {
   set: CandidateSet;
   /** The ref that keeps the selection commit from Git's pruning (selectionRef). */
   ref: string;
+  /** The selection commit's author as a GitHub App (collect.ts `factoryCommit`). */
+  author?: CommitAuthor;
   signal: AbortSignal;
   log: (event: Record<string, unknown>) => void;
 }): Promise<MediaOutcome<{ commit: string; tree: string }>> {
@@ -1228,13 +1231,12 @@ export async function materializeSelection(input: {
         `Writing set ${set.id} staged ${staged.join(", ") || "nothing"}, not exactly its destinations ${destinations.join(", ")}. Answer ${again} (with the same bind text, if any) to write it again; if it repeats, report it. Or answer repair or cancel.`,
         [rewrite(again), NEW_CANDIDATES, "cancel"],
       );
+    const commitAs = factoryCommit(input.author);
     await git([
-      "-c",
-      "user.name=Factory",
-      "-c",
-      `user.email=${FACTORY_EMAIL}`,
+      ...commitAs.config,
       "commit",
       "--quiet",
+      ...commitAs.author,
       "-m",
       `Factory: selected ${set.id} assets`,
     ]);

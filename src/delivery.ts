@@ -588,7 +588,7 @@ async function pushBranch(
       if ((await context.github.canPush(context.signal)) === false)
         return objectiveWide(
           hold(
-            `Factory's login may not push to ${context.github.repository} (git push of ${branch} failed: ${message(error).slice(0, 300)}). Give it write access (fine-grained token: Contents: write), then answer retry; or cancel.`,
+            `Factory's login may not push to ${context.github.repository} (git push of ${branch} failed: ${message(error).slice(0, 300)}). Give it write access (${context.github.isApp ? "the GitHub App's Contents: write" : "fine-grained token: Contents: write"}), then answer retry; or cancel.`,
           ),
         );
       throw new TransientError(`git push of ${branch}: ${message(error)}`);

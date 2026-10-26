@@ -23,7 +23,7 @@ import {
 } from "./github-trace.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { type RunLog, redact } from "./log.js";
-import { code, mark, prose } from "./markdown.js";
+import { code, mark, mentions, prose } from "./markdown.js";
 import {
   decisionsOf,
   RunTally,
@@ -407,7 +407,7 @@ export class GitHubSync {
     const minutes = Math.floor((this.now() - this.failingSince) / 60_000);
     if (this.now() - this.failingSince < INTAKE_PROBLEM_MS) return;
     const first = this.intakeStopped === undefined;
-    this.intakeStopped = `Factory hasn't read the queue for ${minutes} min (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued. Check that the service's GitHub login can still read Project ${this.config.queue.projectId} (a token needs the project scope) and that queue.projectId names it; intake resumes at the next good read`;
+    this.intakeStopped = `Factory hasn't read the queue for ${minutes} min (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued. Check that ${this.config.github.app ? "the service's GitHub App can still read Project" : "the service's GitHub login can still read Project"} ${this.config.queue.projectId} (${this.config.github.app ? "the App needs the organization permission Projects: read and write" : "a token needs the project scope"}) and that queue.projectId names it; intake resumes at the next good read`;
     if (first)
       this.log.write(0, {
         event: "intake-stopped",
@@ -986,7 +986,13 @@ export class GitHubSync {
           const comment = await this.github.upsertComment(
             issue,
             marker,
-            `${marker}\n${opening}\n\nReply with one of:\n${answers}\n\nAdd text after the answer to explain it.${about}${form}`,
+            questionComment(
+              marker,
+              opening,
+              answers,
+              `${about}${form}`,
+              this.config.operators,
+            ),
             "sync:ask",
             signal,
             new Date(Date.parse(hold.askedAt) - CLOCK_SKEW_MS).toISOString(),
@@ -1442,17 +1448,10 @@ export class GitHubSync {
       `cancel:${issue}`,
       async (signal) => {
         const marker = mark(issue, "cancelled", runOf(state));
-        const ended = state.ended;
-        const why =
-          ended?.by === DEADLINE
-            ? `its deadline${state.deadline ? `, ${code(state.deadline)},` : ""} passed`
-            : ended?.source === "github" && ended.by
-              ? `${prose(ended.by)} cancelled it`
-              : "the operator cancelled it";
         await this.github.ensureComment(
           issue,
           marker,
-          `${marker}\n**Factory cancelled this Objective**${ended ? ` at ${code(ended.at)}` : ""}: ${why}. ${left ? `Its cleanup stopped after ${left.failures} tries, and left what it couldn't do: ${excerpt(left.left, this.config.secrets, 1500)} Close or delete those by hand.` : "Its open pull requests are closed and the issue is closed as not planned."} What merged stays merged. Queue it again to run it from a new plan.`,
+          cancelComment(marker, state, left, this.config),
           "sync:cancel",
           signal,
           sinceRun(state),
@@ -1499,7 +1498,7 @@ export class GitHubSync {
         const question = await this.github.ensureComment(
           issue,
           marker,
-          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with ${entry.setAside ? "`/factory retry` (recommended) to read it again and run on once its cause is fixed, `/factory reset`" : "`/factory reset` (recommended)"} to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).`,
+          `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with ${entry.setAside ? "`/factory retry` (recommended) to read it again and run on once its cause is fixed, `/factory reset`" : "`/factory reset` (recommended)"} to rebuild it from its plan comment and PRs on GitHub, or \`/factory cancel\` to start over from a cancelled record (queue it again to run it again).${mentions(this.config.operators)}`,
           "sync:ask",
           signal,
         );
@@ -1811,6 +1810,42 @@ function excerpt(
 ): string {
   const shown = redact(value, secrets);
   return code(shown.length > limit ? `${shown.slice(0, limit - 1)}…` : shown);
+}
+
+/**
+ * A question's comment: its opening (the question, a failure's evidence),
+ * its answers and how to give them (`notes`), then the operators'
+ * mentions, so GitHub notifies them of a new hold. An edit (the bound
+ * form) keeps the same mentions.
+ */
+export function questionComment(
+  marker: string,
+  opening: string,
+  answers: string,
+  notes: string,
+  operators: readonly string[],
+): string {
+  return `${marker}\n${opening}\n\nReply with one of:\n${answers}\n\nAdd text after the answer to explain it.${notes}${mentions(operators)}`;
+}
+
+/**
+ * The cancel comment: when and why the Objective was cancelled, what its
+ * cleanup left, and the operators' mentions.
+ */
+export function cancelComment(
+  marker: string,
+  state: Pick<ObjectiveState, "ended" | "deadline">,
+  left: Left | undefined,
+  config: Pick<CoreConfig, "secrets" | "operators">,
+): string {
+  const ended = state.ended;
+  const why =
+    ended?.by === DEADLINE
+      ? `its deadline${state.deadline ? `, ${code(state.deadline)},` : ""} passed`
+      : ended?.source === "github" && ended.by
+        ? `${prose(ended.by)} cancelled it`
+        : "the operator cancelled it";
+  return `${marker}\n**Factory cancelled this Objective**${ended ? ` at ${code(ended.at)}` : ""}: ${why}. ${left ? `Its cleanup stopped after ${left.failures} tries, and left what it couldn't do: ${excerpt(left.left, config.secrets, 1500)} Close or delete those by hand.` : "Its open pull requests are closed and the issue is closed as not planned."} What merged stays merged. Queue it again to run it from a new plan.${mentions(config.operators)}`;
 }
 
 /**

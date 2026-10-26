@@ -174,9 +174,9 @@ const GENERATED_VALUES =
 const STORAGE_OWNERSHIP =
   "Storage that new durable data (a new table or persisted record) needs is owned by the item, with the module that writes the data, or by an item it depends on.";
 
-/** Check 5: a validation command follows the files it checks. */
+/** Check 5: a work item's directory-scoped command follows its owned paths (checks.ts `boundaryFindings`). */
 const VALIDATION_OWNERSHIP =
-  "An item selects a validation command only if it owns files that command checks: a command scoped to one directory (the request lists them) goes only on items owning a path in it. Factory refuses the others.";
+  "On a work item, a validation command whose package script body works in one directory (it starts with `cd DIR &&`, or is one command naming DIR after --prefix, --dir or -C) needs the item to own a path in that directory; Factory refuses one that doesn't. A read-only QA item owns no paths by design: its commands check the integrated result of the items it depends on, so it is never flagged for owning no paths or for running a whole-repository command.";
 
 /** Check 9: candidate media sets are offered for choice; only the selection is delivered. */
 const CANDIDATE_SETS =

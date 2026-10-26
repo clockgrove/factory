@@ -5,16 +5,28 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
-import { hydrateTree, materializeSelection } from "../dist/media.js";
+import {
+  destinationFinding,
+  hydrateTree,
+  materializeSelection,
+  restoreDestinations,
+} from "../dist/media.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
 import { repairPath } from "../dist/repair.js";
 import { validateTree } from "../dist/validate.js";
+import { collect, FACTORY_EMAIL } from "../dist/work/collect.js";
 import { aboutMedia, repairOutcome } from "../dist/work/step-deliver.js";
 import { configured, installation, REPO, tempDir } from "./helpers.mjs";
 
@@ -427,4 +439,172 @@ test("a repair keeps captured candidate sets unless it is about them, comes from
     kept("work", "Start again.", { fresh: true }),
   ])
     assert.equal(keep[key], null);
+});
+
+// Destinations are Factory's: the work step restores them to the base
+// before it collects a media item's result (#2039).
+function collector() {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  const { sandbox, planning } = loadConfig(REPO);
+  delete process.env.FACTORY_CONFIG;
+  const work = item(["assets/", "test/"]);
+  return (target, base) =>
+    collect({
+      worktree: target.directory,
+      base,
+      plan: { items: [work] },
+      item: work,
+      mayChange: [],
+      playbook: planning.playbook,
+      sandbox,
+      finalResponse: "Staged the candidates.",
+      signal: AbortSignal.timeout(60_000),
+    });
+}
+
+function commit(directory, email, message) {
+  git(
+    directory,
+    "-c",
+    "user.name=Committer",
+    "-c",
+    `user.email=${email}`,
+    "commit",
+    "--quiet",
+    "-m",
+    message,
+  );
+  return git(directory, "rev-parse", "HEAD");
+}
+
+const tracked = (directory, revision) =>
+  git(directory, "ls-tree", "-r", "--name-only", revision).split("\n");
+
+test("a destination write Factory's earlier collection commit holds is restored to the base before the next collection (#2039)", async () => {
+  const collectAt = collector();
+  const target = checkout();
+  const set = candidateSet(target.root, ["assets/x.png"]);
+  const destinations = {
+    worktree: target.directory,
+    base: target.commit,
+    sets: [set],
+    signal: AbortSignal.timeout(60_000),
+  };
+  // The qualifier's state: the worker copied a candidate to its
+  // destination beside its test, and collection committed both.
+  mkdirSync(join(target.directory, "assets"));
+  mkdirSync(join(target.directory, "test"));
+  copyFileSync(set.members[0].file, join(target.directory, "assets/x.png"));
+  writeFileSync(join(target.directory, "test/x.test.js"), "// test\n");
+  git(target.directory, "add", ".");
+  commit(target.directory, FACTORY_EMAIL, "Factory: Badge");
+
+  // Collected as it is, every later attempt is refused.
+  const kept = await collectAt(target, target.commit);
+  assert.equal(kept.kind, "collected", kept.finding);
+  assert.match(
+    (await destinationFinding({ ...destinations, commit: kept.commit })) ?? "",
+    /^The result writes or deletes candidate destinations assets\/x\.png, which Factory restored to the base/,
+  );
+
+  assert.deepEqual(await restoreDestinations(destinations), ["assets/x.png"]);
+  const collected = await collectAt(target, target.commit);
+  assert.equal(collected.kind, "collected", collected.finding);
+  assert.equal(
+    await destinationFinding({ ...destinations, commit: collected.commit }),
+    undefined,
+  );
+  assert.equal(git(target.directory, "rev-parse", "HEAD^"), target.commit);
+  assert.deepEqual(tracked(target.directory, collected.commit), [
+    ".gitattributes",
+    "README.md",
+    "test/x.test.js",
+  ]);
+  assert.equal(existsSync(join(target.directory, "assets/x.png")), false);
+});
+
+test("an untracked write at a destination the base lacks is removed before collection, and the rest stays (#2039)", async () => {
+  const collectAt = collector();
+  const target = checkout();
+  const set = candidateSet(target.root, ["assets/x.png"]);
+  const destinations = {
+    worktree: target.directory,
+    base: target.commit,
+    sets: [set],
+    signal: AbortSignal.timeout(60_000),
+  };
+  mkdirSync(join(target.directory, "assets"));
+  mkdirSync(join(target.directory, "test"));
+  copyFileSync(set.members[0].file, join(target.directory, "assets/x.png"));
+  writeFileSync(join(target.directory, "assets/notes.txt"), "notes\n");
+  writeFileSync(join(target.directory, "test/x.test.js"), "// test\n");
+
+  assert.deepEqual(await restoreDestinations(destinations), ["assets/x.png"]);
+  assert.equal(existsSync(join(target.directory, "assets/x.png")), false);
+  assert.deepEqual(await restoreDestinations(destinations), []);
+  const collected = await collectAt(target, target.commit);
+  assert.equal(collected.kind, "collected", collected.finding);
+  assert.equal(
+    await destinationFinding({ ...destinations, commit: collected.commit }),
+    undefined,
+  );
+  assert.deepEqual(tracked(target.directory, collected.commit), [
+    ".gitattributes",
+    "README.md",
+    "assets/notes.txt",
+    "test/x.test.js",
+  ]);
+});
+
+test("a destination the base holds is restored to the base's pointer before collection (#2039)", async () => {
+  const collectAt = collector();
+  const target = checkout();
+  const set = candidateSet(target.root, ["assets/x.png"]);
+  // An existing asset the item replaces: its LFS pointer is in the base.
+  const bytes = Buffer.from("old asset bytes");
+  const pointer = `version https://git-lfs.github.com/spec/v1\noid sha256:${createHash("sha256").update(bytes).digest("hex")}\nsize ${bytes.length}\n`;
+  mkdirSync(join(target.directory, "assets"));
+  writeFileSync(join(target.directory, "assets/x.png"), pointer);
+  git(target.directory, "add", "assets/x.png");
+  const base = commit(target.directory, "test@example.com", "asset");
+  const destinations = {
+    worktree: target.directory,
+    base,
+    sets: [set],
+    signal: AbortSignal.timeout(60_000),
+  };
+  // The worker writes a candidate over it and stages it.
+  mkdirSync(join(target.directory, "test"));
+  copyFileSync(set.members[0].file, join(target.directory, "assets/x.png"));
+  git(target.directory, "add", "assets/x.png");
+  writeFileSync(join(target.directory, "test/x.test.js"), "// test\n");
+
+  assert.deepEqual(await restoreDestinations(destinations), ["assets/x.png"]);
+  assert.equal(
+    readFileSync(join(target.directory, "assets/x.png"), "utf8"),
+    pointer,
+  );
+  const collected = await collectAt(target, base);
+  assert.equal(collected.kind, "collected", collected.finding);
+  assert.equal(
+    await destinationFinding({ ...destinations, commit: collected.commit }),
+    undefined,
+  );
+  assert.equal(
+    git(target.directory, "rev-parse", `${collected.commit}:assets/x.png`),
+    git(target.directory, "rev-parse", `${base}:assets/x.png`),
+  );
+  assert.deepEqual(
+    git(
+      target.directory,
+      "diff-tree",
+      "-r",
+      "--name-only",
+      base,
+      collected.commit,
+    ),
+    "test/x.test.js",
+  );
 });

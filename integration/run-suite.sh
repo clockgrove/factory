@@ -452,7 +452,8 @@ while :; do
   [ $alive = 0 ] && break
   [ "$(date +%s)" -ge "$STOP_AT" ] && { log "55 min: stopping the wave"; break; }
   inst $SUP; SERVE_DIR=$(serve_dir_of $SUP)
-  if [ -n "$SERVE_DIR" ]; then
+  # A case restarting the shared serve on purpose (edge's reset) owns it until it's back.
+  if [ -n "$SERVE_DIR" ] && [ ! -e "$RUN_DIR/serve-restarting" ]; then
     serve_tick
     if serve_exited; then
       ( CASE=suite; record "suite.serve-$SUP" FAIL "the shared serve exited $(cat "$SERVE_DIR/exit"): $(tail -c 400 "$SERVE_DIR/out.log" | tr '\n' ' ')" "$START_S" )

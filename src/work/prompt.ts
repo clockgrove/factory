@@ -512,7 +512,7 @@ function mediaContract(
   if (!needsSelection(item)) return "";
   if (!kept && candidates?.sets.length) {
     const destinations = candidates.destinations.join(", ");
-    return `\n\nMedia: Factory kept the candidate sets the previous attempt staged (${candidates.sets.join(", ")}), and this repair is not about them, so the operator still chooses from those. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets replace the kept ones. Do not write, remove or otherwise change ${destinations}: Factory writes the chosen set there after selection, they are not in this checkout, and a result that changes them is refused. Fix what the findings name in the owned code, tests and documentation.`;
+    return `\n\nMedia: Factory kept the candidate sets the previous attempt staged (${candidates.sets.join(", ")}), and this repair is not about them, so the operator still chooses from those. Do not stage candidates: write no .factory-media/ or .factory-assets.json, because new candidate sets replace the kept ones. Do not write, remove or otherwise change ${destinations}: Factory writes the chosen set there after selection, they are not in this checkout, and a result that changes them is refused. A check that needs those files at their destinations can fail in this checkout for that reason alone: report it rather than writing them there or weakening the check. Fix what the findings name in the owned code, tests and documentation.`;
   }
   if (kept) {
     const destinations = kept.destinations.join(", ");

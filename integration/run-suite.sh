@@ -75,6 +75,7 @@ CASE_TABLE_prd=(
   "paths|P|40|two Objectives owning the same file take turns (queue.paths-take-turns)"
   "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"
   "hostnet|P|25|sandbox.network host: final validation reaches a service on the host's loopback (worker.host-network)"
+  "nocheck|P|35|its own repository N (protected main, no required check, no workflow) and installation N: a Work Item PR with no checks merges 15-20 min after its push, with no hold (delivery.no-check-merge)"
   "prod|Q|45|repository C at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; planning in Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory shown for a file an earlier Objective pinned; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
 )
 case "$SUITE_NAME" in main|edge|prd) ;; *) echo "unknown suite: $SUITE_NAME (main, edge, prd)" >&2; exit 2 ;; esac
@@ -164,6 +165,7 @@ required_checks() {
     paths) echo queue.paths-take-turns ;;
     shared) echo delivery.shared-main ;;
     hostnet) echo worker.host-network ;;
+    nocheck) echo delivery.no-check-merge ;;
     prod) echo 'setup.config setup.background queue.pause-github queue.order queue.concurrency-3 exec.parallel-items prod.no-holds visibility.github visibility.cli knowledge.memory knowledge.dream' ;;
   esac
 }
@@ -242,7 +244,7 @@ write_results() {
     fi
     echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
-    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":"", $1, $2}' "$RUN_DIR/issues")"; }
+    [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":($3=="N"?"N ":""), $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2
 }
@@ -342,7 +344,7 @@ cleanup() {
   cancel_left
   # Q's serve is the user service the prod case installed: uninstall it.
   [ -s "$RUN_DIR/inst/Q/env" ] && (inst Q; q_uninstall)
-  local i p jobs=(); for i in C H X M E P; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
+  local i p jobs=(); for i in C H X M E P N; do [ -d "$RUN_DIR/inst/$i" ] || continue; (inst "$i"; SERVE_DIR=$(serve_dir_of "$i"); serve_down) & jobs+=("$!"); done
   for p in "${jobs[@]}"; do wait "$p" || record suite.stop FAIL "a serve could not be stopped" "$START_S"; done
   for i in M E P; do proxy_stop $i; done
   local s; while read -r p s; do kill_exact "$p" "$s" TERM || true; done <"$RUN_DIR/pids"

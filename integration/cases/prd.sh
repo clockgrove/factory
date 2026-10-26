@@ -5,6 +5,8 @@
 #   Q  repository C, installation Q written by `factory setup` with
 #      production defaults and run by `setup --background` as a user
 #      service: one lane case, `prod`, at production models and concurrency.
+# Lane P's `nocheck` case makes its own repository N and installation N (a
+# target with no required check and no workflow), since M requires `test`.
 # Functions are case_<name>, as in main.sh.
 
 HOSTNET_PORT=18650
@@ -492,6 +494,114 @@ case_hostnet() {
   end_done "$n"; local ok=$?
   [ $ok = 0 ] && [ "$hits" -ge 1 ]
   rec_if worker.host-network $? "requests from validation to the host's loopback: $hits; $EVID" "$t0"
+}
+
+# PRD 14 (#1967): a Work Item PR on a target whose protected main requires no
+# check, and whose tree has no workflow, merges once the settle window
+# (delivery.ts CHECK_SETTLE_MS, 15 min from GitHub's push time) passes, with no
+# hold. Repository M requires `test`, so the case makes its own repository N
+# (the baseline without .github/workflows/ci.yml, protected main with nothing
+# required) with its own Project and installation N, inside its own budget, so
+# the wait runs beside the other cases. Factory's rule decides the timing: the
+# push time is the one its own wait names, the merge time its merge result.
+NOCHECK_SETTLE=900   # delivery.ts CHECK_SETTLE_MS
+NOCHECK_SLACK=300    # the next CI poll (20 s) and the merge step, with room
+case_nocheck() {
+  local t0 id fn n; t0=$(now); id=$(uid); fn="triple$id"
+  nocheck_target || { record delivery.no-check-merge FAIL "couldn't make the no-check target ${REPO_STEM}-n: $(tail -c 300 "$RUN_DIR/nocheck.setup.err" 2>/dev/null)" "$t0"; return 1; }
+  local HOLD_POLICY="d2 review decide more"
+  n=$(new_objective exec "no-check merge" FN="$fn" SPEC="\`$fn(s)\` returns \`s\` repeated three times: \`$fn(\"ab\")\` is \`\"ababab\"\`.") || { record delivery.no-check-merge FAIL "couldn't queue an Objective on $REPO" "$t0"; return 1; }
+  local p; p=$(wait_phase "$n" 'done|cancelled|failed' "$(left)"); sleep 10
+  local kept heads why live ends
+  kept=$(nocheck_window "$n"); local rk=$?
+  heads=${kept%%$'\n'*}; why=${kept#*$'\n'}
+  # shellcheck disable=SC2086
+  live=$(nocheck_github $heads); local rl=$?
+  end_done "$n"; ends=$?
+  [ $rk = 0 ] && [ $rl = 0 ] && [ $ends = 0 ]
+  rec_if delivery.no-check-merge $? "#$n on $REPO ($p): $why; $live; $EVID" "$t0"
+}
+# nocheck_target: repository N and installation N, its serve up (sets INST N).
+nocheck_target() {
+  local repo=$REPO_OWNER/${REPO_STEM}-n co="$STATE_BASE/checkout-n" sha pid
+  {
+    repo_create "${repo#*/}" &&
+      gh api -X PUT "repos/$repo/branches/main/protection" --input - >/dev/null <<'JSON' &&
+{"required_status_checks":null,"enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null}
+JSON
+      sha=$(gh api "repos/$repo/contents/.github/workflows/ci.yml" --jq .sha) &&
+      gh api -X DELETE "repos/$repo/contents/.github/workflows/ci.yml" -f message="Drill: no workflow on this target" -f sha="$sha" >/dev/null &&
+      pid=$(C_REPO=$repo project_create) && [ -n "$pid" ] &&
+      clone "$repo" "$co"
+  } 2>>"$RUN_DIR/nocheck.setup.err" || return 1
+  write_config "$STATE_BASE/config-n.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'"
+  inst_define N "$repo" "$STATE_BASE/config-n.json"
+  printf '%s\n' "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/N/extra_env"
+  inst N; serve_up && serve_ready
+}
+# nocheck_window N: from N's state and logs. Prints the merged heads (one line,
+# space-separated), then the evidence; 0 when N is done and every published Work
+# Item waited for checks to register (Factory's no-check wait, which names
+# GitHub's push time) and merged NOCHECK_SETTLE to NOCHECK_SETTLE+NOCHECK_SLACK
+# seconds after that push, with no hold on its ci or merge step.
+nocheck_window() {
+  python3 -B - "$SUITE/lib" "$ROOT" "$1" "$NOCHECK_SETTLE" "$NOCHECK_SLACK" <<'PY'
+import datetime, re, sys
+sys.path.insert(0, sys.argv[1])
+import st
+root, n, settle, slack = sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+d = st.load(root, n)
+d = d if isinstance(d, dict) else {}
+done = d.get("done") or {}
+evs = list(st.events(root, n))
+t = lambda s: datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+# delivery.ts unregisteredChecks, with no check of any app on the head.
+rx = re.compile(r"Awaiting checks to register on PR #(\d+) \(none since its push at (\S+)\)$")
+items = sorted(k[len("item:"):-len(":publish")] for k in done if k.startswith("item:") and k.endswith(":publish"))
+ok = d.get("status") == "done" and bool(items)
+heads, parts = [], []
+for i in items:
+    waits = [m for m in (rx.match(str(e.get("reason", ""))) for e in evs
+                         if e.get("step") == f"item:{i}:ci" and e.get("event") == "outcome" and e.get("outcome") == "retry") if m]
+    holds = sum(1 for e in evs if e.get("event") == "hold" and e.get("step") in (f"item:{i}:ci", f"item:{i}:merge"))
+    head = (done.get(f"item:{i}:ci") or {}).get("head")
+    merged = (done.get(f"item:{i}:merge") or {}).get("at")
+    if head:
+        heads.append(head)
+    if not waits:
+        ok = False
+        parts.append(f"{i}: no wait for checks to register (its ci step never took the no-check path), merged {merged or 'no'}, holds {holds}")
+        continue
+    pr, pushed = waits[-1].groups()
+    if not merged:
+        ok = False
+        parts.append(f"{i} PR #{pr} pushed {pushed}: not merged, ci/merge holds {holds}")
+        continue
+    gap = int((t(merged) - t(pushed)).total_seconds())
+    ok = ok and settle <= gap <= settle + slack and holds == 0
+    parts.append(f"{i} PR #{pr} pushed {pushed}, merged {merged}: {gap // 60}m{gap % 60:02d}s after the push "
+                 f"(window {settle // 60}-{(settle + slack) // 60} min), ci/merge holds {holds}")
+print(" ".join(heads))
+print(f"status {d.get('status')}; " + ("; ".join(parts) or "no Work Item published"))
+sys.exit(0 if ok else 1)
+PY
+}
+# nocheck_github HEAD...: 0 when $REPO's main is protected and requires no
+# check, and no head has a check run, a commit status or an Actions run.
+nocheck_github() {
+  local req h cr cs ar out ok=0
+  if req=$(gh api "repos/$REPO/branches/main/protection" --jq '[.required_status_checks.contexts // [], .required_status_checks.checks // []] | flatten | length'); then
+    out="main protected, required checks $req"; [ "$req" = 0 ] || ok=1
+  else out="main not protected (or unreadable)"; ok=1; fi
+  [ $# -ge 1 ] || { out="$out; no merged head to read"; ok=1; }
+  for h; do
+    cr=$(gh api "repos/$REPO/commits/$h/check-runs" --jq .total_count) || cr="?"
+    cs=$(gh api "repos/$REPO/commits/$h/status" --jq .total_count) || cs="?"
+    ar=$(gh api "repos/$REPO/actions/runs?head_sha=$h" --jq .total_count) || ar="?"
+    out="$out; head ${h:0:12}: check runs $cr, statuses $cs, Actions runs $ar"
+    [ "$cr" = 0 ] && [ "$cs" = 0 ] && [ "$ar" = 0 ] || ok=1
+  done
+  echo "$out"; return $ok
 }
 
 # ---------- lane Q: production settings ----------

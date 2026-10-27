@@ -1,23 +1,35 @@
 // clockgrove/clockgrove#826: an Objective that moved dependencies held at
 // planning, since no worker has the network to resolve pnpm-lock.yaml and
 // the frozen install refuses a stale one. Factory now resolves it itself,
-// as the install runs, and commits it on the candidate (#2095). Real Git
-// and the real sandbox; a stand-in pnpm on the PATH plays the registry.
+// as the install runs, and commits it on the candidate (#2095), for
+// pnpm-workspace.yaml overrides and catalogs and for npm too (#2099). Real
+// Git and the real sandbox; stand-in pnpm and npm on the PATH play the
+// registry.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
-import { resolutionNetworkRefusal } from "../dist/package-network.js";
+import {
+  installNetworkRefusal,
+  resolutionNetworkRefusal,
+} from "../dist/package-network.js";
 import { validationEnvironmentNote } from "../dist/planning/facts.js";
 import { lockfileRef, validateTree } from "../dist/validate.js";
 import { candidate } from "../dist/work/steps.js";
 import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
 
 const BOOTSTRAP = "pnpm install --frozen-lockfile --ignore-scripts";
+const NPM_BOOTSTRAP = "npm ci --ignore-scripts";
 
 // The sandbox mounts PATH directories read-only, never one in a shared
 // temporary directory, so the stand-in lives beside the tests (ignored).
@@ -27,12 +39,16 @@ const tools = mkdtempSync(
 after(() => rmSync(tools, { recursive: true, force: true }));
 writeFileSync(
   join(tools, "fake-pnpm.cjs"),
-  `const { readFileSync, writeFileSync } = require("node:fs");
+  `const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2).join(" ");
 const dependencies = JSON.parse(readFileSync("package.json", "utf8")).dependencies ?? {};
 const names = Object.keys(dependencies).sort();
+// The workspace's settings (its overrides) are recorded in the lockfile.
+const workspace = existsSync("pnpm-workspace.yaml") ? readFileSync("pnpm-workspace.yaml", "utf8") : undefined;
+const settings = workspace === undefined ? [] : ["# workspace " + JSON.stringify(workspace)];
 const expected = [
   "lockfileVersion: '9.0'",
+  ...settings,
   "importers:",
   "  .:",
   "    dependencies:",
@@ -42,7 +58,13 @@ const expected = [
   "",
 ].join("\\n");
 if (args === "install --frozen-lockfile --ignore-scripts") {
-  if (readFileSync("pnpm-lock.yaml", "utf8") === expected) process.exit(0);
+  const current = readFileSync("pnpm-lock.yaml", "utf8");
+  if (current === expected) process.exit(0);
+  const unset = (text) => text.split("\\n").filter((line) => !line.startsWith("# workspace ")).join("\\n");
+  if (unset(current) === unset(expected)) {
+    console.error(" ERR_PNPM_LOCKFILE_CONFIG_MISMATCH  Cannot proceed with the frozen installation. The current \\"overrides\\" configuration doesn't match the value found in the lockfile");
+    process.exit(1);
+  }
   console.error(' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with package.json');
   process.exit(1);
 }
@@ -69,13 +91,58 @@ writeFileSync(
   `#!/bin/sh\nexec node "${join(tools, "fake-pnpm.cjs")}" "$@"\n`,
 );
 chmodSync(join(tools, "pnpm"), 0o755);
+// npm's stand-in: `npm ci` refuses a package-lock.json out of sync with
+// package.json, with npm's own message; the lockfile-only resolution
+// writes the one that matches.
+writeFileSync(
+  join(tools, "fake-npm.cjs"),
+  `const { readFileSync, writeFileSync } = require("node:fs");
+const args = process.argv.slice(2).join(" ");
+const dependencies = JSON.parse(readFileSync("package.json", "utf8")).dependencies ?? {};
+const expected = ${npmLockfile.toString()}(dependencies);
+if (args === "ci --ignore-scripts") {
+  if (readFileSync("package-lock.json", "utf8") === expected) process.exit(0);
+  console.error("npm error \`npm ci\` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with \`npm install\` before continuing.");
+  process.exit(1);
+}
+if (args === "install --package-lock-only --ignore-scripts --no-audit --no-fund") {
+  writeFileSync("package-lock.json", expected);
+  process.exit(0);
+}
+console.error("unexpected npm " + args);
+process.exit(3);
+`,
+);
+writeFileSync(
+  join(tools, "npm"),
+  `#!/bin/sh\nexec node "${join(tools, "fake-npm.cjs")}" "$@"\n`,
+);
+chmodSync(join(tools, "npm"), 0o755);
 process.env.PATH = `${tools}:${process.env.PATH}`;
 
-/** The lockfile the stand-in writes for `dependencies`. */
-function lockfile(dependencies) {
+/** The package-lock.json npm's stand-in writes for `dependencies`. */
+function npmLockfile(dependencies) {
+  const packages = { "": { name: "target", dependencies } };
+  for (const [name, version] of Object.entries(dependencies))
+    packages[`node_modules/${name}`] = {
+      version,
+      resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`,
+      integrity: "sha512-AAAA",
+    };
+  return `${JSON.stringify({ name: "target", lockfileVersion: 3, requires: true, packages }, null, 2)}\n`;
+}
+
+/**
+ * The lockfile the stand-in writes for `dependencies`, and for the
+ * `workspace` (pnpm-workspace.yaml's text) when there is one.
+ */
+function lockfile(dependencies, workspace) {
   const names = Object.keys(dependencies).sort();
   return [
     "lockfileVersion: '9.0'",
+    ...(workspace === undefined
+      ? []
+      : [`# workspace ${JSON.stringify(workspace)}`]),
     "importers:",
     "  .:",
     "    dependencies:",
@@ -105,8 +172,10 @@ const git = (cwd, ...args) => {
 
 /** Commits `files` (path to content) on `checkout`; returns the commit. */
 function commit(checkout, files) {
-  for (const [path, content] of Object.entries(files))
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(checkout, path)), { recursive: true });
     writeFileSync(join(checkout, path), content);
+  }
   git(checkout, "add", ".");
   git(checkout, "commit", "--quiet", "-m", "change");
   return git(checkout, "rev-parse", "HEAD");
@@ -127,6 +196,12 @@ async function validate({
   change = { "package.json": manifest(dependencies) },
   network = "host",
   commands = [BOOTSTRAP],
+  workspace,
+  baseFiles = {
+    "package.json": manifest(base),
+    "pnpm-lock.yaml": lockfile(lock, workspace),
+    ...(workspace === undefined ? {} : { "pnpm-workspace.yaml": workspace }),
+  },
 } = {}) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
@@ -135,10 +210,7 @@ async function validate({
   delete process.env.FACTORY_CONFIG;
   const checkout = tempDir("factory-lockfile-");
   git(checkout, "init", "--quiet");
-  const planned = commit(checkout, {
-    "package.json": manifest(base),
-    "pnpm-lock.yaml": lockfile(lock),
-  });
+  const planned = commit(checkout, baseFiles);
   const built = commit(checkout, change);
   const log = new RunLog(
     inst.logs,
@@ -410,10 +482,258 @@ test("later steps use the validate step's commit with the resolved lockfile", ()
   assert.equal(candidate(state, "b"), "work-b");
 });
 
+// #2099: clockgrove/clockgrove#828 cleared transitive advisories with
+// pnpm-workspace.yaml overrides, which the workspace pin refused.
+const WORKSPACE = [
+  "packages:",
+  "  - packages/*",
+  "minimumReleaseAge: 1440",
+  "allowBuilds:",
+  "  esbuild: true",
+  "overrides:",
+  "  zod@<4.6.6: 4.6.6",
+  "",
+].join("\n");
+const OVERRIDDEN = WORKSPACE.replace(
+  "  zod@<4.6.6: 4.6.6\n",
+  "  zod@<4.6.6: 4.6.6\n  ajv@8.20.0>fast-uri: 3.1.9\n  miniflare>undici: ^7.24.0\n",
+);
+
+test("a dependency change's pnpm-workspace.yaml overrides get Factory's resolved lockfile, and the frozen install passes", async () => {
+  const { result, events, checkout, built } = await validate({
+    workspace: WORKSPACE,
+    change: { "pnpm-workspace.yaml": OVERRIDDEN },
+  });
+  assert.equal(result.kind, "passed", JSON.stringify(result).slice(0, 1500));
+  assert.equal(result.regenerated?.lockfile, "pnpm-lock.yaml");
+  const made = result.regenerated.commit;
+  assert.equal(git(checkout, "rev-parse", `${made}^`), built);
+  assert.equal(
+    git(checkout, "diff", "--name-only", built, made),
+    "pnpm-lock.yaml",
+  );
+  assert.equal(
+    git(checkout, "show", `${made}:pnpm-lock.yaml`),
+    lockfile({ "left-pad": "1.0.0" }, OVERRIDDEN).trimEnd(),
+  );
+  const [refused] = events.filter(
+    (event) => event.event === "validation-result" && !event.passed,
+  );
+  assert.match(refused.tail, /ERR_PNPM_LOCKFILE_CONFIG_MISMATCH/);
+  assert.equal(resolutions(events).length, 1);
+});
+
+for (const [shape, changed, message] of [
+  [
+    "its dependency build approvals",
+    WORKSPACE.replace("  esbuild: true", "  esbuild: true\n  sharp: true"),
+    /settings other than package membership and overrides, catalog, catalogs; those settings \(such as dependency build approvals/,
+  ],
+  [
+    "its minimum release age",
+    OVERRIDDEN.replace("minimumReleaseAge: 1440", "minimumReleaseAge: 0"),
+    /settings other than package membership and overrides/,
+  ],
+  [
+    "its package membership, without Workspace package additions",
+    OVERRIDDEN.replace("  - packages/*", "  - packages/*\n  - tools/*"),
+    /package membership differs from the accepted base, and the Objective declares no Workspace package additions/,
+  ],
+  [
+    "an override to something other than a specifier",
+    WORKSPACE.replace("  zod@<4.6.6: 4.6.6", "  zod:\n    ajv: 1.0.0"),
+    /pnpm-workspace\.yaml overrides must map package selectors to version specifiers/,
+  ],
+])
+  test(`a candidate whose pnpm-workspace.yaml changes ${shape} fails before anything runs`, async () => {
+    const { result, events } = await validate({
+      workspace: WORKSPACE,
+      change: { "pnpm-workspace.yaml": changed },
+    });
+    assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 1500));
+    assert.match(result.detail, message);
+    assert.equal(resolutions(events).length, 0);
+    assert.equal(
+      events.filter((event) => event.event === "validation-command").length,
+      0,
+    );
+  });
+
+test("an npm dependency change gets Factory's resolved package-lock.json, and npm ci passes", async () => {
+  const { result, events, checkout, built } = await validate({
+    baseFiles: {
+      "package.json": manifest({ "left-pad": "1.0.0" }),
+      "package-lock.json": npmLockfile({ "left-pad": "1.0.0" }),
+    },
+    commands: [NPM_BOOTSTRAP],
+  });
+  assert.equal(result.kind, "passed", JSON.stringify(result).slice(0, 1500));
+  assert.equal(result.regenerated?.lockfile, "package-lock.json");
+  const made = result.regenerated.commit;
+  assert.equal(git(checkout, "rev-parse", `${made}^`), built);
+  assert.equal(
+    git(checkout, "diff", "--name-only", built, made),
+    "package-lock.json",
+  );
+  assert.equal(
+    git(checkout, "show", `${made}:package-lock.json`),
+    npmLockfile({ "left-pad": "1.0.0", "is-number": "7.0.0" }).trimEnd(),
+  );
+  assert.deepEqual(
+    resolutions(events).map((event) => event.command),
+    ["npm install --package-lock-only --ignore-scripts --no-audit --no-fund"],
+  );
+});
+
+test("an npm candidate that adds workspaces fails before anything runs", async () => {
+  const { result } = await validate({
+    baseFiles: {
+      "package.json": manifest({ "left-pad": "1.0.0" }),
+      "package-lock.json": npmLockfile({ "left-pad": "1.0.0" }),
+    },
+    change: {
+      "package.json": `${JSON.stringify({ name: "target", workspaces: ["packages/*"], dependencies: { "left-pad": "1.0.0" } })}\n`,
+    },
+    commands: [NPM_BOOTSTRAP],
+  });
+  assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 1500));
+  assert.match(result.detail, /npm bootstrap does not support workspaces/);
+});
+
+/** A repository at `base` (path to content) and a commit changing `change`. */
+function inputs(base, change) {
+  const directory = tempDir("factory-resolution-network-");
+  git(directory, "init", "--quiet");
+  const planned = commit(directory, base);
+  return { directory, base: planned, changed: commit(directory, change) };
+}
+
+const registryBase = (workspace) => ({
+  "package.json": manifest({ "left-pad": "1.0.0" }),
+  "pnpm-lock.yaml": lockfile({ "left-pad": "1.0.0" }),
+  ...(workspace === undefined ? {} : { "pnpm-workspace.yaml": workspace }),
+});
+
+test("the install keeps the registry network when pnpm-workspace.yaml changes only its membership, overrides and catalogs", async () => {
+  const { directory, base, changed } = inputs(registryBase(WORKSPACE), {
+    "pnpm-workspace.yaml": `${OVERRIDDEN.replace("  - packages/*", "  - packages/*\n  - tools/*")}catalog:\n  zod: ^4.6.6\n`,
+  });
+  assert.equal(
+    await installNetworkRefusal(directory, base, changed),
+    undefined,
+  );
+  assert.equal(
+    await resolutionNetworkRefusal(directory, base, changed),
+    undefined,
+  );
+});
+
+for (const [shape, workspace] of [
+  [
+    "its minimum release age",
+    WORKSPACE.replace("minimumReleaseAge: 1440", "minimumReleaseAge: 0"),
+  ],
+  [
+    "its build approvals",
+    WORKSPACE.replace("  esbuild: true", "  esbuild: true\n  sharp: true"),
+  ],
+  ["its registry", `${WORKSPACE}registry: https://example.com/\n`],
+])
+  test(`the install stays offline when pnpm-workspace.yaml changes ${shape}`, async () => {
+    const { directory, base, changed } = inputs(registryBase(WORKSPACE), {
+      "pnpm-workspace.yaml": workspace,
+    });
+    const refusal = await installNetworkRefusal(directory, base, changed);
+    assert.match(
+      refusal?.reason ?? "",
+      /pnpm-workspace\.yaml changes settings other than package membership/,
+    );
+  });
+
+for (const [shape, workspace, refused] of [
+  [
+    "an override from a git URL",
+    WORKSPACE.replace(
+      "  zod@<4.6.6: 4.6.6",
+      "  zod@<4.6.6: git+https://example.com/zod.git",
+    ),
+    /pnpm-workspace\.yaml overrides name a package from outside the registry \(git\+https:\/\/example\.com\/zod\.git\)/,
+  ],
+  [
+    "a catalog entry from a file",
+    `${WORKSPACE}catalogs:\n  next:\n    zod: file:../zod\n`,
+    /pnpm-workspace\.yaml catalogs name a package from outside the registry \(file:\.\.\/zod\)/,
+  ],
+])
+  test(`a lockfile resolution stays offline for ${shape} in pnpm-workspace.yaml`, async () => {
+    const { directory, base, changed } = inputs(registryBase(WORKSPACE), {
+      "pnpm-workspace.yaml": workspace,
+    });
+    const refusal = await resolutionNetworkRefusal(directory, base, changed);
+    assert.match(refusal?.reason ?? "", refused);
+    assert.equal(refusal.unverified, undefined);
+  });
+
+const fixture = `${JSON.stringify({ name: "fixture", dependencies: { pad: "file:../pad" } })}\n`;
+
+test("a changed package.json outside the workspace keeps no lockfile resolution offline", async () => {
+  // No workspace: only the root is resolved.
+  const alone = inputs(registryBase(), {
+    "package.json": manifest({ "left-pad": "1.0.0", "is-number": "7.0.0" }),
+    "test/fixtures/app/package.json": fixture,
+  });
+  assert.equal(
+    await resolutionNetworkRefusal(alone.directory, alone.base, alone.changed),
+    undefined,
+  );
+  // A workspace: only its members are.
+  const member = inputs(registryBase(WORKSPACE), {
+    "test/fixtures/app/package.json": fixture,
+  });
+  assert.equal(
+    await resolutionNetworkRefusal(
+      member.directory,
+      member.base,
+      member.changed,
+    ),
+    undefined,
+  );
+});
+
+for (const [shape, workspace, path] of [
+  ["a workspace member", WORKSPACE, "packages/app/package.json"],
+  [
+    "a member of a nested pattern",
+    WORKSPACE.replace("  - packages/*", "  - 'apps/**'"),
+    "apps/web/site/package.json",
+  ],
+  [
+    "a package under a pattern Factory can't read exactly",
+    WORKSPACE.replace("  - packages/*", "  - '{apps,tools}/*'"),
+    "test/fixtures/app/package.json",
+  ],
+  [
+    "a package a negated pattern leaves out",
+    WORKSPACE.replace("  - packages/*", "  - packages/*\n  - '!packages/app'"),
+    "packages/app/package.json",
+  ],
+])
+  test(`a lockfile resolution stays offline for a file dependency in ${shape}`, async () => {
+    const { directory, base, changed } = inputs(registryBase(workspace), {
+      [path]: fixture,
+    });
+    const refusal = await resolutionNetworkRefusal(directory, base, changed);
+    assert.match(refusal?.reason ?? "", /from outside the registry/);
+  });
+
 test("the planner and plan review learn who resolves a dependency change's lockfile", () => {
   assert.match(
     validationEnvironmentNote(false, true),
     /Factory resolves it itself \(pnpm install --lockfile-only/,
+  );
+  assert.match(
+    validationEnvironmentNote(false, true),
+    /pnpm-workspace\.yaml overrides\/catalogs .*npm install --package-lock-only.*build approvals, stay the operator's/,
   );
   assert.match(
     validationEnvironmentNote(false, false),

@@ -820,12 +820,12 @@ export type CiResult =
  *
  * A native-stack layer above the bottom (`input.stack`) whose PR is open
  * on its base makes the stack once every layer is published, before
- * anything else is judged, so it never reads ready without it (#2068).
- * Making it starts the default branch's `pull_request` workflows
- * on every layer above the bottom as on a PR into that branch (GitHub's
- * `stacked` event, with `base_ref` the stack's base; later pushes carry it
- * too), so a workflow filtered to that branch reports there, and GitHub
- * requires its checks there. Until then, a check that has not registered
+ * anything else is judged, so from then on it never reads ready without
+ * it (#2068). Making it runs the `pull_request` workflows filtered to the
+ * default branch on every layer above the bottom (GitHub's `stacked`
+ * event, with `base_ref` the stack's base; later pushes carry it too), so
+ * such a workflow reports there, and GitHub requires the default branch's
+ * checks there. Until then, a check that has not registered
  * on such a layer is a wait on the layers above, never a question; from
  * then on, the 15 minutes before one is asked about run from when Factory
  * began waiting, not from the layer's push.

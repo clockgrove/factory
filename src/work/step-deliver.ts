@@ -198,8 +198,8 @@ export function pullInput(
  * The CI step's view of a native stack above its bottom layer: the PRs of
  * the unit's published layers, bottom first, and the layers not published
  * yet. Once every layer is published, the step makes the stack, so GitHub
- * runs the default branch's workflows on the layer (delivery.ts
- * `observeCi`, #2068).
+ * runs the workflows filtered to the default branch on the layer
+ * (delivery.ts `observeCi`, #2068).
  */
 export function stackInput(
   state: ObjectiveState,

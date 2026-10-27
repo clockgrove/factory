@@ -15,7 +15,7 @@ import { mergeUnit, observeCi } from "../dist/delivery.js";
 import { DEFAULT_LIMITS, ObjectiveRunner } from "../dist/engine.js";
 import { GitHubError } from "../dist/github.js";
 import { newObjective } from "../dist/state.js";
-import { stackInput } from "../dist/work/step-deliver.js";
+import { ciStep, stackInput } from "../dist/work/step-deliver.js";
 import { githubOrigin, REPO, tempDir } from "./helpers.mjs";
 
 const LOWER = "b".repeat(40);
@@ -378,6 +378,50 @@ test("the CI step passes a layer above the bottom its unit's published PRs and t
   // The bottom layer and a regular PR make no stack.
   assert.deepEqual(stackInput(state, { unit, layer: 0 }), {});
   assert.deepEqual(stackInput(state, undefined), {});
+});
+
+test("the CI step of a layer above the bottom makes the native stack of its unit's PRs once every layer is published", async () => {
+  const { checkout, head } = checkoutWithOrigin();
+  const calls = [];
+  const { answers } = filteredAnswers(head, calls);
+  const unit = {
+    items: [{ id: "a" }, { id: "b" }, { id: "c" }],
+    externalDependencies: [],
+  };
+  const published = (pr, sha) => ({ pr, head: sha, merged: false });
+  const state = {
+    issue: 1,
+    kept: { "item:b:pushed": [head] },
+    done: {
+      plan: { items: unit.items },
+      "item:a:publish": published(7, LOWER),
+      "item:b:publish": published(8, head),
+    },
+  };
+  const step = () =>
+    ciStep(
+      unit.items[1],
+      { state, signal: new AbortController().signal, log() {} },
+      { github: fake(answers), config: { checkout } },
+      { unit, layer: 1 },
+    );
+  // c is not published yet: a wait on it, with no stack.
+  const waiting = await step();
+  assert.equal(waiting.kind, "retry", JSON.stringify(waiting));
+  assert.deepEqual(waiting.wait, {
+    kind: "gate",
+    gate: "the native stack, made once Work Item c is published",
+  });
+  assert.deepEqual(calls, []);
+  // c is published: the stack of all three PRs, bottom first.
+  state.done["item:c:publish"] = published(9, "c".repeat(40));
+  const made = await step();
+  assert.equal(made.kind, "retry", JSON.stringify(made));
+  assert.equal(made.wait, undefined);
+  assert.deepEqual(calls, [
+    ["find", 7],
+    ["create", [7, 8, 9]],
+  ]);
 });
 
 test("the wait on the layers above never asks, and the 15 minutes start once the stack exists", () => {

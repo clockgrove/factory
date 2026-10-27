@@ -27,6 +27,7 @@ import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal } from "./git.js";
+import type { CommitAuthor } from "./github.js";
 import type { RunFile } from "./log.js";
 import {
   hydrateTree,
@@ -35,9 +36,14 @@ import {
   type SelectedMember,
 } from "./media.js";
 import { declaration, onlyEntry } from "./objective.js";
-import { installNetworkRefusal } from "./package-network.js";
+import {
+  installNetworkRefusal,
+  type NetworkRefusal,
+  resolutionNetworkRefusal,
+} from "./package-network.js";
 import { forceRemove, openParent, within } from "./paths.js";
 import {
+  LOCKFILE_RESOLUTION,
   PINNED_NPM_BOOTSTRAP,
   PINNED_PNPM_BOOTSTRAP,
   packageBootstrap,
@@ -60,9 +66,10 @@ import {
 import { runSandboxed, sandboxAvailable } from "./sandbox.js";
 import type { ObjectiveBlock } from "./shown.js";
 import { errorMessage, headAndTail } from "./text.js";
-import { privateStagingPath } from "./work/collect.js";
+import { factoryCommit, privateStagingPath } from "./work/collect.js";
 import {
   addWorktree,
+  clearStaleLocks,
   hasGitlink,
   hostGit,
   removeWorktree,
@@ -132,6 +139,20 @@ export interface ValidateInput {
   base?: string;
   /** Final validation of one Work Item's commands: the declared Package manager update must have landed. */
   requirePackageManagerUpdate?: true;
+  /**
+   * A Work Item's validation, the validate step's and the worker's own:
+   * when the candidate changed its dependency inputs and the bootstrap
+   * refuses its lockfile as out of date, Factory resolves the lockfile
+   * itself (LOCKFILE_RESOLUTION), as the bootstrap installs, commits it on
+   * the candidate and validates that commit instead (#2095). `ref` keeps
+   * the commit from Git's pruning; `author` authors it (collect.ts
+   * `factoryCommit`). Absent (QA and final validation, on the default
+   * branch): the lockfile is never changed.
+   */
+  lockfile?: {
+    ref?: string;
+    author?: () => Promise<CommitAuthor | undefined>;
+  };
   sandbox: SandboxConfig;
   /** Each command's limit (`validation.commandTimeoutSeconds`); past it the command failed. */
   commandTimeoutMs: number;
@@ -187,9 +208,18 @@ export interface CommandResult {
   tail: string;
 }
 
+/** Factory's commit on the candidate with the lockfile it resolved (`lockfile`). */
+export interface RegeneratedLockfile {
+  /** The commit the commands ran on: the candidate and the regenerated lockfile. */
+  commit: string;
+  /** The lockfile's path: pnpm-lock.yaml or package-lock.json. */
+  lockfile: string;
+}
+
 export type Validation =
   | {
       kind: "passed";
+      /** The tree the commands ran on: `regenerated.commit`'s when there is one. */
       tree: string;
       /** The commands that ran, preparation first. */
       commands: string[];
@@ -198,6 +228,7 @@ export type Validation =
       produced?: string;
       /** Every review artifact captured, in command order; present when `reviewArtifacts` was given. */
       artifacts?: ReviewArtifact[];
+      regenerated?: RegeneratedLockfile;
     }
   /** The candidate's fault: the step repairs it. */
   | {
@@ -213,6 +244,7 @@ export type Validation =
       /** The complete output, for diagnosis and the next attempt. */
       output: string;
       produced?: string;
+      regenerated?: RegeneratedLockfile;
     }
   | Extract<Outcome, { kind: "retry" | "hold" }>;
 
@@ -229,13 +261,15 @@ export type Validation =
  * restore, or LFS files over the bound are media's hold (hydrateTree).
  */
 export async function validateTree(input: ValidateInput): Promise<Validation> {
-  const { checkout, commit, plan, item } = input;
+  const { checkout, plan, item } = input;
+  // A regenerated lockfile moves both to Factory's commit on the candidate.
+  let { commit } = input;
   const { preparation, commands } = item
     ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   const { signal } = input;
-  const tree = await revParse(checkout, `${commit}^{tree}`, signal);
+  let tree = await revParse(checkout, `${commit}^{tree}`, signal);
   // Sandboxed commands can write any directory of the checkout. Behind a
   // gitlink, host-side Git would enter a repository they wrote, with its
   // configuration; so no tree with one is validated.
@@ -358,7 +392,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
     const lfsFiles: readonly LfsFile[] = restored.value;
     const hydrated = new Set(lfsFiles.map((file) => file.path));
     const linked = lfsFiles.filter((file) => file.linked);
-    const baseline = await status(worktree, signal);
+    let baseline = await status(worktree, signal);
     const dirty = mutationDetail(Buffer.alloc(0), baseline, hydrated);
     if (dirty) {
       // Checkout filters (line-ending or other attributes) rewrite what
@@ -375,13 +409,40 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
     }
     const results: CommandResult[] = [];
     let artifacts: ReviewArtifact[] = [];
-    for (const [index, command] of sequence.entries()) {
+    let regenerated: RegeneratedLockfile | undefined;
+    // An install gets an empty HOME of its own, so nothing an earlier
+    // command left there configures it.
+    const sandboxed = async (
+      command: string,
+      whole: RunFile,
+      grant: { install: boolean; network: boolean; outputLimit?: number },
+    ) =>
+      runSandboxed(command, {
+        cwd: worktree,
+        home: grant.install ? await made("factory-install-home-") : home,
+        temporary,
+        env: {
+          ...validationEnvironment(credentials),
+          // Factory fetches by SHA and never moves the checkout's
+          // remote-tracking branches, so base-relative checks use this (#1664).
+          FACTORY_BASE_SHA: input.base ?? plan.base,
+        },
+        config: input.sandbox,
+        packageInstall: grant.install,
+        network: grant.network,
+        readOnlyFiles: linked.map((file) => file.path),
+        ...(grant.outputLimit ? { outputLimit: grant.outputLimit } : {}),
+        onOutput: (stream, text) => whole.append(text, stream),
+        signal: input.signal,
+        timeoutMs: input.commandTimeoutMs,
+      });
+    for (let index = 0; index < sequence.length; index++) {
+      const command = sequence[index]!;
       const preparing = index < preparation.length;
       // Only Factory's exact script-disabled install, run first (before any
       // command could change the checkout) after its package inputs were
       // pinned above, writes the shared store; and only it, when the
-      // operator allowed it, reaches the network. It gets an empty HOME of
-      // its own, so nothing an earlier command left there configures it.
+      // operator allowed it, reaches the network.
       const install = index === 0 && packageBootstrap(command) !== undefined;
       // Network only from the configured registries: unchanged package
       // configuration and a lockfile that resolves only there. A refused
@@ -399,24 +460,10 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       const whole = input.runFile(`validation-${index}`);
       let run: Awaited<ReturnType<typeof runSandboxed>>;
       try {
-        run = await runSandboxed(command, {
-          cwd: worktree,
-          home: install ? await made("factory-install-home-") : home,
-          temporary,
-          env: {
-            ...validationEnvironment(credentials),
-            // Factory fetches by SHA and never moves the checkout's
-            // remote-tracking branches, so base-relative checks use this (#1664).
-            FACTORY_BASE_SHA: input.base ?? plan.base,
-          },
-          config: input.sandbox,
-          packageInstall: install,
+        run = await sandboxed(command, whole, {
+          install,
           network: online,
-          readOnlyFiles: linked.map((file) => file.path),
           ...(limit ? { outputLimit: limit } : {}),
-          onOutput: (stream, text) => whole.append(text, stream),
-          signal: input.signal,
-          timeoutMs: input.commandTimeoutMs,
         });
       } catch (error) {
         // Cancelled or past its deadline: nothing names its output.
@@ -451,6 +498,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           failed: { index, command },
           detail,
           output: detail,
+          ...(regenerated && { regenerated }),
         };
       }
       const output = `${run.stdout}${run.stderr}`;
@@ -516,6 +564,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
             failed: { index, command },
             detail: captured.detail,
             output: captured.detail,
+            ...(regenerated && { regenerated }),
           };
         artifacts = captured.artifacts;
         continue;
@@ -556,6 +605,52 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
             `${failed}the install ran offline, because sandbox.network is off, and the package store lacks packages the base's lockfile needs:\n${failedOutput(output)}\n\nSet sandbox.network to package-install, or warm sandbox.packageStore with those packages; then answer \`retry\`.`,
           ),
         );
+      // The candidate changed its dependencies, and its lockfile no longer
+      // matches them: no worker has the network to resolve one. Factory
+      // does, once, as the install runs, and starts the sequence again on
+      // its commit of the result (#2095).
+      const manager = packageBootstrap(command);
+      if (
+        install &&
+        manager &&
+        input.lockfile &&
+        !regenerated &&
+        !overflow &&
+        OUTDATED_LOCKFILE.test(output) &&
+        (await dependencyInputsChanged(checkout, plan.base, commit, signal))
+      ) {
+        const resolved = await resolveLockfile({
+          input,
+          worktree,
+          commit,
+          manager,
+          failed,
+          output,
+          baseline,
+          hydrated,
+          run: (resolution, file, network) =>
+            sandboxed(resolution, file, { install: true, network }),
+        });
+        if (resolved.kind === "regenerated") {
+          ({ commit, tree } = resolved);
+          regenerated = { commit, lockfile: resolved.lockfile };
+          // The new commit's checkout is clean again with its lockfile.
+          baseline = await status(worktree, signal);
+          index = -1;
+          continue;
+        }
+        if (resolved.kind === "failed")
+          return {
+            kind: "failed",
+            tree,
+            commands: sequence,
+            results,
+            failed: { index, command },
+            detail: resolved.detail,
+            output: resolved.output,
+          };
+        if (resolved.kind !== "unchanged") return resolved;
+      }
       // A grant the candidate's package inputs refused stays its fault,
       // but says why the install was offline.
       const offlineBecause =
@@ -587,6 +682,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         detail,
         output: `${failed}${offlineBecause}${overflow ? `${overflow}\n` : ""}${output}`,
         ...(produced && { produced }),
+        ...(regenerated && { regenerated }),
       };
     }
     if (input.returnTo && item)
@@ -609,6 +705,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         detail,
         output: detail,
         ...(produced && { produced }),
+        ...(regenerated && { regenerated }),
       };
     }
     return {
@@ -618,6 +715,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       results,
       ...(produced && { produced }),
       ...(capture && { artifacts }),
+      ...(regenerated && { regenerated }),
     };
   } finally {
     await Promise.all(scratch.map((path) => forceRemove(path)));
@@ -664,6 +762,9 @@ const PASSED_OUTPUT_TAIL = 2_000;
 /** pnpm's and npm's errors for a package an offline install cannot fetch. */
 const OFFLINE_PACKAGES_MISSING =
   /\b(?:ERR_PNPM_NO_OFFLINE_(?:META|TARBALL)|ENOTCACHED)\b/;
+/** pnpm's and npm's refusals of a lockfile that no longer matches the manifests. */
+const OUTDATED_LOCKFILE =
+  /\bERR_PNPM_(?:OUTDATED_LOCKFILE|LOCKFILE_CONFIG_MISMATCH)\b|`npm ci` can only install packages when your package\.json and package-lock\.json/;
 
 const failedOutput = (output: string) =>
   headAndTail(output, FAILED_OUTPUT_HEAD, FAILED_OUTPUT_TAIL);
@@ -749,6 +850,203 @@ async function dependencyInputsChanged(
       path === "package.json" ||
       path.endsWith("/package.json"),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Lockfile resolution
+
+/** The ref that pins an item's resolved-lockfile commit; report and cancel cleanup delete it. */
+export function lockfileRef(issue: number, itemId: string): string {
+  return `refs/factory/${issue}/${itemId}/lockfile`;
+}
+
+/** What resolving an out-of-date lockfile came to. */
+type Resolution =
+  /** Factory's commit of the candidate with the resolved lockfile. */
+  | { kind: "regenerated"; commit: string; tree: string; lockfile: string }
+  /** The resolution left the lockfile as it was: the install's failure stands. */
+  | { kind: "unchanged" }
+  /** The candidate's fault: its package inputs kept the resolution offline. */
+  | { kind: "failed"; detail: string; output: string }
+  | Extract<Outcome, { kind: "hold" }>;
+
+/**
+ * Resolve the lockfile of `commit`, whose bootstrap refused it as out of
+ * date after the candidate changed its dependencies (#2095). No worker has
+ * the network to, so Factory runs the package manager's lockfile-only
+ * resolution (LOCKFILE_RESOLUTION) in the validation checkout as the
+ * install runs: scripts and hooks off, the package store writable, and the
+ * network only as the install would get it from these inputs, through
+ * pasta, and only when every manifest the candidate changed names registry
+ * packages alone (package-network.ts `resolutionNetworkRefusal`). The
+ * repository's own policy (registries, minimum release age, provenance)
+ * applies unchanged: the candidate can't change its configuration. The
+ * lockfile is committed on the candidate as Factory's change, and the
+ * caller validates that commit.
+ *
+ * With sandbox.network off nothing can resolve it: a hold naming
+ * package-install. A resolution the package manager refuses (the
+ * repository's minimum release age, a version the registry lacks) holds
+ * with its message; one that ran offline because of the candidate's own
+ * inputs is the candidate's to repair.
+ */
+async function resolveLockfile(context: {
+  input: ValidateInput;
+  worktree: string;
+  commit: string;
+  manager: "npm" | "pnpm";
+  /** The install's failure, as its messages start. */
+  failed: string;
+  /** The install's output. */
+  output: string;
+  /** The checkout's status before any command ran. */
+  baseline: Buffer;
+  hydrated: ReadonlySet<string>;
+  /** Runs the resolution as the install runs, with or without the network. */
+  run(
+    command: string,
+    file: RunFile,
+    network: boolean,
+  ): ReturnType<typeof runSandboxed>;
+}): Promise<Resolution> {
+  const { input, worktree, commit, failed, output } = context;
+  const { signal } = input;
+  const { command, lockfile } = LOCKFILE_RESOLUTION[context.manager];
+  const network = input.sandbox.network;
+  if (network === "off")
+    return hold(
+      `${failed}the candidate changed its dependencies, and its ${lockfile} no longer matches them:\n${failedOutput(output)}\n\nNo worker has the network to resolve a lockfile, and Factory resolves one itself only when sandbox.network is package-install (or host). Set sandbox.network to package-install (\`factory setup --repo ${input.repository} --sandbox-network package-install --background\`), then answer \`retry\`; or answer replan or cancel.`,
+      ["retry", "replan", "cancel"],
+    );
+  const refused: NetworkRefusal | undefined =
+    network === "package-install"
+      ? await resolutionNetworkRefusal(
+          worktree,
+          input.plan.base,
+          commit,
+          signal,
+        )
+      : undefined;
+  const online = network === "package-install" && !refused;
+  const started = Date.now();
+  input.log({
+    event: "lockfile-resolution",
+    command,
+    lockfile,
+    network: network === "host" ? "host" : online ? "registry" : "offline",
+    ...(refused ? { offline: refused.reason } : {}),
+  });
+  const whole = input.runFile("validation-lockfile");
+  let run: Awaited<ReturnType<typeof runSandboxed>>;
+  try {
+    run = await context.run(command, whole, online);
+  } catch (error) {
+    // Cancelled or past its deadline: nothing names its output.
+    whole.remove();
+    throw error;
+  }
+  whole.close();
+  if (run.kind === "fault") {
+    whole.remove();
+    return objectiveWide(
+      hold(
+        `The command sandbox could not run \`${command}\`: ${run.detail}. ${run.fix}.`,
+      ),
+    );
+  }
+  const resolution = `${run.stdout}${run.stderr}`;
+  const overflow =
+    run.diskOverflow ??
+    (run.timedOut
+      ? `the resolution ran longer than ${Math.round(input.commandTimeoutMs / 1000)} s and was stopped`
+      : undefined);
+  const passed = run.exitCode === 0 && !overflow;
+  if (passed) whole.remove();
+  input.log({
+    event: "lockfile-resolution-result",
+    command,
+    passed,
+    exitCode: run.exitCode,
+    durationMs: Date.now() - started,
+    tail: passed
+      ? resolution.slice(-PASSED_OUTPUT_TAIL)
+      : failedOutput(resolution),
+    ...(passed
+      ? {}
+      : {
+          output: whole.file,
+          outputBytes: whole.written,
+          ...(whole.dropped ? { outputDropped: whole.dropped } : {}),
+        }),
+  });
+  if (!passed) {
+    const ran = `${failed}the candidate changed its dependencies, so Factory resolved ${lockfile} with \`${command}\`, which failed (${run.diskOverflow ? "disk budget" : run.timedOut ? "time limit" : run.exitCode})`;
+    const missing = !overflow && OFFLINE_PACKAGES_MISSING.test(resolution);
+    // As for the install: offline for the host's lack of pasta, or for
+    // inputs Factory could not check, is the operator's to fix.
+    if (run.offline !== undefined && missing)
+      return objectiveWide(
+        hold(
+          `${ran}: it ran offline, because ${run.offline}, and the package store lacks what it needs:\n${failedOutput(resolution)}\n\nInstall passt so pasta is on Factory's PATH, and run Factory as a regular user, so verified installs reach the configured registry; then answer \`retry\`.`,
+        ),
+      );
+    if (refused?.unverified && missing)
+      return objectiveWide(
+        hold(
+          `${ran}: it ran offline, because ${refused.reason}, and the package store lacks what it needs:\n${failedOutput(resolution)}\n\nKeep the base's registry configuration literal http(s) URLs and its lockfiles plain YAML or JSON; then answer \`retry\`.`,
+        ),
+      );
+    // The candidate's own inputs kept it offline: its fault, with why,
+    // however the offline resolution failed (a git or URL dependency
+    // fails with its own error, not the store's).
+    if (refused && !refused.unverified) {
+      const offline = `${ran}: it ran offline, because ${refused.reason}${missing ? ", and the package store lacks what it needs" : ""}:\n`;
+      return {
+        kind: "failed",
+        detail: `${offline}${failedOutput(resolution)}`,
+        output: `${offline}${resolution}`,
+      };
+    }
+    return hold(
+      `${ran}. The package manager refused it:\n${overflow ?? failedOutput(resolution)}\n\nThe repository's package policy (such as its minimum release age) or the registry refuses what the change asks for, and Factory never relaxes that policy. Answer \`retry\` once the registry or the policy on the default branch allows it, replan to plan the dependency change again, or cancel.`,
+      ["retry", "replan", "cancel"],
+    );
+  }
+  // Only the lockfile may change; anything else is not Factory's to commit.
+  const changed = mutationDetail(
+    context.baseline,
+    await status(worktree, signal),
+    context.hydrated,
+  );
+  if (!changed) return { kind: "unchanged" };
+  if (changed !== `+ M ${lockfile}`)
+    return hold(
+      `\`${command}\` changed more than ${lockfile} in the validation checkout: ${changed}. Factory commits only the lockfile. Answer retry to validate again; if it repeats, report it.`,
+    );
+  const git = (args: string[]) => hostGit(worktree, args, { signal });
+  const commitAs = factoryCommit(await input.lockfile?.author?.());
+  await git(["add", "--", lockfile]);
+  await git([
+    ...commitAs.config,
+    "commit",
+    "--quiet",
+    ...commitAs.author,
+    "-m",
+    `Factory: resolve ${lockfile} for the dependency change`,
+  ]);
+  const made = (await git(["rev-parse", "HEAD"])).toString("utf8").trim();
+  const tree = (await git(["rev-parse", "HEAD^{tree}"]))
+    .toString("utf8")
+    .trim();
+  // The validation checkout goes when validation ends; the ref keeps the
+  // commit until cleanup.
+  const ref = input.lockfile?.ref;
+  if (ref) {
+    await clearStaleLocks(input.checkout, { signal, log: input.log });
+    await hostGit(input.checkout, ["update-ref", ref, made], { signal });
+  }
+  input.log({ event: "lockfile-resolved", lockfile, commit: made });
+  return { kind: "regenerated", commit: made, tree, lockfile };
 }
 
 // ---------------------------------------------------------------------------

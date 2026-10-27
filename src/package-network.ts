@@ -8,7 +8,10 @@
  * the base's, byte for byte, and every package the candidate's lockfile
  * resolves comes from a configured registry origin. Lockfiles are read
  * structurally (YAML and JSON), never matched as text. Package names still
- * reach the registry in its lookups: that channel remains.
+ * reach the registry in its lookups: that channel remains. Factory's own
+ * lockfile resolution (validate.ts) fetches what the manifests name, with
+ * no lockfile to check, so it also needs every manifest the candidate
+ * changed to name registry specifiers only.
  */
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -531,6 +534,137 @@ export async function installNetworkRefusal(
     );
   } catch (error) {
     // Refused Git is the operator's to fix, and an abort is not a refusal.
+    if (error instanceof GitRefusal) throw error;
+    signal?.throwIfAborted();
+    return {
+      reason: `Factory could not check its package inputs: ${(error as Error).message}`,
+      unverified: true,
+    };
+  }
+}
+
+/** The manifest fields whose values name what a resolution fetches. */
+const MANIFEST_DEPENDENCIES = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+];
+/** Manifest fields that replace specifiers anywhere in the tree, nested by package. */
+const MANIFEST_OVERRIDES = ["overrides", "resolutions"];
+
+/**
+ * Whether a manifest's specifier resolves only from a registry: a range,
+ * version or tag, an `npm:` alias of one, a pnpm catalog, or a sibling
+ * package (`workspace:`, or a `link:` inside the checkout). A hosted
+ * shorthand (`owner/repo`), git, `file:` or a URL may not: resolving it
+ * would fetch from wherever it names.
+ */
+function manifestSpecifierAllowed(importer: string, value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (/^catalog:[\w.-]*$/.test(value)) return true;
+  if (value.startsWith("workspace:") || value.startsWith("link:"))
+    return importerEntryAllowed(importer, value);
+  const aliased = value.startsWith("npm:") ? value.slice("npm:".length) : "";
+  const at = aliased.indexOf("@", 1);
+  const range = !value.startsWith("npm:")
+    ? value
+    : at < 0
+      ? ""
+      : aliased.slice(at + 1);
+  return importerEntryAllowed(importer, value) && !/[/#\\]/.test(range);
+}
+
+/**
+ * The first override value, at any depth, that is not a registry
+ * specifier or an npm `$name` reference to a direct dependency.
+ */
+function refusedOverride(importer: string, value: unknown): string | undefined {
+  if (typeof value === "string")
+    return /^\$[\w@./-]+$/.test(value) ||
+      manifestSpecifierAllowed(importer, value)
+      ? undefined
+      : value;
+  if (!value || typeof value !== "object") return String(value);
+  for (const nested of Object.values(value)) {
+    const refused = refusedOverride(importer, nested);
+    if (refused !== undefined) return refused;
+  }
+  return undefined;
+}
+
+/**
+ * Why a lockfile-only resolution of `commit` may not reach the network, or
+ * undefined when it may. A resolution has no lockfile to verify: it reads
+ * the manifests and fetches what they name. So it takes the network only
+ * as the install would on the inputs it starts from (installNetworkRefusal),
+ * and only when every package.json the candidate changed names its
+ * dependencies and overrides from the registry alone.
+ */
+export async function resolutionNetworkRefusal(
+  worktree: string,
+  base: string,
+  commit: string,
+  signal?: AbortSignal,
+): Promise<NetworkRefusal | undefined> {
+  const refused = await installNetworkRefusal(worktree, base, commit, signal);
+  if (refused) return refused;
+  try {
+    const manifests = (
+      await hostGit(
+        worktree,
+        [
+          "diff-tree",
+          "-r",
+          "--name-only",
+          "-z",
+          "--no-renames",
+          "--diff-filter=AM",
+          base,
+          commit,
+        ],
+        { signal },
+      )
+    )
+      .toString("utf8")
+      .split("\0")
+      .filter(
+        (path) => path === "package.json" || path.endsWith("/package.json"),
+      );
+    for (const path of manifests) {
+      const importer = posix.dirname(path);
+      let manifest: Record<string, unknown>;
+      try {
+        manifest = JSON.parse(
+          (await file(worktree, commit, path, signal)) ?? "{}",
+        );
+      } catch {
+        return { reason: `the candidate's ${path} cannot be read` };
+      }
+      if (!manifest || typeof manifest !== "object")
+        return { reason: `the candidate's ${path} is not an object` };
+      for (const group of MANIFEST_DEPENDENCIES) {
+        const entries = manifest[group];
+        if (entries === undefined) continue;
+        if (!entries || typeof entries !== "object")
+          return { reason: `the candidate's ${path} has malformed ${group}` };
+        for (const [name, specifier] of Object.entries(entries))
+          if (!manifestSpecifierAllowed(importer, specifier))
+            return {
+              reason: `the candidate's ${path} names ${name} from outside the registry (${String(specifier)})`,
+            };
+      }
+      for (const field of MANIFEST_OVERRIDES) {
+        if (manifest[field] === undefined) continue;
+        const value = refusedOverride(importer, manifest[field]);
+        if (value !== undefined)
+          return {
+            reason: `the candidate's ${path} ${field} name a package from outside the registry (${value})`,
+          };
+      }
+    }
+    return undefined;
+  } catch (error) {
     if (error instanceof GitRefusal) throw error;
     signal?.throwIfAborted();
     return {

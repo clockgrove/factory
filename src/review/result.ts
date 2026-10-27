@@ -74,6 +74,8 @@ export function resultCriteria(plan: Plan, item: WorkItem): string[] {
 export interface PassedValidation {
   tree: string;
   commands: readonly string[];
+  /** The lockfile Factory resolved for the item's dependency change and committed on its result (validate.ts). */
+  regenerated?: { commit: string; lockfile: string };
 }
 
 /**
@@ -1343,6 +1345,14 @@ function validationRow(validation: PassedValidation): ResultEvidence {
         command,
         exitCode: 0,
       })),
+      ...(validation.regenerated && {
+        resolvedLockfile: {
+          path: validation.regenerated.lockfile,
+          commitSha: validation.regenerated.commit,
+          scope:
+            "The worker's dependency change left this lockfile out of date, and no worker has the network to resolve one, so Factory resolved it under the repository's unchanged package policy and committed it as the result's last commit. It is Factory's change, not the worker's: it needs no owned path, and it is judged only as the dependency change it records.",
+        },
+      }),
     }),
     complete: true,
   };

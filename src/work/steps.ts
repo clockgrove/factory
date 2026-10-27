@@ -9,7 +9,7 @@ import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
-import { validationDeadlineMs } from "../validate.js";
+import { type RegeneratedLockfile, validationDeadlineMs } from "../validate.js";
 import type { HandoffNote } from "./collect.js";
 import { fact, facts, itemsWith } from "./facts.js";
 import { finalReviewStep, finalStep, reportStep } from "./finish.js";
@@ -102,6 +102,12 @@ export interface ValidateResult {
   tree: string;
   commands: string[];
   artifacts?: ReviewArtifact[];
+  /**
+   * Factory's commit on the candidate with the lockfile it resolved for a
+   * dependency change (validate.ts): the commands ran on it, so later steps
+   * review and publish it (`candidate`).
+   */
+  regenerated?: RegeneratedLockfile;
 }
 
 export interface PublishResult {
@@ -336,9 +342,15 @@ export function selection(state: ObjectiveState) {
     state.done[stepKey(id, "select")] as Selection | undefined;
 }
 
-/** The commit later steps use: the selection's, which adds the chosen media, else the work commit. */
+/**
+ * The commit later steps use: the validate step's, which adds a lockfile
+ * Factory resolved; else the selection's, which adds the chosen media;
+ * else the work commit.
+ */
 export function candidate(state: ObjectiveState, id: string): string {
   return (
+    (state.done[stepKey(id, "validate")] as ValidateResult | undefined)
+      ?.regenerated?.commit ??
     selection(state)(id)?.commit ??
     (state.done[stepKey(id, "work")] as WorkResult).commit
   );

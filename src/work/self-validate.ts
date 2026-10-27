@@ -176,6 +176,8 @@ export class SelfValidation {
       returnTo: input.worktree,
       base: input.base,
       predecessor: input.base !== options.plan.base ? input.base : undefined,
+      // Resolved here as after the worker finishes, but never committed.
+      lockfile: {},
       signal,
       log: input.log,
       runFile: input.runFile,
@@ -190,6 +192,10 @@ export class SelfValidation {
     const parts = [
       result.produced ? `${declared}\n\n${result.produced}` : declared,
     ];
+    if (result.regenerated)
+      parts.push(
+        `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
+      );
     if (handoff.text)
       if (handoff.passed) parts.push(handoff.text);
       else parts.unshift(handoff.text);

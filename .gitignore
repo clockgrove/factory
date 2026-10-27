@@ -3,3 +3,4 @@ dist/
 *.tgz
 .factory/
 integration/.runs/
+test/.tools-*/

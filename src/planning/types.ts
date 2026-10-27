@@ -222,6 +222,8 @@ export interface PlanningFacts {
   ciOnlyCommands: string[];
   /** `sandbox.network: host`: validation reaches the host's network. */
   hostNetwork?: true;
+  /** `sandbox.network` isn't off: Factory resolves an out-of-date lockfile itself (validate.ts). */
+  lockfileResolution?: true;
   /** CI check names the base's pull-request workflows report. */
   checkNames: string[];
   /** CI check names the base's workflows report on a push to the default branch: integrated-ci's only choices. */

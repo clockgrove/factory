@@ -8,7 +8,7 @@ setup_edge() {
   clone $M_REPO "$STATE_BASE/checkout-e" || return 1
   write_config "$STATE_BASE/config-e.json" $M_REPO "$STATE_BASE/checkout-e" 6
   inst_define E $M_REPO "$STATE_BASE/config-e.json" || return 1
-  inst E; proxy_start E 18612
+  inst E; proxy_start E || return 1
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" >"$RUN_DIR/inst/E/extra_env"
   serve_up && serve_ready
 }
@@ -88,7 +88,7 @@ e_target() {
       sha=$(gh api "repos/$repo/contents/.github/workflows/ci.yml" --jq .sha) &&
       gh api -X PUT "repos/$repo/contents/.github/workflows/ci.yml" -f message="Drill: this target's CI ($2)" -f sha="$sha" \
         -f content="$(base64 -w0 <"$SUITE/fixtures/repo/$2")" >/dev/null &&
-      pid=$(C_REPO=$repo project_create) && [ -n "$pid" ] &&
+      pid=$(project_create "$repo") && [ -n "$pid" ] &&
       clone "$repo" "$co"
   } 2>>"$RUN_DIR/$s.setup.err" || return 1
   write_config "$STATE_BASE/config-$s.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'"

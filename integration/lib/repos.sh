@@ -44,21 +44,24 @@ repos_sweep() {
     while read -r r; do [ -n "$r" ] && repo_delete "$r"; done
 }
 
-# ---------- repository C's Project ----------
-# One installation serves a Project (PRD 8), so repository C gets a Project of
-# its own each run, with Factory's queue field and order field, deleted with
-# the repositories. Only a Project whose title starts with REPO_MARK is deleted.
+# ---------- each repository's Project ----------
+# One installation serves a Project (PRD 8), so each repository the run makes
+# gets a Project of its own, with Factory's queue field (its six options) and
+# order field, deleted with the repositories: no Project is shared with
+# another run. GitHub gives a new Project the built-in Status field (Todo, In
+# Progress, Done) and its default view and workflows. Only a Project whose
+# title starts with REPO_MARK is deleted.
 
-# project_create: repository C's Project -> its node id (recorded by number in RUN_DIR/projects).
+# project_create REPO: REPO's Project -> its node id (recorded by number in RUN_DIR/projects).
 project_create() {
   local data number
-  data=$(gh project create --owner "$REPO_OWNER" --title "$REPO_MARK $RUN_ID" --format json) || return 1
+  data=$(gh project create --owner "$REPO_OWNER" --title "$REPO_MARK $RUN_ID ${1#*/}" --format json) || return 1
   number=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["number"])' <<<"$data") || return 1
   echo "$number" >>"$RUN_DIR/projects"
   gh project field-create "$number" --owner "$REPO_OWNER" --name Factory --data-type SINGLE_SELECT \
     --single-select-options "Queued,Planning,Building,Needs you,Done,Cancelled" >/dev/null || return 1
   gh project field-create "$number" --owner "$REPO_OWNER" --name "Factory order" --data-type NUMBER >/dev/null || return 1
-  log "created Project #$number for $C_REPO"
+  log "created Project #$number for $1"
   python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])' <<<"$data"
 }
 

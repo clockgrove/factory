@@ -24,15 +24,14 @@
 # suite enforces its own wall clock: at 55 min it stops
 # starting anything, stops its cases, cancels unsettled Objectives, then runs
 # cleanup and the report, so a run never passes 60 min.
-# Results: .runs/results/<PDT timestamp>.md; exit 1 on any FAIL, 3 when it
+# Results: /tmp/factory-integration-runs/results/<run id>.md; exit 1 on any FAIL, 3 when it
 # refuses to start (no GitHub identity, or a serve already runs for a scratch
 # repository), 2 on bad usage.
 set -uo pipefail
 {   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""; REPLAY=""; KEPT=""
-REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
-PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
+REPO_OWNER=clockgrove   # each run's repositories, and a Project for each, are made here (lib/repos.sh)
 usage() { sed -n 2,29p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -120,15 +119,26 @@ if [ -z "$DRY" ] && [ -z "$REPLAY" ]; then
   SUITE_IDENTITY=$(suite_identity) || { echo "$SUITE_IDENTITY" >&2; exit 3; }
 fi
 
-RUN_ID=$(TZ=America/Los_Angeles date +%Y-%m-%dT%H%M%S%Z); SFX=$(TZ=America/Los_Angeles date +%m%d%H%M)
-# This run's repositories: M (installation M, or E in the edge suite) and C (the crash lane).
-REPO_STEM=fd-$(TZ=America/Los_Angeles date +%Y%m%d-%H%M%S)
-M_REPO=$REPO_OWNER/$REPO_STEM-m; C_REPO=$REPO_OWNER/$REPO_STEM-c
+# The run's id, which its run and state directories, results file, repositories
+# and Projects are named from: its PDT start time and a random suffix, claimed
+# by making its run directory, so two runs started in the same second (a Codex
+# and a Claude lane) never share one.
 RUNS=/tmp/factory-integration-runs; mkdir -p "$RUNS/results"
-STATE_BASE=${STATE_BASE:-/tmp/factory-integration/$RUN_ID}
 START_S=$(date +%s); HARD_STOP_AT=$(( START_S + 60 * 60 )); STOP_AT=$(( HARD_STOP_AT - 300 ))
 export HARD_STOP_AT STOP_AT
-if [ -n "$DRY" ]; then RUN_DIR=$(mktemp -d "$RUNS/.dry.XXXX"); else RUN_DIR="$RUNS/$RUN_ID"; mkdir -p "$RUN_DIR"; fi
+for _ in 1 2 3 4 5; do
+  RUN_SFX=$(od -An -N2 -tx2 /dev/urandom | tr -d ' \n')
+  RUN_ID=$(TZ=America/Los_Angeles date -d @"$START_S" +%Y-%m-%dT%H%M%S%Z)-$RUN_SFX
+  # This run's repositories: M (installation M, or E in the edge suite) and C (the crash lane).
+  REPO_STEM=fd-$(TZ=America/Los_Angeles date -d @"$START_S" +%Y%m%d-%H%M%S)-$RUN_SFX
+  if [ -n "$DRY" ]; then RUN_DIR=$(mktemp -d "$RUNS/.dry.XXXX"); break; fi
+  RUN_DIR="$RUNS/$RUN_ID"; mkdir "$RUN_DIR" 2>/dev/null && break
+  RUN_DIR=""
+done
+[ -n "$RUN_DIR" ] || { echo "could not claim a run directory under $RUNS" >&2; exit 3; }
+SFX=$(TZ=America/Los_Angeles date -d @"$START_S" +%m%d%H%M)
+M_REPO=$REPO_OWNER/$REPO_STEM-m; C_REPO=$REPO_OWNER/$REPO_STEM-c
+STATE_BASE=${STATE_BASE:-/tmp/factory-integration/$RUN_ID}
 mkdir -p "$RUN_DIR/answered"; : >"$RUN_DIR/results.tsv"; : >"$RUN_DIR/pids"; : >"$RUN_DIR/issues"; : >"$RUN_DIR/cases.tsv"; : >"$RUN_DIR/repos"; : >"$RUN_DIR/projects"
 source "$SUITE/lib/common.sh"; source "$SUITE/lib/gh.sh"; source "$SUITE/lib/serve.sh"; source "$SUITE/lib/repos.sh"
 source "$SUITE/cases/main.sh"; source "$SUITE/cases/crash.sh"; source "$SUITE/cases/edge.sh"; source "$SUITE/cases/prd.sh"
@@ -151,7 +161,7 @@ if [ -n "$DRY" ]; then
     login) echo "GitHub identity: the gh login (FACTORY_SUITE_GITHUB_LOGIN=1, setup --github-login)" ;;
     *) echo "GitHub identity: none, so a live run stops at setup: $(suite_identity)" ;;
   esac
-  echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
+  echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/,$([ -n "$NEEDS_C" ] && echo " each") on a Project of its own"; echo
   for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  %2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
   echo; budget
   rm -rf "$RUN_DIR"; exit 0
@@ -227,10 +237,12 @@ check_complete() {
 # Plumbing runs on the fastest model and lowest effort each provider offers;
 # `codex-plan` and `claude-plan` keep the production planner, for the cases
 # whose check is a planner decision (it must ask its question). The default
-# provider is --provider's.
+# provider is --provider's. The queue is repository M's Project, this run's
+# own (setup_repos); an installation on another repository sets its own.
 write_config() { # FILE REPO CHECKOUT MAX_ACTIVE [PY_EXPR...]
   local f=$1; shift
-  SUITE_CAPTURE=$CAPTURE SUITE_PROVIDER=$PROVIDER python3 - "$f" "$@" <<'PY'
+  [ -n "$M_PROJECT_ID" ] || { log "no Project for repository M"; return 1; }
+  SUITE_CAPTURE=$CAPTURE SUITE_PROVIDER=$PROVIDER SUITE_PROJECT_ID=$M_PROJECT_ID python3 - "$f" "$@" <<'PY'
 import json, os, sys
 f, repo, checkout, active, *more = sys.argv[1:]
 fast = {"model": "gpt-6-luna", "effort": "low", "serviceTier": "fast"}
@@ -238,7 +250,7 @@ haiku = {"model": "claude-haiku-5-5", "effort": "low"}
 opus = {"model": "claude-opus-5-5", "effort": "medium"}  # Factory's Claude planner and reviewer default
 c = {
   "repository": repo, "checkout": checkout,
-  "queue": {"projectId": "PVT_kwDOEvXlbc4BoR0S", "pollSeconds": 15, "maxActiveObjectives": int(active)},
+  "queue": {"projectId": os.environ["SUITE_PROJECT_ID"], "pollSeconds": 15, "maxActiveObjectives": int(active)},
   "execution": {"concurrency": 4, "workers": 12, "validations": 6},
   "providers": {
     "codex": {"planner": "codex", "models": {"planner": fast, "reviewer": fast}, "worker": {"kind": "codex", **fast}},
@@ -423,19 +435,22 @@ else
   IDENTITY_ARGS=(--github-login)
 fi
 log "suite $SUITE_NAME, provider $PROVIDER, build $BUILD ($commit), state $STATE_BASE, $([ "$SUITE_IDENTITY" = app ] && echo "as GitHub App $FACTORY_SUITE_APP_ID" || echo "as the gh login $login (FACTORY_SUITE_GITHUB_LOGIN=1)")"
-[ ! -e "$STATE_BASE" ] || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
 for r in $M_REPO $C_REPO; do s=$(running_serves "$r"); [ -n "$s" ] && { echo "refused: a serve runs for $r: $s" >&2; exit 3; }; done
+# Claimed, not just checked: another run given the same --state-base is refused.
+mkdir -p "$(dirname "$STATE_BASE")" && mkdir "$STATE_BASE" 2>/dev/null || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
 trap 'INTERRUPTED=1; exit 130' INT TERM
 trap cleanup EXIT
-mkdir -p "$STATE_BASE"
 SETUP0=$(date +%s)
-C_PROJECT_ID=""
+# Each repository queues on a Project of its own, this run's: one installation
+# serves a Project, so a run sharing another's would be refused there.
+M_PROJECT_ID=""; C_PROJECT_ID=""
 setup_repos() {
   repos_sweep; projects_sweep
   repo_create "${M_REPO#*/}" || return 1
+  M_PROJECT_ID=$(project_create "$M_REPO") && [ -n "$M_PROJECT_ID" ] || return 1
   [ -z "$NEEDS_C" ] && return 0
   repo_create "${C_REPO#*/}" || return 1
-  C_PROJECT_ID=$(project_create) && [ -n "$C_PROJECT_ID" ]
+  C_PROJECT_ID=$(project_create "$C_REPO") && [ -n "$C_PROJECT_ID" ]
 }
 setup_main() {
   clone $M_REPO "$STATE_BASE/checkout-m" || return 1
@@ -457,7 +472,7 @@ setup_main() {
   local open; open=$(gh pr list -R $M_REPO --state open --json number --jq length)
   [ "$open" = 0 ] || log "note: $M_REPO has $open open PRs at the start"
   # M: one serve for the whole wave, behind the fault proxy.
-  proxy_start M 18611
+  proxy_start M || return 1
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/M/extra_env"
   serve_up || return 1
   serve_ready

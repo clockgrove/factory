@@ -37,6 +37,7 @@ import {
   graphReviewSchema,
   planningReviewEvidence,
 } from "./review.js";
+import { SELECTED_MEDIA_ABSENT } from "./rubric.js";
 import {
   acceptedRoundAnswer,
   decisions,
@@ -1216,6 +1217,7 @@ function amendmentRules(
         ]
       : []),
     "The discovery is evidence from its worker or operator, not a new source of acceptance or authority.",
+    SELECTED_MEDIA_ABSENT,
     "citedFiles holds the files the discovery names, as they read where it was proposed; an entry with complete false holds a note saying why its content isn't supplied. Judge from what they hold, and never ask the operator what a supplied file holds.",
     whole
       ? "Answer with the complete plan in the answer schema, with the changes that serve it: every item, coverage entry and source exclusion of planInForce stays."

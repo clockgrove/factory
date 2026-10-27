@@ -31,6 +31,7 @@ import {
   startedItemRule,
 } from "../dist/planning/amendments.js";
 import { buildFacts } from "../dist/planning/facts.js";
+import { SELECTED_MEDIA_ABSENT } from "../dist/planning/rubric.js";
 import { planningRevisions } from "../dist/planning/steps.js";
 import { decodePlan } from "../dist/planning/wire.js";
 import { readShown } from "../dist/shown.js";
@@ -541,6 +542,10 @@ test("an amendment that changes a started item without growing it has the change
   // The planner was told the rule, naming a as started and its reattempt.
   assert.ok(asked[0].prompt.includes(RULE));
   assert.ok(RULE.includes('startedItemIds: \\"a\\"'), RULE);
+  // And that a media item's missing selected set is no gap in the plan:
+  // live (Codex, media.select-repair), a worker's ENOENT on its own
+  // destinations became an amendment the planner could never satisfy.
+  assert.ok(asked[0].prompt.includes(inJson(SELECTED_MEDIA_ABSENT)));
   const restored = [
     { itemId: "a", fields: ["acceptance", "brief", "validation"] },
   ];
@@ -583,6 +588,11 @@ test("an amendment that changes a started item without growing it has the change
   assert.ok(asked[1].prompt.includes(RULE));
   assert.ok(asked[1].prompt.includes("FACTORY_AMENDMENT's startedItemRule"));
   assert.ok(asked[1].prompt.includes("FACTORY_AMENDMENT's restoredFields"));
+  assert.ok(
+    asked[1].prompt.includes(
+      `${SELECTED_MEDIA_ABSENT} Report a change made only for one as a defect.`,
+    ),
+  );
   assert.ok(toldRestored(asked[1].prompt, restored));
   assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
   const accept = await step(state, deps);

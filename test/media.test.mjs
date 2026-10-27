@@ -623,6 +623,82 @@ test("a diagnosed correction about the kept sets drops them, and the worker make
   assert.ok(!kept.includes("the diagnosed correction ("));
 });
 
+// A media item's selected set is never in its worker's checkout, so a test
+// of the delivered files fails there for that reason alone. Live (Codex,
+// media.select-repair, run 2026-10-27T062037PDT-66dd), a first attempt,
+// told to propose a replacement for a command no correct result can pass
+// but not that its destinations are filled only after selection, took its
+// test's ENOENT for a gap and proposed an amendment the planner could
+// never satisfy; the Objective stopped on the rejected amendment.
+test("every media worker prompt says a check of the delivered files fails in its checkout for that reason alone, and is no discovery", async () => {
+  const absent =
+    "A check that needs those files at their destinations, such as a test of the delivered files, can fail in this checkout for that reason alone. That failure is expected, not a gap: Factory's validation runs the check with the chosen set written there. Write the check against the destinations as the acceptance requires, and report the failure; do not write the files there, weaken or skip the check, or propose a replacement command or further work for it in .factory-discovery.json.";
+  const notReplaceable =
+    "A command that fails here only because this item's selected media are not yet at their destinations is not one: the media instructions below say what to do with it.";
+  const media = item(["assets/badge/", "test/badge.test.js"], {
+    validation: [{ command: "npm test" }],
+  });
+  const target = checkout();
+  const prompt = async (work, fields = {}) => {
+    const prepared = await prepareWorkPrompt({
+      checkout: target.directory,
+      worktree: target.directory,
+      objective: 7,
+      objectiveBody: "",
+      plan: { items: [work], coverage: [], finalCommands: [], decisions: [] },
+      item: work,
+      base: target.commit,
+      fixedScripts: [],
+      ...fields,
+    });
+    assert.equal(prepared.problem, undefined);
+    return prepared.prompt;
+  };
+  // The first attempt, which stages the candidates.
+  const first = await prompt(media);
+  assert.ok(first.includes("Produce at least 1 complete candidate AssetSets."));
+  assert.ok(
+    first.includes(
+      `Do not write, remove, or otherwise change final destinations directly. Factory writes the operator's chosen set at its destinations on top of your result after selection, before it validates, reviews and delivers it; until then they are not in this checkout. ${absent}`,
+    ),
+    first,
+  );
+  assert.ok(first.includes(notReplaceable));
+  // The validation section says so before the media section explains it.
+  assert.ok(first.indexOf(notReplaceable) < first.indexOf(absent));
+  // A repair whose kept candidates or selection stand says the same.
+  const repair = { repair: { finding: "npm test failed" } };
+  for (const fields of [
+    {
+      keptCandidates: {
+        sets: ["candidate-a", "candidate-b"],
+        destinations: ["assets/badge/a.png"],
+      },
+    },
+    {
+      keptSelection: {
+        set: "candidate-a",
+        destinations: ["assets/badge/a.png"],
+      },
+    },
+  ]) {
+    const text = await prompt(media, { ...repair, ...fields });
+    assert.ok(text.includes(absent), Object.keys(fields)[0]);
+    assert.ok(text.includes(notReplaceable), Object.keys(fields)[0]);
+  }
+  // An item with no media gets neither.
+  const plain = await prompt({
+    ...media,
+    expectedOutputRoles: undefined,
+    minimumAssetSets: undefined,
+  });
+  assert.ok(!plain.includes(absent));
+  assert.ok(!plain.includes(notReplaceable));
+  assert.ok(
+    plain.includes("propose its replacement in .factory-discovery.json"),
+  );
+});
+
 // Destinations are Factory's: the work step restores them to the base
 // before it collects a media item's result (#2039).
 function collector() {

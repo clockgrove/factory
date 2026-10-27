@@ -462,6 +462,18 @@ for (const [shape, dependencies, fields] of [
   ["a tarball URL", { pad: "https://example.com/pad.tgz" }],
   ["a file path", { pad: "file:../pad" }],
   ["an alias of a hosted package", { pad: "npm:pad@owner/left-pad" }],
+  // npm reads these as a local folder or tarball though they name no
+  // protocol or slash, and fetches what that manifest names.
+  ["the parent folder", { pad: ".." }],
+  ["a dot folder", { pad: ".vendored" }],
+  ["a home-relative path", { pad: "~/pad" }],
+  ["a bare tarball", { pad: "pad.tgz" }],
+  [
+    "a bare tar.gz in an override",
+    { "left-pad": "1.0.0" },
+    { overrides: { ajv: { "fast-uri": "vendor.TAR.GZ" } } },
+  ],
+  ["an alias of a tarball", { pad: "npm:pad@pad.tar" }],
   [
     "an override from a URL",
     { "left-pad": "1.0.0" },

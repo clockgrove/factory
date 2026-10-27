@@ -201,8 +201,18 @@ function insideCheckout(from: string, target: string): boolean {
   return resolved !== ".." && !resolved.startsWith("../");
 }
 
-/** A registry range or version (`^1.2.0`, `1.2.0(peer@2.0.0)`) names no protocol. */
+/**
+ * A specifier npm reads as a local file or folder although it names no
+ * protocol and no slash (npm-package-arg's file-spec and file-type rules):
+ * one starting with `.` (`.`, `..`), `~/`, `/`, `\` or a drive letter, or
+ * ending in `.tgz`, `.tar.gz` or `.tar`. Installing it reads that folder's
+ * or tarball's manifest and fetches what it names.
+ */
+const LOCAL_SPEC = /^(?:[.]|~[/]|[/\\]|[a-zA-Z]:)|[.](?:tgz|tar\.gz|tar)$/i;
+
+/** A registry range or version (`^1.2.0`, `1.2.0(peer@2.0.0)`) names no protocol and no local path. */
 function plainRange(value: string): boolean {
+  if (LOCAL_SPEC.test(value)) return false;
   const colon = value.indexOf(":");
   return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
 }

@@ -405,18 +405,13 @@ case_scope() {
   n=$(new_objective scope3 "item question scope" ID="$id") || return
   wait_for 1500 started_or_answer "$n" 'item:*:work' || { record holds.item-scope FAIL "#$n never built ($(st phase "$n"))" "$t0"; cancel_wait "$n"; return; }
   # The plan's roles among its three work items: top depends on base; solo
-  # depends on nothing and nothing on it. Any other item must be read-only QA
-  # (`npm test` passes may be proved by one after all three).
+  # depends on nothing and no work item depends on it. Any other item must be
+  # read-only: QA (`npm test` passes may be proved by one after all three) or an
+  # aggregate, neither of which runs a worker or opens a PR, and no work item
+  # may depend on one (lib/scope-roles.mjs).
   local items base top solo; items=$(p_items "$n")
-  read -r base top solo <<<"$(python3 -c 'import sys
-rows = [l.split() for l in sys.argv[1].splitlines() if l.strip()]
-deps = {i: ([] if d == "-" else d.split(",")) for i, k, d in rows if k == "work"}
-tops = [i for i in deps if deps[i]]
-bases = sorted({d for i in tops for d in deps[i]})
-solos = [i for i in deps if not deps[i] and i not in bases]
-ok = len(deps) == 3 and len(tops) == 1 and len(bases) == 1 and len(solos) == 1 and all(k in ("work", "qa") for _, k, _ in rows)
-print(*(bases[:1] + tops[:1] + solos[:1])) if ok else print()' "$items")"
-  [ -n "$solo" ] || { record holds.item-scope FAIL "#$n plan isn't base/top/solo work items and QA (ID KIND DEPS): $(paste -sd';' <<<"$items")" "$t0"; record holds.item-scope-after FAIL "not reached" "$t0"; cancel_wait "$n"; return; }
+  read -r base top solo <<<"$(node "$SUITE/lib/scope-roles.mjs" "$items")"
+  [ -n "$solo" ] || { record holds.item-scope FAIL "#$n plan isn't base/top/solo work items and read-only QA or aggregates (ID KIND DEPS): $(paste -sd';' <<<"$items")" "$t0"; record holds.item-scope-after FAIL "not reached" "$t0"; cancel_wait "$n"; return; }
   local pr=""; local end=$(( $(now) + 1500 ))
   while [ -z "$pr" ] && [ "$(now)" -lt "$end" ] && ! stopping; do pr=$(p_pr "$n" "$base" OPEN); [ -n "$pr" ] || sleep 10; done
   [ -n "$pr" ] || { record holds.item-scope FAIL "#$n: $base never opened a PR" "$t0"; cancel_wait "$n"; return; }

@@ -278,6 +278,15 @@ test("a collected in-scope discovery is proposed as amendment worker-<item>-<att
   assert.equal(waits.reason, "Waits for amendment worker-feature-1");
   assert.equal(waits.afterMs, 60_000);
 
+  // Settled with the plan unchanged (the discovery showed no gap, #2116):
+  // collection goes on with the result as collected, with no question and
+  // no new attempt.
+  state.done["amend:worker-feature-1"] = { unchanged: true };
+  assert.equal(
+    discoveryOutcome(work, contextOf(state), undefined, again, keep),
+    undefined,
+  );
+
   // Accepted: a free repair on the amended plan, replaying the change.
   const companion = item("companion", { ownedPaths: ["src/companion.js"] });
   state.done["amend:worker-feature-1"] = {

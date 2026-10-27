@@ -1647,6 +1647,27 @@ test("a cannotPlan resting on a missing selected set is sent back to answer with
   assert.equal(amendmentStatus(state, "op-1").status, "continued");
   assert.deepEqual(amendmentSteps(state, deps), []);
   assert.equal(asked.length, 4);
+  // The integration suite's ledger reads it as continued too: case_amend
+  // took a result with no plan and no `continue` for a rejection and
+  // waited for a `continue` question that never comes.
+  const root = tempDir("factory-amend-unchanged-");
+  mkdirSync(join(root, "objectives"));
+  writeFileSync(
+    join(root, "objectives", `${state.issue}.json`),
+    JSON.stringify(state),
+  );
+  const ledger = spawnSync(
+    "python3",
+    [
+      join(import.meta.dirname, "..", "integration", "lib", "st.py"),
+      root,
+      "amendments",
+      String(state.issue),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(ledger.status, 0, ledger.stderr);
+  assert.equal(ledger.stdout, "op-1 continued\n");
 });
 
 test("a refusal's review that asks an operator decision rejects with both, and the same findings twice or an invalid review twice reject with the refusal too", async () => {

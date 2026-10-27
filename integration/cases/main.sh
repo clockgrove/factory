@@ -285,12 +285,12 @@ pr_or_settled() { has_open_pr "$1" || settled "$1" && return 0; [[ $(st phase "$
 case_media() {
   local t0 n reps=0 picks=0 sets=(); t0=$(now)
   local HOLD_POLICY="d2 review decide more"
-  # Final review may ask a person to judge the binary assets (criteria 1, the
-  # model, and 2, the preview, in cube.md's order): the suite's operator
-  # accepts them, since this case checks selection, repair and LFS delivery.
-  local reason="Accepted by the integration suite's operator: the selected set passed its own test; this check covers selection, repair and Git LFS delivery, not asset geometry."
+  # The item's result review, which judges a perceptual quality of candidate
+  # media, or final review may ask a person to judge the binary assets (the
+  # model and the preview): the suite's operator accepts them, since this case
+  # checks selection, repair and LFS delivery (fixtures/media-review-decisions.json).
   local AUTO_REVIEW_DECISIONS
-  AUTO_REVIEW_DECISIONS=$(python3 -c 'import json,sys;print(json.dumps([{"step":"final-review","answer":"accept","arg":a,"text":sys.argv[1]} for a in ("1","2")]))' "$reason")
+  AUTO_REVIEW_DECISIONS=$(cat "$SUITE/fixtures/media-review-decisions.json") || return
   local id; id=$(uid)
   n=$(new_objective cube "media select and repair" ID="$id") || return
   local end=$(( $(now) + 2400 ))

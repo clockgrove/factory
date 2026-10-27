@@ -44,6 +44,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import sys
 
 
@@ -93,18 +94,48 @@ def with_answers(h):
     return h
 
 
+def review_criteria(d, step):
+    """A review hold's criteria by the number its `accept <n>`/`refuse <n>` take, from
+    the review Factory keeps while it asks (`item:<id>:held`, `final-review:held`)."""
+    if step == "final-review":
+        key = "final-review:held"
+    elif step.startswith("item:") and step.endswith(":review"):
+        key = step[: -len("review")] + "held"
+    else:
+        return {}
+    review = ((d.get("kept") or {}) if isinstance(d, dict) else {}).get(key)
+    if not isinstance(review, dict):
+        return {}
+    return {str(entry["criterionIndex"] + 1): str(entry.get("criterion", ""))
+            for entry in (review.get("questions") or []) + (review.get("refused") or [])
+            if isinstance(entry, dict) and isinstance(entry.get("criterionIndex"), int)}
+
+
+def decides(entry, step, option, criteria):
+    """Whether fixture decision `entry` is the answer `option` of a review hold at `step`.
+    `step` is a glob; `arg` names the criterion by number, or `criterion` by a regex its
+    text must match (a Work Item's review numbers the plan's criteria, not the Objective's)."""
+    if not fnmatch.fnmatchcase(step, entry.get("step", "")) or entry.get("answer") != option.get("answer"):
+        return False
+    if "arg" in entry and entry["arg"] != option.get("arg"):
+        return False
+    if "criterion" in entry:
+        text = criteria.get(option.get("arg"))
+        return text is not None and re.search(entry["criterion"], text, re.I | re.S) is not None
+    return "arg" in entry
+
+
 def auto_answers(d, policy, decisions):
-    """Policies choose actual options; criterion overrides require an exact fixture decision."""
+    """Policies choose actual options; criterion overrides require a fixture decision naming the criterion."""
     for h in holds_of(d):
         options = h.get("options") or []
         step = h.get("step", "")
         chosen, text = None, None
         if "review" in policy and (step.endswith(":review") or step == "final-review"):
+            criteria = review_criteria(d, step)
             for option in options:
                 decision = next((entry for entry in decisions
-                                 if entry.get("step") == step
-                                 and entry.get("answer") == option.get("answer")
-                                 and entry.get("arg") == option.get("arg")), None)
+                                 if decides(entry, step, option, criteria)), None)
                 if decision and option.get("answer") in ("accept", "refuse"):
                     chosen, text = option, decision.get("text")
                     break

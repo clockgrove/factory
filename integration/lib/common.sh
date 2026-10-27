@@ -231,7 +231,9 @@ hold_pick() { python3 -c 'import json,sys;h=json.loads(sys.argv[1] or "null") or
 # Hold policies, by structure (HOLD_POLICY, per case):
 #   d2      retry a failure hold with only retry/cancel (a crash-loop suspect from the suite's restarts)
 #   review  apply an exact fixture decision from AUTO_REVIEW_DECISIONS
-#           ([{step,answer,arg,text}]); never invent evidence for a criterion
+#           ([{step,answer,arg|criterion,text}]: step a glob, arg the criterion's
+#           number, or criterion a regex its text must match, st.py `decides`);
+#           never invent evidence for a criterion
 #   decide  ask the planner to choose within the existing Objective, without new authority
 #           (at most AUTO_DECIDE_MAX per Objective)
 #   more    answer `more` when it is the recommended answer (an allowance reached by the suite's own answers)

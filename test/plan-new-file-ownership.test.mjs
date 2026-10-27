@@ -81,7 +81,7 @@ test("the planner and the graph reviewer keep the new-identifier rule out of own
   }
   assert.ok(
     planner.includes(
-      "Own each new file an item creates, a new test file included, by the literal path you choose for it.",
+      "Own each new file an item creates, a new test file included, by the literal path you choose for it; where it creates a whole new directory, such as a new package, own that directory by its prefix instead.",
     ),
   );
 });

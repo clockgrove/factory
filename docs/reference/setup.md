@@ -28,7 +28,7 @@ Part of [the design](../DESIGN.md).
   - Factory's identity (see [GitHub identity](#github-identity)): with neither `github.app` nor `github.login`, the `GitHub App` check is `blocked`, naming the preflight step, its registration link and the opt-out, and no other repository check runs;
   - with a GitHub App: its private key is there, its installation covers the repository and isn't suspended, a token can be minted, and the installation grants every permission Factory needs, each missing one named (Actions: write among them; the organization's Projects only for an organization's repository). An origin that isn't https is a warning: its pushes use the host's SSH login, not the App's;
   - Factory's login (the GitHub CLI's, or the App's) can read the repository and push to it;
-  - a login's Actions access is not checked: a fine-grained token needs Actions: read for failed checks' job logs and Actions: write to rerun a failed job once before a repair (see [Delivery](delivery.md#delivery)); a `gh` login's `repo` scope covers both;
+  - a login's Actions access is not checked: a fine-grained token needs Actions: read for failed checks' job logs, failed steps and artifacts, and Actions: write to rerun a failed job once before a repair (see [Delivery](delivery.md#delivery)); a `gh` login's `repo` scope covers both;
   - operators (`operators`): none is a warning, since holds then notify nobody, and so is Factory's own login among them, since GitHub doesn't notify an account of its own comments; that fix gives the App registration link;
   - PRs into the default branch may merge with a merge commit;
   - required status checks exist. None is a warning: a PR then merges once Factory's own validation passes and any checks that register on it pass.

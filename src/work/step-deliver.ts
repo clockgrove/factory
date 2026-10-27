@@ -8,6 +8,7 @@ import {
   observeCi,
   type PullInput,
   publish,
+  REPAIR_SHARED,
   REPUBLISH,
   RESET_BRANCH,
   type Repair,
@@ -189,6 +190,8 @@ export function pullInput(
       (c) => c.checkName,
     ),
     ...(context.answer?.answer === REPUBLISH ? { republish: true } : {}),
+    ...(context.answer?.answer === "retry" ? { retried: true } : {}),
+    ...(context.answer?.answer === REPAIR_SHARED ? { repairShared: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
     ...(rerun ? { rerun } : {}),
   };

@@ -567,6 +567,9 @@ export async function workStep(
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
     refusedTree: refusedOf(state, item.id)?.tree,
+    // A Work Item that owns only its media destinations changes nothing
+    // else: its candidates are its result.
+    media: sets.length > 0,
     author,
     signal,
   });

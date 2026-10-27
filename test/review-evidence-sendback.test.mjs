@@ -637,9 +637,10 @@ test("a question an earlier review of the same tree asked, which the operator is
 /**
  * Two captured candidate sets with the same model and different previews,
  * set `a` selected and committed as LFS pointers (run
- * 2026-10-27T142211PDT-8f9f).
+ * 2026-10-27T142211PDT-8f9f). `bigPreview` makes set `b`'s preview larger
+ * than a review copy may be, so the evidence root holds none of it.
  */
-function twoColourSets() {
+function twoColourSets({ bigPreview = false } = {}) {
   const checkout = tempDir("factory-sendback-sets-");
   git(checkout, "init", "--quiet", "--initial-branch=main");
   writeFileSync(
@@ -682,7 +683,10 @@ function twoColourSets() {
       ),
     ],
   });
-  const sets = [set("a", "red"), set("b", "blue")];
+  const sets = [
+    set("a", "red"),
+    set("b", bigPreview ? `blue${" ".repeat(1024 * 1024)}` : "blue"),
+  ];
   mkdirSync(join(checkout, "assets"));
   for (const selected of sets[0].members)
     writeFileSync(
@@ -794,6 +798,84 @@ test("a question citing the candidate receipt, naming no file, goes back with ev
     { event: "result-review-evidence-sendback", criteria: [0], paths: 4 },
   );
   assert.equal(outcome.kind, "pass");
+});
+
+test("a cited receipt adds only the copies the evidence root holds, after the files the text names", async () => {
+  const { repo, item, candidates } = twoColourSets({ bigPreview: true });
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      const receipt = rowIndex(call.prompt, "Controller candidate receipt:");
+      if (calls.length === 1)
+        return {
+          value: {
+            findings: [
+              {
+                ...colourQuestion([receipt]),
+                detail: `${colourQuestion([]).detail} candidate/.gitattributes routes both destinations through Git LFS.`,
+              },
+            ],
+          },
+        };
+      return {
+        value: {
+          findings: [
+            {
+              criterionIndex: 0,
+              verdict: "pass",
+              evidenceIndices: [receipt],
+              detail: "Set a's preview is red; set b's differs by its digest.",
+              question: "",
+            },
+          ],
+        },
+      };
+    },
+  };
+  const { run, events } = review(repo, item, planner, { candidates });
+  const outcome = await run;
+  assert.equal(calls.length, 2);
+  const note = calls[1].prompt.slice(calls[0].prompt.length);
+  assert.match(note, /questions name or cite files the evidence root holds/);
+  assert.ok(
+    note.includes(
+      `the evidence root holds ${[
+        "candidate/.gitattributes",
+        "media-sets/CubeAssets/a/cubeQdjpn.glb",
+        "media-sets/CubeAssets/a/cubeQdjpn-preview.png",
+        "media-sets/CubeAssets/b/cubeQdjpn.glb",
+      ]
+        .map((path) => JSON.stringify(path))
+        .join(", ")}\n`,
+    ),
+    note,
+  );
+  assert.ok(!note.includes("media-sets/CubeAssets/b/cubeQdjpn-preview.png"));
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-evidence-sendback"),
+    { event: "result-review-evidence-sendback", criteria: [0], paths: 4 },
+  );
+  assert.equal(outcome.kind, "pass");
+});
+
+test("a question citing the candidate receipt that is still asked after the send-back reaches the operator, once", async () => {
+  const { repo, item, candidates } = twoColourSets();
+  let calls = 0;
+  const planner = {
+    async answer(call) {
+      calls += 1;
+      const receipt = rowIndex(call.prompt, "Controller candidate receipt:");
+      return { value: { findings: [colourQuestion([receipt])] } };
+    },
+  };
+  const outcome = await review(repo, item, planner, { candidates }).run;
+  assert.equal(calls, 2);
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(
+    outcome.questions.map((question) => question.question),
+    ["Do the two offered candidate sets visibly use different cube colours?"],
+  );
 });
 
 test("the same question citing no receipt still reaches the operator with no send-back", async () => {

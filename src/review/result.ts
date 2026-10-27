@@ -13,8 +13,9 @@
  * repair (repair.ts); a needs-human verdict becomes a question for the
  * operator. An invalid answer is asked again once with the error; still
  * invalid, the criteria it left undecided go to the operator. A needs-human
- * finding that names files the evidence root holds is first sent back to
- * the reviewer once, naming them (`heldEvidence`, #2124). Provider
+ * finding that names files the evidence root holds, or cites a receipt
+ * whose review copies it holds, is first sent back to the reviewer once,
+ * naming them (`heldEvidence`, #2124). Provider
  * failures escape as `PlannerError` to the engine (workflow.ts `errorOutcome`).
  */
 
@@ -1635,8 +1636,8 @@ const SHORTEST_IDENTIFIER = 4;
  * basenames, then stems, so the cap never drops a file named by its exact
  * path for files that only end with it or share its stem. A finding that
  * cites a controller candidate or input receipt among its evidence also
- * names every review copy that receipt lists, after the files its text
- * names: a reviewer asked the operator whether the two offered candidate
+ * names every review copy that receipt lists and the root holds, after the
+ * files its text names: a reviewer asked the operator whether the two offered candidate
  * sets differ in colour, citing the candidate receipt but naming no file,
  * while media-sets/ held both sets' previews (run
  * 2026-10-27T142211PDT-8f9f). Only this answer's own findings count: a
@@ -1867,7 +1868,7 @@ function sendBackNote(asked: readonly SentBack[], media: boolean): string {
       `criterion ${entry.criterionIndex}: you asked ${JSON.stringify(entry.question.slice(0, 600))}; the evidence root holds ${entry.paths.map((path) => JSON.stringify(path)).join(", ")}`,
   );
   return [
-    "Evidence check: your needs-human questions name files the evidence root holds.",
+    "Evidence check: your needs-human questions name or cite files the evidence root holds.",
     "The operator is asked only for decisions, authority and facts the evidence root lacks, never for repository contents, patches or media bytes it holds. Read these files in your working directory, the evidence root, and judge these criteria again from them:",
     ...lines,
     ...(media

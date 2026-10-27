@@ -3,7 +3,13 @@
 // redaction covers.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -407,6 +413,71 @@ test("readiness reads a checkout with linked worktrees, and their worktree confi
     "credential.password",
     "credential.username",
   ]);
+});
+
+test("readiness reads each Work Item worktree's own config.worktree when worktree configuration is on", () => {
+  const checkout = tempDir("factory-credentials-");
+  git(checkout, "init", "--quiet");
+  git(
+    checkout,
+    "-c",
+    "user.name=Factory",
+    "-c",
+    "user.email=factory@example.com",
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "--message=base",
+  );
+  const first = tempDir("factory-wt-");
+  const second = tempDir("factory-wt-");
+  for (const worktree of [first, second])
+    git(checkout, "worktree", "add", "--quiet", "--detach", worktree);
+  const admin = (worktree) =>
+    realpathSync(
+      git(worktree, "rev-parse", "--path-format=absolute", "--git-dir"),
+    );
+  // Off: Git reads no config.worktree, so one written anyway is not read.
+  writeFileSync(
+    join(admin(first), "config.worktree"),
+    "[credential]\n\tusername = octo\n",
+  );
+  assert.deepEqual(checkoutCredentialEntries(checkout), []);
+  git(checkout, "config", "extensions.worktreeConfig", "true");
+  // A Work Item worktree's own entry, which its sandbox mounts.
+  git(
+    second,
+    "config",
+    "--worktree",
+    "http.https://github.com/.extraheader",
+    "AUTHORIZATION: basic abc",
+  );
+  // And one reached through an include, resolved from that worktree's Git directory.
+  const included = join(tempDir("factory-include-"), "credentials");
+  writeFileSync(included, '[credential]\n\thelper = "!f() { echo x; }; f"\n');
+  git(second, "config", "--worktree", "include.path", included);
+  const firstFile = join(admin(first), "config.worktree");
+  const secondFile = join(admin(second), "config.worktree");
+  assert.deepEqual(
+    checkoutCredentialEntries(checkout)
+      .map((entry) =>
+        entry.replace(/ in (.+)$/, (_, file) => ` in ${realpathSync(file)}`),
+      )
+      .sort(),
+    [
+      `credential.helper in ${secondFile}`,
+      `credential.username in ${firstFile}`,
+      `http.https://github.com/.extraheader in ${secondFile}`,
+    ].sort(),
+  );
+  // Removed as readiness's fix says, nothing is left.
+  for (const [file, name] of [
+    [firstFile, "credential.username"],
+    [secondFile, "http.https://github.com/.extraheader"],
+    [secondFile, "include.path"],
+  ])
+    git(checkout, "config", "--file", file, "--unset-all", name);
+  assert.deepEqual(checkoutCredentialEntries(checkout), []);
 });
 
 for (const path of [

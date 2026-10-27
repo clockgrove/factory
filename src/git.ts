@@ -1,6 +1,6 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { GitHubError, TransientError } from "./github.js";
@@ -76,28 +76,37 @@ const URL_CREDENTIAL =
   /^(?:https?:\/\/[^/@\s]+@|[a-z][a-z\d+.-]*:\/\/[^/@:\s]*:[^/@\s]*@)/i;
 
 /**
- * The checkout's own Git configuration entries (local and worktree) that
- * carry a credential: `http.*extraheader` (an Authorization header, as CI
- * checkouts write), a `credential.*helper` that runs inline shell (`!…`),
- * `credential.*username` or `password`, a `remote.*.url` or `pushurl` with
- * one in it, and a `url.*` rewrite whose base has one. Sandboxed commands
- * read that configuration (sandbox.ts gitMetadata), so readiness refuses a
- * checkout that has any. Names only, never values; undefined when Git
- * can't read it. Worktree configuration exists only with
- * `extensions.worktreeConfig` on, in the checkout's `config.worktree`;
- * without the extension Git refuses `--worktree` once the repository has a
- * linked worktree (as every Objective's Work Items add), and it refuses to
- * list a `config.worktree` that doesn't exist, so either skips that pass.
+ * The checkout's own Git configuration entries (local and worktree, and
+ * each linked worktree's) that carry a credential: `http.*extraheader` (an
+ * Authorization header, as CI checkouts write), a `credential.*helper` that
+ * runs inline shell (`!…`), `credential.*username` or `password`, a
+ * `remote.*.url` or `pushurl` with one in it, and a `url.*` rewrite whose
+ * base has one. Sandboxed commands read that configuration (sandbox.ts
+ * gitMetadata), so readiness refuses a checkout that has any. Names only,
+ * never values; an entry from a linked worktree's configuration is
+ * `<name> in <its config.worktree>`. Undefined when Git can't read it.
+ *
+ * Worktree configuration exists only with `extensions.worktreeConfig` on:
+ * the checkout's `config.worktree`, and each linked worktree's (every Work
+ * Item's) in its admin directory `<common>/worktrees/<id>/`, which the
+ * sandbox mounts for that Work Item's commands. Each is read through its
+ * own Git directory (`--git-dir`), so includes resolve as Git resolves them
+ * there, without running Git in a tree a worker wrote. Without the
+ * extension Git reads none of them and refuses `--worktree` once the
+ * repository has a linked worktree (as every Objective's Work Items add),
+ * and it refuses to list a `config.worktree` that doesn't exist, so either
+ * skips that pass.
  */
 export function checkoutCredentialEntries(
   checkout: string,
 ): string[] | undefined {
-  const git = (...args: string[]) =>
-    spawnSync("git", ["-C", checkout, ...args], {
+  const spawn = (args: string[]) =>
+    spawnSync("git", args, {
       env: gitEnvironment(),
       encoding: "utf8",
       timeout: 30_000,
     });
+  const git = (...args: string[]) => spawn(["-C", checkout, ...args]);
   // Exit 1 is an unset key; anything else unexpected is a failed read.
   const extension = git(
     "config",
@@ -107,16 +116,42 @@ export function checkoutCredentialEntries(
     "extensions.worktreeConfig",
   );
   if (extension.status !== 0 && extension.status !== 1) return undefined;
-  const scopes = ["--local"];
+  const reads: { args: string[]; source?: string }[] = [
+    { args: ["-C", checkout, "config", "--local"] },
+  ];
   if (extension.status === 0 && extension.stdout.trim() === "true") {
-    const gitDir = git("rev-parse", "--absolute-git-dir");
-    if (gitDir.status !== 0) return undefined;
-    if (existsSync(join(gitDir.stdout.trim(), "config.worktree")))
-      scopes.push("--worktree");
+    const dirs = git(
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-dir",
+      "--git-common-dir",
+    );
+    if (dirs.status !== 0) return undefined;
+    const [gitDir, common] = dirs.stdout.trim().split("\n");
+    if (gitDir === undefined || common === undefined) return undefined;
+    if (existsSync(join(gitDir, "config.worktree")))
+      reads.push({ args: ["-C", checkout, "config", "--worktree"] });
+    let names: string[] = [];
+    try {
+      names = readdirSync(join(common, "worktrees"));
+    } catch (error) {
+      // No linked worktree yet; any other failure is a failed read.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+    }
+    for (const name of names.sort()) {
+      const admin = join(common, "worktrees", name);
+      const file = join(admin, "config.worktree");
+      // The checkout itself, when it is a linked worktree, was read above.
+      if (admin === gitDir || !existsSync(file)) continue;
+      reads.push({
+        args: [`--git-dir=${admin}`, "config", "--worktree"],
+        source: file,
+      });
+    }
   }
   const found = new Set<string>();
-  for (const scope of scopes) {
-    const read = git("config", scope, "--includes", "--null", "--list");
+  for (const { args, source } of reads) {
+    const read = spawn([...args, "--includes", "--null", "--list"]);
     if (read.status !== 0) return undefined;
     for (const entry of read.stdout.split("\0")) {
       const split = entry.indexOf("\n");
@@ -132,7 +167,7 @@ export function checkoutCredentialEntries(
           URL_CREDENTIAL.test(value)) ||
         (key.startsWith("url.") && URL_CREDENTIAL.test(name.slice(4)))
       )
-        found.add(name);
+        found.add(source ? `${name} in ${source}` : name);
     }
   }
   return [...found];

@@ -41,6 +41,18 @@ Decide on its JSON:
 
 - `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. With `--prefix`, a launcher on a newer release in that prefix is refused the same way as `launcher` above: update this plugin, or `--downgrade` only on the operator's say. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
 
+## Register Factory's GitHub App
+
+Factory acts on GitHub as its own GitHub App, and registering it is the required preflight step: walk the operator through it first, before anything about the repository's configuration. Skip it only for a configuration that already names the App or the login (`github.app` or `github.login` in it), or when the operator says to keep the GitHub CLI's login (below).
+
+1. **Link:** `factory setup --repo OWNER/NAME --github-app-link --json` (it needs no configuration). Give the operator `link`: it registers a private App with every permission Factory needs prefilled, in the organization's settings when OWNER is an organization and in their own otherwise. `next` says the rest.
+2. **Register:** they open the link and create the App, keeping the prefilled permissions.
+3. **Key:** they generate a private key on the App's page; GitHub downloads a `.pem` file. Ask them for that file's absolute path, as plain text in their reply, never the file or its content. Never read, print or copy the key yourself; setup reads it.
+4. **Install:** they install the App on All repositories (on an organization; at the least, on the repository and every other repository of its Project). Factory reads every repository of the queue's Project, and All repositories also covers one added to it later.
+5. **App ID:** they give the App's ID, on its settings page.
+
+Their GitHub CLI login is still needed: it runs their own commands and setup's, and Factory acts as the App. If the operator says to keep that login instead, give `--github-login` in place of the App's options; it is recorded, and readiness warns while holds would notify no one. Never choose it for them.
+
 ## Choose the outcome
 
 - **Configuration only** (`factory setup`): the request says install, configure, or "don't start work". Nothing runs.
@@ -62,20 +74,22 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
 
   docs/reference/setup.md#Setup lists every option and the key it sets.
 
-- **Who hears about holds:** the operator's GitHub login for `--operator LOGIN`. When Factory would act as that same login (readiness warns), offer its own GitHub App: `factory setup --repo OWNER/NAME --github-app-link --json` gives the registration link. The operator creates the App, generates its private key and installs it (on an organization, on All repositories; at the least, on the repository and every other repository of its Project, which Factory reads too), then gives its id and the key's path: `--github-app-id ID --github-app-key PATH`. Never read or show the key. The App is a new login, and an Objective in flight finds what it made by the login, so setup refuses it while any Objective has state: ask the operator to drain the queue (`factory queue drain`) and wait until none runs.
+- **GitHub App:** its ID and the key's path from the preflight above, for `--github-app-id ID --github-app-key PATH`.
+- **Who hears about holds:** the operator's GitHub login for `--operator LOGIN`.
 
 Keep the configuration, credentials and state outside the target checkout. Setup refuses a configuration or state directory inside it.
 
 ## Run
 
 ```sh
-factory setup --repo OWNER/NAME --checkout ABSOLUTE_CLONE --project-id PVT_... [options] --json
+factory setup --repo OWNER/NAME --checkout ABSOLUTE_CLONE --project-id PVT_... --github-app-id ID --github-app-key ABSOLUTE_PEM --operator LOGIN [options] --json
 factory setup --repo OWNER/NAME --provider claude --planner claude --worker claude [--default] --json
 factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FILE]... --json
 ```
 
 - **Create:** the first run creates the configuration (mode 0600). A repeat with the same options changes nothing (`changed: []`).
 - **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
+- **Identity:** a configuration that names neither the App nor `--github-login`, as one from before 0.5.2, is `blocked` on a `GitHub App` check, and its service refuses to start: walk the operator through the preflight above, or record `--github-login` if they choose the login. The App is a new login, and an Objective in flight finds what it made by the login, so setup refuses the App while any Objective has state: ask the operator to drain the queue (`factory queue drain`) and wait until none runs. With the service refusing and Objectives in flight, that takes the login first, on the operator's say: record `--github-login`, start the service, drain, then the App.
 - **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
 - **Background logins:** the service doesn't keep logins from the setup shell, and `--background` checks readiness without them. Codex needs `codex login` (an API key in the shell doesn't reach the service), GitHub needs `gh auth login` or a GitHub App's key given with `--github-app-key` (the service loads setup's copy), and a Claude or Copilot token needs `--credential-file`.
 - **Toolchain:** the service runs the tools on the setup shell's PATH. When the clone pins its tools with mise (`mise.toml` or `.tool-versions`) and `mise` is on that PATH, `--background` puts the pinned versions first. Factory never runs `mise trust` or `mise install`: when readiness's `mise toolchain` check names one, give it to the operator to run in the clone. Never run either yourself, since trusting a mise configuration lets it run code.
@@ -87,7 +101,7 @@ Decide on the JSON, never the prose.
 - `status: "configured"` (exit 0): saved, it loads, and the target and host are ready.
 - `status: "blocked"` (exit 1): saved, but something isn't ready.
   - `problems` names the target's problems: the clone's origin, or the Project fields.
-  - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, the mise toolchain, provider logins, GitHub access, merge commits and required checks.
+  - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, the mise toolchain, provider logins, the GitHub App, GitHub access, merge commits and required checks.
   - Give the operator one checklist of every `blocked` item with its fix. Then repeat the same command.
 - `status: "refused"` (exit 1): nothing was saved. `problems` says why: a bad value, or a binding conflict.
 - **Installation:** a `warn` named `installation` means another installation serves the repository, and this one's service is refused when it starts. Ask the operator to stop that one (`factory setup --repo OWNER/NAME --stop` on its machine, or stop its `factory serve`). Only if it is gone for good, because its machine is gone or its state was wiped, and the operator says so: run `factory serve --repo OWNER/NAME --take-over` once in the foreground, stop it once it serves, then run `factory setup --repo OWNER/NAME --background`, since the background service can't take over. Then reset the Objectives that were in flight, as in moving the service below.

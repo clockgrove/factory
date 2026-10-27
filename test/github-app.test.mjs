@@ -9,6 +9,9 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -34,19 +37,25 @@ import {
 import { redact } from "../dist/log.js";
 import { mark } from "../dist/markdown.js";
 import { postPlan } from "../dist/planning/steps.js";
+import { unitName, unitText } from "../dist/systemd.js";
 import { FACTORY_EMAIL, factoryCommit } from "../dist/work/collect.js";
 import { reportComment } from "../dist/work/finish.js";
 import { workerEnvironment } from "../dist/worktree.js";
 import {
   CLI,
   children,
+  cli,
+  closedPort,
   configured,
+  exited,
   githubOrigin,
   installation,
   item,
   offered,
   plan,
   REPO,
+  serve,
+  stopped,
   tempDir,
   until,
 } from "./helpers.mjs";
@@ -763,7 +772,7 @@ test("the registration link prefills every permission for an organization or a u
   );
   assert.match(
     appSteps(false),
-    /install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH/,
+    /install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH --operator LOGIN/,
   );
   const { organization_projects: _projects, ...personal } = APP_PERMISSIONS;
   assert.deepEqual(missingPermissions(personal, false), []);
@@ -855,9 +864,10 @@ test("setup keeps the App's key as an owner-only copy, never shown; readiness ch
   );
   assert.doesNotMatch(first.out + first.err, /PRIVATE KEY|MII/);
   const report = JSON.parse(first.out);
+  // The App replaces the GitHub CLI's login the configuration chose.
   assert.deepEqual(
     [...report.changed].sort(),
-    ["FACTORY_GITHUB_APP_KEY", "github.app.id", "operators"],
+    ["FACTORY_GITHUB_APP_KEY", "github.app.id", "github.login", "operators"],
     first.out,
   );
   const saved = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
@@ -908,6 +918,12 @@ test("setup keeps the App's key as an owner-only copy, never shown; readiness ch
   assert.equal(other.status, "refused");
   assert.match(other.problems[0], /#5 still has state/);
   assert.match(other.problems[0], /factory queue drain/);
+  // So is going back to the GitHub CLI's login.
+  const back = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.equal(back.status, "refused");
+  assert.match(back.problems[0], /^--github-login changes who Factory acts as/);
   assert.deepEqual(
     JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8")).github,
     { app: { id: 42 } },
@@ -959,4 +975,211 @@ test("readiness warns when no operator is set, or when Factory acts as the opera
     "kirk",
   );
   assert.equal(mixed.code, 2);
+});
+
+test("a configuration naming no GitHub identity, as before 0.5.2, is blocked on the App's preflight step; --github-login records the opt-out, and with an Objective in flight the App is refused", async () => {
+  const { api } = await fakeGitHub({
+    "GET /user": () => [200, { login: "kirk" }],
+    [`GET /repos/${REPO}`]: repository,
+  });
+  const inst = installation();
+  configured(inst, api, {}, { github: undefined });
+  const setup = async (...args) =>
+    JSON.parse((await factory(inst, "setup", ...args, "--json")).out);
+  const saved = () =>
+    JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8")).github;
+  const named = (report, name) =>
+    report.readiness.checks.filter((entry) => entry.name === name);
+
+  // The upgraded configuration loads, and nothing changes who Factory is.
+  const upgraded = await setup();
+  assert.equal(upgraded.status, "blocked");
+  assert.deepEqual(upgraded.changed, []);
+  assert.equal(saved(), undefined);
+  const [identity, ...more] = named(upgraded, "GitHub App");
+  assert.deepEqual(more, []);
+  assert.equal(identity.status, "blocked");
+  assert.match(identity.fix, /preflight step/);
+  assert.match(identity.fix, /factory setup --github-app-link/);
+  assert.match(
+    identity.fix,
+    /https:\/\/github\.com\/organizations\/drill\/settings\/apps\/new\?name=/,
+  );
+  assert.match(
+    identity.fix,
+    /--github-app-id ID --github-app-key PATH --operator LOGIN/,
+  );
+  assert.match(identity.fix, /factory setup --github-login$/);
+  // Nothing is read as the login no one chose.
+  assert.deepEqual(named(upgraded, "GitHub"), []);
+  assert.deepEqual(named(upgraded, "operators"), []);
+
+  // An Objective in flight finds what it made by the login: the App would
+  // change it, so it waits for a drained queue; the opt-out doesn't.
+  mkdirSync(join(inst.root, "objectives"), { recursive: true });
+  writeFileSync(join(inst.root, "objectives", "5.json"), "{}\n");
+  const pem = join(inst.root, "downloaded.pem");
+  writeFileSync(pem, key.privateKey, { mode: 0o600 });
+  const app = ["--github-app-id", "42", "--github-app-key", pem];
+  const refused = await setup(...app);
+  assert.equal(refused.status, "refused");
+  assert.match(
+    refused.problems[0],
+    /^--github-app-id changes who Factory acts as on GitHub, and #5 still has state/,
+  );
+  assert.equal(saved(), undefined);
+  assert.equal(existsSync(join(inst.root, "github-app-key.pem")), false);
+
+  const kept = await setup("--github-login");
+  assert.notEqual(kept.status, "refused", JSON.stringify(kept.problems));
+  assert.deepEqual(kept.changed, ["github.login"]);
+  assert.deepEqual(saved(), { login: true });
+  assert.deepEqual(named(kept, "GitHub App"), []);
+  // With the opt-out, readiness warns as before: holds notify nobody.
+  const [operators] = named(kept, "operators");
+  assert.equal(operators.status, "warn");
+  assert.match(operators.detail, /holds notify nobody/);
+  assert.equal((await setup(...app)).status, "refused");
+  assert.deepEqual(saved(), { login: true });
+
+  // Once the Objective is finished, the App replaces the login.
+  mkdirSync(join(inst.root, "objectives", "finished"));
+  renameSync(
+    join(inst.root, "objectives", "5.json"),
+    join(inst.root, "objectives", "finished", "5.json"),
+  );
+  const adopted = await setup(...app);
+  assert.notEqual(adopted.status, "refused", JSON.stringify(adopted.problems));
+  assert.deepEqual([...adopted.changed].sort(), [
+    "FACTORY_GITHUB_APP_KEY",
+    "github.app.id",
+    "github.login",
+  ]);
+  assert.deepEqual(saved(), { app: { id: 42 } });
+});
+
+test("setup takes one GitHub identity: --github-login with an App option is refused, both keys by hand don't load, and --github-login drops the App and its key copy", async () => {
+  const { api } = await fakeGitHub({});
+  const inst = installation();
+  configured(inst, api, {}, { github: { app: { id: 42 } } });
+  const copy = join(inst.root, "github-app-key.pem");
+  writeFileSync(copy, key.privateKey, { mode: 0o600 });
+  for (const flags of [
+    ["--github-app-id", "42"],
+    ["--github-app-installation", "9"],
+  ]) {
+    const both = await factory(inst, "setup", "--github-login", ...flags);
+    assert.equal(both.code, 2, both.err);
+    assert.match(
+      both.err,
+      /--github-login keeps the GitHub CLI's login instead of a GitHub App: drop --github-app-/,
+    );
+  }
+  // The App's key copy setup kept stays through a usage error, and goes
+  // with the App, unread; while the background unit loads it, it stays
+  // until --background rewrites the unit (the unit is written, never loaded).
+  assert.equal(existsSync(copy), true);
+  const units = tempDir("factory-units-");
+  inst.env.XDG_CONFIG_HOME = units;
+  mkdirSync(join(units, "systemd", "user"), { recursive: true });
+  const unit = join(
+    units,
+    "systemd",
+    "user",
+    unitName({ root: realpathSync(inst.root) }),
+  );
+  writeFileSync(
+    unit,
+    unitText(REPO, [{ name: "FACTORY_GITHUB_APP_KEY", file: copy }]),
+  );
+  const config = inst.env.FACTORY_CONFIG;
+  const switched = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.deepEqual([...switched.changed].sort(), [
+    "github.app",
+    "github.login",
+  ]);
+  assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).github, {
+    login: true,
+  });
+  assert.equal(existsSync(copy), true);
+  rmSync(unit);
+  const unbound = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.deepEqual(unbound.changed, ["FACTORY_GITHUB_APP_KEY"]);
+  assert.equal(existsSync(copy), false);
+  const again = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.deepEqual(again.changed, []);
+
+  const written = JSON.parse(readFileSync(config, "utf8"));
+  written.github = { app: { id: 42 }, login: true };
+  writeFileSync(config, JSON.stringify(written));
+  const loaded = JSON.parse((await factory(inst, "setup", "--json")).out);
+  assert.equal(loaded.status, "refused");
+  assert.match(
+    loaded.problems[0],
+    /github\.app and github\.login are both set/,
+  );
+});
+
+test("serve refuses to start on a configuration naming no GitHub identity, as before 0.5.2, and status shows why; with the App or the login it starts", async () => {
+  const { api } = await fakeGitHub(appRoutes({ minted: 0 }));
+  const inst = installation();
+  configured(
+    inst,
+    api,
+    { FACTORY_GITHUB_APP_KEY: key.privateKey },
+    { github: undefined },
+  );
+  delete inst.env.CREDENTIALS_DIRECTORY;
+  const holder = () =>
+    spawnSync(
+      "git",
+      [
+        "--git-dir",
+        join(inst.root, "origin.git"),
+        "for-each-ref",
+        "--format=%(objectname)",
+        "refs/factory/holder",
+      ],
+      { encoding: "utf8" },
+    ).stdout.trim();
+  const named = (github) => {
+    const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+    config.github = github;
+    writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  };
+  const why =
+    /The configuration of drill\/target names no GitHub identity \(github\.app or github\.login\), so the service refuses to start\. Factory acts as its own GitHub App, setup's preflight step \(docs\/reference\/setup\.md#github-identity\): register and install it \(factory setup --repo drill\/target --github-app-link prints the link\), then run factory setup --repo drill\/target --github-app-id N --github-app-key PATH --operator LOGIN\. Or keep the GitHub CLI's login: factory setup --repo drill\/target --github-login\./;
+
+  // Refused as a configuration that doesn't load is: the unit doesn't
+  // restart on it, and nothing reaches GitHub or takes the repository.
+  const refused = await exited(serve(inst), "the refused start");
+  assert.equal(refused.code, 78, refused.stderr);
+  assert.match(refused.stderr, new RegExp(`^factory: ${why.source}$`, "m"));
+  assert.equal(holder(), "", "a refused start takes nothing");
+  const shown = JSON.parse(cli(inst, "status", "--json").out);
+  assert.match(shown.setup.identity, why);
+  assert.match(
+    cli(inst, "status").out,
+    /\n {2}Not ready: The configuration of drill\/target names no GitHub identity/,
+  );
+
+  for (const github of [{ login: true }, { app: { id: APP } }]) {
+    named(github);
+    const view = JSON.parse(cli(inst, "status", "--json").out);
+    assert.equal(view.setup.identity, undefined);
+    assert.doesNotMatch(cli(inst, "status").out, /Not ready/);
+    const serving = serve(inst);
+    await until(
+      () => JSON.parse(cli(inst, "status", "--json").out).service === "running",
+      `a start with ${JSON.stringify(github)}`,
+    );
+    assert.notEqual(holder(), "");
+    assert.equal((await stopped(serving)).code, 0, serving.stderr());
+  }
 });

@@ -10,7 +10,7 @@ import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { eventLine, redactDeep } from "./display.js";
 import { DEFAULT_LIMITS, type EngineLimits, hostLimits } from "./engine.js";
 import { GitRefusal } from "./git.js";
-import { factoryGitHub } from "./github-app.js";
+import { factoryGitHub, identityUnchosen } from "./github-app.js";
 import { GitHubSync } from "./github-sync.js";
 import {
   type Holder,
@@ -123,8 +123,9 @@ function envLimits(): EngineLimits {
 /**
  * Serve the installation in this process until SIGTERM or SIGINT:
  * `factory serve`. New Objectives freeze `provider`, else
- * defaultProvider. A configuration that doesn't load throws
- * ConfigurationError before anything runs; a second service is refused
+ * defaultProvider. A configuration that doesn't load, or names no GitHub
+ * identity (github-app.ts identityUnchosen), throws ConfigurationError
+ * before anything runs; a second service is refused
  * by the installation lock.
  */
 export async function serveInstallation(
@@ -152,6 +153,9 @@ export async function serveInstallation(
     } catch (error) {
       throw new ConfigurationError(errorMessage(error));
     }
+    // Setup's preflight step: no start acts as a login no one chose.
+    const unchosen = identityUnchosen(config);
+    if (unchosen) throw new ConfigurationError(unchosen);
     loaded = config;
     configureKnowledge(knowledge(config, paths));
     const name = providerNamed(config, options.provider);

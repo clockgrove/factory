@@ -419,7 +419,7 @@ test("readiness warns when the default branch requires review threads resolved",
     repository: REPO,
     checkout: tempDir("factory-threads-checkout-"),
     tracking: { enabled: false },
-    github: {},
+    github: { login: true },
     operators: [],
   };
   const named = (checks) =>

@@ -650,7 +650,7 @@ case_prod() {
   local HOLD_POLICY="d2 review decide more"
   local co="$STATE_BASE/checkout-q"
   # --default: on a fresh configuration setup keeps codex first and default otherwise.
-  cli_t 120 setup --checkout "$co" --project-id "$C_PROJECT_ID" --provider "$PROVIDER" --planner "$PROVIDER" --worker "$PROVIDER" --default "${APP_ARGS[@]}" --json >"$RUN_DIR/q.setup.out" 2>&1; local rs=$?
+  cli_t 120 setup --checkout "$co" --project-id "$C_PROJECT_ID" --provider "$PROVIDER" --planner "$PROVIDER" --worker "$PROVIDER" --default "${IDENTITY_ARGS[@]}" --json >"$RUN_DIR/q.setup.out" 2>&1; local rs=$?
   local sj; sj=$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 node=[c for c in (d.get("readiness") or {}).get("checks", []) if c.get("name")=="node version"]
@@ -658,7 +658,7 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   local calls; calls=$(cat "$ROOT"/logs/*/*.jsonl 2>/dev/null | grep -c '"event":"model-usage"')
   [ "$rs" = 0 ] && [[ $sj == "configured "* ]] && [[ $sj != *absent ]] && [ "$calls" = 0 ]
   rec_if setup.config $? "factory setup exit $rs: status and node-version check: $sj; model calls $calls" "$t0"
-  app_given Q "$RUN_DIR/q.setup.out" || return
+  identity_given Q "$RUN_DIR/q.setup.out" || return
   cli_t 120 setup --background --json >"$RUN_DIR/q.background.out" 2>&1; local rb=$?
   cli_t 60 setup --check --json >"$RUN_DIR/q.check.out" 2>&1; local rc=$?
   [ "$rb" = 0 ] && [ "$rc" = 0 ]; local bg=$?

@@ -251,6 +251,8 @@ export function configured(inst, api, env = {}, fields = {}) {
       repository: REPO,
       checkout: join(inst.root, "checkout"),
       queue: { projectId: "PVT_none", pollSeconds: 5 },
+      // The tests' fake GitHub serves a token, the GitHub CLI's login.
+      github: { login: true },
       ...fields,
     }),
   );

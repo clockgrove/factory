@@ -7,6 +7,7 @@ import {
   hostCapacity,
 } from "../capacity.js";
 import { loadConfig } from "../config.js";
+import { identityUnchosen } from "../github-app.js";
 import { configOf, Refusal, serviceLive } from "../host.js";
 import type { Paths } from "../paths.js";
 import {
@@ -99,6 +100,7 @@ async function status(
     return 0;
   }
   const config = configOf(repository);
+  const identity = config && identityUnchosen(config);
   const unit = installedUnitHealth(paths);
   const view = readStatus(paths, {
     ...(unit ? { unit } : {}),
@@ -113,6 +115,7 @@ async function status(
               required: config.sandbox.required,
               network: config.sandbox.network,
             },
+            ...(identity ? { identity } : {}),
           },
         }
       : {}),

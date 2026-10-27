@@ -17,7 +17,7 @@ import { type Args, type Command, usage } from "./shared.js";
 export const spec: Command = {
   args: "",
   flags: SETUP_FLAGS,
-  help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; --github-app-link prints the link that registers Factory's GitHub App, and --github-app-id ID --github-app-key PATH makes Factory act as it; --operator LOGIN names whom holds mention; see docs/reference/setup.md#Setup for every option",
+  help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; Factory's GitHub App comes first: --github-app-link prints the link that registers it, and --github-app-id ID --github-app-key PATH makes Factory act as it (--github-login keeps the GitHub CLI's login instead); --operator LOGIN names whom holds mention; see docs/reference/setup.md#Setup for every option",
   run: ({ repository, args }) => setupCommand(repository, args),
 };
 

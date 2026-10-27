@@ -92,6 +92,13 @@ export type Outcome =
       free?: { target: string; repair: number };
       /** A human gate's question: the step polls on while it is open (`Hold.polls`). */
       polls?: true;
+      /**
+       * The step's result is its refused result, kept unchanged at the
+       * operator's word (their guidance, #2131): the engine answers
+       * `revalidate` itself when the workflow can take it and a result
+       * rereview is left, charged as one; else the question is asked.
+       */
+      rereview?: true;
     }
   /**
    * The whole state is replaced (`factory reset`'s steps, reset.ts): the
@@ -1164,6 +1171,7 @@ export class ObjectiveRunner {
         else this.retry(key, outcome);
         break;
       case "hold":
+        if (outcome.rereview && this.rereview(key, outcome.question)) break;
         // Free only when this question was recorded: one another hold
         // stops is asked again, and frees it then.
         if (this.hold(key, outcome)) markFree(state, outcome.free);
@@ -1211,6 +1219,38 @@ export class ObjectiveRunner {
       }
     }
     this.settle();
+  }
+
+  /**
+   * A question whose step kept its refused result unchanged at the
+   * operator's word (`rereview`): `revalidate` is answered for it, as the
+   * operator's would be, when the workflow takes it there and a result
+   * rereview is left, charged here against the live state like an
+   * operator's (`answer`). True when answered; else the question is asked,
+   * offering `revalidate` where it is taken, so past the allowance its
+   * `more` asks as an operator's `revalidate` would.
+   */
+  private rereview(key: string, question: string): boolean {
+    const state = this.state;
+    if (!this.workflow.revalidatable?.(state, key)) return false;
+    if (!chargeRereview(state)) return false;
+    const at = this.now().toISOString();
+    state.answers[key] = {
+      holdId: `${key}@${at}`,
+      question,
+      answer: REVALIDATE,
+      by: "factory",
+      at,
+    };
+    delete state.retries[key];
+    this.afterSave.push(() =>
+      this.log.write(state.issue, {
+        step: key,
+        event: "rereview-kept",
+        question: oneLine(question, 300),
+      }),
+    );
+    return true;
   }
 
   /**

@@ -280,7 +280,7 @@ Or comment on the issue: `/factory ANSWER [--question HOLD_ID] [ARG] [text]` (it
 Common answers:
 
 - `retry`: run the step again, after you fixed the cause.
-- `answer` with text: your decision, sent back to the planner or worker.
+- `answer` with text: your decision, sent back to the planner or worker. When your guidance tells a Work Item's worker to keep its refused result and it does, that isn't charged as a repair: the result is checked again as `revalidate` would (a result rereview), or Factory asks you.
 - `more`: grant more repairs or rounds.
 - `replan`, and `revalidate` (check a refused result again, unchanged).
 - `approve`: plan an issue whose author has no write access, or run the plan as it is when plan review asks you a question.
@@ -305,7 +305,7 @@ How much an Objective may correct itself before asking. These are frozen with it
 | `planningRevisions`             | 4       | planning revision rounds, and amendments of the accepted plan with their revision rounds |
 | `implementationRepairs`         | 6       | repairs of Work Items' work, across the Objective                                        |
 | `perPath`                       | 3       | repairs of one step (one Work Item's work, say)                                          |
-| `resultRereviews`               | 1       | `revalidate` answers                                                                     |
+| `resultRereviews`               | 1       | `revalidate` answers, and refused results a worker kept on your guidance                 |
 
 Running out holds with `more`, `replan` and `cancel`. An amendment past `planningRevisions` holds with `more` (allow as many again and plan it), `refuse` (reject it) and `cancel`.
 

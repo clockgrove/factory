@@ -40,7 +40,7 @@ import {
 } from "../worktree.js";
 import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
-import { fact, facts } from "./facts.js";
+import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
 import { refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
@@ -650,6 +650,19 @@ export async function workStep(
       };
     }
     case "repair":
+      // The operator's guidance was this attempt's only correction, and the
+      // worker kept the refused result as it was: no repair, since the
+      // worker did what it was told. It is checked again as `revalidate`
+      // would check it (a result rereview), or the operator is asked.
+      if (
+        collected.unchanged &&
+        !collected.staging &&
+        guidedOnly(state, item.id, keepAll)
+      )
+        return keptAsGuided(item, finished.finalResponse, {
+          ...keepAll,
+          ...facts({ finished: null }, item.id),
+        });
       return repairOutcome(
         item,
         "work",
@@ -667,6 +680,59 @@ export async function workStep(
     default:
       return withKeep(collected, keepFinished);
   }
+}
+
+/**
+ * Whether this attempt's only correction was the operator's guidance (their
+ * `answer` to its repair diagnosis question, repair-context.ts): the
+ * diagnosis for the item's current repair, written by this run or saved for
+ * it, is the operator's, with no correction of Factory's.
+ */
+export function guidedOnly(
+  state: ObjectiveState,
+  id: string,
+  keep: Record<string, unknown>,
+): boolean {
+  const now = written(keep, "diagnosis", id);
+  const diagnosis = now === undefined ? fact(state, "diagnosis", id) : now;
+  return (
+    !!diagnosis &&
+    diagnosis.repair === state.repairs?.[stepKey(id, "work")]?.count &&
+    diagnosis.context.operator !== undefined &&
+    diagnosis.context.correction === undefined
+  );
+}
+
+/** The longest worker final response a question quotes. */
+const KEPT_RESPONSE_LIMIT = 2000;
+
+/**
+ * The worker followed the operator's guidance and resubmitted the refused
+ * result unchanged (#2131). That is no repair: the engine answers
+ * `revalidate` for it where it is taken and a result rereview is left
+ * (engine.ts `rereview`), so the same result is checked again, charged as
+ * a rereview; else this question asks, and the engine adds `revalidate`
+ * (with its sentence) where the item can take it, so past the rereview
+ * allowance it asks for `more`.
+ */
+function keptAsGuided(
+  item: WorkItem,
+  finalResponse: string,
+  keep: Record<string, unknown>,
+): Outcome {
+  const text = finalResponse.trim();
+  const said =
+    text.length > KEPT_RESPONSE_LIMIT
+      ? `${text.slice(0, KEPT_RESPONSE_LIMIT)}...`
+      : text;
+  return {
+    ...hold(
+      `Work Item ${item.id}'s worker followed your guidance and kept its refused result unchanged, so there is no new result, and no repair is charged for it.${said ? `\n\nThe worker's final response: ${said}` : ""}\n\nFactory checks a result kept this way again as a result rereview when it can; it can't now (the result can't be checked again as it is, or this Objective's result rereviews are spent). Answer \`answer <text>\` to send the worker other guidance, \`replan\` to plan again, or cancel.`,
+      ["answer", "replan", "cancel"],
+    ),
+    rereview: true,
+    keep,
+  };
 }
 
 /** A media answer other than done as the step's outcome: `repair` goes back to the work step. */

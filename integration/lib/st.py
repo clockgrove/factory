@@ -32,7 +32,8 @@
   st.py ROOT artifacts-kind N KIND   1 when any done step result holds {"kind": KIND}
   st.py ROOT amendments N [ISO]  each kept amendment proposal taken in at or after ISO, oldest
                                  first, as "ID STATUS": pending, accepted, rejected or continued,
-                                 from its own result alone (amend:<id>, amend:<id>:continue)
+                                 from its own result alone (amend:<id>, amend:<id>:continue;
+                                 a result {"unchanged": true} is continued)
   st.py ROOT unreadable N        1 when service.json lists N as unreadable
 
 Holds: a build saves a list `holds` (STATE_VERSION 2); an older one saves
@@ -347,8 +348,10 @@ def main():
         for p in proposals:
             key = f"amend:{p.get('id')}"
             result = done.get(key)
+            # A reviewed round that left the plan unchanged settles it as
+            # continued with no `continue` answer: {"unchanged": true} (#2116).
             print(p.get("id"), "pending" if not isinstance(result, dict) else "accepted" if result.get("plan")
-                  else "continued" if f"{key}:continue" in done else "rejected")
+                  else "continued" if result.get("unchanged") or f"{key}:continue" in done else "rejected")
     elif cmd == "unreadable":
         try:
             with open(os.path.join(root, "service.json")) as f:

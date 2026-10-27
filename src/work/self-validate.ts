@@ -10,8 +10,9 @@ import { stripVTControlCharacters } from "node:util";
 import type { SandboxConfig } from "../config.js";
 import { hold, objectiveWide } from "../engine.js";
 import { GitRefusal } from "../git.js";
+import { needsSelection } from "../media.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
-import type { Plan } from "../planning/types.js";
+import type { Plan, WorkItem } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, headAndTail } from "../text.js";
 import { validateTree } from "../validate.js";
@@ -50,6 +51,29 @@ export const VALIDATION_TOOL_DESCRIPTION =
  */
 export const UNOWNED_FIX =
   "If the fix needs files outside your owned paths, do not change them: write an in-scope .factory-discovery.json naming them and stop.";
+
+/**
+ * What Validate means for a media item (#2116): its selected set is never
+ * in the worker's checkout, so never in the snapshot Validate runs on, and
+ * a check of the delivered files fails there for that reason alone, as the
+ * worker prompt's media contract says (work/prompt.ts
+ * `ABSENT_DESTINATIONS`). Everything Factory tells the worker about
+ * Validate (the tool, a failed run, the request to validate, a turn-limit
+ * continuation) carries it, so none of them asks for a fix or a discovery
+ * of that failure, or for a passing run it can't have.
+ */
+export const SELECTED_MEDIA_VALIDATE =
+  "This item's selected media are not in your checkout, so not in the files Validate runs on either: Factory writes the operator's chosen set at their destinations after selection, and its own validation runs with them there. A failure caused only by their absence, such as a test of the delivered files that can't find them, is expected: it is no failure to fix and no discovery. Keep the check as the acceptance requires, do not write .factory-discovery.json for it, and finish once every other failure is fixed, reporting it.";
+
+/** SELECTED_MEDIA_VALIDATE, with a leading space, for an item that needs a selection; else nothing. */
+export function selectedMediaNote(item: WorkItem): string {
+  return needsSelection(item) ? ` ${SELECTED_MEDIA_VALIDATE}` : "";
+}
+
+/** The Validate tool's description for `item`'s worker. */
+export function validationToolDescription(item: WorkItem): string {
+  return `${VALIDATION_TOOL_DESCRIPTION}${selectedMediaNote(item)}`;
+}
 
 /** Validate keeps the tail: failures report last. */
 const VALIDATION_OUTPUT_CHARS = 8_000;
@@ -188,7 +212,7 @@ export class SelfValidation {
     const declared =
       result.kind === "passed"
         ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}\n${UNOWNED_FIX}`;
+        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
     const parts = [
       result.produced ? `${declared}\n\n${result.produced}` : declared,
     ];

@@ -25,8 +25,9 @@ import { validationDeadlineMs } from "../validate.js";
 import {
   type SelfValidateOptions,
   SelfValidation,
-  VALIDATION_TOOL_DESCRIPTION,
+  selectedMediaNote,
   VALIDATION_TOOL_NAME,
+  validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
 import {
@@ -791,11 +792,13 @@ export class CopilotWorker implements Worker {
         directory: input.worktree,
         tools,
         writes: true,
-        system: validator ? WORKER_SYSTEM + VALIDATE_SYSTEM : WORKER_SYSTEM,
+        system: validator
+          ? `${WORKER_SYSTEM}${VALIDATE_SYSTEM}${selectedMediaNote(input.item)}`
+          : WORKER_SYSTEM,
         custom: validator && [
           {
             name: VALIDATION_TOOL_NAME,
-            description: VALIDATION_TOOL_DESCRIPTION,
+            description: validationToolDescription(input.item),
             parameters: {
               type: "object",
               properties: {},

@@ -42,7 +42,7 @@ import type { SandboxConfig } from "../config.js";
 import { errored, hold } from "../engine.js";
 import { openParent, pathInsideRoot, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
-import type { Plan } from "../planning/types.js";
+import type { Plan, WorkItem } from "../planning/types.js";
 import { runSandboxed, sandboxAvailable } from "../sandbox.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { BoundedText, errorMessage, headAndTail } from "../text.js";
@@ -51,9 +51,10 @@ import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
   SelfValidation,
+  selectedMediaNote,
   UNOWNED_FIX,
-  VALIDATION_TOOL_DESCRIPTION,
   VALIDATION_TOOL_NAME,
+  validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
 import {
@@ -201,9 +202,25 @@ const CREDENTIAL_RESTART =
 
 export const VALIDATE_REQUEST = `Run Validate on your final files, fix any failures, then give your final report. ${UNOWNED_FIX}`;
 
-/** `failed`: Validate's last run on the worker's current files failed. */
-export function continuation(validating: boolean, failed: boolean): string {
-  return `You reached the turn limit before finishing. Continue the same task from where you stopped.${validating ? " Finish only after Validate passes on your final files," : " Finish the change,"} then review your own diff, then give your final report.${failed ? ` Validate failed on your current files. ${UNOWNED_FIX}` : ""}`;
+/**
+ * The request to validate for `item`'s worker: a media item's also says
+ * what a failure for its absent selected set means (`selectedMediaNote`).
+ */
+export function validateRequest(item: WorkItem): string {
+  return `${VALIDATE_REQUEST}${selectedMediaNote(item)}`;
+}
+
+/**
+ * `failed`: Validate's last run on the worker's current files failed.
+ * `item`: a media item's continuation says what a failure for its absent
+ * selected set means (`selectedMediaNote`).
+ */
+export function continuation(
+  validating: boolean,
+  failed: boolean,
+  item?: WorkItem,
+): string {
+  return `You reached the turn limit before finishing. Continue the same task from where you stopped.${validating ? " Finish only after Validate passes on your final files," : " Finish the change,"} then review your own diff, then give your final report.${failed ? ` Validate failed on your current files. ${UNOWNED_FIX}` : ""}${validating && item ? selectedMediaNote(item) : ""}`;
 }
 
 // Limits
@@ -723,7 +740,7 @@ class Attempt {
       tools: [
         tool(
           VALIDATION_TOOL_NAME,
-          VALIDATION_TOOL_DESCRIPTION,
+          validationToolDescription(this.input.item),
           {},
           async () => {
             const result = await this.validator.call();
@@ -1535,6 +1552,7 @@ export class ClaudeWorker implements Worker {
               attempt.grants.validate,
               attempt.grants.validate &&
                 (await watchdog.race(attempt.validator.finalFailed())),
+              attempt.input.item,
             ),
           );
           continue;
@@ -1556,7 +1574,7 @@ export class ClaudeWorker implements Worker {
           (await watchdog.race(attempt.validator.finalTree())) === false
         ) {
           validationRequested = true;
-          send(VALIDATE_REQUEST);
+          send(validateRequest(attempt.input.item));
           continue;
         }
         break;

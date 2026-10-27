@@ -195,6 +195,32 @@ const VALIDATION_OWNERSHIP =
 const UNCOMMITTED_RESULT =
   "Validation runs on the uncommitted result. The worker writes and runs an item's validation commands in its checkout, where its change is not committed and selected media are not yet there; Factory runs them in a fresh checkout of a commit it makes of the result. So what HEAD, the index and the history hold differs between those runs, and every Git LFS file holds its real bytes, never its pointer. A command, and every test it runs, checks the files in the working tree and must not depend on the result being committed: flag one that does, such as `git show HEAD:<new file>`, `git log` or `git diff HEAD` to find the change, `git ls-files` or `git lfs ls-files` of a path the item adds, or a test that reads a Git LFS file expecting its pointer text. A Work Item's base-relative check that compares the working tree with $FACTORY_BASE_SHA does not depend on it, though in the worker's checkout `git diff` leaves out files the change adds. Flag a command its tool can't run as written, too, such as `git lfs ls-files -- <path> <path>`: `git lfs ls-files` reads its arguments as revisions, not paths. Either fails whatever the result holds, and a started item's commands can be replaced only through an amendment. Git LFS storage of selected media is a Factory controller guarantee (selected-set-materialization): an item checks that a destination is routed through Git LFS from the output of `git check-attr filter -- <path>`, which must name `lfs` (the command exits zero for an unrouted path too, so it proves nothing alone), never by reading pointers.";
 
+/**
+ * A media item's selected set reaches its destinations only when Factory
+ * writes it there, after selection and before its own validation, review
+ * and delivery (work/step-select.ts `materializeSelection`): the worker's
+ * checkout never holds it, so a check of the delivered files fails there
+ * for that reason alone. An amendment's planner and both its reviews (of
+ * a plan round and of a cannotPlan) are told so, since such a failure is
+ * no gap in the plan.
+ */
+export const SELECTED_MEDIA_ABSENT =
+  "A media item's worker checkout never holds its selected set: Factory writes the operator's chosen set at the item's destinations on top of its result after selection, before its own validation, review and delivery. So a check of the delivered files at those destinations, such as the item's own test of them, fails in the worker's checkout for that reason alone, and Factory's validation runs it on the selected set. A discovery resting on such a failure (a destination the item's own media roles fill is missing) shows no gap in the plan: the item's validation already runs after selection, so it justifies no replaced or dropped command, moved test, new item or dependency, and the plan needs no change for it.";
+
+/**
+ * What the amendment planner answers for a discovery that shows no gap:
+ * the plan unchanged, which amendments.ts `amendAcceptStep` settles as
+ * continued once its review agrees. Neither a revision nor cannotPlan
+ * fits it otherwise: an empty revision read as a changed plan, and a
+ * cannotPlan its review confirms rejects the amendment and holds the
+ * Objective (#2116).
+ */
+export const NO_GAP_ANSWER =
+  "When the discovery shows no gap in the plan, as one resting on such a failure does, answer with no change: every item, coverage entry and source exclusion as the plan being amended has them, and none added. Never answer cannotPlan for it. Once the independent review agrees, Factory settles the amendment with the plan as it is and posts nothing, and the proposing Work Item carries on with its result.";
+
+/** What the review of an amendment's cannotPlan is told of a discovery with no gap (prompts.ts `renderRefusalReviewCall`). */
+export const NO_GAP_REFUSAL = `${SELECTED_MEDIA_ABSENT} A refusal resting on such a discovery is wrong, since the plan as it is serves it: return a fix finding saying the discovery shows no gap, so the planner answers with no change to the plan.`;
+
 /** Check 9: candidate media sets are offered for choice; only the selection is delivered. */
 const CANDIDATE_SETS =
   "Candidate media sets are alternatives the operator chooses from: Factory validates, reviews and delivers only the selected set, and unselected sets are never committed or validated. An item with candidate sets states its alternatives as offered (how many, each complete with its roles, how they should differ) and its repository checks (format, content, tests) about the delivered selection at its destinations. Flag a criterion that requires each or every candidate, or an unselected alternative, to pass validation, tests or repository checks: no result can prove it.";

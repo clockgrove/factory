@@ -9,8 +9,9 @@
  * `errorOutcome`).
  *
  * Native-stack delivery reuses publish and observeCi per layer, with the
- * layer below as the PR's base, and merges the whole chain at once with
- * mergeUnit.
+ * layer below as the PR's base. A layer above the bottom makes the GitHub
+ * stack in its observeCi once every layer is published, and mergeUnit
+ * merges the whole chain at once.
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { crashPoint } from "./crash.js";
@@ -780,6 +781,13 @@ export interface PullInput {
   baseBranch?: string;
   /** The item's last rerun of failed Actions jobs, as kept. */
   rerun?: CiRerun;
+  /**
+   * The CI step of a native-stack layer above the bottom: the PRs of its
+   * unit's published layers, bottom first, and the items of the layers not
+   * published yet. Once every layer is published, observeCi makes the
+   * stack (#2068).
+   */
+  stack?: { pulls: number[]; unpublished: string[] };
 }
 
 export type CiResult =
@@ -809,6 +817,18 @@ export type CiResult =
  * or running are a transient wait; an environment approval or a required
  * review is a human gate the engine waits on without a deadline
  * (docs/reference/steps.md#Waits).
+ *
+ * A native-stack layer above the bottom (`input.stack`) whose PR is open
+ * on its base makes the stack once every layer is published, before
+ * anything else is judged, so from then on it never reads ready without
+ * it (#2068). Making it runs the `pull_request` workflows filtered to the
+ * default branch on every layer above the bottom (GitHub's `stacked`
+ * event, with `base_ref` the stack's base; later pushes carry it too), so
+ * such a workflow reports there, and GitHub requires the default branch's
+ * checks there. Until then, a check that has not registered
+ * on such a layer is a wait on the layers above, never a question; from
+ * then on, the 15 minutes before one is asked about run from when Factory
+ * began waiting, not from the layer's push.
  */
 export async function observeCi(
   context: DeliveryContext,
@@ -926,6 +946,18 @@ async function judge(
   const head = await deliveredHead(context, pull, input, bases);
   if (typeof head !== "string") return head;
   if (pull.merged) return { kind: "ready", head, pull, defaultBranch };
+  // A native-stack layer above the bottom makes the stack once every layer
+  // is published (observeCi, #2068).
+  let made = false;
+  if (input.stack && !input.stack.unpublished.length) {
+    const stacked = await ensureStack(
+      context,
+      input.stack.pulls,
+      defaultBranch,
+    );
+    if (typeof stacked === "object") return stacked;
+    made = stacked === "made";
+  }
   const state = await github.mergeState(pr, signal);
   if (
     state.headRefOid !== head ||
@@ -1060,14 +1092,24 @@ async function judge(
     // The engine asks once the wait has gone on CHECK_SETTLE_MS from the
     // push, or from when Factory began waiting when GitHub doesn't say.
     const missing = [...new Set([...unreported, ...absent])];
+    // A native-stack layer above the bottom: a workflow that runs only on
+    // PRs into the default branch starts on it once the stack exists
+    // (#2068), which can be long after its push. Before then (a layer
+    // above it is not published yet) a missing check is a wait on those
+    // layers, Factory's own work, with no question.
+    const upper = baseBranch !== defaultBranch;
+    const above =
+      upper && missing.length ? (input.stack?.unpublished ?? []) : [];
     let settle: HoldAfter | undefined;
-    if (missing.length) {
-      const pushedAt = await github.pushTime(pull.head.ref, head, signal);
+    if (missing.length && !above.length) {
+      const pushedAt = upper
+        ? undefined
+        : await github.pushTime(pull.head.ref, head, signal);
       const pushed = Number.isFinite(Date.parse(pushedAt ?? ""));
       // The default branch requires them, a stack layer above its bottom too.
       const requiring = absent.length
         ? "the plan requires it"
-        : `${defaultBranch}'s branch protection requires it${baseBranch === defaultBranch ? "" : ", for every layer of a native stack"}`;
+        : `${defaultBranch}'s branch protection requires it${upper ? ", for every layer of a native stack" : ""}`;
       settle = {
         ms: CHECK_SETTLE_MS,
         question: `Check ${bounded(
@@ -1093,11 +1135,29 @@ async function judge(
           )
         ? `a required review on PR #${pr}`
         : undefined;
+    // The layers above are Factory's to publish: a gate no person holds,
+    // which never asks, and whose clock stays apart from the wait that
+    // follows once the stack exists (engine.ts `retry`).
+    const items = `Work Item${above.length === 1 ? "" : "s"} ${above.join(", ")}`;
+    const stacking = above.length
+      ? `the native stack, made once ${items} ${above.length === 1 ? "is" : "are"} published`
+      : undefined;
     return {
       kind: "retry",
-      reason: gate ? `Waiting on ${gate}` : waiting,
+      reason: gate
+        ? `Waiting on ${gate}`
+        : stacking
+          ? `${waiting}. ${bounded(
+              missing.map((name) => JSON.stringify(name)),
+              ", ",
+            )} may run on this layer only once ${stacking}`
+          : waiting,
       afterMs: CI_POLL_MS,
-      ...(gate ? { wait: { kind: "gate", gate, human: true } } : {}),
+      ...(gate
+        ? { wait: { kind: "gate", gate, human: true } }
+        : stacking
+          ? { wait: { kind: "gate", gate: stacking } }
+          : {}),
       ...(settle ? { holdAfter: settle } : {}),
     };
   }
@@ -1108,7 +1168,15 @@ async function judge(
     runs,
     reported.size > 0,
   );
-  return unregistered ?? { kind: "ready", head, pull, defaultBranch };
+  if (unregistered) return unregistered;
+  // The checks a stack just made starts may not show yet.
+  if (made)
+    return {
+      kind: "retry",
+      reason: `Made the native stack of PRs ${input.stack!.pulls.map((number) => `#${number}`).join(", ")}; awaiting the checks it starts on PR #${pr}`,
+      afterMs: CI_POLL_MS,
+    };
+  return { kind: "ready", head, pull, defaultBranch };
 }
 
 /**
@@ -2094,7 +2162,7 @@ async function mergeUnitOnce(
     layers.map((layer) => layer.pull.number),
     defaultBranch,
   );
-  if (stacked) return pin(stacked, top);
+  if (typeof stacked === "object") return pin(stacked, top);
   const last = layers[layers.length - 1]!;
   crashPoint("stack:merge:before");
   let request: AsyncMerge;
@@ -2223,13 +2291,15 @@ function judgeLayer(
  * bottom PR, or created and checked. Another stack holding these PRs is a
  * question; Factory never adopts a stack it did not build. A refused
  * creation, or stack data Factory can't read, retries and becomes a
- * question after GitHub's lag window.
+ * question after GitHub's lag window. `found` or `made` when the stack is
+ * there: the CI step of a layer above the bottom makes it as soon as every
+ * layer is published (judge, #2068), and the merge checks it again.
  */
 async function ensureStack(
   context: DeliveryContext,
   pulls: number[],
   defaultBranch: string,
-): Promise<Retry | Hold | undefined> {
+): Promise<Retry | Hold | "found" | "made"> {
   const { github, signal } = context;
   const expected = `base ${defaultBranch} and PRs ${pulls.map((pr) => `#${pr}`).join(", ")}`;
   const shown = (stack: Stack) =>
@@ -2259,7 +2329,7 @@ async function ensureStack(
     return hold(
       `PR #${pulls[0]} is in ${found.map(shown).join(" and ")}, not the native stack Factory builds (${expected}). Inspect it; remove the other stack, then answer retry; or cancel.`,
     );
-  if (found.length) return undefined;
+  if (found.length) return "found";
   crashPoint("stack:create:before");
   let created: Stack;
   try {
@@ -2280,7 +2350,7 @@ async function ensureStack(
   }
   crashPoint("stack:create:after");
   return same(created)
-    ? undefined
+    ? "made"
     : hold(
         `GitHub made ${shown(created)}, not the native stack Factory asked for (${expected}). Inspect it; remove it, then answer retry; or cancel.`,
       );

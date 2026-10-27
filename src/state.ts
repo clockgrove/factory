@@ -159,8 +159,10 @@ export type Wait =
   | { kind: "reset"; at?: string; provider?: string }
   /**
    * Something outside Factory: a person (`human`: an environment approval,
-   * a required review), or another Objective (a predecessor, a split's
-   * children). Only a person's gate asks after a while.
+   * a required review), another Objective (a predecessor, a split's
+   * children), or the native-stack layers above a layer, which must be
+   * published before its stack exists (delivery.ts `judge`). Only a
+   * person's gate asks after a while.
    */
   | { kind: "gate"; gate: string; human?: true };
 

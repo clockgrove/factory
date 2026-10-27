@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { deflateRawSync } from "node:zlib";
-import { observeCi } from "../dist/delivery.js";
+import { observeCi, stepLog } from "../dist/delivery.js";
 import { GitHub, GitHubError, TransientError } from "../dist/github.js";
 import { correction } from "../dist/repair.js";
 import { pullInput } from "../dist/work/step-deliver.js";
@@ -98,6 +98,7 @@ function github({
       run: RUN,
       attempt: jobs[job]?.attempt ?? 1,
       failedSteps: jobs[job]?.failedSteps ?? [],
+      failedStepTimes: jobs[job]?.failedStepTimes ?? [],
     }),
     workflowRunAttempt: async () => ({ attempt, status: "completed" }),
     rerunFailedJobs: async (run) => {
@@ -396,6 +397,304 @@ test("the failed run's artifacts reach the repair finding: names, sizes and smal
   assert.ok(finding.endsWith("quality: the checks job failed"));
 });
 
+// Clockgrove #821, job 122053441527: the checks job failed in "Bootstrap
+// canonical local capability", whose supply-chain assertion is followed by
+// the receipts upload and post-job cleanup. The job's tail held only those,
+// so the diagnosis asked the operator "what step failed and what error"
+// (#2120): the finding holds the failed step's own lines instead.
+test("the failed step's own log reaches the finding, not only the job's tail", async () => {
+  const at = (second, fraction) =>
+    `2026-10-27T06:${second}.${String(fraction).padStart(7, "0")}Z`;
+  const step = [
+    `${at("51:19", 5722621)} ##[group]Run node scripts/bootstrap.mjs "$CI_EVIDENCE_DIR" --only "install,check,supply-chain"`,
+    `${at("51:19", 5781050)} ##[endgroup]`,
+    `${at("52:23", 9491559)} $ node scripts/supply-chain.mjs`,
+    `${at("52:23", 9492180)} license allowlist and SBOM: dependency vulnerability scan: advisories found; inspect vulnerabilities.json`,
+    `${at("52:23", 9493874)} \x1b[31mAssertionError [ERR_ASSERTION]: supply-chain failures: license allowlist and SBOM\x1b[0m`,
+    `${at("52:23", 9494999)}     at verifySupplyChain (file:///home/runner/work/clockgrove/clockgrove/scripts/supply-chain.mjs:190:10)`,
+    "  actual: 1,",
+    `${at("52:23", 9498908)} [ELIFECYCLE] Command failed with exit code 1.`,
+    `${at("52:23", 9557000)} ##[error]Process completed with exit code 1.`,
+  ];
+  // The next step starts within the second the failed one completed.
+  const after = [
+    `${at("52:23", 9638466)} ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`,
+    ...Array.from(
+      { length: 50 },
+      (_, n) => `${at("52:25", 4239146 + n)} Post job cleanup line ${n}`,
+    ),
+  ];
+  // Before it, the step before: the read tail starts within it. A line
+  // without a timestamp has its line before's.
+  const before = [
+    `${at("51:18", 5666717)} ##[end-action id=__self.install;outcome=success]`,
+    "a line of the step before",
+  ];
+  const failing = {
+    attempt: 2,
+    failedSteps: ["Bootstrap canonical local capability (checks)"],
+    failedStepTimes: [
+      {
+        name: "Bootstrap canonical local capability (checks)",
+        startedAt: "2026-10-27T06:51:19Z",
+        completedAt: "2026-10-27T06:52:23Z",
+      },
+    ],
+    log: [...before, ...step, ...after].join("\n"),
+  };
+  const hub = github({
+    runs: [check(1, "checks", "failure")],
+    baseRuns: [onBase(21, "checks", "success")],
+    jobs: { 1: failing },
+    attempt: 2,
+  });
+  const result = await observe(hub);
+  assert.equal(result.kind, "repair", JSON.stringify(result));
+  const { finding } = result;
+  assert.ok(
+    finding.endsWith(
+      [
+        "checks:",
+        "Failed step: Bootstrap canonical local capability (checks)",
+        "Log of failed step Bootstrap canonical local capability (checks):",
+        '##[group]Run node scripts/bootstrap.mjs "$CI_EVIDENCE_DIR" --only "install,check,supply-chain"',
+        "##[endgroup]",
+        "$ node scripts/supply-chain.mjs",
+        "license allowlist and SBOM: dependency vulnerability scan: advisories found; inspect vulnerabilities.json",
+        "AssertionError [ERR_ASSERTION]: supply-chain failures: license allowlist and SBOM",
+        "    at verifySupplyChain (file:///home/runner/work/clockgrove/clockgrove/scripts/supply-chain.mjs:190:10)",
+        "  actual: 1,",
+        "[ELIFECYCLE] Command failed with exit code 1.",
+        "##[error]Process completed with exit code 1.",
+      ].join("\n"),
+    ),
+    finding,
+  );
+  assert.doesNotMatch(
+    finding,
+    /Post job cleanup|upload-artifact|end-action|step before/,
+  );
+
+  // Long, it keeps its end, where the error is.
+  const long = stepLog(
+    [
+      `${at("51:19", 1)} first`,
+      ...Array.from({ length: 100 }, (_, n) => `${at("51:20", n)} line ${n}`),
+      `${at("51:21", 0)} ##[error]boom`,
+    ].join("\n"),
+    {
+      name: "s",
+      startedAt: "2026-10-27T06:51:19Z",
+      completedAt: "2026-10-27T06:51:21Z",
+    },
+  );
+  assert.equal(long.split("\n").length, 60);
+  assert.ok(long.endsWith("line 99\n##[error]boom"));
+  // A tail read that starts after the step, or no times: the job's tail.
+  assert.equal(
+    stepLog(after.slice(1).join("\n"), failing.failedStepTimes[0]),
+    undefined,
+  );
+  const tail = github({
+    runs: [check(1, "checks", "failure")],
+    jobs: { 1: { ...failing, failedStepTimes: [] } },
+    attempt: 2,
+  });
+  const repaired = await observe(tail);
+  assert.ok(repaired.finding.endsWith("Post job cleanup line 49"));
+  assert.doesNotMatch(repaired.finding, /Log of failed step/);
+});
+
+// GitHub gives a step's times to the second, and its neighbours write
+// within those seconds: Clockgrove job 122053950360's failed step "Require
+// every share to pass" ran within 06:52:46, after the upload step's last
+// lines there. Actions' own markers keep each step's error under its name.
+test("a failed step's log holds neither the step before's lines nor the next failed step's error", () => {
+  const at = (time) => `2026-10-27T06:52:${time}Z`;
+  const shareStep = {
+    name: "Require every share to pass",
+    startedAt: "2026-10-27T06:52:46Z",
+    completedAt: "2026-10-27T06:52:46Z",
+  };
+  assert.equal(
+    stepLog(
+      [
+        `${at("45.1000000")} ##[group]Run actions/upload-artifact@v4`,
+        `${at("46.0100000")} Uploaded bytes 2239558`,
+        `${at("46.0200000")} Artifact quality-evidence successfully finalized.`,
+        `${at("46.1000000")} ##[group]Run test "$RESULT" = success`,
+        `${at("46.1100000")} ##[endgroup]`,
+        `${at("46.2000000")} ##[error]Process completed with exit code 1.`,
+        `${at("47.0000000")} Post job cleanup.`,
+      ].join("\n"),
+      shareStep,
+    ),
+    [
+      '##[group]Run test "$RESULT" = success',
+      "##[endgroup]",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n"),
+  );
+
+  // Two failed steps, the second (`if: always()`) within the second the
+  // first completed.
+  const log = [
+    `${at("20.1000000")} ##[group]Run npm test`,
+    `${at("23.1000000")} A: test suite failed: expected 3 got 4`,
+    `${at("23.2000000")} ##[error]Process completed with exit code 1.`,
+    `${at("23.3000000")} ##[group]Run node scripts/report.mjs`,
+    `${at("23.5000000")} B: report script crashed: ENOENT receipts.json`,
+    `${at("23.6000000")} ##[error]Process completed with exit code 2.`,
+    `${at("24.0000000")} Post job cleanup.`,
+  ].join("\n");
+  assert.equal(
+    stepLog(log, {
+      name: "Test",
+      startedAt: "2026-10-27T06:52:20Z",
+      completedAt: "2026-10-27T06:52:23Z",
+    }),
+    [
+      "##[group]Run npm test",
+      "A: test suite failed: expected 3 got 4",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n"),
+  );
+  assert.equal(
+    stepLog(log, {
+      name: "Report",
+      startedAt: "2026-10-27T06:52:23Z",
+      completedAt: "2026-10-27T06:52:23Z",
+    }),
+    [
+      "##[group]Run node scripts/report.mjs",
+      "B: report script crashed: ENOENT receipts.json",
+      "##[error]Process completed with exit code 2.",
+    ].join("\n"),
+  );
+});
+
+// Two quick failed steps (`test "$X" = success` gates), both within one
+// second: the second began at the first step's `##[group]Run` there, read
+// the first's error, and was cut at its own start as "the next step's", so
+// the finding held the first step's error twice and never the second's.
+test("two failed steps within one second each keep their own error", async () => {
+  const at = (time) => `2026-10-27T06:52:${time}Z`;
+  const second = "2026-10-27T06:52:46Z";
+  const steps = ["Require lint to pass", "Require tests to pass"];
+  const hub = github({
+    runs: [check(1, "checks", "failure")],
+    baseRuns: [onBase(21, "checks", "success")],
+    jobs: {
+      1: {
+        attempt: 2,
+        failedSteps: steps,
+        failedStepTimes: steps.map((name) => ({
+          name,
+          startedAt: second,
+          completedAt: second,
+        })),
+        log: [
+          `${at("45.1000000")} ##[group]Run actions/upload-artifact@v4`,
+          `${at("46.0100000")} Artifact evidence successfully finalized.`,
+          `${at("46.1000000")} ##[group]Run test "$LINT" = success`,
+          `${at("46.2000000")} LINT-ERROR: lint failed`,
+          `${at("46.3000000")} ##[error]Process completed with exit code 1.`,
+          `${at("46.4000000")} ##[group]Run test "$TESTS" = success`,
+          `${at("46.5000000")} TESTS-ERROR: tests failed`,
+          `${at("46.6000000")} ##[error]Process completed with exit code 2.`,
+          `${at("47.0000000")} Post job cleanup.`,
+        ].join("\n"),
+      },
+    },
+    attempt: 2,
+  });
+  const result = await observe(hub);
+  assert.equal(result.kind, "repair", JSON.stringify(result));
+  assert.ok(
+    result.finding.endsWith(
+      [
+        `Log of failed step ${steps[0]}:`,
+        '##[group]Run test "$LINT" = success',
+        "LINT-ERROR: lint failed",
+        "##[error]Process completed with exit code 1.",
+        `Log of failed step ${steps[1]}:`,
+        '##[group]Run test "$TESTS" = success',
+        "TESTS-ERROR: tests failed",
+        "##[error]Process completed with exit code 2.",
+      ].join("\n"),
+    ),
+    result.finding,
+  );
+});
+
+// The repair diagnosis keeps a finding's first 1000 and last 7000
+// characters (repair.ts), and the excerpts come last: three failed checks,
+// each with two long failed steps, still each reach it with their errors,
+// however long the steps' names (an unnamed step's is its command line).
+for (const [gate, report] of [
+  ["Gate", "Report"],
+  [
+    `Run node gate.mjs ${"--flag ".repeat(90)}`,
+    `Run report ${"y".repeat(700)}`,
+  ],
+])
+  test(`every excerpted check's error reaches the repair diagnosis, whatever the steps' logs hold (step names of ${gate.length} and ${report.length} characters)`, async () => {
+    const names = ["lint", "checks", "quality"];
+    const step = (tag, name, second) => [
+      `2026-10-27T06:52:${second}.0000000Z ##[group]Run ${name}`,
+      ...Array.from(
+        { length: 120 },
+        (_, n) =>
+          `2026-10-27T06:52:${second}.${String(n + 1).padStart(7, "0")}Z ${tag} ${name} output line ${n} ${"x".repeat(40)}`,
+      ),
+      `2026-10-27T06:52:${second}.9000000Z ERROR-CAUSE-${tag}-${name}: the assertion that failed`,
+      `2026-10-27T06:52:${second}.9500000Z ##[error]Process completed with exit code 1.`,
+    ];
+    const jobs = Object.fromEntries(
+      names.map((tag, n) => [
+        n + 1,
+        {
+          attempt: 2,
+          failedSteps: [gate, report],
+          failedStepTimes: [
+            {
+              name: gate,
+              startedAt: "2026-10-27T06:52:20Z",
+              completedAt: "2026-10-27T06:52:20Z",
+            },
+            {
+              name: report,
+              startedAt: "2026-10-27T06:52:30Z",
+              completedAt: "2026-10-27T06:52:30Z",
+            },
+          ],
+          log: [...step(tag, "gate", 20), ...step(tag, "report", 30)].join(
+            "\n",
+          ),
+        },
+      ]),
+    );
+    const hub = github({
+      runs: names.map((name, n) => check(n + 1, name, "failure")),
+      baseRuns: names.map((name, n) => onBase(21 + n, name, "success")),
+      jobs,
+      attempt: 2,
+    });
+    const result = await observe(hub);
+    assert.equal(result.kind, "repair", JSON.stringify(result));
+    const { correction: diagnosed } = await correction({
+      finding: { kind: "failure", detail: result.finding },
+      operatorAnswer: "look at the logs",
+      prior: [],
+    });
+    for (const tag of names)
+      for (const name of ["gate", "report"])
+        assert.ok(
+          diagnosed.failure.includes(`ERROR-CAUSE-${tag}-${name}`),
+          `ERROR-CAUSE-${tag}-${name} not in\n\n${diagnosed.failure}`,
+        );
+  });
+
 test("artifacts reach the repair diagnosis's input, so it needn't ask the operator for them", async () => {
   const hub = github({
     runs: [check(1, "quality", "failure")],
@@ -678,6 +977,113 @@ test("the CI and merge steps pass the operator's retry and repair on to the comp
   assert.equal(input("repair").retried, undefined);
   assert.equal(input(undefined).retried, undefined);
   assert.equal(input("republish").repairShared, undefined);
+  // A result rereview of the delivered result (`revalidate`, #2120) is
+  // judged as the operator's retry: the default branch may have been what
+  // failed its checks. Only while that result is the item's.
+  const at = "2026-10-27T15:53:48.000Z";
+  state.done["item:a:work"] = { base: BASE, commit: "c".repeat(40) };
+  state.kept["item:a:rereviewed"] = { commit: "c".repeat(40), at };
+  assert.equal(input(undefined).retried, true);
+  assert.equal(input(undefined).rereviewedAt, at);
+  assert.equal(input("retry").rereviewedAt, at);
+  state.done["item:a:work"] = { base: BASE, commit: "d".repeat(40) };
+  assert.equal(input(undefined).retried, undefined);
+  assert.equal(input(undefined).rereviewedAt, undefined);
+});
+
+// Clockgrove #821 from 06:53 to 15:50 on 2026-10-27: PR #825's `checks`
+// job failed on its rerun (attempt 2), main (dc3e310) hadn't moved since
+// its checks passed five days before, and the PR's head already had it.
+// A `revalidate` then delivered the same head again: nothing new could
+// run, so the CI step repaired with the same finding, spending a repair
+// the operator's rereview said was not due. It asks instead, until main
+// fails them too or has moved on and passes them.
+test("a result rereview whose failed checks nothing has run again since asks instead of repairing again", async () => {
+  const failedAt = Date.now() - 60_000;
+  const stale = new Date(failedAt - 5 * DAY).toISOString();
+  const rereviewedAt = new Date(failedAt + 30_000).toISOString();
+  const kept = {
+    head: HEAD,
+    runs: [RUN],
+    checks: ["checks"],
+    at: new Date(failedAt - 120_000).toISOString(),
+  };
+  const shape = (fields = {}) =>
+    github({
+      runs: [
+        check(1, "checks", "failure", {
+          completed_at: new Date(failedAt).toISOString(),
+        }),
+      ],
+      baseRuns: [onBase(21, "checks", "success", { completed_at: stale })],
+      jobs: { 1: { attempt: 2 } },
+      attempt: 2,
+      ...fields,
+    });
+  const answered = { retried: true, rereviewedAt, rerun: kept };
+
+  const hub = shape();
+  const asked = await observe(hub, answered);
+  assert.equal(asked.kind, "hold", JSON.stringify(asked));
+  assert.match(
+    asked.question,
+    new RegExp(
+      `^Work Item a's result was checked again on the operator's revalidate and delivered unchanged, and no check has run on PR #7 since: at ${HEAD} it still fails checks \\(failure, \\S+\\)\\. Factory has nothing more to run there .*; it spent none\\.`,
+    ),
+  );
+  // What main shows: its stale pass.
+  assert.match(asked.question, /checks ended success at \S+, 5 days before/);
+  assert.match(
+    asked.question,
+    /If main would fail them now too, run them again on main or fix them there \(another Objective can\), then answer retry; repair if the failure is this Work Item's change's; or cancel\.$/,
+  );
+  assert.deepEqual(
+    asked.options.map((option) => option.answer),
+    ["retry", "repair", "cancel"],
+  );
+  assert.deepEqual(hub.reruns, []);
+  assert.deepEqual(hub.updates, []);
+  // The operator's retry to it, with nothing changed: asks again.
+  assert.equal((await observe(shape(), answered)).kind, "hold");
+  // Without the rereview, the same state repairs, as before.
+  assert.equal((await observe(shape(), { rerun: kept })).kind, "repair");
+  // `repair` to it repairs.
+  const repaired = await observe(shape(), {
+    ...answered,
+    repairShared: true,
+  });
+  assert.equal(repaired.kind, "repair");
+  assert.equal(repaired.checks, true);
+
+  // The operator ran main's checks again and they fail now: main is red.
+  const red = await observe(
+    shape({
+      baseRuns: [
+        onBase(21, "checks", "success", { completed_at: stale }),
+        onBase(22, "checks", "failure"),
+      ],
+    }),
+    answered,
+  );
+  assert.equal(red.kind, "hold");
+  assert.match(red.question, /^main is red: /);
+
+  // 15:50: main moved on (#828) and passes them: GitHub updates the PR.
+  const moved = shape({
+    baseRuns: [onBase(21, "checks", "success")],
+    behind: 1,
+  });
+  const update = await observe(moved, answered);
+  assert.equal(update.kind, "retry");
+  assert.deepEqual(moved.updates, [[7, HEAD]]);
+
+  // A check that ran since the rereview (a head delivered for the first
+  // time, or a rerun) is evidence: it is rerun and repaired as usual.
+  const fresh = await observe(shape(), {
+    ...answered,
+    rereviewedAt: new Date(failedAt - 30_000).toISOString(),
+  });
+  assert.equal(fresh.kind, "repair");
 });
 
 test("the client reads main's head, a job's failed steps, a run's artifacts and a bounded download, and holds them for a rate limit", async () => {
@@ -706,7 +1112,12 @@ test("the client reads main's head, a job's failed steps, a run's artifacts and 
         run_attempt: 2,
         steps: [
           { name: "Set up job", conclusion: "success" },
-          { name: "Supply-chain gate", conclusion: "failure" },
+          {
+            name: "Supply-chain gate",
+            conclusion: "failure",
+            started_at: "2026-10-27T06:51:19Z",
+            completed_at: "2026-10-27T06:52:23Z",
+          },
           { name: "Upload receipts", conclusion: "skipped" },
         ],
       });
@@ -757,6 +1168,13 @@ test("the client reads main's head, a job's failed steps, a run's artifacts and 
     run: RUN,
     attempt: 2,
     failedSteps: ["Supply-chain gate"],
+    failedStepTimes: [
+      {
+        name: "Supply-chain gate",
+        startedAt: "2026-10-27T06:51:19Z",
+        completedAt: "2026-10-27T06:52:23Z",
+      },
+    ],
   });
   assert.deepEqual(await hub.runArtifacts(RUN), [
     { id: 9, name: "receipts", size: 200, expired: false },

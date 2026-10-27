@@ -1,5 +1,5 @@
 import { itemOf } from "../engine.js";
-import { needsSelection } from "../media.js";
+import { type CandidateSet, needsSelection } from "../media.js";
 import { currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
@@ -34,6 +34,24 @@ export function refusedOf(
 ): Refused | undefined {
   const refused = fact(state, "refused", id);
   return refused?.replayOnly ? undefined : refused;
+}
+
+/**
+ * The tree collection reads as the refused result again (collect.ts
+ * `refusedTree`): the kept refused result's, while this result's media is
+ * the refused result's own (it has no candidate sets, or its selection
+ * stands). The refused tree is the work commit's, before the select step
+ * wrote the chosen set on it, so new candidates (a refusal about the media
+ * drops the selection) are a new result even on that same tree: for an
+ * item that owns only its destinations, the base's.
+ */
+export function refusedTreeFor(
+  state: ObjectiveState,
+  id: string,
+  result: { sets: readonly CandidateSet[]; selectionStands: boolean },
+): string | undefined {
+  if (result.sets.length > 0 && !result.selectionStands) return undefined;
+  return refusedOf(state, id)?.tree;
 }
 
 /**

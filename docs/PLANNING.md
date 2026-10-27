@@ -49,6 +49,8 @@ The rules live in `src/planning/rubric.ts`. The planner and the graph reviewer r
 
 All three happen in the planner's one session. Self-checking is a filter; the independent graph review stays the gate.
 
+**A refusal is reviewed too.** When the planner answers `cannotPlan` (no plan can meet the Objective as written), the independent review judges the refusal before the operator is asked: it confirms it, or returns a fix finding naming the rule or evidence that allows a plan, which goes back to the planner as another round within `planningRevisions`. A later refusal's review is given the corrections the planner was given before it, so a refusal that rests on a reviewer's own conflicting findings is settled by judging those findings again, not by asking the operator. This holds in first planning and in an amendment (see [Holds](reference/holds.md), Can't be planned). Why: live, a planner refused after a reviewer's contradictory objections about a new test file's ownership, and the refusal went to the operator unreviewed (#2111).
+
 **Plan changes after acceptance are planned, not asked.** When a Work Item's repair needs files or work outside its owned paths that no item owns (a module a person's new test imports, say), the repair diagnosis decides `discover`, and amendment planning chooses between a new Work Item and a change to an existing one, under the same checks and independent review. The diagnosis asks the operator only what a person alone can decide: their intent, an external fact or an authorization. Why: a question like "add an item to own the file, or drop the test?" hands the plan to the operator, when the planner and its review can make and check that change (see [Holds](reference/holds.md)).
 
 ## How review holds the standard

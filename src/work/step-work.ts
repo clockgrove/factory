@@ -42,7 +42,7 @@ import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
 import { fact, facts } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
-import { refusedOf, refusedResult } from "./refused.js";
+import { refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import { itemMemory } from "./shared.js";
 import { correctsMedia, repairOutcome } from "./step-deliver.js";
@@ -185,12 +185,27 @@ export async function workStep(
         ),
         keepBase,
       );
+    // Delivery judges its failed checks as on the operator's `retry`
+    // (step-deliver.ts `pullInput`): the default branch may have been
+    // what failed them, and a failure nothing has run again since is a
+    // question, not the same repair again.
     return {
       kind: "done",
       result: refused,
       keep: {
         ...keepBase,
-        ...facts({ finished: null, finding: null, refused: null }, item.id),
+        ...facts(
+          {
+            finished: null,
+            finding: null,
+            refused: null,
+            rereviewed: {
+              commit: refused.commit,
+              at: context.answer.at,
+            },
+          },
+          item.id,
+        ),
       },
     };
   }
@@ -204,7 +219,12 @@ export async function workStep(
   if (
     !finished &&
     context.answer?.answer === ACCEPT &&
-    finding?.kind === "review"
+    finding?.kind === "review" &&
+    // Recorded already: a run past a spent allowance saved what it left
+    // standing and its diagnosis, which the repair after `more` uses.
+    !(fact(state, "decisions", item.id) ?? []).some(
+      (entry) => entry.holdId === context.answer?.holdId,
+    )
   ) {
     const decided = refusalDecisions(context, finding, item.id);
     keepAll = { ...keepAll, ...decided.keep };
@@ -566,7 +586,14 @@ export async function workStep(
     playbook: config.planning.playbook,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
-    refusedTree: refusedOf(state, item.id)?.tree,
+    // New candidates are a new result, even on the refused tree.
+    refusedTree: refusedTreeFor(state, item.id, {
+      sets,
+      selectionStands: own !== undefined,
+    }),
+    // A Work Item that owns only its media destinations changes nothing
+    // else: its candidates are its result.
+    media: sets.length > 0,
     author,
     signal,
   });

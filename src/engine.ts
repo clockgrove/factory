@@ -7,6 +7,7 @@ import {
   grantRereviews,
   overrun,
   overrunQuestion,
+  rereviewNote,
   rereviewQuestion,
 } from "./allowances.js";
 import { crashPoint } from "./crash.js";
@@ -1512,6 +1513,11 @@ export class ObjectiveRunner {
         0,
         common(REVALIDATE),
       );
+    // Its text is the engine's too, written where it is offered, so a
+    // question never names `revalidate` without taking it (#2120).
+    const rereview =
+      options.some((option) => option.answer === REVALIDATE) &&
+      this.workflow.revalidatable?.(state, key) === true;
     // A recommended `switch` with several targets recommends this
     // Objective's own provider (re-freeze), else the next other answer:
     // never an arbitrary provider.
@@ -1546,6 +1552,7 @@ export class ObjectiveRunner {
         ...(item !== undefined ? { item } : {}),
         question: [
           question,
+          ...(rereview ? [rereviewNote(state)] : []),
           ...(named.length ? [named.join(" ")] : []),
           ...deadlineNote(state.deadline, this.now()),
         ].join("\n\n"),

@@ -421,6 +421,139 @@ test("a refused candidate set is repaired from its staging or receipt, and only 
   );
 });
 
+// Live (Codex, media.select-repair, run 2026-10-27T063313PDT-d8db): review
+// refused a criterion about the alternatives and the delivered files for a
+// missing test assertion, citing the receipt (where it judges the
+// alternatives) and the worker's test. The operator's choice was dropped,
+// the worker had to stage new candidates, and the Objective held.
+test("a review refusal that cites the receipt beside the worker's own file keeps the selection (#2110)", () => {
+  const media = item(["assets/badge/", "test/badge.test.js"]);
+  const set = candidateSet(tempDir("factory-set-"), ["assets/badge/a.png"]);
+  const receipt = {
+    path: "Controller candidate receipt: badge",
+    origin: "controller",
+  };
+  const objective = { path: "OBJECTIVE", origin: "source" };
+  const testPatch = {
+    path: 'Exact Git change patch excerpt "test/badge.test.js"',
+    file: "test/badge.test.js",
+    origin: "controller",
+  };
+  const criterion = (evidence) => ({
+    source: "model",
+    criterion: "c",
+    detail: "the test does not check the badge's pixels",
+    question: "",
+    evidence,
+  });
+  const refused = (...criteria) => ({
+    kind: "review",
+    tree: "t",
+    refused: criteria,
+  });
+  // The run's refusal: the gap is in the test the worker wrote.
+  assert.equal(
+    aboutMedia(media, set, refused(criterion([objective, receipt, testPatch]))),
+    false,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(
+        criterion([objective, receipt, testPatch]),
+        criterion([testPatch]),
+      ),
+    ),
+    false,
+  );
+  // The receipt with nothing the worker can change, a file the item doesn't
+  // own, or a selected destination still drops it.
+  assert.equal(
+    aboutMedia(media, set, refused(criterion([objective, receipt]))),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(
+        criterion([
+          receipt,
+          { path: "src/app.ts", file: "src/app.ts", origin: "controller" },
+        ]),
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(
+        criterion([
+          receipt,
+          testPatch,
+          { path: "patch", file: "assets/badge/a.png", origin: "controller" },
+        ]),
+      ),
+    ),
+    true,
+  );
+  // Each criterion is judged on its own evidence.
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(criterion([testPatch]), criterion([receipt])),
+    ),
+    true,
+  );
+  // Only a change the worker made counts. A pinned source's row names a
+  // file, README.md here, that a media item embedding its badge may own,
+  // but cites the requirement the bytes were judged against: the refused
+  // gap is in the selected set, so it still drops it. The worker's change
+  // to README.md is a change row, and keeps it.
+  const readme = item(["assets/badge/", "README.md", "test/badge.test.js"]);
+  const source = { path: "README.md", origin: "source" };
+  assert.equal(
+    aboutMedia(readme, set, refused(criterion([source, receipt]))),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      readme,
+      set,
+      refused(
+        criterion([
+          { path: "test/badge.test.js", origin: "worker" },
+          { path: "assets/badge/", origin: "source" },
+          receipt,
+        ]),
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      readme,
+      set,
+      refused(
+        criterion([
+          source,
+          receipt,
+          {
+            path: 'Exact Git change patch excerpt "README.md"',
+            file: "README.md",
+            origin: "controller",
+          },
+        ]),
+      ),
+    ),
+    false,
+  );
+});
+
 test("a repair keeps captured candidate sets unless it is about them, comes from selection, or starts fresh (#1987)", () => {
   const media = item(["assets/badge/"]);
   const key = "item:badge:candidates";
@@ -621,6 +754,106 @@ test("a diagnosed correction about the kept sets drops them, and the worker make
   });
   assert.ok(kept.includes("that choice stands for this repair"));
   assert.ok(!kept.includes("the diagnosed correction ("));
+  // A check reads the destinations, never the worker's own copies of the
+  // media, and a failure for their absence is not a command that can't
+  // pass (#2116, run 2026-10-27T063313PDT-d8db: a test read
+  // .factory-media/, and later a worker proposed replacing npm test).
+  const notCantPass =
+    "That failure is expected: it is not a gap, and not a command that can't pass on a correct result, since Factory's validation runs the check with the chosen set written there.";
+  assert.ok(
+    kept.includes(
+      "Their read-only copies are staged under .factory-inputs/assets (origin selected) for reading; a check of the delivered files reads them at their destinations, never these copies (which Factory removes).",
+    ),
+    kept,
+  );
+  assert.ok(kept.includes(notCantPass), kept);
+  // New candidates: the destinations are absent until Factory writes the
+  // chosen set.
+  for (const fresh of [remade, await prompt({})]) {
+    assert.ok(
+      fresh.includes(
+        "until then they are not in this checkout. A check of the delivered files reads them at their destinations, never under .factory-media/ (which Factory removes). A check that needs those files at their destinations",
+      ),
+      fresh,
+    );
+    assert.ok(fresh.includes(notCantPass), fresh);
+  }
+});
+
+// A media item's selected set is never in its worker's checkout, so a test
+// of the delivered files fails there for that reason alone. Live (Codex,
+// media.select-repair, run 2026-10-27T062037PDT-66dd), a first attempt,
+// told to propose a replacement for a command no correct result can pass
+// but not that its destinations are filled only after selection, took its
+// test's ENOENT for a gap and proposed an amendment the planner could
+// never satisfy; the Objective stopped on the rejected amendment.
+test("every media worker prompt says a check of the delivered files fails in its checkout for that reason alone, and is no discovery", async () => {
+  const absent =
+    "A check that needs those files at their destinations, such as a test of the delivered files, can fail in this checkout for that reason alone. That failure is expected: it is not a gap, and not a command that can't pass on a correct result, since Factory's validation runs the check with the chosen set written there. Write the check against the destinations as the acceptance requires, and report the failure; do not write the files there, weaken or skip the check, or propose a replacement command or further work for it in .factory-discovery.json.";
+  const notReplaceable =
+    "A command that fails here only because this item's selected media are not yet at their destinations is not one: the media instructions below say what to do with it.";
+  const media = item(["assets/badge/", "test/badge.test.js"], {
+    validation: [{ command: "npm test" }],
+  });
+  const target = checkout();
+  const prompt = async (work, fields = {}) => {
+    const prepared = await prepareWorkPrompt({
+      checkout: target.directory,
+      worktree: target.directory,
+      objective: 7,
+      objectiveBody: "",
+      plan: { items: [work], coverage: [], finalCommands: [], decisions: [] },
+      item: work,
+      base: target.commit,
+      fixedScripts: [],
+      ...fields,
+    });
+    assert.equal(prepared.problem, undefined);
+    return prepared.prompt;
+  };
+  // The first attempt, which stages the candidates.
+  const first = await prompt(media);
+  assert.ok(first.includes("Produce at least 1 complete candidate AssetSets."));
+  assert.ok(
+    first.includes(
+      `Do not write, remove, or otherwise change final destinations directly. Factory writes the operator's chosen set at its destinations on top of your result after selection, before it validates, reviews and delivers it; until then they are not in this checkout. A check of the delivered files reads them at their destinations, never under .factory-media/ (which Factory removes). ${absent}`,
+    ),
+    first,
+  );
+  assert.ok(first.includes(notReplaceable));
+  // The validation section says so before the media section explains it.
+  assert.ok(first.indexOf(notReplaceable) < first.indexOf(absent));
+  // A repair whose kept candidates or selection stand says the same.
+  const repair = { repair: { finding: "npm test failed" } };
+  for (const fields of [
+    {
+      keptCandidates: {
+        sets: ["candidate-a", "candidate-b"],
+        destinations: ["assets/badge/a.png"],
+      },
+    },
+    {
+      keptSelection: {
+        set: "candidate-a",
+        destinations: ["assets/badge/a.png"],
+      },
+    },
+  ]) {
+    const text = await prompt(media, { ...repair, ...fields });
+    assert.ok(text.includes(absent), Object.keys(fields)[0]);
+    assert.ok(text.includes(notReplaceable), Object.keys(fields)[0]);
+  }
+  // An item with no media gets neither.
+  const plain = await prompt({
+    ...media,
+    expectedOutputRoles: undefined,
+    minimumAssetSets: undefined,
+  });
+  assert.ok(!plain.includes(absent));
+  assert.ok(!plain.includes(notReplaceable));
+  assert.ok(
+    plain.includes("propose its replacement in .factory-discovery.json"),
+  );
 });
 
 // Destinations are Factory's: the work step restores them to the base

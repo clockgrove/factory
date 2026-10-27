@@ -83,18 +83,34 @@ const URL_CREDENTIAL =
  * one in it, and a `url.*` rewrite whose base has one. Sandboxed commands
  * read that configuration (sandbox.ts gitMetadata), so readiness refuses a
  * checkout that has any. Names only, never values; undefined when Git
- * can't read it.
+ * can't read it. Worktree configuration exists only with
+ * `extensions.worktreeConfig` on; without it Git refuses `--worktree` once
+ * the repository has a linked worktree (as every Objective's Work Items
+ * add), so that pass is skipped.
  */
 export function checkoutCredentialEntries(
   checkout: string,
 ): string[] | undefined {
+  const git = (...args: string[]) =>
+    spawnSync("git", ["-C", checkout, "config", ...args], {
+      env: gitEnvironment(),
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+  // Exit 1 is an unset key; anything else unexpected is a failed read.
+  const extension = git(
+    "--local",
+    "--get",
+    "--type=bool",
+    "extensions.worktreeConfig",
+  );
+  if (extension.status !== 0 && extension.status !== 1) return undefined;
+  const scopes = ["--local"];
+  if (extension.status === 0 && extension.stdout.trim() === "true")
+    scopes.push("--worktree");
   const found = new Set<string>();
-  for (const scope of ["--local", "--worktree"]) {
-    const read = spawnSync(
-      "git",
-      ["-C", checkout, "config", scope, "--includes", "--null", "--list"],
-      { env: gitEnvironment(), encoding: "utf8", timeout: 30_000 },
-    );
+  for (const scope of scopes) {
+    const read = git(scope, "--includes", "--null", "--list");
     if (read.status !== 0) return undefined;
     for (const entry of read.stdout.split("\0")) {
       const split = entry.indexOf("\n");

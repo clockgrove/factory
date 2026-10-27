@@ -370,6 +370,41 @@ test("readiness finds credentials in the checkout's own Git configuration", () =
   ]);
 });
 
+test("readiness reads a checkout with linked worktrees, and their worktree configuration only when enabled", () => {
+  const checkout = tempDir("factory-credentials-");
+  git(checkout, "init", "--quiet");
+  git(
+    checkout,
+    "-c",
+    "user.name=Factory",
+    "-c",
+    "user.email=factory@example.com",
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "--message=base",
+  );
+  // As an Objective's Work Items add, with extensions.worktreeConfig off.
+  git(
+    checkout,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    tempDir("factory-wt-"),
+  );
+  git(checkout, "config", "credential.username", "octo");
+  assert.deepEqual(checkoutCredentialEntries(checkout), [
+    "credential.username",
+  ]);
+  git(checkout, "config", "extensions.worktreeConfig", "true");
+  git(checkout, "config", "--worktree", "credential.password", "secret");
+  assert.deepEqual(checkoutCredentialEntries(checkout).sort(), [
+    "credential.password",
+    "credential.username",
+  ]);
+});
+
 for (const path of [
   "https://github.com/other/place/assets/1/shot.png",
   "https://github.com/drill/target/../../other/place/assets/1/shot.png",

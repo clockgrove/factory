@@ -14,11 +14,18 @@ gh_project() {
 gh_pj() { gh_project | python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
 gh_option_id() { gh_pj "next(o['id'] for o in d['field']['options'] if o['name']=='$1')"; }
 
+# gh_item_add ISSUE: put an existing issue on the Project (an issue already
+# there keeps its card); prints the card's item id.
+gh_item_add() {
+  gh project item-add "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" \
+    --url "https://github.com/$REPO/issues/$1" --format json --jq .id
+}
+# gh_item_archive ITEM: archive a card on the Project.
+gh_item_archive() { gh project item-archive "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" --id "$1" >/dev/null; }
 # gh_enqueue ISSUE: add an existing issue to the Project, set Queued; prints it.
 gh_enqueue() {
   local n=$1 item
-  item=$(gh project item-add "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" \
-    --url "https://github.com/$REPO/issues/$n" --format json --jq .id) || return 1
+  item=$(gh_item_add "$n") && [ -n "$item" ] || return 1
   gh project item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" \
     --single-select-option-id "$(gh_option_id Queued)" >/dev/null || return 1
   echo "$n"

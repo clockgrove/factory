@@ -678,7 +678,7 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   wait_for 180 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"mode\"))' '$ROOT/queue.json' 2>/dev/null)\" = paused ]"
   local paused; paused=$(q_mode)
   local a b c; a=$(new_issue readme "production: order 3" ID="${id}b") && b=$(new_issue happy "production: order 2" ID="${id}c") && c=$(new_issue pair "production: order 1, two items" ID="${id}d") || { q_uninstall; return; }
-  local x; for x in "$a" "$b" "$c"; do gh_enqueue "$x" >/dev/null; done
+  local x; for x in "$a" "$b" "$c"; do queue_issue "$x" || { record queue.pause-github FAIL "setup: couldn't queue #$x: $(head -c 300 "$RUN_DIR/enqueue.$x.err")" "$t0"; q_uninstall; return; }; done
   q_order "$a" 3; q_order "$b" 2; q_order "$c" 1
   sleep 90
   local admitted_paused=0; for x in "$a" "$b" "$c"; do [ "$(st events "$x" event=admitted)" = 0 ] || admitted_paused=1; done

@@ -394,11 +394,19 @@ new_issue() {
 # failure is tried again; one that lasts fails here, never as a silent wait.
 queue_issue() {
   if [ -n "${2:-}" ]; then cli_t 30 run "$1" --provider "$2" >>"$RUN_DIR/run.$1.out" 2>&1; log "factory run #$1 --provider $2 (follower stopped: rc $?)"; return 0; fi
-  local try
+  gh_retry "$RUN_DIR/enqueue.$1.err" "queueing #$1" gh_enqueue "$1" >/dev/null || return 1
+  log "queued #$1"
+}
+# gh_retry ERRFILE WHAT CMD...: run CMD, GitHub calls that repeat safely, up to
+# three times (a Project "temporary conflict" passes in seconds). Its stdout
+# passes through; its stderr goes to ERRFILE and each failure is logged. One
+# that lasts returns 1 with gh's last error left in ERRFILE for the evidence.
+gh_retry() {
+  local err=$1 what=$2 try; shift 2
   for try in 1 2 3; do
-    gh_enqueue "$1" >/dev/null 2>"$RUN_DIR/enqueue.$1.err" && { log "queued #$1"; return 0; }
-    log "queueing #$1 failed (try $try): $(head -c 300 "$RUN_DIR/enqueue.$1.err")"
-    sleep $(( try * 5 ))
+    "$@" 2>"$err" && return 0
+    log "$what failed (try $try): $(head -c 300 "$err")"
+    [ "$try" = 3 ] || sleep $(( try * 5 ))
   done
   return 1
 }

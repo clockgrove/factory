@@ -421,6 +421,96 @@ test("a refused candidate set is repaired from its staging or receipt, and only 
   );
 });
 
+// Live (Codex, media.select-repair, run 2026-10-27T063313PDT-d8db): review
+// refused a criterion about the alternatives and the delivered files for a
+// missing test assertion, citing the receipt (where it judges the
+// alternatives) and the worker's test. The operator's choice was dropped,
+// the worker had to stage new candidates, and the Objective held.
+test("a review refusal that cites the receipt beside the worker's own file keeps the selection (#2110)", () => {
+  const media = item(["assets/badge/", "test/badge.test.js"]);
+  const set = candidateSet(tempDir("factory-set-"), ["assets/badge/a.png"]);
+  const receipt = {
+    path: "Controller candidate receipt: badge",
+    origin: "controller",
+  };
+  const objective = { path: "OBJECTIVE", origin: "source" };
+  const testPatch = {
+    path: 'Exact Git change patch excerpt "test/badge.test.js"',
+    file: "test/badge.test.js",
+    origin: "controller",
+  };
+  const criterion = (evidence) => ({
+    source: "model",
+    criterion: "c",
+    detail: "the test does not check the badge's pixels",
+    question: "",
+    evidence,
+  });
+  const refused = (...criteria) => ({
+    kind: "review",
+    tree: "t",
+    refused: criteria,
+  });
+  // The run's refusal: the gap is in the test the worker wrote.
+  assert.equal(
+    aboutMedia(media, set, refused(criterion([objective, receipt, testPatch]))),
+    false,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(
+        criterion([objective, receipt, testPatch]),
+        criterion([testPatch]),
+      ),
+    ),
+    false,
+  );
+  // The receipt with nothing the worker can change, a file the item doesn't
+  // own, or a selected destination still drops it.
+  assert.equal(
+    aboutMedia(media, set, refused(criterion([objective, receipt]))),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(
+        criterion([
+          receipt,
+          { path: "src/app.ts", file: "src/app.ts", origin: "controller" },
+        ]),
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(
+        criterion([
+          receipt,
+          testPatch,
+          { path: "patch", file: "assets/badge/a.png", origin: "controller" },
+        ]),
+      ),
+    ),
+    true,
+  );
+  // Each criterion is judged on its own evidence.
+  assert.equal(
+    aboutMedia(
+      media,
+      set,
+      refused(criterion([testPatch]), criterion([receipt])),
+    ),
+    true,
+  );
+});
+
 test("a repair keeps captured candidate sets unless it is about them, comes from selection, or starts fresh (#1987)", () => {
   const media = item(["assets/badge/"]);
   const key = "item:badge:candidates";
@@ -621,6 +711,22 @@ test("a diagnosed correction about the kept sets drops them, and the worker make
   });
   assert.ok(kept.includes("that choice stands for this repair"));
   assert.ok(!kept.includes("the diagnosed correction ("));
+  assert.ok(
+    kept.includes(
+      "report it rather than writing them there, weakening the check or proposing its replacement.",
+    ),
+  );
+  // New candidates: the destinations are absent until Factory writes the
+  // chosen set, which is not a command that can't pass (#2110, run
+  // 2026-10-27T063313PDT-d8db: a test read .factory-media/, and later a
+  // worker proposed replacing npm test).
+  for (const fresh of [remade, await prompt({})])
+    assert.ok(
+      fresh.includes(
+        "Factory validates, reviews and delivers this item's result only after it writes the operator's chosen set at those destinations, so a check of the delivered files reads them at their destinations, never under .factory-media/ (which Factory removes). The destinations are not in this checkout, so such a check can fail here for that reason alone. That is not a command that can't pass on a correct result: report it rather than pointing the check at the staging, writing the destinations, weakening the check or proposing its replacement.",
+      ),
+      fresh,
+    );
 });
 
 // Destinations are Factory's: the work step restores them to the base

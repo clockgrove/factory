@@ -398,6 +398,10 @@ test("readiness reads a checkout with linked worktrees, and their worktree confi
     "credential.username",
   ]);
   git(checkout, "config", "extensions.worktreeConfig", "true");
+  // On, but with no config.worktree yet: nothing more to read.
+  assert.deepEqual(checkoutCredentialEntries(checkout), [
+    "credential.username",
+  ]);
   git(checkout, "config", "--worktree", "credential.password", "secret");
   assert.deepEqual(checkoutCredentialEntries(checkout).sort(), [
     "credential.password",

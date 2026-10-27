@@ -867,9 +867,10 @@ export function pushCheckNames(
  * would refuse to dispatch it (missing, unparsable, no `workflow_dispatch`,
  * or an input it requires with no default), the check-run names it
  * reports, and the workflows that run after it (`on: workflow_run` naming
- * its name), which a dispatch of it starts too: `followers`, or `guarded`
- * when every job of one skips a run that a dispatch started
- * (dispatch-guard.ts `skipsDispatchedRuns`).
+ * its name), which a dispatch of it starts too, and the workflows that run
+ * after those in turn: `followers`, or `guarded` when every job of one
+ * skips every run that a dispatch started (dispatch-guard.ts
+ * `skipsDispatchedRuns`).
  */
 export async function baseRerunWorkflow(
   files: BaseFiles,
@@ -919,39 +920,64 @@ export async function baseRerunWorkflow(
       problem: `${path} requires the input${required.length === 1 ? "" : "s"} ${required.join(", ")} with no default, and Factory dispatches it with none`,
       ...none,
     };
-  // GitHub names a workflow without `name` by its path.
-  const named = (parsed as { name?: unknown } | null)?.name;
-  const name = typeof named === "string" ? named : path;
-  const followers: string[] = [];
-  const guarded: string[] = [];
+  const others = new Map<string, unknown>();
   for (const other of await workflowPaths(files)) {
     if (other === path) continue;
-    let follower: unknown;
     try {
-      follower = parse((await files.text(other)) ?? "");
+      others.set(other, parse((await files.text(other)) ?? ""));
     } catch {
       continue;
     }
-    const after = (follower as { on?: unknown } | null)?.on;
-    const run =
-      after && typeof after === "object" && !Array.isArray(after)
-        ? (after as Record<string, unknown>).workflow_run
-        : undefined;
-    const followed =
-      run && typeof run === "object" && !Array.isArray(run)
-        ? (run as { workflows?: unknown }).workflows
-        : undefined;
-    if (
-      (Array.isArray(followed) ? followed : [followed]).some(
-        (entry) => entry === name || entry === path,
+  }
+  // GitHub names a workflow without `name` by its path.
+  const nameOf = (file: string, workflow: unknown) => {
+    const value = (workflow as { name?: unknown } | null)?.name;
+    return typeof value === "string" ? value : file;
+  };
+  const name = nameOf(path, parsed);
+  // A dispatch starts each follower (`workflow_dispatch` the event of the
+  // run it follows), and each completed run of a follower, even one whose
+  // every job was skipped, starts that one's followers in turn (the event
+  // then `workflow_run`). A workflow that runs for any of them is a
+  // follower; one skipped for every one of them is guarded.
+  const runs = new Set<string>();
+  const skipped = new Set<string>();
+  const queue = [{ file: path, name, event: "workflow_dispatch" }];
+  const seen = new Set<string>();
+  for (let at = queue.shift(); at; at = queue.shift()) {
+    for (const [other, follower] of others) {
+      const after = (follower as { on?: unknown } | null)?.on;
+      const run =
+        after && typeof after === "object" && !Array.isArray(after)
+          ? (after as Record<string, unknown>).workflow_run
+          : undefined;
+      const followed =
+        run && typeof run === "object" && !Array.isArray(run)
+          ? (run as { workflows?: unknown }).workflows
+          : undefined;
+      if (
+        !(Array.isArray(followed) ? followed : [followed]).some(
+          (entry) => entry === at.name || entry === at.file,
+        )
       )
-    )
-      (skipsDispatchedRuns(follower) ? guarded : followers).push(other);
+        continue;
+      const key = `${other}\n${at.event}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      (skipsDispatchedRuns(follower, at.event) ? skipped : runs).add(other);
+      queue.push({
+        file: other,
+        name: nameOf(other, follower),
+        event: "workflow_run",
+      });
+    }
   }
   return {
     checks: await checkNamesOf(files, () => true, path),
-    followers,
-    guarded,
+    followers: [...others.keys()].filter((other) => runs.has(other)),
+    guarded: [...others.keys()].filter(
+      (other) => skipped.has(other) && !runs.has(other),
+    ),
   };
 }
 

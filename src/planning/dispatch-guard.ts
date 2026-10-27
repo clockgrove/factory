@@ -5,6 +5,9 @@
  * completed run, its `github.event.workflow_run.event` then
  * `workflow_dispatch`; a follower that releases only from a push (as
  * Clockgrove's "Guarded release" does) guards each job with an `if` on it.
+ * GitHub starts a follower of that follower too, even when every job of
+ * its run was skipped, with `github.event.workflow_run.event`
+ * `workflow_run` (facts.ts `baseRerunWorkflow` reads each in turn).
  *
  * Readiness reads the jobs' `if` expressions with only what that start
  * makes certain (`github.event_name` is `workflow_run`, and
@@ -24,11 +27,17 @@ type Value =
 
 const STATUS_FUNCTIONS = ["success", "always", "failure", "cancelled"];
 
-/** What a dispatched run's follower knows for certain. */
-const KNOWN: Record<string, string> = {
-  "github.event_name": "workflow_run",
-  "github.event.workflow_run.event": "workflow_dispatch",
-};
+/**
+ * What a follower knows for certain of the run it follows: GitHub starts
+ * it with `workflow_run`, and that run's own event (`workflow_dispatch`
+ * for a run Factory dispatched, `workflow_run` for a follower's run).
+ */
+function known(event: string): Record<string, string> {
+  return {
+    "github.event_name": "workflow_run",
+    "github.event.workflow_run.event": event,
+  };
+}
 
 type Token =
   | { kind: "string"; text: string }
@@ -119,7 +128,10 @@ function equal(
 }
 
 /** Evaluate `source` three-valued; `status` is set when it calls a status function. */
-function evaluate(source: string): { value: Value; status: boolean } {
+function evaluate(
+  source: string,
+  certain: Record<string, string>,
+): { value: Value; status: boolean } {
   const list = tokens(source);
   let at = 0;
   let status = false;
@@ -237,8 +249,8 @@ function evaluate(source: string): { value: Value; status: boolean } {
             : undefined;
       } else break;
     }
-    const known = path === undefined ? undefined : KNOWN[path];
-    return known === undefined ? {} : { value: known };
+    const given = path === undefined ? undefined : certain[path];
+    return given === undefined ? {} : { value: given };
   };
   const value = or();
   if (at !== list.length) throw new Error("unexpected trailing input");
@@ -246,7 +258,10 @@ function evaluate(source: string): { value: Value; status: boolean } {
 }
 
 /** A job's `if` as a run Factory dispatched starts it: certainly false, or not. */
-function condition(raw: unknown): { never: boolean; status: boolean } {
+function condition(
+  raw: unknown,
+  certain: Record<string, string>,
+): { never: boolean; status: boolean } {
   if (raw === undefined || raw === null) return { never: false, status: false };
   if (typeof raw === "boolean") return { never: !raw, status: false };
   if (typeof raw === "number") return { never: raw === 0, status: false };
@@ -257,7 +272,7 @@ function condition(raw: unknown): { never: boolean; status: boolean } {
   // Text around an expression is a string, always truthy.
   if (source.includes("${{")) return { never: false, status: true };
   try {
-    const { value, status } = evaluate(source);
+    const { value, status } = evaluate(source, certain);
     return { never: truth(value) === false, status };
   } catch {
     return { never: false, status: true };
@@ -266,9 +281,14 @@ function condition(raw: unknown): { never: boolean; status: boolean } {
 
 /**
  * Whether every job of `workflow` (a parsed workflow file) is skipped when
- * a run of the workflow it follows that Factory dispatched starts it.
+ * a run of the workflow it follows that Factory dispatched starts it, or,
+ * with `event` `workflow_run`, a run of a follower of that one.
  */
-export function skipsDispatchedRuns(workflow: unknown): boolean {
+export function skipsDispatchedRuns(
+  workflow: unknown,
+  event = "workflow_dispatch",
+): boolean {
+  const certain = known(event);
   const jobs = (workflow as { jobs?: unknown } | null)?.jobs;
   if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return false;
   const all = jobs as Record<string, unknown>;
@@ -280,7 +300,7 @@ export function skipsDispatchedRuns(workflow: unknown): boolean {
     if (done !== undefined) return done;
     const job = all[id];
     if (!job || typeof job !== "object" || seen.has(id)) return false;
-    const { never, status } = condition((job as { if?: unknown }).if);
+    const { never, status } = condition((job as { if?: unknown }).if, certain);
     const needs = (job as { needs?: unknown }).needs;
     const needed = (Array.isArray(needs) ? needs : [needs]).filter(
       (entry): entry is string => typeof entry === "string" && entry in all,

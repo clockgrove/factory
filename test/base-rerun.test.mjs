@@ -6,11 +6,13 @@
 // workflow on main and compares with a fresh run there; without it, it
 // still runs nothing on the default branch.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import { observeCi } from "../dist/delivery.js";
+import { mergeUnit, observeCi } from "../dist/delivery.js";
 import { GitHub, GitHubError } from "../dist/github.js";
 import { skipsDispatchedRuns } from "../dist/planning/dispatch-guard.js";
 import { baseRerunWorkflow } from "../dist/planning/facts.js";
@@ -25,10 +27,12 @@ import {
   cli,
   closedPort,
   configured,
+  githubOrigin,
   installation,
   item,
   plan,
   REPO,
+  tempDir,
 } from "./helpers.mjs";
 
 const HEAD = "a".repeat(40);
@@ -844,6 +848,16 @@ test("a native stack's layers share one dispatch, and the merge step keeps and l
     logged.map((event) => event.item),
     ["b"],
   );
+  // On the next merge step, before GitHub shows layer a's run, layer b
+  // waits for it as kept: no dispatch of its own.
+  assert.equal(second.baseRerun.madeBy, "a");
+  const next = github();
+  const waits = await observe(next, "quality.yml", {
+    baseRerun: second.baseRerun,
+  });
+  assert.equal(waits.kind, "retry", JSON.stringify(waits));
+  assert.match(waits.reason, /^Awaiting main's fresh run of quality/);
+  assert.deepEqual(next.dispatched, []);
 });
 
 test("readiness accepts a follower whose every job skips a dispatched run, as Clockgrove's Guarded release does", async () => {
@@ -947,4 +961,271 @@ jobs:
     ["no jobs", {}, false],
   ])
     assert.equal(skips(jobs), expected, what);
+  // A follower's run, whose own event is workflow_run.
+  const notDispatch = {
+    jobs: {
+      a: job({ if: "github.event.workflow_run.event != 'workflow_dispatch'" }),
+    },
+  };
+  assert.equal(skipsDispatchedRuns(notDispatch), true);
+  assert.equal(skipsDispatchedRuns(notDispatch, "workflow_run"), false);
+});
+
+const OTHER_RUN = 970;
+
+test("the result Factory waits for is its workflow's own run: another workflow's run of a check with that name is not it", async () => {
+  // main's nightly workflow also has a `quality` job, and its run on main's
+  // head ended after the dispatch, before quality.yml's run shows.
+  const nightly = (conclusion, fields = {}) =>
+    github({
+      attempt: 2,
+      baseRuns: [
+        STALE,
+        onBase(32, "quality", conclusion, { completed_at: now() }),
+      ],
+      jobRuns: { 32: OTHER_RUN },
+      paths: {
+        [MAIN_RUN]: QUALITY,
+        [DISPATCHED_RUN]: QUALITY,
+        [OTHER_RUN]: ".github/workflows/nightly.yml",
+      },
+      ...fields,
+    });
+  for (const conclusion of ["success", "cancelled"]) {
+    const hub = nightly(conclusion);
+    const wait = await observe(hub, "quality.yml", {
+      ...kept(10 * MINUTE),
+      retried: true,
+      rereviewedAt: now(),
+    });
+    assert.equal(wait.kind, "retry", `${conclusion}: ${JSON.stringify(wait)}`);
+    assert.match(
+      wait.reason,
+      /^Awaiting main's fresh run of quality at b{40} \(quality\.yml/,
+    );
+    assert.deepEqual(hub.dispatched, []);
+  }
+  // Past the hour, Factory says its run gave no result, not that it passed.
+  const late = await observe(
+    nightly("success"),
+    "quality.yml",
+    kept(61 * MINUTE),
+  );
+  assert.equal(late.kind, "repair", JSON.stringify(late));
+  assert.match(
+    late.finding,
+    /and quality had no fresh result there 60 minutes later\./,
+  );
+  assert.doesNotMatch(late.finding, /it passed quality there/);
+  // quality.yml's own run, once it ended, is the result.
+  const own = await observe(
+    nightly("success", {
+      baseRuns: [
+        STALE,
+        onBase(31, "quality", "success", { completed_at: now() }),
+        onBase(32, "quality", "success", { completed_at: now() }),
+      ],
+      jobRuns: { 31: DISPATCHED_RUN, 32: OTHER_RUN },
+    }),
+    "quality.yml",
+    kept(10 * MINUTE),
+  );
+  assert.equal(own.kind, "repair", JSON.stringify(own));
+  assert.match(own.finding, /and it passed quality there\./);
+});
+
+test("a run of the workflow under way on main blocks a dispatch, though its job for the failed check hasn't registered", async () => {
+  // quality needs build: only build's check shows while it runs.
+  const building = (fields = {}) =>
+    github({
+      attempt: 2,
+      baseRuns: [
+        STALE,
+        onBase(33, "build", null, {
+          status: "in_progress",
+          completed_at: null,
+        }),
+      ],
+      jobRuns: { 33: DISPATCHED_RUN },
+      ...fields,
+    });
+  const hub = building();
+  const wait = await observe(hub, "quality.yml");
+  assert.equal(wait.kind, "rerun", JSON.stringify(wait));
+  assert.deepEqual(hub.dispatched, []);
+  assert.equal(wait.baseRerun.dispatched, false);
+  assert.deepEqual(wait.baseRerun.checks, ["quality"]);
+  assert.match(
+    wait.reason,
+    /^Awaiting the run of quality\.yml in progress on main's head b{40} to compare PR #7's failed quality with it/,
+  );
+  // Kept: still under way, it is waited for; no dispatch.
+  const still = building();
+  const waiting = await observe(still, "quality.yml", {
+    baseRerun: {
+      ...wait.baseRerun,
+      at: new Date(Date.now() - 5 * MINUTE).toISOString(),
+    },
+  });
+  assert.equal(waiting.kind, "retry", JSON.stringify(waiting));
+  assert.deepEqual(still.dispatched, []);
+  // Under way past the hour: judged without it, still no dispatch.
+  const stuck = building();
+  const judged = await observe(stuck, "quality.yml", {
+    baseRerun: {
+      ...wait.baseRerun,
+      at: new Date(Date.now() - 61 * MINUTE).toISOString(),
+    },
+  });
+  assert.equal(judged.kind, "repair", JSON.stringify(judged));
+  assert.deepEqual(stuck.dispatched, []);
+  assert.match(
+    judged.finding,
+    /A run of quality\.yml was in progress on main's head b{40} at \S+, and quality had no fresh result there 60 minutes later\./,
+  );
+  // It ended without quality's result: quality's pass is still stale, so
+  // Factory dispatches its own run.
+  const ended = github({
+    baseRuns: [STALE, onBase(33, "build", "success", { completed_at: now() })],
+    jobRuns: { 33: DISPATCHED_RUN },
+  });
+  const dispatched = await observe(ended, "quality.yml", {
+    baseRerun: {
+      ...wait.baseRerun,
+      at: new Date(Date.now() - 5 * MINUTE).toISOString(),
+    },
+  });
+  assert.equal(dispatched.kind, "rerun", JSON.stringify(dispatched));
+  assert.deepEqual(ended.dispatched, [["quality.yml", "main"]]);
+  assert.equal(dispatched.baseRerun.dispatched, true);
+  // Another workflow's run under way there doesn't hold the dispatch back.
+  const other = building({
+    paths: {
+      [MAIN_RUN]: QUALITY,
+      [DISPATCHED_RUN]: ".github/workflows/nightly.yml",
+    },
+  });
+  const ran = await observe(other, "quality.yml");
+  assert.equal(ran.kind, "rerun", JSON.stringify(ran));
+  assert.deepEqual(other.dispatched, [["quality.yml", "main"]]);
+});
+
+function git(directory, ...args) {
+  const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+  assert.equal(run.status, 0, `git ${args.join(" ")}: ${run.stderr}`);
+  return run.stdout.trim();
+}
+
+/** A checkout whose origin is a GitHub URL for REPO, as a stack merge reads it. */
+function checkoutWithOrigin() {
+  const root = tempDir("factory-base-rerun-");
+  const bare = join(root, "origin.git");
+  const checkout = join(root, "checkout");
+  git(root, "init", "--quiet", "--bare", "--initial-branch=main", bare);
+  git(root, "clone", "--quiet", bare, checkout);
+  git(checkout, "config", "user.name", "Test");
+  git(checkout, "config", "user.email", "test@example.com");
+  writeFileSync(join(checkout, "README.md"), "stack\n");
+  git(checkout, "add", "README.md");
+  git(checkout, "commit", "--quiet", "-m", "base");
+  git(checkout, "push", "--quiet", "origin", "main");
+  githubOrigin(checkout, bare);
+  return checkout;
+}
+
+test("a native stack's merge keeps a layer's dispatch when judging a layer above it fails", async () => {
+  const hub = { ...github(), repository: REPO };
+  const pull = hub.pull;
+  hub.pull = async (number) => {
+    if (number === 8) throw new GitHubError("Bad gateway", 502);
+    return pull(number);
+  };
+  const baseReruns = [];
+  const layer = (name, pr) => ({
+    issue: 1,
+    item: name,
+    pr,
+    head: HEAD,
+    pushedHeads: [HEAD],
+    requiredChecks: [],
+  });
+  const result = await mergeUnit(
+    {
+      github: hub,
+      checkout: checkoutWithOrigin(),
+      signal: new AbortController().signal,
+      baseRerun: "quality.yml",
+      baseReruns,
+    },
+    [layer("a", 7), layer("b", 8)],
+  );
+  // The dispatch is the step's result, kept for layer a; the error comes
+  // back on the next run.
+  assert.equal(result.kind, "rerun", JSON.stringify(result));
+  assert.equal(result.item, "a");
+  assert.equal(result.baseRerun.dispatched, true);
+  assert.deepEqual(hub.dispatched, [["quality.yml", "main"]]);
+  // Without a dispatch the error is the step's.
+  const plain = { ...github({ baseRuns: [] }), repository: REPO };
+  plain.pull = async () => {
+    throw new GitHubError("Bad gateway", 502);
+  };
+  await assert.rejects(
+    mergeUnit(
+      {
+        github: plain,
+        checkout: checkoutWithOrigin(),
+        signal: new AbortController().signal,
+        baseRerun: "quality.yml",
+        baseReruns: [],
+      },
+      [layer("a", 7), layer("b", 8)],
+    ),
+    /Bad gateway/,
+  );
+});
+
+test("readiness reads the workflows that run after a follower too: GitHub starts them though every job of its run was skipped", async () => {
+  const config = {
+    repository: REPO,
+    checkout: "/nonexistent",
+    delivery: { kind: "regular", baseRerun: { workflow: "quality.yml" } },
+  };
+  const release =
+    "name: Guarded release\non:\n  workflow_run:\n    workflows: [Quality]\n    types: [completed]\njobs:\n  release:\n    if: github.event.workflow_run.event == 'push'\n    runs-on: ubuntu-latest\n    steps: [{ run: npm publish }]\n";
+  const after = (condition) =>
+    `name: Announce\non:\n  workflow_run:\n    workflows: [Guarded release]\n    types: [completed]\njobs:\n  announce:\n${condition ? `    if: ${condition}\n` : ""}    runs-on: ubuntu-latest\n    steps: [{ run: ./announce.sh }]\n`;
+  const read = (announce) =>
+    baseRerunCheck(
+      config,
+      "main",
+      files({
+        [QUALITY]: QUALITY_YML,
+        ".github/workflows/release.yml": release,
+        ".github/workflows/announce.yml": announce,
+      }),
+    );
+  for (const [what, announce] of [
+    ["no if", after()],
+    [
+      "guarded against a dispatch only",
+      after("github.event.workflow_run.event != 'workflow_dispatch'"),
+    ],
+  ]) {
+    const warned = await read(announce);
+    assert.equal(warned.status, "warn", what);
+    assert.match(
+      warned.detail,
+      /and \.github\/workflows\/announce\.yml runs after it \(workflow_run\)/,
+      what,
+    );
+  }
+  const guarded = await read(
+    after("github.event.workflow_run.event == 'push'"),
+  );
+  assert.equal(guarded.status, "ok", JSON.stringify(guarded));
+  assert.match(
+    guarded.detail,
+    /\.github\/workflows\/release\.yml, \.github\/workflows\/announce\.yml run after it but skip every job/,
+  );
 });

@@ -6,11 +6,15 @@
 // planner's answers are fixed here, in the shape that run's had. The
 // independent review's fix findings go back to the planner the same way.
 // Both get the files the discovery cites: live, without them, the planner
-// asked the operator what a cited test imports. A round that changes a
-// started item goes back the same way, and both are told the rule: live
-// (Claude, discovery case), the planner relaxed its own worker's item's
-// `npm test` acceptance and validation to make room for the new item, and
-// the fence's finding rejected the amendment and asked a person.
+// asked the operator what a cited test imports. Both are told the
+// started-item rule: live (Claude, discovery case), the planner relaxed its
+// own worker's item's `npm test` acceptance and validation to make room for
+// the new item, and the fence's finding rejected the amendment and asked a
+// person. Factory now sets such a change back itself (#2088): live (Codex,
+// discovery case), the planner grew its worker's item's owned paths to take
+// the discovered file, as the rule allows, but reworded the item's goal in
+// rounds 2 and 3 too, so the same fence finding twice rejected it. What
+// Factory can't set back, a removed started item, still goes back.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -206,15 +210,18 @@ function scripted(...answers) {
   };
 }
 
-/** The amendment's next step, run once against `state` and applied as the engine applies it. */
-async function step(state, deps, answer) {
+/**
+ * The amendment's next step, run once against `state` and applied as the
+ * engine applies it; its log events go to `logged`.
+ */
+async function step(state, deps, answer, logged = []) {
   const [next] = amendmentSteps(state, deps);
   const kept = {};
   const outcome = await next.run({
     state,
     ...(answer ? { answer } : {}),
     signal: AbortSignal.timeout(60_000),
-    log: () => {},
+    log: (event) => logged.push(event),
     runFile: () => assert.fail("no run file"),
     keep: (facts) => Object.assign(kept, facts),
   });
@@ -458,11 +465,13 @@ test("an amendment's review still rejects it on an operator decision, or on the 
 });
 
 // The run's slip: a's own worker proposed b, and the planner relaxed a's
-// acceptance and brief so that b, after a, could make `npm test` pass.
+// acceptance, brief and validation so that b, after a, could make
+// `npm test` pass.
 const relaxesA = revision([
   work("a", {
     acceptance: ["a() returns 1 when its own test runs."],
     brief: "Export a from src/a.js; npm test is qa's to prove.",
+    validation: ["node --test test/a.test.js"],
   }),
   work("b", { dependencies: ["a"] }),
   qa(["a", "b"]),
@@ -487,68 +496,392 @@ async function discovered(options = {}) {
   return built;
 }
 
-test("an amendment that changes a started item goes back to its planner with the reason, and the revised round is reviewed and accepted; both are told the rule", async () => {
+/** The review's prompt holds `restored` as FACTORY_AMENDMENT's restoredFields. */
+const toldRestored = (prompt, restored) =>
+  prompt.includes(`"restoredFields":${JSON.stringify(restored)}}`);
+
+test("an amendment that changes a started item without growing it has the change set back, and the review, told the rule and what was set back, accepts it", async () => {
   const { checkout, state } = await discovered();
-  const { planner, asked } = scripted(relaxesA, restoresA, { findings: [] });
+  const { planner, asked } = scripted(relaxesA, { findings: [] });
   const posted = [];
+  const logged = [];
   const deps = depsOf(checkout, planner, posted);
 
-  // Round 1: the fence's finding goes back to the planner, charged.
-  const first = await step(state, deps);
+  // Round 1: a grows neither its owned paths nor its dependencies, so its
+  // restated acceptance and brief, and its validation, are set back;
+  // nothing goes back.
+  const first = await step(state, deps, undefined, logged);
   assert.equal(first.key, "amend:op-1:plan");
-  assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
-  assert.equal(
-    first.outcome.reason,
-    "Amendment plan round 1 has 1 fix finding; revising",
-  );
-  assert.equal(state.done["amend:op-1:plan"], undefined);
-  assert.deepEqual(state.kept["amend:op-1:revisions"][0].findings, [
-    { source: "check", message: STARTED_A, itemId: "a" },
-  ]);
-  assert.equal(planningRevisions(state).used, 2);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
   // The planner was told the rule, naming a as started and its reattempt.
   assert.ok(asked[0].prompt.includes(RULE));
   assert.ok(RULE.includes('startedItemIds: \\"a\\"'), RULE);
-
-  // Round 2 revises its own answer with the reason, and passes.
-  const second = await step(state, deps);
-  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
-  assert.ok(asked[1].prompt.includes(inJson(STARTED_A)));
+  const restored = [
+    { itemId: "a", fields: ["acceptance", "brief", "validation"] },
+  ];
   const round = state.done["amend:op-1:plan"];
   assert.equal(round.rejected, undefined);
+  assert.equal(round.round, 1);
+  assert.deepEqual(round.restored, restored);
+  assert.equal(state.kept["amend:op-1:revisions"], undefined);
+  assert.equal(planningRevisions(state).used, 1);
+  // Set back in the draft and in the answer the next revision edits.
+  const a = state.done.plan.items.find((item) => item.id === "a");
   assert.deepEqual(
-    round.draft.items.find((item) => item.id === "a").acceptance,
-    ["a() returns 1."],
+    round.draft.items.find((item) => item.id === "a"),
+    a,
+  );
+  assert.deepEqual(
+    round.answer.items.find((item) => item.id === "a"),
+    work("a"),
+  );
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "b").dependencies,
+    ["a"],
+  );
+  assert.deepEqual(
+    logged.filter((event) => event.event === "amendment-restored"),
+    [
+      {
+        event: "amendment-restored",
+        amendment: "op-1",
+        round: 1,
+        restored,
+      },
+    ],
   );
 
-  // The review is told the rule too, and the amendment is accepted.
+  // The review is told the rule and what was set back, and it is accepted.
   const review = await step(state, deps);
   assert.equal(review.key, "amend:op-1:review");
-  assert.equal(asked[2].phase, "graph-review");
-  assert.ok(asked[2].prompt.includes(RULE));
-  assert.ok(asked[2].prompt.includes("FACTORY_AMENDMENT's startedItemRule"));
-  assert.deepEqual(review.outcome, { kind: "done", result: { round: 2 } });
+  assert.equal(asked[1].phase, "graph-review");
+  assert.ok(asked[1].prompt.includes(RULE));
+  assert.ok(asked[1].prompt.includes("FACTORY_AMENDMENT's startedItemRule"));
+  assert.ok(asked[1].prompt.includes("FACTORY_AMENDMENT's restoredFields"));
+  assert.ok(toldRestored(asked[1].prompt, restored));
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
   const accept = await step(state, deps);
   assert.equal(accept.key, "amend:op-1");
-  assert.equal(state.done["amend:op-1"].rejected, undefined);
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.deepEqual(result.plan.items.map((item) => item.id).sort(), [
+    "a",
+    "b",
+    "qa",
+  ]);
   assert.deepEqual(
-    state.done["amend:op-1"].plan.items.map((item) => item.id).sort(),
-    ["a", "b", "qa"],
+    result.plan.items.find((item) => item.id === "a"),
+    a,
   );
   assert.equal(posted.length, 1);
-  assert.equal(asked.length, 3);
+  assert.equal(asked.length, 2);
 });
 
-test("an amendment sent back for a started item asks past the allowance before its planner runs, and the same change twice rejects it", async () => {
+// The run's rounds 2 and 3 (#2088): a's worker found that b's existing
+// test needs src/b.js. The planner grew a's owned paths to take it, as the
+// rule allows, restated a's acceptance and brief to match, and reworded
+// a's goal, which the rule keeps; b owns src/b.js too, after a.
+const growsA = revision([
+  work("a", {
+    goal: "Add a, which returns 1 once b's test is active.",
+    ownedPaths: ["src/a.js", "src/b.js"],
+    acceptance: ["a() returns 1.", "npm test passes with b's test active."],
+    brief: "Export a from src/a.js; npm test must pass with b's test active.",
+  }),
+  work("b", {
+    dependencies: ["a"],
+    ownedPaths: ["src/b.js", "test/b.test.js"],
+  }),
+  qa(["a", "b"]),
+]);
+
+test("an amendment that grows a started item's owned paths and rewords its goal keeps the growth and the restatement, has the goal set back, and is reviewed and accepted (#2088)", async () => {
+  const { checkout, state } = await discovered();
+  const { planner, asked } = scripted(growsA, { findings: [] });
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.rejected, undefined);
+  const restored = [{ itemId: "a", fields: ["goal"] }];
+  assert.deepEqual(round.restored, restored);
+  assert.equal(state.kept["amend:op-1:revisions"], undefined);
+  const a = round.draft.items.find((item) => item.id === "a");
+  assert.equal(a.goal, "Add a.");
+  assert.deepEqual(a.ownedPaths, ["src/a.js", "src/b.js"]);
+  assert.deepEqual(a.acceptance, [
+    "a() returns 1.",
+    "npm test passes with b's test active.",
+  ]);
+  assert.equal(
+    a.brief,
+    "Export a from src/a.js; npm test must pass with b's test active.",
+  );
+  assert.deepEqual(
+    round.answer.items.find((item) => item.id === "a"),
+    work("a", {
+      ownedPaths: ["src/a.js", "src/b.js"],
+      acceptance: a.acceptance,
+      brief: a.brief,
+    }),
+  );
+
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.ok(toldRestored(asked[1].prompt, restored));
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.deepEqual(
+    result.plan.items.find((item) => item.id === "a"),
+    a,
+  );
+  assert.deepEqual(result.answer, round.answer);
+  assert.equal(posted.length, 1);
+  assert.equal(asked.length, 2);
+});
+
+test("a reattempt item that grows still keeps its validation, kind and title; only its acceptance, brief and non-goals are restated", async () => {
+  const { checkout, state } = await discovered();
+  const [grown, ...rest] = growsA.items;
+  const relaxes = revision([
+    {
+      ...grown,
+      title: "Add a and b",
+      nonGoals: ["Changing b's test."],
+      validation: ["node --test test/a.test.js"],
+      oneOutcomeReason: null,
+    },
+    ...rest,
+  ]);
+  const { planner } = scripted(relaxes);
+  assert.equal(
+    (await step(state, depsOf(checkout, planner))).outcome.kind,
+    "done",
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.deepEqual(round.restored, [
+    { itemId: "a", fields: ["goal", "title", "validation"] },
+  ]);
+  const a = round.draft.items.find((item) => item.id === "a");
+  const old = state.done.plan.items.find((item) => item.id === "a");
+  assert.deepEqual(a.validation, old.validation);
+  assert.equal(a.title, old.title);
+  assert.equal(a.kind, old.kind);
+  assert.deepEqual(a.nonGoals, ["Changing b's test."]);
+  assert.deepEqual(a.acceptance, grown.acceptance);
+});
+
+test("an ownership overlap a started item's growth makes still goes back to the planner, which is told what was set back", async () => {
+  const { checkout, state } = await discovered();
+  // As growsA, but b owns src/b.js without waiting for a.
+  const overlaps = revision([growsA.items[0], work("b"), qa(["a", "b"])]);
+  const afterA = revision([work("b", { dependencies: ["a"] })]);
+  const { planner, asked } = scripted(overlaps, afterA, { findings: [] });
+  const deps = depsOf(checkout, planner);
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.equal(kept.findings.length, 1, JSON.stringify(kept.findings));
+  assert.match(
+    kept.findings[0].message,
+    /^Work Items a and b own overlapping paths \(src\/b\.js\) and neither depends on the other/,
+  );
+  const restored = [{ itemId: "a", fields: ["goal"] }];
+  assert.deepEqual(kept.restored, restored);
+  // The answer kept for the next round is the one set back.
+  assert.equal(
+    kept.answer.items.find((item) => item.id === "a").goal,
+    "Add a.",
+  );
+  assert.equal(planningRevisions(state).used, 2);
+
+  // Round 2 is told the finding and what was set back, and passes.
+  const second = await step(state, deps);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.ok(
+    asked[1].prompt.includes(
+      "Factory set these fields of started Work Items back to the plan being amended, as the started-item rule keeps them: a (goal). Keep them as that plan has them.",
+    ),
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.restored, undefined);
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "a").ownedPaths,
+    ["src/a.js", "src/b.js"],
+  );
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  assert.equal(state.done["amend:op-1"].rejected, undefined);
+});
+
+test("a started item that isn't a reattempt item and grows goes back to the planner, with the rest set back", async () => {
+  // An operator's proposal: a started, but hasn't failed.
+  const { checkout, state } = await building({
+    kept: { "item:a:base": "0".repeat(40) },
+  });
+  const { planner } = scripted(growsA);
+  const deps = depsOf(checkout, planner);
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.deepEqual(kept.findings, [
+    {
+      source: "check",
+      message:
+        "Work Item a has started, so it keeps its spec; this answer changes its ownedPaths. Leave it as it is, and put further work in a new item",
+      itemId: "a",
+    },
+  ]);
+  assert.deepEqual(kept.restored, [
+    { itemId: "a", fields: ["acceptance", "brief", "goal"] },
+  ]);
+});
+
+test("a plan with no planner answer to revise has its started items set back in the draft, and keeps no answer that would show them changed", async () => {
+  const { checkout, state } = await discovered();
+  // As `factory reset` leaves it: no planning round to revise.
+  state.done["plan:1:1"] = {};
+  const whole = (a, qaDependencies) => ({
+    ...accepted,
+    items: [a, work("b", { dependencies: ["a"] }), qa(qaDependencies)],
+  });
+  // Round 1 changes a and leaves b out of qa's reach; round 2 fixes qa.
+  const changesA = whole(
+    work("a", { acceptance: ["a() returns 1 when its own test runs."] }),
+    ["a"],
+  );
+  const reaches = whole(work("a"), ["a", "b"]);
+  const { planner, asked } = scripted(changesA, reaches, { findings: [] });
+  const deps = depsOf(checkout, planner);
+  const a = state.done.plan.items.find((item) => item.id === "a");
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.deepEqual(
+    kept.findings.map((f) => f.message),
+    [REACH],
+  );
+  const restored = [{ itemId: "a", fields: ["acceptance"] }];
+  assert.deepEqual(kept.restored, restored);
+  // The answer still holds a as the planner changed it, so it isn't kept:
+  // round 2 answers in full again, with the plan as it stands.
+  assert.equal(kept.answer, undefined);
+  assert.ok(asked[0].prompt.includes('"planInForce"'));
+
+  // Round 2 leaves a as it is: its answer decodes to its draft and is kept.
+  const second = await step(state, deps);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.ok(asked[1].prompt.includes('"planInForce"'));
+  assert.ok(!asked[1].prompt.includes('"currentPlan"'));
+  assert.ok(
+    asked[1].prompt.includes(
+      "Factory set these fields of started Work Items back to the plan being amended, as the started-item rule keeps them: a (acceptance).",
+    ),
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.restored, undefined);
+  assert.deepEqual(round.answer, reaches);
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "a"),
+    a,
+  );
+  assert.equal((await step(state, deps)).key, "amend:op-1:review");
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  assert.deepEqual(state.done["amend:op-1"].answer, reaches);
+});
+
+test("a whole plan whose accepted round had a started item set back keeps no answer, so the next amendment answers in full", async () => {
+  const { checkout, state } = await discovered();
+  state.done["plan:1:1"] = {};
+  const changesA = {
+    ...accepted,
+    items: [
+      work("a", { goal: "Add a, as its own test checks." }),
+      work("b", { dependencies: ["a"] }),
+      qa(["a", "b"]),
+    ],
+  };
+  const { planner } = scripted(changesA, { findings: [] });
+  const deps = depsOf(checkout, planner);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  const round = state.done["amend:op-1:plan"];
+  assert.deepEqual(round.restored, [{ itemId: "a", fields: ["goal"] }]);
+  assert.equal(round.answer, undefined);
+  assert.equal(
+    round.draft.items.find((item) => item.id === "a").goal,
+    "Add a.",
+  );
+  assert.equal((await step(state, deps)).key, "amend:op-1:review");
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.equal(result.answer, undefined);
+  assert.equal(
+    result.plan.items.find((item) => item.id === "a").goal,
+    "Add a.",
+  );
+
+  // The next amendment's planner gets the plan as it stands, not a's change.
+  state.kept["amend:op-2:proposal"] = {
+    ...state.kept["amend:op-1:proposal"],
+    id: "op-2",
+    at: "2026-01-01T02:00:00.000Z",
+  };
+  const next = scripted(revision());
+  const asked = await step(state, depsOf(checkout, next.planner));
+  assert.equal(asked.key, "amend:op-2:plan");
+  assert.ok(next.asked[0].prompt.includes('"planInForce"'));
+  assert.ok(!next.asked[0].prompt.includes("as its own test checks"));
+});
+
+// A round that removes a, which Factory can't set back: b takes its coverage.
+const dropsA = {
+  ...revision([work("b"), qa(["b"])]),
+  removedItemIds: ["a"],
+  coverage: [
+    {
+      obligationIndex: 0,
+      itemId: "b",
+      proof: { kind: "result-semantic" },
+      environment: null,
+    },
+  ],
+};
+// Round 2 puts a back, with its coverage.
+const keepsA = {
+  ...revision([work("a"), qa(["a", "b"])]),
+  coverage: [
+    {
+      obligationIndex: 0,
+      itemId: "a",
+      proof: { kind: "result-semantic" },
+      environment: null,
+    },
+  ],
+};
+const DROPS_A =
+  "The amendment removes Work Item a; keep every item (an unneeded pending item can change, not disappear)";
+
+test("an amendment that removes a started item goes back to its planner, asks past the allowance before its planner runs, and the same removal twice rejects it", async () => {
   {
     const { checkout, state } = await discovered({
       frozen: {
         config: { autonomy: { allowances: { planningRevisions: 1 } } },
       },
     });
-    const { planner, asked } = scripted(relaxesA, restoresA);
+    const { planner, asked } = scripted(dropsA, keepsA);
     const deps = depsOf(checkout, planner);
-    assert.equal((await step(state, deps)).outcome.kind, "retry");
+    const first = (await step(state, deps)).outcome;
+    assert.equal(first.kind, "retry", JSON.stringify(first));
+    assert.deepEqual(state.kept["amend:op-1:revisions"][0].findings, [
+      { source: "check", message: DROPS_A, itemId: "a" },
+    ]);
     const held = (await step(state, deps)).outcome;
     assert.equal(held.kind, "hold", JSON.stringify(held));
     assert.match(
@@ -569,13 +902,13 @@ test("an amendment sent back for a started item asks past the allowance before i
   }
   {
     const { checkout, state } = await discovered();
-    const { planner } = scripted(relaxesA, revision());
+    const { planner } = scripted(dropsA, revision());
     const deps = depsOf(checkout, planner);
     assert.equal((await step(state, deps)).outcome.kind, "retry");
     assert.equal((await step(state, deps)).outcome.kind, "done");
     assert.equal(
       state.done["amend:op-1:plan"].rejected,
-      `Amendment plan round 2 came back with the same problems as round 1: ${STARTED_A}`,
+      `Amendment plan round 2 came back with the same problems as round 1: ${DROPS_A}`,
     );
     await step(state, deps);
     assert.equal(

@@ -59,11 +59,11 @@ import {
 } from "./predecessors.js";
 import {
   type EarlierRefusalReview,
+  earlierFindingsView,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
   renderRefusalReviewCall,
-  reviewFindingsView,
   revisionScope,
 } from "./prompts.js";
 import {
@@ -611,7 +611,10 @@ function reviewStep(
         signal,
       );
       const last = lastReview(state, g, n);
+      // A broken answer last time: the reviewer is told why (`invalidKey`).
+      const invalid = state.kept[invalidKey(key)] as string | undefined;
       const call = {
+        ...(invalid ? { invalid } : {}),
         facts,
         evidence,
         decisions: all,
@@ -626,15 +629,21 @@ function reviewStep(
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
       };
-      // A refusal after a review that found problems is judged with that
-      // review's findings, so it rules consistently with them (#2111).
-      const earlier: EarlierRefusalReview | undefined =
-        cannot && last && reviewFindingsView(last.findings).length
-          ? {
-              round: last.round,
-              ...(last.cannot ? { refusal: last.cannot } : {}),
-              findings: reviewFindingsView(last.findings),
-            }
+      // A refusal after corrections is judged with them, so it rules
+      // consistently with them (#2111).
+      const earlier = cannot
+        ? earlierCorrections(state, g, n, last)
+        : undefined;
+      // A plan after a refusal its review overturned is given that review's
+      // findings, so an objection one withdrew isn't raised again (#2111).
+      const overturned =
+        draft && last?.cannot
+          ? sentAfter(
+              state,
+              g,
+              last.round,
+              new Set(draft.items.map((item) => item.id)),
+            )
           : undefined;
       const { prompt, facts: promptFacts } = cannot
         ? renderRefusalReviewCall({
@@ -647,7 +656,8 @@ function reviewStep(
             ...call,
             draft: draft!,
             // A plan after a reviewed refusal has no reviewed plan to be a
-            // revision of: it gets the full first review.
+            // revision of: it gets the full first review, with the
+            // refusal's review's findings.
             ...(last?.draft
               ? {
                   scope: revisionScope(
@@ -661,6 +671,7 @@ function reviewStep(
                   ),
                 }
               : {}),
+            ...(overturned ? { overturned } : {}),
           });
       const answer = await deps.planner.answer({
         role: "reviewer",
@@ -687,9 +698,15 @@ function reviewStep(
         evidence,
         draft ? draft.items.map((item) => item.id) : [],
       );
+      // An answer clears the mark; an invalid one sets it again, and the
+      // retry is told why.
+      context.keep({ [invalidKey(key)]: null });
       if (decoded.invalid) {
         logRefused(context.log, answer.callId, decoded.reason);
-        return errored(`The plan review answer was invalid: ${decoded.reason}`);
+        return invalidRetry(
+          key,
+          `The plan review answer was invalid: ${decoded.reason}`,
+        );
       }
       const result: ReviewRound = { findings: decoded.findings };
       return done(result);
@@ -721,6 +738,58 @@ function lastReview(
     }
   }
   return undefined;
+}
+
+/**
+ * The findings decide step `round` sent the planner as corrections, with
+ * that round's refusal when it was one, as a later review reads them
+ * (prompts.ts `earlierFindingsView`); undefined when it sent none.
+ */
+function sentAfter(
+  state: ObjectiveState,
+  g: number,
+  round: number,
+  known: ReadonlySet<string>,
+): EarlierRefusalReview | undefined {
+  const sent = (state.done[`decide:${g}:${round}`] as Decision | undefined)
+    ?.corrections;
+  const findings = earlierFindingsView(round, sent ?? [], known);
+  if (!findings.length) return undefined;
+  const { cannot } = state.done[`plan:${g}:${round}`] as PlanRound;
+  return { round, ...(cannot ? { refusal: cannot } : {}), findings };
+}
+
+/**
+ * What the planner was given before refusing at round `n`: the round
+ * before's corrections, Factory's checks' or its review's, and when that
+ * round wasn't reviewed, the last review's findings too, so a refusal that
+ * rests on a check and a review finding together is judged with both. A
+ * first-planning refusal's review names no item, so every item id is an
+ * earlier plan's.
+ */
+function earlierCorrections(
+  state: ObjectiveState,
+  g: number,
+  n: number,
+  last: ReturnType<typeof lastReview>,
+): EarlierRefusalReview | undefined {
+  const none = new Set<string>();
+  const sent = n > 1 ? sentAfter(state, g, n - 1, none) : undefined;
+  const older =
+    last && last.round < n - 1
+      ? earlierFindingsView(
+          last.round,
+          last.findings.filter((finding) => finding.source === "review"),
+          none,
+        )
+      : [];
+  if (!older.length) return sent;
+  const { cannot } = state.done[`plan:${g}:${n - 1}`] as PlanRound;
+  return {
+    round: n - 1,
+    ...(cannot ? { refusal: cannot } : {}),
+    findings: [...older, ...(sent?.findings ?? [])],
+  };
 }
 
 // ---------------------------------------------------------------------------

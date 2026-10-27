@@ -7,6 +7,7 @@ import { validationEnvironmentNote } from "./facts.js";
 import { REPOSITORY_DIRECTORY, type RepositoryView } from "./repository.js";
 import type { ReviewEvidence } from "./review.js";
 import {
+  GRAPH_REVIEW_AFTER_REFUSAL,
   GRAPH_REVIEW_CHECKS,
   GRAPH_REVIEW_FINDINGS,
   GRAPH_REVIEW_FIRST_ROUND,
@@ -472,7 +473,7 @@ export function revisionScope(
 }
 
 /** An earlier review's findings as a later review reads them; other sources' are left out. */
-export function reviewFindingsView(
+function reviewFindingsView(
   findings: readonly (Finding & { itemIds?: readonly string[] })[],
 ): RevisionScope["previousFindings"] {
   return findings
@@ -565,13 +566,27 @@ interface ReviewCallInput {
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   /** The installation's execution profile policy; absent means one configured harness. */
   executionProfiles?: unknown;
+  /** Why Factory refused this review's last answer (`invalidKey`): the retry is told. */
+  invalid?: string;
 }
 
 export interface GraphReviewInput extends ReviewCallInput {
   draft: Draft;
   /** Absent on round 1. */
   scope?: RevisionScope;
+  /**
+   * The last reviewed round was the planner's refusal, which its review
+   * overturned: the refusal and the review's findings the planner was given
+   * (steps.ts `reviewStep`), so a withdrawn objection isn't raised again.
+   */
+  overturned?: EarlierRefusalReview;
 }
+
+/** A retry after an invalid answer is told why it was refused; it follows the cached prefix. */
+const invalidNote = (invalid: string | undefined): string =>
+  invalid
+    ? `\n\nYour previous answer to this review was refused, and nothing of it was kept: ${invalid}\nAnswer again, correcting it.`
+    : "";
 
 /** The graph-review prompt. The answer schema is graphReviewSchema (review.ts). */
 export function renderGraphReviewCall(input: GraphReviewInput): Rendered {
@@ -598,7 +613,16 @@ Objective:\n`;
   // Everything above repeats across revisions of one Objective. The
   // candidate and its round scope follow, so the provider cache reuses the
   // prefix.
-  const tail = `\nBase: ${facts.base}\nGraph:\n${JSON.stringify(reviewGraphView(input.draft, input.evidence))}\nFinal commands:\n${JSON.stringify(input.finalCommands)}${graphReviewScope(input.scope)}`;
+  const { overturned } = input;
+  const after = overturned
+    ? `\nOverturned refusal (round ${overturned.round}):\n${GRAPH_REVIEW_AFTER_REFUSAL}\n${JSON.stringify(
+        {
+          ...(overturned.refusal ? { earlierRefusal: overturned.refusal } : {}),
+          findings: overturned.findings,
+        },
+      )}`
+    : "";
+  const tail = `\nBase: ${facts.base}\nGraph:\n${JSON.stringify(reviewGraphView(input.draft, input.evidence))}\nFinal commands:\n${JSON.stringify(input.finalCommands)}${graphReviewScope(input.scope)}${after}${invalidNote(input.invalid)}`;
   return rendered(
     [
       ["instructions", instructions],
@@ -617,12 +641,59 @@ function reviewEvidenceText(input: ReviewCallInput): string {
   return `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}\nRoot package scripts at the base:\n${JSON.stringify(facts.packageCommands)}\nCI-only commands (validation never runs them):\n${JSON.stringify(facts.ciOnlyCommands)}\n${validationEnvironmentNote(facts.hostNetwork === true, facts.lockfileResolution === true)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
 }
 
-/** The review before a refusal's, when it found problems: its findings, and the refusal it reviewed if it was one. */
+/** A correction the planner was given before it refused, as the refusal's review reads it. */
+export interface EarlierFinding {
+  /** The planning round whose checks or review found it. */
+  round: number;
+  /** review: an earlier round of this review; check: Factory's deterministic plan checks. */
+  source: Finding["source"];
+  kind: string;
+  /** The items it names that the refusal review's answer may name too. */
+  itemIds: string[];
+  /** The items it named in that round's plan, which the review doesn't see (`earlierFindingsView`). */
+  earlierItemIds?: string[];
+  detail: string;
+}
+
+/**
+ * What the planner was given before it refused, when it was given
+ * corrections: the round they came from, that round's own refusal when it
+ * was one, and the findings, with the last review's when it was older.
+ */
 export interface EarlierRefusalReview {
-  /** The planning round it reviewed. */
+  /** The round before the refusal, whose corrections the planner received. */
   round: number;
   refusal?: CannotPlan;
-  findings: RevisionScope["previousFindings"];
+  findings: EarlierFinding[];
+}
+
+/**
+ * Findings of round `round` as a refusal's review reads them. Operator
+ * answers are left out: they are FACTORY_OPERATOR_PLANNING_DECISIONS. The
+ * refusal review's own answer may name only `known` items (none in first
+ * planning, previousPlan's in an amendment), so a finding keeps those in
+ * itemIds and the rest, items of a plan the review doesn't see, in
+ * earlierItemIds: one it restates then stays a valid answer (#2111).
+ */
+export function earlierFindingsView(
+  round: number,
+  findings: readonly (Finding & { itemIds?: readonly string[] })[],
+  known: ReadonlySet<string>,
+): EarlierFinding[] {
+  return findings
+    .filter((finding) => finding.source !== "operator")
+    .map((finding) => {
+      const ids = findingItemIds(finding);
+      const other = ids.filter((id) => !known.has(id));
+      return {
+        round,
+        source: finding.source,
+        kind: finding.kind ?? "fix",
+        itemIds: ids.filter((id) => known.has(id)),
+        ...(other.length ? { earlierItemIds: other } : {}),
+        detail: finding.message,
+      };
+    });
 }
 
 export interface RefusalReviewInput extends ReviewCallInput {
@@ -633,7 +704,7 @@ export interface RefusalReviewInput extends ReviewCallInput {
    * plan yet, or an amendment planner's (amendments.ts `amendReviewStep`).
    */
   of: "objective" | "amendment";
-  /** An earlier review's findings, which a later refusal is judged consistently with. */
+  /** The corrections the planner was given before it refused, which the refusal is judged consistently with. */
   earlier?: EarlierRefusalReview;
 }
 
@@ -643,8 +714,9 @@ export interface RefusalReviewInput extends ReviewCallInput {
  * the discovery. An amendment's plan is FACTORY_AMENDMENT's previousPlan,
  * so its findings name that plan's items; first planning's name none. The
  * answer schema is graphReviewSchema (review.ts); no findings confirm the
- * refusal. A refusal after a review that found problems is given that
- * review's findings (`earlier`), as a plan's revision round is.
+ * refusal. A refusal after a round the planner was given corrections for
+ * is given them, with the last review's findings when that review was
+ * older (`earlier`), as a plan's revision round is given the last review's.
  */
 export function renderRefusalReviewCall(input: RefusalReviewInput): Rendered {
   const { facts } = input;
@@ -656,17 +728,17 @@ ${input.workers ? `${workerCapability(input.workers)}\n` : ""}${input.decisions.
 ${amendment ? `${NO_GAP_REFUSAL}\n${REFUSAL_REVIEW_FINDINGS}` : PLAN_REFUSAL_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
 
 Objective:\n`;
-  // The earlier review follows the refusal, so the cached prefix holds.
+  // The earlier corrections follow the refusal, so the cached prefix holds.
   const { earlier } = input;
   const scope = earlier
-    ? `\nEarlier review (round ${earlier.round}):\n${REFUSAL_REVIEW_LATER_ROUND}\n${JSON.stringify(
+    ? `\nEarlier corrections (round ${earlier.round}):\n${REFUSAL_REVIEW_LATER_ROUND}\n${JSON.stringify(
         {
           ...(earlier.refusal ? { earlierRefusal: earlier.refusal } : {}),
           previousFindings: earlier.findings,
         },
       )}`
     : "";
-  const tail = `\nBase: ${facts.base}\nRefusal:\n${JSON.stringify(input.refusal)}\nFinal commands:\n${JSON.stringify(input.finalCommands)}${scope}`;
+  const tail = `\nBase: ${facts.base}\nRefusal:\n${JSON.stringify(input.refusal)}\nFinal commands:\n${JSON.stringify(input.finalCommands)}${scope}${invalidNote(input.invalid)}`;
   return rendered(
     [
       ["instructions", instructions],

@@ -28,11 +28,11 @@ import {
 } from "./plan.js";
 import {
   type EarlierRefusalReview,
+  earlierFindingsView,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
   renderRefusalReviewCall,
-  reviewFindingsView,
 } from "./prompts.js";
 import {
   decodeGraphReview,
@@ -119,7 +119,7 @@ import {
  *   amendment with the planner's reason; a fix finding names what allows a
  *   plan and sends the round back like any other, so the planner plans
  *   again within the same allowance. A later refusal's review is given the
- *   findings of the last review that sent a round back (`earlierReview`).
+ *   corrections the planner was given before it (`earlierReview`).
  * - A reviewed round that leaves the plan unchanged, the planner's answer
  *   for a discovery that shows no gap (`NO_GAP_ANSWER`), settles the
  *   amendment as continued (`AmendmentResult.unchanged`): nothing is
@@ -266,25 +266,38 @@ function revisionsOf(state: ObjectiveState, id: string): AmendRevision[] {
 }
 
 /**
- * The last round its review sent back, with that review's findings and
- * the refusal it reviewed, if it was one: a later refusal's review is
- * given them (prompts.ts `renderRefusalReviewCall`). Round `at + 1` is
- * kept at `at`, as `sendBack` numbers them.
+ * What the planner was given before it refused: the last round sent back,
+ * with its findings (the plan checks', the fence's or the review's) and its
+ * refusal if it was one, and when its findings hold no review finding, the
+ * last review's that sent a round back too. A later refusal's review is
+ * given them (prompts.ts `renderRefusalReviewCall`). Its answer names only
+ * previousPlan's items (`known`), so a new item an earlier round's draft
+ * held is an earlierItemIds entry (`earlierFindingsView`). Round `at + 1`
+ * is kept at `at`, as `sendBack` numbers them.
  */
 function earlierReview(
   revisions: readonly AmendRevision[],
+  known: ReadonlySet<string>,
 ): EarlierRefusalReview | undefined {
-  for (let at = revisions.length - 1; at >= 0; at--) {
-    const { findings, refused } = revisions[at]!;
-    const reviewed = reviewFindingsView(findings);
-    if (reviewed.length)
-      return {
-        round: at + 1,
-        ...(refused ? { refusal: refused } : {}),
-        findings: reviewed,
-      };
-  }
-  return undefined;
+  const last = revisions.at(-1);
+  if (!last) return undefined;
+  const round = revisions.length;
+  const findings = earlierFindingsView(round, last.findings, known);
+  if (!findings.some((finding) => finding.source === "review"))
+    for (let at = revisions.length - 2; at >= 0; at--) {
+      const reviewed = revisions[at]!.findings.filter(
+        (finding) => finding.source === "review",
+      );
+      if (!reviewed.length) continue;
+      findings.unshift(...earlierFindingsView(at + 1, reviewed, known));
+      break;
+    }
+  if (!findings.length) return undefined;
+  return {
+    round,
+    ...(last.refused ? { refusal: last.refused } : {}),
+    findings,
+  };
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -1885,7 +1898,10 @@ function amendReviewStep(
         inputs.base,
         signal,
       );
+      // A broken answer last time: its one retry is told why (`invalidKey`).
+      const invalid = state.kept[invalidKey(key)] as string | undefined;
       const call = {
+        ...(invalid ? { invalid } : {}),
         facts,
         evidence,
         decisions: all,
@@ -1900,10 +1916,13 @@ function amendReviewStep(
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
       };
-      // A refusal after a review that found problems is judged with that
-      // review's findings, so it rules consistently with them (#2111).
+      // A refusal after corrections is judged with them, so it rules
+      // consistently with them (#2111).
       const earlier = cannot
-        ? earlierReview(revisionsOf(state, proposal.id))
+        ? earlierReview(
+            revisionsOf(state, proposal.id),
+            new Set(previousPlan.items.map((item) => item.id)),
+          )
         : undefined;
       const { prompt, facts: promptFacts } = cannot
         ? renderRefusalReviewCall({

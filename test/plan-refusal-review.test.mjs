@@ -14,7 +14,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import {
+  GRAPH_REVIEW_AFTER_REFUSAL,
   GRAPH_REVIEW_FIRST_ROUND,
+  GRAPH_REVIEW_REVISION_ROUND,
   PLAN_REFUSAL_REVIEW_INTRO,
   REFUSAL_REVIEW_INTRO,
   REFUSAL_REVIEW_LATER_ROUND,
@@ -241,7 +243,7 @@ test("first planning's cannotPlan is reviewed, and a refusal its review confirms
   assert.ok(prompt.includes("with itemIds [] (there is no plan yet)"));
   assert.ok(!prompt.includes("Graph:\n"));
   assert.ok(!prompt.includes("FACTORY_AMENDMENT"));
-  assert.ok(!prompt.includes("Earlier review"));
+  assert.ok(!prompt.includes("Earlier corrections"));
   assert.deepEqual(review.outcome, { kind: "done", result: { findings: [] } });
 
   // Confirmed: the operator is asked with the planner's reason.
@@ -305,12 +307,31 @@ test("a first-planning refusal its review overturns goes back to the planner, wh
     ["a", "qa"],
   );
 
-  // The plan has no reviewed plan before it: it gets the full first review.
+  // The plan has no reviewed plan before it: it gets the full first review,
+  // with the refusal and the findings that overturned it.
   const again = await step(state, deps);
   assert.equal(again.key, "review:1:2");
   assert.ok(asked[3].prompt.includes(GRAPH_REVIEW_FIRST_ROUND));
   assert.ok(asked[3].prompt.includes("Graph:\n"));
   assert.ok(!asked[3].prompt.includes("This is a revision round"));
+  assert.ok(
+    asked[3].prompt.includes(
+      `Overturned refusal (round 1):\n${GRAPH_REVIEW_AFTER_REFUSAL}\n${JSON.stringify(
+        {
+          earlierRefusal: CANNOT,
+          findings: [
+            {
+              round: 1,
+              source: "review",
+              kind: "fix",
+              itemIds: [],
+              detail: FOUND,
+            },
+          ],
+        },
+      )}`,
+    ),
+  );
   assert.equal((await step(state, deps)).key, "decide:1:2");
   assert.equal(state.done["decide:1:2"].accept, true);
   const accept = await step(state, deps);
@@ -344,18 +365,30 @@ test("a second refusal's review is given the earlier review's finding, and the s
   const prompt = asked[3].prompt;
   assert.ok(prompt.startsWith(PLAN_REFUSAL_REVIEW_INTRO));
   assert.ok(
-    prompt.includes(`Earlier review (round 1):\n${REFUSAL_REVIEW_LATER_ROUND}`),
+    prompt.includes(
+      `Earlier corrections (round 1):\n${REFUSAL_REVIEW_LATER_ROUND}`,
+    ),
   );
   assert.ok(
     prompt.includes(
       JSON.stringify({
         earlierRefusal: CANNOT,
-        previousFindings: [{ kind: "fix", itemIds: [], detail: FOUND }],
+        previousFindings: [
+          {
+            round: 1,
+            source: "review",
+            kind: "fix",
+            itemIds: [],
+            detail: FOUND,
+          },
+        ],
       }),
     ),
   );
-  // The earlier review follows the refusal, after the cached prefix.
-  assert.ok(prompt.indexOf("Refusal:\n") < prompt.indexOf("Earlier review"));
+  // The earlier corrections follow the refusal, after the cached prefix.
+  assert.ok(
+    prompt.indexOf("Refusal:\n") < prompt.indexOf("Earlier corrections"),
+  );
 
   const decide = await step(state, deps);
   assert.equal(decide.key, "decide:1:2");
@@ -399,6 +432,244 @@ test("a refusal's review that finds a question only the operator can decide asks
     ["answer", "replan", "cancel"],
   );
   assert.equal(asked.length, 2);
+});
+
+// A plan review's objection to a's ownership of its new test file.
+const OBJECTION =
+  "test/a.test.js is an invented name: a must not own a test file the Objective doesn't name";
+const objects = {
+  findings: [
+    {
+      kind: "fix",
+      itemIds: ["a"],
+      evidenceIndices: [],
+      detail: OBJECTION,
+      question: "",
+    },
+  ],
+};
+const OBJECTED = `${OBJECTION}\nQuestion: How should the plan change to fix this: ${OBJECTION}?`;
+// A revision round's refusal: the rest of the answer is discarded.
+const refusesRevision = { cannotPlan: CANNOT };
+
+test("a refusal after a plan review whose findings named items is shown them apart, and its review may restate them; an invalid answer's retry is told why (#2111)", async () => {
+  const { checkout, state } = checked();
+  const restates = (itemIds) => ({
+    findings: [
+      {
+        kind: "fix",
+        itemIds,
+        evidenceIndices: [],
+        detail: `${OBJECTION}: restated`,
+        question: "",
+      },
+    ],
+  });
+  const { planner, asked } = scripted(
+    planned,
+    objects,
+    refusesRevision,
+    restates(["a"]),
+    restates([]),
+  );
+  const deps = depsOf(checkout, planner);
+  assert.equal((await step(state, deps)).key, "plan:1:1");
+  assert.equal((await step(state, deps)).key, "review:1:1");
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.equal((await step(state, deps)).key, "plan:1:2");
+  assert.deepEqual(state.done["plan:1:2"].cannot, CANNOT);
+
+  // The objection named a, an item of a plan the refusal review doesn't
+  // see: it is shown apart, as its answer names no item.
+  const invalid = await step(state, deps);
+  assert.equal(invalid.key, "review:1:2");
+  const prompt = asked[3].prompt;
+  assert.ok(prompt.startsWith(PLAN_REFUSAL_REVIEW_INTRO));
+  assert.ok(
+    prompt.includes(
+      JSON.stringify({
+        previousFindings: [
+          {
+            round: 1,
+            source: "review",
+            kind: "fix",
+            itemIds: [],
+            earlierItemIds: ["a"],
+            detail: OBJECTED,
+          },
+        ],
+      }),
+    ),
+  );
+  assert.ok(!prompt.includes('"earlierRefusal"'));
+  assert.ok(
+    !prompt.includes("Your previous answer to this review was refused"),
+  );
+  // An answer that still names a is refused, and the retry is told why.
+  assert.equal(invalid.outcome.kind, "retry");
+  const reason = `The plan review answer was invalid: Finding 0 itemIds must be a unique array of item ids in the reviewed graph (none); use [] for the plan as a whole.`;
+  assert.equal(invalid.outcome.reason, reason);
+  assert.equal(state.kept["review:1:2:invalid"], reason);
+  assert.equal(state.done["review:1:2"], undefined);
+
+  const retried = await step(state, deps);
+  assert.equal(retried.key, "review:1:2");
+  assert.ok(
+    asked[4].prompt.includes(
+      `\n\nYour previous answer to this review was refused, and nothing of it was kept: ${reason}\nAnswer again, correcting it.`,
+    ),
+  );
+  assert.equal(retried.outcome.kind, "done", JSON.stringify(retried.outcome));
+  assert.equal(state.kept["review:1:2:invalid"], undefined);
+  assert.deepEqual(
+    state.done["review:1:2"].findings.map((f) => [f.kind, f.itemIds]),
+    [["fix", []]],
+  );
+  assert.equal(asked.length, 5);
+});
+
+test("a refusal after a round that failed Factory's checks is judged with the check findings the planner got and the review before them (#2111)", async () => {
+  const { checkout, state } = checked();
+  // b owns a's source too, and neither depends on the other.
+  const overlaps = {
+    items: [
+      work("b", { ownedPaths: ["src/a.js", "test/b.test.js"] }),
+      qa(["a", "b"]),
+    ],
+    itemEdits: [],
+    removedItemIds: [],
+    coverage: [],
+    sourceObligations: null,
+    requiredPreIntegrationChecks: null,
+    cannotPlan: null,
+    decisionRequired: null,
+  };
+  const { planner, asked } = scripted(
+    planned,
+    objects,
+    overlaps,
+    refusesRevision,
+    { findings: [] },
+  );
+  const deps = depsOf(checkout, planner);
+  await step(state, deps);
+  await step(state, deps);
+  await step(state, deps);
+  const second = await step(state, deps);
+  assert.equal(second.key, "plan:1:2");
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  const checked2 = state.done["plan:1:2"];
+  assert.ok(checked2.findings?.length, JSON.stringify(checked2));
+  assert.ok(checked2.findings.every((f) => f.source === "check"));
+  assert.equal(state.done["review:1:2"], undefined);
+  // Round 2 was not reviewed: its check findings go to the planner.
+  assert.equal((await step(state, deps)).key, "decide:1:2");
+  const sent = state.done["decide:1:2"].corrections;
+  assert.ok(sent.length);
+  assert.equal((await step(state, deps)).key, "plan:1:3");
+  assert.deepEqual(state.done["plan:1:3"].cannot, CANNOT);
+
+  const review = await step(state, deps);
+  assert.equal(review.key, "review:1:3");
+  const prompt = asked[4].prompt;
+  assert.ok(
+    prompt.includes(
+      `Earlier corrections (round 2):\n${REFUSAL_REVIEW_LATER_ROUND}`,
+    ),
+  );
+  const view = (round, f) => {
+    const ids = f.itemIds ?? (f.itemId ? [f.itemId] : []);
+    return {
+      round,
+      source: f.source,
+      kind: f.kind ?? "fix",
+      itemIds: [],
+      ...(ids.length ? { earlierItemIds: ids } : {}),
+      detail: f.message,
+    };
+  };
+  assert.ok(
+    prompt.includes(
+      JSON.stringify({
+        previousFindings: [
+          {
+            round: 1,
+            source: "review",
+            kind: "fix",
+            itemIds: [],
+            earlierItemIds: ["a"],
+            detail: OBJECTED,
+          },
+          ...sent.map((f) => view(2, f)),
+        ],
+      }),
+    ),
+    prompt.slice(prompt.indexOf("Earlier corrections")),
+  );
+});
+
+test("a plan after a refusal whose review withdrew an earlier plan review's objection is reviewed with the withdrawal (#2111)", async () => {
+  const { checkout, state } = checked();
+  const WITHDRAWN =
+    "The round 1 objection to test/a.test.js was wrong and is withdrawn: an item owns each new file it creates by the path the planner chooses";
+  const { planner, asked } = scripted(
+    planned,
+    objects,
+    refusesRevision,
+    {
+      findings: [
+        {
+          kind: "fix",
+          itemIds: [],
+          evidenceIndices: [],
+          detail: WITHDRAWN,
+          question: "",
+        },
+      ],
+    },
+    planned,
+    { findings: [] },
+  );
+  const deps = depsOf(checkout, planner);
+  for (const key of [
+    "plan:1:1",
+    "review:1:1",
+    "decide:1:1",
+    "plan:1:2",
+    "review:1:2",
+    "decide:1:2",
+    "plan:1:3",
+  ])
+    assert.equal((await step(state, deps)).key, key);
+  assert.ok(state.done["plan:1:3"].draft);
+  const review = await step(state, deps);
+  assert.equal(review.key, "review:1:3");
+  const prompt = asked[5].prompt;
+  // A full review: no reviewed plan was revised for it.
+  assert.ok(prompt.includes(GRAPH_REVIEW_FIRST_ROUND));
+  assert.ok(!prompt.includes(GRAPH_REVIEW_REVISION_ROUND));
+  // With the refusal and the finding that withdrew the objection.
+  assert.ok(
+    prompt.includes(
+      `Overturned refusal (round 2):\n${GRAPH_REVIEW_AFTER_REFUSAL}\n${JSON.stringify(
+        {
+          earlierRefusal: CANNOT,
+          findings: [
+            {
+              round: 2,
+              source: "review",
+              kind: "fix",
+              itemIds: [],
+              detail: `${WITHDRAWN}\nQuestion: How should the plan change to fix this: ${WITHDRAWN}?`,
+            },
+          ],
+        },
+      )}`,
+    ),
+    prompt.slice(prompt.indexOf("Review scope")),
+  );
+  assert.equal((await step(state, deps)).key, "decide:1:3");
+  assert.equal(state.done["decide:1:3"].accept, true);
 });
 
 test("a refusal an earlier Factory saved without its review mark asks at once, with no review", async () => {

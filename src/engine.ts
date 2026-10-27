@@ -93,8 +93,8 @@ export type Outcome =
       /** A human gate's question: the step polls on while it is open (`Hold.polls`). */
       polls?: true;
       /**
-       * The step's result is its refused result, kept unchanged at the
-       * operator's word (their guidance, #2131): the engine answers
+       * The step's result is its refused result again: its worker made no
+       * change after the operator's guidance (#2131). The engine answers
        * `revalidate` itself when the workflow can take it and a result
        * rereview is left, charged as one; else the question is asked.
        */
@@ -1222,8 +1222,8 @@ export class ObjectiveRunner {
   }
 
   /**
-   * A question whose step kept its refused result unchanged at the
-   * operator's word (`rereview`): `revalidate` is answered for it, as the
+   * A question whose step's worker made no change after the operator's
+   * guidance (`rereview`): `revalidate` is answered for it, as the
    * operator's would be, when the workflow takes it there and a result
    * rereview is left, charged here against the live state like an
    * operator's (`answer`). True when answered; else the question is asked,

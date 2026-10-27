@@ -42,7 +42,7 @@ import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
 import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
-import { refusedResult, refusedTreeFor } from "./refused.js";
+import { refusedOf, refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import { itemMemory } from "./shared.js";
 import { correctsMedia, repairOutcome } from "./step-deliver.js";
@@ -651,18 +651,24 @@ export async function workStep(
     }
     case "repair":
       // The operator's guidance was this attempt's only correction, and the
-      // worker kept the refused result as it was: no repair, since the
-      // worker did what it was told. It is checked again as `revalidate`
-      // would check it (a result rereview), or the operator is asked.
+      // worker made no change: it resubmitted the refused result as it was,
+      // or (in a checkout that never held it, such as one added again at
+      // the kept base) left no change at all. Whatever the guidance said,
+      // that is no repair: the refused result is checked again as
+      // `revalidate` would check it (a result rereview), or the operator is
+      // asked. Any other attempt with no change is refused as before.
       if (
-        collected.unchanged &&
+        (collected.unchanged ||
+          (collected.empty && refusedOf(state, item.id) !== undefined)) &&
         !collected.staging &&
         guidedOnly(state, item.id, keepAll)
       )
-        return keptAsGuided(item, finished.finalResponse, {
-          ...keepAll,
-          ...facts({ finished: null }, item.id),
-        });
+        return keptAsGuided(
+          item,
+          finished.finalResponse,
+          collected.unchanged ? "unchanged" : "empty",
+          { ...keepAll, ...facts({ finished: null }, item.id) },
+        );
       return repairOutcome(
         item,
         "work",
@@ -707,17 +713,21 @@ export function guidedOnly(
 const KEPT_RESPONSE_LIMIT = 2000;
 
 /**
- * The worker followed the operator's guidance and resubmitted the refused
- * result unchanged (#2131). That is no repair: the engine answers
- * `revalidate` for it where it is taken and a result rereview is left
- * (engine.ts `rereview`), so the same result is checked again, charged as
- * a rereview; else this question asks, and the engine adds `revalidate`
- * (with its sentence) where the item can take it, so past the rereview
- * allowance it asks for `more`.
+ * After the operator's guidance, the attempt's only correction, the worker
+ * made no change (#2131): it resubmitted the refused result unchanged
+ * (`unchanged`), or left no change at all (`empty`). Factory never reads
+ * the guidance, so this holds whatever it said; the question quotes the
+ * worker's final response for the operator to judge. That is no repair:
+ * the engine answers `revalidate` for it where it is taken and a result
+ * rereview is left (engine.ts `rereview`), so the refused result is checked
+ * again, charged as a rereview; else this question asks, and the engine
+ * adds `revalidate` (with its sentence) where the item can take it, so past
+ * the rereview allowance it asks for `more`.
  */
 function keptAsGuided(
   item: WorkItem,
   finalResponse: string,
+  how: "unchanged" | "empty",
   keep: Record<string, unknown>,
 ): Outcome {
   const text = finalResponse.trim();
@@ -725,9 +735,13 @@ function keptAsGuided(
     text.length > KEPT_RESPONSE_LIMIT
       ? `${text.slice(0, KEPT_RESPONSE_LIMIT)}...`
       : text;
+  const did =
+    how === "unchanged"
+      ? "resubmitted its refused result unchanged"
+      : "made no change";
   return {
     ...hold(
-      `Work Item ${item.id}'s worker followed your guidance and kept its refused result unchanged, so there is no new result, and no repair is charged for it.${said ? `\n\nThe worker's final response: ${said}` : ""}\n\nFactory checks a result kept this way again as a result rereview when it can; it can't now (the result can't be checked again as it is, or this Objective's result rereviews are spent). Answer \`answer <text>\` to send the worker other guidance, \`replan\` to plan again, or cancel.`,
+      `After your guidance, Work Item ${item.id}'s worker ${did}, so there is no new result, and no repair is charged for it.${said ? `\n\nThe worker's final response: ${said}` : ""}\n\nFactory checks the refused result again as a result rereview when it can; it can't now (the result can't be checked again as it is, or this Objective's result rereviews are spent). Answer \`answer <text>\` to send the worker other guidance, \`replan\` to plan again, or cancel.`,
       ["answer", "replan", "cancel"],
     ),
     rereview: true,

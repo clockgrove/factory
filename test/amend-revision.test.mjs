@@ -35,6 +35,7 @@ import { buildFacts } from "../dist/planning/facts.js";
 import {
   NO_GAP_ANSWER,
   NO_GAP_REFUSAL,
+  REFUSAL_REVIEW_LATER_ROUND,
   SELECTED_MEDIA_ABSENT,
 } from "../dist/planning/rubric.js";
 import { planningRevisions } from "../dist/planning/steps.js";
@@ -1693,14 +1694,43 @@ test("a refusal's review that asks an operator decision rejects with both, and t
   {
     // The planner refuses again, and the review says the same: rejected.
     const { checkout, state } = await discovered();
-    const { planner } = scripted(refuses, overturns(), refuses, overturns());
+    const { planner, asked } = scripted(
+      refuses,
+      overturns(),
+      refuses,
+      overturns(),
+    );
     const deps = depsOf(checkout, planner);
     await step(state, deps);
     assert.equal((await step(state, deps)).outcome.kind, "retry");
+    assert.ok(!asked[1].prompt.includes("Earlier corrections"));
     await step(state, deps);
     assert.deepEqual(state.done["amend:op-1:plan"].cannot, CANNOT);
     const again = await step(state, deps);
     assert.equal(again.key, "amend:op-1:review");
+    // The second refusal's review is given the first review's finding, so
+    // it rules consistently with it (#2111).
+    assert.ok(
+      asked[3].prompt.includes(
+        `Earlier corrections (round 1):\n${REFUSAL_REVIEW_LATER_ROUND}`,
+      ),
+    );
+    assert.ok(
+      asked[3].prompt.includes(
+        JSON.stringify({
+          earlierRefusal: CANNOT,
+          previousFindings: [
+            {
+              round: 1,
+              source: "review",
+              kind: "fix",
+              itemIds: ["a"],
+              detail: `${ALLOWED}\nQuestion: How should the plan change to fix this: ${ALLOWED}?`,
+            },
+          ],
+        }),
+      ),
+    );
     assert.ok(
       state.done["amend:op-1:review"].rejected.startsWith(
         `${REFUSED} Independent amendment review: Amendment plan round 2 came back with the same problems as round 1: ${ALLOWED}`,
@@ -1708,6 +1738,69 @@ test("a refusal's review that asks an operator decision rejects with both, and t
     );
     assert.equal(state.kept["amend:op-1:revisions"].length, 1);
   }
+});
+
+test("a refusal after a review whose finding named a new item is shown it apart, its review may restate it, and its one retry is told why (#2111)", async () => {
+  const { checkout, state } = await building();
+  const restates = (itemIds) => ({
+    findings: [
+      {
+        kind: "fix",
+        itemIds,
+        evidenceIndices: [],
+        detail: `${VAGUE}: restated`,
+        question: "",
+      },
+    ],
+  });
+  const { planner, asked } = scripted(
+    withB,
+    reviewed("fix"),
+    refuses,
+    restates(["b"]),
+    { findings: [] },
+  );
+  const deps = depsOf(checkout, planner);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.equal((await step(state, deps)).outcome.kind, "retry");
+  await step(state, deps);
+  assert.deepEqual(state.done["amend:op-1:plan"].cannot, CANNOT);
+
+  // b was a new item of round 1's draft, not of previousPlan, which the
+  // refusal review's answer names.
+  const invalid = await step(state, deps);
+  assert.equal(invalid.key, "amend:op-1:review");
+  assert.ok(
+    asked[3].prompt.includes(
+      JSON.stringify({
+        previousFindings: [
+          {
+            round: 1,
+            source: "review",
+            kind: "fix",
+            itemIds: [],
+            earlierItemIds: ["b"],
+            detail: `${VAGUE}\nQuestion: How should the plan change to fix this: ${VAGUE}?`,
+          },
+        ],
+      }),
+    ),
+    asked[3].prompt.slice(asked[3].prompt.indexOf("Earlier corrections")),
+  );
+  assert.equal(invalid.outcome.kind, "retry", JSON.stringify(invalid.outcome));
+  const reason = state.kept["amend:op-1:review:invalid"];
+  assert.ok(reason.startsWith("The amendment review answer was invalid: "));
+
+  // Its one retry is told why, and confirms the refusal.
+  const confirmed = await step(state, deps);
+  assert.equal(confirmed.key, "amend:op-1:review");
+  assert.ok(
+    asked[4].prompt.includes(
+      `Your previous answer to this review was refused, and nothing of it was kept: ${reason}\nAnswer again, correcting it.`,
+    ),
+  );
+  assert.equal(confirmed.outcome.kind, "done");
+  assert.equal(state.kept["amend:op-1:review:invalid"], undefined);
 });
 
 test("a whole plan's refusal keeps no answer, so the round its review sends back answers in full", async () => {

@@ -1191,10 +1191,11 @@ test("a wait on a human gate takes no slot", async () => {
   await stopped(service);
 });
 
-test("a planner's can't-be-planned answer holds once with replan and cancel, and plans no round on its own", async () => {
+test("a planner's can't-be-planned answer an earlier Factory saved unreviewed holds once with replan and cancel, and plans no round on its own", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  // The round the plan step saves for that answer (planning/steps.ts).
+  // The round an earlier Factory's plan step saved for that answer, before
+  // its review (#2111): no `refusalReview` mark (planning/steps.ts).
   const reason =
     "Acceptance requires changing src/config.ts; the constraints forbid touching src/, and nothing outside it can change the behaviour.";
   seed(inst, 71, "planning", {

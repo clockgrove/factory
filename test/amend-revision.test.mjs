@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import {
+  amendmentStatus,
   amendmentSteps,
   citedFiles,
   declineDiscovery,
@@ -31,7 +32,11 @@ import {
   startedItemRule,
 } from "../dist/planning/amendments.js";
 import { buildFacts } from "../dist/planning/facts.js";
-import { SELECTED_MEDIA_ABSENT } from "../dist/planning/rubric.js";
+import {
+  NO_GAP_ANSWER,
+  NO_GAP_REFUSAL,
+  SELECTED_MEDIA_ABSENT,
+} from "../dist/planning/rubric.js";
 import { planningRevisions } from "../dist/planning/steps.js";
 import { decodePlan } from "../dist/planning/wire.js";
 import { readShown } from "../dist/shown.js";
@@ -1463,6 +1468,8 @@ test("an amendment planner's cannotPlan is reviewed, and a refusal its review co
   assert.ok(prompt.includes(RULE));
   assert.ok(prompt.includes('"previousPlan"'));
   assert.ok(!prompt.includes("Graph:\n"));
+  // And, as the planner is, that a missing selected set is no gap.
+  assert.ok(prompt.includes(NO_GAP_REFUSAL));
   assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
 
   // Confirmed: the amendment is rejected with the planner's reason.
@@ -1567,6 +1574,79 @@ test("a cannotPlan its review overturns goes back to the planner with the rule t
   assert.equal(posted.length, 1);
   assert.equal(asked.length, 4);
   assert.equal(planningRevisions(state).used, 2);
+});
+
+// #2116 (Codex, media.select-repair, run 2026-10-27T062037PDT-66dd): a
+// media item's worker took its own test's ENOENT on destinations Factory
+// fills only after selection for a gap. The plan needed no change, but the
+// planner could answer only with a change or cannotPlan, and a confirmed
+// cannotPlan holds the Objective. Now the refusal's review is told the
+// discovery shows no gap and sends the planner back to answer with no
+// change; the unchanged round, once reviewed, settles the amendment as
+// continued, with nothing posted and no "plan changed" reattempt.
+const NO_GAP = {
+  reason:
+    "test/cube.test.js reads assets/cube.glb, which is absent until selection, so no plan can make npm test pass in the worker's checkout.",
+  change: "Move the test into an item after materialization.",
+};
+test("a cannotPlan resting on a missing selected set is sent back to answer with no change, and an unchanged round settles the amendment as continued (#2116)", async () => {
+  const { checkout, state } = await discovered();
+  const { planner, asked } = scripted(
+    { ...revision(), cannotPlan: NO_GAP },
+    {
+      findings: [
+        {
+          kind: "fix",
+          itemIds: ["a"],
+          evidenceIndices: [],
+          detail:
+            "The discovery shows no gap: the item's validation runs after selection. Answer with no change to the plan.",
+          question: "",
+        },
+      ],
+    },
+    revision(),
+    { findings: [] },
+  );
+  const posted = [];
+  const logged = [];
+  const deps = depsOf(checkout, planner, posted);
+  // The planner is told what to answer for a discovery with no gap.
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.ok(asked[0].prompt.includes(inJson(SELECTED_MEDIA_ABSENT)));
+  assert.ok(asked[0].prompt.includes(inJson(NO_GAP_ANSWER)));
+  // The refusal's review is told the rule too, and sends it back.
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.ok(
+    asked[1].prompt.includes("Independently review a planner's refusal"),
+  );
+  assert.ok(asked[1].prompt.includes(NO_GAP_REFUSAL), asked[1].prompt);
+  assert.equal(review.outcome.kind, "retry", JSON.stringify(review.outcome));
+  // Round 2 answers with no change, and its review agrees.
+  const second = await step(state, deps);
+  assert.equal(second.key, "amend:op-1:plan");
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  const again = await step(state, deps);
+  assert.deepEqual(again.outcome, { kind: "done", result: { round: 2 } });
+  assert.ok(
+    asked[3].prompt.includes(
+      "A draft that leaves previousPlan unchanged is the planner's answer for a discovery that shows no gap",
+    ),
+  );
+  // Settled as continued: no plan posted, the plan as it was, no rejection
+  // to answer, and the proposing item carries on (work/amend.ts).
+  const accept = await step(state, deps, undefined, logged);
+  assert.equal(accept.key, "amend:op-1");
+  assert.deepEqual(state.done["amend:op-1"], { unchanged: true });
+  assert.deepEqual(
+    logged.filter((event) => event.event === "amendment-unchanged"),
+    [{ event: "amendment-unchanged", amendment: "op-1" }],
+  );
+  assert.equal(posted.length, 0);
+  assert.equal(amendmentStatus(state, "op-1").status, "continued");
+  assert.deepEqual(amendmentSteps(state, deps), []);
+  assert.equal(asked.length, 4);
 });
 
 test("a refusal's review that asks an operator decision rejects with both, and the same findings twice or an invalid review twice reject with the refusal too", async () => {

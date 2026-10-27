@@ -23,12 +23,18 @@ import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
   continuation,
   VALIDATE_REQUEST,
+  validateRequest,
 } from "../dist/providers/claude-worker.js";
 import { correction } from "../dist/repair.js";
 import { discoveryOutcome } from "../dist/work/amend.js";
 import { collect } from "../dist/work/collect.js";
 import { prepareWorkPrompt } from "../dist/work/prompt.js";
-import { SelfValidation } from "../dist/work/self-validate.js";
+import {
+  SELECTED_MEDIA_VALIDATE,
+  SelfValidation,
+  VALIDATION_TOOL_DESCRIPTION,
+  validationToolDescription,
+} from "../dist/work/self-validate.js";
 import {
   configured,
   installation,
@@ -678,7 +684,7 @@ test("the worker prompt sends a file outside the owned paths to the discovery, a
     assert.ok(prepared.prompt.includes(text), text);
 });
 
-test("a failed Validate run, the request to validate and a turn-limit continuation after a failed run send a fix outside the owned paths to the discovery", async () => {
+test("a failed Validate run, the request to validate and a turn-limit continuation after a failed run send a fix outside the owned paths to the discovery, and a media item's say a failure for its absent selected set is neither (#2116)", async () => {
   const { worktree, base } = personsMain();
   ownedChange(worktree);
   const validated = { ...work, validation: [required] };
@@ -719,6 +725,59 @@ test("a failed Validate run, the request to validate and a turn-limit continuati
     ),
   );
   assert.ok(!continuation(true, false).includes(REDIRECT));
+  // None of them says anything of selected media for an item with none.
+  assert.ok(!run.text.includes(SELECTED_MEDIA_VALIDATE));
+  assert.equal(validateRequest(validated), VALIDATE_REQUEST);
+  assert.equal(continuation(true, true, validated), continuation(true, true));
+  assert.equal(
+    validationToolDescription(validated),
+    VALIDATION_TOOL_DESCRIPTION,
+  );
+  // A media item's selected set is never in the files Validate runs on, so
+  // a test of the delivered files always fails there (#2116): the tool, a
+  // failed run, the request to validate and a continuation all say that
+  // failure is no fix and no discovery, after what they say of other
+  // failures. Live (Codex, media.select-repair), a worker took that ENOENT
+  // for a gap and its amendment could never be planned.
+  const media = {
+    ...validated,
+    expectedOutputRoles: ["badge"],
+    minimumAssetSets: 2,
+  };
+  const note = ` ${SELECTED_MEDIA_VALIDATE}`;
+  const mediaRun = await new SelfValidation(
+    {
+      worktree,
+      item: media,
+      base,
+      signal,
+      log: () => {},
+      runFile: (kind) => log.runFile(1, `item:feature:work#1.${kind}`),
+    },
+    {
+      sandbox,
+      plan: plan([media], { base }),
+      blocks: [],
+      repository: REPO,
+      commandTimeoutMs: 60_000,
+    },
+    signal,
+  ).call();
+  assert.equal(mediaRun.isError, false, mediaRun.text);
+  assert.ok(mediaRun.text.endsWith(`${REDIRECT}${note}`), mediaRun.text);
+  assert.equal(validateRequest(media), `${VALIDATE_REQUEST}${note}`);
+  for (const failed of [true, false])
+    assert.ok(continuation(true, failed, media).endsWith(note));
+  assert.ok(!continuation(false, false, media).includes(note));
+  assert.equal(
+    validationToolDescription(media),
+    `${VALIDATION_TOOL_DESCRIPTION}${note}`,
+  );
+  assert.ok(
+    SELECTED_MEDIA_VALIDATE.includes(
+      "do not write .factory-discovery.json for it, and finish once every other failure is fixed",
+    ),
+  );
   // Files changed since are not the ones that failed.
   writeFileSync(join(worktree, "src", "feature.js"), "exports.feature = 2;\n");
   assert.equal(await validator.finalFailed(), false);

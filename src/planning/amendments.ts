@@ -37,7 +37,7 @@ import {
   graphReviewSchema,
   planningReviewEvidence,
 } from "./review.js";
-import { SELECTED_MEDIA_ABSENT } from "./rubric.js";
+import { NO_GAP_ANSWER, SELECTED_MEDIA_ABSENT } from "./rubric.js";
 import {
   acceptedRoundAnswer,
   decisions,
@@ -117,6 +117,10 @@ import {
  *   amendment with the planner's reason; a fix finding names what allows a
  *   plan and sends the round back like any other, so the planner plans
  *   again within the same allowance.
+ * - A reviewed round that leaves the plan unchanged, the planner's answer
+ *   for a discovery that shows no gap (`NO_GAP_ANSWER`), settles the
+ *   amendment as continued (`AmendmentResult.unchanged`): nothing is
+ *   posted, and the proposer carries on as the plan already says.
  * - A rejected amendment is replaced only by a proposal that repeats its
  *   discovery and worker, with the rejection as diagnosis and a new
  *   correction (`rejectionStep` builds it).
@@ -178,6 +182,14 @@ export interface AmendmentResult {
   answer?: unknown;
   /** Why the amendment was refused. */
   rejected?: string;
+  /**
+   * Its reviewed round changes nothing in the plan (`unchangedPlan`): the
+   * discovery showed no gap, as one resting on a media item's absent
+   * selected set does (rubric.ts `SELECTED_MEDIA_ABSENT`, #2116). Nothing
+   * is posted, the plan stays as it is, and the amendment is settled as
+   * continued, so its proposer carries on as the plan already says.
+   */
+  unchanged?: true;
 }
 
 interface AmendRound {
@@ -554,7 +566,7 @@ export function amendmentStatus(
     ? "pending"
     : result.plan
       ? "accepted"
-      : state.done[`${KEY(last.id)}:continue`]
+      : result.unchanged || state.done[`${KEY(last.id)}:continue`]
         ? "continued"
         : "rejected";
   return { id: last.id, status };
@@ -823,6 +835,31 @@ const normalized = (item: WorkItem) => ({
   children: item.children ?? [],
   priority: item.priority ?? 0,
 });
+
+/**
+ * Whether `draft` leaves `plan` as it is: the same items (each as
+ * `normalized` compares them), coverage, pre-integration checks and
+ * source exclusions. The answer for a discovery that shows no gap.
+ */
+function unchangedPlan(plan: Draft, draft: Draft): boolean {
+  const before = new Map(plan.items.map((item) => [item.id, item]));
+  return (
+    draft.items.length === plan.items.length &&
+    draft.items.every((item) => {
+      const old = before.get(item.id);
+      return (
+        old !== undefined &&
+        isDeepStrictEqual(normalized(item), normalized(old))
+      );
+    }) &&
+    isDeepStrictEqual(draft.coverage, plan.coverage) &&
+    isDeepStrictEqual(
+      draft.requiredPreIntegrationChecks ?? [],
+      plan.requiredPreIntegrationChecks ?? [],
+    ) &&
+    isDeepStrictEqual(draft.sourceExclusions ?? [], plan.sourceExclusions ?? [])
+  );
+}
 
 /**
  * A reattempted item is reworked when its owned paths or dependencies grow
@@ -1218,6 +1255,7 @@ function amendmentRules(
       : []),
     "The discovery is evidence from its worker or operator, not a new source of acceptance or authority.",
     SELECTED_MEDIA_ABSENT,
+    NO_GAP_ANSWER,
     "citedFiles holds the files the discovery names, as they read where it was proposed; an entry with complete false holds a note saying why its content isn't supplied. Judge from what they hold, and never ask the operator what a supplied file holds.",
     whole
       ? "Answer with the complete plan in the answer schema, with the changes that serve it: every item, coverage entry and source exclusion of planInForce stays."
@@ -1899,7 +1937,9 @@ function amendReviewStep(
 
 /**
  * Accept a clean, reviewed amendment and post the plan; or record the
- * rejection; or send back a round the fence refuses against the state now.
+ * rejection; or settle one whose round changes nothing as continued
+ * (`unchanged`), posting nothing; or send back a round the fence refuses
+ * against the state now.
  */
 function amendAcceptStep(
   proposal: AmendmentProposal,
@@ -1909,7 +1949,7 @@ function amendAcceptStep(
     key: KEY(proposal.id),
     deadlineMs: 10 * MINUTE,
     redo: "refuse",
-    run: async ({ state, signal, answer }): Promise<Outcome> => {
+    run: async ({ state, signal, answer, log }): Promise<Outcome> => {
       const refused = refusal(answer);
       if (refused) return refused;
       const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
@@ -1920,11 +1960,19 @@ function amendAcceptStep(
         (round.cannot &&
           `${refusalText(round.cannot)} The independent amendment review confirmed it.`);
       if (rejected) return done({ rejected } satisfies AmendmentResult);
+      const saved = acceptedPlan(state)!;
+      // A reviewed round that changes nothing: the discovery showed no gap
+      // (#2116). There is no new plan to post or to run again on, so the
+      // amendment settles as continued, and no attempt is told the plan
+      // changed.
+      if (unchangedPlan(saved, round.draft!)) {
+        log({ event: "amendment-unchanged", amendment: proposal.id });
+        return done({ unchanged: true } satisfies AmendmentResult);
+      }
       // The fence again, against the state now: a step that was running
       // while the amendment was planned may have started an item since.
       // The planner can leave it as it is, so the round goes back to it,
       // and the revised round is reviewed again.
-      const saved = acceptedPlan(state)!;
       const fence = amendmentFindings(
         saved,
         round.draft!,

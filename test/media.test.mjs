@@ -509,6 +509,49 @@ test("a review refusal that cites the receipt beside the worker's own file keeps
     ),
     true,
   );
+  // Only a change the worker made counts. A pinned source's row names a
+  // file, README.md here, that a media item embedding its badge may own,
+  // but cites the requirement the bytes were judged against: the refused
+  // gap is in the selected set, so it still drops it. The worker's change
+  // to README.md is a change row, and keeps it.
+  const readme = item(["assets/badge/", "README.md", "test/badge.test.js"]);
+  const source = { path: "README.md", origin: "source" };
+  assert.equal(
+    aboutMedia(readme, set, refused(criterion([source, receipt]))),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      readme,
+      set,
+      refused(
+        criterion([
+          { path: "test/badge.test.js", origin: "worker" },
+          { path: "assets/badge/", origin: "source" },
+          receipt,
+        ]),
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    aboutMedia(
+      readme,
+      set,
+      refused(
+        criterion([
+          source,
+          receipt,
+          {
+            path: 'Exact Git change patch excerpt "README.md"',
+            file: "README.md",
+            origin: "controller",
+          },
+        ]),
+      ),
+    ),
+    false,
+  );
 });
 
 test("a repair keeps captured candidate sets unless it is about them, comes from selection, or starts fresh (#1987)", () => {

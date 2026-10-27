@@ -552,7 +552,7 @@ export function movedLayer(
  * it comes from the select step (the operator's `repair`, or the selected
  * set couldn't be written), from publish's own Git LFS check (`media`), or
  * a refused review criterion cites a selected destination, or the
- * candidate receipt and no owned file (`aboutMedia`). A selection (or kept candidates) that stands here still goes
+ * candidate receipt and no change to an owned file (`aboutMedia`). A selection (or kept candidates) that stands here still goes
  * when the repair's diagnosed correction is about it (work step,
  * `correctsMedia`).
  *
@@ -691,13 +691,16 @@ export function repairOutcome(
 /**
  * Whether a review refusal is about the selected media: a refused
  * criterion's evidence (its path or file) is one of the set's
- * destinations, or the item's candidate receipt with no file the item
- * owns. Review judges every criterion about the alternatives from the
- * receipt, so it cites the receipt for a criterion that also asks for a
- * test of the delivered files; when that refusal also cites a file the
- * worker wrote (its test, say), the gap is there and the selection stands.
- * A repeated refusal goes to the diagnosis, whose path can still name the
- * receipt (correctsMedia). Finding prose is never searched.
+ * destinations, or the item's candidate receipt with no change to a file
+ * the item owns. Review judges every criterion about the alternatives from
+ * the receipt, so it cites the receipt for a criterion that also asks for
+ * a test of the delivered files; when that refusal also cites the change
+ * the worker made to an owned file (a change row's `file`: its test, say),
+ * the gap is there and the selection stands. Any other row's path, such
+ * as a pinned source's (README.md, which a media item may own), names no
+ * change the worker made, so it never counts. A repeated refusal goes to
+ * the diagnosis, whose path can still name the receipt (correctsMedia).
+ * Finding prose is never searched.
  */
 export function aboutMedia(
   item: WorkItem,
@@ -706,14 +709,16 @@ export function aboutMedia(
 ): boolean {
   if (fact.kind !== "review") return false;
   const destinations = new Set(set.members.map((m) => m.destination));
-  return fact.refused.some((refused) => {
-    const cited = refused.evidence
+  return fact.refused.some(({ evidence }) => {
+    const cited = evidence
       .flatMap((e) => [e.path, e.file])
       .filter((path): path is string => path !== undefined);
     return (
       cited.some((path) => destinations.has(path)) ||
       (cited.includes(receiptPath(item.id)) &&
-        !cited.some((path) => ownsPath(path, item.ownedPaths)))
+        !evidence.some(
+          (e) => e.file !== undefined && ownsPath(e.file, item.ownedPaths),
+        ))
     );
   });
 }

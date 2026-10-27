@@ -200,11 +200,26 @@ const UNCOMMITTED_RESULT =
  * writes it there, after selection and before its own validation, review
  * and delivery (work/step-select.ts `materializeSelection`): the worker's
  * checkout never holds it, so a check of the delivered files fails there
- * for that reason alone. An amendment's planner and review are told so,
- * since such a failure is no gap in the plan.
+ * for that reason alone. An amendment's planner and both its reviews (of
+ * a plan round and of a cannotPlan) are told so, since such a failure is
+ * no gap in the plan.
  */
 export const SELECTED_MEDIA_ABSENT =
   "A media item's worker checkout never holds its selected set: Factory writes the operator's chosen set at the item's destinations on top of its result after selection, before its own validation, review and delivery. So a check of the delivered files at those destinations, such as the item's own test of them, fails in the worker's checkout for that reason alone, and Factory's validation runs it on the selected set. A discovery resting on such a failure (a destination the item's own media roles fill is missing) shows no gap in the plan: the item's validation already runs after selection, so it justifies no replaced or dropped command, moved test, new item or dependency, and the plan needs no change for it.";
+
+/**
+ * What the amendment planner answers for a discovery that shows no gap:
+ * the plan unchanged, which amendments.ts `amendAcceptStep` settles as
+ * continued once its review agrees. Neither a revision nor cannotPlan
+ * fits it otherwise: an empty revision read as a changed plan, and a
+ * cannotPlan its review confirms rejects the amendment and holds the
+ * Objective (#2116).
+ */
+export const NO_GAP_ANSWER =
+  "When the discovery shows no gap in the plan, as one resting on such a failure does, answer with no change: every item, coverage entry and source exclusion as the plan being amended has them, and none added. Never answer cannotPlan for it. Once the independent review agrees, Factory settles the amendment with the plan as it is and posts nothing, and the proposing Work Item carries on with its result.";
+
+/** What the review of an amendment's cannotPlan is told of a discovery with no gap (prompts.ts `renderRefusalReviewCall`). */
+export const NO_GAP_REFUSAL = `${SELECTED_MEDIA_ABSENT} A refusal resting on such a discovery is wrong, since the plan as it is serves it: return a fix finding saying the discovery shows no gap, so the planner answers with no change to the plan.`;
 
 /** Check 9: candidate media sets are offered for choice; only the selection is delivered. */
 const CANDIDATE_SETS =

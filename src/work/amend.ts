@@ -101,8 +101,9 @@ export function amendedAttempt(
  * amendment `worker-<item>-<attempt>`: the item
  * waits for its outcome with no question, and the amendment's independent
  * review judges it. Accepted, the item starts a new attempt
- * (`amendedAttempt`); rejected and continued past, or declined by the
- * operator (`factory decline-discovery`, planning/amendments.ts
+ * (`amendedAttempt`); rejected and continued past, settled with the plan
+ * unchanged (the discovery showed no gap), or declined by the operator
+ * (`factory decline-discovery`, planning/amendments.ts
  * `declineDiscovery`), it carries on with the result as collected. Only a
  * proposal intake refuses (`proposalProblems`) asks, offering
  * `decline-discovery <reason>`. A backlog discovery is only logged: it is
@@ -218,8 +219,9 @@ export function discoveryOutcome(
  * A merged predecessor's blame answered `amend` (`mergedBlame`): propose
  * a follow-up Work Item after it as amendment `blame-<item>-<repair>`.
  * Accepted, the item starts a new attempt on the amended plan
- * (`amendedAttempt`); rejected and continued past, it asks again without
- * `amend`. Undefined: the repair goes on as usual.
+ * (`amendedAttempt`); rejected and continued past, or settled with the
+ * plan unchanged, it asks again without `amend`. Undefined: the repair
+ * goes on as usual.
  */
 export function blameAmendment(
   item: WorkItem,
@@ -244,7 +246,7 @@ export function blameAmendment(
             item,
             predecessor,
             correction,
-            `Amendment ${amendment.id} was rejected, and the plan continues without it.`,
+            `Amendment ${amendment.id} didn't change the plan, which continues as it is.`,
           ),
           keep,
         )

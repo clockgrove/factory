@@ -2,8 +2,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Outcome, StepContext } from "../engine.js";
 import { validationMembers } from "../media.js";
-import { acceptedInputs, currentPlan } from "../planning/plan.js";
+import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
+import type { ObjectiveState } from "../state.js";
 import { headAndTail } from "../text.js";
 import { lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, worktreePath } from "../worktree.js";
@@ -115,12 +116,38 @@ export async function validateStep(
         { kind: "failure", detail: keptOutput },
         context.state,
         place,
-        { shown: result.detail },
+        {
+          shown: result.detail,
+          keep: failedCommandKept(state, item.id, result.failed?.command),
+        },
       );
     }
     default:
       return result;
   }
+}
+
+/**
+ * The item's `validationFailed` fact with `command` added: the commands
+ * the validate step failed its results on under the plan accepted now,
+ * which an amendment may replace (#2107). Nothing when no command failed
+ * (a pin or the mutation check).
+ */
+export function failedCommandKept(
+  state: ObjectiveState,
+  itemId: string,
+  command: string | undefined,
+): Record<string, unknown> {
+  if (command === undefined) return {};
+  const plan = String(state.kept[ACCEPTED_AT] ?? "");
+  const earlier = fact(state, "validationFailed", itemId);
+  const commands = earlier?.plan === plan ? earlier.commands : [];
+  return commands.includes(command)
+    ? {}
+    : facts(
+        { validationFailed: { plan, commands: [...commands, command] } },
+        itemId,
+      );
 }
 
 /**

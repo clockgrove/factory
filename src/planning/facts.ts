@@ -434,6 +434,8 @@ const VALIDATION_ENVIRONMENT = {
   network:
     "none except the exact script-disabled package install, which runs first",
   refs: "remote-tracking branches may be stale; a Work Item's validation compares with $FACTORY_BASE_SHA, the commit its change was built on; integrated, QA and final commands run on the shared default branch, which holds other Objectives' merges, so they prove behaviour, never a diff: Factory enforces each item's owned paths",
+  commit:
+    "the uncommitted result: commands check working-tree files, never HEAD, the index or a commit of the result; a base-relative check compares the working tree with $FACTORY_BASE_SHA",
   ci: "no hosted CI jobs, logs or secrets",
   tests:
     "HOME and TMPDIR are private and empty, with no host credentials or user config",

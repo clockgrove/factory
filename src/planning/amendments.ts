@@ -77,11 +77,15 @@ import {
  *   a reattempted one (the proposing worker's unpublished item at its
  *   current attempt, or for an operator's proposal every failed,
  *   unpublished work item) may widen: its owned paths or dependencies
- *   strictly grow, and it may restate acceptance, brief and non-goals.
- *   Factory applies the rule itself before checking a plan round
- *   (`restoreStarted`): each started item keeps the accepted spec, with
- *   its owned paths and dependencies grown by what the answer adds and,
- *   for a grown reattempt item, the answer's acceptance, brief and
+ *   strictly grow, or its validation replaces or drops commands the
+ *   validate step failed its results on under this plan (the item's
+ *   `validationFailed` fact; #2107), and it may restate acceptance, brief
+ *   and non-goals. Whether such a command could pass at all is the
+ *   review's to judge. Factory applies the rule itself before checking a
+ *   plan round (`restoreStarted`): each started item keeps the accepted
+ *   spec, with its owned paths and dependencies grown by what the answer
+ *   adds and, for a reworked reattempt item, the answer's validation when
+ *   it replaces only those commands, and its acceptance, brief and
  *   non-goals. Every other change is set back, in the round's answer and
  *   its draft (a round whose draft was set back beyond its answer keeps
  *   none), and recorded with the round (`restored`), logged
@@ -654,6 +658,13 @@ export interface AmendmentProgress {
   started: Set<string>;
   /** Started, unpublished work items the amendment may widen and run again. */
   reattempt: Set<string>;
+  /**
+   * By reattempt item, the validation commands it still runs that the
+   * validate step failed its results on under the plan accepted now (the
+   * item's `validationFailed` fact): the only ones the amendment may
+   * replace (#2107). Absent or empty: none.
+   */
+  replaceable?: ReadonlyMap<string, readonly string[]>;
 }
 
 const itemOf = (key: string): string | undefined =>
@@ -710,8 +721,79 @@ export function amendmentProgress(
         eligible(item)
       : eligible(item) && failed(item.id),
   );
-  return { started, reattempt: new Set(reattempt.map((item) => item.id)) };
+  // The commands the validate step failed each one on, under this plan,
+  // that it still runs.
+  const accepted = String(state.kept[ACCEPTED_AT] ?? "");
+  const replaceable = new Map<string, string[]>();
+  for (const item of reattempt) {
+    const failedOn = fact(state, "validationFailed", item.id);
+    if (failedOn?.plan !== accepted) continue;
+    const commands = failedOn.commands.filter((command) =>
+      item.validation.some((entry) => entry.command === command),
+    );
+    if (commands.length) replaceable.set(item.id, commands);
+  }
+  return {
+    started,
+    reattempt: new Set(reattempt.map((item) => item.id)),
+    ...(replaceable.size ? { replaceable } : {}),
+  };
 }
+
+/** A reattempt item's replaceable validation commands (`AmendmentProgress.replaceable`). */
+function replaceableOf(
+  progress: AmendmentProgress,
+  itemId: string,
+): readonly string[] {
+  return progress.reattempt.has(itemId)
+    ? (progress.replaceable?.get(itemId) ?? [])
+    : [];
+}
+
+/**
+ * Whether validation list `next` replaces `old` as the started-item rule
+ * allows a reattempt item: it no longer runs at least one command of
+ * `old` that `replaceable` names, and it keeps every other command of
+ * `old` once, in its order (#2107). Commands may be added only in place
+ * of one it drops, so a list that only adds, or reorders the commands it
+ * keeps, replaces nothing. `command` reads an entry as its command line;
+ * a list with an entry it can't read replaces nothing.
+ */
+function replacesValidation(
+  old: unknown,
+  next: unknown,
+  replaceable: readonly string[],
+  command: (entry: unknown) => string | undefined,
+): boolean {
+  if (!replaceable.length || !Array.isArray(old) || !Array.isArray(next))
+    return false;
+  const lines = (list: unknown[]) =>
+    list.map(command).filter((line) => line !== undefined);
+  const before = lines(old);
+  const after = lines(next);
+  if (before.length !== old.length || after.length !== next.length)
+    return false;
+  const kept = before.filter((line) => !replaceable.includes(line));
+  return (
+    before.some(
+      (line) => replaceable.includes(line) && !after.includes(line),
+    ) &&
+    isDeepStrictEqual(
+      after.filter((line) => kept.includes(line)),
+      kept,
+    )
+  );
+}
+
+/** A validation entry's command line, in the answer's form (a string). */
+const answerCommand = (entry: unknown): string | undefined =>
+  typeof entry === "string" ? entry.trim() : undefined;
+
+/** A validation entry's command line, in the draft's form (`ValidationCommand`). */
+const draftCommand = (entry: unknown): string | undefined =>
+  isObject(entry) && typeof entry.command === "string"
+    ? entry.command.trim()
+    : undefined;
 
 /** Defaults are the same item: no kind is work, no children none, no priority zero. */
 const normalized = (item: WorkItem) => ({
@@ -722,15 +804,26 @@ const normalized = (item: WorkItem) => ({
 });
 
 /**
- * A reattempted item widens when its owned paths or dependencies grow and
- * keep every earlier entry; only then may it restate acceptance, brief and
- * non-goals.
+ * A reattempted item is reworked when its owned paths or dependencies grow
+ * and keep every earlier entry, or its validation replaces commands in
+ * `replaceable` (`replacesValidation`); only then may it restate
+ * acceptance, brief and non-goals.
  */
-function widens(old: WorkItem, next: WorkItem): boolean {
+function reworks(
+  old: WorkItem,
+  next: WorkItem,
+  replaceable: readonly string[],
+): boolean {
   const keeps = (before: string[], after: string[]) =>
     before.every((entry) => after.includes(entry));
   const grows = (before: string[], after: string[]) =>
     keeps(before, after) && after.some((entry) => !before.includes(entry));
+  const replaced = replacesValidation(
+    old.validation,
+    next.validation,
+    replaceable,
+    draftCommand,
+  );
   return (
     isDeepStrictEqual(
       normalized({
@@ -740,13 +833,15 @@ function widens(old: WorkItem, next: WorkItem): boolean {
         acceptance: old.acceptance,
         brief: old.brief,
         nonGoals: old.nonGoals,
+        ...(replaced ? { validation: old.validation } : {}),
       }),
       normalized(old),
     ) &&
     keeps(old.ownedPaths, next.ownedPaths) &&
     keeps(old.dependencies, next.dependencies) &&
     (grows(old.ownedPaths, next.ownedPaths) ||
-      grows(old.dependencies, next.dependencies))
+      grows(old.dependencies, next.dependencies) ||
+      replaced)
   );
 }
 
@@ -772,8 +867,10 @@ export interface RestoredFields {
 interface StartedItemRule {
   /** The lists that may grow, keeping every entry. */
   grows: string[];
-  /** What a reattempt item may restate once one of them grows. */
+  /** What a reattempt item may restate once one of them grows, or its validation replaces a command. */
   restates: string[];
+  /** A `validation` entry's command line in this form. */
+  command: (entry: unknown) => string | undefined;
   /**
    * Every item of a kind has the same fields, the answer schema's: an
    * item keeping its kind keeps the answer's field names (a field the
@@ -786,11 +883,13 @@ interface StartedItemRule {
 const ANSWER_RULE: StartedItemRule = {
   grows: ["ownedPaths", "dependencies", "newPackages"],
   restates: ["acceptance", "brief", "nonGoals", "oneOutcomeReason"],
+  command: answerCommand,
   schemaFields: true,
 };
 const DRAFT_RULE: StartedItemRule = {
   grows: ["ownedPaths", "dependencies"],
   restates: ["acceptance", "brief", "nonGoals"],
+  command: draftCommand,
   schemaFields: false,
 };
 
@@ -798,7 +897,9 @@ const DRAFT_RULE: StartedItemRule = {
  * Started item `old` as the started-item rule lets `next` change it: every
  * field as `old` has it, except that each list in `rule.grows` keeps all of
  * `old`'s entries and takes the ones `next` adds, and, when `restates` (a
- * reattempt item) and one of those lists grew, `rule.restates` come from
+ * reattempt item), its validation comes from `next` when that replaces only
+ * commands in `replaceable` (`replacesValidation`), and, when one of those
+ * lists grew or its validation was replaced, `rule.restates` come from
  * `next`; with `rule.schemaFields`, an item keeping its kind has `next`'s
  * field names. The field list comes from the items themselves, so a field
  * either form gains is covered. `fields`: what `next` said that was set
@@ -810,21 +911,34 @@ function restoreItem<T extends object>(
   next: T,
   rule: StartedItemRule,
   restates: boolean,
+  replaceable: readonly string[],
   view: (item: T) => object,
 ): { item: T; fields: string[] } {
   const before = old as Record<string, unknown>;
   const after = next as Record<string, unknown>;
   const item = structuredClone(before);
-  let grew = false;
+  let reworked = false;
   for (const field of rule.grows) {
     const kept = before[field];
     const given = after[field];
     if (!Array.isArray(kept) || !Array.isArray(given)) continue;
     const added = given.filter((entry) => !kept.includes(entry));
     item[field] = [...kept, ...added];
-    grew ||= added.length > 0;
+    reworked ||= added.length > 0;
   }
-  if (restates && grew)
+  if (
+    restates &&
+    replacesValidation(
+      before.validation,
+      after.validation,
+      replaceable,
+      rule.command,
+    )
+  ) {
+    item.validation = structuredClone(after.validation);
+    reworked = true;
+  }
+  if (restates && reworked)
     for (const field of rule.restates)
       if (Object.hasOwn(after, field))
         item[field] = structuredClone(after[field]);
@@ -881,6 +995,7 @@ function restoreStarted<T extends object>(
       next,
       rule,
       progress.reattempt.has(id),
+      replaceableOf(progress, id),
       view,
     );
     if (fields.length) restored.push({ itemId: id, fields });
@@ -975,14 +1090,18 @@ export function amendmentFindings(
     }
     if (isDeepStrictEqual(normalized(item), normalized(old))) continue;
     if (!progress.started.has(old.id)) continue;
-    if (!progress.reattempt.has(old.id) || !widens(old, item)) {
+    const replaceable = replaceableOf(progress, old.id);
+    if (!progress.reattempt.has(old.id) || !reworks(old, item, replaceable)) {
       const fields = changedFields(old, item);
       const changes = fields.length
         ? `; this answer changes its ${fields.join(", ")}`
         : "";
+      const replacing = replaceable.length
+        ? `, or a validation command Factory's validation failed it on (${replaceable.map((command) => JSON.stringify(command)).join(", ")}) may be replaced, keeping every other command in its order`
+        : "";
       found(
         progress.reattempt.has(old.id)
-          ? `Work Item ${old.id} has started, so it keeps its spec, except that its owned paths or dependencies may grow, keeping every entry, and only then may its acceptance, brief and non-goals be restated${changes}. Restore the rest, and put further work in a new item or grow its owned paths or dependencies to take it`
+          ? `Work Item ${old.id} has started, so it keeps its spec, except that its owned paths or dependencies may grow, keeping every entry${replacing}, and only then may its acceptance, brief and non-goals be restated${changes}. Restore the rest, and put further work in a new item or grow its owned paths or dependencies to take it`
           : `Work Item ${old.id} has started, so it keeps its spec${changes}. Leave it as it is, and put further work in a new item`,
         old.id,
       );
@@ -1087,7 +1206,19 @@ function amendmentRules(
 export function startedItemRule(progress: AmendmentProgress): string {
   const ids = (set: Set<string>) =>
     set.size ? [...set].map((id) => JSON.stringify(id)).join(", ") : "none";
-  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry, and only when one of them grows may its acceptance, brief and non-goals be restated to match; its validation and every other field stay. Never relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+  const replaceable = progress.replaceable?.size
+    ? JSON.stringify(Object.fromEntries(progress.replaceable))
+    : "none";
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation failed its result on (replaceableValidation, by item: ${replaceable}) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+}
+
+/** `replaceableValidation`, by item, as the planner and the review get it; absent when there is none. */
+function replaceableData(progress: AmendmentProgress): {
+  replaceableValidation?: Record<string, readonly string[]>;
+} {
+  return progress.replaceable?.size
+    ? { replaceableValidation: Object.fromEntries(progress.replaceable) }
+    : {};
 }
 
 /**
@@ -1271,6 +1402,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           })),
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
+          ...replaceableData(progress),
         },
         contextLookups: lookups.data,
       };
@@ -1630,6 +1762,7 @@ function amendReviewStep(
           // nothing it refuses.
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
+          ...replaceableData(progress),
           startedItemRule: startedItemRule(progress),
           // What Factory set back of the planner's answer: the draft holds
           // those fields as previousPlan has them.

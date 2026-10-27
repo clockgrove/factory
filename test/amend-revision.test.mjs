@@ -32,6 +32,7 @@ import { buildFacts } from "../dist/planning/facts.js";
 import { planningRevisions } from "../dist/planning/steps.js";
 import { decodePlan } from "../dist/planning/wire.js";
 import { readShown } from "../dist/shown.js";
+import { failedCommandKept } from "../dist/work/step-validate.js";
 import { configured, installation, REPO, tempDir } from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
@@ -150,7 +151,7 @@ const discovery = {
 };
 
 /** An Objective building the accepted plan, with operator proposal op-1 pending. */
-async function building({ kept = {}, frozen } = {}) {
+async function building({ kept = {}, frozen, answer = accepted } = {}) {
   const checkout = join(tempDir("factory-amend-revision-"), "c");
   mkdirSync(join(checkout, "src"), { recursive: true });
   git(checkout, "init", "--quiet", "--initial-branch=main");
@@ -164,7 +165,7 @@ async function building({ kept = {}, frozen } = {}) {
   const base = git(checkout, "rev-parse", "HEAD");
   const built = await buildFacts({ objective: 9, shown, base, checkout });
   assert.ok(built.facts, JSON.stringify(built.problems));
-  const decoded = decodePlan(accepted, built.facts);
+  const decoded = decodePlan(answer, built.facts);
   assert.deepEqual(decoded.findings, []);
   const state = {
     issue: 9,
@@ -176,7 +177,7 @@ async function building({ kept = {}, frozen } = {}) {
     repairs: {},
     done: {
       check: { shown, writer: true, base, title: "Add a", reviewArtifacts: [] },
-      "plan:1:1": { answer: accepted, draft: decoded.plan },
+      "plan:1:1": { answer, draft: decoded.plan },
       "decide:1:1": { accept: true },
       plan: { ...decoded.plan, finalCommands: [], decisions: [] },
     },
@@ -673,6 +674,224 @@ test("a reattempt item that grows still keeps its validation, kind and title; on
   assert.equal(a.kind, old.kind);
   assert.deepEqual(a.nonGoals, ["Changing b's test."]);
   assert.deepEqual(a.acceptance, grown.acceptance);
+});
+
+// #2107 (Codex, media.select-repair): the plan fixed `git lfs ls-files --
+// <paths>` as a media item's validation. git-lfs reads those paths as
+// revisions, so the command failed whatever the result held, and the
+// started item's own worker's amendment could not change it: the Work Item
+// could only end at an operator hold. The planner and the review are now
+// told validation runs on the uncommitted result, and a command the
+// validate step failed the item on may be replaced through the amendment's
+// review.
+const MALFORMED = "git lfs ls-files -- src/a.js";
+// check-attr exits zero for an unrouted path too: its output is the proof.
+const CHECK_ATTR =
+  "git check-attr filter -- src/a.js | grep -qx 'src/a.js: filter: lfs'";
+const withMalformed = {
+  ...accepted,
+  items: [work("a", { validation: ["npm test", MALFORMED] }), qa(["a"])],
+};
+/** The validate step failed a's results on `commands` under the plan accepted at `plan`. */
+const failedOn = (commands, plan = ACCEPTED_AT) => ({
+  "item:a:validationFailed": { plan, commands },
+});
+const replacesMalformed = revision([
+  work("a", {
+    validation: ["npm test", CHECK_ATTR],
+    brief:
+      "Export a from src/a.js; check src/a.js's Git LFS routing with git check-attr.",
+  }),
+]);
+const UNCOMMITTED = "Validation runs on the uncommitted result.";
+const LFS_ARGUMENTS =
+  "`git lfs ls-files` reads its arguments as revisions, not paths.";
+const ENVIRONMENT =
+  '"commit":"the uncommitted result: commands check working-tree files, never HEAD, the index or a commit of the result; a base-relative check compares the working tree with $FACTORY_BASE_SHA"';
+const ROUTING =
+  "which must name `lfs` (the command exits zero for an unrouted path too, so it proves nothing alone)";
+
+test("a reattempt item's validation command the validate step failed it on is replaced through the amendment's review, and both are told validation runs on the uncommitted result (#2107)", async () => {
+  const { checkout, state } = await discovered({
+    answer: withMalformed,
+    kept: failedOn([MALFORMED]),
+  });
+  const { planner, asked } = scripted(replacesMalformed, { findings: [] });
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.rejected, undefined);
+  // Nothing set back: the replacement and the restated brief stay.
+  assert.equal(round.restored, undefined);
+  const a = round.draft.items.find((item) => item.id === "a");
+  assert.deepEqual(a.validation, [
+    { command: "npm test" },
+    { command: CHECK_ATTR },
+  ]);
+  assert.equal(a.brief, replacesMalformed.items[0].brief);
+  assert.deepEqual(
+    round.answer.items.find((item) => item.id === "a").validation,
+    ["npm test", CHECK_ATTR],
+  );
+
+  // The planner is told which commands it may replace, and why a command
+  // can't pass.
+  const rule = inJson(
+    startedItemRule({
+      started: new Set(["a"]),
+      reattempt: new Set(["a"]),
+      replaceable: new Map([["a", [MALFORMED]]]),
+    }),
+  );
+  assert.ok(
+    rule.includes(inJson(`by item: ${JSON.stringify({ a: [MALFORMED] })}`)),
+  );
+  const replaceable = `"replaceableValidation":${JSON.stringify({ a: [MALFORMED] })}`;
+  const [planning] = asked;
+  assert.ok(planning.prompt.includes(rule));
+  assert.ok(planning.prompt.includes(replaceable));
+  assert.ok(planning.prompt.includes(UNCOMMITTED));
+  assert.ok(planning.prompt.includes(LFS_ARGUMENTS));
+  assert.ok(planning.prompt.includes(ROUTING));
+  assert.ok(planning.prompt.includes(inJson(ENVIRONMENT)));
+
+  // So is the review, which accepts it.
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  const reviewing = asked[1];
+  assert.equal(reviewing.phase, "graph-review");
+  assert.ok(reviewing.prompt.includes(rule));
+  assert.ok(reviewing.prompt.includes(replaceable));
+  assert.ok(
+    reviewing.prompt.includes(
+      "A reattempt item may lose only the validation commands FACTORY_AMENDMENT's replaceableValidation lists for it",
+    ),
+  );
+  assert.ok(reviewing.prompt.includes(UNCOMMITTED));
+  assert.ok(reviewing.prompt.includes(LFS_ARGUMENTS));
+  assert.ok(reviewing.prompt.includes(ENVIRONMENT));
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.deepEqual(
+    result.plan.items.find((item) => item.id === "a").validation,
+    a.validation,
+  );
+  assert.equal(posted.length, 1);
+});
+
+test("a reattempt item keeps every validation command the validate step didn't fail it on under the plan accepted now (#2107)", async () => {
+  const cases = [
+    // It failed on another command: the replaced one stays.
+    [failedOn(["npm test"]), ["npm test"]],
+    // It failed on this one under an earlier plan.
+    [failedOn([MALFORMED], "2025-12-31T00:00:00.000Z"), []],
+    // It never failed.
+    [{}, []],
+  ];
+  for (const [kept, listed] of cases) {
+    const { checkout, state } = await discovered({
+      answer: withMalformed,
+      kept,
+    });
+    const { planner, asked } = scripted(replacesMalformed);
+    const first = await step(state, depsOf(checkout, planner));
+    assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+    const round = state.done["amend:op-1:plan"];
+    assert.deepEqual(round.restored, [
+      { itemId: "a", fields: ["brief", "validation"] },
+    ]);
+    const a = round.draft.items.find((item) => item.id === "a");
+    assert.deepEqual(a.validation, [
+      { command: "npm test" },
+      { command: MALFORMED },
+    ]);
+    assert.equal(a.brief, "Export a from src/a.js.");
+    assert.equal(
+      asked[0].prompt.includes('"replaceableValidation"'),
+      listed.length > 0,
+    );
+  }
+  // A replacement that also drops a command it didn't fail on is set back
+  // whole; so is a list that only adds a command, keeping the failed one,
+  // or one that reorders the commands it keeps.
+  const withThree = {
+    ...accepted,
+    items: [
+      work("a", { validation: ["npm test", "node --test", MALFORMED] }),
+      qa(["a"]),
+    ],
+  };
+  const setBack = [
+    [withMalformed, [CHECK_ATTR]],
+    [withMalformed, ["npm test", MALFORMED, CHECK_ATTR]],
+    [withThree, ["node --test", "npm test", CHECK_ATTR]],
+  ];
+  for (const [answer, validation] of setBack) {
+    const { checkout, state } = await discovered({
+      answer,
+      kept: failedOn([MALFORMED]),
+    });
+    const { planner } = scripted(revision([work("a", { validation })]));
+    assert.equal(
+      (await step(state, depsOf(checkout, planner))).outcome.kind,
+      "done",
+    );
+    const round = state.done["amend:op-1:plan"];
+    assert.deepEqual(round.restored, [{ itemId: "a", fields: ["validation"] }]);
+    assert.deepEqual(
+      round.draft.items.find((item) => item.id === "a").validation,
+      answer.items[0].validation.map((command) => ({ command })),
+    );
+  }
+  // Keeping the other commands in their order, it may drop the failed one.
+  const { checkout, state } = await discovered({
+    answer: withThree,
+    kept: failedOn([MALFORMED]),
+  });
+  const { planner } = scripted(
+    revision([work("a", { validation: ["npm test", "node --test"] })]),
+  );
+  assert.equal(
+    (await step(state, depsOf(checkout, planner))).outcome.kind,
+    "done",
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.restored, undefined);
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "a").validation,
+    [{ command: "npm test" }, { command: "node --test" }],
+  );
+});
+
+test("the validate step keeps every command it failed an item's results on, under the plan accepted then (#2107)", () => {
+  const state = { kept: { "plan:acceptedAt": ACCEPTED_AT } };
+  assert.deepEqual(failedCommandKept(state, "a", undefined), {});
+  const first = failedCommandKept(state, "a", MALFORMED);
+  assert.deepEqual(first, {
+    "item:a:validationFailed": { plan: ACCEPTED_AT, commands: [MALFORMED] },
+  });
+  Object.assign(state.kept, first);
+  // The same command again keeps nothing new.
+  assert.deepEqual(failedCommandKept(state, "a", MALFORMED), {});
+  assert.deepEqual(failedCommandKept(state, "a", "npm test"), {
+    "item:a:validationFailed": {
+      plan: ACCEPTED_AT,
+      commands: [MALFORMED, "npm test"],
+    },
+  });
+  // A replan accepts a new plan: what failed under the old one no longer counts.
+  state.kept["plan:acceptedAt"] = "2026-02-01T00:00:00.000Z";
+  assert.deepEqual(failedCommandKept(state, "a", "npm test"), {
+    "item:a:validationFailed": {
+      plan: "2026-02-01T00:00:00.000Z",
+      commands: ["npm test"],
+    },
+  });
 });
 
 test("an ownership overlap a started item's growth makes still goes back to the planner, which is told what was set back", async () => {

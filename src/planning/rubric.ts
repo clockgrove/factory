@@ -50,10 +50,20 @@ export function workerCapability(
 export const HOST_VALIDATION_NETWORK =
   "the host's network (sandbox.network host)";
 
+/**
+ * The validation sandbox's isolation under `sandbox.network: host`: it hides
+ * the host's socket files (sandbox.ts `showsHostSockets`) but shares the
+ * host's network namespace (`--share-net`). Live (Codex, prd hostnet), the
+ * planner read "no host sockets" as no reaching the host's loopback service
+ * and held its curl criterion for the operator (#2121).
+ */
+export const HOST_VALIDATION_SANDBOX =
+  "read-only host, private HOME and /tmp, no host socket files (runtime Unix sockets); TCP to the host's network, its loopback services included, is not blocked";
+
 /** The Validation line's network rule: what a validation command can reach. */
 function validationNetworkRule(hostNetwork: boolean): string {
   return hostNetwork
-    ? `Validation has ${HOST_VALIDATION_NETWORK}, including services on its loopback, so a command that reaches the network may run in it.`
+    ? `Validation has ${HOST_VALIDATION_NETWORK}, including services on its loopback, so a command that reaches the network may run in it. A service the Objective says the host runs is already running: a request to it is not a service launch, needs no startup, shutdown or readiness harness, and proves its criterion by running as written.`
     : "A script that runs a network tool (an init, install, fetch or audit) fails in validation, which has no network: never select one.";
 }
 

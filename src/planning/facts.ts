@@ -11,7 +11,7 @@ import { checkObjective, type SourceRef, validPath } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
 import { skipsDispatchedRuns } from "./dispatch-guard.js";
-import { HOST_VALIDATION_NETWORK } from "./rubric.js";
+import { HOST_VALIDATION_NETWORK, HOST_VALIDATION_SANDBOX } from "./rubric.js";
 import type {
   CoverageObligation,
   PinnedSource,
@@ -625,7 +625,9 @@ export function validationEnvironmentNote(
 ): string {
   const environment = {
     ...VALIDATION_ENVIRONMENT,
-    ...(hostNetwork ? { network: HOST_VALIDATION_NETWORK } : {}),
+    ...(hostNetwork
+      ? { network: HOST_VALIDATION_NETWORK, sandbox: HOST_VALIDATION_SANDBOX }
+      : {}),
     lockfile: lockfileNote(lockfileResolution),
   };
   return `Validation environment (differs from hosted CI): ${JSON.stringify(environment)}`;

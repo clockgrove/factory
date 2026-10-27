@@ -8,7 +8,10 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildFacts } from "../dist/planning/facts.js";
+import {
+  buildFacts,
+  validationEnvironmentNote,
+} from "../dist/planning/facts.js";
 import { renderGraphReviewCall } from "../dist/planning/prompts.js";
 import { readShown } from "../dist/shown.js";
 import { tempDir } from "./helpers.mjs";
@@ -72,8 +75,39 @@ test("the graph reviewer is told validation's network: the host's under sandbox.
     ),
   );
   assert.doesNotMatch(host, /no network/);
+  // The Codex prd run's hostnet case: the graph reviewer twice asked for a
+  // harness to start the host's service, and the planner then read the
+  // sandbox's "no host sockets" as no reaching it and held the curl for the
+  // operator (#2121). Under host the sandbox entry says TCP to the host's
+  // loopback is open, and a request to a host service is no service launch.
+  assert.ok(
+    host.includes(
+      `"sandbox":"read-only host, private HOME and /tmp, no host socket files (runtime Unix sockets); TCP to the host's network, its loopback services included, is not blocked"`,
+    ),
+  );
+  assert.doesNotMatch(host, /no host sockets/);
+  assert.ok(
+    host.includes(
+      "A service the Objective says the host runs is already running: a request to it is not a service launch, needs no startup, shutdown or readiness harness, and proves its criterion by running as written.",
+    ),
+  );
+  for (const resolves of [true, false])
+    assert.ok(
+      validationEnvironmentNote(true, resolves).includes(
+        "its loopback services included, is not blocked",
+      ),
+    );
 
   const off = await graphReviewPrompt(checkout, base, false);
+  assert.ok(
+    off.includes(
+      `"sandbox":"read-only host, private HOME and /tmp, no host sockets"`,
+    ),
+  );
+  assert.doesNotMatch(
+    off,
+    /loopback services included|service the Objective says the host runs/,
+  );
   assert.ok(
     off.includes(
       "A script that runs a network tool (an init, install, fetch or audit) fails in validation, which has no network: never select one.",

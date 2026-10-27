@@ -59,13 +59,18 @@ function github({
       baseRefName: "main",
       mergeStateStatus: "CLEAN",
     }),
+    // main's head shows none of these checks (base-red-checks.test.mjs).
+    branchHead: async () => "b".repeat(40),
     checkRuns: async () => runs,
-    commitStatuses: async () => statuses,
+    commitStatuses: async (sha) => (sha === HEAD ? statuses : []),
     requiredChecks: async () => [],
     failureAnnotations: async () => [],
     jobLogTail: async () => undefined,
     workflowJob: async (job) =>
-      actionsRead ? { run: RUN, attempt: jobs[job] ?? 1 } : undefined,
+      actionsRead
+        ? { run: RUN, attempt: jobs[job] ?? 1, failedSteps: [] }
+        : undefined,
+    runArtifacts: async () => undefined,
     workflowRunAttempt: async () => ({ attempt, status }),
     rerunFailedJobs: async (run) => {
       if (refuse) throw new GitHubError("refused", refuse);

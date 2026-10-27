@@ -1,7 +1,7 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { GitHubError, TransientError } from "./github.js";
 import { errorMessage } from "./text.js";
@@ -75,85 +75,160 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
 const URL_CREDENTIAL =
   /^(?:https?:\/\/[^/@\s]+@|[a-z][a-z\d+.-]*:\/\/[^/@:\s]*:[^/@\s]*@)/i;
 
+/** A word as a POSIX shell reads it back, quoted only when it needs it. */
+const shellWord = (word: string) =>
+  /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+
+/** What Git couldn't read, and the command that shows why. */
+export interface UnreadableConfiguration {
+  unreadable: string;
+  command: string;
+}
+
 /**
- * The checkout's own Git configuration entries (local and worktree, and
- * each linked worktree's) that carry a credential: `http.*extraheader` (an
- * Authorization header, as CI checkouts write), a `credential.*helper` that
- * runs inline shell (`!…`), `credential.*username` or `password`, a
- * `remote.*.url` or `pushurl` with one in it, and a `url.*` rewrite whose
- * base has one. Sandboxed commands read that configuration (sandbox.ts
- * gitMetadata), so readiness refuses a checkout that has any. Names only,
- * never values; an entry from a linked worktree's configuration is
- * `<name> in <its config.worktree>`. Undefined when Git can't read it.
+ * The Git configuration entries sandboxed commands can read that carry a
+ * credential: `http.*extraheader` (an Authorization header, as CI checkouts
+ * write), a `credential.*helper` that runs inline shell (`!…`),
+ * `credential.*username` or `password`, a `remote.*.url` or `pushurl` with
+ * one in it, and a `url.*` rewrite whose base has one. Sandboxed commands
+ * read that configuration (sandbox.ts gitMetadata), so readiness refuses a
+ * checkout that has any. Each is `<name> in <file>`, the file it is
+ * actually in (`--show-origin`, so an included file is named, and
+ * `git config --file <file> --unset-all <name>` removes it), with any
+ * credential in the name's URL (`url.<base>.insteadOf`) shown as `***`.
+ * Names only, never values. When Git can't read one of them, which one and
+ * the command that shows why.
  *
- * Worktree configuration exists only with `extensions.worktreeConfig` on:
- * the checkout's `config.worktree`, and each linked worktree's (every Work
- * Item's) in its admin directory `<common>/worktrees/<id>/`, which the
- * sandbox mounts for that Work Item's commands. Each is read through its
- * own Git directory (`--git-dir`), so includes resolve as Git resolves them
- * there, without running Git in a tree a worker wrote. Without the
- * extension Git reads none of them and refuses `--worktree` once the
- * repository has a linked worktree (as every Objective's Work Items add),
- * and it refuses to list a `config.worktree` that doesn't exist, so either
- * skips that pass.
+ * Read: the checkout's local configuration (the repository's shared
+ * `config`) and, with `extensions.worktreeConfig` on, its `config.worktree`;
+ * for each linked worktree (every Work Item's, whose admin directory
+ * `<common>/worktrees/<id>/` the sandbox mounts for its commands) the shared
+ * configuration again and, with the extension on, its own
+ * `config.worktree`, each through that worktree's Git directory
+ * (`--git-dir`), so `includeIf` `gitdir:` and `onbranch:` conditions are
+ * evaluated as that worktree's Git evaluates them, without running Git in a
+ * tree a worker wrote; and every file the shared configuration includes
+ * under a condition, whatever the condition, since a Work Item started
+ * later may meet it. Without the extension Git reads no `config.worktree`
+ * and refuses `--worktree` once the repository has a linked worktree (as
+ * every Objective's Work Items add), and it refuses to list a
+ * `config.worktree` that doesn't exist, so either skips that read. A
+ * worktree removed while this runs (worktree.ts removeWorktree) is skipped.
  */
 export function checkoutCredentialEntries(
   checkout: string,
-): string[] | undefined {
-  const spawn = (args: string[]) =>
+): string[] | UnreadableConfiguration {
+  const run = (args: string[]) =>
     spawnSync("git", args, {
       env: gitEnvironment(),
       encoding: "utf8",
       timeout: 30_000,
     });
-  const git = (...args: string[]) => spawn(["-C", checkout, ...args]);
+  const git = (...args: string[]) => run(["-C", checkout, ...args]);
+  const failed = (unreadable: string, args: string[]) => ({
+    unreadable,
+    command: ["git", ...args].map(shellWord).join(" "),
+  });
+  const own = `${checkout}'s Git configuration`;
   // Exit 1 is an unset key; anything else unexpected is a failed read.
-  const extension = git(
+  const extensionArgs = [
     "config",
     "--local",
     "--get",
     "--type=bool",
     "extensions.worktreeConfig",
-  );
-  if (extension.status !== 0 && extension.status !== 1) return undefined;
-  const reads: { args: string[]; source?: string }[] = [
-    { args: ["-C", checkout, "config", "--local"] },
   ];
-  if (extension.status === 0 && extension.stdout.trim() === "true") {
-    const dirs = git(
-      "rev-parse",
-      "--path-format=absolute",
-      "--git-dir",
-      "--git-common-dir",
-    );
-    if (dirs.status !== 0) return undefined;
-    const [gitDir, common] = dirs.stdout.trim().split("\n");
-    if (gitDir === undefined || common === undefined) return undefined;
-    if (existsSync(join(gitDir, "config.worktree")))
-      reads.push({ args: ["-C", checkout, "config", "--worktree"] });
-    let names: string[] = [];
-    try {
-      names = readdirSync(join(common, "worktrees"));
-    } catch (error) {
-      // No linked worktree yet; any other failure is a failed read.
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
-    }
-    for (const name of names.sort()) {
-      const admin = join(common, "worktrees", name);
-      const file = join(admin, "config.worktree");
-      // The checkout itself, when it is a linked worktree, was read above.
-      if (admin === gitDir || !existsSync(file)) continue;
+  const extension = git(...extensionArgs);
+  if (extension.status !== 0 && extension.status !== 1)
+    return failed(own, ["-C", checkout, ...extensionArgs]);
+  const worktreeConfig =
+    extension.status === 0 && extension.stdout.trim() === "true";
+  const dirArgs = [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-dir",
+    "--git-common-dir",
+  ];
+  const dirs = git(...dirArgs);
+  const [gitDir, common] = dirs.stdout.trim().split("\n");
+  if (dirs.status !== 0 || gitDir === undefined || common === undefined)
+    return failed(own, ["-C", checkout, ...dirArgs]);
+  /** `args` lists with `--includes --list`; `gone` says it went away. */
+  const reads: { args: string[]; what: string; gone?: () => boolean }[] = [
+    { args: ["-C", checkout, "config", "--local"], what: own },
+  ];
+  if (worktreeConfig && existsSync(join(gitDir, "config.worktree")))
+    reads.push({ args: ["-C", checkout, "config", "--worktree"], what: own });
+  let names: string[] = [];
+  try {
+    names = readdirSync(join(common, "worktrees"));
+  } catch (error) {
+    // No linked worktree yet; any other failure is a failed read.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      return {
+        unreadable: join(common, "worktrees"),
+        command: ["ls", join(common, "worktrees")].map(shellWord).join(" "),
+      };
+  }
+  for (const name of names.sort()) {
+    const admin = join(common, "worktrees", name);
+    // The checkout itself, when it is a linked worktree, was read above.
+    if (admin === gitDir) continue;
+    const what = `the Git configuration of linked worktree ${admin}`;
+    const gone = () => !existsSync(admin);
+    reads.push({
+      args: [`--git-dir=${admin}`, "config", "--local"],
+      what,
+      gone,
+    });
+    const file = join(admin, "config.worktree");
+    if (worktreeConfig && existsSync(file))
       reads.push({
         args: [`--git-dir=${admin}`, "config", "--worktree"],
-        source: file,
+        what: file,
+        gone: () => !existsSync(file),
       });
-    }
+  }
+  // Each conditional include of the shared configuration, met or not.
+  const includeArgs = [
+    "config",
+    "--local",
+    "--no-includes",
+    "--type=path",
+    "--null",
+    "--get-regexp",
+    "^includeif\\..*\\.path$",
+  ];
+  const includes = git(...includeArgs);
+  if (includes.status !== 0 && includes.status !== 1)
+    return failed(own, ["-C", checkout, ...includeArgs]);
+  for (const entry of includes.stdout.split("\0")) {
+    const split = entry.indexOf("\n");
+    if (split < 0) continue;
+    // Relative to the file that includes it, as Git reads it.
+    const target = resolve(common, entry.slice(split + 1));
+    if (existsSync(target))
+      reads.push({
+        args: ["-C", checkout, "config", "--file", target],
+        what: target,
+        gone: () => !existsSync(target),
+      });
   }
   const found = new Set<string>();
-  for (const { args, source } of reads) {
-    const read = spawn([...args, "--includes", "--null", "--list"]);
-    if (read.status !== 0) return undefined;
-    for (const entry of read.stdout.split("\0")) {
+  for (const { args, what, gone } of reads) {
+    const list = [...args, "--includes", "--show-origin", "--null", "--list"];
+    let read = run(list);
+    // Once more, unless it went away: a worktree being removed.
+    if (read.status !== 0 && !gone?.()) read = run(list);
+    if (read.status !== 0) {
+      if (gone?.()) continue;
+      return failed(what, [...args, "--includes", "--list"]);
+    }
+    // origin NUL name LF value NUL, for each entry.
+    const fields = read.stdout.split("\0");
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const origin = fields[index] ?? "";
+      const entry = fields[index + 1] ?? "";
       const split = entry.indexOf("\n");
       const name = split < 0 ? entry : entry.slice(0, split);
       const value = split < 0 ? "" : entry.slice(split + 1);
@@ -167,10 +242,23 @@ export function checkoutCredentialEntries(
           URL_CREDENTIAL.test(value)) ||
         (key.startsWith("url.") && URL_CREDENTIAL.test(name.slice(4)))
       )
-        found.add(source ? `${name} in ${source}` : name);
+        found.add(
+          `${name.replace(/(:\/\/)[^/@\s]*@/g, "$1***@")} in ${originFile(checkout, origin)}`,
+        );
     }
   }
   return [...found];
+}
+
+/** The file `--show-origin` names, absolute and without links. */
+function originFile(base: string, origin: string): string {
+  if (!origin.startsWith("file:")) return origin;
+  const path = resolve(base, origin.slice("file:".length));
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 export interface GitExit {

@@ -177,22 +177,22 @@ function hostChecks(
       status: "warn",
       detail: warning,
     });
-  // Sandboxed commands read the checkout's Git configuration, and each
-  // Work Item's own config.worktree.
+  // Sandboxed commands read the checkout's Git configuration, as each
+  // Work Item worktree's Git reads it, and that worktree's config.worktree.
   const credentials = checkoutCredentialEntries(config.checkout);
-  if (!credentials)
+  if (!Array.isArray(credentials))
     checks.push({
       name: "checkout git config",
       status: "warn",
-      detail: `Git can't read ${config.checkout}'s configuration, so whether it holds a credential sandboxed commands could read is unknown`,
-      fix: `Check \`git -C ${config.checkout} config --local --list\` runs, then repeat`,
+      detail: `Git can't read ${credentials.unreadable}, so whether ${config.checkout}'s Git configuration holds a credential sandboxed commands could read is unknown`,
+      fix: `Check \`${credentials.command}\` runs, then repeat`,
     });
   else if (credentials.length)
     checks.push({
       name: "checkout git config",
       status: "blocked",
       detail: `${config.checkout}'s Git configuration holds ${credentials.join(", ")}, which sandboxed commands can read`,
-      fix: `Remove ${credentials.length === 1 ? "it" : "them"} (\`git -C ${config.checkout} config --unset-all NAME\`, with \`--worktree\` for a worktree entry, or \`git config --file FILE --unset-all NAME\` for one in a Work Item worktree's FILE), use remote URLs without credentials, and keep Git credentials in the user's global configuration (for example \`gh auth setup-git\`)`,
+      fix: `Remove ${credentials.length === 1 ? "it" : "each"} with \`git config --file FILE --unset-all NAME\` (or remove the include that reaches FILE; a NAME with \`***\` hides a credential in its URL, which \`git config --file FILE --name-only --list\` shows), use remote URLs without credentials, and keep Git credentials in the user's global configuration (for example \`gh auth setup-git\`)`,
     });
   const store = config.sandbox.packageStore;
   if (store && existsSync(store) && !statSync(store).isDirectory())

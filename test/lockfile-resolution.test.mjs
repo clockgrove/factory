@@ -48,6 +48,10 @@ if (args === "install --frozen-lockfile --ignore-scripts") {
 }
 if (args === "install --lockfile-only --no-frozen-lockfile --ignore-scripts") {
   if (process.env.pnpm_config_ignore_scripts !== "true") process.exit(2);
+  if (process.env.pnpm_config_offline === "true") {
+    console.error(" ERR_PNPM_FETCH_FAIL  offline: could not fetch https://example.com/left-pad.tgz");
+    process.exit(1);
+  }
   for (const name of names)
     if (dependencies[name] === "9.9.9") {
       console.error(" ERR_PNPM_NO_MATCHING_VERSION  No matching version found for " + name + "@9.9.9 published before the minimumReleaseAge of 1440 minutes");
@@ -244,6 +248,38 @@ test("a resolution the repository's release-age policy refuses holds with the pa
   assert.equal(done.passed, false);
   assert.ok(done.output, "the failed resolution's output is kept");
   // Nothing was committed or pinned.
+  const pinned = spawnSync(
+    "git",
+    ["-C", checkout, "rev-parse", "--verify", "--quiet", lockfileRef(1, "a")],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(pinned.status, 0);
+});
+
+test("a resolution the candidate's own inputs kept offline fails the candidate, however it failed", async () => {
+  // The candidate's lockfile fetches from outside the registry, so neither
+  // the install nor the resolution gets the network; offline, the
+  // resolution fails with its own error, not the store's.
+  const foreign = lockfile({ "left-pad": "1.0.0" }).replace(
+    "resolution: {integrity: sha512-AAAA}",
+    "resolution: {integrity: sha512-AAAA, tarball: https://example.com/left-pad.tgz}",
+  );
+  const { result, events, checkout } = await validate({
+    change: {
+      "package.json": manifest({ "left-pad": "1.0.0", pad: "1.0.0" }),
+      "pnpm-lock.yaml": foreign,
+    },
+    network: "package-install",
+  });
+  assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 1500));
+  assert.match(
+    result.detail,
+    /it ran offline, because pnpm-lock\.yaml resolves left-pad@1\.0\.0 other than by integrity from a configured registry:\n.*ERR_PNPM_FETCH_FAIL/s,
+  );
+  assert.deepEqual(
+    resolutions(events).map((event) => event.network),
+    ["offline"],
+  );
   const pinned = spawnSync(
     "git",
     ["-C", checkout, "rev-parse", "--verify", "--quiet", lockfileRef(1, "a")],

@@ -996,9 +996,11 @@ async function resolveLockfile(context: {
           `${ran}: it ran offline, because ${refused.reason}, and the package store lacks what it needs:\n${failedOutput(resolution)}\n\nKeep the base's registry configuration literal http(s) URLs and its lockfiles plain YAML or JSON; then answer \`retry\`.`,
         ),
       );
-    // The candidate's own inputs kept it offline: its fault, with why.
-    if (refused && missing) {
-      const offline = `${ran}: it ran offline, because ${refused.reason}, and the package store lacks what it needs:\n`;
+    // The candidate's own inputs kept it offline: its fault, with why,
+    // however the offline resolution failed (a git or URL dependency
+    // fails with its own error, not the store's).
+    if (refused && !refused.unverified) {
+      const offline = `${ran}: it ran offline, because ${refused.reason}${missing ? ", and the package store lacks what it needs" : ""}:\n`;
       return {
         kind: "failed",
         detail: `${offline}${failedOutput(resolution)}`,

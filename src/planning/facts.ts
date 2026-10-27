@@ -450,7 +450,7 @@ const VALIDATION_ENVIRONMENT = {
  */
 function lockfileNote(resolves: boolean): string {
   return resolves
-    ? "a worker edits package.json dependencies only, never the lockfile, and no one supplies one: when the install refuses the lockfile as out of date, Factory resolves it itself (pnpm install --lockfile-only, npm install --package-lock-only, scripts off, under the repository's registry and release-age policy) and commits it on the item's result"
+    ? "a worker edits package.json dependencies only, never the lockfile, and no one supplies one: when the install refuses the lockfile as out of date, Factory resolves it itself (pnpm install --lockfile-only, scripts off, under the repository's registry and release-age policy) and commits it on the item's result; npm's install still requires package.json and package-lock.json as at the base, so this serves pnpm"
     : "no worker or validation command can resolve a new lockfile, and with sandbox.network off neither can Factory: a change to package.json dependencies whose lockfile is out of date holds for the operator";
 }
 

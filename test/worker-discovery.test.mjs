@@ -336,6 +336,20 @@ test("a no-change repair's discovery is proposed for the attempt that made it, a
   // No change: its cited files are read from the item's start.
   assert.equal(proposed.keep["amend:worker-feature-2:proposal"].commit, base);
 
+  // A first attempt keeps its start only in this step's keep: the files are
+  // still read there, not at the plan's base, which lacks the person's test
+  // (#2121: run 2026-10-27T140320PDT-d58c).
+  const first = discoveryOutcome(
+    work,
+    contextOf(accepted(1)),
+    undefined,
+    stopped,
+    { "item:feature:base": base, "item:feature:rebase": false },
+  );
+  assert.equal(first.reason, "Proposed amendment worker-feature-1");
+  assert.equal(first.keep["amend:worker-feature-1:proposal"].commit, base);
+  assert.equal(first.keep["item:feature:base"], base);
+
   const backlog = { ...discovery, scope: "backlog" };
   ownedChange(worktree);
   writeFileSync(join(worktree, MANIFEST), JSON.stringify(backlog));

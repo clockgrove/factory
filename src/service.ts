@@ -8,7 +8,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { crashPoint } from "./crash.js";
+import { isObject } from "./checked.js";
+import { crashPoint, recordCrashes } from "./crash.js";
 import {
   CANCEL_CLEANUP,
   type CapacityUse,
@@ -183,6 +184,8 @@ export async function serve(options: ServeOptions): Promise<number> {
   };
   // The last run's record, read before this run's first heartbeat replaces it.
   const previous = readServiceRecord(paths.root);
+  /** The crash point a test killed the last run at; undefined for a clean stop or a death with no known cause. */
+  const injected = crashPointOf(paths.root, previous);
   // Unfinished Objectives, and finished ones until their cleanup, their
   // final sync and their settled observation are done; then their files
   // move to finished/, which startup never reads. A finished one is read
@@ -437,7 +440,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       log.write(0, { event: "observation-unreadable", path, error });
       rmSync(path, { force: true });
     }
-  const record = startRecord(previous, startedAt, runId, limits);
+  const record = startRecord(previous, startedAt, runId, limits, injected);
   if (options.unconfigured) {
     record.problem = `No configuration at ${options.unconfigured}, so the service applies requests only and never reads the queue; run factory setup, then restart the service`;
     log.write(0, { event: "unconfigured", config: options.unconfigured });
@@ -465,12 +468,25 @@ export async function serve(options: ServeOptions): Promise<number> {
   // Saved before any death is counted below, so a crash in between never
   // counts the same death twice.
   heartbeat();
+  // The record names this run, and the last one's crash point is in its
+  // deaths: from here a crash point this run dies at is recorded for it.
+  const crashPointPath = join(paths.root, CRASH_POINT);
+  try {
+    rmSync(crashPointPath, { force: true });
+  } catch {
+    // Left: it names an earlier run, which the next start ignores.
+  }
+  recordCrashes((point) =>
+    writeAtomic(crashPointPath, JSON.stringify({ run: runId, point })),
+  );
   // The last run died: its files end with that, as far as this start
   // knows them (after the heartbeat that records the death). Rule 4: each
   // attempt it ran counts its death (engine.ts `interrupted`), after the
   // record, so no death counts twice; a step the service keeps dying under
   // then asks. The dead run progressed if it finished a step: its
-  // heartbeat's count can trail a death, the saved states can't.
+  // heartbeat's count can trail a death, the saved states can't. A death
+  // a test caused at a crash point counts for no attempt: the attempts it
+  // cut off keep their counts, as if it never happened.
   if (previous?.runId && !previous.stopped && previous.runId !== runId) {
     const dead = previous.runId;
     endCrashedRun(
@@ -478,12 +494,13 @@ export async function serve(options: ServeOptions): Promise<number> {
       dead,
       [...runners.keys(), ...unreadable.keys()],
       runId,
+      injected,
     );
     const progressed =
       (previous.finished ?? 0) > 0 ||
       [...runners.values()].some((runner) => runner.state.finishedRun === dead);
     run.suspects = 0;
-    for (const runner of runners.values())
+    for (const runner of injected ? [] : runners.values())
       try {
         run.suspects += runner.interrupted(dead, progressed);
       } catch (error) {
@@ -1629,6 +1646,39 @@ export interface Death {
   at: string;
   /** How long the run lived after resuming; null when its record didn't say. */
   lived: number | null;
+  /**
+   * The crash point a test killed the run at (crash.ts, FACTORY_CRASH_AT);
+   * absent for a death with no known cause. It continues a crash streak
+   * like any death, but counts for no attempt (engine.ts `interrupted`).
+   */
+  crashPoint?: string;
+}
+
+/**
+ * `crash-point.json`: the crash point a test killed the service at, and
+ * that run's id (`{ run, point }`), written just before the kill. Each start
+ * records it in the death and removes it.
+ */
+const CRASH_POINT = "crash-point.json";
+
+/** The crash point the last run died at, when `crash-point.json` names that run. */
+function crashPointOf(
+  root: string,
+  previous: Partial<ServiceRecord> | undefined,
+): string | undefined {
+  if (!previous?.runId || previous.stopped) return undefined;
+  try {
+    const saved: unknown = JSON.parse(
+      readFileSync(join(root, CRASH_POINT), "utf8"),
+    );
+    return isObject(saved) &&
+      saved.run === previous.runId &&
+      typeof saved.point === "string"
+      ? saved.point
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Deaths kept: enough for any streak the resume delay still grows on. */
@@ -1663,13 +1713,15 @@ function readServiceRecord(root: string): Partial<ServiceRecord> | undefined {
  * crash restart: it records the death, and continues the crash streak if
  * that run died within STREAK_MS of resuming. From the third start in a
  * streak, interrupted steps resume after a delay: 30 s (the base
- * backoff), doubling, up to 30 min. A clean stop starts afresh.
+ * backoff), doubling, up to 30 min. A clean stop starts afresh. A death a
+ * test caused at a crash point records it (`point`).
  */
 function startRecord(
   previous: Partial<ServiceRecord> | undefined,
   startedAt: Date,
   runId: string,
   limits: EngineLimits,
+  point: string | undefined,
 ): ServiceRecord {
   const now = startedAt.toISOString();
   const crashed = previous?.runId !== undefined && !previous.stopped;
@@ -1679,7 +1731,11 @@ function startRecord(
   const deaths: Death[] = crashed
     ? [
         ...(previous.deaths ?? []),
-        { at: now, lived: Number.isFinite(lived) ? lived : null },
+        {
+          at: now,
+          lived: Number.isFinite(lived) ? lived : null,
+          ...(point ? { crashPoint: point } : {}),
+        },
       ].slice(-MAX_DEATHS)
     : [];
   // This start is the streak's deaths plus one.

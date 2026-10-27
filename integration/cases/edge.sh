@@ -58,13 +58,17 @@ case_reset() {
   [ $okd = 0 ] && [ $okb = 0 ] && [ "$rd" = 0 ] && [ "$rb" = 0 ]; rec_if reset.clean-dir $? "$ev" "$t0"
 }
 
-# `factory run N` on an issue whose Project card is archived admits it.
+# `factory run N` on an issue whose Project card is archived admits it. Adding
+# and archiving the card both repeat safely, so a GitHub failure (a Project
+# "temporary conflict") is tried again, as queueing does; one that lasts fails
+# the check with gh's error. Filing the issue is not retried: that could file
+# it twice. Every exit touches archived.done, which the reset case waits for.
 case_archived() {
-  local t0 n item; t0=$(now)
+  local t0 n item err="$RUN_DIR/archived.card.err"; t0=$(now)
   need queue.archived-card "$t0" run || { touch "$RUN_DIR/archived.done"; return; }
-  n=$(new_issue withdraw "archived card" ID="$(uid)") || return
-  item=$(gh project item-add "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" --url "https://github.com/$REPO/issues/$n" --format json --jq .id) || return
-  gh project item-archive "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" --id "$item" >/dev/null || { record queue.archived-card FAIL "couldn't archive #$n's card" "$t0"; touch "$RUN_DIR/archived.done"; return; }
+  n=$(new_issue withdraw "archived card" ID="$(uid)") || { record queue.archived-card FAIL "setup: couldn't file the issue (gh's error is in the suite log)" "$t0"; touch "$RUN_DIR/archived.done"; return; }
+  item=$(gh_retry "$err" "adding #$n's card" gh_item_add "$n") && [ -n "$item" ] || { record queue.archived-card FAIL "setup: couldn't add #$n's card: $(head -c 300 "$err")" "$t0"; touch "$RUN_DIR/archived.done"; return; }
+  gh_retry "$err" "archiving #$n's card" gh_item_archive "$item" || { record queue.archived-card FAIL "setup: couldn't archive #$n's card: $(head -c 300 "$err")" "$t0"; touch "$RUN_DIR/archived.done"; return; }
   cli_t 40 run "$n" >>"$RUN_DIR/run.$n.out" 2>&1
   wait_for 300 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' status $n)\" != none ]"
   local s; s=$(st status "$n"); local adm; adm=$(st events "$n" event=admitted)

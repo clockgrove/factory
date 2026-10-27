@@ -188,9 +188,10 @@ export function discoveryOutcome(
     };
   // The files it cites are read from the worker's result: the one
   // collected, the refused one it resubmitted unchanged, or the item's
-  // start when it left no change. A first attempt keeps its start in this
-  // step's `keep`, not yet in the state: without it the files would be read
-  // at the plan's base, which lacks what landed on main since intake.
+  // start when it left no change. That start is this step's `keep`'s: a
+  // first attempt hasn't kept one in the state yet (its files would be read
+  // at the plan's base, which lacks what landed on main since intake), and
+  // an attempt moved onto a new start kept its previous one there.
   const commit =
     collected.kind === "collected"
       ? collected.commit

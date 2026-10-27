@@ -338,7 +338,7 @@ test("a no-change repair's discovery is proposed for the attempt that made it, a
 
   // A first attempt keeps its start only in this step's keep: the files are
   // still read there, not at the plan's base, which lacks the person's test
-  // (#2121: run 2026-10-27T140320PDT-d58c).
+  // (#2134: run 2026-10-27T140320PDT-d58c).
   const first = discoveryOutcome(
     work,
     contextOf(accepted(1)),
@@ -349,6 +349,26 @@ test("a no-change repair's discovery is proposed for the attempt that made it, a
   assert.equal(first.reason, "Proposed amendment worker-feature-1");
   assert.equal(first.keep["amend:worker-feature-1:proposal"].commit, base);
   assert.equal(first.keep["item:feature:base"], base);
+
+  // A repair attempt moved onto a new start (an amended attempt's replay, a
+  // conflict or a failed delivery) keeps that start only in this step's
+  // keep too: the files are read where the worker started, not at the
+  // start its previous attempt had.
+  const earlier = "e".repeat(40);
+  const moved = discoveryOutcome(
+    work,
+    contextOf(
+      accepted(2, {
+        "item:feature:base": earlier,
+        "item:feature:rebase": true,
+      }),
+    ),
+    undefined,
+    stopped,
+    { "item:feature:base": base, "item:feature:rebase": false },
+  );
+  assert.equal(moved.reason, "Proposed amendment worker-feature-2");
+  assert.equal(moved.keep["amend:worker-feature-2:proposal"].commit, base);
 
   const backlog = { ...discovery, scope: "backlog" };
   ownedChange(worktree);

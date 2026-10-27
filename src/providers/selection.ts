@@ -413,11 +413,34 @@ export function providerWorkflow(
     status: (state) => (frozen(state) ?? fallback).status(state),
     upstream: (state, item) =>
       (frozen(state) ?? fallback).upstream?.(state, item) ?? [],
+    resumed: (state) => (frozen(state) ?? fallback).resumed?.(state),
     // The same on every provider: GitHub, Git and provider errors and
     // replan.
     ...(fallback.outcomeOf ? { outcomeOf: fallback.outcomeOf } : {}),
     ...(fallback.replannable ? { replannable: fallback.replannable } : {}),
     ...(fallback.replan ? { replan: fallback.replan } : {}),
+    // A Work Item's answers the engine offers and applies itself (`fresh`,
+    // `revalidate`, a repair allowance's `accept` and diagnosis first) are
+    // the frozen provider's workflow's, as its steps are: none while the
+    // configuration isn't the one it froze. Dropped here, the service
+    // never offered them, and a question's text offered `revalidate` the
+    // answer check refused (#2120).
+    freshable: (state, key) => frozen(state)?.freshable?.(state, key) ?? false,
+    fresh: (state, key, answer) => {
+      const fresh = (frozen(state) ?? fallback).fresh;
+      return fresh
+        ? fresh(state, key, answer)
+        : hold(
+            "This Work Item can't start fresh on the configuration it froze. Answer retry, or cancel.",
+          );
+    },
+    revalidatable: (state, key) =>
+      frozen(state)?.revalidatable?.(state, key) ?? false,
+    overrunOffers: (state, key) => frozen(state)?.overrunOffers?.(state, key),
+    unspent: (state, key, answer) =>
+      frozen(state)?.unspent?.(state, key, answer) ?? false,
+    diagnoseFirst: (state, key) =>
+      frozen(state)?.diagnoseFirst?.(state, key) ?? false,
     freezable,
   };
 }

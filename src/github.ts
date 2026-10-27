@@ -347,6 +347,13 @@ export interface RunArtifact {
   expired: boolean;
 }
 
+/** An Actions job step and when it ran, as GitHub reports it (to the second). */
+export interface StepTimes {
+  name: string;
+  startedAt: string;
+  completedAt: string;
+}
+
 /** A native stack of PRs: its base branch and its PRs, bottom first. */
 export interface Stack {
   number: number;
@@ -1799,33 +1806,58 @@ export class GitHub {
 
   /**
    * An Actions job's workflow run, the attempt it ran in (an Actions check
-   * run's id is its job's) and the names of its steps that failed;
-   * undefined without Actions read access.
+   * run's id is its job's) and the names of its steps that failed, with
+   * when each ran where GitHub says (`failedStepTimes`, to find its own
+   * lines in the job's log); undefined without Actions read access.
    */
   async workflowJob(
     job: number,
     signal?: AbortSignal,
   ): Promise<
-    { run: number; attempt: number; failedSteps: string[] } | undefined
+    | {
+        run: number;
+        attempt: number;
+        failedSteps: string[];
+        failedStepTimes: StepTimes[];
+      }
+    | undefined
   > {
     const read = await this.optional(() =>
       this.rest<{
         run_id?: unknown;
         run_attempt?: unknown;
-        steps?: { name?: unknown; conclusion?: unknown }[] | null;
+        steps?:
+          | {
+              name?: unknown;
+              conclusion?: unknown;
+              started_at?: unknown;
+              completed_at?: unknown;
+            }[]
+          | null;
       }>("GET", this.repo(`actions/jobs/${job}`), undefined, signal),
     );
     if (typeof read?.run_id !== "number") return undefined;
+    const failed = (Array.isArray(read.steps) ? read.steps : []).filter(
+      (step) =>
+        ["failure", "timed_out"].includes(String(step?.conclusion)) &&
+        typeof step.name === "string",
+    );
     return {
       run: read.run_id,
       attempt: typeof read.run_attempt === "number" ? read.run_attempt : 1,
-      failedSteps: (Array.isArray(read.steps) ? read.steps : [])
-        .filter(
-          (step) =>
-            ["failure", "timed_out"].includes(String(step?.conclusion)) &&
-            typeof step.name === "string",
-        )
-        .map((step) => String(step.name)),
+      failedSteps: failed.map((step) => String(step.name)),
+      failedStepTimes: failed.flatMap((step) =>
+        typeof step.started_at === "string" &&
+        typeof step.completed_at === "string"
+          ? [
+              {
+                name: String(step.name),
+                startedAt: step.started_at,
+                completedAt: step.completed_at,
+              },
+            ]
+          : [],
+      ),
     };
   }
 

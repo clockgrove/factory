@@ -185,12 +185,27 @@ export async function workStep(
         ),
         keepBase,
       );
+    // Delivery judges its failed checks as on the operator's `retry`
+    // (step-deliver.ts `pullInput`): the default branch may have been
+    // what failed them, and a failure nothing has run again since is a
+    // question, not the same repair again.
     return {
       kind: "done",
       result: refused,
       keep: {
         ...keepBase,
-        ...facts({ finished: null, finding: null, refused: null }, item.id),
+        ...facts(
+          {
+            finished: null,
+            finding: null,
+            refused: null,
+            rereviewed: {
+              commit: refused.commit,
+              at: context.answer.at,
+            },
+          },
+          item.id,
+        ),
       },
     };
   }
@@ -204,7 +219,12 @@ export async function workStep(
   if (
     !finished &&
     context.answer?.answer === ACCEPT &&
-    finding?.kind === "review"
+    finding?.kind === "review" &&
+    // Recorded already: a run past a spent allowance saved what it left
+    // standing and its diagnosis, which the repair after `more` uses.
+    !(fact(state, "decisions", item.id) ?? []).some(
+      (entry) => entry.holdId === context.answer?.holdId,
+    )
   ) {
     const decided = refusalDecisions(context, finding, item.id);
     keepAll = { ...keepAll, ...decided.keep };

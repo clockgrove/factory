@@ -7,7 +7,7 @@
 // provider routing passes each answer on to the frozen provider's workflow.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -171,14 +171,53 @@ test("a refused result that can't be checked again is offered in neither the opt
   assert.equal(engine.state.kept["allowances:rereviews"], undefined);
 });
 
+test("a kept result's question is answered revalidate by the engine only where it is taken", () => {
+  const { workflow } = served();
+  const kept = {
+    ...hold("Work Item kept its refused result.", ["answer", "cancel"]),
+    rereview: true,
+    keep: { [`item:${ID}:base`]: BASE, [`item:${ID}:rebase`]: false },
+  };
+  const engine = runner(held(), workflow);
+  engine.apply(WORK, kept);
+  assert.equal(engine.state.holds.length, 0);
+  assert.equal(engine.state.answers[WORK].answer, "revalidate");
+  assert.equal(engine.state.answers[WORK].by, "factory");
+  assert.equal(engine.state.kept["allowances:rereviews"], 1);
+  // Gone or off its base: asked, with no `revalidate`, nothing charged.
+  const state = held();
+  state.kept[`item:${ID}:refused`] = {
+    commit: HEAD,
+    tree: TREE,
+    notes: [],
+    unrecheckable: true,
+  };
+  const off = runner(state, workflow);
+  off.apply(WORK, kept);
+  const [asked] = off.state.holds;
+  assert.match(asked.question, /^Work Item kept its refused result\./);
+  assert.doesNotMatch(asked.question, /revalidate/);
+  assert.ok(!asked.options.some((option) => option.answer === "revalidate"));
+  assert.equal(off.state.answers[WORK], undefined);
+  assert.equal(off.state.kept["allowances:rereviews"], undefined);
+});
+
 /**
  * Work Item a's work step as the service runs it (providerWorkflow over the
  * real workflow), past its spent repair allowance (perPath 1, repaired
  * twice), with a real checkout: the refused result sits on its base, and
  * the diagnosis's model and the worker are fakes that record their calls.
- * The worker never finishes: reaching it is where a repair starts.
+ * The worker never finishes, unless `work` says what it does: reaching it
+ * is where a repair starts. The item worktree is added at the kept base
+ * when the step runs, unless `holding`: then it is kept from the refused
+ * attempt and holds the refused change (uncommitted on the base, as a
+ * resubmitted result leaves it).
  */
-function servedWork(finding, answers = []) {
+function servedWork(
+  finding,
+  answers = [],
+  { perPath = 1, work, holding = false } = {},
+) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   const saved = process.env.FACTORY_CONFIG;
@@ -242,6 +281,13 @@ function servedWork(finding, answers = []) {
     },
   };
   const dir = tempDir("factory-served-");
+  if (holding) {
+    // workDir(9)/9/a (worktree.ts `worktreePath`).
+    const at = join(dir, "work", "9", "9", "a");
+    mkdirSync(join(at, ".."), { recursive: true });
+    git("worktree", "add", "--quiet", "--detach", at, base);
+    writeFileSync(join(at, "src", "a.js"), "export const a = 2;\n");
+  }
   const inner = objectiveWorkflow({
     config,
     github: {
@@ -253,6 +299,7 @@ function servedWork(finding, answers = []) {
     worker: () => ({
       run: async (input) => {
         prompts.push(input.prompt);
+        if (work) return work(input);
         throw new Error("the worker ran");
       },
     }),
@@ -273,7 +320,7 @@ function servedWork(finding, answers = []) {
     provider: "codex",
     selectedBy: "defaultProvider",
     digest: "frozen",
-    config: { autonomy: { allowances: { perPath: 1 } } },
+    config: { autonomy: { allowances: { perPath } } },
   });
   state.status = "building";
   state.done.predecessors = { predecessors: [], ignored: [] };
@@ -440,3 +487,269 @@ test("fresh on a repair diagnosis question past a spent allowance is one more re
   assert.equal(prompts.length, 0);
   assert.equal(runner.state.kept["allowances:rereviews"], undefined);
 });
+
+// Clockgrove #821 (#2131): the operator answered the diagnosis question
+// with guidance to keep the change as it is, the worker did exactly that,
+// and collection refused the unchanged result as "no repository change",
+// charged as a repair past both repair allowances.
+const KEEP =
+  "Keep your change as it is; with the current main as its base, CI picks up the fix.";
+
+/** A worker that keeps the refused result as it is: the refused tree again. */
+const keeps = async (input) => {
+  writeFileSync(join(input.worktree, "src", "a.js"), "export const a = 2;\n");
+  return {
+    kind: "finished",
+    finalResponse: "Kept the change as it is, as the operator said.",
+  };
+};
+
+const operatorQuestion = [
+  { decision: "operator", question: "Is the failed check the change's?" },
+];
+
+test("a result kept unchanged on the operator's guidance is checked again as a rereview, not charged as a repair", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: keeps,
+  });
+  const { runner, asked, prompts, commit } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", KEEP);
+  await served.run(
+    "the work step",
+    () =>
+      runner.state.done["item:a:work"] ||
+      runner.state.holds.length > 0 ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  assert.equal(prompts.length, 1, "the worker ran once, with the guidance");
+  assert.match(prompts[0], /Keep your change as it is/);
+  assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");
+  assert.equal(runner.state.done["item:a:work"]?.commit, commit);
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+  assert.equal(runner.state.kept["item:a:rereviewed"].commit, commit);
+  assert.equal(runner.state.kept["item:a:refused"], undefined);
+  assert.equal(runner.state.kept["item:a:finished"], undefined);
+  assert.equal(runner.state.holds.length, 0);
+  assert.equal(asked.length, 1);
+});
+
+test("past the rereview allowance, a result kept on the operator's guidance asks, charging no repair", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: keeps,
+  });
+  const { runner, prompts, commit } = served;
+  runner.state.kept["allowances:rereviews"] = 1;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", KEEP);
+  await served.run(
+    "the kept result's question",
+    () =>
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  const kept = runner.state.holds[0];
+  assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");
+  assert.match(
+    kept.question,
+    /^After your guidance, Work Item a's worker resubmitted its refused result unchanged,/,
+  );
+  assert.match(kept.question, /Kept the change as it is/);
+  // The engine's sentence, once, where it offers the answer.
+  assert.equal(kept.question.split("answer `revalidate`").length, 2);
+  assert.deepEqual(
+    kept.options.map((option) => option.answer),
+    ["answer", "replan", "fresh", "revalidate", "cancel"],
+  );
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+  assert.equal(prompts.length, 1);
+  // `revalidate` asks for `more`, which checks the same result again.
+  served.answer(kept, "revalidate");
+  const more = await served.question();
+  assert.match(more.question, /result rereview/);
+  served.answer(more, "more");
+  await served.run("the work step", () => runner.state.done["item:a:work"]);
+  assert.equal(runner.state.done["item:a:work"].commit, commit);
+  assert.equal(runner.state.kept["allowances:rereviews"], 2);
+  assert.equal(runner.state.repairs["item:a:work"].count, 2);
+  assert.equal(prompts.length, 1);
+});
+
+/**
+ * A worker that changes nothing. servedWork's item worktree is added at the
+ * kept base and nothing replays the refused change into it, so its
+ * checkout never held the refused result: it leaves no change at all.
+ */
+const idles = async (input) => {
+  assert.equal(
+    readFileSync(join(input.worktree, "src", "a.js"), "utf8"),
+    "export const a = 1;\n",
+    "the checkout is the base's, without the refused change",
+  );
+  return {
+    kind: "finished",
+    finalResponse: "Kept the change as it is; I changed nothing.",
+  };
+};
+
+// The same guidance, in a checkout that doesn't hold the refused change
+// (one added again at the kept base): the worker changes nothing, which
+// collection finds empty rather than unchanged. It was refused as "no
+// repository change" and charged as a repair, the #2131 symptom.
+test("a worker that makes no change after the operator's guidance, in a checkout without its refused result, is checked again as a rereview", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: idles,
+  });
+  const { runner, prompts, commit } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", KEEP);
+  await served.run(
+    "the work step",
+    () =>
+      runner.state.done["item:a:work"] ||
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  assert.equal(prompts.length, 1);
+  assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");
+  assert.deepEqual(runner.state.repairs["item:a:work"].findings, ["refused"]);
+  assert.equal(runner.state.holds.length, 0);
+  assert.equal(runner.state.done["item:a:work"]?.commit, commit);
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+  assert.equal(runner.state.kept["item:a:rereviewed"].commit, commit);
+});
+
+test("past the rereview allowance, a worker that made no change after the operator's guidance asks, charging no repair", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: idles,
+  });
+  const { runner } = served;
+  runner.state.kept["allowances:rereviews"] = 1;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", KEEP);
+  await served.run(
+    "the question",
+    () =>
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  const [asked] = runner.state.holds;
+  assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");
+  assert.match(
+    asked.question,
+    /^After your guidance, Work Item a's worker made no change,/,
+  );
+  assert.match(asked.question, /I changed nothing\./);
+  assert.ok(asked.options.some((option) => option.answer === "revalidate"));
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+});
+
+/** A worker whose checkout holds the refused change and that changes nothing. */
+const leaves = async (input) => {
+  assert.equal(
+    readFileSync(join(input.worktree, "src", "a.js"), "utf8"),
+    "export const a = 2;\n",
+    "the kept checkout holds the refused change",
+  );
+  return { kind: "finished", finalResponse: "Kept the change as it is." };
+};
+
+/** A worker that removes the refused change from a checkout that held it. */
+const reverts = async (input) => {
+  assert.equal(
+    readFileSync(join(input.worktree, "src", "a.js"), "utf8"),
+    "export const a = 2;\n",
+    "the kept checkout holds the refused change",
+  );
+  writeFileSync(join(input.worktree, "src", "a.js"), "export const a = 1;\n");
+  return {
+    kind: "finished",
+    finalResponse: "Removed my change to src/a.js, as the operator said.",
+  };
+};
+
+// In a checkout that held the refused change, an empty change is the
+// worker removing it: that is a change, not the worker keeping its result.
+// It was taken for "made no change", and the refused result the worker
+// dropped was checked again (and could be delivered) as a rereview.
+test("a worker that removes its refused change after the operator's guidance is refused, not taken as keeping it", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: reverts,
+    holding: true,
+  });
+  const { runner, prompts } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", "Drop your change to src/a.js.");
+  await served.run(
+    "the work step",
+    () =>
+      runner.state.done["item:a:work"] ||
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  assert.equal(prompts.length, 1);
+  assert.equal(runner.state.done["item:a:work"], undefined);
+  assert.equal(runner.state.holds.length, 0);
+  assert.equal(runner.state.repairs["item:a:work"].count, 3);
+  assert.match(
+    runner.state.repairs["item:a:work"].findings.at(-1),
+    /^Worker produced no repository change/,
+  );
+  assert.equal(runner.state.kept["allowances:rereviews"], undefined);
+});
+
+// The same kept checkout, left as it was: the refused result resubmitted.
+test("a worker that leaves its kept checkout as it was after the operator's guidance is checked again as a rereview", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: leaves,
+    holding: true,
+  });
+  const { runner, prompts, commit } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", KEEP);
+  await served.run(
+    "the work step",
+    () =>
+      runner.state.done["item:a:work"] ||
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  assert.equal(prompts.length, 1);
+  assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");
+  assert.equal(runner.state.done["item:a:work"]?.commit, commit);
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+});
+
+for (const [what, work] of [
+  ["an unchanged result", keeps],
+  ["no change at all", idles],
+])
+  test(`${what} after Factory's own diagnosis is still refused as a repair`, async () => {
+    const served = servedWork(failedChecks, [], { perPath: 5, work });
+    const { runner, prompts } = served;
+    await served.run(
+      "the repair",
+      () =>
+        runner.state.repairs["item:a:work"].count > 2 ||
+        runner.state.done["item:a:work"],
+    );
+    assert.equal(runner.state.done["item:a:work"], undefined);
+    assert.equal(runner.state.repairs["item:a:work"].count, 3);
+    assert.match(
+      runner.state.repairs["item:a:work"].findings.at(-1),
+      /^Worker produced no repository change/,
+    );
+    assert.equal(runner.state.kept["allowances:rereviews"], undefined);
+    assert.equal(prompts.length, 1);
+  });

@@ -40,9 +40,9 @@ import {
 } from "../worktree.js";
 import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
-import { fact, facts } from "./facts.js";
+import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
-import { refusedResult, refusedTreeFor } from "./refused.js";
+import { refusedOf, refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import { itemMemory } from "./shared.js";
 import { correctsMedia, repairOutcome } from "./step-deliver.js";
@@ -270,6 +270,12 @@ export async function workStep(
     // saves it, and the engine asks for `more` (`diagnoseFirst`).
   }
   if (!finished) {
+    // Whether the checkout holds any change, read before Factory writes the
+    // worker's inputs into it: an empty change from a checkout that held
+    // the refused result is that result removed, never kept (#2131).
+    const bare =
+      refusedOf(state, item.id) !== undefined &&
+      (await holdsNoChange(worktree, base, signal));
     // A merged predecessor's blame answered `amend`, or its amendment
     // settled: no diagnosis runs again.
     const amended = blameAmendment(item, context, place, keepBase);
@@ -480,6 +486,7 @@ export async function workStep(
     finished = {
       finalResponse: result.finalResponse,
       ...(result.validated ? { validated: result.validated } : {}),
+      ...(bare ? { bare: true as const } : {}),
     };
     keepAll = { ...keepAll, ...dropped };
   }
@@ -650,6 +657,29 @@ export async function workStep(
       };
     }
     case "repair":
+      // The operator's guidance was this attempt's only correction, and the
+      // worker made no change: it resubmitted the refused result as it was,
+      // or left a checkout that held no change when it started (one added
+      // again at the kept base, which never held the refused result) as it
+      // was. Whatever the guidance said, that is no repair: the refused
+      // result is checked again as `revalidate` would check it (a result
+      // rereview), or the operator is asked. Any other attempt with no
+      // change is refused as before, an empty change from a checkout that
+      // held the refused result (the worker removed it) included.
+      if (
+        (collected.unchanged ||
+          (collected.empty &&
+            finished.bare === true &&
+            refusedOf(state, item.id) !== undefined)) &&
+        !collected.staging &&
+        guidedOnly(state, item.id, keepAll)
+      )
+        return keptAsGuided(
+          item,
+          finished.finalResponse,
+          collected.unchanged ? "unchanged" : "empty",
+          { ...keepAll, ...facts({ finished: null }, item.id) },
+        );
       return repairOutcome(
         item,
         "work",
@@ -667,6 +697,83 @@ export async function workStep(
     default:
       return withKeep(collected, keepFinished);
   }
+}
+
+/**
+ * Whether this attempt's only correction was the operator's guidance (their
+ * `answer` to its repair diagnosis question, repair-context.ts): the
+ * diagnosis for the item's current repair, written by this run or saved for
+ * it, is the operator's, with no correction of Factory's.
+ */
+export function guidedOnly(
+  state: ObjectiveState,
+  id: string,
+  keep: Record<string, unknown>,
+): boolean {
+  const now = written(keep, "diagnosis", id);
+  const diagnosis = now === undefined ? fact(state, "diagnosis", id) : now;
+  return (
+    !!diagnosis &&
+    diagnosis.repair === state.repairs?.[stepKey(id, "work")]?.count &&
+    diagnosis.context.operator !== undefined &&
+    diagnosis.context.correction === undefined
+  );
+}
+
+/**
+ * Whether `worktree` holds no change from `base`: HEAD is the base, and
+ * Git reports no changed or untracked file (an ignored one is no change).
+ */
+async function holdsNoChange(
+  worktree: string,
+  base: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const head = (await hostGit(worktree, ["rev-parse", "HEAD"], { signal }))
+    .toString("utf8")
+    .trim();
+  return head === base && (await changedFiles(worktree, signal)).length === 0;
+}
+
+/** The longest worker final response a question quotes. */
+const KEPT_RESPONSE_LIMIT = 2000;
+
+/**
+ * After the operator's guidance, the attempt's only correction, the worker
+ * made no change (#2131): it resubmitted the refused result unchanged
+ * (`unchanged`), or left a checkout that held no change as it was (`empty`,
+ * with the finished run `bare`). Factory never reads
+ * the guidance, so this holds whatever it said; the question quotes the
+ * worker's final response for the operator to judge. That is no repair:
+ * the engine answers `revalidate` for it where it is taken and a result
+ * rereview is left (engine.ts `rereview`), so the refused result is checked
+ * again, charged as a rereview; else this question asks, and the engine
+ * adds `revalidate` (with its sentence) where the item can take it, so past
+ * the rereview allowance it asks for `more`.
+ */
+function keptAsGuided(
+  item: WorkItem,
+  finalResponse: string,
+  how: "unchanged" | "empty",
+  keep: Record<string, unknown>,
+): Outcome {
+  const text = finalResponse.trim();
+  const said =
+    text.length > KEPT_RESPONSE_LIMIT
+      ? `${text.slice(0, KEPT_RESPONSE_LIMIT)}...`
+      : text;
+  const did =
+    how === "unchanged"
+      ? "resubmitted its refused result unchanged"
+      : "made no change";
+  return {
+    ...hold(
+      `After your guidance, Work Item ${item.id}'s worker ${did}, so there is no new result, and no repair is charged for it.${said ? `\n\nThe worker's final response: ${said}` : ""}\n\nFactory checks the refused result again as a result rereview when it can; it can't now (the result can't be checked again as it is, or this Objective's result rereviews are spent). Answer \`answer <text>\` to send the worker other guidance, \`replan\` to plan again, or cancel.`,
+      ["answer", "replan", "cancel"],
+    ),
+    rereview: true,
+    keep,
+  };
 }
 
 /** A media answer other than done as the step's outcome: `repair` goes back to the work step. */

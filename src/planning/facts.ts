@@ -11,7 +11,7 @@ import { checkObjective, type SourceRef, validPath } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
 import { skipsDispatchedRuns } from "./dispatch-guard.js";
-import { HOST_VALIDATION_NETWORK } from "./rubric.js";
+import { HOST_VALIDATION_NETWORK, HOST_VALIDATION_SANDBOX } from "./rubric.js";
 import type {
   CoverageObligation,
   PinnedSource,
@@ -432,6 +432,7 @@ export function listCommands(commands: readonly string[]): string {
  * planner receives. Keep this under ~1 KB.
  */
 const VALIDATION_ENVIRONMENT = {
+  // sandbox.network package-install; host and off replace it below.
   network:
     "none except the exact script-disabled package install, which runs first",
   refs: "remote-tracking branches may be stale; a Work Item's validation compares with $FACTORY_BASE_SHA, the commit its change was built on; integrated, QA and final commands run on the shared default branch, which holds other Objectives' merges, so they prove behaviour, never a diff: Factory enforces each item's owned paths",
@@ -445,6 +446,10 @@ const VALIDATION_ENVIRONMENT = {
   ifNeeded:
     "leave out any command needing more, and ask through decisionRequired",
 } as const;
+
+/** Validation's network under `sandbox.network: off`, as the planner and the graph reviewer read it. */
+const OFF_VALIDATION_NETWORK =
+  "none, the exact script-disabled package install included: it runs first, offline, from the package store";
 
 /**
  * How a dependency change gets its lockfile: the planner's and the graph
@@ -618,6 +623,9 @@ async function packageCommands(
 /**
  * The validation environment the planner and the graph reviewer are given:
  * with `lockfileResolution`, Factory resolves an out-of-date lockfile itself.
+ * `lockfileResolution` is set exactly when `sandbox.network` isn't off
+ * (steps.ts `planningFacts`), so without it or `hostNetwork` the network is
+ * off and even the install runs offline (validate.ts).
  */
 export function validationEnvironmentNote(
   hostNetwork: boolean,
@@ -625,13 +633,21 @@ export function validationEnvironmentNote(
 ): string {
   const environment = {
     ...VALIDATION_ENVIRONMENT,
-    ...(hostNetwork ? { network: HOST_VALIDATION_NETWORK } : {}),
+    ...(hostNetwork
+      ? { network: HOST_VALIDATION_NETWORK, sandbox: HOST_VALIDATION_SANDBOX }
+      : lockfileResolution
+        ? {}
+        : { network: OFF_VALIDATION_NETWORK }),
     lockfile: lockfileNote(lockfileResolution),
   };
   return `Validation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
 }
 
-/** The planner's note on the installation's CI-only commands, after the environment note. */
+/**
+ * The planner's note on the installation's CI-only commands, after the
+ * environment note. Under host, validation is not offline, so the note gives
+ * only the operator's rule: these run in CI alone.
+ */
 function ciOnlyInstructions(
   ciOnlyCommands: readonly string[],
   hostNetwork: boolean,
@@ -640,7 +656,7 @@ function ciOnlyInstructions(
   return (
     `\n\n${validationEnvironmentNote(hostNetwork, lockfileResolution)}` +
     (ciOnlyCommands.length
-      ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
+      ? `\n\n${hostNetwork ? "The installation runs these commands only in CI" : "These commands need network and run only in CI; validation runs offline"}, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
       : "")
   );
 }

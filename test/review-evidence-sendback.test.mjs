@@ -633,3 +633,265 @@ test("a question an earlier review of the same tree asked, which the operator is
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(outcome.questions, [question]);
 });
+
+/**
+ * Two captured candidate sets with the same model and different previews,
+ * set `a` selected and committed as LFS pointers (run
+ * 2026-10-27T142211PDT-8f9f). `bigPreview` makes set `b`'s preview larger
+ * than a review copy may be, so the evidence root holds none of it.
+ */
+function twoColourSets({ bigPreview = false } = {}) {
+  const checkout = tempDir("factory-sendback-sets-");
+  git(checkout, "init", "--quiet", "--initial-branch=main");
+  writeFileSync(
+    join(checkout, ".gitattributes"),
+    "*.glb filter=lfs diff=lfs merge=lfs -text\n*.png filter=lfs diff=lfs merge=lfs -text\n",
+  );
+  const base = commit(checkout, "base");
+  const staged = tempDir("factory-sendback-sets-staged-");
+  const member = (set, role, destination, mediaType, content) => {
+    const bytes = Buffer.from(content);
+    const file = join(staged, `${set}-${role}`);
+    mkdirSync(file);
+    const path = join(file, destination.split("/").pop());
+    writeFileSync(path, bytes);
+    return {
+      role,
+      destination,
+      mediaType,
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      file: path,
+    };
+  };
+  const set = (id, colour) => ({
+    id,
+    provenance: {
+      source: "generated",
+      rights: "owned",
+      visibility: "private",
+      lineage: "test",
+    },
+    members: [
+      member(id, "model", "assets/cubeQdjpn.glb", "model/gltf-binary", "glTF"),
+      member(
+        id,
+        "preview-image",
+        "assets/cubeQdjpn-preview.png",
+        "image/png",
+        `PNG ${colour}`,
+      ),
+    ],
+  });
+  const sets = [
+    set("a", "red"),
+    set("b", bigPreview ? `blue${" ".repeat(1024 * 1024)}` : "blue"),
+  ];
+  mkdirSync(join(checkout, "assets"));
+  for (const selected of sets[0].members)
+    writeFileSync(
+      join(checkout, selected.destination),
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${selected.sha256}\nsize ${selected.bytes}\n`,
+    );
+  const head = commit(checkout, "cube");
+  const tree = git(checkout, "rev-parse", `${head}^{tree}`);
+  const item = workItem(
+    "CubeAssets",
+    [
+      "Two complete candidate sets in different colours are offered, and only the selected set is delivered.",
+    ],
+    ["assets/cubeQdjpn.glb", "assets/cubeQdjpn-preview.png"],
+  );
+  return {
+    repo: { checkout, base, head, tree },
+    item,
+    candidates: [
+      {
+        item,
+        sets,
+        selection: {
+          commit: head,
+          tree,
+          set: sets[0],
+          bound: [],
+          by: "kirk",
+          at: "2026-10-27T21:30:12.289Z",
+        },
+      },
+    ],
+  };
+}
+
+/** The index of the evidence row whose path starts with `prefix`, from the prompt. */
+function rowIndex(prompt, prefix) {
+  for (const paragraph of prompt.split("\n\n")) {
+    if (!paragraph.startsWith('{"evidenceIndex"')) continue;
+    const row = JSON.parse(paragraph);
+    if (row.path.startsWith(prefix)) return row.evidenceIndex;
+  }
+  assert.fail(`no evidence row ${prefix}`);
+}
+
+/** The reviewer's question of run 2026-10-27T142211PDT-8f9f, citing `indices`. */
+function colourQuestion(indices) {
+  return {
+    criterionIndex: 0,
+    verdict: "needs-human",
+    evidenceIndices: indices,
+    detail:
+      "The controller receipt establishes two complete captured sets, but says only the preview-image bytes differ; both sets have identical model bytes. The alternative's colour cannot be inferred from the receipt's digest or size.",
+    question:
+      "Do the two offered candidate sets visibly use different cube colours?",
+  };
+}
+
+test("a question citing the candidate receipt, naming no file, goes back with every set's review copies", async () => {
+  const { repo, item, candidates } = twoColourSets();
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      const receipt = rowIndex(call.prompt, "Controller candidate receipt:");
+      if (calls.length === 1)
+        return { value: { findings: [colourQuestion([receipt])] } };
+      for (const set of ["a", "b"])
+        assert.ok(
+          existsSync(
+            join(
+              call.readDir,
+              `media-sets/CubeAssets/${set}/cubeQdjpn-preview.png`,
+            ),
+          ),
+        );
+      return {
+        value: {
+          findings: [
+            {
+              criterionIndex: 0,
+              verdict: "pass",
+              evidenceIndices: [receipt],
+              detail: "The two previews differ: red and blue.",
+              question: "",
+            },
+          ],
+        },
+      };
+    },
+  };
+  const { run, events } = review(repo, item, planner, { candidates });
+  const outcome = await run;
+  assert.equal(calls.length, 2);
+  const note = calls[1].prompt.slice(calls[0].prompt.length);
+  for (const set of ["a", "b"]) {
+    assert.ok(note.includes(`media-sets/CubeAssets/${set}/cubeQdjpn.glb`));
+    assert.ok(
+      note.includes(`media-sets/CubeAssets/${set}/cubeQdjpn-preview.png`),
+    );
+  }
+  assert.ok(
+    note.includes(
+      "the selection is the human judgment of their appearance: never ask the operator to confirm it again",
+    ),
+  );
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-evidence-sendback"),
+    { event: "result-review-evidence-sendback", criteria: [0], paths: 4 },
+  );
+  assert.equal(outcome.kind, "pass");
+});
+
+test("a cited receipt adds only the copies the evidence root holds, after the files the text names", async () => {
+  const { repo, item, candidates } = twoColourSets({ bigPreview: true });
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      const receipt = rowIndex(call.prompt, "Controller candidate receipt:");
+      if (calls.length === 1)
+        return {
+          value: {
+            findings: [
+              {
+                ...colourQuestion([receipt]),
+                detail: `${colourQuestion([]).detail} candidate/.gitattributes routes both destinations through Git LFS.`,
+              },
+            ],
+          },
+        };
+      return {
+        value: {
+          findings: [
+            {
+              criterionIndex: 0,
+              verdict: "pass",
+              evidenceIndices: [receipt],
+              detail: "Set a's preview is red; set b's differs by its digest.",
+              question: "",
+            },
+          ],
+        },
+      };
+    },
+  };
+  const { run, events } = review(repo, item, planner, { candidates });
+  const outcome = await run;
+  assert.equal(calls.length, 2);
+  const note = calls[1].prompt.slice(calls[0].prompt.length);
+  assert.match(note, /questions name or cite files the evidence root holds/);
+  assert.ok(
+    note.includes(
+      `the evidence root holds ${[
+        "candidate/.gitattributes",
+        "media-sets/CubeAssets/a/cubeQdjpn.glb",
+        "media-sets/CubeAssets/a/cubeQdjpn-preview.png",
+        "media-sets/CubeAssets/b/cubeQdjpn.glb",
+      ]
+        .map((path) => JSON.stringify(path))
+        .join(", ")}\n`,
+    ),
+    note,
+  );
+  assert.ok(!note.includes("media-sets/CubeAssets/b/cubeQdjpn-preview.png"));
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-evidence-sendback"),
+    { event: "result-review-evidence-sendback", criteria: [0], paths: 4 },
+  );
+  assert.equal(outcome.kind, "pass");
+});
+
+test("a question citing the candidate receipt that is still asked after the send-back reaches the operator, once", async () => {
+  const { repo, item, candidates } = twoColourSets();
+  let calls = 0;
+  const planner = {
+    async answer(call) {
+      calls += 1;
+      const receipt = rowIndex(call.prompt, "Controller candidate receipt:");
+      return { value: { findings: [colourQuestion([receipt])] } };
+    },
+  };
+  const outcome = await review(repo, item, planner, { candidates }).run;
+  assert.equal(calls, 2);
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(
+    outcome.questions.map((question) => question.question),
+    ["Do the two offered candidate sets visibly use different cube colours?"],
+  );
+});
+
+test("the same question citing no receipt still reaches the operator with no send-back", async () => {
+  const { repo, item, candidates } = twoColourSets();
+  let calls = 0;
+  const planner = {
+    async answer() {
+      calls += 1;
+      return { value: { findings: [colourQuestion([CHANGE_INDEX_ROW])] } };
+    },
+  };
+  const { run, events } = review(repo, item, planner, { candidates });
+  const outcome = await run;
+  assert.equal(calls, 1);
+  assert.equal(outcome.kind, "needs-human");
+  assert.ok(
+    !events.some((event) => event.event === "result-review-evidence-sendback"),
+  );
+});

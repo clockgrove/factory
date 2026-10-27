@@ -163,6 +163,14 @@ export interface Finished {
   validated?: { tree: string; commands: string[] };
   /** Captured once; absent until then. */
   sets?: CandidateSet[];
+  /**
+   * While a refused result is kept, the worker's checkout held no change
+   * when it started (HEAD on the base, nothing changed): one added again at
+   * the kept base never held the refused result, so an empty change there
+   * is no change by the worker (step-work.ts `keptAsGuided`), not the
+   * refused change removed.
+   */
+  bare?: true;
 }
 
 /**

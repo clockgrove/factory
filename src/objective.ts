@@ -237,18 +237,25 @@ export function validPath(path: string): boolean {
 }
 
 /**
- * Whether the Objective names `path` as a whole token: a code span's
- * whole text, or a word between whitespace, quotes or brackets (sentence
- * punctuation after it aside). A prefix or part of a named path is not
- * named. Planning's source-asset check and resolveInputs both use it.
+ * The whole tokens the Objective names: each code span's whole text, and
+ * each word between whitespace, quotes or brackets (sentence punctuation
+ * after it aside). A prefix or part of a token is not one.
+ */
+export function namedTokens(body: string): Set<string> {
+  const spans = body
+    .split("`")
+    .filter((_, index) => index % 2 === 1)
+    .map((span) => span.trim());
+  const words = body
+    .split(/[\s`'"()<>[\]{}]+/)
+    .map((word) => word.replace(/[.,;:!?]+$/, ""));
+  return new Set([...spans, ...words].filter(Boolean));
+}
+
+/**
+ * Whether the Objective names `path` as a whole token (namedTokens).
+ * Planning's source-asset check and resolveInputs both use it.
  */
 export function namesPath(body: string, path: string): boolean {
-  if (!path) return false;
-  const spans = body.split("`").filter((_, index) => index % 2 === 1);
-  return (
-    spans.some((span) => span.trim() === path) ||
-    body
-      .split(/[\s`'"()<>[\]{}]+/)
-      .some((word) => word.replace(/[.,;:!?]+$/, "") === path)
-  );
+  return Boolean(path) && namedTokens(body).has(path);
 }

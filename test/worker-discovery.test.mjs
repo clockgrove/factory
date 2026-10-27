@@ -672,6 +672,8 @@ test("the worker prompt sends a file outside the owned paths to the discovery, a
     "(script-run files, existing tests, source files existing tests import, new packages)",
     "If a command needs an unavailable service, tool or credential, report the exact command and reason. If it needs a file the repository's own files require (such as a source file a test imports) outside your owned paths, do not write it, and do not just report it: propose it in .factory-discovery.json",
     "when that output's path is in a peer's ownedPaths (a peer with no ownedPaths, such as a QA or final-validation item, owns no file)",
+    // #2107: a command no correct result can pass goes to the discovery.
+    "Validation runs on the uncommitted result, so your tests check files, never HEAD, the index or a commit of the result. If a command can't pass on any correct result, because it is malformed or needs the result committed, don't work around it in your tests: propose its replacement in .factory-discovery.json",
   ])
     assert.ok(prepared.prompt.includes(text), text);
 });

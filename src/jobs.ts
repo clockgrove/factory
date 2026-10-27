@@ -69,9 +69,7 @@ export class Jobs {
     job: (signal: AbortSignal) => Promise<void>,
     options: JobOptions = {},
   ): void {
-    if (this.running.has(key)) return;
-    const wait = this.waits.get(key);
-    if (wait && this.now() < wait.nextAt) return;
+    if (this.held(key)) return;
     const entry: Running = { issue, controller: new AbortController() };
     const { signal } = entry.controller;
     this.running.set(key, entry);
@@ -139,9 +137,20 @@ export class Jobs {
     return this.running.has(key);
   }
 
-  /** Whether `key` is in flight or backing off after a failure. */
+  /**
+   * Whether `key` is in flight, or its last run failed: its work isn't
+   * done yet, whether its backoff is still on or has ended. Never a reason
+   * to skip `run`, which starts it again once its backoff ends (`held`).
+   */
   pending(key: string): boolean {
     return this.running.has(key) || this.waits.has(key);
+  }
+
+  /** Whether `run` leaves `key` alone now: in flight, or its backoff after a failure hasn't ended. */
+  held(key: string): boolean {
+    if (this.running.has(key)) return true;
+    const wait = this.waits.get(key);
+    return wait !== undefined && this.now() < wait.nextAt;
   }
 
   /** Whether any job of Objective `issue` is in flight. */

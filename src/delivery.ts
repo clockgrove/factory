@@ -51,6 +51,7 @@ import type { WorkItem } from "./planning/types.js";
 import { errorMessage } from "./text.js";
 import { FACTORY_EMAIL } from "./work/collect.js";
 import { hostGit, isAncestor } from "./worktree.js";
+import { isZip, utf8Text, type ZipListing, zipTexts } from "./zip.js";
 
 const MINUTE = 60_000;
 /** How long GitHub may not yet show what Factory just did. */
@@ -71,6 +72,13 @@ const LISTED_CHECKS = 10;
 const EXCERPTED_CHECKS = 3;
 const LOG_TAIL_LINES = 40;
 const LOG_TAIL_CHARS = 3000;
+/** A default branch's pass this long before a PR's failure may no longer hold. */
+const BASE_STALE_MS = 24 * 60 * MINUTE;
+/** A failed run's artifacts a finding reads, smallest first, and their download's bound. */
+const ARTIFACTS_READ = 5;
+const ARTIFACT_DOWNLOAD_BYTES = 1024 * 1024;
+/** The largest artifact file a finding reads, and its artifact text in all. */
+const ARTIFACT_TEXT_BYTES = 64 * 1024;
 /** Update-branch merges followed back to Factory's own head. */
 const MAX_BRANCH_UPDATES = 10;
 /** ANSI CSI and OSC sequences, and other two-byte escapes, in job logs. */
@@ -806,7 +814,9 @@ export type CiResult =
 /**
  * Whether the PR may merge. Every check on the exact head must settle; any
  * that failed, required or not, or a conflict with the base, is a repair
- * (#1637), once failed Actions jobs were rerun (rerunFailed). Each
+ * (#1637), once failed Actions jobs were rerun (rerunFailed), with the
+ * failed runs' artifacts (failedRunArtifacts); a failed check the default
+ * branch fails too is a question instead (baseFailures, #2094). Each
  * plan-named check must pass by name. A PR BEHIND its base
  * under strict protection is updated by GitHub and observed again. A PR
  * made a draft, closed without merging, with only cancelled checks nothing
@@ -993,6 +1003,13 @@ async function judge(
     (check) => !["cancelled", "stale"].includes(check.conclusion),
   );
   if (broken.length) {
+    // A failure the default branch shares is no repair's to fix (#2094).
+    const base = await baseFailures(
+      context,
+      { pr, head, defaultBranch },
+      broken,
+    );
+    if (base.kind === "hold") return base;
     const rerun = await rerunFailed(context, input, head, broken);
     if (rerun) return rerun;
     // Why the first few failed, so a repair is not blind.
@@ -1001,12 +1018,19 @@ async function judge(
       const excerpt = check.run && (await failureExcerpt(context, check.run));
       if (excerpt) excerpts.push(`${check.name}:\n${excerpt}`);
     }
+    const artifacts = await failedRunArtifacts(
+      context,
+      broken.slice(0, EXCERPTED_CHECKS),
+    );
     const reran = input.rerun?.head === head ? input.rerun : undefined;
     return {
       kind: "repair",
       checks: true,
+      // The log excerpts last: a long finding keeps its end (repair.ts).
       finding: [
         `Checks failed on PR #${pr} at ${head}: ${listed(broken)}${reran ? `. Factory reran the failed Actions jobs of ${bounded(reran.checks, ", ")} once on this head, and the failure stands` : ""}`,
+        ...(base.note ? [base.note] : []),
+        ...(artifacts ? [artifacts] : []),
         ...excerpts,
       ].join("\n\n"),
     };
@@ -1432,6 +1456,237 @@ async function rerunFailed(
   };
 }
 
+/**
+ * Whether the default branch fails a check that failed on the PR (#2094).
+ * A failure it shares fails every PR into it, whatever the change, so no
+ * repair can fix it. Factory compares the checks' latest runs and statuses
+ * on the default branch's current head as GitHub already has them, and
+ * runs nothing there: rerunning a workflow on the default branch can start
+ * what follows a run on it (a release, a deployment). A check that failed
+ * there too, with any failing conclusion but cancelled or stale, is a hold
+ * at once, before any rerun, that names it, its failed step and excerpt,
+ * and spends no repair; `retry` compares again once the default branch is
+ * fixed. Otherwise `note` says what the default branch's head shows of
+ * each failed check, for the repair finding: no run, one still running,
+ * or how it ended and when, and that a pass from BASE_STALE_MS or more
+ * before the failure may not hold now. The default branch is a native
+ * stack's base too: GitHub requires its checks on every layer (#2060).
+ */
+async function baseFailures(
+  context: DeliveryContext,
+  at: { pr: number; head: string; defaultBranch: string },
+  broken: FailedCheck[],
+): Promise<Hold | { kind: "compared"; note?: string }> {
+  const { github, signal } = context;
+  const { pr, head, defaultBranch } = at;
+  const base = await github.branchHead(defaultBranch, signal);
+  if (base === head) return { kind: "compared" };
+  const runs = (await github.checkRuns(base, signal)).filter(
+    (run) => run.head_sha === base,
+  );
+  const statuses = await github.commitStatuses(base, signal);
+  const names = [...new Set(broken.map((check) => check.name))];
+  const red = failedChecks(runs, statuses).filter(
+    (check) =>
+      names.includes(check.name) &&
+      !["cancelled", "stale"].includes(check.conclusion),
+  );
+  if (red.length) {
+    const shared = [...new Set(red.map((check) => check.name))];
+    const only = names.filter((name) => !shared.includes(name));
+    const checks = bounded(
+      shared.map((name) => JSON.stringify(name)),
+      ", ",
+    );
+    const failures: string[] = [];
+    for (const check of red.slice(0, EXCERPTED_CHECKS)) {
+      const excerpt = check.run && (await failureExcerpt(context, check.run));
+      failures.push(
+        `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})${excerpt ? `:\n${excerpt}` : ""}`,
+      );
+    }
+    return hold(
+      `${defaultBranch} is red: its head ${base} fails ${checks} too, which failed on PR #${pr} at ${head}. A failure ${defaultBranch} shares fails every PR into it whatever the change, so Factory spent no repair on it.${only.length ? ` PR #${pr} also fails ${bounded(only, ", ")}, which ${defaultBranch} doesn't; Factory repairs that once ${defaultBranch} passes ${checks}.` : ""} On ${defaultBranch}:\n\n${failures.join("\n\n")}\n\nFix ${checks} on ${defaultBranch} (another Objective can), then answer retry; or cancel.`,
+      [
+        {
+          answer: "retry",
+          family: "retry",
+          consequence: `Compares PR #${pr}'s failed checks with ${defaultBranch} again: asks again while ${defaultBranch} still fails them, else reruns or repairs them as usual.`,
+        },
+        "cancel",
+      ],
+    );
+  }
+  // When the PR's check failed, for a pass on the base that predates it.
+  const failedAt = (name: string) =>
+    Math.max(
+      ...broken
+        .filter((check) => check.name === name)
+        .map((check) => Date.parse(check.run?.completed_at ?? "") || 0),
+    );
+  let stale = false;
+  const shown = names.map((name) => {
+    const there = runs.filter((run) => run.name === name);
+    const status = statuses.find((entry) => entry.context === name);
+    if (!there.length && !status) return `${name} has no run or status`;
+    if (
+      there.some((run) => run.status !== "completed") ||
+      status?.state === "pending"
+    )
+      return `${name} is still running`;
+    const ended = there.length
+      ? there.map((run) => ({
+          conclusion: String(run.conclusion),
+          at: run.completed_at ?? "",
+        }))
+      : [{ conclusion: String(status?.state), at: String(status?.updated_at) }];
+    const last = ended.sort((a, b) => b.at.localeCompare(a.at))[0]!;
+    const done = Date.parse(last.at);
+    const old =
+      ["success", "neutral", "skipped"].includes(last.conclusion) &&
+      Number.isFinite(done) &&
+      failedAt(name) - done >= BASE_STALE_MS;
+    if (old) stale = true;
+    const days = Math.floor((failedAt(name) - done) / (24 * 60 * MINUTE));
+    return `${name} ended ${last.conclusion}${Number.isFinite(done) ? ` at ${last.at}` : ""}${old ? `, ${days} day${days === 1 ? "" : "s"} before it failed here` : ""}`;
+  });
+  return {
+    kind: "compared",
+    note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (Factory runs nothing there): ${shown.join("; ")}.${stale ? ` A pass that old may not hold now: a check that depends on when it runs (new advisories against locked dependencies, an expired credential, an outside service) can fail ${defaultBranch} too, and then no change to this Work Item fixes it.` : ""}`,
+  };
+}
+
+/**
+ * The artifacts the failed checks' Actions workflow runs uploaded, for the
+ * repair diagnosis (#2094), so it needn't ask the operator for them: each
+ * one's name and size (an artifact uploaded again in a later attempt shows
+ * its latest upload), and the UTF-8 text files of at most
+ * ARTIFACT_TEXT_BYTES (JSON, logs, reports) in the ARTIFACTS_READ smallest
+ * whose download fits ARTIFACT_DOWNLOAD_BYTES, within ARTIFACT_TEXT_BYTES
+ * in all. They are read in memory as text and never run. Best effort, like
+ * failureExcerpt, but a rate limit (GitHub's own, or one the client holds
+ * requests for) is waited out: the step retries at its reset, so the
+ * repair isn't diagnosed without them.
+ */
+async function failedRunArtifacts(
+  context: DeliveryContext,
+  checks: FailedCheck[],
+): Promise<string | undefined> {
+  const { github, signal } = context;
+  const tolerated = async <T>(read: () => Promise<T>) => {
+    try {
+      return await read();
+    } catch (error) {
+      if (signal.aborted || (error instanceof TransientError && error.limited))
+        throw error;
+      return undefined;
+    }
+  };
+  const byRun = new Map<number, string[]>();
+  for (const { name, run } of checks) {
+    if (run?.app?.slug !== "github-actions") continue;
+    const job = await tolerated(() => github.workflowJob(run.id, signal));
+    if (job) byRun.set(job.run, [...(byRun.get(job.run) ?? []), name]);
+  }
+  const sections: string[] = [];
+  let room = ARTIFACT_TEXT_BYTES;
+  for (const [run, names] of byRun) {
+    const listed = await tolerated(() => github.runArtifacts(run, signal));
+    if (!listed?.length) continue;
+    // Artifact ids grow, so the last of a name is its latest upload.
+    const latest = [
+      ...new Map(
+        [...listed]
+          .sort((a, b) => a.id - b.id)
+          .map((artifact) => [artifact.name, artifact]),
+      ).values(),
+    ];
+    const read = new Set(
+      latest
+        .filter(
+          (artifact) =>
+            !artifact.expired && artifact.size <= ARTIFACT_DOWNLOAD_BYTES,
+        )
+        .sort((a, b) => a.size - b.size)
+        .slice(0, ARTIFACTS_READ)
+        .map((artifact) => artifact.id),
+    );
+    const lines: string[] = [];
+    const texts: string[] = [];
+    for (const artifact of latest) {
+      const label = `${artifact.name} (${byteSize(artifact.size)})`;
+      if (!read.has(artifact.id)) {
+        lines.push(
+          `- ${label}: ${artifact.expired ? "expired" : artifact.size > ARTIFACT_DOWNLOAD_BYTES ? `not read, larger than ${byteSize(ARTIFACT_DOWNLOAD_BYTES)}` : `not read, past the ${ARTIFACTS_READ} smallest`}`,
+        );
+        continue;
+      }
+      const data = await tolerated(() =>
+        github.artifactDownload(artifact.id, ARTIFACT_DOWNLOAD_BYTES, signal),
+      );
+      const listing = data && artifactTexts(artifact.name, data);
+      if (!listing) {
+        lines.push(`- ${label}: GitHub did not serve a readable download`);
+        continue;
+      }
+      const included: string[] = [];
+      const skipped = listing.skipped.map(
+        (file) => `${file.name} (${file.reason})`,
+      );
+      for (const file of listing.texts) {
+        const text = file.text.replace(ANSI_ESCAPE, "").trimEnd();
+        const size = Buffer.byteLength(text);
+        if (size > room) {
+          skipped.push(`${file.name} (past the finding's bound)`);
+          continue;
+        }
+        room -= size;
+        included.push(file.name);
+        texts.push(`--- ${artifact.name}: ${file.name} ---\n${text}`);
+      }
+      lines.push(
+        `- ${label}: ${included.length ? `text files below: ${bounded(included, ", ")}` : "no text files read"}${skipped.length ? `; skipped ${bounded(skipped, ", ")}` : ""}`,
+      );
+    }
+    sections.push(
+      [
+        `Artifacts of the workflow run ${run} of ${bounded(names, ", ")}, read as text and never run:`,
+        bounded(lines, "\n"),
+        ...texts,
+      ].join("\n"),
+    );
+  }
+  return sections.length ? redact(sections.join("\n\n")) : undefined;
+}
+
+/**
+ * The text files of an artifact's download: a zip archive's, or the one
+ * file an artifact uploaded unarchived is. Undefined when it is a zip
+ * archive Factory can't read.
+ */
+function artifactTexts(name: string, data: Buffer): ZipListing | undefined {
+  if (isZip(data)) return zipTexts(data, ARTIFACT_TEXT_BYTES);
+  const text = data.length <= ARTIFACT_TEXT_BYTES ? utf8Text(data) : undefined;
+  return text === undefined
+    ? {
+        texts: [],
+        skipped: [
+          {
+            name,
+            reason: `not UTF-8 text of at most ${byteSize(ARTIFACT_TEXT_BYTES)}`,
+          },
+        ],
+      }
+    : { texts: [{ name, text }], skipped: [] };
+}
+
+/** `bytes` for a person: bytes, KiB or MiB. */
+function byteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
 /** A large matrix lists its first checks and counts the rest. */
 function bounded(items: string[], separator: string): string {
   return items.length > LISTED_CHECKS
@@ -1441,8 +1696,9 @@ function bounded(items: string[], separator: string): string {
 
 /**
  * A failed check run's failure annotations and, for an Actions job, the
- * tail of its log. Best effort: undefined when GitHub shows neither (no
- * access, logs expired), and the finding then names the check only.
+ * steps that failed and the tail of its log. Best effort: undefined when
+ * GitHub shows none of them (no access, logs expired), and the finding
+ * then names the check only.
  */
 async function failureExcerpt(
   context: DeliveryContext,
@@ -1452,6 +1708,14 @@ async function failureExcerpt(
   const tolerate = (error: unknown) => {
     if (context.signal.aborted) throw error;
   };
+  if (check.app?.slug === "github-actions")
+    try {
+      const job = await context.github.workflowJob(check.id, context.signal);
+      if (job?.failedSteps.length)
+        parts.push(`Failed step: ${job.failedSteps.join(", ")}`);
+    } catch (error) {
+      tolerate(error);
+    }
   try {
     parts.push(
       ...(await context.github.failureAnnotations(check.id, context.signal)),

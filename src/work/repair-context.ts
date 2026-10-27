@@ -33,6 +33,8 @@ import {
  * The correction is diagnosed once per repair and kept, so a rerun of the
  * work step reuses it; an operator question holds, and a predecessor blame
  * is the step's outcome instead (`blameOutcome`), with no worker run.
+ * `path` is the file the correction names, when it names one (the
+ * diagnosis's structured path, never prose).
  */
 export async function repairContext(
   item: WorkItem,
@@ -45,7 +47,7 @@ export async function repairContext(
   /** A decision narrowed `finding`: diagnose it again, never reuse the saved diagnosis. */
   narrowed = false,
 ): Promise<
-  | { context: RepairContext; keep: Record<string, unknown> }
+  | { context: RepairContext; keep: Record<string, unknown>; path?: string }
   | { outcome: Outcome }
   | undefined
 > {
@@ -80,7 +82,7 @@ export async function repairContext(
             progress: true,
           },
         }
-      : { context: saved.context, keep: {} };
+      : savedContext(saved);
   const applied = saved?.applied ?? [];
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
@@ -187,7 +189,24 @@ export async function repairContext(
         keep,
       },
     };
-  return { context: repairContextValue, keep };
+  return {
+    context: repairContextValue,
+    keep,
+    ...(result.correction.path ? { path: result.correction.path } : {}),
+  };
+}
+
+/**
+ * A saved diagnosis reused for its own repair: its context, and the file
+ * its correction (the last one it applied) names.
+ */
+function savedContext(saved: NonNullable<ItemFacts["diagnosis"]>): {
+  context: RepairContext;
+  keep: Record<string, unknown>;
+  path?: string;
+} {
+  const path = saved.applied.at(-1)?.path;
+  return { context: saved.context, keep: {}, ...(path ? { path } : {}) };
 }
 
 /**

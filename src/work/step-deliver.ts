@@ -551,7 +551,9 @@ export function movedLayer(
  * it comes from the select step (the operator's `repair`, or the selected
  * set couldn't be written), from publish's own Git LFS check (`media`), or
  * a refused review criterion cites a selected destination or the candidate
- * receipt.
+ * receipt. A selection (or kept candidates) that stands here still goes
+ * when the repair's diagnosed correction is about it (work step,
+ * `correctsMedia`).
  *
  * Every cleared work result (the item's and each layer's above) is kept
  * as the `refused` fact, so a rebase never drops the change.
@@ -702,6 +704,31 @@ export function aboutMedia(
   return (
     cited.has(receiptPath(item.id)) ||
     set.members.some((m) => cited.has(m.destination))
+  );
+}
+
+/**
+ * Whether a diagnosed correction is about the kept media `sets` (the
+ * operator's selection, or captured candidates): `path`, the file the
+ * diagnosis names (structured, never prose), is one of their
+ * destinations, the candidate staging (`.factory-media/`,
+ * `.factory-assets.json`) or the item's candidate receipt. Factory writes a
+ * kept set as it was captured: a worker never writes a destination, and
+ * the staging the set came from is gone. So no repair can make such a
+ * correction to a kept set: the sets no longer stand, and the attempt
+ * makes new candidates with it.
+ */
+export function correctsMedia(
+  item: WorkItem,
+  path: string | undefined,
+  sets: readonly CandidateSet[],
+): boolean {
+  if (path === undefined || !sets.length) return false;
+  return (
+    path === receiptPath(item.id) ||
+    path === ".factory-assets.json" ||
+    path.startsWith(".factory-media/") ||
+    sets.some((set) => set.members.some((m) => m.destination === path))
   );
 }
 

@@ -1624,9 +1624,11 @@ const SHORTEST_IDENTIFIER = 4;
  * the operator what a function in an unchanged file returns, and for media
  * bytes Factory had copied under media-sets/. A finding names a file by its
  * repository path (or a path suffix or basename with an extension), by a
- * code identifier that is its basename's stem (`sharedQwfwq` names
- * candidate/src/sharedQwfwq.js), or, for a review copy under media-sets/ or
- * inputs/, by the destination or source path its receipt gives. Only this
+ * backticked identifier or call whose name is its basename's stem
+ * (`sharedQwfwq("ab")` names candidate/src/sharedQwfwq.js), or, for a review
+ * copy under media-sets/ or inputs/, by the destination or source path its
+ * receipt gives. Path matches come first, then basenames, then stems, so the
+ * cap never drops a file named by its path. Only this
  * answer's own findings count: a criterion an operator decided, or that an
  * earlier review of this tree asked about, is settled, and a question
  * Factory asked for an invalid answer is no finding.
@@ -1734,8 +1736,26 @@ function fileNames(path: string, aliases: Map<string, string[]>): string[] {
 const PATH_WORD = /[\w@$.\-/]+/g;
 const CODE_SPAN = /`([^`\n]+)`/g;
 const IDENTIFIER = /[A-Za-z_$][\w$]*/g;
+/** A code span that is an identifier, a member chain, or a call of one: `sharedQwfwq`, `sharedQwfwq("ab")`. */
+const CODE_NAME =
+  /^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*(?:\(.*\))?\s*;?\s*$/;
 
-/** The files `text` names; see heldEvidence. */
+/** How directly a text names a file: a path, then a basename with an extension, then a code identifier's stem. */
+const BY_PATH = 0;
+const BY_BASENAME = 1;
+const BY_STEM = 2;
+
+/** Within a match class: the candidate and review copies first, the base tree last. */
+function area(path: string): number {
+  if (/^(?:candidate|media-sets|inputs)\//.test(path)) return 0;
+  return path.startsWith("base/") ? 2 : 1;
+}
+
+/**
+ * The files `text` names, most directly named first (see heldEvidence), so
+ * the send-back's cap keeps a file named by its path over files that only
+ * share a stem with an identifier.
+ */
 function namedFiles(
   files: readonly { path: string; names: readonly string[] }[],
   text: string,
@@ -1747,23 +1767,40 @@ function namedFiles(
     if (path.includes("/") || /[^./]\.[A-Za-z0-9]+$/.test(path))
       paths.add(path);
   }
-  for (const [, span] of text.matchAll(CODE_SPAN))
-    for (const name of span!.match(IDENTIFIER) ?? [])
+  // Only a span that is itself code names a stem: the directory and file
+  // names inside a span holding a path would name every index.ts.
+  for (const [, span] of text.matchAll(CODE_SPAN)) {
+    const code = span!.match(CODE_NAME)?.[1];
+    for (const name of code?.match(IDENTIFIER) ?? [])
       if (name.length >= SHORTEST_IDENTIFIER) stems.add(name);
-  const named = (name: string) => {
+  }
+  const match = (name: string): number | undefined => {
     const base = name.slice(name.lastIndexOf("/") + 1);
-    if (stems.has(base.split(".")[0]!)) return true;
-    for (const path of paths)
-      if (
-        name === path ||
-        name.endsWith(`/${path}`) ||
-        (!path.includes("/") && base === path)
-      )
-        return true;
-    return false;
+    let best: number | undefined;
+    for (const path of paths) {
+      if (path.includes("/")) {
+        if (name === path || name.endsWith(`/${path}`)) return BY_PATH;
+      } else if (base === path) best = BY_BASENAME;
+    }
+    if (best === undefined && stems.has(base.split(".")[0]!)) best = BY_STEM;
+    return best;
   };
   return files
-    .filter((file) => file.names.some(named))
+    .flatMap((file) => {
+      const ranks = file.names.flatMap((name) => {
+        const rank = match(name);
+        return rank === undefined ? [] : [rank];
+      });
+      return ranks.length
+        ? [{ path: file.path, rank: Math.min(...ranks) }]
+        : [];
+    })
+    .sort(
+      (a, b) =>
+        a.rank - b.rank ||
+        area(a.path) - area(b.path) ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    )
     .map((file) => file.path);
 }
 
@@ -1793,8 +1830,13 @@ function sendBackNote(asked: readonly SentBack[], media: boolean): string {
 
 /**
  * The answer after a send-back: each sent criterion's new valid finding
- * replaces its question; every other criterion, and a sent one the new
- * answer left invalid, keeps the earlier answer's finding.
+ * replaces its question, and a valid refusal of any other criterion
+ * replaces the earlier finding too: the send-back is the round in which the
+ * reviewer was told to read the files, so its refusal is the better-informed
+ * verdict (an earlier pass may come from a resumed round that read
+ * nothing). Every other criterion, and a sent one the new answer left
+ * invalid, keeps the earlier answer's finding. A settled criterion is
+ * judged by its decision whatever either answer said.
  */
 function sentBack(
   before: Extract<Decoded, { invalid: false }>,
@@ -1803,10 +1845,19 @@ function sentBack(
 ): Decoded {
   if (after.invalid) return before;
   const sent = new Set(asked.map((entry) => entry.criterionIndex));
+  const replaced = (index: number) => {
+    const again = after.findings[index];
+    return (
+      again !== undefined && (sent.has(index) || again.verdict === "refuse")
+    );
+  };
   return {
     ...before,
     findings: before.findings.map((finding, index) =>
-      sent.has(index) ? (after.findings[index] ?? finding) : finding,
+      replaced(index) ? after.findings[index] : finding,
+    ),
+    errors: before.findings.map((_, index) =>
+      replaced(index) ? undefined : before.errors[index],
     ),
   };
 }

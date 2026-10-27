@@ -374,6 +374,117 @@ test("a question about a selected media member's bytes goes back naming its dige
   assert.equal(outcome.kind, "pass");
 });
 
+test("the send-back keeps the file a question names by its path when more than 12 files share its stem", async () => {
+  const checkout = tempDir("factory-sendback-stems-");
+  git(checkout, "init", "--quiet", "--initial-branch=main");
+  const names = [
+    ...["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"],
+    ...["hotel", "india", "juliet", "kilo", "lima", "mike", "zeta"],
+  ];
+  for (const name of names) {
+    mkdirSync(join(checkout, `packages/${name}/src`), { recursive: true });
+    writeFileSync(
+      join(checkout, `packages/${name}/src/index.ts`),
+      `export const ${name} = 0;\n`,
+    );
+  }
+  const base = commit(checkout, "packages");
+  writeFileSync(
+    join(checkout, "packages/zeta/src/index.ts"),
+    "export const zeta = 1;\n",
+  );
+  const head = commit(checkout, "zeta");
+  const repo = {
+    checkout,
+    base,
+    head,
+    tree: git(checkout, "rev-parse", `${head}^{tree}`),
+  };
+  const item = workItem(
+    "Zeta",
+    ["`packages/zeta/src/index.ts` exports `zeta` equal to 1."],
+    ["packages/zeta/src/index.ts"],
+  );
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      return {
+        value: {
+          findings: [
+            calls.length === 1
+              ? finding(
+                  0,
+                  "needs-human",
+                  "What does packages/zeta/src/index.ts export?",
+                )
+              : finding(0, "pass"),
+          ],
+        },
+      };
+    },
+  };
+  const outcome = await review(repo, item, planner).run;
+  assert.equal(calls.length, 2);
+  const note = calls[1].prompt.slice(calls[0].prompt.length);
+  assert.ok(
+    note.includes('"candidate/packages/zeta/src/index.ts"'),
+    "exact path missing from send-back",
+  );
+  // The directory and file names inside a backticked path are not stems.
+  assert.ok(!note.includes("packages/alpha/src/index.ts"));
+  assert.equal(outcome.kind, "pass");
+});
+
+test("a refusal in the answer to the send-back replaces an earlier pass of a criterion that was not sent back", async () => {
+  const repo = sharedMain();
+  const item = workItem(
+    "SharedQwfwq",
+    [
+      '`sharedQwfwq("ab")` returns `"abab"`.',
+      "The test file covers the empty string.",
+    ],
+    ["test/sharedQwfwq.test.js"],
+  );
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      return {
+        value: {
+          findings:
+            calls.length === 1
+              ? [
+                  finding(0, "needs-human", "What does `sharedQwfwq` return?"),
+                  finding(1, "pass"),
+                ]
+              : [
+                  finding(0, "pass"),
+                  finding(1, "refuse", "The test never calls it with ''."),
+                ],
+        },
+      };
+    },
+  };
+  const { run, events } = review(repo, item, planner);
+  const outcome = await run;
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-evidence-sendback")
+      ?.criteria,
+    [0],
+  );
+  assert.equal(outcome.kind, "refused");
+  assert.deepEqual(
+    outcome.refused.map((refused) => refused.criterionIndex),
+    [1],
+  );
+  assert.deepEqual(
+    outcome.verdicts.map((verdict) => verdict.criterionIndex),
+    [0],
+  );
+});
+
 test("a question an earlier review of the same tree asked, which the operator is answering, is not sent back again", async () => {
   const repo = sharedMain();
   const item = workItem(

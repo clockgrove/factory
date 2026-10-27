@@ -496,6 +496,61 @@ test("readiness reads the shared configuration as each Work Item worktree's Git 
   assert.deepEqual(checkoutCredentialEntries(checkout), []);
 });
 
+test("readiness reads a condition inside an included file, which a Work Item started later may meet, and hides a password holding an @", () => {
+  const checkout = credentialCheckout();
+  const common = join(checkout, ".git");
+  git(
+    checkout,
+    "worktree",
+    "add",
+    "--quiet",
+    "-b",
+    "factory/wi-1",
+    tempDir("factory-wt-"),
+  );
+  const files = realpathSync(tempDir("factory-include-"));
+  mkdirSync(join(files, "deeper"));
+  const file = (name, text) => {
+    writeFileSync(join(files, name), text);
+    return join(files, name);
+  };
+  // Included unconditionally, it includes under a condition no worktree
+  // meets yet, by a path relative to itself.
+  const later = file("deeper/later", "[credential]\n\tusername = octo\n");
+  const include = file(
+    "include",
+    '[includeIf "onbranch:factory/later/**"]\n\tpath = deeper/later\n',
+  );
+  git(checkout, "config", "include.path", include);
+  // Met by the Work Item's branch, it includes under another condition.
+  const deep = file("deep", "[http]\n\textraheader = AUTHORIZATION: basic z\n");
+  const met = file(
+    "met",
+    `[includeIf "onbranch:factory/other/**"]\n\tpath = ${deep}\n[include]\n\tpath = include\n`,
+  );
+  git(checkout, "config", "includeIf.onbranch:factory/wi-*.path", met);
+  git(
+    checkout,
+    "config",
+    "url.https://u:p@SECRET@github.com/.insteadOf",
+    "https://github.com/",
+  );
+  const entries = sortedEntries(checkout);
+  assert.deepEqual(entries, [
+    `credential.username in ${later}`,
+    `http.extraheader in ${deep}`,
+    `url.https://***@github.com/.insteadof in ${common}/config`,
+  ]);
+  assert.ok(!entries.join().includes("SECRET"));
+  // What the later Work Item's Git reads, readiness found.
+  const second = tempDir("factory-wt-");
+  git(checkout, "worktree", "add", "--quiet", "-b", "factory/later/x", second);
+  assert.equal(
+    git(second, "config", "--includes", "--get", "credential.username"),
+    "octo",
+  );
+});
+
 test("readiness skips a linked worktree removed while it reads, and names one it can't read", () => {
   const checkout = credentialCheckout();
   git(

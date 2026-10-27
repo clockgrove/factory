@@ -1,7 +1,7 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { GitHubError, TransientError } from "./github.js";
 import { errorMessage } from "./text.js";
@@ -107,9 +107,10 @@ export interface UnreadableConfiguration {
  * `config.worktree`, each through that worktree's Git directory
  * (`--git-dir`), so `includeIf` `gitdir:` and `onbranch:` conditions are
  * evaluated as that worktree's Git evaluates them, without running Git in a
- * tree a worker wrote; and every file the shared configuration includes
- * under a condition, whatever the condition, since a Work Item started
- * later may meet it. Without the extension Git reads no `config.worktree`
+ * tree a worker wrote; and, on its own, every file an include in the shared
+ * configuration or a `config.worktree` read reaches, at any depth and
+ * whatever its condition, since a Work Item started later may meet it.
+ * Without the extension Git reads no `config.worktree`
  * and refuses `--worktree` once the repository has a linked worktree (as
  * every Objective's Work Items add), and it refuses to list a
  * `config.worktree` that doesn't exist, so either skips that read. A
@@ -170,6 +171,10 @@ export function checkoutCredentialEntries(
         command: ["ls", join(common, "worktrees")].map(shellWord).join(" "),
       };
   }
+  // The files whose includes are followed: the shared configuration and
+  // each config.worktree read.
+  const roots = [join(common, "config")];
+  if (worktreeConfig) roots.push(join(gitDir, "config.worktree"));
   for (const name of names.sort()) {
     const admin = join(common, "worktrees", name);
     // The checkout itself, when it is a linked worktree, was read above.
@@ -182,37 +187,51 @@ export function checkoutCredentialEntries(
       gone,
     });
     const file = join(admin, "config.worktree");
-    if (worktreeConfig && existsSync(file))
+    if (worktreeConfig && existsSync(file)) {
       reads.push({
         args: [`--git-dir=${admin}`, "config", "--worktree"],
         what: file,
         gone: () => !existsSync(file),
       });
+      roots.push(file);
+    }
   }
-  // Each conditional include of the shared configuration, met or not.
-  const includeArgs = [
-    "config",
-    "--local",
-    "--no-includes",
-    "--type=path",
-    "--null",
-    "--get-regexp",
-    "^includeif\\..*\\.path$",
-  ];
-  const includes = git(...includeArgs);
-  if (includes.status !== 0 && includes.status !== 1)
-    return failed(own, ["-C", checkout, ...includeArgs]);
-  for (const entry of includes.stdout.split("\0")) {
-    const split = entry.indexOf("\n");
-    if (split < 0) continue;
-    // Relative to the file that includes it, as Git reads it.
-    const target = resolve(common, entry.slice(split + 1));
-    if (existsSync(target))
+  // Every file an include reaches, at any depth, read on its own: a
+  // condition, met or not, may be met by a Work Item started later, also
+  // one inside a file another include reaches.
+  const seen = new Set<string>();
+  const pending = roots.filter((file) => existsSync(file));
+  for (let file = pending.shift(); file !== undefined; file = pending.shift()) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const includeArgs = [
+      "config",
+      "--file",
+      file,
+      "--no-includes",
+      "--type=path",
+      "--null",
+      "--get-regexp",
+      "^include(if\\..*)?\\.path$",
+    ];
+    const includes = run(includeArgs);
+    if (includes.status !== 0 && includes.status !== 1) {
+      if (!existsSync(file)) continue;
+      return failed(file, includeArgs);
+    }
+    for (const entry of includes.stdout.split("\0")) {
+      const split = entry.indexOf("\n");
+      if (split < 0) continue;
+      // Relative to the file that includes it, as Git reads it.
+      const target = resolve(dirname(file), entry.slice(split + 1));
+      if (seen.has(target) || !existsSync(target)) continue;
+      pending.push(target);
       reads.push({
         args: ["-C", checkout, "config", "--file", target],
         what: target,
         gone: () => !existsSync(target),
       });
+    }
   }
   const found = new Set<string>();
   for (const { args, what, gone } of reads) {
@@ -243,7 +262,8 @@ export function checkoutCredentialEntries(
         (key.startsWith("url.") && URL_CREDENTIAL.test(name.slice(4)))
       )
         found.add(
-          `${name.replace(/(:\/\/)[^/@\s]*@/g, "$1***@")} in ${originFile(checkout, origin)}`,
+          // Up to the authority's last `@`: a password may hold one.
+          `${name.replace(/(:\/\/)[^/]*@/g, "$1***@")} in ${originFile(checkout, origin)}`,
         );
     }
   }

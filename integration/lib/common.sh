@@ -327,12 +327,17 @@ cancel_wait() { cli_t 60 cancel "$1" >/dev/null 2>&1; wait_for "${2:-300}" cance
 # ---------- fault proxy (lib/gh-fault-proxy.mjs) ----------
 # One proxy per installation: its rules file holds every case's rules, each
 # line tagged with its case (`#tag` at the end), so a case adds and clears
-# only its own. The proxy re-reads the file per request.
-proxy_start() { # NAME PORT -> sets PROXY_URL
-  local name=$1 port=$2
+# only its own. The proxy re-reads the file per request. Its port is the one
+# the OS picks (the proxy prints it once it listens): two runs at once never share one.
+proxy_start() { # NAME -> sets PROXY_URL
+  local name=$1 port="" end=$(( $(now) + 15 ))
   : >"$RUN_DIR/$name.rules"; : >"$RUN_DIR/$name.calls.jsonl"
-  node "$SUITE/lib/gh-fault-proxy.mjs" "$port" "$RUN_DIR/$name.calls.jsonl" "$RUN_DIR/$name.rules" </dev/null >"$RUN_DIR/$name.proxy.out" 2>&1 &
-  local pp=$!; track $pp; echo "$pp $(starttime $pp)" >"$RUN_DIR/$name.proxy.pid"; sleep 1
+  node "$SUITE/lib/gh-fault-proxy.mjs" 0 "$RUN_DIR/$name.calls.jsonl" "$RUN_DIR/$name.rules" </dev/null >"$RUN_DIR/$name.proxy.out" 2>&1 &
+  local pp=$! ps; ps=$(starttime $pp); track $pp; echo "$pp $ps" >"$RUN_DIR/$name.proxy.pid"
+  while [ -z "$port" ] && [ "$(now)" -lt "$end" ] && same_proc "$pp" "$ps"; do
+    port=$(sed -n 's/^listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$RUN_DIR/$name.proxy.out"); [ -n "$port" ] || sleep 0.2
+  done
+  [ -n "$port" ] || { log "fault proxy $name did not start: $(tail -c 300 "$RUN_DIR/$name.proxy.out")"; return 1; }
   PROXY_URL="http://127.0.0.1:$port"
 }
 proxy_stop() { local p s; [ -s "$RUN_DIR/$1.proxy.pid" ] || return 0; read -r p s <"$RUN_DIR/$1.proxy.pid"; kill_exact "$p" "$s" TERM; rm -f "$RUN_DIR/$1.proxy.pid"; }

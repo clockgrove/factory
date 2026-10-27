@@ -76,7 +76,7 @@ Keep coverage within the [coverage rules](AGENTS.md#testing); CI runs the comple
 
 ### Integration tests
 
-[Integration tests](integration/README.md) run real Objectives with real providers against the scratch repositories `clockgrove/factory-drill` and `clockgrove/factory-drill-2`, and never run in CI. A suite runs all its cases at once and stops itself within 60 minutes:
+[Integration tests](integration/README.md) run real Objectives with real providers against scratch repositories and Projects each run creates and deletes, and never run in CI. A suite runs all its cases at once and stops itself within 60 minutes:
 
 ```sh
 npm run build

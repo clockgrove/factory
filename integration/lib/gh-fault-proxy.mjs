@@ -2,6 +2,9 @@
 // Pass-through GitHub API proxy that can fail, slow or reshape chosen requests.
 // Usage: node gh-fault-proxy.mjs <port> <log.jsonl> <rules-file>
 //
+// Port 0 is one the OS picks. Once it listens, the proxy prints
+// "listening on 127.0.0.1:<port>" on stdout.
+//
 // The rules file is re-read per request, so the suite turns faults on and off
 // by writing it. One rule per line:
 //
@@ -80,7 +83,7 @@ function pick(method, path, body) {
   );
 }
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const c of req) chunks.push(c);
   const body = Buffer.concat(chunks);
@@ -165,4 +168,7 @@ createServer(async (req, res) => {
     logFile,
     `${JSON.stringify({ at: new Date().toISOString(), method: req.method, path, status, ms: Date.now() - start, ...(fault ? { fault } : {}) })}\n`,
   );
-}).listen(Number(port), "127.0.0.1");
+});
+server.listen(Number(port), "127.0.0.1", () => {
+  console.log(`listening on 127.0.0.1:${server.address().port}`);
+});

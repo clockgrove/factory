@@ -11,8 +11,6 @@
 # target with no required check and no workflow), since M requires `test`.
 # Functions are case_<name>, as in main.sh.
 
-HOSTNET_PORT=18650
-
 setup_prd() {
   clone $M_REPO "$STATE_BASE/checkout-p" || return 1
   # Repository C and installation Q exist only when lane Q's case runs.
@@ -33,7 +31,7 @@ setup_prd() {
   [ -z "$NEEDS_C" ] || inst_define Q $C_REPO "$STATE_BASE/config-q.json" || return 1
   inst P
   [ "$(gh_human_gate)" = false ] || { log "required review must be OFF before the run"; return 1; }
-  proxy_start P 18613
+  proxy_start P || return 1
   printf '%s\n' "FACTORY_GITHUB_API=$PROXY_URL" "FACTORY_BACKOFF_MS=10000" "FACTORY_DISPLAY_TIMEZONE=America/Los_Angeles" >"$RUN_DIR/inst/P/extra_env"
   [ -z "$NEEDS_C" ] || : >"$RUN_DIR/inst/Q/extra_env"
   serve_up && serve_ready
@@ -483,13 +481,19 @@ case_shared() {
 }
 
 # PRD 14: with sandbox.network host, final validation reaches a service on the host's loopback.
+# The service's port is the one the OS picks (it prints it): two runs at once never share one.
 case_hostnet() {
-  local t0 id n fn dir; t0=$(now); id=$(uid); fn="double$id"
+  local t0 id n fn dir port="" end; t0=$(now); id=$(uid); fn="double$id"
   dir="$RUN_DIR/hostnet"; mkdir -p "$dir"; echo ready >"$dir/hostnet-$id"
-  python3 -m http.server --bind 127.0.0.1 "$HOSTNET_PORT" --directory "$dir" >"$RUN_DIR/hostnet.log" 2>&1 </dev/null &
+  python3 -u -m http.server --bind 127.0.0.1 0 --directory "$dir" >"$RUN_DIR/hostnet.log" 2>&1 </dev/null &
   local hp=$!; track $hp; local hs; hs=$(starttime $hp)
+  end=$(( $(now) + 15 ))
+  while [ -z "$port" ] && [ "$(now)" -lt "$end" ] && same_proc "$hp" "$hs"; do
+    port=$(sed -n 's/^Serving HTTP on 127\.0\.0\.1 port \([0-9]*\) .*/\1/p' "$RUN_DIR/hostnet.log"); [ -n "$port" ] || sleep 0.2
+  done
+  [ -n "$port" ] || { record worker.host-network FAIL "the host's loopback service did not start: $(tail -c 300 "$RUN_DIR/hostnet.log")" "$t0"; kill_exact "$hp" "$hs" TERM; return; }
   local HOLD_POLICY="d2 review decide more"
-  n=$(new_objective hostnet "host network in validation" FN="$fn" URL="http://127.0.0.1:$HOSTNET_PORT/hostnet-$id") || { kill_exact "$hp" "$hs" TERM; return; }
+  n=$(new_objective hostnet "host network in validation" FN="$fn" URL="http://127.0.0.1:$port/hostnet-$id") || { kill_exact "$hp" "$hs" TERM; return; }
   wait_phase "$n" 'done|cancelled|failed' 2400 >/dev/null; sleep 10
   kill_exact "$hp" "$hs" TERM
   local hits; hits=$(grep -c "GET /hostnet-$id " "$RUN_DIR/hostnet.log")
@@ -533,7 +537,7 @@ nocheck_target() {
 JSON
       sha=$(gh api "repos/$repo/contents/.github/workflows/ci.yml" --jq .sha) &&
       gh api -X DELETE "repos/$repo/contents/.github/workflows/ci.yml" -f message="Drill: no workflow on this target" -f sha="$sha" >/dev/null &&
-      pid=$(C_REPO=$repo project_create) && [ -n "$pid" ] &&
+      pid=$(project_create "$repo") && [ -n "$pid" ] &&
       clone "$repo" "$co"
   } 2>>"$RUN_DIR/nocheck.setup.err" || return 1
   write_config "$STATE_BASE/config-n.json" "$repo" "$co" 4 "c['queue']['projectId']='$pid'"
@@ -779,7 +783,7 @@ TOOLCHAIN_CMD="pnpm run toolchain"
 t_setup() {
   local name="$REPO_STEM-t" repo="$REPO_OWNER/$REPO_STEM-t" co="$STATE_BASE/checkout-t" pid
   repo_create "$name" || return 1
-  pid=$(C_REPO=$repo project_create) && [ -n "$pid" ] || return 1
+  pid=$(project_create "$repo") && [ -n "$pid" ] || return 1
   clone "$repo" "$co" || return 1
   mkdir -p "$co/drill" && cp "$SUITE/fixtures/repo/toolchain.mjs" "$co/drill/toolchain.mjs" &&
     cp "$SUITE/fixtures/repo/toolchain-ci.yml" "$co/.github/workflows/ci.yml" && printf '%s\n' "$2" >"$co/.nvmrc" || return 1

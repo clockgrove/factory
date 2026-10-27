@@ -42,7 +42,7 @@ import { blameAmendment, discoveryOutcome } from "./amend.js";
 import { collect, type HandoffNote } from "./collect.js";
 import { fact, facts } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
-import { refusedOf, refusedResult } from "./refused.js";
+import { refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import { itemMemory } from "./shared.js";
 import { correctsMedia, repairOutcome } from "./step-deliver.js";
@@ -566,7 +566,14 @@ export async function workStep(
     playbook: config.planning.playbook,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
-    refusedTree: refusedOf(state, item.id)?.tree,
+    // New candidates are a new result, even on the refused tree.
+    refusedTree: refusedTreeFor(state, item.id, {
+      sets,
+      selectionStands: own !== undefined,
+    }),
+    // A Work Item that owns only its media destinations changes nothing
+    // else: its candidates are its result.
+    media: sets.length > 0,
     author,
     signal,
   });

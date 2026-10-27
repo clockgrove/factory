@@ -138,6 +138,14 @@ export interface CollectInput {
    * again is no change.
    */
   refusedTree?: string;
+  /**
+   * The result carries candidate media sets, which the select step writes
+   * at their destinations on top of the collected commit. A Work Item that
+   * owns only those destinations has nothing else to change, so an empty
+   * change is its result: collected as an empty commit, unless it is the
+   * refused tree again.
+   */
+  media?: boolean;
   /** The collected commit's author as a GitHub App (`factoryCommit`). */
   author?: CommitAuthor;
   signal: AbortSignal;
@@ -284,12 +292,14 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   // An empty result is still wrong, but a staged discovery is the worker's
   // account of why: it rides on the finding. A repair that left the refused
   // tree as it was resubmits the refused result, so it is empty too, on any
-  // base: what refused it judged the tree.
+  // base: what refused it judged the tree. With candidate media an empty
+  // change is a result (`media`): the selected set is its delivery.
+  const empty = !paths.length;
   const unchanged =
-    paths.length > 0 &&
+    (!empty || input.media === true) &&
     input.refusedTree !== undefined &&
     (await text("write-tree")) === input.refusedTree;
-  if (!paths.length || unchanged)
+  if ((empty && !input.media) || unchanged)
     return {
       kind: "repair",
       finding: noChangeDetail(input.finalResponse),
@@ -301,6 +311,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
     ...commitAs.config,
     "commit",
     "--quiet",
+    ...(empty ? ["--allow-empty"] : []),
     ...commitAs.author,
     "-m",
     collectionMessage(item),

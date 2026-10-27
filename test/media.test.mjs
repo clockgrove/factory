@@ -30,6 +30,7 @@ import { repairPath } from "../dist/repair.js";
 import { validateTree } from "../dist/validate.js";
 import { collect, FACTORY_EMAIL } from "../dist/work/collect.js";
 import { prepareWorkPrompt } from "../dist/work/prompt.js";
+import { refusedTreeFor } from "../dist/work/refused.js";
 import { repairContext } from "../dist/work/repair-context.js";
 import {
   aboutMedia,
@@ -1053,6 +1054,124 @@ test("a media item that owns only its destinations collects an empty change, and
     "README.md",
     "assets/x.png",
   ]);
+});
+
+// A review refusal about the selected media drops the selection and keeps
+// the refused result, whose tree is the work commit's, before selection:
+// the base's, for an item that owns only its destinations. The repair's new
+// candidates change no other file, so that tree is its result again; read
+// as the refused result resubmitted, every repair was refused as no change.
+test("new candidates after a refusal about the media are a new result on the refused tree, and a standing selection is not (#2123)", async () => {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  const { sandbox, planning } = loadConfig(REPO);
+  delete process.env.FACTORY_CONFIG;
+  const work = item(["assets/x.png"], { expectedOutputRoles: ["image-0"] });
+  const target = checkout();
+  const set = candidateSet(target.root, ["assets/x.png"]);
+  const baseTree = git(
+    target.directory,
+    "rev-parse",
+    `${target.commit}^{tree}`,
+  );
+  const collectAt = (refusedTree) =>
+    collect({
+      worktree: target.directory,
+      base: target.commit,
+      plan: { items: [work] },
+      item: work,
+      mayChange: [],
+      playbook: planning.playbook,
+      sandbox,
+      finalResponse: "Staged new candidate sets.",
+      refusedTree,
+      media: true,
+      signal: AbortSignal.timeout(60_000),
+    });
+  const first = await collectAt(undefined);
+  assert.equal(first.kind, "collected", first.finding);
+  const state = {
+    done: {
+      "item:badge:work": {
+        base: target.commit,
+        commit: first.commit,
+        tree: first.tree,
+        notes: [],
+        sets: [set],
+      },
+      "item:badge:select": {
+        commit: first.commit,
+        tree: first.tree,
+        set,
+        bound: [],
+        by: "operator",
+        at: "2026-10-27T00:00:00.000Z",
+      },
+    },
+    kept: {},
+  };
+  const refusedOn = (evidence) => ({
+    done: {},
+    kept: repairOutcome(
+      work,
+      "review",
+      {
+        kind: "review",
+        tree: first.tree,
+        refused: [
+          {
+            source: "model",
+            criterion: "c",
+            detail: "d",
+            question: "",
+            evidence,
+          },
+        ],
+      },
+      state,
+      undefined,
+    ).keep,
+  });
+
+  // About the media: the selection goes, and the result is kept as refused.
+  const media = refusedOn([
+    { path: "patch", file: "assets/x.png", origin: "controller" },
+  ]);
+  assert.equal(media.kept["item:badge:selection"], null);
+  assert.equal(media.kept["item:badge:refused"].tree, baseTree);
+  assert.equal(media.kept["item:badge:refused"].replayOnly, undefined);
+  // Compared with the refused tree, the repair's new candidates were no change.
+  const compared = await collectAt(baseTree);
+  assert.equal(compared.kind, "repair");
+  assert.equal(compared.unchanged, true);
+  // They are a new result: nothing to compare, and collected.
+  const fresh = refusedTreeFor(media, "badge", {
+    sets: [set],
+    selectionStands: false,
+  });
+  assert.equal(fresh, undefined);
+  const remade = await collectAt(fresh);
+  assert.equal(remade.kind, "collected", remade.finding);
+  // With no candidate sets, the refused tree is compared as before.
+  assert.equal(
+    refusedTreeFor(media, "badge", { sets: [], selectionStands: false }),
+    baseTree,
+  );
+
+  // About something else: the selection stands, so the same tree with it
+  // is the refused result again.
+  const other = refusedOn([{ path: "OBJECTIVE", origin: "source" }]);
+  const standing = other.kept["item:badge:selection"];
+  assert.equal(standing.selection.set.id, set.id);
+  const kept = refusedTreeFor(other, "badge", {
+    sets: standing.sets,
+    selectionStands: true,
+  });
+  assert.equal(kept, baseTree);
+  const again = await collectAt(kept);
+  assert.equal(again.kind, "repair");
+  assert.equal(again.unchanged, true);
 });
 
 test("a destination the base holds is restored to the base's pointer before collection (#2039)", async () => {

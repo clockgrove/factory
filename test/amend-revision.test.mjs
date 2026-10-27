@@ -685,7 +685,9 @@ test("a reattempt item that grows still keeps its validation, kind and title; on
 // validate step failed the item on may be replaced through the amendment's
 // review.
 const MALFORMED = "git lfs ls-files -- src/a.js";
-const CHECK_ATTR = "git check-attr filter -- src/a.js";
+// check-attr exits zero for an unrouted path too: its output is the proof.
+const CHECK_ATTR =
+  "git check-attr filter -- src/a.js | grep -qx 'src/a.js: filter: lfs'";
 const withMalformed = {
   ...accepted,
   items: [work("a", { validation: ["npm test", MALFORMED] }), qa(["a"])],
@@ -705,7 +707,9 @@ const UNCOMMITTED = "Validation runs on the uncommitted result.";
 const LFS_ARGUMENTS =
   "`git lfs ls-files` reads its arguments as revisions, not paths.";
 const ENVIRONMENT =
-  '"commit":"the uncommitted result: commands check working-tree files, never HEAD, the index or the history"';
+  '"commit":"the uncommitted result: commands check working-tree files, never HEAD, the index or a commit of the result; a base-relative check compares the working tree with $FACTORY_BASE_SHA"';
+const ROUTING =
+  "which must name `lfs` (the command exits zero for an unrouted path too, so it proves nothing alone)";
 
 test("a reattempt item's validation command the validate step failed it on is replaced through the amendment's review, and both are told validation runs on the uncommitted result (#2107)", async () => {
   const { checkout, state } = await discovered({
@@ -751,6 +755,7 @@ test("a reattempt item's validation command the validate step failed it on is re
   assert.ok(planning.prompt.includes(replaceable));
   assert.ok(planning.prompt.includes(UNCOMMITTED));
   assert.ok(planning.prompt.includes(LFS_ARGUMENTS));
+  assert.ok(planning.prompt.includes(ROUTING));
   assert.ok(planning.prompt.includes(inJson(ENVIRONMENT)));
 
   // So is the review, which accepts it.
@@ -811,22 +816,55 @@ test("a reattempt item keeps every validation command the validate step didn't f
       listed.length > 0,
     );
   }
-  // A replacement that also drops a command it didn't fail on is set back whole.
+  // A replacement that also drops a command it didn't fail on is set back
+  // whole; so is a list that only adds a command, keeping the failed one,
+  // or one that reorders the commands it keeps.
+  const withThree = {
+    ...accepted,
+    items: [
+      work("a", { validation: ["npm test", "node --test", MALFORMED] }),
+      qa(["a"]),
+    ],
+  };
+  const setBack = [
+    [withMalformed, [CHECK_ATTR]],
+    [withMalformed, ["npm test", MALFORMED, CHECK_ATTR]],
+    [withThree, ["node --test", "npm test", CHECK_ATTR]],
+  ];
+  for (const [answer, validation] of setBack) {
+    const { checkout, state } = await discovered({
+      answer,
+      kept: failedOn([MALFORMED]),
+    });
+    const { planner } = scripted(revision([work("a", { validation })]));
+    assert.equal(
+      (await step(state, depsOf(checkout, planner))).outcome.kind,
+      "done",
+    );
+    const round = state.done["amend:op-1:plan"];
+    assert.deepEqual(round.restored, [{ itemId: "a", fields: ["validation"] }]);
+    assert.deepEqual(
+      round.draft.items.find((item) => item.id === "a").validation,
+      answer.items[0].validation.map((command) => ({ command })),
+    );
+  }
+  // Keeping the other commands in their order, it may drop the failed one.
   const { checkout, state } = await discovered({
-    answer: withMalformed,
+    answer: withThree,
     kept: failedOn([MALFORMED]),
   });
-  const dropsTest = revision([work("a", { validation: [CHECK_ATTR] })]);
-  const { planner } = scripted(dropsTest);
+  const { planner } = scripted(
+    revision([work("a", { validation: ["npm test", "node --test"] })]),
+  );
   assert.equal(
     (await step(state, depsOf(checkout, planner))).outcome.kind,
     "done",
   );
   const round = state.done["amend:op-1:plan"];
-  assert.deepEqual(round.restored, [{ itemId: "a", fields: ["validation"] }]);
+  assert.equal(round.restored, undefined);
   assert.deepEqual(
     round.draft.items.find((item) => item.id === "a").validation,
-    [{ command: "npm test" }, { command: MALFORMED }],
+    [{ command: "npm test" }, { command: "node --test" }],
   );
 });
 

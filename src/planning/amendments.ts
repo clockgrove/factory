@@ -752,10 +752,12 @@ function replaceableOf(
 
 /**
  * Whether validation list `next` replaces `old` as the started-item rule
- * allows a reattempt item: it differs, and it keeps every command of
- * `old` that `replaceable` doesn't name (#2107). `command` reads an entry
- * as its command line; a list with an entry it can't read replaces
- * nothing.
+ * allows a reattempt item: it no longer runs at least one command of
+ * `old` that `replaceable` names, and it keeps every other command of
+ * `old` once, in its order (#2107). Commands may be added only in place
+ * of one it drops, so a list that only adds, or reorders the commands it
+ * keeps, replaces nothing. `command` reads an entry as its command line;
+ * a list with an entry it can't read replaces nothing.
  */
 function replacesValidation(
   old: unknown,
@@ -771,9 +773,15 @@ function replacesValidation(
   const after = lines(next);
   if (before.length !== old.length || after.length !== next.length)
     return false;
+  const kept = before.filter((line) => !replaceable.includes(line));
   return (
-    !isDeepStrictEqual(before, after) &&
-    before.every((line) => after.includes(line) || replaceable.includes(line))
+    before.some(
+      (line) => replaceable.includes(line) && !after.includes(line),
+    ) &&
+    isDeepStrictEqual(
+      after.filter((line) => kept.includes(line)),
+      kept,
+    )
   );
 }
 
@@ -1089,7 +1097,7 @@ export function amendmentFindings(
         ? `; this answer changes its ${fields.join(", ")}`
         : "";
       const replacing = replaceable.length
-        ? `, or a validation command Factory's validation failed it on (${replaceable.map((command) => JSON.stringify(command)).join(", ")}) may be replaced, keeping every other command`
+        ? `, or a validation command Factory's validation failed it on (${replaceable.map((command) => JSON.stringify(command)).join(", ")}) may be replaced, keeping every other command in its order`
         : "";
       found(
         progress.reattempt.has(old.id)
@@ -1201,7 +1209,7 @@ export function startedItemRule(progress: AmendmentProgress): string {
   const replaceable = progress.replaceable?.size
     ? JSON.stringify(Object.fromEntries(progress.replaceable))
     : "none";
-  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation failed its result on (replaceableValidation, by item: ${replaceable}) may be replaced or dropped, keeping every other command, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation failed its result on (replaceableValidation, by item: ${replaceable}) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
 }
 
 /** `replaceableValidation`, by item, as the planner and the review get it; absent when there is none. */

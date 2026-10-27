@@ -163,7 +163,8 @@ export type Collection =
    * The worker's result is wrong; the finding goes back to it. `staging`:
    * Factory's own file was refused, the handoff notes or the discovery
    * proposal (repair.ts `stagingRefusalCorrection`). `unchanged`: no
-   * change, since the worker resubmitted the refused tree.
+   * change, since the worker resubmitted the refused tree. `empty`: no
+   * change from the base at all.
    */
   | {
       kind: "repair";
@@ -171,6 +172,7 @@ export type Collection =
       discovery?: WorkDiscovery;
       staging?: CollectedStaging;
       unchanged?: true;
+      empty?: true;
     }
   | Held
   | { kind: "retry"; reason: string };
@@ -303,7 +305,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
     return {
       kind: "repair",
       finding: noChangeDetail(input.finalResponse),
-      ...(unchanged ? { unchanged: true as const } : {}),
+      ...(unchanged ? { unchanged: true as const } : { empty: true as const }),
       ...(discovery ? { discovery } : {}),
     };
   const commitAs = factoryCommit(input.author);

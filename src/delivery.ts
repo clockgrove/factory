@@ -73,6 +73,13 @@ const LISTED_CHECKS = 10;
 const EXCERPTED_CHECKS = 3;
 const LOG_TAIL_LINES = 40;
 const LOG_TAIL_CHARS = 3000;
+/**
+ * The failed checks' excerpts in all, shared among those excerpted: a
+ * repair diagnosis keeps a finding's last 7000 characters (repair.ts
+ * FAILURE_TAIL), and the excerpts come last, so every excerpted check's
+ * error reaches it.
+ */
+const EXCERPT_CHARS = 6000;
 /** The end of each failed step's own log a finding holds, in place of the job's tail. */
 const STEP_LOG_LINES = 60;
 const STEP_LOG_CHARS = 4000;
@@ -808,6 +815,13 @@ export interface PullInput {
    */
   retried?: boolean;
   /**
+   * When the operator's `revalidate` (a result rereview) of the item's
+   * result landed: a delivered head whose failed checks all ended before
+   * it, with nothing left to rerun, is a question, not a repair that
+   * would only repeat the one the rereview answered.
+   */
+  rereviewedAt?: string;
+  /**
    * The operator answered REPAIR_SHARED to this step's question: failed
    * checks the default branch fails too are the item's to repair, as its
    * change is meant to fix them there (#2094).
@@ -842,7 +856,9 @@ export type CiResult =
  * failed runs' artifacts (failedRunArtifacts); a failed check the default
  * branch fails too is a question instead (baseFailures, #2094), and on the
  * operator's retry, a delivered head behind a default branch whose runs of
- * the failed checks pass is updated with it instead of repaired. Each
+ * the failed checks pass is updated with it instead of repaired; after a
+ * result rereview, failures that all ended before it, with nothing left
+ * to rerun, are a question instead of the same repair again. Each
  * plan-named check must pass by name. A PR BEHIND its base
  * under strict protection is updated by GitHub and observed again. A PR
  * made a draft, closed without merging, with only cancelled checks nothing
@@ -1071,10 +1087,44 @@ async function judge(
       ? undefined
       : await rerunFailed(context, input, head, broken);
     if (rerun) return rerun;
+    // A result rereview (`revalidate`) delivered the same head, and nothing
+    // has run on it since: its failed jobs were rerun already (or can't
+    // be), and it isn't behind a default branch that passes them. A repair
+    // would only repeat the one the operator's rereview answered (#2120).
+    const since = Date.parse(input.rereviewedAt ?? "");
+    if (
+      !input.repairShared &&
+      head === input.head &&
+      Number.isFinite(since) &&
+      broken.every((check) => !(Date.parse(check.at ?? "") >= since))
+    )
+      return hold(
+        `Work Item ${input.item}'s result was checked again on the operator's revalidate and delivered unchanged, and no check has run on PR #${pr} since: at ${head} it still fails ${listed(broken)}. Factory has nothing more to run there (their Actions jobs were rerun on this head already, or can't be), so a repair would only repeat the last one; it spent none.${base.note ? ` ${base.note}` : ""}\n\nIf ${defaultBranch} would fail them now too, run them again on ${defaultBranch} or fix them there (another Objective can), then answer retry; ${REPAIR_SHARED} if the failure is this Work Item's change's; or cancel.`,
+        [
+          {
+            answer: "retry",
+            family: "retry",
+            consequence: `Compares PR #${pr}'s failed checks with ${defaultBranch} again: holds with no repair while ${defaultBranch} fails them too or nothing new has run; once ${defaultBranch} has moved on and passes them, brings PR #${pr} up to date with it (no worker).`,
+          },
+          {
+            answer: REPAIR_SHARED,
+            family: "repair",
+            consequence: `Repairs PR #${pr}'s failed checks at once, as this Work Item's to fix; counts as a repair.`,
+          },
+          "cancel",
+        ],
+      );
     // Why the first few failed, so a repair is not blind.
     const excerpts: string[] = [];
-    for (const check of broken.slice(0, EXCERPTED_CHECKS)) {
-      const excerpt = check.run && (await failureExcerpt(context, check.run));
+    const excerpted = broken.slice(0, EXCERPTED_CHECKS);
+    for (const check of excerpted) {
+      const excerpt =
+        check.run &&
+        (await failureExcerpt(
+          context,
+          check.run,
+          Math.floor(EXCERPT_CHARS / excerpted.length),
+        ));
       if (excerpt) excerpts.push(`${check.name}:\n${excerpt}`);
     }
     const artifacts = await failedRunArtifacts(
@@ -1361,6 +1411,8 @@ interface FailedCheck {
   conclusion: string;
   url?: string;
   run?: CheckRun;
+  /** When it ended (a check run's completion, a status's update), where GitHub says. */
+  at?: string;
 }
 
 /**
@@ -1406,6 +1458,7 @@ function failedChecks(
       conclusion,
       ...(run.html_url ? { url: run.html_url } : {}),
       run,
+      ...(run.completed_at ? { at: run.completed_at } : {}),
     });
   }
   for (const status of statuses)
@@ -1419,6 +1472,9 @@ function failedChecks(
         conclusion: String(status.state),
         ...(typeof status.target_url === "string" && status.target_url
           ? { url: status.target_url }
+          : {}),
+        ...(typeof status.updated_at === "string"
+          ? { at: status.updated_at }
           : {}),
       });
   return failed;
@@ -1584,8 +1640,15 @@ async function baseFailures(
       ", ",
     );
     const failures: string[] = [];
-    for (const check of red.slice(0, EXCERPTED_CHECKS)) {
-      const excerpt = check.run && (await failureExcerpt(context, check.run));
+    const excerpted = red.slice(0, EXCERPTED_CHECKS);
+    for (const check of excerpted) {
+      const excerpt =
+        check.run &&
+        (await failureExcerpt(
+          context,
+          check.run,
+          Math.floor(EXCERPT_CHARS / excerpted.length),
+        ));
       failures.push(
         `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})${excerpt ? `:\n${excerpt}` : ""}`,
       );
@@ -1809,15 +1872,20 @@ function bounded(items: string[], separator: string): string {
  * steps that failed and the end of each one's own log (stepLog), else the
  * tail of the job's log. The job's tail is mostly the steps that run after
  * a failure (artifact uploads, post-job cleanup), so the failed step's
- * error, earlier in the log, never reached the diagnosis (#2120). Best
- * effort: undefined when GitHub shows none of them (no access, logs
- * expired), and the finding then names the check only.
+ * error, earlier in the log, never reached the diagnosis (#2120). Within
+ * `room` characters: the logs get what the step names and annotations
+ * leave, and at least half, shared among the failed steps, and the step
+ * names and annotations are cut to what the logs leave. Best effort:
+ * undefined when GitHub shows none of them (no access, logs expired), and
+ * the finding then names the check only.
  */
 async function failureExcerpt(
   context: DeliveryContext,
   check: CheckRun,
+  room = EXCERPT_CHARS,
 ): Promise<string | undefined> {
   const parts: string[] = [];
+  const logs: string[] = [];
   const tolerate = (error: unknown) => {
     if (context.signal.aborted) throw error;
   };
@@ -1845,29 +1913,43 @@ async function failureExcerpt(
       // Colour codes would spend the bound without saying anything.
       const log = read?.replace(ANSI_ESCAPE, "").trimEnd();
       if (log) {
+        const header = parts.join("\n").length;
+        const logRoom = Math.max(
+          Math.floor(room / 2),
+          room - (header ? header + 1 : 0),
+        );
         const own = steps.slice(0, EXCERPTED_STEPS).flatMap((step) => {
           const section = stepLog(log, step);
           return section
-            ? [`Log of failed step ${step.name}:\n${section}`]
+            ? [{ label: `Log of failed step ${step.name}:`, section }]
             : [];
         });
-        parts.push(
+        // Each step's share, less its label and the line breaks.
+        const share = Math.floor(logRoom / Math.max(own.length, 1)) - 1;
+        logs.push(
           ...(own.length
-            ? own
+            ? own.map(
+                ({ label, section }) =>
+                  `${label}\n${section.slice(-Math.max(share - label.length - 1, 0))}`,
+              )
             : [
                 log
                   .split("\n")
                   .slice(-LOG_TAIL_LINES)
                   .map(untimed)
                   .join("\n")
-                  .slice(-LOG_TAIL_CHARS),
+                  .slice(-Math.min(LOG_TAIL_CHARS, logRoom)),
               ]),
         );
       }
     } catch (error) {
       tolerate(error);
     }
-  return parts.length ? redact(parts.join("\n")) : undefined;
+  const logged = logs.join("\n");
+  const left = room - (logged ? logged.length + 1 : 0);
+  const named = parts.join("\n").slice(0, Math.max(left, 0));
+  const excerpt = [named, logged].filter(Boolean).join("\n");
+  return excerpt ? redact(excerpt) : undefined;
 }
 
 /** A job log line's leading timestamp, as Actions writes it. */
@@ -1878,33 +1960,57 @@ function untimed(line: string): string {
   return line.replace(LOG_TIME, "");
 }
 
+/** The line Actions writes as a step (or a composite action's step) starts. */
+const STEP_START = "##[group]Run ";
+
 /**
  * The end of failed step `step`'s own lines in a job's log, by the time
  * each line was written (a line without one has its line before's): from
  * the second GitHub says it started to the end of the second it says it
- * completed (GitHub reports them to the second), up to the step's last
- * `##[error]` line there, since the next step may start within that
- * second. Undefined when the log holds none of it (no timestamps, or the
- * tail read starts after the step).
+ * completed (GitHub reports them to the second). Its neighbours may write
+ * within those seconds, so Actions' own markers cut them off: in the start
+ * second, the lines before the first STEP_START line there are the step
+ * before's; in the completion second, a STEP_START line after an
+ * `##[error]` line starts the next step (one that runs after a failure,
+ * which may fail too). Then up to the step's last `##[error]` line.
+ * Undefined when the log holds none of it (no timestamps, or the tail read
+ * starts after the step).
  */
 export function stepLog(log: string, step: StepTimes): string | undefined {
   const from = Date.parse(step.startedAt);
   const to = Date.parse(step.completedAt) + 1000;
   if (!Number.isFinite(from) || !Number.isFinite(to)) return undefined;
   let at = Number.NaN;
-  const lines: string[] = [];
+  const lines: { at: number; text: string }[] = [];
   for (const line of log.split("\n")) {
     const time = LOG_TIME.exec(line)?.[1];
     // Actions writes 7 fraction digits; a millisecond is precise enough.
     if (time) at = Date.parse(time.replace(/(\.\d{3})\d+Z$/, "$1Z"));
-    if (at >= from && at < to) lines.push(line);
+    if (at >= from && at < to) lines.push({ at, text: untimed(line) });
   }
-  const own = lines.map(untimed);
+  const starts = (line: { text: string }) => line.text.startsWith(STEP_START);
+  const errs = (line: { text: string }) => line.text.startsWith("##[error]");
+  const first = lines.findIndex(
+    (line) => line.at < from + 1000 && starts(line),
+  );
+  const own = lines.slice(Math.max(first, 0));
+  let failed = false;
+  for (const [n, line] of own.entries()) {
+    if (failed && line.at >= to - 1000 && starts(line)) {
+      own.length = n;
+      break;
+    }
+    if (errs(line)) failed = true;
+  }
   let end = own.length;
-  while (end > 0 && !own[end - 1]!.startsWith("##[error]")) end -= 1;
+  while (end > 0 && !errs(own[end - 1]!)) end -= 1;
   if (end > 0) own.length = end;
-  if (!own.some((line) => line.trim())) return undefined;
-  return own.slice(-STEP_LOG_LINES).join("\n").slice(-STEP_LOG_CHARS);
+  if (!own.some((line) => line.text.trim())) return undefined;
+  return own
+    .slice(-STEP_LOG_LINES)
+    .map((line) => line.text)
+    .join("\n")
+    .slice(-STEP_LOG_CHARS);
 }
 
 /**

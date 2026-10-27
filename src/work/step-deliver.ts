@@ -184,8 +184,9 @@ export function pullInput(
   // A result rereview (`revalidate`) of this result says the check was at
   // fault, as the operator's `retry` here does.
   const work = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
+  const kept = fact(state, "rereviewed", item.id);
   const rereviewed =
-    work !== undefined && fact(state, "rereviewed", item.id) === work.commit;
+    work !== undefined && kept?.commit === work.commit ? kept : undefined;
   return {
     issue: state.issue,
     item: item.id,
@@ -199,6 +200,7 @@ export function pullInput(
     ...(context.answer?.answer === "retry" || rereviewed
       ? { retried: true }
       : {}),
+    ...(rereviewed ? { rereviewedAt: rereviewed.at } : {}),
     ...(context.answer?.answer === REPAIR_SHARED ? { repairShared: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
     ...(rerun ? { rerun } : {}),

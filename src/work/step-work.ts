@@ -187,7 +187,8 @@ export async function workStep(
       );
     // Delivery judges its failed checks as on the operator's `retry`
     // (step-deliver.ts `pullInput`): the default branch may have been
-    // what failed them.
+    // what failed them, and a failure nothing has run again since is a
+    // question, not the same repair again.
     return {
       kind: "done",
       result: refused,
@@ -198,7 +199,10 @@ export async function workStep(
             finished: null,
             finding: null,
             refused: null,
-            rereviewed: refused.commit,
+            rereviewed: {
+              commit: refused.commit,
+              at: context.answer.at,
+            },
           },
           item.id,
         ),

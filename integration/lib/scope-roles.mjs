@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // The scope case's roles among a plan's Work Items (integration/cases/prd.sh).
 //
-//   node scope-roles.mjs ITEMS     prints "BASE TOP SOLO", or nothing when the
-//                                  plan doesn't fit
+//   node scope-roles.mjs ITEMS     prints "BASE TOP SOLO", or an empty line
+//                                  when the plan doesn't fit
 //
 // ITEMS is p_items' output: one "ID KIND DEP,DEP" line per item ("-" for no
 // dependencies). The plan fits when it has exactly three work items, one (top)
@@ -11,7 +11,8 @@
 // once its children have (Factory's plan check makes an aggregate depend on its
 // children, and neither kind runs a worker or delivers a PR, so neither changes
 // which items hold or merge).
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const READ_ONLY = new Set(["qa", "aggregate"]);
 
@@ -40,7 +41,12 @@ export function scopeRoles(text) {
   return fits ? [bases[0], tops[0], solos[0]] : undefined;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+// Run as a command, also through a symlinked suite path: Node resolves the
+// main module's symlinks for import.meta.url but not for argv[1].
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   const roles = scopeRoles(process.argv[2] ?? "");
   console.log(roles ? roles.join(" ") : "");
 }

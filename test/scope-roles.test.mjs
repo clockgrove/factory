@@ -5,6 +5,8 @@
 // anything (holds.item-scope).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { scopeRoles } from "../integration/lib/scope-roles.mjs";
@@ -59,6 +61,47 @@ test("a plan without exactly base, top and solo work items doesn't fit", () => {
   assert.equal(scopeRoles(""), undefined);
 });
 
+test("a work item that depends on solo or on a read-only node doesn't fit", () => {
+  // Top over both base and solo: solo is no longer independent.
+  assert.equal(
+    scopeRoles(
+      [
+        "scope-base work -",
+        "scope-top work scope-base,scope-solo",
+        "scope-solo work -",
+      ].join("\n"),
+    ),
+    undefined,
+  );
+  // Top over the QA or aggregate (alone or beside base): its start would wait
+  // on a node, not on base's held merge.
+  for (const topDeps of ["qa-base", "scope-base,qa-base", "scope-all"])
+    assert.equal(
+      scopeRoles(
+        [
+          "scope-base work -",
+          `scope-top work ${topDeps}`,
+          "scope-solo work -",
+          "qa-base qa scope-base",
+          "scope-all aggregate scope-base",
+        ].join("\n"),
+      ),
+      undefined,
+      topDeps,
+    );
+  // Base and top depending on each other.
+  assert.equal(
+    scopeRoles(
+      [
+        "scope-base work scope-top",
+        "scope-top work scope-base",
+        "scope-solo work -",
+      ].join("\n"),
+    ),
+    undefined,
+  );
+});
+
 test("the case's command line prints the roles, or nothing", () => {
   const script = join(
     import.meta.dirname,
@@ -72,4 +115,23 @@ test("the case's command line prints the roles, or nothing", () => {
   const not = run(WORK.slice(0, 2).join("\n"));
   assert.equal(not.status, 0, not.stderr);
   assert.equal(not.stdout, "\n");
+});
+
+test("the command line works through a symlinked suite directory", () => {
+  // run-suite.sh's $SUITE is `pwd` of its directory, which keeps symlinks;
+  // Node resolves them for the main module's import.meta.url only.
+  const dir = mkdtempSync(join(tmpdir(), "scope-roles-"));
+  try {
+    const lib = join(dir, "lib");
+    symlinkSync(join(import.meta.dirname, "../integration/lib"), lib);
+    const run = spawnSync(
+      process.execPath,
+      [join(lib, "scope-roles.mjs"), [...WORK, QA, AGGREGATE].join("\n")],
+      { encoding: "utf8" },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout, "scope-base scope-top scope-solo\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -14,7 +14,9 @@
 // discovery case), the planner grew its worker's item's owned paths to take
 // the discovered file, as the rule allows, but reworded the item's goal in
 // rounds 2 and 3 too, so the same fence finding twice rejected it. What
-// Factory can't set back, a removed started item, still goes back.
+// Factory can't set back, a removed started item, still goes back. A
+// planner's cannotPlan is reviewed like a plan (#2105): live (Codex,
+// plan.discovery), a wrong refusal rejected the amendment with no review.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -462,6 +464,28 @@ test("an amendment's review still rejects it on an operator decision, or on the 
       ),
     );
     assert.equal(state.kept["amend:op-1:revisions"].length, 1);
+  }
+  {
+    // A review invalid twice rejects, and the operator still reads the
+    // planner's reason.
+    const { checkout, state } = await discovered();
+    const { planner } = scripted(refuses, { verdict: "ok" }, { verdict: "ok" });
+    const deps = depsOf(checkout, planner);
+    await step(state, deps);
+    assert.equal((await step(state, deps)).outcome.kind, "retry");
+    const again = await step(state, deps);
+    assert.equal(again.key, "amend:op-1:review");
+    assert.ok(
+      state.done["amend:op-1:review"].rejected.startsWith(
+        `${REFUSED} The amendment review answer was invalid twice: `,
+      ),
+      state.done["amend:op-1:review"].rejected,
+    );
+    await step(state, deps);
+    assert.equal(
+      state.done["amend:op-1"].rejected,
+      state.done["amend:op-1:review"].rejected,
+    );
   }
 });
 
@@ -1354,5 +1378,248 @@ test("cited files share a diagnosis's bound on named files, and a binary file or
     proposalProblems({ ...proposal, commit: "HEAD" }, state).includes(
       "An amendment's commit is a full commit id",
     ),
+  );
+});
+
+// The run's refusal (#2105, Codex, plan.discovery): a's worker found that
+// its test needs a file no item owns, and the amendment planner answered
+// cannotPlan, saying no separate item could supply it before a's own
+// validation runs. The started-item rule in the same prompt lets a, a
+// reattempt item, grow its dependencies to wait for a new item that
+// delivers it. The refusal rejected the amendment with no review.
+const CANNOT = {
+  reason:
+    "A separate item cannot supply src/b.js before the started item's pre-delivery validation runs.",
+  change: "Let item a own src/b.js.",
+};
+const refuses = { ...revision(), cannotPlan: CANNOT };
+const REFUSED = `The planner says it can't be planned: ${CANNOT.reason} What would have to change: ${CANNOT.change}`;
+const ALLOWED =
+  "The started-item rule lets reattempt item a grow its dependencies to wait for a new item b that owns src/b.js";
+const overturns = (kind = "fix") => ({
+  findings: [
+    {
+      kind,
+      itemIds: ["a"],
+      evidenceIndices: [],
+      detail: ALLOWED,
+      question: "",
+    },
+  ],
+});
+// The plan the review names: b delivers src/b.js, and a waits for it.
+const waitsForB = [
+  work("a", { dependencies: ["b"] }),
+  work("b"),
+  qa(["a", "b"]),
+];
+
+test("an amendment planner's cannotPlan is reviewed, and a refusal its review confirms rejects the amendment and asks the operator (#2105)", async () => {
+  const { checkout, state } = await discovered();
+  const { planner, asked } = scripted(refuses, { findings: [] });
+  const posted = [];
+  const logged = [];
+  const deps = depsOf(checkout, planner, posted);
+  const first = await step(state, deps, undefined, logged);
+  assert.equal(first.key, "amend:op-1:plan");
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  assert.ok(
+    asked[0].prompt.includes(
+      "An independent review judges a cannotPlan answer before Factory asks the operator",
+    ),
+  );
+  // The refusal is a round with no draft: the current plan with it.
+  const round = state.done["amend:op-1:plan"];
+  assert.deepEqual(round, {
+    answer: { ...accepted, cannotPlan: CANNOT },
+    cannot: CANNOT,
+    round: 1,
+  });
+  assert.deepEqual(
+    logged.filter((event) => event.event === "planner-cannot-plan"),
+    [{ event: "planner-cannot-plan", amendment: "op-1", ...CANNOT }],
+  );
+  // A rerun from the saved round reviews it; the planner isn't asked again.
+  assert.equal(amendmentSteps(state, deps)[0].key, "amend:op-1:review");
+
+  // The review judges the refusal, told the rule and the plan it amends.
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.equal(asked[1].phase, "graph-review");
+  const prompt = asked[1].prompt;
+  assert.ok(prompt.includes("Independently review a planner's refusal"));
+  assert.ok(prompt.includes(`Refusal:\n${JSON.stringify(CANNOT)}`));
+  assert.ok(prompt.includes("The planner's rule for cannotPlan: cannotPlan"));
+  assert.ok(prompt.includes(RULE));
+  assert.ok(prompt.includes('"previousPlan"'));
+  assert.ok(!prompt.includes("Graph:\n"));
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+
+  // Confirmed: the amendment is rejected with the planner's reason.
+  const accept = await step(state, deps);
+  assert.equal(accept.key, "amend:op-1");
+  assert.equal(
+    state.done["amend:op-1"].rejected,
+    `${REFUSED} The independent amendment review confirmed it.`,
+  );
+  assert.equal(posted.length, 0);
+  assert.equal(asked.length, 2);
+  assert.equal(planningRevisions(state).used, 1);
+  const asks = await step(state, deps);
+  assert.equal(asks.key, "amend:op-1:continue");
+  const held = asks.outcome;
+  assert.equal(held.kind, "hold");
+  assert.ok(held.question.includes(REFUSED));
+  assert.deepEqual(
+    held.options.map((option) => option.answer),
+    ["replace", "continue", "cancel"],
+  );
+});
+
+test("a refusal saved before it was reviewed still rejects its amendment on a rerun, with no model call", async () => {
+  const { checkout, state } = await discovered();
+  // The round an earlier Factory saved for a cannotPlan.
+  state.done["amend:op-1:plan"] = {
+    answer: { ...accepted, cannotPlan: CANNOT },
+    rejected: REFUSED,
+  };
+  const { planner, asked } = scripted();
+  const accept = await step(state, depsOf(checkout, planner));
+  assert.equal(accept.key, "amend:op-1");
+  assert.equal(state.done["amend:op-1"].rejected, REFUSED);
+  assert.equal(asked.length, 0);
+});
+
+test("a cannotPlan its review overturns goes back to the planner with the rule that allows a plan, and the plan is reviewed and accepted (#2105)", async () => {
+  const { checkout, state } = await discovered();
+  const { planner, asked } = scripted(
+    refuses,
+    overturns(),
+    revision(waitsForB),
+    { findings: [] },
+  );
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+
+  // The review's fix finding sends the refusal back, charged.
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.equal(review.outcome.kind, "retry", JSON.stringify(review.outcome));
+  assert.equal(
+    review.outcome.reason,
+    "Amendment plan round 1 has 1 fix finding; revising",
+  );
+  assert.equal(state.done["amend:op-1:review"], undefined);
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.deepEqual(kept.refused, CANNOT);
+  assert.deepEqual(kept.answer, state.done["amend:op-1:plan"].answer);
+  assert.deepEqual(
+    kept.findings.map((f) => [f.source, f.kind, f.itemIds]),
+    [["review", "fix", ["a"]]],
+  );
+  assert.equal(planningRevisions(state).used, 2);
+
+  // Round 2 is told the refusal was overturned, and why; it plans.
+  const second = await step(state, deps);
+  assert.equal(second.key, "amend:op-1:plan");
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.ok(asked[2].prompt.includes(ALLOWED));
+  assert.ok(
+    asked[2].prompt.includes(
+      "Your previous answer for it was cannotPlan, with the reason",
+    ),
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.cannot, undefined);
+  assert.equal(round.round, 2);
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "a").dependencies,
+    ["b"],
+  );
+
+  // The plan is reviewed as a plan, and accepted.
+  const again = await step(state, deps);
+  assert.equal(again.key, "amend:op-1:review");
+  assert.ok(
+    asked[3].prompt.includes(
+      "Independently review this complete proposed Factory plan",
+    ),
+  );
+  assert.deepEqual(again.outcome, { kind: "done", result: { round: 2 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.deepEqual(
+    result.plan.items.find((item) => item.id === "a").dependencies,
+    ["b"],
+  );
+  assert.equal(posted.length, 1);
+  assert.equal(asked.length, 4);
+  assert.equal(planningRevisions(state).used, 2);
+});
+
+test("a refusal's review that asks an operator decision rejects with both, and the same findings twice or an invalid review twice reject with the refusal too", async () => {
+  {
+    const { checkout, state } = await discovered();
+    const { planner } = scripted(refuses, overturns("operator-decision"));
+    const deps = depsOf(checkout, planner);
+    await step(state, deps);
+    const review = await step(state, deps);
+    assert.equal(review.outcome.kind, "done");
+    assert.ok(
+      review.outcome.result.rejected.startsWith(
+        `${REFUSED} Independent amendment review: ${ALLOWED}`,
+      ),
+    );
+    assert.equal(state.kept["amend:op-1:revisions"], undefined);
+    await step(state, deps);
+    assert.equal(
+      state.done["amend:op-1"].rejected,
+      review.outcome.result.rejected,
+    );
+  }
+  {
+    // The planner refuses again, and the review says the same: rejected.
+    const { checkout, state } = await discovered();
+    const { planner } = scripted(refuses, overturns(), refuses, overturns());
+    const deps = depsOf(checkout, planner);
+    await step(state, deps);
+    assert.equal((await step(state, deps)).outcome.kind, "retry");
+    await step(state, deps);
+    assert.deepEqual(state.done["amend:op-1:plan"].cannot, CANNOT);
+    const again = await step(state, deps);
+    assert.equal(again.key, "amend:op-1:review");
+    assert.ok(
+      state.done["amend:op-1:review"].rejected.startsWith(
+        `${REFUSED} Independent amendment review: Amendment plan round 2 came back with the same problems as round 1: ${ALLOWED}`,
+      ),
+    );
+    assert.equal(state.kept["amend:op-1:revisions"].length, 1);
+  }
+});
+
+test("a whole plan's refusal keeps no answer, so the round its review sends back answers in full", async () => {
+  const { checkout, state } = await discovered();
+  // As `factory reset` leaves it: no planning round to revise.
+  state.done["plan:1:1"] = {};
+  const { planner, asked } = scripted(
+    { ...accepted, cannotPlan: CANNOT },
+    overturns(),
+    { ...accepted, items: waitsForB },
+  );
+  const deps = depsOf(checkout, planner);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.deepEqual(state.done["amend:op-1:plan"], { cannot: CANNOT, round: 1 });
+  assert.equal((await step(state, deps)).outcome.kind, "retry");
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.equal(kept.answer, undefined);
+  const second = await step(state, deps);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.ok(asked[2].prompt.includes('"planInForce"'));
+  assert.ok(!asked[2].prompt.includes('"currentPlan"'));
+  assert.deepEqual(
+    state.done["amend:op-1:plan"].draft.items.map((item) => item.id),
+    ["a", "b", "qa"],
   );
 });

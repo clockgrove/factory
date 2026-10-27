@@ -177,6 +177,16 @@ test("GitHub's rate limits are told by their headers or their message, with how 
     ),
     { ms: LIMIT_UNSAID_MS, resource: "*" },
   );
+  // GitHub's older wording for a secondary limit.
+  assert.deepEqual(
+    rateLimitOf(
+      403,
+      headers({}),
+      "You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.",
+      now,
+    ),
+    { ms: LIMIT_UNSAID_MS, resource: "*" },
+  );
   assert.deepEqual(rateLimitOf(429, headers({}), undefined, now), {
     ms: LIMIT_UNSAID_MS,
     resource: "*",
@@ -490,6 +500,34 @@ test("a cancelled factory run's card move that failed runs again from the tick o
   tick();
   await until(() => !sync.unqueuing.has(7), "the card's move");
   assert.equal(tries, 2);
+});
+
+test("a cancelled factory run's card move stops once its issue is gone", async () => {
+  let now = Date.parse("2026-10-27T01:44:00Z");
+  let tries = 0;
+  const github = {
+    repository: REPO,
+    takeAmbient: () => undefined,
+    graphqlPartial: async () => {
+      tries += 1;
+      throw new TransientError("GitHub POST /graphql: 502 Bad Gateway");
+    },
+  };
+  const { sync, failures } = harness(github, () => now);
+  sync.identified = true;
+  const tick = () => {
+    sync.lastPoll = now;
+    sync.tick({ runners: new Map(), unreadable: new Map(), guard: () => {} });
+  };
+  sync.unqueue(7);
+  await until(() => failures("unrun:7").length === 1, "the failed move");
+  // A queue read finds the issue gone: there is no card left to move.
+  sync.lose(7, "queue", 404);
+  assert.equal(sync.unqueuing.has(7), false);
+  now += 60 * 60_000;
+  tick();
+  await sleep(50);
+  assert.equal(tries, 1);
 });
 
 test("a job that names its earliest retry waits for it with jitter, even one that otherwise retries at once", async () => {

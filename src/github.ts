@@ -147,8 +147,8 @@ const ANY_RESOURCE = "*";
 /**
  * GitHub's rate limit in an answer, if it is one: a 429; or a 403 with
  * `x-ratelimit-remaining: 0` (the primary limit), a `retry-after`, or a
- * message that says so (a secondary limit, which may come without
- * headers). `ms` is how long to wait: the `retry-after`, else until
+ * message that says so ("rate limit", or the older "abuse detection": a
+ * secondary limit, which may come without headers). `ms` is how long to wait: the `retry-after`, else until
  * `x-ratelimit-reset`, else LIMIT_UNSAID_MS. `resource` is the limit it
  * spent (`x-ratelimit-resource`, such as core or graphql; absent when the
  * answer doesn't say) for the primary limit, and ANY_RESOURCE for a
@@ -161,7 +161,8 @@ export function rateLimitOf(
   now = Date.now(),
 ): { ms: number; resource?: string } | undefined {
   const remaining = headers.get("x-ratelimit-remaining");
-  const said = typeof message === "string" && /rate limit/i.test(message);
+  const said =
+    typeof message === "string" && /rate limit|abuse detection/i.test(message);
   if (
     status !== 429 &&
     !(

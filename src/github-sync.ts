@@ -1710,6 +1710,8 @@ export class GitHubSync {
   private lose(issue: number, job: string, status?: number): void {
     if (this.gone.has(issue)) return;
     this.gone.add(issue);
+    // A gone issue has no card to take out of the queue.
+    if (this.unqueuing.delete(issue)) this.jobs.forget(`unrun:${issue}`);
     this.log.write(issue, {
       event: "issue-gone",
       job,

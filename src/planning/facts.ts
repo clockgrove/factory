@@ -328,6 +328,25 @@ export const PINNED_PNPM_BOOTSTRAP =
   "pnpm install --frozen-lockfile --ignore-scripts";
 export const PINNED_NPM_BOOTSTRAP = "npm ci --ignore-scripts";
 
+/**
+ * Factory's own lockfile resolution for each bootstrap (validate.ts): run
+ * as the bootstrap's install runs, never as a validation command, when a
+ * candidate's dependency change left its lockfile out of date. It writes
+ * only the lockfile and runs no scripts.
+ */
+export const LOCKFILE_RESOLUTION = {
+  pnpm: {
+    command:
+      "pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts",
+    lockfile: "pnpm-lock.yaml",
+  },
+  npm: {
+    command:
+      "npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
+    lockfile: "package-lock.json",
+  },
+} as const;
+
 /** Exact script-disabled root installs; this classification grants no authority. */
 export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
   if (command.trim() === PINNED_NPM_BOOTSTRAP) return "npm";
@@ -423,6 +442,17 @@ const VALIDATION_ENVIRONMENT = {
   ifNeeded:
     "leave out any command needing more, and ask through decisionRequired",
 } as const;
+
+/**
+ * How a dependency change gets its lockfile: the planner's and the graph
+ * reviewer's `lockfile` entry. Factory resolves one itself unless
+ * `sandbox.network` is off (validate.ts).
+ */
+function lockfileNote(resolves: boolean): string {
+  return resolves
+    ? "a worker edits package.json dependencies only, never the lockfile, and no one supplies one: when the install refuses the lockfile as out of date, Factory resolves it itself (pnpm install --lockfile-only, npm install --package-lock-only, scripts off, under the repository's registry and release-age policy) and commits it on the item's result"
+    : "no worker or validation command can resolve a new lockfile, and with sandbox.network off neither can Factory: a change to package.json dependencies whose lockfile is out of date holds for the operator";
+}
 
 /** Tools that reach a network, by the first word of a shell command. */
 const NETWORK_TOOLS = new Set([
@@ -582,11 +612,19 @@ async function packageCommands(
 
 // ── Planner instructions ────────────────────────────────────────────────
 
-/** The validation environment the planner and the graph reviewer are given. */
-export function validationEnvironmentNote(hostNetwork: boolean): string {
-  const environment = hostNetwork
-    ? { ...VALIDATION_ENVIRONMENT, network: HOST_VALIDATION_NETWORK }
-    : VALIDATION_ENVIRONMENT;
+/**
+ * The validation environment the planner and the graph reviewer are given:
+ * with `lockfileResolution`, Factory resolves an out-of-date lockfile itself.
+ */
+export function validationEnvironmentNote(
+  hostNetwork: boolean,
+  lockfileResolution: boolean,
+): string {
+  const environment = {
+    ...VALIDATION_ENVIRONMENT,
+    ...(hostNetwork ? { network: HOST_VALIDATION_NETWORK } : {}),
+    lockfile: lockfileNote(lockfileResolution),
+  };
   return `Validation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
 }
 
@@ -594,9 +632,10 @@ export function validationEnvironmentNote(hostNetwork: boolean): string {
 function ciOnlyInstructions(
   ciOnlyCommands: readonly string[],
   hostNetwork: boolean,
+  lockfileResolution: boolean,
 ): string {
   return (
-    `\n\n${validationEnvironmentNote(hostNetwork)}` +
+    `\n\n${validationEnvironmentNote(hostNetwork, lockfileResolution)}` +
     (ciOnlyCommands.length
       ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
       : "")
@@ -622,7 +661,11 @@ export async function commandInstructions(
 ): Promise<string> {
   const scripts = await new BaseFiles(checkout, facts.base, signal).scripts();
   return (
-    ciOnlyInstructions(facts.ciOnlyCommands, facts.hostNetwork === true) +
+    ciOnlyInstructions(
+      facts.ciOnlyCommands,
+      facts.hostNetwork === true,
+      facts.lockfileResolution === true,
+    ) +
     packageCommandInstructions(
       facts.packageCommands,
       scopedCommands(facts.packageCommands, scripts),
@@ -886,6 +929,8 @@ export interface FactsArgs {
   ciOnlyCommands?: readonly string[];
   /** `sandbox.network: host`: validation reaches the host's network. */
   hostNetwork?: boolean;
+  /** `sandbox.network` isn't off: Factory resolves an out-of-date lockfile itself. */
+  lockfileResolution?: boolean;
   /** The approved playbook text. */
   playbook?: string;
   /** The operator's media.localAssetRoots. */
@@ -934,6 +979,7 @@ export async function buildFacts(
     packageCommands: await packageCommands(files, ciOnlyCommands),
     ciOnlyCommands,
     ...(args.hostNetwork ? { hostNetwork: true as const } : {}),
+    ...(args.lockfileResolution ? { lockfileResolution: true as const } : {}),
     checkNames: await workflowCheckNames(files),
     integratedCheckNames: await pushCheckNames(
       files,

@@ -209,6 +209,11 @@ const GIVE_UP_AFTER = 3;
 /** A sync job that failed waits this long, doubling, up to MAX_BACKOFF_MS. */
 const BASE_BACKOFF_MS = 10_000;
 const MAX_BACKOFF_MS = 10 * 60_000;
+/**
+ * A rate-limited sync job waits for the reset, then up to this much more
+ * at random, so the jobs the limit held don't all start in the same second.
+ */
+const RESET_JITTER_MS = 15_000;
 /** A sync job past this is aborted and counts as failed. */
 const DEADLINE_MS = 10 * 60_000;
 /** Comments kept waiting for their author's access to be read, per Objective. */
@@ -267,9 +272,13 @@ export function commentRequest(
  * GitHub is input and display, never a precondition: every call here runs in
  * the background, and nothing here can fail a run. A failed job is logged
  * and tried again after a backoff of its own (per job and Objective, capped
- * at ten minutes; jobs.ts), and one past its ten-minute deadline is
- * aborted and counts as failed, so one Objective's bad card or locked issue never spends
- * the rate limit the others need. A finished Objective stays until its
+ * at ten minutes; jobs.ts), even when nothing else changes. A rate-limited
+ * one waits for the limit's reset instead, plus up to RESET_JITTER_MS, and
+ * never counts toward giving up; meanwhile the client sends nothing the
+ * limit holds (github.ts `send`), so every job waits for the reset. One
+ * past its ten-minute deadline is aborted and counts as failed, so one
+ * Objective's bad card or locked issue never spends the rate limit the
+ * others need. A finished Objective stays until its
  * final option and replies are written.
  *
  * The queue is read by levels: Factory never writes the queued option, so
@@ -320,6 +329,8 @@ export class GitHubSync {
    * until then.
    */
   private readonly queuing = new Map<number, (result: RequestResult) => void>();
+  /** Cancelled `factory run` cards whose move out of the queue hasn't landed yet (`unqueue`). */
+  private readonly unqueuing = new Set<number>();
   private readonly jobs: Jobs;
   /** Finished Objectives whose final option and replies are written. */
   private readonly settled = new Set<number>();
@@ -355,6 +366,8 @@ export class GitHubSync {
       "noteAfterMs" | "remindAfterMs"
     >,
     private readonly now: () => number = () => Date.now(),
+    /** The jitter after a rate limit's reset (RESET_JITTER_MS), as a fraction. */
+    random: () => number = Math.random,
   ) {
     this.display = new QueueDisplay(github, config);
     this.jobs = new Jobs(
@@ -364,9 +377,15 @@ export class GitHubSync {
         baseMs: BASE_BACKOFF_MS,
         maxMs: MAX_BACKOFF_MS,
         deadlineMs: DEADLINE_MS,
+        jitterMs: RESET_JITTER_MS,
       },
       now,
-      (error) => ({ transient: error instanceof TransientError }),
+      (error) => ({
+        transient: error instanceof TransientError,
+        ...(limitMs(error) !== undefined ? { rateLimited: true } : {}),
+      }),
+      limitMs,
+      random,
     );
   }
 
@@ -407,7 +426,11 @@ export class GitHubSync {
     const minutes = Math.floor((this.now() - this.failingSince) / 60_000);
     if (this.now() - this.failingSince < INTAKE_PROBLEM_MS) return;
     const first = this.intakeStopped === undefined;
-    this.intakeStopped = `Factory hasn't read the queue for ${minutes} min (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued. Check that ${this.config.github.app ? "the service's GitHub App can still read Project" : "the service's GitHub login can still read Project"} ${this.config.queue.projectId} (${this.config.github.app ? "the App needs the organization permission Projects: read and write" : "a token needs the project scope"}) and that queue.projectId names it; intake resumes at the next good read`;
+    const limited = limitMs(error);
+    this.intakeStopped =
+      limited !== undefined
+        ? `Factory hasn't read the queue for ${minutes} min: GitHub's rate limit for ${this.config.github.app ? "the service's GitHub App installation" : "the service's GitHub login"} is spent (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued until it resets, at about ${displayTime(new Date(this.now() + limited).toISOString())}. Intake resumes at the next good read`
+        : `Factory hasn't read the queue for ${minutes} min (${redact(errorMessage(error))}), so no queued Objective is admitted or dequeued. Check that ${this.config.github.app ? "the service's GitHub App can still read Project" : "the service's GitHub login can still read Project"} ${this.config.queue.projectId} (${this.config.github.app ? "the App needs the organization permission Projects: read and write" : "a token needs the project scope"}) and that queue.projectId names it; intake resumes at the next good read`;
     if (first)
       this.log.write(0, {
         event: "intake-stopped",
@@ -425,6 +448,9 @@ export class GitHubSync {
       this.countTransport(0, AMBIENT, ambient, 0, ambient.failed > 0);
     }
     if (this.problem()) return;
+    // A cancelled `factory run`'s card whose move failed: again, once its
+    // wait is over.
+    for (const issue of this.unqueuing) this.unrun(issue);
     // Read once at start: a rename while the service was down pauses
     // before any issue counts as gone (later redirects check it again).
     if (!this.identified)
@@ -568,6 +594,8 @@ export class GitHubSync {
     answer: (result: RequestResult) => void,
   ): void {
     if (this.problem() || this.queuing.has(issue)) return;
+    // The latest request wins: a cancel's move out of the queue stops.
+    if (this.unqueuing.delete(issue)) this.jobs.forget(`unrun:${issue}`);
     this.background(issue, `run:${issue}`, async (signal) => {
       const outcome = await queueIssue(
         this.github,
@@ -596,14 +624,24 @@ export class GitHubSync {
   /**
    * A cancel of a `factory run N` not admitted yet: stop queuing its card,
    * and move a card that reads queued to cancelled (queue.ts unqueueIssue).
+   * A failed write runs again (`tick`) until it lands, and until then
+   * intake leaves the issue alone, so a cancelled run is never admitted; a
+   * later `factory run N` replaces it (`queue`).
    */
   unqueue(issue: number): void {
     this.queuing.delete(issue);
     this.jobs.forget(`run:${issue}`);
+    this.unqueuing.add(issue);
+    this.unrun(issue);
+  }
+
+  /** Take a cancelled `factory run` card out of the queue (`unqueue`). */
+  private unrun(issue: number): void {
     if (this.problem()) return;
     this.background(issue, `unrun:${issue}`, async (signal) => {
       await unqueueIssue(this.github, this.config, this.display, issue, signal);
       this.wroteAt.set(issue, this.now());
+      this.unqueuing.delete(issue);
     });
   }
 
@@ -682,7 +720,12 @@ export class GitHubSync {
     const queuedOption = this.config.queue.options.queued;
     const items = new Map(this.view.map((item) => [item.issue, item]));
     for (const issue of new Set([...items.keys(), ...this.viewKnown])) {
-      if (sync.unreadable.has(issue) || this.unread.has(issue)) continue;
+      if (
+        sync.unreadable.has(issue) ||
+        this.unread.has(issue) ||
+        this.unqueuing.has(issue)
+      )
+        continue;
       if (
         this.jobs.active(`show:${issue}`) ||
         (this.wroteAt.get(issue) ?? -1) >= this.viewAt
@@ -1270,7 +1313,8 @@ export class GitHubSync {
 
   /**
    * A status or tracking job failed. GitHub's transient errors (network,
-   * 5xx, rate limits) retry on; a lasting refusal (a 4xx), or anything
+   * 5xx, rate limits, which wait for their reset) retry on and never count
+   * here; a lasting refusal (a 4xx that isn't a rate limit), or anything
    * else three times in a row (a render that keeps throwing), gives it up
    * for this run, so it never holds back settling. Tracking handles a
    * refusal on one item's issue itself, so one reaching here is the
@@ -1570,11 +1614,16 @@ export class GitHubSync {
           allowed = await this.github.canWrite(comment.login, signal);
         } catch (error) {
           const failures = comment.failures + 1;
+          // A rate limit waits for its reset, never less.
           unchecked.push({
             ...comment,
             failures,
             nextAt: new Date(
-              now + backoffMs(failures, BASE_BACKOFF_MS, MAX_BACKOFF_MS),
+              now +
+                Math.max(
+                  backoffMs(failures, BASE_BACKOFF_MS, MAX_BACKOFF_MS),
+                  limitMs(error) ?? 0,
+                ),
             ).toISOString(),
           });
           this.log.write(issue, {
@@ -1661,6 +1710,8 @@ export class GitHubSync {
   private lose(issue: number, job: string, status?: number): void {
     if (this.gone.has(issue)) return;
     this.gone.add(issue);
+    // A gone issue has no card to take out of the queue.
+    if (this.unqueuing.delete(issue)) this.jobs.forget(`unrun:${issue}`);
     this.log.write(issue, {
       event: "issue-gone",
       job,
@@ -1921,6 +1972,17 @@ function skewed(since: string): string | undefined {
   const at = Date.parse(since);
   return Number.isFinite(at)
     ? new Date(at - CLOCK_SKEW_MS).toISOString()
+    : undefined;
+}
+
+/**
+ * How long a failure says to wait before GitHub is asked again: a rate
+ * limit's reset (or a request it held back), in ms; undefined for anything
+ * else, which waits its backoff.
+ */
+function limitMs(error: unknown): number | undefined {
+  return error instanceof TransientError && error.limited
+    ? (error.retryAfterMs ?? 0)
     : undefined;
 }
 

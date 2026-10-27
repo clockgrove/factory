@@ -14,10 +14,25 @@ export interface JobTiming {
   baseMs: number;
   maxMs: number;
   deadlineMs: number;
+  /**
+   * A failure that names its earliest retry (`JobsLimit`, a rate limit's
+   * reset) waits until then plus up to this much more, at random, so the
+   * jobs it held don't all start at the same moment.
+   */
+  jitterMs?: number;
 }
 
+/**
+ * How long a failure says to wait at the least, in ms (a rate limit's
+ * reset), or undefined when it says nothing: the key then waits its backoff.
+ */
+export type JobsLimit = (error: unknown) => number | undefined;
+
 export interface JobOptions {
-  /** Wait a backoff after a failure (default); false runs it again on the next call. */
+  /**
+   * Wait a backoff after a failure (default); false runs it again on the
+   * next call, unless the failure names its earliest retry (`JobsLimit`).
+   */
   backoff?: boolean;
   /** After a success. */
   done?: () => void;
@@ -37,7 +52,11 @@ interface Running {
  * one Objective; issue 0 is the installation's own). At most one run of a
  * key is in flight, and a key whose run failed waits a capped backoff of
  * its own, so one Objective's failing job never spends what the others
- * need. Each run gets a signal that aborts at its deadline; a run past
+ * need. A failure that names its earliest retry (a rate limit's reset,
+ * `JobsLimit`) waits until then, with jitter, instead: never sooner. A key
+ * keeps its failures until it succeeds or is forgotten, and once its wait
+ * is over the next `run` starts it (`held`), so a failed job always runs
+ * again. Each run gets a signal that aborts at its deadline; a run past
  * its deadline counts as failed and leaves its key at once, whether or not
  * it heeds the signal, so a hung call never holds a key. `forget` aborts
  * and drops an Objective's (or one key's) running and backing-off jobs. A
@@ -60,6 +79,8 @@ export class Jobs {
     private readonly describe: (
       error: unknown,
     ) => Record<string, unknown> = () => ({}),
+    private readonly limit: JobsLimit = () => undefined,
+    private readonly random: () => number = Math.random,
   ) {}
 
   /** Start `job` under `key` unless that key is running or backing off. */
@@ -104,12 +125,23 @@ export class Jobs {
         async (error: unknown) => {
           if (!current()) return;
           // The backoff starts, and the key frees (a deadline frees it now).
+          // A failure that names its earliest retry (a rate limit's reset)
+          // waits for it, with jitter, and at least the base backoff, so a
+          // reset already past (a skewed clock) never loops hot.
           const failures = (this.waits.get(key)?.failures ?? 0) + 1;
+          const limited = this.limit(error);
           const nextAt =
-            options.backoff === false
-              ? undefined
-              : this.now() +
-                backoffMs(failures, this.timing.baseMs, this.timing.maxMs);
+            limited !== undefined
+              ? this.now() +
+                Math.max(
+                  limited +
+                    Math.floor(this.random() * (this.timing.jitterMs ?? 0)),
+                  this.timing.baseMs,
+                )
+              : options.backoff === false
+                ? undefined
+                : this.now() +
+                  backoffMs(failures, this.timing.baseMs, this.timing.maxMs);
           if (nextAt !== undefined)
             this.waits.set(key, { issue, failures, nextAt });
           this.running.delete(key);

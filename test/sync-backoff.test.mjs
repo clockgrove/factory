@@ -13,7 +13,11 @@ import { mark } from "../dist/markdown.js";
 import { trackingDue } from "../dist/tracking.js";
 import { item, plan, REPO, tempDir, until } from "./helpers.mjs";
 
-/** A GitHubSync on the fake `github`, with progress comments and tracking on; its log goes to `events`. */
+/**
+ * A GitHubSync on the fake `github`, with progress comments and tracking
+ * on; its log goes to `events`. No jitter after a rate limit's reset, so a
+ * limited job's wait is exactly max(reset, the base backoff).
+ */
 function syncOf(github, events, now) {
   return new GitHubSync(
     github,
@@ -34,6 +38,7 @@ function syncOf(github, events, now) {
     { write: (on, event) => events.push({ on, ...event }) },
     { noteAfterMs: 0, remindAfterMs: 0 },
     now,
+    () => 0,
   );
 }
 

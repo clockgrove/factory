@@ -25,9 +25,10 @@ export class TransientError extends Error {
     /** When GitHub said to come back, if it did. */
     readonly retryAfterMs?: number,
     /**
-     * A rate limit (429, or a 403 with GitHub's rate-limit headers):
-     * `retryAfterMs` is when it resets. Otherwise it is only a backoff hint
-     * (a 5xx's retry-after).
+     * A rate limit (`rateLimitOf`: a 429, or a 403 with GitHub's rate-limit
+     * headers or message), or a request one holds back: `retryAfterMs` is
+     * when it resets, and nothing should be tried before. Otherwise it is
+     * only a backoff hint (a 5xx's retry-after).
      */
     readonly limited = false,
   ) {
@@ -134,6 +135,66 @@ const answers = new WeakMap<
 export const FRESH_MS = 2 * 60_000;
 /** How long a 403 without rate-limit headers, or a refused push, retries before it asks. */
 export const REFUSED_MS = 2 * 60_000;
+/**
+ * A rate limit that says neither when it resets nor when to retry (a
+ * secondary limit known only by its message): GitHub asks for at least a
+ * minute.
+ */
+export const LIMIT_UNSAID_MS = 60_000;
+/** A secondary limit's hold covers every request, whatever its resource. */
+const ANY_RESOURCE = "*";
+
+/**
+ * GitHub's rate limit in an answer, if it is one: a 429; or a 403 with
+ * `x-ratelimit-remaining: 0` (the primary limit), a `retry-after`, or a
+ * message that says so ("rate limit", or the older "abuse detection": a
+ * secondary limit, which may come without headers). `ms` is how long to wait: the `retry-after`, else until
+ * `x-ratelimit-reset`, else LIMIT_UNSAID_MS. `resource` is the limit it
+ * spent (`x-ratelimit-resource`, such as core or graphql; absent when the
+ * answer doesn't say) for the primary limit, and ANY_RESOURCE for a
+ * secondary one, which holds every request.
+ */
+export function rateLimitOf(
+  status: number,
+  headers: Headers,
+  message: unknown,
+  now = Date.now(),
+): { ms: number; resource?: string } | undefined {
+  const remaining = headers.get("x-ratelimit-remaining");
+  const said =
+    typeof message === "string" && /rate limit|abuse detection/i.test(message);
+  if (
+    status !== 429 &&
+    !(
+      status === 403 &&
+      (remaining === "0" || headers.has("retry-after") || said)
+    )
+  )
+    return undefined;
+  const retryAfter = Number(headers.get("retry-after"));
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  const ms =
+    retryAfter > 0
+      ? retryAfter * 1000
+      : remaining === "0" && reset > 0
+        ? Math.max(0, reset * 1000 - now)
+        : LIMIT_UNSAID_MS;
+  const resource =
+    remaining === "0" ? headers.get("x-ratelimit-resource") : ANY_RESOURCE;
+  return { ms, ...(resource ? { resource } : {}) };
+}
+
+/** The rate-limit resource a request spends (GitHub's `x-ratelimit-resource`). */
+function resourceOf(path: string): string {
+  const route = path.split("?")[0]!;
+  return route === "/graphql"
+    ? "graphql"
+    : route.startsWith("/search/code")
+      ? "code_search"
+      : route.startsWith("/search/")
+        ? "search"
+        : "core";
+}
 
 /**
  * A GitHub failure as a step outcome (docs/reference/steps.md#Waits): only what a person
@@ -370,6 +431,12 @@ export class GitHub {
   private renamed: RepositoryMoved | undefined;
   /** What Factory made lately, and when (`made`): a 403 or 404 under one is GitHub's lag. */
   private readonly fresh = new Map<string, number>();
+  /**
+   * Until when GitHub's rate limit holds requests back (this host's
+   * clock), by the resource it limits (ANY_RESOURCE: all of them). Set by
+   * a rate-limited answer (`limited`); `send` sends nothing it holds.
+   */
+  private readonly heldUntil = new Map<string, number>();
 
   constructor(
     readonly repository: string,
@@ -1295,10 +1362,10 @@ export class GitHub {
           response,
         );
         const reset = Number(response.headers.get("x-ratelimit-reset"));
-        throw new TransientError(
+        throw this.limited(
           `GitHub GraphQL: ${message}`,
-          reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : undefined,
-          true,
+          reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : LIMIT_UNSAID_MS,
+          "graphql",
         );
       }
       throw this.marked(new GitHubError(`GitHub GraphQL: ${message}`, 200));
@@ -2240,6 +2307,23 @@ export class GitHub {
     refreshed = false,
   ): Promise<Response> {
     if (this.renamed) throw this.renamed;
+    // A request the rate limit holds isn't sent until its reset: one
+    // limited answer pauses every caller (steps, sync jobs, readiness), and
+    // each waits for the reset as for its own. The App's own requests
+    // (its JWT) spend the App's limit, not the installation's.
+    if (!headers.authorization) {
+      const until = Math.max(
+        this.heldUntil.get(resourceOf(path)) ?? 0,
+        this.heldUntil.get(ANY_RESOURCE) ?? 0,
+      );
+      const now = Date.now();
+      if (now < until)
+        throw new TransientError(
+          `GitHub ${method} ${path}: not sent, GitHub's rate limit holds requests until ${new Date(until).toISOString()}`,
+          until - now,
+          true,
+        );
+    }
     // A request as the GitHub App itself carries its JWT instead.
     const authorization =
       headers.authorization ?? `Bearer ${await this.auth(refreshed)}`;
@@ -2323,14 +2407,15 @@ export class GitHub {
       return this.send(method, path, body, signal, headers, true);
     }
     const retryAfter = Number(response.headers.get("retry-after"));
-    const reset = Number(response.headers.get("x-ratelimit-reset"));
-    // GitHub marks a 403 rate limit (primary or secondary) by its headers;
-    // a 403 without them may still be a secondary limit (githubOutcome).
-    const limited =
-      response.status === 429 ||
-      (response.status === 403 &&
-        (response.headers.get("x-ratelimit-remaining") === "0" ||
-          response.headers.has("retry-after")));
+    // GitHub marks a 403 rate limit (primary or secondary) by its headers
+    // or its message (`rateLimitOf`); any other 403 may still be a
+    // secondary limit (githubOutcome).
+    const limit = rateLimitOf(
+      response.status,
+      response.headers,
+      isObject(answer) ? answer.message : undefined,
+    );
+    const limited = limit !== undefined;
     const expected =
       !limited && expectedStatuses.getStore()?.includes(response.status);
     if (!expected) {
@@ -2352,16 +2437,10 @@ export class GitHub {
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
     if (response.status === 401)
       throw this.marked(new GitHubError(detail, 401, answer));
-    if (limited)
-      throw new TransientError(
-        detail,
-        retryAfter > 0
-          ? retryAfter * 1000
-          : reset > 0
-            ? Math.max(0, reset * 1000 - Date.now())
-            : undefined,
-        true,
-      );
+    if (limit)
+      throw headers.authorization
+        ? new TransientError(detail, limit.ms, true)
+        : this.limited(detail, limit.ms, limit.resource ?? resourceOf(path));
     // A 301 for the repository itself is its move; one under it is an
     // issue (or other resource) moved away only while the repository still
     // answers under its configured name. An identity that can't be read
@@ -2406,6 +2485,22 @@ export class GitHub {
       : null;
     if (issue) failed.missingIssue = Number(issue[1]);
     throw this.marked(failed);
+  }
+
+  /**
+   * A rate-limited answer: hold `resource` (ANY_RESOURCE: every request)
+   * until it resets, `ms` from now, so no request spends it again before
+   * then (`send`); the error waits as long.
+   */
+  private limited(
+    detail: string,
+    ms: number,
+    resource: string,
+  ): TransientError {
+    const until = Date.now() + ms;
+    if (until > (this.heldUntil.get(resource) ?? 0))
+      this.heldUntil.set(resource, until);
+    return new TransientError(detail, ms, true);
   }
 
   /** `error`, marked as the GitHub App's when Factory acts as one. */

@@ -19,7 +19,11 @@ import { readShown } from "../dist/shown.js";
 import { tempDir } from "./helpers.mjs";
 
 const EVIDENCE_METHOD =
-  "How a criterion is evidenced (a command that checks a property of the result, or a semantic proof whose review judges the criterion itself) is the planner's choice, never an operator decision: review judges whether the chosen method can show the criterion, and one that can't is a fix finding asking for one that can. A perceptual quality of candidate media (that a preview depicts its model, how an image looks) is seen by the operator when choosing a set at select and judged by the owner's result review through a semantic proof of its criterion; it is not an acceptance entry, so it needs no command evidence, and commands check its checkable properties (format, dimensions, content).";
+  "Choosing among the methods the plan can produce to evidence a criterion (a command that checks a property of the result, or a semantic proof whose review judges the criterion itself) is the planner's choice, never an operator decision: review judges whether the chosen method can show the criterion, and one that can't is a fix finding asking for one that can. Proof that only a CI-only command, or an environment local validation lacks, can supply is not such a choice: it stays an integrated-ci proof or an operator decision, as the Work Item standard and the CI-only rule say. A perceptual quality of candidate media (that a preview depicts its model, how an image looks) is seen by the operator when choosing a set at select and judged by the owner's result review through a semantic proof of its criterion, which Factory gives that review from the Objective itself: no acceptance entry needs to state it, so it needs no command evidence, and commands check its checkable properties (format, dimensions, content).";
+
+// The suite's recorded answer in that run (objectives/finished/2.json).
+const RECORDED_ANSWER =
+  "Choose an implementation detail within the Objective's written goal, acceptance criteria, Sources and existing command authority. Do not add authority, relax acceptance or drop capabilities; keep the question open if that is required.";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -64,7 +68,7 @@ test("graph review judges how a criterion is evidenced and does not undo a fix i
   const decision = {
     question: DEPICTION_QUESTION,
     answer: "answer",
-    text: "Choose an implementation detail within the Objective's written goal.",
+    text: RECORDED_ANSWER,
     by: "kirk",
     at: "2026-10-27T12:41:49.311Z",
   };
@@ -98,19 +102,38 @@ test("graph review judges how a criterion is evidenced and does not undo a fix i
   assert.equal(check1 < rule && rule < check2, true);
   assert.ok(
     reviewer.includes(
-      "Fixture or test values the sources call policy, internal names, file layout and how a criterion is evidenced (check 1) are the planner's choice: never an operator question.",
+      "Fixture or test values the sources call policy, internal names, file layout and the choice among evidence methods the plan can produce (check 1) are the planner's choice: never an operator question.",
     ),
   );
-  // A revision round keeps the fix a previous finding asked for.
+  // A perceptual media quality need not be in the owner's acceptance.
   assert.ok(
     reviewer.includes(
-      "(d) A change the revision made for a previous finding is what that finding asked for: do not ask to undo it, or raise the choice it settled as an operator decision, without a new reason that finding did not weigh.",
+      "check that the owner's acceptance as a whole delivers it, except a perceptual quality of candidate media, which the owner's result review judges from the Objective criterion itself",
     ),
   );
-  // An answer that leaves the choice to the planner settles it.
+  // The CI-only and source-decision routes to the operator remain.
   assert.ok(
     reviewer.includes(
-      "An answer that leaves the choice to the planner settles it too: judge the planner's choice as sound or not.",
+      "it is proved by an integrated-ci proof of a CI check that runs it, or it is an operator decision; never a fix finding asking the plan to run it.",
+    ),
+  );
+  assert.ok(
+    reviewer.includes(
+      "where proof truly needs an environment local validation lacks, ask through decisionRequired",
+    ),
+  );
+  // A revision round keeps the fix a previous finding asked for, but not a
+  // product choice the change made.
+  assert.ok(
+    reviewer.includes(
+      "(d) Where a change does what a previous finding asked for, do not ask to undo it without a new reason that finding did not weigh, and do not raise the evidence method it chose as an operator decision. A product or authority choice the change itself makes is still judged under check 10.",
+    ),
+  );
+  // An answer that leaves the choice to the planner settles only a choice
+  // the planner owns; a product choice follows the answer's own terms.
+  assert.ok(
+    reviewer.includes(
+      "An answer that leaves the choice to the planner settles a choice rule 2 leaves to the planner, such as which method the plan can produce evidences a criterion: judge the planner's choice as sound or not. For a product or authority choice, follow the answer's own terms: one that keeps the question open when that is required does not settle it.",
     ),
   );
 });
@@ -119,28 +142,51 @@ test("the planner decides an answered or planner-owned question instead of askin
   const { facts, shown } = await cubeFacts();
   const operator = {
     source: "operator",
-    message: `${DEPICTION_QUESTION}\nAnswer: answer — Choose an implementation detail within the Objective's written goal.`,
+    message: `${DEPICTION_QUESTION}\nAnswer: answer — ${RECORDED_ANSWER}`,
   };
+  const instructions = renderPlanningInstructions(
+    shown.blocks,
+    [operator],
+    true,
+  );
+  const settles =
+    "An operator answer settles the question it answers. An answer that leaves the choice to you (such as choosing within the Objective) settles a choice rule 2 leaves to you, such as which method the plan can produce evidences a criterion: make that choice in the plan, keeping the current plan's choice when it is sound, and never ask it again. For a product or authority choice, follow the answer's own terms: one that keeps the question open when that is required does not settle it, so keep your recommendation in the graph and ask again only while that choice is still open. Never ask a question rule 2 leaves to you.";
+  // The rule comes before the answer it governs, which arrives whole.
+  assert.ok(instructions.indexOf(settles) >= 0);
+  assert.ok(
+    instructions.indexOf(settles) <
+      instructions.indexOf("keep the question open if that is required"),
+  );
   const planner = renderCompilationCall({
     facts,
-    data: {
-      instructions: renderPlanningInstructions(shown.blocks, [operator], true),
-    },
+    data: { instructions },
     revising: true,
     lookups: { open: false, bodies: [] },
   }).prompt;
+  assert.ok(planner.includes(settles));
+  // Rule 2 and the checklist name the evidence method as the planner's, and
+  // keep proof that needs CI or a missing environment with the operator.
   assert.ok(
     planner.includes(
-      "An operator answer settles the question it answers, also when it leaves the choice to you (such as choosing within the Objective): make that choice in the plan, keeping the current plan's choice when it is sound. Never ask an answered question again, and never ask one rule 2 leaves to you, such as how a criterion is evidenced.",
-    ),
-  );
-  // Rule 2 and the checklist name the evidence method as the planner's.
-  assert.ok(
-    planner.includes(
-      "Choosing fixture or test values the sources call policy, internal names, file layout, how a criterion is evidenced and other implementation details is your job, not a product question.",
+      "Choosing fixture or test values the sources call policy, internal names, file layout, which method the plan can produce evidences a criterion and other implementation details is your job, not a product question; proof that needs a CI-only command or an environment local validation lacks is still asked through decisionRequired.",
     ),
   );
   assert.ok(planner.includes(`- Evidence method. ${EVIDENCE_METHOD}`));
+  assert.ok(
+    planner.includes(
+      "prove it by an integrated-ci proof of a CI check that runs it, or ask the operator through decisionRequired.",
+    ),
+  );
+  assert.ok(
+    planner.includes(
+      "where proof truly needs an environment local validation lacks, ask through decisionRequired",
+    ),
+  );
+  assert.ok(
+    planner.includes(
+      "the owner's acceptance as a whole must deliver it, except a perceptual quality of candidate media (that a preview depicts its model), which the owner's result review judges from the Objective criterion itself, so no acceptance entry needs to state it.",
+    ),
+  );
   // Without an operator answer the planner is not told about one.
   const unanswered = renderPlanningInstructions(
     shown.blocks,

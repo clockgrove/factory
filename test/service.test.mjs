@@ -525,6 +525,69 @@ test("a step running at three deaths with no known cause, with progress between,
   await stopped(service);
 });
 
+test("a death a test caused at a crash point leaves a step's count as it was; the next death with no known cause counts on from it", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  const at = new Date().toISOString();
+  // Interrupted at two deaths already; the run killed at a crash point
+  // finished a step too, so a death with no known cause would make three.
+  seed(inst, 67, "checking", {
+    attempts: { check: { startedAt: at, run: "dead", interrupted: 2 } },
+    finishedRun: "dead",
+  });
+  writeFileSync(
+    join(inst.root, "service.json"),
+    JSON.stringify({
+      pid: 1,
+      runId: "dead",
+      at,
+      startedAt: at,
+      finished: 0,
+      deaths: [],
+      setAside: {},
+    }),
+  );
+  writeFileSync(
+    join(inst.root, "crash-point.json"),
+    JSON.stringify({ run: "dead", point: "engine:check:started" }),
+  );
+  let service = serve(inst);
+  await until(
+    () => {
+      const { runId } = recordOf(inst);
+      return (
+        runId !== "dead" && stateOf(inst, 67).attempts.check?.run === runId
+      );
+    },
+    "the check resumed",
+    30_000,
+  );
+  const { runId } = recordOf(inst);
+  assert.deepEqual(stateOf(inst, 67).holds, []);
+  assert.equal(
+    stateOf(inst, 67).attempts.check.interrupted,
+    2,
+    "the count as it was",
+  );
+  // A death with no known cause, after progress: the third in a row.
+  service.child.kill("SIGKILL");
+  await exited(service, "the killed service");
+  const state = stateOf(inst, 67);
+  state.finishedRun = runId;
+  writeFileSync(join(inst.objectives, "67.json"), JSON.stringify(state));
+  service = serve(inst);
+  await until(() => stateOf(inst, 67).holds.length, "hold", 30_000);
+  assert.match(
+    stateOf(inst, 67).holds[0].question,
+    /^The service died 3 times in a row while step check ran/,
+  );
+  assert.deepEqual(
+    recordOf(inst).deaths.map((death) => death.crashPoint),
+    ["engine:check:started", undefined],
+  );
+  await stopped(service);
+});
+
 test("an Objective dequeued during its check, before a re-run's cleanup began, or while that cleanup holds, is withdrawn and never plans", async () => {
   const inst = installation();
   // Saved by a dequeue while the check ran: the check is done now.

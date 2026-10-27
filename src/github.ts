@@ -338,6 +338,15 @@ export interface WorkflowRun {
   conclusion?: unknown;
 }
 
+/** An artifact a workflow run uploaded (GitHub.runArtifacts). */
+export interface RunArtifact {
+  id: number;
+  name: string;
+  /** Its download's size, in bytes. */
+  size: number;
+  expired: boolean;
+}
+
 /** A native stack of PRs: its base branch and its PRs, bottom first. */
 export interface Stack {
   number: number;
@@ -1741,6 +1750,21 @@ export class GitHub {
     return { total, commits: commits.slice(0, max) };
   }
 
+  /** The commit branch `branch` holds on GitHub. */
+  async branchHead(branch: string, signal?: AbortSignal): Promise<string> {
+    const ref = branch.split("/").map(encodeURIComponent).join("/");
+    const read = await this.rest<{ object?: { sha?: unknown } | null }>(
+      "GET",
+      this.repo(`git/ref/heads/${ref}`),
+      undefined,
+      signal,
+    );
+    const sha = read.object?.sha;
+    if (typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha))
+      throw new TransientError(`GitHub shows no head of branch ${branch}`);
+    return sha;
+  }
+
   /** The latest check run of each check suite on the commit. */
   checkRuns(sha: string, signal?: AbortSignal): Promise<CheckRun[]> {
     return this.pages<CheckRun>(
@@ -1774,26 +1798,164 @@ export class GitHub {
   }
 
   /**
-   * An Actions job's workflow run and the attempt it ran in (an Actions
-   * check run's id is its job's); undefined without Actions read access.
+   * An Actions job's workflow run, the attempt it ran in (an Actions check
+   * run's id is its job's) and the names of its steps that failed;
+   * undefined without Actions read access.
    */
   async workflowJob(
     job: number,
     signal?: AbortSignal,
-  ): Promise<{ run: number; attempt: number } | undefined> {
+  ): Promise<
+    { run: number; attempt: number; failedSteps: string[] } | undefined
+  > {
     const read = await this.optional(() =>
-      this.rest<{ run_id?: unknown; run_attempt?: unknown }>(
-        "GET",
-        this.repo(`actions/jobs/${job}`),
-        undefined,
-        signal,
-      ),
+      this.rest<{
+        run_id?: unknown;
+        run_attempt?: unknown;
+        steps?: { name?: unknown; conclusion?: unknown }[] | null;
+      }>("GET", this.repo(`actions/jobs/${job}`), undefined, signal),
     );
     if (typeof read?.run_id !== "number") return undefined;
     return {
       run: read.run_id,
       attempt: typeof read.run_attempt === "number" ? read.run_attempt : 1,
+      failedSteps: (Array.isArray(read.steps) ? read.steps : [])
+        .filter(
+          (step) =>
+            ["failure", "timed_out"].includes(String(step?.conclusion)) &&
+            typeof step.name === "string",
+        )
+        .map((step) => String(step.name)),
     };
+  }
+
+  /**
+   * The artifacts a workflow run uploaded, in every attempt (GitHub's
+   * first 100); undefined without Actions read access.
+   */
+  async runArtifacts(
+    run: number,
+    signal?: AbortSignal,
+  ): Promise<RunArtifact[] | undefined> {
+    const listed = await this.optional(() =>
+      this.pages<{
+        id?: unknown;
+        name?: unknown;
+        size_in_bytes?: unknown;
+        expired?: unknown;
+      }>(
+        this.repo(`actions/runs/${run}/artifacts`),
+        signal,
+        (body) => (body as { artifacts?: unknown }).artifacts ?? [],
+        1,
+        () => false,
+      ),
+    );
+    return listed?.flatMap((artifact) =>
+      typeof artifact?.id === "number" && typeof artifact.name === "string"
+        ? [
+            {
+              id: artifact.id,
+              name: artifact.name,
+              size:
+                typeof artifact.size_in_bytes === "number"
+                  ? artifact.size_in_bytes
+                  : 0,
+              expired: artifact.expired === true,
+            },
+          ]
+        : [],
+    );
+  }
+
+  /**
+   * An artifact's download (a zip archive, or the one file uploaded
+   * unarchived), read in memory: undefined when it is longer than
+   * `maxBytes` or GitHub won't serve it (expired, no access).
+   */
+  async artifactDownload(
+    artifact: number,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<Buffer | undefined> {
+    let response: Response;
+    try {
+      response = await expecting([302, 403, 404, 410], () =>
+        this.send(
+          "GET",
+          this.repo(`actions/artifacts/${artifact}/zip`),
+          undefined,
+          signal,
+        ),
+      );
+    } catch (error) {
+      if (!(error instanceof GitHubError)) throw error;
+      if (error.status !== 302 || !error.location) return undefined;
+      const followed = await this.signedLink(
+        error.location,
+        `artifact ${artifact}`,
+        {},
+        signal,
+      );
+      if (!followed) return undefined;
+      response = followed;
+    }
+    return this.boundedBody(response, maxBytes, `artifact ${artifact}`, signal);
+  }
+
+  /**
+   * A signed link to storage GitHub redirected to: read without Factory's
+   * login, and never redirected again. Undefined when it doesn't answer OK.
+   */
+  private async signedLink(
+    location: string,
+    what: string,
+    headers: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Response | undefined> {
+    const deadline = AbortSignal.timeout(TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(location, {
+        headers,
+        redirect: "error",
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+      });
+    } catch (failure) {
+      if (signal?.aborted) throw failure;
+      throw new TransientError(`${what}: ${errorMessage(failure)}`);
+    }
+    if (response.ok) return response;
+    await response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+
+  /** A response's body, or undefined once it runs past `maxBytes`. */
+  private async boundedBody(
+    response: Response,
+    maxBytes: number,
+    what: string,
+    signal?: AbortSignal,
+  ): Promise<Buffer | undefined> {
+    const reader = response.body?.getReader();
+    if (!reader) return undefined;
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) return undefined;
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new TransientError(`${what}: ${errorMessage(error)}`);
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+    return Buffer.concat(chunks);
   }
 
   /**
@@ -2260,42 +2422,21 @@ export class GitHub {
         range,
       );
     } catch (error) {
-      // The log is served from a signed link to storage: read without
-      // Factory's login, and never redirected again.
+      // The log is served from a signed link to storage.
       if (!(error instanceof GitHubError && error.status === 302)) throw error;
       if (!error.location) return undefined;
-      const deadline = AbortSignal.timeout(TIMEOUT_MS);
-      try {
-        response = await fetch(error.location, {
-          headers: range,
-          redirect: "error",
-          signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
-        });
-      } catch (failure) {
-        if (signal?.aborted) throw failure;
-        throw new TransientError(`job ${job} log: ${errorMessage(failure)}`);
-      }
-      if (!response.ok) return undefined;
+      const followed = await this.signedLink(
+        error.location,
+        `job ${job} log`,
+        range,
+        signal,
+      );
+      if (!followed) return undefined;
+      response = followed;
     }
-    const reader = response.body?.getReader();
-    if (!reader) return undefined;
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > 1024 * 1024) return undefined;
-        chunks.push(value);
-      }
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      throw new TransientError(`job ${job} log: ${errorMessage(error)}`);
-    } finally {
-      await reader.cancel().catch(() => undefined);
-    }
-    return Buffer.concat(chunks).toString("utf8");
+    return (
+      await this.boundedBody(response, 1024 * 1024, `job ${job} log`, signal)
+    )?.toString("utf8");
   }
 
   private async send(

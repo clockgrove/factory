@@ -5,7 +5,7 @@ import { validationMembers } from "../media.js";
 import { acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import { headAndTail } from "../text.js";
-import { validateTree } from "../validate.js";
+import { lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
@@ -56,6 +56,12 @@ export async function validateStep(
       dir: join(workDir, "artifacts", item.id),
     },
     media: validationMembers(plan, item, selection(state)),
+    // A dependency change's lockfile, which Factory resolves when the
+    // worker couldn't, is committed on the candidate (validate.ts).
+    lockfile: {
+      ref: lockfileRef(state.issue, item.id),
+      author: () => deps.github.commitAuthor(signal),
+    },
     sandbox: config.sandbox,
     commandTimeoutMs: commandTimeoutMs(deps),
     signal,
@@ -68,6 +74,7 @@ export async function validateStep(
         tree: result.tree,
         commands: result.commands,
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
+        ...(result.regenerated ? { regenerated: result.regenerated } : {}),
       };
       return { kind: "done", result: done };
     }

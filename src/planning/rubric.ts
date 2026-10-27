@@ -301,6 +301,38 @@ export const REFUSAL_REVIEW_FINDINGS =
   "If the refusal is right, because the obstacle it names is real and no amended plan within the rules the planner was given can serve the discovery, return an empty findings array: Factory then rejects the amendment with the planner's reason and asks the operator. Otherwise return a fix finding that names the rule or evidence that allows a plan (for example, the started-item rule lets a reattempt item's dependencies grow to wait for a new item that delivers what its own acceptance or validation needs) and outlines the plan it allows. Its itemIds name the previousPlan items that plan changes or that a new item depends on, and its evidenceIndices the rows it rests on. The planner receives it as a correction and plans the amendment again. Never report a finding whose plan the started-item rule refuses. When only the operator can decide whether a plan is allowed (a product, scope or authority choice the Objective leaves open), return an operator-decision finding whose question states that choice instead. Do not report observations, confirmations or speculative questions.";
 
 /**
+ * What the review of first planning's cannotPlan judges (steps.ts
+ * `reviewStep`). Live (Codex, media.select-repair), a planner refused after
+ * a reviewer's contradictory objections, and the refusal went to the
+ * operator unreviewed (#2111).
+ */
+export const PLAN_REFUSAL_REVIEW_INTRO =
+  "Independently review a planner's refusal to plan a Factory Objective. The planner was asked for a plan of Work Items that meets the Objective within its constraints and the pinned sources, and answered cannotPlan instead, with the reason and the change below: it says no plan can meet the Objective as written, so the operator must change the Objective or the repository. Decide whether the refusal is right. Judge its reason against the Objective, the pinned sources, the review packet and the repository, never from the planner's word alone.";
+
+/** How the findings of a review of first planning's cannotPlan are shaped. */
+export const PLAN_REFUSAL_REVIEW_FINDINGS =
+  "If the refusal is right, because the obstacle it names is real and no plan within the Objective, its constraints and the pinned sources can meet it, return an empty findings array: Factory then asks the operator with the planner's reason. Otherwise return a fix finding that names the rule or evidence that allows a plan (outcomes the refusal reads as contradictory that one plan can meet together, or a file, command or capability a Work Item may create) and outlines the plan it allows, with itemIds [] (there is no plan yet) and its evidenceIndices the rows it rests on. The planner receives it as a correction and plans again. When an operator's answer can settle the obstacle (a product, scope or authority choice the Objective leaves open), return an operator-decision finding whose question states that choice instead, and Factory asks the operator. Do not report observations, confirmations or speculative questions.";
+
+/**
+ * A refusal reviewed after the planner was given corrections: the reviewer
+ * is given them, Factory's checks' and this review's earlier rounds', as a
+ * plan's revision round is given the last review's findings
+ * (GRAPH_REVIEW_REVISION_ROUND), so it rules consistently with them
+ * (#2111). Item ids of a plan it doesn't see are earlierItemIds, so a
+ * finding it restates is a valid answer.
+ */
+export const REFUSAL_REVIEW_LATER_ROUND =
+  "This is a later round: the planner was given the corrections below, each with the round it came from and its source (review: an earlier round of this review; check: Factory's deterministic plan checks, which no review finding overrides), and then answered cannotPlan; the round's last review's findings are among them when that review was older. earlierRefusal, when present, is that round's own refusal, which this review overturned. A finding's earlierItemIds name items of a plan you are not shown; a finding you report keeps those in its detail, and its itemIds name only items you may name. (a) When an earlier review finding said a plan is allowed, report it again, with its kind, unless the new refusal names an obstacle that finding did not weigh. (b) When the refusal rests on the earlier findings themselves (it says they conflict with each other or with the Objective, or that one can't be met), judge those findings again: when a review finding was wrong, return a fix finding that says which, withdraws or restates it, and outlines a plan that meets the rest and every check finding; confirm the refusal only when the obstacle lies in the Objective, the repository or a check finding, not in a review finding. Do not reverse an earlier review finding without a new reason it did not weigh.";
+
+/**
+ * A plan reviewed after a refusal the review overturned: it is given the
+ * refusal and that review's findings, which the planner planned from, so a
+ * finding that withdrew an objection holds (#2111).
+ */
+export const GRAPH_REVIEW_AFTER_REFUSAL =
+  "The planner answered cannotPlan in an earlier round (earlierRefusal below), and this review overturned it with the findings below, which the planner was given and planned this plan from. Review the plan as the scope above says, and also: (a) report one of these findings again, with its kind, when the plan does not do what it asks; (b) where one withdrew or restated an earlier objection, do not raise that objection again, or ask to undo what the finding asked for, without a new reason it did not weigh. A finding's earlierItemIds name items of a plan you are not shown.";
+
+/**
  * The code-quality bar every worker gets up front and every Work Item result
  * review enforces on changed code. Generic for any repository; the target's
  * own conventions win where they differ.

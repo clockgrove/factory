@@ -13,10 +13,13 @@ import {
   GRAPH_REVIEW_INTRO,
   GRAPH_REVIEW_REVISION_ROUND,
   NO_GAP_REFUSAL,
+  PLAN_REFUSAL_REVIEW_FINDINGS,
+  PLAN_REFUSAL_REVIEW_INTRO,
   PLANNER_CHECKLIST,
   QA_EVIDENCE_GUIDANCE,
   REFUSAL_REVIEW_FINDINGS,
   REFUSAL_REVIEW_INTRO,
+  REFUSAL_REVIEW_LATER_ROUND,
   SELECTED_MEDIA_ABSENT,
   WORK_ITEM_ENTRY_SIGNAL,
   type WorkerCommandAccess,
@@ -238,6 +241,8 @@ export function renderPlanningInstructions(
   corrections: readonly (Finding & { itemIds?: readonly string[] })[] = [],
   /** The planner answers with only its changes to the current plan. */
   revising = false,
+  /** The previous round's cannotPlan, which its review found a plan allows (steps.ts). */
+  refused?: CannotPlan,
 ): string {
   const entries = corrections.map((finding) => {
     const itemIds = findingItemIds(finding);
@@ -248,7 +253,10 @@ export function renderPlanningInstructions(
     };
   });
   const answered = corrections.some((entry) => entry.source === "operator");
-  return `\n\n${packageManagerInstructions(packageManagerUpdate(blocks))}${qualityCheckpointInstructions(blocks)}${entries.length ? `\n\n${revising ? "Revise the current plan once to fix these findings, answering with only the changes." : "Revise the complete graph once to fix these findings."} Each has a source field: review (the independent plan reviewer), check (a deterministic Factory refusal), diagnosis (an analysis of the last failure) or operator (the operator's answer to your decisionRequired question or to the plan reviewer's operator question, which is authority to act as answered).${revising && answered ? " The current plan holds the choice it made when each question was asked: change it only where an operator answer differs from that choice or is not yet reflected, so an answer that confirms it needs no item changes; set decisionRequired again only for a choice no answer settles." : ""}${answered ? ` ${OPERATOR_ANSWER_SETTLES}` : ""} Do not expand scope or invent authority:\n${JSON.stringify(entries)}` : ""}`;
+  const overturned = refused
+    ? `\n\nYour previous answer was cannotPlan, with the reason ${JSON.stringify(refused.reason)}, and Factory's independent review found that a plan is allowed: plan as the review's findings below say, and answer cannotPlan again only for an obstacle they do not address.`
+    : "";
+  return `\n\n${packageManagerInstructions(packageManagerUpdate(blocks))}${qualityCheckpointInstructions(blocks)}${overturned}${entries.length ? `\n\n${revising ? "Revise the current plan once to fix these findings, answering with only the changes." : "Revise the complete graph once to fix these findings."} Each has a source field: review (the independent plan reviewer), check (a deterministic Factory refusal), diagnosis (an analysis of the last failure) or operator (the operator's answer to your decisionRequired question or to the plan reviewer's operator question, which is authority to act as answered).${revising && answered ? " The current plan holds the choice it made when each question was asked: change it only where an operator answer differs from that choice or is not yet reflected, so an answer that confirms it needs no item changes; set decisionRequired again only for a choice no answer settles." : ""}${answered ? ` ${OPERATOR_ANSWER_SETTLES}` : ""} Do not expand scope or invent authority:\n${JSON.stringify(entries)}` : ""}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,8 +309,8 @@ const lookupGuidance = (open: boolean) =>
 
 /**
  * When the planner may answer cannotPlan, and what it is never for: the
- * planner is told both, and an amendment's refusal review judges a refusal
- * against them.
+ * planner is told both, and the refusal review (`renderRefusalReviewCall`)
+ * judges a refusal against them, in first planning and in an amendment.
  */
 const CANNOT_PLAN_WHEN =
   "cannotPlan is null unless no plan can meet the Objective as written: its outcomes contradict each other or its constraints, it needs something the repository and sources lack that no Work Item may create, or its constraints rule the outcome out.";
@@ -342,7 +350,7 @@ ${PLANNER_CHECKLIST}
 
 How to answer:
 ${compileRepositoryGuidance(repository, baseSha)}- Return only the requested choice structure and zero-based indices. Use a concise title, one-sentence goal, stage-local acceptance and non-goals. oneOutcomeReason is null unless an item has more than ${WORK_ITEM_ENTRY_SIGNAL} acceptance entries. Before review, Factory refuses an item above that without a reason, an acceptance entry that cites a line number, two items owning the same or overlapping paths when neither depends on the other, and, when the plan selects any validation command, a work item without one or a criterion proved by final review or CI whose owner runs none. The brief carries only settled decisions, cross-item contracts and evidence responsibilities the worker cannot get from the repository or the item's other fields; workers read the code themselves, so give no reading lists, line ranges or edit steps, and never recopy sources, acceptance, ownership or commands.
-- ${CANNOT_PLAN_WHEN} Then reason names the concrete obstacle (the conflicting lines, the missing file, command or capability) and change says what the operator must change in the Objective or the repository; Factory asks the operator and plans no round on its own. ${CANNOT_PLAN_LIMITS}
+- ${CANNOT_PLAN_WHEN} Then reason names the concrete obstacle (the conflicting lines, the missing file, command or capability) and change says what the operator must change in the Objective or the repository. An independent review judges the refusal first: it sends the refusal back to you when a rule or the evidence allows a plan, and otherwise Factory asks the operator and plans no round on its own. ${CANNOT_PLAN_LIMITS}
 - A pinned source has its complete literal body in the block labeled "source <sourceIndex>"; a source-line lineIndex is that block's numbered line.
 - Coverage: emit one top-level entry per supplied obligation, in order; array position selects obligationIndex. Choose a declared owner and a proof allowed by its actual item kind, including retained kinds. Validation indices refer to that same item. A semantic proof names no acceptance entry: the owner's review judges the obligation itself, so the owner's acceptance as a whole must deliver it, except a perceptual quality of candidate media (that a preview depicts its model), which the owner's result review judges from the Objective criterion itself, so no acceptance entry needs to state it; the owner's goal or brief states it, because its worker sees only its own item. Do not duplicate coverage or obligation indices. Preserve every clause of the whole obligation. Item-local proof and acceptance are after its validation but before its delivery, LFS upload, publication, merge or hydration; they cannot depend on its own merge, later items or final validation. Native-stack predecessors are not yet merged. Use stage-local component acceptance and final-review on its implementation owner when final validation or QA evidence proves the full obligation. Final-review names a phase, not supplied runtime evidence. Never fake sibling implementations or prematurely passing checks. Add downstream/QA proof only for a named source requirement or material risk whose necessary evidence is missing from final validation/review; put that responsibility in its brief. A final-controller guarantee must cover the entire obligation. Final commands are only the installation's required commands; they run on the integrated result. A criterion that requires a command to pass ("\`npm test\` passes", or a command the Objective says the result must pass) is proved by running that exact command, unchanged, on the integrated result: a read-only QA item that depends on every item the command covers and runs it as its validation. Never weaken, replace, split or drop such a command. A command in the installation's CI-only list never runs in validation: prove it by an integrated-ci proof of a CI check that runs it, or ask the operator through decisionRequired.
 - Source obligations (rule 3): give each sourceObligations entry its pinned sourceIndex (repository files you cite are not obligation sources), the smallest firstLineIndex..lastLineIndex range of that source's numbered lines stating it, and statement null when those lines state it on their own, otherwise a short self-contained statement that keeps every clause; ranges never repeat or overlap. A covered entry has an owner, a proof allowed for the owner's kind and an environment, usually a semantic proof by the owner whose acceptance delivers it; an out-of-scope entry has a reason and the OBJECTIVE objectiveLineIndices whose constraints or out-of-scope text exclude it. Obligations that carry source and lines are retained source obligations: cover them in coverage and do not list them again. In an amendment, list each previous sourceExclusions entry again with the same lines, or cover it.
@@ -450,13 +458,7 @@ export function revisionScope(
   const keys = new Set([...before.fields.keys(), ...now.fields.keys()]);
   return {
     round,
-    previousFindings: previous.findings
-      .filter((finding) => finding.source === "review")
-      .map((finding) => ({
-        kind: finding.kind ?? "fix",
-        itemIds: findingItemIds(finding),
-        detail: finding.message,
-      })),
+    previousFindings: reviewFindingsView(previous.findings),
     changedItemIds: [...now.items.keys()].filter(
       (id) =>
         before.items.has(id) && before.items.get(id) !== now.items.get(id),
@@ -467,6 +469,19 @@ export function revisionScope(
       (key) => before.fields.get(key) !== now.fields.get(key),
     ),
   };
+}
+
+/** An earlier review's findings as a later review reads them; other sources' are left out. */
+export function reviewFindingsView(
+  findings: readonly (Finding & { itemIds?: readonly string[] })[],
+): RevisionScope["previousFindings"] {
+  return findings
+    .filter((finding) => finding.source === "review")
+    .map((finding) => ({
+      kind: finding.kind ?? "fix",
+      itemIds: findingItemIds(finding),
+      detail: finding.message,
+    }));
 }
 
 /**
@@ -602,29 +617,56 @@ function reviewEvidenceText(input: ReviewCallInput): string {
   return `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}\nRoot package scripts at the base:\n${JSON.stringify(facts.packageCommands)}\nCI-only commands (validation never runs them):\n${JSON.stringify(facts.ciOnlyCommands)}\n${validationEnvironmentNote(facts.hostNetwork === true, facts.lockfileResolution === true)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
 }
 
+/** The review before a refusal's, when it found problems: its findings, and the refusal it reviewed if it was one. */
+export interface EarlierRefusalReview {
+  /** The planning round it reviewed. */
+  round: number;
+  refusal?: CannotPlan;
+  findings: RevisionScope["previousFindings"];
+}
+
 export interface RefusalReviewInput extends ReviewCallInput {
-  /** The amendment planner's cannotPlan answer. */
+  /** The planner's cannotPlan answer. */
   refusal: CannotPlan;
+  /**
+   * Whose refusal: first planning's (steps.ts `reviewStep`), which has no
+   * plan yet, or an amendment planner's (amendments.ts `amendReviewStep`).
+   */
+  of: "objective" | "amendment";
+  /** An earlier review's findings, which a later refusal is judged consistently with. */
+  earlier?: EarlierRefusalReview;
 }
 
 /**
- * The review of an amendment planner's cannotPlan (amendments.ts
- * `amendReviewStep`): whether a plan within the rules the planner was
- * given can serve the discovery. The plan being amended is
- * FACTORY_AMENDMENT's previousPlan, so findings name its items. The answer
- * schema is graphReviewSchema (review.ts); no findings confirm the refusal.
+ * The review of a planner's cannotPlan: whether a plan within the rules
+ * the planner was given can meet the Objective, or for an amendment serve
+ * the discovery. An amendment's plan is FACTORY_AMENDMENT's previousPlan,
+ * so its findings name that plan's items; first planning's name none. The
+ * answer schema is graphReviewSchema (review.ts); no findings confirm the
+ * refusal. A refusal after a review that found problems is given that
+ * review's findings (`earlier`), as a plan's revision round is.
  */
 export function renderRefusalReviewCall(input: RefusalReviewInput): Rendered {
   const { facts } = input;
-  const instructions = `${REFUSAL_REVIEW_INTRO}
+  const amendment = input.of === "amendment";
+  const instructions = `${amendment ? REFUSAL_REVIEW_INTRO : PLAN_REFUSAL_REVIEW_INTRO}
 The planner's rule for cannotPlan: ${CANNOT_PLAN_WHEN} ${CANNOT_PLAN_LIMITS}
 ${workItemStandard(facts.hostNetwork === true)}
 ${input.workers ? `${workerCapability(input.workers)}\n` : ""}${input.decisions.length ? "\nOperator planning decisions: the controller evidence FACTORY_OPERATOR_PLANNING_DECISIONS holds the operator's recorded answers to questions the planner or an earlier plan review asked. Each answer settles that choice within the Objective, so a refusal that rests on a choice an answer settled is wrong. An answer grants no command, ownership, source or capability authority beyond the Objective.\n" : ""}
-${NO_GAP_REFUSAL}
-${REFUSAL_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
+${amendment ? `${NO_GAP_REFUSAL}\n${REFUSAL_REVIEW_FINDINGS}` : PLAN_REFUSAL_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
 
 Objective:\n`;
-  const tail = `\nBase: ${facts.base}\nRefusal:\n${JSON.stringify(input.refusal)}\nFinal commands:\n${JSON.stringify(input.finalCommands)}`;
+  // The earlier review follows the refusal, so the cached prefix holds.
+  const { earlier } = input;
+  const scope = earlier
+    ? `\nEarlier review (round ${earlier.round}):\n${REFUSAL_REVIEW_LATER_ROUND}\n${JSON.stringify(
+        {
+          ...(earlier.refusal ? { earlierRefusal: earlier.refusal } : {}),
+          previousFindings: earlier.findings,
+        },
+      )}`
+    : "";
+  const tail = `\nBase: ${facts.base}\nRefusal:\n${JSON.stringify(input.refusal)}\nFinal commands:\n${JSON.stringify(input.finalCommands)}${scope}`;
   return rendered(
     [
       ["instructions", instructions],

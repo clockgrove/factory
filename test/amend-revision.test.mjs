@@ -35,6 +35,7 @@ import { buildFacts } from "../dist/planning/facts.js";
 import {
   NO_GAP_ANSWER,
   NO_GAP_REFUSAL,
+  REFUSAL_REVIEW_LATER_ROUND,
   SELECTED_MEDIA_ABSENT,
 } from "../dist/planning/rubric.js";
 import { planningRevisions } from "../dist/planning/steps.js";
@@ -1693,14 +1694,41 @@ test("a refusal's review that asks an operator decision rejects with both, and t
   {
     // The planner refuses again, and the review says the same: rejected.
     const { checkout, state } = await discovered();
-    const { planner } = scripted(refuses, overturns(), refuses, overturns());
+    const { planner, asked } = scripted(
+      refuses,
+      overturns(),
+      refuses,
+      overturns(),
+    );
     const deps = depsOf(checkout, planner);
     await step(state, deps);
     assert.equal((await step(state, deps)).outcome.kind, "retry");
+    assert.ok(!asked[1].prompt.includes("Earlier review"));
     await step(state, deps);
     assert.deepEqual(state.done["amend:op-1:plan"].cannot, CANNOT);
     const again = await step(state, deps);
     assert.equal(again.key, "amend:op-1:review");
+    // The second refusal's review is given the first review's finding, so
+    // it rules consistently with it (#2111).
+    assert.ok(
+      asked[3].prompt.includes(
+        `Earlier review (round 1):\n${REFUSAL_REVIEW_LATER_ROUND}`,
+      ),
+    );
+    assert.ok(
+      asked[3].prompt.includes(
+        JSON.stringify({
+          earlierRefusal: CANNOT,
+          previousFindings: [
+            {
+              kind: "fix",
+              itemIds: ["a"],
+              detail: `${ALLOWED}\nQuestion: How should the plan change to fix this: ${ALLOWED}?`,
+            },
+          ],
+        }),
+      ),
+    );
     assert.ok(
       state.done["amend:op-1:review"].rejected.startsWith(
         `${REFUSED} Independent amendment review: Amendment plan round 2 came back with the same problems as round 1: ${ALLOWED}`,

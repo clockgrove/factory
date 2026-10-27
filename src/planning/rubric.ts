@@ -301,6 +301,28 @@ export const REFUSAL_REVIEW_FINDINGS =
   "If the refusal is right, because the obstacle it names is real and no amended plan within the rules the planner was given can serve the discovery, return an empty findings array: Factory then rejects the amendment with the planner's reason and asks the operator. Otherwise return a fix finding that names the rule or evidence that allows a plan (for example, the started-item rule lets a reattempt item's dependencies grow to wait for a new item that delivers what its own acceptance or validation needs) and outlines the plan it allows. Its itemIds name the previousPlan items that plan changes or that a new item depends on, and its evidenceIndices the rows it rests on. The planner receives it as a correction and plans the amendment again. Never report a finding whose plan the started-item rule refuses. When only the operator can decide whether a plan is allowed (a product, scope or authority choice the Objective leaves open), return an operator-decision finding whose question states that choice instead. Do not report observations, confirmations or speculative questions.";
 
 /**
+ * What the review of first planning's cannotPlan judges (steps.ts
+ * `reviewStep`). Live (Codex, media.select-repair), a planner refused after
+ * a reviewer's contradictory objections, and the refusal went to the
+ * operator unreviewed (#2111).
+ */
+export const PLAN_REFUSAL_REVIEW_INTRO =
+  "Independently review a planner's refusal to plan a Factory Objective. The planner was asked for a plan of Work Items that meets the Objective within its constraints and the pinned sources, and answered cannotPlan instead, with the reason and the change below: it says no plan can meet the Objective as written, so the operator must change the Objective or the repository. Decide whether the refusal is right. Judge its reason against the Objective, the pinned sources, the review packet and the repository, never from the planner's word alone.";
+
+/** How the findings of a review of first planning's cannotPlan are shaped. */
+export const PLAN_REFUSAL_REVIEW_FINDINGS =
+  "If the refusal is right, because the obstacle it names is real and no plan within the Objective, its constraints and the pinned sources can meet it, return an empty findings array: Factory then asks the operator with the planner's reason. Otherwise return a fix finding that names the rule or evidence that allows a plan (outcomes the refusal reads as contradictory that one plan can meet together, or a file, command or capability a Work Item may create) and outlines the plan it allows, with itemIds [] (there is no plan yet) and its evidenceIndices the rows it rests on. The planner receives it as a correction and plans again. When an operator's answer can settle the obstacle (a product, scope or authority choice the Objective leaves open), return an operator-decision finding whose question states that choice instead, and Factory asks the operator. Do not report observations, confirmations or speculative questions.";
+
+/**
+ * A refusal reviewed after an earlier review of the same planning found
+ * problems: the reviewer is given that review's findings, as a plan's
+ * revision round is (GRAPH_REVIEW_REVISION_ROUND), so it rules
+ * consistently with them (#2111).
+ */
+export const REFUSAL_REVIEW_LATER_ROUND =
+  "This is a later round: the earlier review's findings below went to the planner as corrections, and it answered cannotPlan. (a) When an earlier finding said a plan is allowed, report it again, with its kind, unless the new refusal names an obstacle that finding did not weigh. (b) When the refusal rests on the earlier findings themselves (it says they conflict with each other or with the Objective, or that one can't be met), judge those findings again: when one was wrong, return a fix finding that says which, withdraws or restates it, and outlines a plan that meets the rest; confirm the refusal only when the obstacle lies in the Objective or the repository, not in a finding. Do not reverse an earlier finding without a new reason it did not weigh.";
+
+/**
  * The code-quality bar every worker gets up front and every Work Item result
  * review enforces on changed code. Generic for any repository; the target's
  * own conventions win where they differ.

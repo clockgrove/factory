@@ -27,10 +27,12 @@ import {
   revisionsKey,
 } from "./plan.js";
 import {
+  type EarlierRefusalReview,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
   renderRefusalReviewCall,
+  reviewFindingsView,
 } from "./prompts.js";
 import {
   decodeGraphReview,
@@ -116,7 +118,8 @@ import {
  *   planner was given. No findings confirm it, and acceptance rejects the
  *   amendment with the planner's reason; a fix finding names what allows a
  *   plan and sends the round back like any other, so the planner plans
- *   again within the same allowance.
+ *   again within the same allowance. A later refusal's review is given the
+ *   findings of the last review that sent a round back (`earlierReview`).
  * - A reviewed round that leaves the plan unchanged, the planner's answer
  *   for a discovery that shows no gap (`NO_GAP_ANSWER`), settles the
  *   amendment as continued (`AmendmentResult.unchanged`): nothing is
@@ -260,6 +263,28 @@ interface AmendRevision {
 
 function revisionsOf(state: ObjectiveState, id: string): AmendRevision[] {
   return (state.kept[revisionsKey(id)] ?? []) as AmendRevision[];
+}
+
+/**
+ * The last round its review sent back, with that review's findings and
+ * the refusal it reviewed, if it was one: a later refusal's review is
+ * given them (prompts.ts `renderRefusalReviewCall`). Round `at + 1` is
+ * kept at `at`, as `sendBack` numbers them.
+ */
+function earlierReview(
+  revisions: readonly AmendRevision[],
+): EarlierRefusalReview | undefined {
+  for (let at = revisions.length - 1; at >= 0; at--) {
+    const { findings, refused } = revisions[at]!;
+    const reviewed = reviewFindingsView(findings);
+    if (reviewed.length)
+      return {
+        round: at + 1,
+        ...(refused ? { refusal: refused } : {}),
+        findings: reviewed,
+      };
+  }
+  return undefined;
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -1875,8 +1900,18 @@ function amendReviewStep(
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
       };
+      // A refusal after a review that found problems is judged with that
+      // review's findings, so it rules consistently with them (#2111).
+      const earlier = cannot
+        ? earlierReview(revisionsOf(state, proposal.id))
+        : undefined;
       const { prompt, facts: promptFacts } = cannot
-        ? renderRefusalReviewCall({ ...call, refusal: cannot })
+        ? renderRefusalReviewCall({
+            ...call,
+            refusal: cannot,
+            of: "amendment",
+            ...(earlier ? { earlier } : {}),
+          })
         : renderGraphReviewCall({ ...call, draft: round.draft! });
       const answer = await deps.planner.answer({
         role: "reviewer",

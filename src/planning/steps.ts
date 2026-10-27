@@ -58,9 +58,12 @@ import {
   predecessorsOnBase,
 } from "./predecessors.js";
 import {
+  type EarlierRefusalReview,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
+  renderRefusalReviewCall,
+  reviewFindingsView,
   revisionScope,
 } from "./prompts.js";
 import {
@@ -111,7 +114,8 @@ export interface PlanningDeps {
  * which re-reads the issue) and a round `n` (each revision):
  *
  *   plan:g:n   the planner's answer, decoded and checked
- *   review:g:n the independent plan review, when the draft is clean
+ *   review:g:n the independent plan review, when the draft is clean, or of
+ *              the planner's cannotPlan (`refusalReview`)
  *   decide:g:n accept, revise, or ask the operator (the only place that asks)
  *   plan       the accepted plan, posted on the issue
  *
@@ -128,7 +132,7 @@ export function planningStep(
   const planned = state.done[planKey] as PlanRound | undefined;
   if (!planned) return forgetting(planRoundStep(planKey, g, n, deps));
   const reviewKey = `review:${g}:${n}`;
-  if (cleanDraft(planned) && !state.done[reviewKey])
+  if ((cleanDraft(planned) || planned.refusalReview) && !state.done[reviewKey])
     return reviewStep(reviewKey, g, n, deps);
   const decideKey = `decide:${g}:${n}`;
   if (!state.done[decideKey]) return decideStep(decideKey, g, n, deps);
@@ -168,8 +172,15 @@ interface PlanRound {
   draft?: Draft;
   findings?: Finding[];
   question?: string;
-  /** The planner declared the Objective can't be planned as written: no plan to review or revise. */
+  /** The planner declared the Objective can't be planned as written: no plan to revise. */
   cannot?: CannotPlan;
+  /**
+   * The refusal goes to the independent review before the decide step asks
+   * (#2111), which confirms it or sends it back to the planner. A refusal
+   * an earlier Factory saved has none, so its decide step asks at once, as
+   * it did then.
+   */
+  refusalReview?: true;
   /** The operator answered `replan` to a problem with the Objective. */
   replan?: true;
 }
@@ -420,6 +431,11 @@ function planRoundStep(
         ...(invalid ? [{ source: "check" as const, message: invalid }] : []),
       ];
       const revising = Boolean(previous?.answer);
+      // The previous round refused, and its review found a plan allowed.
+      const overturned =
+        previous?.cannot && fixes.some((f) => f.source === "review")
+          ? previous.cannot
+          : undefined;
       const profiles = offeredProfiles(config);
       const wire = {
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
@@ -435,6 +451,7 @@ function planRoundStep(
           inputs.shown.blocks,
           corrections,
           revising,
+          overturned,
         )}${await commandInstructions(facts, config.checkout, signal)}`,
         ...(revising
           ? {
@@ -516,10 +533,12 @@ function planRoundStep(
         return refusedAnswer(key, context.log, answer, decoded.findings);
       if (decoded.cannot) {
         context.log({ event: "planner-cannot-plan", ...decoded.cannot });
-        // No plan to revise: a round after it answers in full.
+        // No plan to revise: a round after it answers in full. Its review
+        // judges the refusal before anyone is asked.
         return done({
           ...(g > 1 && n === 1 ? { inputs } : {}),
           cannot: decoded.cannot,
+          refusalReview: true,
         } satisfies PlanRound);
       }
       const round: PlanRound = {
@@ -575,7 +594,8 @@ function reviewStep(
       if ("problems" in built)
         return objectiveProblemsHold(built.problems, "replan");
       const { facts } = built;
-      const draft = (state.done[`plan:${g}:${n}`] as PlanRound).draft!;
+      // A refusal has no draft: its review judges the planner's cannotPlan.
+      const { draft, cannot } = state.done[`plan:${g}:${n}`] as PlanRound;
       const all = decisions(state);
       const local = await localExecutables(inputs, config, signal);
       const evidence = planningReviewEvidence({
@@ -590,10 +610,9 @@ function reviewStep(
         inputs.base,
         signal,
       );
-      const scope = lastReview(state, g, n);
-      const { prompt, facts: promptFacts } = renderGraphReviewCall({
+      const last = lastReview(state, g, n);
+      const call = {
         facts,
-        draft,
         evidence,
         decisions: all,
         finalCommands: finalCommands(config.finalValidation.requiredCommands),
@@ -606,19 +625,43 @@ function reviewStep(
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
-        ...(scope
+      };
+      // A refusal after a review that found problems is judged with that
+      // review's findings, so it rules consistently with them (#2111).
+      const earlier: EarlierRefusalReview | undefined =
+        cannot && last && reviewFindingsView(last.findings).length
           ? {
-              scope: revisionScope(
-                n,
-                {
-                  ...scope,
-                  decisions: decisionsBefore(state, g, scope.round),
-                },
-                { draft, decisions: all },
-              ),
+              round: last.round,
+              ...(last.cannot ? { refusal: last.cannot } : {}),
+              findings: reviewFindingsView(last.findings),
             }
-          : {}),
-      });
+          : undefined;
+      const { prompt, facts: promptFacts } = cannot
+        ? renderRefusalReviewCall({
+            ...call,
+            refusal: cannot,
+            of: "objective",
+            ...(earlier ? { earlier } : {}),
+          })
+        : renderGraphReviewCall({
+            ...call,
+            draft: draft!,
+            // A plan after a reviewed refusal has no reviewed plan to be a
+            // revision of: it gets the full first review.
+            ...(last?.draft
+              ? {
+                  scope: revisionScope(
+                    n,
+                    {
+                      draft: last.draft,
+                      findings: last.findings,
+                      decisions: decisionsBefore(state, g, last.round),
+                    },
+                    { draft: draft!, decisions: all },
+                  ),
+                }
+              : {}),
+          });
       const answer = await deps.planner.answer({
         role: "reviewer",
         phase: "graph-review",
@@ -638,10 +681,11 @@ function reviewStep(
         log: context.log,
       });
       keepSession(context, "graph-review", answer);
+      // A refusal's findings name no item: there is no plan yet.
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
-        draft.items.map((item) => item.id),
+        draft ? draft.items.map((item) => item.id) : [],
       );
       if (decoded.invalid) {
         logRefused(context.log, answer.callId, decoded.reason);
@@ -653,20 +697,28 @@ function reviewStep(
   };
 }
 
-/** The last reviewed round of this generation before round `n`. */
+/**
+ * The last reviewed round of this generation before round `n`: its draft,
+ * or its refusal when the planner answered cannotPlan.
+ */
 function lastReview(
   state: ObjectiveState,
   g: number,
   n: number,
-): { draft: Draft; findings: Finding[]; round: number } | undefined {
+):
+  | { draft?: Draft; cannot?: CannotPlan; findings: Finding[]; round: number }
+  | undefined {
   for (let m = n - 1; m >= 1; m--) {
     const review = state.done[`review:${g}:${m}`] as ReviewRound | undefined;
-    if (review)
+    if (review) {
+      const { draft, cannot } = state.done[`plan:${g}:${m}`] as PlanRound;
       return {
-        draft: (state.done[`plan:${g}:${m}`] as PlanRound).draft!,
+        ...(draft ? { draft } : {}),
+        ...(cannot ? { cannot } : {}),
         findings: review.findings,
         round: m,
       };
+    }
   }
   return undefined;
 }
@@ -724,7 +776,14 @@ function decideStep(
       const nextRound = (decision?: PlannerDecision): Outcome =>
         spent
           ? {
-              ...spentHold(state, n, allowance, fixes, decision),
+              ...spentHold(
+                state,
+                n,
+                allowance,
+                fixes,
+                decision,
+                planned.cannot,
+              ),
               keep: { [answeredKey]: decision ?? null },
             }
           : {
@@ -817,10 +876,25 @@ function spentHold(
   allowance: number,
   fixes: Finding[],
   pending: PlannerDecision | undefined,
+  /** The round's refusal, which its review sends back with `fixes`. */
+  cannot?: CannotPlan,
 ): Held {
   const more = grant(state, "planningRevisions");
   const list = fixes.map((f, i) => `${i + 1}. ${f.message}`).join("\n");
   const past = `${n} rounds, past the ${allowance} autonomy.allowances.planningRevisions allows`;
+  const offers: Offer[] = [
+    {
+      answer: "more",
+      family: "retry",
+      consequence: `Allows ${more} more plan rounds.`,
+    },
+    ...ask(true),
+  ];
+  if (cannot && !pending)
+    return hold(
+      `${refusalText(cannot)}\n\nFactory's independent plan review found that a plan is allowed:\n\n${list}\n\nPlanning has run ${past}. \`more\` allows ${more} more rounds and sends the review's findings to the planner.`,
+      offers,
+    );
   return pending
     ? hold(
         `Planning has run ${past}. Your answer is kept until \`more\` sends it to the planner.\n\nQuestion: ${prose(oneLine(pending.question, 500))}\n\nAnswer: \`${pending.answer}\`${pending.text ? ` ${prose(pending.text)}` : ""}\n\n\`more\` allows ${more} more rounds and sends it.`,
@@ -840,14 +914,7 @@ function spentHold(
 ${list}
 
 \`more\` allows ${more} more rounds.`,
-        [
-          {
-            answer: "more",
-            family: "retry",
-            consequence: `Allows ${more} more plan rounds.`,
-          },
-          ...ask(true),
-        ],
+        offers,
       );
 }
 
@@ -961,9 +1028,17 @@ function questionFor(
     offers,
   });
   const ASK = ask(spent);
-  if (planned.cannot)
+  const refused = planned.cannot && refusalText(planned.cannot);
+  // A refusal its review sends back with fixes is planned again, below;
+  // one it confirmed, or one an earlier Factory saved unreviewed, asks.
+  if (refused && asks.length && !fixes.length)
     return question(
-      `The planner says this Objective can't be planned as written:\n\n${planned.cannot.reason}\n\nWhat would have to change: ${planned.cannot.change}\n\nEdit the issue, then \`replan\` plans again from it. \`answer <guidance>\` sends your guidance to the planner for another round.`,
+      `${refused}\n\nFactory's independent plan review found ${asks.length === 1 ? "a question" : "questions"} only you can decide, which may allow a plan:\n\n${list(asks)}\n\n\`answer <decision>\` sends your decision to the planner for another round; \`replan\` plans again from the issue after you edit it.`,
+      ASK,
+    );
+  if (refused && !fixes.length)
+    return question(
+      `${refused}${state.done[`review:${g}:${n}`] ? "\n\nFactory's independent plan review confirmed it." : ""}\n\nEdit the issue, then \`replan\` plans again from it. \`answer <guidance>\` sends your guidance to the planner for another round.`,
       ["replan", answering(spent), "cancel"],
     );
   if (planned.question)
@@ -994,11 +1069,17 @@ function questionFor(
     n > 1 ? (state.done[`decide:${g}:${n - 1}`] as Decision) : undefined;
   if (previous?.corrections && sameFindings(previous.corrections, fixes))
     return question(
-      `Plan round ${n} came back with the same problems as round ${n - 1}:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`,
+      refused
+        ? `${refused}\n\nFactory's independent plan review found that a plan is allowed, with the same findings as round ${n - 1}, which the planner was given:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`
+        : `Plan round ${n} came back with the same problems as round ${n - 1}:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`,
       ASK,
     );
   return undefined;
 }
+
+/** The planner's cannotPlan as the operator reads it. */
+const refusalText = (cannot: CannotPlan): string =>
+  `The planner says this Objective can't be planned as written:\n\n${cannot.reason}\n\nWhat would have to change: ${cannot.change}`;
 
 /**
  * Planning revisions of the current generation: the rounds before this

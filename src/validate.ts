@@ -849,8 +849,8 @@ async function dependencyInputsChanged(
       path === "package-lock.json" ||
       path === "pnpm-workspace.yaml" ||
       path === ".npmrc" ||
-      path === "package.json" ||
-      path.endsWith("/package.json"),
+      // pnpm also reads a project's package.json5 or package.yaml.
+      /(?:^|\/)package\.(?:json|json5|yaml)$/.test(path),
   );
 }
 

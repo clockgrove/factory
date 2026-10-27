@@ -7,7 +7,8 @@
  * the network only when the registry and package-manager configuration is
  * the base's, byte for byte (of pnpm-workspace.yaml, every setting but its
  * package membership, overrides and catalogs), and every package the
- * candidate's lockfile resolves comes from a configured registry origin.
+ * candidate's lockfile resolves comes from a configured registry origin
+ * (with npm, so does every package a directory it links names).
  * Lockfiles are read structurally (YAML and JSON), never matched as text.
  * Package names still reach the registry in its lookups: that channel
  * remains. Factory's own lockfile resolution (validate.ts) fetches what the
@@ -91,6 +92,25 @@ async function changed(
     { signal },
   );
   return names.length !== 0;
+}
+
+/** Every path that differs between `base` and `commit`. */
+async function changedPaths(
+  worktree: string,
+  base: string,
+  commit: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return (
+    await hostGit(
+      worktree,
+      ["diff-tree", "-r", "--name-only", "-z", "--no-renames", base, commit],
+      { signal },
+    )
+  )
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
 }
 
 async function file(
@@ -190,18 +210,24 @@ function plainRange(value: string): boolean {
 /** An npm package name, scoped or not, with no leading dot (legacy uppercase included). */
 const NPM_PACKAGE_NAME = /^(?:@[\w~-][\w.~-]*\/)?[\w~-][\w.~-]*$/;
 
+/** A pnpm catalog reference: `catalog:` (the default catalog) or `catalog:<name>`. */
+const CATALOG = /^catalog:[\w.-]*$/;
+
 /**
  * Whether an importer's specifier or resolved version may stand beside a
  * registry-only install. A registry range or version may, and so may an
  * `npm:<name>@<range>` alias: it resolves from the registry like the range
- * would. `workspace:` ranges and `link:` paths to directories inside the
- * checkout (sibling workspace packages) may too: they fetch nothing. Any
- * other protocol (`file:`, git, hosted, an http URL) or a link out of the
- * checkout may not.
+ * would. A pnpm catalog reference may: the lockfile records it as the
+ * importer's specifier, and the version it resolved to, beside it, is
+ * checked here as any other. `workspace:` ranges and `link:` paths to
+ * directories inside the checkout (sibling workspace packages) may too:
+ * they fetch nothing. Any other protocol (`file:`, git, hosted, an http
+ * URL) or a link out of the checkout may not.
  */
 function importerEntryAllowed(importer: string, value: unknown): boolean {
   if (value === undefined) return true;
   if (typeof value !== "string") return false;
+  if (CATALOG.test(value)) return true;
   if (value.startsWith("workspace:")) return true;
   if (value.startsWith("link:"))
     return insideCheckout(importer, value.slice("link:".length));
@@ -463,6 +489,100 @@ function npmLockfileRefusal(
   return undefined;
 }
 
+/** A checkout-relative directory path in one spelling: `vendor/x`, or `.`. */
+function directory(path: string): string {
+  return posix.normalize(path).replace(/\/+$/, "") || ".";
+}
+
+/** The checkout directories a manifest's `file:` specifiers name, at any depth of its value. */
+function fileTargets(importer: string, value: unknown, into: Set<string>) {
+  if (typeof value === "string") {
+    if (value.startsWith("file:")) {
+      const target = value.slice("file:".length);
+      if (insideCheckout(importer, target))
+        into.add(directory(posix.join(importer, target)));
+    }
+    return;
+  }
+  if (value && typeof value === "object")
+    for (const nested of Object.values(value))
+      fileTargets(importer, nested, into);
+}
+
+/**
+ * Why a manifest npm reads besides the root's names a package from outside
+ * the registry, or undefined (#2099). npm reads the package.json of every
+ * directory it links (a `file:` directory dependency, `"link": true` in
+ * package-lock.json) and fetches what it names, even when the lockfile
+ * leaves that out, so a lockfile verified as registry-only doesn't hold
+ * what such a manifest fetches. Each linked directory the candidate's
+ * lockfile or root package.json names must have a tracked package.json
+ * (a regular file, so no symlink leads elsewhere) whose dependencies all
+ * name the registry. A nested `file:` dependency is refused with the rest.
+ */
+async function npmLinkRefusal(
+  worktree: string,
+  commit: string,
+  lockText: string,
+  signal?: AbortSignal,
+): Promise<NetworkRefusal | undefined> {
+  const targets = new Set<string>();
+  const lock = JSON.parse(lockText) as Record<string, unknown>;
+  for (const entry of Object.values(
+    (lock.packages ?? {}) as Record<string, unknown>,
+  )) {
+    const fields = (entry ?? {}) as Record<string, unknown>;
+    if (fields.link === true && typeof fields.resolved === "string")
+      targets.add(directory(fields.resolved));
+  }
+  const root = await file(worktree, commit, "package.json", signal);
+  if (root !== undefined) {
+    let manifest: Record<string, unknown>;
+    try {
+      manifest = JSON.parse(root) as Record<string, unknown>;
+    } catch {
+      return { reason: "the candidate's package.json cannot be read" };
+    }
+    for (const field of [...MANIFEST_DEPENDENCIES, ...MANIFEST_OVERRIDES])
+      fileTargets(".", manifest?.[field], targets);
+  }
+  for (const target of [...targets].sort()) {
+    const path = target === "." ? "package.json" : `${target}/package.json`;
+    if (path === "package.json") continue;
+    const listed = (
+      await hostGit(worktree, ["ls-tree", "-z", commit, "--", path], {
+        signal,
+      })
+    ).toString("utf8");
+    if (!/^100(?:644|755) blob /.test(listed))
+      return {
+        reason: `npm links ${target}, and the candidate has no tracked package.json file there for Factory to check`,
+      };
+    let manifest: Record<string, unknown>;
+    try {
+      manifest = JSON.parse(
+        (await file(worktree, commit, path, signal)) ?? "",
+      ) as Record<string, unknown>;
+    } catch {
+      return { reason: `the candidate's ${path} cannot be read` };
+    }
+    if (!manifest || typeof manifest !== "object")
+      return { reason: `the candidate's ${path} is not an object` };
+    for (const group of MANIFEST_DEPENDENCIES) {
+      const entries = manifest[group];
+      if (entries === undefined) continue;
+      if (!entries || typeof entries !== "object")
+        return { reason: `the candidate's ${path} has malformed ${group}` };
+      for (const [name, specifier] of Object.entries(entries))
+        if (!manifestSpecifierAllowed(target, specifier))
+          return {
+            reason: `the candidate's ${path}, which npm links, names ${name} from outside the registry (${String(specifier)})`,
+          };
+    }
+  }
+  return undefined;
+}
+
 /** A plain YAML file's one mapping, or why it is not one. */
 function plainMapping(
   text: string,
@@ -524,8 +644,10 @@ async function workspaceRefusal(
 /**
  * Why a verified install of `commit` may not reach the network, judged
  * against the attempt's `base`, or undefined when it may: its package
- * inputs unchanged (the fast path), or its configuration unchanged and
- * every lockfile resolving only from the configured registry origins.
+ * inputs unchanged (the fast path; with npm, every package.json is an
+ * input), or its configuration unchanged, every lockfile resolving only
+ * from the configured registry origins and, with npm, every linked
+ * directory's manifest naming the registry alone (npmLinkRefusal).
  * Unknown is offline. Unverified marks what Factory could not check: the
  * base's registry configuration, a base lockfile or a Git read.
  */
@@ -535,15 +657,41 @@ export async function installNetworkRefusal(
   commit: string,
   signal?: AbortSignal,
 ): Promise<NetworkRefusal | undefined> {
+  return inputsRefusal(worktree, base, commit, true, signal);
+}
+
+/**
+ * installNetworkRefusal, with the fast path for unchanged inputs only when
+ * `fast`. A resolution never takes it: it reads the manifests the candidate
+ * changed, wherever they are, so the lockfile it starts from (whose
+ * importers name what links a manifest in) is always verified.
+ */
+async function inputsRefusal(
+  worktree: string,
+  base: string,
+  commit: string,
+  fast: boolean,
+  signal?: AbortSignal,
+): Promise<NetworkRefusal | undefined> {
   try {
     if (
+      fast &&
       !(await changed(
         worktree,
         base,
         commit,
         ["package.json", WORKSPACE, ...CONFIGURATION, ...LOCKFILES],
         signal,
-      ))
+      )) &&
+      // npm reads the manifest of every directory it links (npmLinkRefusal),
+      // so with npm a package.json anywhere is an input.
+      !(
+        (await file(worktree, commit, "package-lock.json", signal)) !==
+          undefined &&
+        (await changedPaths(worktree, base, commit, signal)).some(
+          (path) => posix.basename(path) === "package.json",
+        )
+      )
     )
       return undefined;
     if (await changed(worktree, base, commit, CONFIGURATION, signal))
@@ -621,10 +769,10 @@ export async function installNetworkRefusal(
           )
         : undefined) ??
       (npm !== undefined
-        ? await lockfile(
+        ? ((await lockfile(
             "package-lock.json",
             npmLockfileRefusal(npm, registries),
-          )
+          )) ?? (await npmLinkRefusal(worktree, commit, npm, signal)))
         : undefined)
     );
   } catch (error) {
@@ -657,7 +805,7 @@ const MANIFEST_OVERRIDES = ["overrides", "resolutions"];
  */
 function manifestSpecifierAllowed(importer: string, value: unknown): boolean {
   if (typeof value !== "string") return false;
-  if (/^catalog:[\w.-]*$/.test(value)) return true;
+  if (CATALOG.test(value)) return true;
   if (value.startsWith("workspace:") || value.startsWith("link:"))
     return importerEntryAllowed(importer, value);
   const aliased = value.startsWith("npm:") ? value.slice("npm:".length) : "";
@@ -713,13 +861,16 @@ function memberPattern(pattern: string): RegExp | undefined {
 type Members = (path: string) => boolean;
 
 /**
- * Which changed package.json files the resolution reads: the root's, and
- * the workspace members'. Members are what `commit`'s pnpm-workspace.yaml
+ * Which changed manifests pnpm's resolution reads: the root's, and the
+ * workspace members'. Members are what `commit`'s pnpm-workspace.yaml
  * `packages` names; negated patterns are left out of the judgement, which
  * can only add members. Every manifest counts when Factory can't tell: a
  * workspace without a readable `packages` list, a pattern it can't read
  * exactly, or package.json `workspaces` (npm's, which its bootstrap
- * refuses anyway).
+ * refuses anyway). With npm every manifest counts too: npm reads the
+ * manifest of each directory it links (`file:`), wherever it is. So does a
+ * tree with a symbolic link, through which a member's path can lead to a
+ * manifest elsewhere.
  */
 async function workspaceMembers(
   worktree: string,
@@ -727,6 +878,14 @@ async function workspaceMembers(
   signal?: AbortSignal,
 ): Promise<Members> {
   const every: Members = () => true;
+  for (const lockfile of ["package-lock.json", "npm-shrinkwrap.json"])
+    if ((await file(worktree, commit, lockfile, signal)) !== undefined)
+      return every;
+  const tree = (
+    await hostGit(worktree, ["ls-tree", "-r", "-z", commit], { signal })
+  ).toString("utf8");
+  if (tree.split("\0").some((entry) => entry.startsWith("120000 ")))
+    return every;
   const root = await file(worktree, commit, "package.json", signal);
   try {
     const manifest = root === undefined ? {} : JSON.parse(root);
@@ -737,7 +896,7 @@ async function workspaceMembers(
     return every;
   }
   const text = await file(worktree, commit, WORKSPACE, signal);
-  if (text === undefined) return (path) => path === "package.json";
+  if (text === undefined) return (path) => posix.dirname(path) === ".";
   const workspace = plainMapping(text, WORKSPACE);
   if ("refused" in workspace) return every;
   const packages = workspace.mapping.packages;
@@ -754,9 +913,12 @@ async function workspaceMembers(
     patterns.push(pattern);
   }
   return (path) =>
-    path === "package.json" ||
+    posix.dirname(path) === "." ||
     patterns.some((pattern) => pattern.test(`${posix.dirname(path)}/`));
 }
+
+/** The manifest names pnpm reads for a project. */
+const MANIFEST_NAMES = ["package.json", "package.json5", "package.yaml"];
 
 /**
  * Why `commit`'s pnpm-workspace.yaml dependency keys (overrides, catalogs)
@@ -791,13 +953,17 @@ async function workspaceDependencyRefusal(
  * Why a lockfile-only resolution of `commit` may not reach the network, or
  * undefined when it may. A resolution has no lockfile to verify: it reads
  * the manifests and fetches what they name. So it takes the network only
- * as the install would on the inputs it starts from (installNetworkRefusal),
- * and only when every package.json the candidate changed that the
- * resolution reads (the root's and the workspace members') names its
- * dependencies and overrides from the registry alone, and so do the
- * overrides and catalogs of a pnpm-workspace.yaml it changed. A changed
- * manifest outside the workspace, such as a test fixture's, fetches
- * nothing (#2099).
+ * as the install would on the inputs it starts from (installNetworkRefusal,
+ * always verifying the lockfile), and only when every package.json the
+ * candidate changed that the resolution reads names its dependencies and
+ * overrides from the registry alone, and so do the overrides and catalogs
+ * of a pnpm-workspace.yaml it changed. With pnpm that is the root's and the
+ * workspace members' (workspaceMembers): a changed manifest elsewhere, such
+ * as a test fixture's, fetches nothing, since the verified lockfile's
+ * importers refuse a `file:` dependency that could link it in (#2099).
+ * With npm, which reads every linked directory's manifest, it is every
+ * changed package.json. A changed project whose manifest is package.yaml
+ * or package.json5, which Factory doesn't read, stays offline.
  */
 export async function resolutionNetworkRefusal(
   worktree: string,
@@ -805,7 +971,7 @@ export async function resolutionNetworkRefusal(
   commit: string,
   signal?: AbortSignal,
 ): Promise<NetworkRefusal | undefined> {
-  const refused = await installNetworkRefusal(worktree, base, commit, signal);
+  const refused = await inputsRefusal(worktree, base, commit, false, signal);
   if (refused) return refused;
   try {
     const workspace = await workspaceDependencyRefusal(
@@ -816,36 +982,33 @@ export async function resolutionNetworkRefusal(
     );
     if (workspace) return workspace;
     const member = await workspaceMembers(worktree, commit, signal);
-    const manifests = (
-      await hostGit(
-        worktree,
-        [
-          "diff-tree",
-          "-r",
-          "--name-only",
-          "-z",
-          "--no-renames",
-          "--diff-filter=AM",
-          base,
-          commit,
-        ],
-        { signal },
-      )
-    )
-      .toString("utf8")
-      .split("\0")
-      .filter(
-        (path) =>
-          (path === "package.json" || path.endsWith("/package.json")) &&
-          member(path),
-      );
-    for (const path of manifests) {
-      const importer = posix.dirname(path);
+    // Every manifest the candidate added, changed or removed that the
+    // resolution reads, by its directory. Factory reads only package.json:
+    // a project whose manifest is package.json5 or package.yaml (pnpm reads
+    // both) keeps the resolution offline.
+    const projects = new Set(
+      (await changedPaths(worktree, base, commit, signal))
+        .filter(
+          (path) =>
+            MANIFEST_NAMES.includes(posix.basename(path)) && member(path),
+        )
+        .map((path) => posix.dirname(path)),
+    );
+    for (const importer of [...projects].sort()) {
+      const at = (name: string) =>
+        importer === "." ? name : `${importer}/${name}`;
+      for (const name of MANIFEST_NAMES.slice(1))
+        if ((await file(worktree, commit, at(name), signal)) !== undefined)
+          return {
+            reason: `the candidate changed the manifest of ${importer}, which has a ${name} Factory doesn't read`,
+          };
+      const path = at("package.json");
+      const text = await file(worktree, commit, path, signal);
+      // A project the candidate removed has nothing left to fetch.
+      if (text === undefined) continue;
       let manifest: Record<string, unknown>;
       try {
-        manifest = JSON.parse(
-          (await file(worktree, commit, path, signal)) ?? "{}",
-        );
+        manifest = JSON.parse(text);
       } catch {
         return { reason: `the candidate's ${path} cannot be read` };
       }

@@ -860,14 +860,110 @@ export function pushCheckNames(
   return checkNamesOf(files, (on) => pushesTo(on, branch));
 }
 
-/** The check-run names of the base's workflows whose `on` passes `triggered`. */
+/**
+ * What the base says of the operator's delivery.baseRerun workflow
+ * `workflow` (a file name in .github/workflows), for readiness: why GitHub
+ * would refuse to dispatch it (missing, unparsable, no `workflow_dispatch`,
+ * or an input it requires with no default), the check-run names it
+ * reports, and the workflows that run after it (`on: workflow_run` naming
+ * its name), which a dispatch of it starts too.
+ */
+export async function baseRerunWorkflow(
+  files: BaseFiles,
+  workflow: string,
+): Promise<{ problem?: string; checks: string[]; followers: string[] }> {
+  const path = `${WORKFLOWS}/${workflow}`;
+  const text = await files.text(path);
+  if (text === undefined)
+    return { problem: `there is no ${path}`, checks: [], followers: [] };
+  let parsed: unknown;
+  try {
+    parsed = parse(text);
+  } catch {
+    return { problem: `${path} can't be parsed`, checks: [], followers: [] };
+  }
+  const on = (parsed as { on?: unknown } | null)?.on;
+  if (!events(on).includes("workflow_dispatch"))
+    return {
+      problem: `${path} doesn't run on workflow_dispatch`,
+      checks: [],
+      followers: [],
+    };
+  const dispatch =
+    on && typeof on === "object" && !Array.isArray(on)
+      ? (on as Record<string, unknown>).workflow_dispatch
+      : undefined;
+  const inputs =
+    dispatch && typeof dispatch === "object" && !Array.isArray(dispatch)
+      ? (dispatch as { inputs?: unknown }).inputs
+      : undefined;
+  const required =
+    inputs && typeof inputs === "object" && !Array.isArray(inputs)
+      ? Object.entries(inputs as Record<string, unknown>)
+          .filter(
+            ([, input]) =>
+              (input as { required?: unknown } | null)?.required === true &&
+              (input as { default?: unknown }).default === undefined,
+          )
+          .map(([name]) => name)
+      : [];
+  if (required.length)
+    return {
+      problem: `${path} requires the input${required.length === 1 ? "" : "s"} ${required.join(", ")} with no default, and Factory dispatches it with none`,
+      checks: [],
+      followers: [],
+    };
+  // GitHub names a workflow without `name` by its path.
+  const named = (parsed as { name?: unknown } | null)?.name;
+  const name = typeof named === "string" ? named : path;
+  const followers: string[] = [];
+  for (const other of await workflowPaths(files)) {
+    if (other === path) continue;
+    let follower: unknown;
+    try {
+      follower = parse((await files.text(other)) ?? "");
+    } catch {
+      continue;
+    }
+    const after = (follower as { on?: unknown } | null)?.on;
+    const run =
+      after && typeof after === "object" && !Array.isArray(after)
+        ? (after as Record<string, unknown>).workflow_run
+        : undefined;
+    const followed =
+      run && typeof run === "object" && !Array.isArray(run)
+        ? (run as { workflows?: unknown }).workflows
+        : undefined;
+    if (
+      (Array.isArray(followed) ? followed : [followed]).some(
+        (entry) => entry === name || entry === path,
+      )
+    )
+      followers.push(other);
+  }
+  return {
+    checks: await checkNamesOf(files, () => true, path),
+    followers,
+  };
+}
+
+/** The workflow files in the top level of the base's .github/workflows. */
+async function workflowPaths(files: BaseFiles): Promise<string[]> {
+  return (await files.paths()).filter((path) =>
+    new RegExp(`^${WORKFLOWS}/[^/]+\\.ya?ml$`).test(path),
+  );
+}
+
+/**
+ * The check-run names of the base's workflows whose `on` passes
+ * `triggered`, or of workflow file `only` alone.
+ */
 async function checkNamesOf(
   files: BaseFiles,
   triggered: (on: unknown) => boolean,
+  only?: string,
 ): Promise<string[]> {
-  const paths = (await files.paths()).filter((path) =>
-    new RegExp(`^${WORKFLOWS}/[^/]+\\.ya?ml$`).test(path),
-  );
+  const paths = await workflowPaths(files);
   const parsed = new Map<string, unknown>();
   for (const path of paths) {
     // A git failure throws (the step retries); only a parse failure is skipped.
@@ -880,6 +976,7 @@ async function checkNamesOf(
   }
   const names = new Set<string>();
   for (const path of paths) {
+    if (only !== undefined && path !== only) continue;
     const workflow = parsed.get(path);
     if (!triggered((workflow as { on?: unknown } | null)?.on)) continue;
     for (const [id, job] of jobsOf(workflow)) {

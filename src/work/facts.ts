@@ -1,4 +1,4 @@
-import type { CiRerun } from "../delivery.js";
+import type { BaseRerun, CiRerun } from "../delivery.js";
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { WorkDiscovery } from "../planning/amendments.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
@@ -104,6 +104,13 @@ export interface ItemFacts {
   checkFailures: string[];
   /** The latest rerun of failed Actions jobs on the item's PR (delivery.ts `rerunFailed`), so none is rerun twice. */
   ciRerun: CiRerun;
+  /**
+   * The latest run of the operator's delivery.baseRerun workflow on the
+   * default branch for the item's failed checks (delivery.ts `freshBase`),
+   * so it runs at most once a day per default-branch head, and its run is
+   * waited for.
+   */
+  baseRerun: BaseRerun;
   /**
    * The work commit the operator's `revalidate` checks again, and when
    * that answer landed: while it is the item's result, its CI and merge

@@ -67,7 +67,7 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
 - **Providers:** `codex` is the default (planner and worker). For Claude or Copilot, add a named provider with `--provider NAME --planner KIND --worker KIND`, and `--default` to make it the default. Ask for the models rather than copying another provider's.
 - **Optional:**
   - limits: `--max-active`, `--workers`, `--validations`;
-  - delivery: `--delivery regular|native-stack`;
+  - delivery: `--delivery regular|native-stack`, and `--base-rerun-workflow FILE` only when the operator names a `workflow_dispatch` workflow free of side effects that Factory may run on the default branch for a fresh comparison of a failed check (off by default: Factory runs nothing there; readiness warns of anything that runs after it);
   - the sandbox: `--sandbox-network`, `--package-store`, `--read-only-path`, `--sandbox-env`;
   - final commands: `--required-command`, `--ci-only-command`;
   - worker settings, such as `--codex-network host` or `--claude-model`.

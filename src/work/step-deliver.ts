@@ -51,10 +51,12 @@ export function delivery(
   context: StepContext,
   deps: BuildDeps,
 ): DeliveryContext {
+  const baseRerun = deps.config.delivery?.baseRerun?.workflow;
   return {
     github: deps.github,
     checkout: deps.config.checkout,
     signal: context.signal,
+    ...(baseRerun ? { baseRerun } : {}),
   };
 }
 
@@ -181,6 +183,7 @@ export function pullInput(
   const published = state.done[stepKey(item.id, "publish")] as PublishResult;
   const branch = baseBranch(state.issue, place);
   const rerun = fact(state, "ciRerun", item.id);
+  const baseRerun = fact(state, "baseRerun", item.id);
   // A result rereview (`revalidate`) of this result says the check was at
   // fault, as the operator's `retry` here does.
   const work = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
@@ -204,6 +207,7 @@ export function pullInput(
     ...(context.answer?.answer === REPAIR_SHARED ? { repairShared: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
     ...(rerun ? { rerun } : {}),
+    ...(baseRerun ? { baseRerun } : {}),
   };
 }
 
@@ -266,13 +270,32 @@ export async function ciStep(
 
 /**
  * Failed Actions jobs rerun before a repair (delivery.ts `rerunFailed`):
- * logged, and kept so no workflow run is rerun twice on the same head.
+ * logged, and kept so no workflow run is rerun twice on the same head. Or
+ * the operator's delivery.baseRerun workflow run on the default branch
+ * (delivery.ts `freshBase`): logged, and kept so it runs at most once a
+ * day per default-branch head for the item, and its run is waited for.
  */
 export function rerunOutcome(
   context: StepContext,
   item: WorkItem,
-  { rerun, reason, afterMs }: Rerun,
+  { rerun, baseRerun, reason, afterMs }: Rerun,
 ): Outcome {
+  if (baseRerun) {
+    context.log({
+      event: "base-rerun",
+      item: item.id,
+      base: baseRerun.base,
+      workflow: baseRerun.workflow,
+      checks: baseRerun.checks,
+      dispatched: baseRerun.dispatched,
+    });
+    return {
+      kind: "retry",
+      reason,
+      afterMs,
+      keep: facts({ baseRerun }, item.id),
+    };
+  }
   context.log({
     event: "ci-rerun",
     item: item.id,

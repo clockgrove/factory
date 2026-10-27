@@ -6,12 +6,25 @@
 // engine now writes that sentence where it offers the answer, and the
 // provider routing passes each answer on to the frozen provider's workflow.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { loadConfig } from "../dist/config.js";
 import { ObjectiveRunner, hold } from "../dist/engine.js";
+import { RunLog } from "../dist/log.js";
 import { providerWorkflow } from "../dist/providers/selection.js";
 import { newObjective } from "../dist/state.js";
 import { objectiveWorkflow } from "../dist/workflow.js";
-import { item, plan, REPO, tempDir } from "./helpers.mjs";
+import {
+  configured,
+  installation,
+  item,
+  plan,
+  REPO,
+  tempDir,
+  until,
+} from "./helpers.mjs";
 
 const ID = "trusted-narrowing-proof";
 const WORK = `item:${ID}:work`;
@@ -156,4 +169,274 @@ test("a refused result that can't be checked again is offered in neither the opt
   );
   assert.equal(refused.code, "invalid_answer");
   assert.equal(engine.state.kept["allowances:rereviews"], undefined);
+});
+
+/**
+ * Work Item a's work step as the service runs it (providerWorkflow over the
+ * real workflow), past its spent repair allowance (perPath 1, repaired
+ * twice), with a real checkout: the refused result sits on its base, and
+ * the diagnosis's model and the worker are fakes that record their calls.
+ * The worker never finishes: reaching it is where a repair starts.
+ */
+function servedWork(finding, answers = []) {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  const saved = process.env.FACTORY_CONFIG;
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  let config;
+  try {
+    config = loadConfig(REPO);
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_CONFIG;
+    else process.env.FACTORY_CONFIG = saved;
+  }
+  const git = (...args) => {
+    const result = spawnSync(
+      "git",
+      [
+        "-C",
+        config.checkout,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+      ].concat(args),
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  mkdirSync(join(config.checkout, "src"), { recursive: true });
+  writeFileSync(join(config.checkout, "src", "a.js"), "export const a = 1;\n");
+  git("add", ".");
+  git("commit", "--quiet", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  writeFileSync(join(config.checkout, "src", "a.js"), "export const a = 2;\n");
+  git("commit", "--quiet", "-am", "Factory: a");
+  const commit = git("rev-parse", "HEAD");
+  const tree = git("rev-parse", "HEAD^{tree}");
+  git("branch", "refused");
+  git("reset", "--quiet", "--hard", base);
+
+  const asked = [];
+  const prompts = [];
+  const planner = {
+    answer: async (call) => {
+      asked.push(call);
+      const n = asked.length;
+      return {
+        value: {
+          decision: "repair",
+          diagnosis: `Diagnosis ${n}.`,
+          predecessor: "",
+          path: "src/a.js",
+          correction: `Correction ${n}.`,
+          question: "",
+          requestedFiles: [],
+          ownership: [],
+          evidence: [],
+          acceptance: [],
+          ...answers[n - 1],
+        },
+      };
+    },
+  };
+  const dir = tempDir("factory-served-");
+  const inner = objectiveWorkflow({
+    config,
+    github: {
+      commitAuthor: async () => undefined,
+      made() {},
+      serviceToken: async () => "",
+    },
+    planner,
+    worker: () => ({
+      run: async (input) => {
+        prompts.push(input.prompt);
+        throw new Error("the worker ran");
+      },
+    }),
+    workDir: (issue) => join(dir, "work", String(issue)),
+    objectives: join(dir, "objectives"),
+  });
+  const workflow = providerWorkflow(
+    new Map([
+      ["codex", { workflow: inner, frozen: { digest: "frozen", config: {} } }],
+    ]),
+    inner,
+  );
+  const a = item("a", {
+    ownedPaths: ["src/a.js"],
+    acceptance: ["A one holds", "A two holds"],
+  });
+  const state = newObjective(9, new Date(), {
+    provider: "codex",
+    selectedBy: "defaultProvider",
+    digest: "frozen",
+    config: { autonomy: { allowances: { perPath: 1 } } },
+  });
+  state.status = "building";
+  state.done.predecessors = { predecessors: [], ignored: [] };
+  state.done.check = {
+    shown: { body: "## Goal\n\nA goal.", blocks: [], spans: [] },
+    base,
+    title: "A",
+    reviewArtifacts: [],
+  };
+  state.done.plan = plan([a], { base });
+  Object.assign(state.kept, {
+    "item:a:base": base,
+    "item:a:refused": { commit, tree, notes: [] },
+    "item:a:finding": finding(tree),
+    // Repair 1's correction, which its worker tried.
+    "item:a:diagnosis": {
+      repair: 1,
+      context: { finding: "refused" },
+      applied: [
+        {
+          source: "review-findings",
+          failure: "refused",
+          diagnosis: "Tried.",
+          correction: "Correction 0.",
+        },
+      ],
+    },
+  });
+  state.repairs["item:a:work"] = { count: 2, findings: ["refused"] };
+  const runner = new ObjectiveRunner(
+    state,
+    workflow,
+    tempDir("factory-served-state-"),
+    new RunLog(join(dir, "logs"), "2026-10-27T00-00-00-000Z-1"),
+    { id: "run", finished: 0, resumeAt: 0 },
+  );
+  /** Ticks until `done` holds; no tick once it does. */
+  const run = (what, done) =>
+    until(() => done() || (runner.tick(), false), what, 30_000);
+  const question = async () => {
+    await run("a question", () => runner.state.holds.length > 0);
+    return runner.state.holds[0];
+  };
+  const answer = (hold, ...args) =>
+    assert.equal(
+      runner.transact(() =>
+        runner.answer(args[0], args[1], "kirk", undefined, hold.id, args[2]),
+      ),
+      null,
+    );
+  return { runner, run, question, answer, asked, prompts, commit };
+}
+
+const reviewRefusal = (tree) => ({
+  kind: "review",
+  tree,
+  refused: ["A one holds", "A two holds"].map((criterion, n) => ({
+    criterionIndex: n,
+    criterion,
+    source: "model",
+    detail: `Gap ${n + 1}.`,
+    question: "",
+    evidence: [],
+  })),
+});
+
+// diagnoseFirst saves its diagnosis past the allowance before the worker
+// tries it. `accept 1` there leaves criterion 2 standing, diagnosed again:
+// that diagnosis was told its own untried correction had already failed,
+// and after `more` the step diagnosed once more instead of repairing with
+// the saved diagnosis (#2120).
+test("accept on a spent repair allowance diagnoses what still stands once, as untried, and more repairs with it", async () => {
+  const served = servedWork(reviewRefusal);
+  const { runner, asked, prompts } = served;
+  const first = await served.question();
+  assert.equal(asked.length, 1, "diagnosed first");
+  assert.equal(first.step, "item:a:work");
+  assert.deepEqual(
+    first.options.map((option) => option.answer + (option.arg ?? "")),
+    ["more", "revalidate", "accept1", "accept2", "replan", "cancel"],
+  );
+  assert.equal(first.question.split("answer `revalidate`").length, 2);
+  served.answer(first, "accept", "The reviewer misread it.", "1");
+  const second = await served.question();
+  assert.notEqual(second.id, first.id);
+  assert.equal(asked.length, 2, "what still stands is diagnosed");
+  assert.match(asked[1].prompt, /Correction 0\./);
+  assert.doesNotMatch(
+    asked[1].prompt,
+    /Correction 1\./,
+    "the correction no worker tried is no prior",
+  );
+  assert.deepEqual(
+    second.options.map((option) => option.answer + (option.arg ?? "")),
+    ["more", "revalidate", "accept2", "replan", "cancel"],
+  );
+  assert.deepEqual(
+    runner.state.kept["item:a:diagnosis"].applied.map((c) => c.correction),
+    ["Correction 0.", "Correction 2."],
+  );
+  // `more`: the worker repairs with that diagnosis, and none runs again.
+  served.answer(second, "more");
+  await served.run("the worker", () => prompts.length > 0);
+  assert.equal(asked.length, 2);
+  assert.match(prompts[0], /Correction 2\./);
+  // Charged once: the repair that led here, no rereview.
+  assert.equal(runner.state.repairs["item:a:work"].count, 2);
+  assert.equal(runner.state.kept["allowances:rereviews"], undefined);
+  assert.equal(runner.state.kept["item:a:decisions"].length, 1);
+});
+
+const failedChecks = () => ({
+  kind: "failure",
+  detail: "Checks failed on PR #3: checks (failure)",
+});
+
+test("revalidate on a spent repair allowance finishes the work step with the same result, charged once as a rereview", async () => {
+  const served = servedWork(failedChecks);
+  const { runner, asked, prompts, commit } = served;
+  const asked1 = await served.question();
+  assert.equal(asked.length, 1, "diagnosed first");
+  assert.deepEqual(
+    asked1.options.map((option) => option.answer),
+    ["more", "revalidate", "replan", "cancel"],
+  );
+  served.answer(asked1, "revalidate");
+  const landed = runner.state.answers["item:a:work"].at;
+  await served.run("the work step", () => runner.state.done["item:a:work"]);
+  assert.equal(runner.state.done["item:a:work"].commit, commit);
+  assert.deepEqual(runner.state.kept["item:a:rereviewed"], {
+    commit,
+    at: landed,
+  });
+  assert.equal(runner.state.kept["item:a:refused"], undefined);
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+  assert.equal(runner.state.repairs["item:a:work"].count, 2);
+  assert.equal(asked.length, 1);
+  assert.equal(prompts.length, 0, "no worker");
+});
+
+test("fresh on a repair diagnosis question past a spent allowance is one more repair, which asks for more", async () => {
+  const served = servedWork(failedChecks, [
+    { decision: "operator", question: "Which runtime does checks use?" },
+  ]);
+  const { runner, asked, prompts } = served;
+  const diagnosis = await served.question();
+  assert.match(diagnosis.question, /Which runtime does checks use\?/);
+  assert.deepEqual(
+    diagnosis.options.map((option) => option.answer),
+    ["answer", "retry", "replan", "fresh", "revalidate", "cancel"],
+  );
+  assert.equal(diagnosis.question.split("answer `revalidate`").length, 2);
+  served.answer(diagnosis, "fresh");
+  const more = await served.question();
+  assert.equal(runner.state.repairs["item:a:work"].count, 3);
+  assert.equal(runner.state.kept["item:a:refused"], undefined);
+  assert.equal(runner.state.kept["item:a:finding"], undefined);
+  assert.match(more.question, /needs another repair, past its repair path's/);
+  assert.deepEqual(
+    more.options.map((option) => option.answer),
+    ["more", "replan", "cancel"],
+  );
+  assert.equal(asked.length, 1);
+  assert.equal(prompts.length, 0);
+  assert.equal(runner.state.kept["allowances:rereviews"], undefined);
 });

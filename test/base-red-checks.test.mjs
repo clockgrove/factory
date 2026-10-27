@@ -573,63 +573,127 @@ test("a failed step's log holds neither the step before's lines nor the next fai
   );
 });
 
-// The repair diagnosis keeps a finding's first 1000 and last 7000
-// characters (repair.ts), and the excerpts come last: three failed checks,
-// each with two long failed steps, still each reach it with their errors.
-test("every excerpted check's error reaches the repair diagnosis, whatever the steps' logs hold", async () => {
-  const names = ["lint", "checks", "quality"];
-  const step = (tag, name, second) => [
-    `2026-10-27T06:52:${second}.0000000Z ##[group]Run ${name}`,
-    ...Array.from(
-      { length: 120 },
-      (_, n) =>
-        `2026-10-27T06:52:${second}.${String(n + 1).padStart(7, "0")}Z ${tag} ${name} output line ${n} ${"x".repeat(40)}`,
-    ),
-    `2026-10-27T06:52:${second}.9000000Z ERROR-CAUSE-${tag}-${name}: the assertion that failed`,
-    `2026-10-27T06:52:${second}.9500000Z ##[error]Process completed with exit code 1.`,
-  ];
-  const jobs = Object.fromEntries(
-    names.map((tag, n) => [
-      n + 1,
-      {
-        attempt: 2,
-        failedSteps: ["Gate", "Report"],
-        failedStepTimes: [
-          {
-            name: "Gate",
-            startedAt: "2026-10-27T06:52:20Z",
-            completedAt: "2026-10-27T06:52:20Z",
-          },
-          {
-            name: "Report",
-            startedAt: "2026-10-27T06:52:30Z",
-            completedAt: "2026-10-27T06:52:30Z",
-          },
-        ],
-        log: [...step(tag, "gate", 20), ...step(tag, "report", 30)].join("\n"),
-      },
-    ]),
-  );
+// Two quick failed steps (`test "$X" = success` gates), both within one
+// second: the second began at the first step's `##[group]Run` there, read
+// the first's error, and was cut at its own start as "the next step's", so
+// the finding held the first step's error twice and never the second's.
+test("two failed steps within one second each keep their own error", async () => {
+  const at = (time) => `2026-10-27T06:52:${time}Z`;
+  const second = "2026-10-27T06:52:46Z";
+  const steps = ["Require lint to pass", "Require tests to pass"];
   const hub = github({
-    runs: names.map((name, n) => check(n + 1, name, "failure")),
-    baseRuns: names.map((name, n) => onBase(21 + n, name, "success")),
-    jobs,
+    runs: [check(1, "checks", "failure")],
+    baseRuns: [onBase(21, "checks", "success")],
+    jobs: {
+      1: {
+        attempt: 2,
+        failedSteps: steps,
+        failedStepTimes: steps.map((name) => ({
+          name,
+          startedAt: second,
+          completedAt: second,
+        })),
+        log: [
+          `${at("45.1000000")} ##[group]Run actions/upload-artifact@v4`,
+          `${at("46.0100000")} Artifact evidence successfully finalized.`,
+          `${at("46.1000000")} ##[group]Run test "$LINT" = success`,
+          `${at("46.2000000")} LINT-ERROR: lint failed`,
+          `${at("46.3000000")} ##[error]Process completed with exit code 1.`,
+          `${at("46.4000000")} ##[group]Run test "$TESTS" = success`,
+          `${at("46.5000000")} TESTS-ERROR: tests failed`,
+          `${at("46.6000000")} ##[error]Process completed with exit code 2.`,
+          `${at("47.0000000")} Post job cleanup.`,
+        ].join("\n"),
+      },
+    },
     attempt: 2,
   });
   const result = await observe(hub);
   assert.equal(result.kind, "repair", JSON.stringify(result));
-  const { correction: diagnosed } = await correction({
-    finding: { kind: "failure", detail: result.finding },
-    operatorAnswer: "look at the logs",
-    prior: [],
-  });
-  for (const tag of names)
-    for (const name of ["gate", "report"])
-      assert.ok(
-        diagnosed.failure.includes(`ERROR-CAUSE-${tag}-${name}`),
-        `ERROR-CAUSE-${tag}-${name} not in\n\n${diagnosed.failure}`,
-      );
+  assert.ok(
+    result.finding.endsWith(
+      [
+        `Log of failed step ${steps[0]}:`,
+        '##[group]Run test "$LINT" = success',
+        "LINT-ERROR: lint failed",
+        "##[error]Process completed with exit code 1.",
+        `Log of failed step ${steps[1]}:`,
+        '##[group]Run test "$TESTS" = success',
+        "TESTS-ERROR: tests failed",
+        "##[error]Process completed with exit code 2.",
+      ].join("\n"),
+    ),
+    result.finding,
+  );
 });
+
+// The repair diagnosis keeps a finding's first 1000 and last 7000
+// characters (repair.ts), and the excerpts come last: three failed checks,
+// each with two long failed steps, still each reach it with their errors,
+// however long the steps' names (an unnamed step's is its command line).
+for (const [gate, report] of [
+  ["Gate", "Report"],
+  [
+    `Run node gate.mjs ${"--flag ".repeat(90)}`,
+    `Run report ${"y".repeat(700)}`,
+  ],
+])
+  test(`every excerpted check's error reaches the repair diagnosis, whatever the steps' logs hold (step names of ${gate.length} and ${report.length} characters)`, async () => {
+    const names = ["lint", "checks", "quality"];
+    const step = (tag, name, second) => [
+      `2026-10-27T06:52:${second}.0000000Z ##[group]Run ${name}`,
+      ...Array.from(
+        { length: 120 },
+        (_, n) =>
+          `2026-10-27T06:52:${second}.${String(n + 1).padStart(7, "0")}Z ${tag} ${name} output line ${n} ${"x".repeat(40)}`,
+      ),
+      `2026-10-27T06:52:${second}.9000000Z ERROR-CAUSE-${tag}-${name}: the assertion that failed`,
+      `2026-10-27T06:52:${second}.9500000Z ##[error]Process completed with exit code 1.`,
+    ];
+    const jobs = Object.fromEntries(
+      names.map((tag, n) => [
+        n + 1,
+        {
+          attempt: 2,
+          failedSteps: [gate, report],
+          failedStepTimes: [
+            {
+              name: gate,
+              startedAt: "2026-10-27T06:52:20Z",
+              completedAt: "2026-10-27T06:52:20Z",
+            },
+            {
+              name: report,
+              startedAt: "2026-10-27T06:52:30Z",
+              completedAt: "2026-10-27T06:52:30Z",
+            },
+          ],
+          log: [...step(tag, "gate", 20), ...step(tag, "report", 30)].join(
+            "\n",
+          ),
+        },
+      ]),
+    );
+    const hub = github({
+      runs: names.map((name, n) => check(n + 1, name, "failure")),
+      baseRuns: names.map((name, n) => onBase(21 + n, name, "success")),
+      jobs,
+      attempt: 2,
+    });
+    const result = await observe(hub);
+    assert.equal(result.kind, "repair", JSON.stringify(result));
+    const { correction: diagnosed } = await correction({
+      finding: { kind: "failure", detail: result.finding },
+      operatorAnswer: "look at the logs",
+      prior: [],
+    });
+    for (const tag of names)
+      for (const name of ["gate", "report"])
+        assert.ok(
+          diagnosed.failure.includes(`ERROR-CAUSE-${tag}-${name}`),
+          `ERROR-CAUSE-${tag}-${name} not in\n\n${diagnosed.failure}`,
+        );
+  });
 
 test("artifacts reach the repair diagnosis's input, so it needn't ask the operator for them", async () => {
   const hub = github({

@@ -219,7 +219,12 @@ export async function workStep(
   if (
     !finished &&
     context.answer?.answer === ACCEPT &&
-    finding?.kind === "review"
+    finding?.kind === "review" &&
+    // Recorded already: a run past a spent allowance saved what it left
+    // standing and its diagnosis, which the repair after `more` uses.
+    !(fact(state, "decisions", item.id) ?? []).some(
+      (entry) => entry.holdId === context.answer?.holdId,
+    )
   ) {
     const decided = refusalDecisions(context, finding, item.id);
     keepAll = { ...keepAll, ...decided.keep };

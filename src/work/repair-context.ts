@@ -83,7 +83,13 @@ export async function repairContext(
           },
         }
       : savedContext(saved);
-  const applied = saved?.applied ?? [];
+  // A diagnosis saved for this repair is one no worker tried yet (saved past
+  // a spent allowance, `diagnoseFirst`): a decision that narrows its finding
+  // diagnoses again, and its correction is no prior that failed (#2120).
+  const applied =
+    narrowed && saved?.repair === history.count
+      ? saved.applied.slice(0, -1)
+      : (saved?.applied ?? []);
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
     | undefined;

@@ -1918,8 +1918,8 @@ async function failureExcerpt(
           Math.floor(room / 2),
           room - (header ? header + 1 : 0),
         );
-        const own = steps.slice(0, EXCERPTED_STEPS).flatMap((step) => {
-          const section = stepLog(log, step);
+        const own = steps.slice(0, EXCERPTED_STEPS).flatMap((step, n) => {
+          const section = stepLog(log, step, steps.slice(0, n));
           return section
             ? [{ label: `Log of failed step ${step.name}:`, section }]
             : [];
@@ -1928,10 +1928,15 @@ async function failureExcerpt(
         const share = Math.floor(logRoom / Math.max(own.length, 1)) - 1;
         logs.push(
           ...(own.length
-            ? own.map(
-                ({ label, section }) =>
-                  `${label}\n${section.slice(-Math.max(share - label.length - 1, 0))}`,
-              )
+            ? own.map(({ label, section }) => {
+                // The section's end, where the error is. A label (an
+                // unnamed step's is its command line) too long for the
+                // share is cut with it: slice(-0) would keep it all.
+                const keep = share - label.length - 1;
+                return keep > 0
+                  ? `${label}\n${section.slice(-keep)}`
+                  : `${label}\n${section}`.slice(-Math.max(share, 1));
+              })
             : [
                 log
                   .split("\n")
@@ -1970,13 +1975,20 @@ const STEP_START = "##[group]Run ";
  * completed (GitHub reports them to the second). Its neighbours may write
  * within those seconds, so Actions' own markers cut them off: in the start
  * second, the lines before the first STEP_START line there are the step
- * before's; in the completion second, a STEP_START line after an
- * `##[error]` line starts the next step (one that runs after a failure,
- * which may fail too). Then up to the step's last `##[error]` line.
- * Undefined when the log holds none of it (no timestamps, or the tail read
- * starts after the step).
+ * before's, and each of the job's failed steps `before` it that completed
+ * in that second ended there with an `##[error]` line, so the step starts
+ * at the STEP_START line after as many of those; in the completion second,
+ * a STEP_START line after an `##[error]` line starts the next step (one
+ * that runs after a failure, which may fail too). Then up to the step's
+ * last `##[error]` line. Undefined when the log holds none of it (no
+ * timestamps, or the tail read starts after the step).
  */
-export function stepLog(log: string, step: StepTimes): string | undefined {
+export function stepLog(
+  log: string,
+  step: StepTimes,
+  /** The job's failed steps before it, in order. */
+  before: readonly StepTimes[] = [],
+): string | undefined {
   const from = Date.parse(step.startedAt);
   const to = Date.parse(step.completedAt) + 1000;
   if (!Number.isFinite(from) || !Number.isFinite(to)) return undefined;
@@ -1990,9 +2002,27 @@ export function stepLog(log: string, step: StepTimes): string | undefined {
   }
   const starts = (line: { text: string }) => line.text.startsWith(STEP_START);
   const errs = (line: { text: string }) => line.text.startsWith("##[error]");
-  const first = lines.findIndex(
-    (line) => line.at < from + 1000 && starts(line),
-  );
+  // Two quick failed steps can share a second: the earlier one's start
+  // there is not this one's (#2120).
+  let ended = before.filter(
+    (earlier) => Date.parse(earlier.completedAt) === from,
+  ).length;
+  let erred = false;
+  let first = -1;
+  for (const [n, line] of lines.entries()) {
+    if (line.at >= from + 1000) break;
+    if (errs(line)) erred = true;
+    else if (starts(line)) {
+      if (erred && ended > 0) {
+        ended -= 1;
+        erred = false;
+      }
+      if (!ended) {
+        first = n;
+        break;
+      }
+    }
+  }
   const own = lines.slice(Math.max(first, 0));
   let failed = false;
   for (const [n, line] of own.entries()) {

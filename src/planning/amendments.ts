@@ -84,13 +84,16 @@ import {
  *   `autonomy.allowances.planningRevisions`; past it, its planning asks
  *   for `more` first. A rejection or a replacement never refunds it, and
  *   widening an item leaves its spent repairs as they are. A replan accepts a new plan, which starts a new allowance.
- * - A plan round whose answer Factory's plan checks or the independent
- *   review refuse goes back to the planner with the findings, as in first
- *   planning: the round is kept in `amend:<id>:revisions` and charges one
- *   more revision, never refunded, and the next round is checked and
- *   reviewed again. The fence's findings, an operator decision, or a round
- *   that repeats the previous round's findings reject the amendment
- *   instead.
+ * - A plan round whose answer Factory's plan checks, the amendment fence
+ *   (`amendmentFindings`) or the independent review refuse goes back to
+ *   the planner with the findings, as in first planning: the round is kept
+ *   in `amend:<id>:revisions` and charges one more revision, never
+ *   refunded, and the next round is checked and reviewed again. The fence
+ *   is checked again at acceptance, against the state then, and a round it
+ *   refuses there goes back the same way. An operator decision, or a round
+ *   that repeats the previous round's findings, rejects the amendment
+ *   instead. The planner and the review are told the started-item rule
+ *   (`startedItemRule`) with the items it binds.
  * - A rejected amendment is replaced only by a proposal that repeats its
  *   discovery and worker, with the rejection as diagnosis and a new
  *   correction (`rejectionStep` builds it).
@@ -158,12 +161,42 @@ interface AmendRound {
   rejected?: string;
 }
 
+/** The independent review's result (`amend:<id>:review`). */
+interface AmendReview {
+  /** The plan round it reviewed; once acceptance sends that round back, the next round is reviewed again. */
+  round?: number;
+  rejected?: string;
+}
+
+/**
+ * The review of proposal `id`'s current plan round, or undefined while
+ * that round is unreviewed or sent back to the planner. One saved without
+ * a round predates acceptance sending rounds back: it reviewed the round
+ * there is unless acceptance has sent one back since.
+ */
+function reviewOf(state: ObjectiveState, id: string): AmendReview | undefined {
+  const review = state.done[`${KEY(id)}:review`] as AmendReview | undefined;
+  if (!review) return undefined;
+  const round = state.done[`${KEY(id)}:plan`] as AmendRound | undefined;
+  const revisions = revisionsOf(state, id);
+  // Sent back and not planned again yet: what it reviewed is being revised.
+  if (round?.round !== undefined && round.round <= revisions.length)
+    return undefined;
+  const current =
+    review.round === undefined
+      ? !revisions.some((revision) => revision.atAcceptance)
+      : review.round === round?.round;
+  return current ? review : undefined;
+}
+
 /** A plan round sent back to the planner (`amend:<id>:revisions`). */
 interface AmendRevision {
   /** The round's full answer: the next round revises it. */
   answer: unknown;
-  /** The plan checks' or the review's findings on it, the next round's corrections. */
+  /** The plan checks', the fence's or the review's findings on it, the next round's corrections. */
   findings: Finding[];
+  /** Sent back by acceptance, after its review: the next round is reviewed again. */
+  atAcceptance?: true;
 }
 
 function revisionsOf(state: ObjectiveState, id: string): AmendRevision[] {
@@ -402,8 +435,9 @@ export function proposeAmendment(
  * settled as declined (rejected and continued past, still charged), the
  * item's `declined` fact is recorded, its planning steps' open questions
  * and waits are dropped, and the item carries on with its
- * result as collected. Refused once the amendment's review is done (its
- * acceptance may be posting), or when no such proposal is pending. The
+ * result as collected. Refused once the review of its current plan round
+ * is done (its acceptance may be posting; `reviewOf`), or when no such
+ * proposal is pending. The
  * problems, or none when it was declined.
  */
 export function declineDiscovery(
@@ -421,7 +455,7 @@ export function declineDiscovery(
     ];
   if (!reason.trim()) return ["decline-discovery needs a reason"];
   const key = KEY(pending.id);
-  if (state.done[`${key}:review`] || state.attempts[key])
+  if (reviewOf(state, pending.id) || state.attempts[key])
     return [
       `Amendment ${pending.id} has been reviewed and is being accepted; it can't be declined now`,
     ];
@@ -694,6 +728,15 @@ function widens(old: WorkItem, next: WorkItem): boolean {
   );
 }
 
+/** The fields of a started item an amended draft changes, by name. */
+function changedFields(old: WorkItem, next: WorkItem): string[] {
+  const before: Record<string, unknown> = normalized(old);
+  const after: Record<string, unknown> = normalized(next);
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((field) => !isDeepStrictEqual(before[field], after[field]))
+    .sort();
+}
+
 const obligationKey = (entry: {
   source: unknown;
   statement?: string;
@@ -729,8 +772,14 @@ export function amendmentFindings(
     if (isDeepStrictEqual(normalized(item), normalized(old))) continue;
     if (!progress.started.has(old.id)) continue;
     if (!progress.reattempt.has(old.id) || !widens(old, item)) {
+      const fields = changedFields(old, item);
+      const changes = fields.length
+        ? `; this answer changes its ${fields.join(", ")}`
+        : "";
       found(
-        `Work Item ${old.id} has started, so it stays as it is${progress.reattempt.has(old.id) ? ", unless its owned paths or dependencies only grow" : ""}; add a new item for further work`,
+        progress.reattempt.has(old.id)
+          ? `Work Item ${old.id} has started, so it keeps its spec, except that its owned paths or dependencies may grow, keeping every entry, and only then may its acceptance, brief and non-goals be restated${changes}. Restore the rest, and put further work in a new item or grow its owned paths or dependencies to take it`
+          : `Work Item ${old.id} has started, so it keeps its spec${changes}. Leave it as it is, and put further work in a new item`,
         old.id,
       );
       continue;
@@ -805,7 +854,11 @@ export function amendmentFindings(
  * currentPlan is the planner's own earlier answer that the checks or the
  * review refused.
  */
-function amendmentRules(whole: boolean, revising: boolean): string {
+function amendmentRules(
+  whole: boolean,
+  revising: boolean,
+  progress: AmendmentProgress,
+): string {
   return [
     whole
       ? "This is an amendment of the accepted plan, which planInForce holds in Factory's own form (not the answer shape)."
@@ -817,8 +870,20 @@ function amendmentRules(whole: boolean, revising: boolean): string {
     whole
       ? "Answer with the complete plan in the answer schema, with the changes that serve it: every item, coverage entry and source exclusion of planInForce stays."
       : "Answer with only the changes that serve it. Keep every current item and every coverage entry and source exclusion.",
-    "Started items stay exactly as they are, except a reattempt item, whose owned paths and dependencies may only grow and whose acceptance, brief and non-goals may be restated to match. Add new items for further work, with ordinary source grounding.",
+    startedItemRule(progress),
+    "Add new items for further work, with ordinary source grounding.",
   ].join(" ");
+}
+
+/**
+ * The started-item rule the fence enforces (`amendmentFindings`), naming
+ * the items it binds, as the amendment's planner and its review are told
+ * it.
+ */
+export function startedItemRule(progress: AmendmentProgress): string {
+  const ids = (set: Set<string>) =>
+    set.size ? [...set].map((id) => JSON.stringify(id)).join(", ") : "none";
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry, and only when one of them grows may its acceptance, brief and non-goals be restated to match; its validation and every other field stay. Never relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory refuses an amendment that changes a started item otherwise and sends it back to the planner.`;
 }
 
 /**
@@ -848,7 +913,7 @@ export function amendmentSteps(
     ...overlaps,
     !round || sentBack
       ? forgetting(amendPlanStep(proposal, deps))
-      : !round.rejected && !state.done[`${KEY(proposal.id)}:review`]
+      : !round.rejected && !reviewOf(state, proposal.id)
         ? amendReviewStep(proposal, deps)
         : amendAcceptStep(proposal, deps),
   ];
@@ -982,7 +1047,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ? { planInForce: currentPlan(state) }
           : { currentPlan: base }),
         amendment: {
-          rules: amendmentRules(whole, Boolean(last)),
+          rules: amendmentRules(whole, Boolean(last), progress),
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
@@ -1120,16 +1185,16 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ],
         );
       if (!decoded.plan) return revise(revised.answer, decoded.findings);
+      // Started work or settled coverage touched (the fence) is the
+      // planner's to restore, like the checks' findings: both go back.
       const findings = [
         ...decoded.findings,
         ...(await checkPlan(decoded.plan, facts, files, plan)),
+        ...amendmentFindings(plan, decoded.plan, progress, {
+          answered: answered.length > 0,
+          nativeStack: config.delivery.kind === "native-stack",
+        }),
       ];
-      const fence = amendmentFindings(plan, decoded.plan, progress, {
-        answered: answered.length > 0,
-        nativeStack: config.delivery.kind === "native-stack",
-      });
-      // Started work or settled coverage touched: rejected, never revised.
-      if (fence.length) return reject([...findings, ...fence]);
       if (findings.length) return revise(revised.answer, findings);
       return done({
         answer: revised.answer,
@@ -1141,12 +1206,14 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
 }
 
 /**
- * Findings the planner can fix, the plan checks' or the review's, go back
- * to it with the round's full answer, as first planning's decide step
- * sends them (steps.ts): the round is kept in `amend:<id>:revisions`,
- * charged to planningRevisions (`allowanceOutcome` asks past it), and
- * planned again at once. An operator decision, or the previous round's
- * findings again, goes to `reject` instead.
+ * Findings the planner can fix, the plan checks', the fence's or the
+ * review's, go back to it with the round's full answer, as first
+ * planning's decide step sends them (steps.ts): the round is kept in
+ * `amend:<id>:revisions`, charged to planningRevisions (`allowanceOutcome`
+ * asks past it), and planned again at once. An operator decision, or the
+ * previous round's findings again, goes to `reject` instead.
+ * `atAcceptance`: acceptance sends a reviewed round back, so the next
+ * round is reviewed again (`reviewOf`).
  */
 function sendBack(
   state: ObjectiveState,
@@ -1154,6 +1221,7 @@ function sendBack(
   answer: unknown,
   findings: Finding[],
   reject: (findings: Finding[]) => Outcome,
+  atAcceptance = false,
 ): Outcome {
   const revisions = revisionsOf(state, proposal.id);
   const last = revisions.at(-1);
@@ -1175,7 +1243,11 @@ function sendBack(
     keep: {
       [revisionsKey(proposal.id)]: [
         ...revisions,
-        { answer, findings } satisfies AmendRevision,
+        {
+          answer,
+          findings,
+          ...(atAcceptance ? { atAcceptance: true as const } : {}),
+        } satisfies AmendRevision,
       ],
     },
   };
@@ -1235,11 +1307,18 @@ function allowanceOutcome(
   );
 }
 
-/** `refuse` (or a `replan` from an earlier hold) rejects the amendment. */
-function refusal(answer: StepContext["answer"]): Outcome | undefined {
+/**
+ * `refuse` (or a `replan` from an earlier hold) rejects the amendment;
+ * `fields` join the step's result.
+ */
+function refusal(
+  answer: StepContext["answer"],
+  fields: Record<string, unknown> = {},
+): Outcome | undefined {
   if (answer?.answer !== "refuse" && answer?.answer !== "replan")
     return undefined;
   return done({
+    ...fields,
     rejected: `The operator refused the amendment${answer.text ? `: ${answer.text}` : ""}`,
   });
 }
@@ -1261,7 +1340,9 @@ function amendReviewStep(
     run: async (context): Promise<Outcome> => {
       const { state, signal } = context;
       const { config } = deps;
-      const refused = refusal(context.answer);
+      const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
+      // Every result names the round it reviewed (`reviewOf`).
+      const refused = refusal(context.answer, { round: round.round });
       if (refused) return refused;
       const inputs = amendmentInputs(state);
       const built = await planningFacts(
@@ -1271,12 +1352,16 @@ function amendReviewStep(
         config,
       );
       if ("problems" in built)
-        return done({ rejected: built.problems.join("; ") });
+        return done({
+          round: round.round,
+          rejected: built.problems.join("; "),
+        } satisfies AmendReview);
       const { facts } = built;
-      const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
       const draft = round.draft!;
       const all = decisions(state);
       const local = await localExecutables(inputs, config, signal);
+      const previousPlan = acceptedPlan(state)!;
+      const progress = amendmentProgress(state, previousPlan, proposal);
       const evidence = planningReviewEvidence({
         sources: facts.sources,
         decisions: all,
@@ -1286,7 +1371,12 @@ function amendReviewStep(
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
-          previousPlan: acceptedPlan(state),
+          previousPlan,
+          // The rule the fence holds the graph to: a fix finding asks for
+          // nothing it refuses.
+          startedItemIds: [...progress.started],
+          reattemptItemIds: [...progress.reattempt],
+          startedItemRule: startedItemRule(progress),
         },
         cited: await citedFiles(config.checkout, proposal, inputs.base, signal),
       });
@@ -1344,10 +1434,12 @@ function amendReviewStep(
       if (decoded.invalid)
         return state.kept[invalidKey(key)] !== undefined
           ? done({
+              round: round.round,
               rejected: `${invalidReview} twice: ${decoded.reason}`,
-            })
+            } satisfies AmendReview)
           : invalidRetry(key, `${invalidReview}: ${decoded.reason}`);
-      if (!decoded.findings.length) return done({});
+      if (!decoded.findings.length)
+        return done({ round: round.round } satisfies AmendReview);
       // Fix findings go back to the planner, as the plan checks' do.
       return sendBack(
         state,
@@ -1356,14 +1448,18 @@ function amendReviewStep(
         decoded.findings,
         (findings) =>
           done({
+            round: round.round,
             rejected: `Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
-          }),
+          } satisfies AmendReview),
       );
     },
   };
 }
 
-/** Accept a clean, reviewed amendment and post the plan; or record the rejection. */
+/**
+ * Accept a clean, reviewed amendment and post the plan; or record the
+ * rejection; or send back a round the fence refuses against the state now.
+ */
 function amendAcceptStep(
   proposal: AmendmentProposal,
   deps: PlanningDeps,
@@ -1376,13 +1472,12 @@ function amendAcceptStep(
       const refused = refusal(answer);
       if (refused) return refused;
       const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
-      const review = state.done[`${KEY(proposal.id)}:review`] as
-        | { rejected?: string }
-        | undefined;
-      const rejected = round.rejected ?? review?.rejected;
+      const rejected = round.rejected ?? reviewOf(state, proposal.id)?.rejected;
       if (rejected) return done({ rejected } satisfies AmendmentResult);
       // The fence again, against the state now: a step that was running
       // while the amendment was planned may have started an item since.
+      // The planner can leave it as it is, so the round goes back to it,
+      // and the revised round is reviewed again.
       const saved = acceptedPlan(state)!;
       const fence = amendmentFindings(
         saved,
@@ -1397,9 +1492,17 @@ function amendAcceptStep(
         },
       );
       if (fence.length)
-        return done({
-          rejected: `The build moved on while the amendment was planned: ${fence.map((f) => f.message).join("; ")}`,
-        } satisfies AmendmentResult);
+        return sendBack(
+          state,
+          proposal,
+          round.answer,
+          fence,
+          (findings) =>
+            done({
+              rejected: `The build moved on while the amendment was planned: ${findings.map((f) => f.message).join("; ")}`,
+            } satisfies AmendmentResult),
+          true,
+        );
       const inputs = amendmentInputs(state);
       // The paths it adds are owned from now: they rank after every plan
       // accepted before it (service.ts `pathOwners`).

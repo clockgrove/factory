@@ -47,6 +47,8 @@ The rules live in `src/planning/rubric.ts`. The planner and the graph reviewer r
 
 All three happen in the planner's one session. Self-checking is a filter; the independent graph review stays the gate.
 
+**Plan changes after acceptance are planned, not asked.** When a Work Item's repair needs files or work outside its owned paths that no item owns (a module a person's new test imports, say), the repair diagnosis decides `discover`, and amendment planning chooses between a new Work Item and a change to an existing one, under the same checks and independent review. The diagnosis asks the operator only what a person alone can decide: their intent, an external fact or an authorization. Why: a question like "add an item to own the file, or drop the test?" hands the plan to the operator, when the planner and its review can make and check that change (see [Holds](reference/holds.md)).
+
 ## How review holds the standard
 
 - **Graph review:** an acceptance entry that prescribes a mechanism, a line or a file edit instead of behaviour is a fix finding. Review never asks for more detail than the standard requires.
@@ -62,7 +64,7 @@ All three happen in the planner's one session. Self-checking is a filter; the in
   - a validation command whose script (from the base `package.json`) invokes a known network tool. The authorized package bootstrap and npx runs of local bins are not refused. Why: validation has no network, so the command could never pass, whatever the item owns;
   - a validation command whose package script body works in one directory (it starts with `cd DIR &&`, or is one command naming DIR after `--prefix`, `--dir` or `-C`) on a work item that owns no path there. The request lists these scoped commands with their directories. Why: the command checks nothing the item changed.
 
-  The planner gets all of these as one correction. An amendment's plan round gets the same: the plan checks' findings, and its graph review's fix findings, go back to its planner as another round, charged to `planningRevisions`, and only the amendment fence, an operator decision or the same findings twice reject it.
+  The planner gets all of these as one correction. An amendment's plan round gets the same: the plan checks' findings, the amendment fence's (a started item changed; an item, coverage entry or source exclusion dropped; a started native stack's layers changed), and its graph review's fix findings, go back to its planner as another round, charged to `planningRevisions`, and only an operator decision or the same findings twice reject it. The planner and the review are told the started-item rule, naming the items it binds: a started item keeps its spec, only a reattempt item (the proposing worker's own unpublished item, or for an operator's proposal a failed, unpublished one) may grow its owned paths or dependencies, and further work goes in a new item.
 
 - **Obligations are proved at owner level.** A covered Objective criterion or source exit item names its owner and proof kind. For item or QA review, the owner's review judges the obligation itself, with the owner's acceptance as a whole as its proof. No proof points at a single acceptance entry. Code still checks that each obligation has exactly one owner, the owner exists and the proof kind fits the owner. In an amendment, an already-reviewed item keeps only the semantic proofs it had; a newly assigned obligation needs final review or new work.
 

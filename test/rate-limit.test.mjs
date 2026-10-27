@@ -2,7 +2,7 @@
 // secondary, holds every request it covers until its reset (github.ts
 // `send`), and a rate-limited sync job runs again after the reset, never
 // sooner and never given up; any sync job that failed runs again once its
-// wait is over, with nothing else changed (jobs.ts `ready`). GitHub is a
+// wait is over, with nothing else changed (jobs.ts `held`). GitHub is a
 // local fake that answers with GitHub's own headers.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -510,17 +510,17 @@ test("a job that names its earliest retry waits for it with jitter, even one tha
   // Without a backoff (a paced read), a plain failure is ready at once...
   jobs.run(0, "plain", failing(undefined), { backoff: false });
   await until(() => events.length === 1, "the plain failure");
-  assert.equal(jobs.ready("plain"), true);
+  assert.equal(jobs.held("plain"), false);
   // ...and one that names its retry waits for it, plus its jitter.
   jobs.run(0, "queue", failing(30_000), { backoff: false });
   await until(() => events.length === 2, "the limited failure");
   assert.equal(events[1].retryAt, new Date(now + 35_000).toISOString());
-  assert.equal(jobs.ready("queue"), false);
+  assert.equal(jobs.held("queue"), true);
   assert.equal(jobs.pending("queue"), true);
   now += 34_999;
-  assert.equal(jobs.ready("queue"), false);
+  assert.equal(jobs.held("queue"), true);
   now += 1;
-  assert.equal(jobs.ready("queue"), true);
+  assert.equal(jobs.held("queue"), false);
   // Not yet succeeded: still pending (the service's observer reads this).
   assert.equal(jobs.pending("queue"), true);
   // A reset already past still waits the base backoff: never a hot loop.

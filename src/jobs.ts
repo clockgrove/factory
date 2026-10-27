@@ -55,7 +55,7 @@ interface Running {
  * need. A failure that names its earliest retry (a rate limit's reset,
  * `JobsLimit`) waits until then, with jitter, instead: never sooner. A key
  * keeps its failures until it succeeds or is forgotten, and once its wait
- * is over the next `run` starts it (`ready`), so a failed job always runs
+ * is over the next `run` starts it (`held`), so a failed job always runs
  * again. Each run gets a signal that aborts at its deadline; a run past
  * its deadline counts as failed and leaves its key at once, whether or not
  * it heeds the signal, so a hung call never holds a key. `forget` aborts
@@ -90,9 +90,7 @@ export class Jobs {
     job: (signal: AbortSignal) => Promise<void>,
     options: JobOptions = {},
   ): void {
-    if (this.running.has(key)) return;
-    const wait = this.waits.get(key);
-    if (wait && this.now() < wait.nextAt) return;
+    if (this.held(key)) return;
     const entry: Running = { issue, controller: new AbortController() };
     const { signal } = entry.controller;
     this.running.set(key, entry);
@@ -172,22 +170,19 @@ export class Jobs {
   }
 
   /**
-   * Whether `key` is in flight or has failed since it last succeeded (its
-   * wait over or not): its work hasn't landed.
+   * Whether `key` is in flight, or its last run failed: its work isn't
+   * done yet, whether its backoff is still on or has ended. Never a reason
+   * to skip `run`, which starts it again once its backoff ends (`held`).
    */
   pending(key: string): boolean {
     return this.running.has(key) || this.waits.has(key);
   }
 
-  /**
-   * Whether a `run` of `key` would start it now: not in flight, and not
-   * waiting after a failure. A caller that paces its own tries checks this
-   * before it counts one, so a key whose wait is over is started again.
-   */
-  ready(key: string): boolean {
-    if (this.running.has(key)) return false;
+  /** Whether `run` leaves `key` alone now: in flight, or its backoff after a failure hasn't ended. */
+  held(key: string): boolean {
+    if (this.running.has(key)) return true;
     const wait = this.waits.get(key);
-    return !wait || this.now() >= wait.nextAt;
+    return wait !== undefined && this.now() < wait.nextAt;
   }
 
   /** Whether any job of Objective `issue` is in flight. */

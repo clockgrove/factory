@@ -46,14 +46,19 @@ export function utf8Text(data: Buffer): string | undefined {
 
 /**
  * The entries of zip archive `data` that are text files of at most
- * `maxBytes` bytes, in the archive's order, and the other entries with why
- * they were skipped (larger, binary, encrypted, compressed some other way).
- * Directories are left out. Undefined when `data` is not a zip archive
- * Factory can read (no end record, or a Zip64 one).
+ * `maxBytes` bytes, in the archive's order, within `totalBytes` in all, and
+ * the other entries with why they were skipped (larger, binary, encrypted,
+ * compressed some other way, past the bound in all). Directories are left
+ * out. An entry is inflated to no more than the size its directory entry
+ * declares, and every entry inflated counts against `totalBytes`, so
+ * entries that share their data (an overlapping zip bomb) cost at most the
+ * bound too. Undefined when `data` is not a zip archive Factory can read
+ * (no end record, or a Zip64 one).
  */
 export function zipTexts(
   data: Buffer,
   maxBytes: number,
+  totalBytes = maxBytes,
 ): ZipListing | undefined {
   const end = endRecord(data);
   if (end === undefined) return undefined;
@@ -61,6 +66,7 @@ export function zipTexts(
   const offset = data.readUInt32LE(end + 16);
   if (count === 0xffff || offset === 0xffffffff) return undefined;
   const listing: ZipListing = { texts: [], skipped: [] };
+  let room = totalBytes;
   let at = offset;
   for (let index = 0; index < count; index++) {
     if (at + 46 > data.length || data.readUInt32LE(at) !== DIRECTORY_ENTRY)
@@ -89,6 +95,11 @@ export function zipTexts(
       skip(`compressed with method ${method}`);
       continue;
     }
+    if (size > room) {
+      skip("past the bound in all");
+      continue;
+    }
+    room -= size;
     const content = entryData(data, local, compressed);
     if (!content) return undefined;
     let file: Buffer;
@@ -96,7 +107,7 @@ export function zipTexts(
       file =
         method === 0
           ? content
-          : inflateRawSync(content, { maxOutputLength: maxBytes });
+          : inflateRawSync(content, { maxOutputLength: Math.max(1, size) });
     } catch {
       skip("unreadable");
       continue;

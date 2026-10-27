@@ -132,6 +132,13 @@ const REPUBLISHING: Offer = {
  */
 export const RESET_BRANCH = "reset";
 
+/**
+ * The answer to a question about a failed check the default branch fails
+ * too (baseFailures) that repairs it all the same, as the Work Item's
+ * change is meant to fix it there: steps pass it as `repairShared`.
+ */
+export const REPAIR_SHARED = "repair";
+
 /** Commits beyond the default branch checked for Factory's ownership; more is not Factory's. */
 const MAX_OWNED_COMMITS = 250;
 
@@ -789,6 +796,14 @@ export interface PullInput {
   baseBranch?: string;
   /** The item's last rerun of failed Actions jobs, as kept. */
   rerun?: CiRerun;
+  /** The operator answered retry to this step's question. */
+  retried?: boolean;
+  /**
+   * The operator answered REPAIR_SHARED to this step's question: failed
+   * checks the default branch fails too are the item's to repair, as its
+   * change is meant to fix them there (#2094).
+   */
+  repairShared?: boolean;
   /**
    * The CI step of a native-stack layer above the bottom: the PRs of its
    * unit's published layers, bottom first, and the items of the layers not
@@ -816,7 +831,9 @@ export type CiResult =
  * that failed, required or not, or a conflict with the base, is a repair
  * (#1637), once failed Actions jobs were rerun (rerunFailed), with the
  * failed runs' artifacts (failedRunArtifacts); a failed check the default
- * branch fails too is a question instead (baseFailures, #2094). Each
+ * branch fails too is a question instead (baseFailures, #2094), and on the
+ * operator's retry, a delivered head behind a default branch whose runs of
+ * the failed checks pass is updated with it instead of repaired. Each
  * plan-named check must pass by name. A PR BEHIND its base
  * under strict protection is updated by GitHub and observed again. A PR
  * made a draft, closed without merging, with only cancelled checks nothing
@@ -1003,14 +1020,47 @@ async function judge(
     (check) => !["cancelled", "stale"].includes(check.conclusion),
   );
   if (broken.length) {
-    // A failure the default branch shares is no repair's to fix (#2094).
+    // A failure the default branch shares is no repair's to fix (#2094),
+    // unless the operator says this item's change is meant to fix it.
     const base = await baseFailures(
       context,
       { pr, head, defaultBranch },
       broken,
     );
-    if (base.kind === "hold") return base;
-    const rerun = await rerunFailed(context, input, head, broken);
+    if (base.hold && !input.repairShared) return base.hold;
+    // The operator's retry, as once the default branch is fixed: the PR's
+    // failures may be the old base's, so the delivered head is brought up
+    // to date with it (by GitHub, no worker) instead of being repaired, once
+    // the default branch's own runs of those checks pass.
+    if (
+      input.retried &&
+      !base.hold &&
+      head === input.head &&
+      baseBranch === defaultBranch
+    ) {
+      if (base.running.length)
+        return {
+          kind: "retry",
+          reason: `Awaiting ${defaultBranch}'s runs of ${bounded(base.running, ", ")} at ${base.base} to compare PR #${pr}'s failed checks with them`,
+          afterMs: CI_POLL_MS,
+        };
+      if (
+        base.passing &&
+        (await github.commitsBeyond(head, base.base, 1, signal)).total > 0
+      )
+        return updateBranch(
+          context,
+          { pr, head, bases },
+          {
+            kind: "repair",
+            finding: `PR #${pr} conflicts with its base branch; rebase the change`,
+            conflict: {},
+          },
+        );
+    }
+    const rerun = base.hold
+      ? undefined
+      : await rerunFailed(context, input, head, broken);
     if (rerun) return rerun;
     // Why the first few failed, so a repair is not blind.
     const excerpts: string[] = [];
@@ -1466,23 +1516,49 @@ async function rerunFailed(
  * there too, with any failing conclusion but cancelled or stale, is a hold
  * at once, before any rerun, that names it, its failed step and excerpt,
  * and spends no repair; `retry` compares again once the default branch is
- * fixed. Otherwise `note` says what the default branch's head shows of
- * each failed check, for the repair finding: no run, one still running,
- * or how it ended and when, and that a pass from BASE_STALE_MS or more
- * before the failure may not hold now. The default branch is a native
- * stack's base too: GitHub requires its checks on every layer (#2060).
+ * fixed, and REPAIR_SHARED repairs it all the same, for a change meant to
+ * fix it there. A failed run a later run of the same check there passed,
+ * or still runs, is not its failure now (a workflow run again by hand).
+ * `note` says what the default branch's head shows of each failed check,
+ * for the repair finding: no run, one still running, or how it ended and
+ * when, and that a pass from BASE_STALE_MS or more before the failure may
+ * not hold now. The default branch is a native stack's base too: GitHub
+ * requires its checks on every layer (#2060).
  */
 async function baseFailures(
   context: DeliveryContext,
   at: { pr: number; head: string; defaultBranch: string },
   broken: FailedCheck[],
-): Promise<Hold | { kind: "compared"; note?: string }> {
+): Promise<{
+  /** The default branch's head. */
+  base: string;
+  /** The question, when the default branch fails a failed check too. */
+  hold?: Hold;
+  note?: string;
+  /** The failed checks whose run on the default branch's head still runs. */
+  running: string[];
+  /** Every failed check passed on the default branch's head. */
+  passing: boolean;
+}> {
   const { github, signal } = context;
   const { pr, head, defaultBranch } = at;
   const base = await github.branchHead(defaultBranch, signal);
-  if (base === head) return { kind: "compared" };
-  const runs = (await github.checkRuns(base, signal)).filter(
+  if (base === head) return { base, running: [], passing: false };
+  const all = (await github.checkRuns(base, signal)).filter(
     (run) => run.head_sha === base,
+  );
+  // A run again of the same check, as a separate workflow run, supersedes
+  // what an earlier one showed: check run ids grow.
+  const runs = all.filter(
+    (run) =>
+      !all.some(
+        (other) =>
+          other.id > run.id &&
+          other.name === run.name &&
+          typeof run.app?.id === "number" &&
+          other.app?.id === run.app.id &&
+          (other.status !== "completed" || other.conclusion === "success"),
+      ),
   );
   const statuses = await github.commitStatuses(base, signal);
   const names = [...new Set(broken.map((check) => check.name))];
@@ -1505,17 +1581,28 @@ async function baseFailures(
         `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})${excerpt ? `:\n${excerpt}` : ""}`,
       );
     }
-    return hold(
-      `${defaultBranch} is red: its head ${base} fails ${checks} too, which failed on PR #${pr} at ${head}. A failure ${defaultBranch} shares fails every PR into it whatever the change, so Factory spent no repair on it.${only.length ? ` PR #${pr} also fails ${bounded(only, ", ")}, which ${defaultBranch} doesn't; Factory repairs that once ${defaultBranch} passes ${checks}.` : ""} On ${defaultBranch}:\n\n${failures.join("\n\n")}\n\nFix ${checks} on ${defaultBranch} (another Objective can), then answer retry; or cancel.`,
-      [
-        {
-          answer: "retry",
-          family: "retry",
-          consequence: `Compares PR #${pr}'s failed checks with ${defaultBranch} again: asks again while ${defaultBranch} still fails them, else reruns or repairs them as usual.`,
-        },
-        "cancel",
-      ],
-    );
+    return {
+      base,
+      hold: hold(
+        `${defaultBranch} is red: its head ${base} fails ${checks} too, which failed on PR #${pr} at ${head}. A failure ${defaultBranch} shares fails every PR into it whatever the change, so Factory spent no repair on it.${only.length ? ` PR #${pr} also fails ${bounded(only, ", ")}, which ${defaultBranch} doesn't; Factory repairs that once ${defaultBranch} passes ${checks}.` : ""} On ${defaultBranch}:\n\n${failures.join("\n\n")}\n\nFix ${checks} on ${defaultBranch} (another Objective can), then answer retry; ${REPAIR_SHARED} if this Work Item's change is meant to fix ${shared.length === 1 ? "it" : "them"} there; or cancel.`,
+        [
+          {
+            answer: "retry",
+            family: "retry",
+            consequence: `Compares PR #${pr}'s failed checks with ${defaultBranch} again: asks again while ${defaultBranch} still fails them; once its runs of them pass, brings PR #${pr} up to date with ${defaultBranch} (no worker), else reruns or repairs them as usual.`,
+          },
+          {
+            answer: REPAIR_SHARED,
+            family: "repair",
+            consequence: `Repairs PR #${pr}'s failed checks at once, as this Work Item's to fix though ${defaultBranch} fails them too; counts as a repair.`,
+          },
+          "cancel",
+        ],
+      ),
+      note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (Factory runs nothing there), ${checks} failed too. The operator answered ${REPAIR_SHARED}: this Work Item's change is meant to fix ${shared.length === 1 ? "it" : "them"} on ${defaultBranch} as well.`,
+      running: [],
+      passing: false,
+    };
   }
   // When the PR's check failed, for a pass on the base that predates it.
   const failedAt = (name: string) =>
@@ -1525,15 +1612,23 @@ async function baseFailures(
         .map((check) => Date.parse(check.run?.completed_at ?? "") || 0),
     );
   let stale = false;
+  const running: string[] = [];
+  let passing = true;
   const shown = names.map((name) => {
     const there = runs.filter((run) => run.name === name);
     const status = statuses.find((entry) => entry.context === name);
-    if (!there.length && !status) return `${name} has no run or status`;
+    if (!there.length && !status) {
+      passing = false;
+      return `${name} has no run or status`;
+    }
     if (
       there.some((run) => run.status !== "completed") ||
       status?.state === "pending"
-    )
+    ) {
+      passing = false;
+      running.push(name);
       return `${name} is still running`;
+    }
     const ended = there.length
       ? there.map((run) => ({
           conclusion: String(run.conclusion),
@@ -1542,16 +1637,18 @@ async function baseFailures(
       : [{ conclusion: String(status?.state), at: String(status?.updated_at) }];
     const last = ended.sort((a, b) => b.at.localeCompare(a.at))[0]!;
     const done = Date.parse(last.at);
+    const passed = ["success", "neutral", "skipped"].includes(last.conclusion);
+    if (!passed) passing = false;
     const old =
-      ["success", "neutral", "skipped"].includes(last.conclusion) &&
-      Number.isFinite(done) &&
-      failedAt(name) - done >= BASE_STALE_MS;
+      passed && Number.isFinite(done) && failedAt(name) - done >= BASE_STALE_MS;
     if (old) stale = true;
     const days = Math.floor((failedAt(name) - done) / (24 * 60 * MINUTE));
     return `${name} ended ${last.conclusion}${Number.isFinite(done) ? ` at ${last.at}` : ""}${old ? `, ${days} day${days === 1 ? "" : "s"} before it failed here` : ""}`;
   });
   return {
-    kind: "compared",
+    base,
+    running,
+    passing,
     note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (Factory runs nothing there): ${shown.join("; ")}.${stale ? ` A pass that old may not hold now: a check that depends on when it runs (new advisories against locked dependencies, an expired credential, an outside service) can fail ${defaultBranch} too, and then no change to this Work Item fixes it.` : ""}`,
   };
 }
@@ -1624,7 +1721,7 @@ async function failedRunArtifacts(
       const data = await tolerated(() =>
         github.artifactDownload(artifact.id, ARTIFACT_DOWNLOAD_BYTES, signal),
       );
-      const listing = data && artifactTexts(artifact.name, data);
+      const listing = data && artifactTexts(artifact.name, data, room);
       if (!listing) {
         lines.push(`- ${label}: GitHub did not serve a readable download`);
         continue;
@@ -1661,11 +1758,15 @@ async function failedRunArtifacts(
 
 /**
  * The text files of an artifact's download: a zip archive's, or the one
- * file an artifact uploaded unarchived is. Undefined when it is a zip
- * archive Factory can't read.
+ * file an artifact uploaded unarchived is, within `room` bytes of a zip
+ * archive's in all. Undefined when it is a zip archive Factory can't read.
  */
-function artifactTexts(name: string, data: Buffer): ZipListing | undefined {
-  if (isZip(data)) return zipTexts(data, ARTIFACT_TEXT_BYTES);
+function artifactTexts(
+  name: string,
+  data: Buffer,
+  room: number,
+): ZipListing | undefined {
+  if (isZip(data)) return zipTexts(data, ARTIFACT_TEXT_BYTES, room);
   const text = data.length <= ARTIFACT_TEXT_BYTES ? utf8Text(data) : undefined;
   return text === undefined
     ? {

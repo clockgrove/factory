@@ -16,6 +16,7 @@ import { deflateRawSync } from "node:zlib";
 import { observeCi } from "../dist/delivery.js";
 import { GitHub, GitHubError, TransientError } from "../dist/github.js";
 import { correction } from "../dist/repair.js";
+import { pullInput } from "../dist/work/step-deliver.js";
 import { zipTexts } from "../dist/zip.js";
 import { item, plan, REPO, tempDir } from "./helpers.mjs";
 
@@ -59,12 +60,15 @@ function github({
   attempt = 1,
   artifacts = {},
   downloads = {},
+  behind = 0,
 }) {
   const reruns = [];
   const downloaded = [];
+  const updates = [];
   return {
     reruns,
     downloaded,
+    updates,
     repository: "o/r",
     defaultBranch: async () => "main",
     pull: async () => ({
@@ -99,6 +103,14 @@ function github({
     rerunFailedJobs: async (run) => {
       reruns.push(run);
     },
+    // `behind`: the commits on main's head that HEAD lacks.
+    commitsBeyond: async (base, head) => {
+      assert.deepEqual([base, head], [HEAD, BASE]);
+      return { total: behind, commits: [] };
+    },
+    requestBranchUpdate: async (pr, head) => {
+      updates.push([pr, head]);
+    },
     runArtifacts: async (run) => artifacts[run],
     artifactDownload: async (id, maxBytes) => {
       assert.equal(maxBytes, 1024 * 1024);
@@ -110,7 +122,8 @@ function github({
   };
 }
 
-function observe(hub) {
+/** The CI step on `hub`'s PR #7; `answered`: what the operator answered. */
+function observe(hub, answered = {}) {
   return observeCi(
     {
       github: hub,
@@ -124,6 +137,7 @@ function observe(hub) {
       head: HEAD,
       pushedHeads: [HEAD],
       requiredChecks: [],
+      ...answered,
     },
   );
 }
@@ -202,11 +216,11 @@ test("a check main fails too holds at once, names main's failed step and error, 
   assert.match(result.question, /npm audit: 3 new advisories \(fast-uri/);
   assert.match(
     result.question,
-    /Fix "checks", "quality" on main \(another Objective can\), then answer retry; or cancel\.$/,
+    /Fix "checks", "quality" on main \(another Objective can\), then answer retry; repair if this Work Item's change is meant to fix them there; or cancel\.$/,
   );
   assert.deepEqual(
     result.options.map((option) => option.answer),
-    ["retry", "cancel"],
+    ["retry", "repair", "cancel"],
   );
   assert.match(result.options[0].consequence, /asks again while main still/);
   // A first attempt would have been rerun, and nothing more was read.
@@ -509,9 +523,161 @@ test("a zip entry is read only within its bound, whatever its header claims", ()
   assert.deepEqual(listing.texts, [{ name: "ok.txt", text: "fine" }]);
   assert.deepEqual(listing.skipped, [
     { name: "bomb.txt", reason: "unreadable" },
-    { name: "short.txt", reason: "not UTF-8 text" },
+    { name: "short.txt", reason: "unreadable" },
   ]);
   assert.equal(zipTexts(Buffer.from("not a zip"), 64 * 1024), undefined);
+
+  // Many directory entries sharing one entry's data: an overlapping zip
+  // bomb. Each counts against the bound in all, so it is read only so far.
+  const one = zip([{ name: "a.txt", data: Buffer.alloc(60 * 1024, 0x61) }]);
+  const end = one.length - 22;
+  const offset = one.readUInt32LE(end + 16);
+  const entry = one.subarray(offset, end);
+  const copies = 1000;
+  const directory = Buffer.concat(Array.from({ length: copies }, () => entry));
+  const record = Buffer.from(one.subarray(end));
+  record.writeUInt16LE(copies, 8);
+  record.writeUInt16LE(copies, 10);
+  record.writeUInt32LE(directory.length, 12);
+  const overlapping = zipTexts(
+    Buffer.concat([one.subarray(0, offset), directory, record]),
+    64 * 1024,
+    128 * 1024,
+  );
+  assert.equal(overlapping.texts.length, 2);
+  assert.equal(overlapping.skipped.length, copies - 2);
+  assert.deepEqual(overlapping.skipped[0], {
+    name: "a.txt",
+    reason: "past the bound in all",
+  });
+});
+
+test("a failure on main that a later run of the check there passed or still runs is not main's now", async () => {
+  for (const later of [
+    onBase(31, "quality", "success"),
+    onBase(31, "quality", null, { status: "in_progress", completed_at: null }),
+  ]) {
+    const hub = github({
+      runs: [check(1, "quality", "failure")],
+      // An earlier workflow run on main's head failed; a later one, run
+      // again by hand, passed or still runs.
+      baseRuns: [onBase(21, "quality", "failure"), later],
+    });
+    const result = await observe(hub);
+    assert.equal(result.kind, "rerun", later.status);
+  }
+  // A later failure of another check does not supersede it.
+  const red = github({
+    runs: [check(1, "quality", "failure")],
+    baseRuns: [
+      onBase(21, "quality", "failure"),
+      onBase(31, "tests", "success"),
+    ],
+  });
+  assert.equal((await observe(red)).kind, "hold");
+});
+
+test("the operator's repair repairs a check main fails too at once: the change is meant to fix it", async () => {
+  const hub = github({
+    runs: [check(1, "quality", "failure")],
+    baseRuns: [onBase(21, "quality", "failure")],
+    jobs: { 1: { log: "quality: 1 advisory left" } },
+  });
+  const result = await observe(hub, { repairShared: true });
+  assert.equal(result.kind, "repair", JSON.stringify(result));
+  assert.equal(result.checks, true);
+  // A first attempt, but no rerun: main fails it too.
+  assert.deepEqual(hub.reruns, []);
+  assert.match(
+    result.finding,
+    new RegExp(
+      `On main's head ${BASE}, as GitHub shows it \\(Factory runs nothing there\\), "quality" failed too\\. The operator answered repair: this Work Item's change is meant to fix it on main as well\\.`,
+    ),
+  );
+  assert.ok(result.finding.endsWith("quality: 1 advisory left"));
+});
+
+test("the operator's retry once main is fixed brings the PR up to date with it instead of repairing", async () => {
+  const fixed = [onBase(21, "quality", "success")];
+  // main passes now, and the PR's head lacks its fix: GitHub updates it.
+  const behind = github({
+    runs: [check(1, "quality", "failure")],
+    baseRuns: fixed,
+    behind: 2,
+  });
+  const update = await observe(behind, { retried: true });
+  assert.equal(update.kind, "retry", JSON.stringify(update));
+  assert.match(update.reason, /Awaiting GitHub's update of PR #7/);
+  assert.deepEqual(behind.updates, [[7, HEAD]]);
+  assert.deepEqual(behind.reruns, []);
+
+  // main's run of it still runs: wait for it to compare.
+  const running = github({
+    runs: [check(1, "quality", "failure")],
+    baseRuns: [
+      onBase(21, "quality", null, {
+        status: "in_progress",
+        completed_at: null,
+      }),
+    ],
+    behind: 2,
+  });
+  const wait = await observe(running, { retried: true });
+  assert.equal(wait.kind, "retry");
+  assert.equal(
+    wait.reason,
+    `Awaiting main's runs of quality at ${BASE} to compare PR #7's failed checks with them`,
+  );
+  assert.deepEqual(running.updates, []);
+
+  // The PR has main's head already, or no retry was answered: as before.
+  for (const [hub, answered] of [
+    [
+      github({ runs: [check(1, "quality", "failure")], baseRuns: fixed }),
+      { retried: true },
+    ],
+    [
+      github({
+        runs: [check(1, "quality", "failure")],
+        baseRuns: fixed,
+        behind: 2,
+      }),
+      {},
+    ],
+  ]) {
+    assert.equal((await observe(hub, answered)).kind, "rerun");
+    assert.deepEqual(hub.updates, []);
+  }
+});
+
+test("the CI and merge steps pass the operator's retry and repair on to the comparison", () => {
+  const a = item("a");
+  const state = {
+    issue: 1,
+    kept: {},
+    done: {
+      plan: plan([a]),
+      "item:a:publish": { pr: 7, head: HEAD, merged: false },
+    },
+  };
+  const input = (answer) =>
+    pullInput(
+      state,
+      a,
+      {
+        state,
+        signal: new AbortController().signal,
+        log() {},
+        ...(answer ? { answer: { answer, at: new Date().toISOString() } } : {}),
+      },
+      undefined,
+    );
+  assert.equal(input("retry").retried, true);
+  assert.equal(input("retry").repairShared, undefined);
+  assert.equal(input("repair").repairShared, true);
+  assert.equal(input("repair").retried, undefined);
+  assert.equal(input(undefined).retried, undefined);
+  assert.equal(input("republish").repairShared, undefined);
 });
 
 test("the client reads main's head, a job's failed steps, a run's artifacts and a bounded download, and holds them for a rate limit", async () => {

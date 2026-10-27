@@ -304,7 +304,8 @@ export function unitText(
     "TimeoutStopSec=30s",
     "Restart=on-failure",
     "RestartSec=5s",
-    // Usage, and a configuration that doesn't load: a restart can't fix them.
+    // Usage, and a configuration that doesn't load or names no GitHub
+    // identity: a restart can't fix them.
     `RestartPreventExitStatus=2 ${CONFIGURATION_EXIT}`,
     "",
     "[Install]",

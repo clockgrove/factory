@@ -9,7 +9,9 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -35,19 +37,25 @@ import {
 import { redact } from "../dist/log.js";
 import { mark } from "../dist/markdown.js";
 import { postPlan } from "../dist/planning/steps.js";
+import { unitName, unitText } from "../dist/systemd.js";
 import { FACTORY_EMAIL, factoryCommit } from "../dist/work/collect.js";
 import { reportComment } from "../dist/work/finish.js";
 import { workerEnvironment } from "../dist/worktree.js";
 import {
   CLI,
   children,
+  cli,
+  closedPort,
   configured,
+  exited,
   githubOrigin,
   installation,
   item,
   offered,
   plan,
   REPO,
+  serve,
+  stopped,
   tempDir,
   until,
 } from "./helpers.mjs";
@@ -1050,10 +1058,12 @@ test("a configuration naming no GitHub identity, as before 0.5.2, is blocked on 
   assert.deepEqual(saved(), { app: { id: 42 } });
 });
 
-test("setup takes one GitHub identity: --github-login with an App option is refused, both keys by hand don't load, and --github-login drops the App", async () => {
+test("setup takes one GitHub identity: --github-login with an App option is refused, both keys by hand don't load, and --github-login drops the App and its key copy", async () => {
   const { api } = await fakeGitHub({});
   const inst = installation();
   configured(inst, api, {}, { github: { app: { id: 42 } } });
+  const copy = join(inst.root, "github-app-key.pem");
+  writeFileSync(copy, key.privateKey, { mode: 0o600 });
   for (const flags of [
     ["--github-app-id", "42"],
     ["--github-app-installation", "9"],
@@ -1065,6 +1075,23 @@ test("setup takes one GitHub identity: --github-login with an App option is refu
       /--github-login keeps the GitHub CLI's login instead of a GitHub App: drop --github-app-/,
     );
   }
+  // The App's key copy setup kept stays through a usage error, and goes
+  // with the App, unread; while the background unit loads it, it stays
+  // until --background rewrites the unit (the unit is written, never loaded).
+  assert.equal(existsSync(copy), true);
+  const units = tempDir("factory-units-");
+  inst.env.XDG_CONFIG_HOME = units;
+  mkdirSync(join(units, "systemd", "user"), { recursive: true });
+  const unit = join(
+    units,
+    "systemd",
+    "user",
+    unitName({ root: realpathSync(inst.root) }),
+  );
+  writeFileSync(
+    unit,
+    unitText(REPO, [{ name: "FACTORY_GITHUB_APP_KEY", file: copy }]),
+  );
   const config = inst.env.FACTORY_CONFIG;
   const switched = JSON.parse(
     (await factory(inst, "setup", "--github-login", "--json")).out,
@@ -1076,6 +1103,17 @@ test("setup takes one GitHub identity: --github-login with an App option is refu
   assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).github, {
     login: true,
   });
+  assert.equal(existsSync(copy), true);
+  rmSync(unit);
+  const unbound = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.deepEqual(unbound.changed, ["FACTORY_GITHUB_APP_KEY"]);
+  assert.equal(existsSync(copy), false);
+  const again = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.deepEqual(again.changed, []);
 
   const written = JSON.parse(readFileSync(config, "utf8"));
   written.github = { app: { id: 42 }, login: true };
@@ -1086,4 +1124,62 @@ test("setup takes one GitHub identity: --github-login with an App option is refu
     loaded.problems[0],
     /github\.app and github\.login are both set/,
   );
+});
+
+test("serve refuses to start on a configuration naming no GitHub identity, as before 0.5.2, and status shows why; with the App or the login it starts", async () => {
+  const { api } = await fakeGitHub(appRoutes({ minted: 0 }));
+  const inst = installation();
+  configured(
+    inst,
+    api,
+    { FACTORY_GITHUB_APP_KEY: key.privateKey },
+    { github: undefined },
+  );
+  delete inst.env.CREDENTIALS_DIRECTORY;
+  const holder = () =>
+    spawnSync(
+      "git",
+      [
+        "--git-dir",
+        join(inst.root, "origin.git"),
+        "for-each-ref",
+        "--format=%(objectname)",
+        "refs/factory/holder",
+      ],
+      { encoding: "utf8" },
+    ).stdout.trim();
+  const named = (github) => {
+    const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
+    config.github = github;
+    writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  };
+  const why =
+    /The configuration of drill\/target names no GitHub identity \(github\.app or github\.login\), so the service refuses to start\. Factory acts as its own GitHub App, setup's preflight step \(docs\/reference\/setup\.md#github-identity\): register and install it \(factory setup --repo drill\/target --github-app-link prints the link\), then run factory setup --repo drill\/target --github-app-id N --github-app-key PATH --operator LOGIN\. Or keep the GitHub CLI's login: factory setup --repo drill\/target --github-login\./;
+
+  // Refused as a configuration that doesn't load is: the unit doesn't
+  // restart on it, and nothing reaches GitHub or takes the repository.
+  const refused = await exited(serve(inst), "the refused start");
+  assert.equal(refused.code, 78, refused.stderr);
+  assert.match(refused.stderr, new RegExp(`^factory: ${why.source}$`, "m"));
+  assert.equal(holder(), "", "a refused start takes nothing");
+  const shown = JSON.parse(cli(inst, "status", "--json").out);
+  assert.match(shown.setup.identity, why);
+  assert.match(
+    cli(inst, "status").out,
+    /\n {2}Not ready: The configuration of drill\/target names no GitHub identity/,
+  );
+
+  for (const github of [{ login: true }, { app: { id: APP } }]) {
+    named(github);
+    const view = JSON.parse(cli(inst, "status", "--json").out);
+    assert.equal(view.setup.identity, undefined);
+    assert.doesNotMatch(cli(inst, "status").out, /Not ready/);
+    const serving = serve(inst);
+    await until(
+      () => JSON.parse(cli(inst, "status", "--json").out).service === "running",
+      `a start with ${JSON.stringify(github)}`,
+    );
+    assert.notEqual(holder(), "");
+    assert.equal((await stopped(serving)).code, 0, serving.stderr());
+  }
 });

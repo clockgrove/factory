@@ -203,8 +203,8 @@ export interface CoreConfig {
    * key is never here (github-app.ts GITHUB_APP_KEY). `login: true` is the
    * operator's recorded opt-out: Factory acts as the GitHub CLI's login
    * (or FACTORY_GITHUB_TOKEN). One of the two, never both; with neither,
-   * Factory still acts as the login, and readiness blocks until the
-   * configuration names one. Operational.
+   * readiness blocks and the service refuses to start until the
+   * configuration names one (github-app.ts identityUnchosen). Operational.
    */
   github: { app?: { id: number; installationId?: number }; login: boolean };
   /**

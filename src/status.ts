@@ -174,6 +174,8 @@ export interface ServiceView {
 export interface SetupView {
   defaultProvider: string;
   sandbox: { required: boolean; network: string };
+  /** Why the service refuses to start: no GitHub identity (github-app.ts identityUnchosen). */
+  identity?: string;
 }
 
 /** The whole status: `--json` prints it as it is, the text renders it. */
@@ -713,6 +715,7 @@ export function statusText(
     lines.push(
       `  Provider: ${view.setup.defaultProvider} (the default) · sandbox ${view.setup.sandbox.required ? "required" : "optional"}, network ${view.setup.sandbox.network}`,
     );
+  if (view.setup?.identity) lines.push(`  Not ready: ${view.setup.identity}`);
   if (view.unit)
     lines.push(
       `  Unit: ${view.unit.active}${view.unit.restarts ? `, ${view.unit.restarts} automatic restart${view.unit.restarts === 1 ? "" : "s"}` : ""}`,

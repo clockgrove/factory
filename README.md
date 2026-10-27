@@ -85,7 +85,7 @@ claude plugin install factory@clockgrove
 
 To stay on one release instead, add the marketplace at its tag, as those releases did. A pinned marketplace doesn't upgrade; moving it to another release takes the same remove and add.
 
-**Set up before 0.5.2?** Factory acts as its own GitHub App by default now, and setup is blocked on a configuration that names neither the App nor the GitHub CLI's login, until you register the App ([Use the plugin](#use-the-plugin), step 2) and give it to setup, or keep the login with `--github-login`. See [Upgrade](docs/USER-GUIDE.md#upgrade).
+**Set up before 0.5.2?** Factory acts as its own GitHub App by default now. On a configuration that names neither the App nor the GitHub CLI's login, setup is blocked and `factory serve`, the background service's included, refuses to start, until you register the App ([Use the plugin](#use-the-plugin), step 2) and give it to setup, or keep the login with `--github-login`. To switch to the App, drain the queue before you upgrade. See [Upgrade](docs/USER-GUIDE.md#upgrade).
 
 ### Run setup
 

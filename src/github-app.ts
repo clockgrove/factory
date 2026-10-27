@@ -6,7 +6,7 @@
  * (git.ts `remoteToken`) pushes and fetches with them.
  */
 import { createPrivateKey, sign } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CoreConfig } from "./config.js";
 import { serviceCredential } from "./credentials.js";
@@ -173,6 +173,32 @@ export function keepAppKey(root: string, key: string): boolean {
   if (existsSync(copy) && readFileSync(copy, "utf8") === key) return false;
   writeAtomic(copy, key);
   return true;
+}
+
+/**
+ * Remove the installation's copy of the App's key, unread, once the
+ * configuration chooses the GitHub CLI's login; returns whether one was there.
+ */
+export function dropAppKey(root: string): boolean {
+  const copy = appKeyFile(root);
+  if (!existsSync(copy)) return false;
+  rmSync(copy, { force: true });
+  return true;
+}
+
+/**
+ * Why Factory can't act on GitHub yet: the configuration names neither its
+ * GitHub App (`github.app`) nor the operator's opt-out for the GitHub CLI's
+ * login (`github.login`), as one written before the App was the default.
+ * The service refuses to start on it (host.ts), status shows it, and
+ * setup's readiness blocks it. Undefined once it names one.
+ */
+export function identityUnchosen(
+  config: Pick<CoreConfig, "repository" | "github">,
+): string | undefined {
+  if (config.github.app || config.github.login) return undefined;
+  const setup = `factory setup --repo ${config.repository}`;
+  return `The configuration of ${config.repository} names no GitHub identity (github.app or github.login), so the service refuses to start. Factory acts as its own GitHub App, setup's preflight step (docs/reference/setup.md#github-identity): register and install it (${setup} --github-app-link prints the link), then run ${setup} --github-app-id N --github-app-key PATH --operator LOGIN. Or keep the GitHub CLI's login: ${setup} --github-login.`;
 }
 
 /**

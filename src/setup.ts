@@ -21,6 +21,7 @@ import {
   appKeyFile,
   appRegistrationLink,
   appSteps,
+  dropAppKey,
   factoryGitHub,
   GITHUB_APP_KEY,
   keepAppKey,
@@ -409,6 +410,14 @@ export async function setup(
   const config = loadConfig(repository);
   if (key !== undefined && keepAppKey(installationPaths(repository).root, key))
     changed.push(GITHUB_APP_KEY);
+  // The login needs no App's key: its copy goes, unread, unless the
+  // background unit still binds it, which --background rewrites first.
+  if (
+    config.github.login &&
+    !unitBindsAppKey(repository) &&
+    dropAppKey(installationPaths(repository).root)
+  )
+    changed.push(GITHUB_APP_KEY);
   const problems: string[] = [];
   if (!existsSync(config.checkout))
     problems.push(
@@ -452,6 +461,12 @@ export async function setup(
     ),
   };
 }
+
+/** Whether the installation's background unit loads setup's copy of the App's key. */
+const unitBindsAppKey = (repository: string): boolean =>
+  boundCredentials(installationPaths(repository)).some(
+    ({ name }) => name === GITHUB_APP_KEY,
+  );
 
 function refused(
   path: string,
@@ -696,6 +711,9 @@ export async function serviceSetup(
       credentials,
       report.setup.changed.length > 0 || given !== undefined,
     );
+    // The unit no longer loads the App's key: with the login, its copy goes.
+    if (config.github.login && dropAppKey(paths.root))
+      report.setup.changed.push(GITHUB_APP_KEY);
   } catch (error) {
     return { ...report, problems: [errorMessage(error)] };
   }

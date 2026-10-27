@@ -53,6 +53,8 @@ function installation() {
       repository: REPO,
       checkout,
       queue: { projectId: "PVT_drill" },
+      // The service starts only with a GitHub identity chosen.
+      github: { login: true },
     }),
   );
   const env = {

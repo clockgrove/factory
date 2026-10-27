@@ -70,7 +70,7 @@ A Work Item has:
 - Docs: what a reader needs documented, where the repository's AGENTS.md doc map or documented conventions put it (otherwise an existing docs/ location). A package README changes only for a user-facing usage change.
 - Design note: where the repository's AGENTS.md, a document it maps or a pinned source declares a design checklist, the brief answers each of its questions for this item in a short line (the settled decision or "not applicable" with the reason), so the worker and its reviewer start from the same design. Cite the checklist.
 A Work Item never contains internal mechanisms (which function does what, a helper to add, where data is frozen or stored), line numbers or ranges, file-by-file edit lists, names for new internal symbols, classes or tests, test prose, reading lists, one entry per malformed field or error path, prose that existing tests stay unchanged, or restated source text. Each is written from a partial read, goes stale against the real code, and then blocks the worker or the review on wording.
-Identifiers: acceptance and briefs name only identifiers that already exist at the base (types, endpoints, files, commands, tests). A new type, endpoint path, migration number or file or test name is described by its role and data, and the worker chooses it, unless the Objective or a pinned source fixes it. A consumer learns a producer's new name from its dependency's result, not from a plan that guessed it.
+Identifiers: acceptance and briefs (not ownedPaths, which name each file literally) name only identifiers that already exist at the base (types, endpoints, files, commands, tests). A new type, endpoint path, migration number or file or test name is described by its role and data, and the worker chooses it, unless the Objective or a pinned source fixes it. A consumer learns a producer's new name from its dependency's result, not from a plan that guessed it.
 Keep these, because they raise result quality:
 - invariants that must hold across inputs or steps (step-size, ordering or aggregation independence, determinism), each naming what varies, with every budget or state rule the invariant depends on stated in the contract;
 - consuming the real upstream producer, named by its type, never a restated schema;
@@ -134,9 +134,16 @@ const BEHAVIOUR_FINDINGS =
 const OPEN_CHOICE =
   "a product or authority choice the Objective leaves open (semantics a user can observe, what a policy means, a public interface, scope)";
 
+/**
+ * Check 8: the new-identifier rule stops at ownedPaths. A reviewer that
+ * applied it there refused a new test file as an invented name and `test/`
+ * as too broad, which left a planned test no valid owner (#2108).
+ */
+export const OWNED_NEW_FILES =
+  'The rule is for acceptance and briefs, not ownedPaths: an item owns each new file it creates, a new test file included, by the literal path the planner chooses for it, or by a directory prefix ending in "/" where the ownership rule allows one, and neither is a new-identifier finding.';
+
 /** Check 8: the worker names what is new. */
-const NEW_IDENTIFIERS =
-  "Flag acceptance or a brief that names a NEW identifier (a type, endpoint path, migration number, file or test name) the Objective and sources do not fix: describe it by role and data and leave the name to the worker. Existing identifiers at the base may be named.";
+const NEW_IDENTIFIERS = `Flag acceptance or a brief that names a NEW identifier (a type, endpoint path, migration number, file or test name) the Objective and sources do not fix: describe it by role and data and leave the name to the worker. Existing identifiers at the base may be named. ${OWNED_NEW_FILES}`;
 
 /** Check 3: dependency edges follow the interface needed. */
 const INTERFACE_EDGES =

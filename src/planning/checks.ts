@@ -1,6 +1,11 @@
 import { isAbsolute } from "node:path";
 import { markdownLines } from "../markdown.js";
-import { namesPath, objectiveText } from "../objective.js";
+import {
+  namedTokens,
+  namesPath,
+  objectiveText,
+  validPath,
+} from "../objective.js";
 import { localAssetPlace } from "../sandbox.js";
 import {
   type BaseFiles,
@@ -458,6 +463,46 @@ async function lfsFindings(
   }
 }
 
+/**
+ * A file the Objective names, which the base lacks and its attributes
+ * route through Git LFS, is new media: Factory delivers it only as a
+ * captured candidate set, with the operator's selection when there are
+ * several. A plan with no media roles at all delivers it as ordinary work,
+ * so no candidates are captured and nobody selects. Whether the Objective
+ * asks for a choice is only in its prose, which no check reads, so this
+ * one reads these structured facts and refuses only a plan that declares
+ * no media.
+ */
+async function undeclaredMediaFindings(
+  items: readonly WorkItem[],
+  shown: string,
+  tracked: ReadonlySet<string>,
+  files: BaseFiles,
+  found: Found,
+): Promise<void> {
+  if (items.some((item) => item.expectedOutputRoles?.length)) return;
+  const named = [...namedTokens(shown)].filter(
+    (path) => validPath(path) && !tracked.has(path),
+  );
+  const owned = new Map<WorkItem, string[]>();
+  for (const item of items) {
+    if ((item.kind ?? "work") !== "work") continue;
+    const paths = named.filter((path) => ownsPath(path, item.ownedPaths));
+    if (paths.length) owned.set(item, paths);
+  }
+  const routed = await files.lfsRouted([
+    ...new Set([...owned.values()].flat()),
+  ]);
+  for (const [item, paths] of owned) {
+    const media = paths.filter((path) => routed.has(path));
+    if (media.length)
+      found(
+        `Work Item ${item.id} owns ${media.join(", ")}, which the Objective names, the base lacks and the base's .gitattributes routes through Git LFS (lfsRules lists its filter=lfs rules), yet no Work Item declares media. A new Git LFS file the Objective asks for is media: Factory captures it in candidate sets, asks the operator to select one when there are several, and delivers only the selection. Declare media on the item that makes it: one expected output role per file, and minimumAssetSets the number of candidate sets the Objective asks for, or 1 when it asks for none`,
+        item.id,
+      );
+  }
+}
+
 /** Output roles, candidate counts, LFS routing and source assets. */
 async function mediaFindings(
   items: readonly WorkItem[],
@@ -468,6 +513,7 @@ async function mediaFindings(
   const shown = objectiveText(facts.blocks);
   const tracked = new Set(await files.paths());
   await lfsFindings(items, files, found);
+  await undeclaredMediaFindings(items, shown, tracked, files, found);
   for (const item of items) {
     const roles = item.expectedOutputRoles ?? [];
     if (new Set(roles).size !== roles.length)

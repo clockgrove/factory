@@ -47,6 +47,8 @@ The rules live in `src/planning/rubric.ts`. The planner and the graph reviewer r
 
 All three happen in the planner's one session. Self-checking is a filter; the independent graph review stays the gate.
 
+**Plan changes after acceptance are planned, not asked.** When a Work Item's repair needs files or work outside its owned paths that no item owns (a module a person's new test imports, say), the repair diagnosis decides `discover`, and amendment planning chooses between a new Work Item and a change to an existing one, under the same checks and independent review. The diagnosis asks the operator only what a person alone can decide: their intent, an external fact or an authorization. Why: a question like "add an item to own the file, or drop the test?" hands the plan to the operator, when the planner and its review can make and check that change (see [Holds](reference/holds.md)).
+
 ## How review holds the standard
 
 - **Graph review:** an acceptance entry that prescribes a mechanism, a line or a file edit instead of behaviour is a fix finding. Review never asks for more detail than the standard requires.

@@ -83,7 +83,8 @@ import {
  *   its owned paths and dependencies grown by what the answer adds and,
  *   for a grown reattempt item, the answer's acceptance, brief and
  *   non-goals. Every other change is set back, in the round's answer and
- *   its draft, and recorded with the round (`restored`), logged
+ *   its draft (a round whose draft was set back beyond its answer keeps
+ *   none), and recorded with the round (`restored`), logged
  *   (`amendment-restored`), told to its review and, when it goes back, to
  *   the planner. What that can't settle, a removed started item or one
  *   that isn't a reattempt item grown, the fence finds.
@@ -155,7 +156,11 @@ export interface AmendmentProposal {
 
 /** The saved outcome of one amendment (`amend:<id>`). */
 export interface AmendmentResult {
-  /** The accepted plan, with the planner's full answer it decodes from. */
+  /**
+   * The accepted plan, with the planner's full answer it decodes from;
+   * none when its draft was set back beyond the answer (`restoreStarted`),
+   * so the next amendment answers in full.
+   */
   plan?: Plan;
   answer?: unknown;
   /** Why the amendment was refused. */
@@ -202,7 +207,11 @@ function reviewOf(state: ObjectiveState, id: string): AmendReview | undefined {
 
 /** A plan round sent back to the planner (`amend:<id>:revisions`). */
 interface AmendRevision {
-  /** The round's full answer: the next round revises it. */
+  /**
+   * The round's full answer: the next round revises it. Undefined when its
+   * draft was set back beyond it (`restoreStarted`): the next round answers
+   * in full.
+   */
   answer: unknown;
   /** The plan checks', the fence's or the review's findings on it, the next round's corrections. */
   findings: Finding[];
@@ -1413,6 +1422,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       );
       const draft: Draft = { ...decoded.plan, items: kept.items };
       const restored = joinRestored(restoredAnswer.restored, kept.restored);
+      // An answer the draft was set back beyond no longer decodes to it,
+      // and would show the next round, or the next amendment once this
+      // one is accepted, a started item as the planner changed it: the
+      // round keeps none, so they answer in full with the plan as it stands.
+      const saved = kept.restored.length ? undefined : full;
       if (restored.length)
         context.log({
           event: "amendment-restored",
@@ -1431,9 +1445,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           nativeStack: config.delivery.kind === "native-stack",
         }),
       ];
-      if (findings.length) return revise(full, findings, restored);
+      if (findings.length) return revise(saved, findings, restored);
       return done({
-        answer: full,
+        ...(saved === undefined ? {} : { answer: saved }),
         draft,
         round,
         ...(restored.length ? { restored } : {}),

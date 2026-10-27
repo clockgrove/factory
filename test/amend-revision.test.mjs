@@ -465,11 +465,13 @@ test("an amendment's review still rejects it on an operator decision, or on the 
 });
 
 // The run's slip: a's own worker proposed b, and the planner relaxed a's
-// acceptance and brief so that b, after a, could make `npm test` pass.
+// acceptance, brief and validation so that b, after a, could make
+// `npm test` pass.
 const relaxesA = revision([
   work("a", {
     acceptance: ["a() returns 1 when its own test runs."],
     brief: "Export a from src/a.js; npm test is qa's to prove.",
+    validation: ["node --test test/a.test.js"],
   }),
   work("b", { dependencies: ["a"] }),
   qa(["a", "b"]),
@@ -506,14 +508,17 @@ test("an amendment that changes a started item without growing it has the change
   const deps = depsOf(checkout, planner, posted);
 
   // Round 1: a grows neither its owned paths nor its dependencies, so its
-  // restated acceptance and brief are set back; nothing goes back.
+  // restated acceptance and brief, and its validation, are set back;
+  // nothing goes back.
   const first = await step(state, deps, undefined, logged);
   assert.equal(first.key, "amend:op-1:plan");
   assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
   // The planner was told the rule, naming a as started and its reattempt.
   assert.ok(asked[0].prompt.includes(RULE));
   assert.ok(RULE.includes('startedItemIds: \\"a\\"'), RULE);
-  const restored = [{ itemId: "a", fields: ["acceptance", "brief"] }];
+  const restored = [
+    { itemId: "a", fields: ["acceptance", "brief", "validation"] },
+  ];
   const round = state.done["amend:op-1:plan"];
   assert.equal(round.rejected, undefined);
   assert.equal(round.round, 1);
@@ -639,6 +644,37 @@ test("an amendment that grows a started item's owned paths and rewords its goal 
   assert.equal(asked.length, 2);
 });
 
+test("a reattempt item that grows still keeps its validation, kind and title; only its acceptance, brief and non-goals are restated", async () => {
+  const { checkout, state } = await discovered();
+  const [grown, ...rest] = growsA.items;
+  const relaxes = revision([
+    {
+      ...grown,
+      title: "Add a and b",
+      nonGoals: ["Changing b's test."],
+      validation: ["node --test test/a.test.js"],
+      oneOutcomeReason: null,
+    },
+    ...rest,
+  ]);
+  const { planner } = scripted(relaxes);
+  assert.equal(
+    (await step(state, depsOf(checkout, planner))).outcome.kind,
+    "done",
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.deepEqual(round.restored, [
+    { itemId: "a", fields: ["goal", "title", "validation"] },
+  ]);
+  const a = round.draft.items.find((item) => item.id === "a");
+  const old = state.done.plan.items.find((item) => item.id === "a");
+  assert.deepEqual(a.validation, old.validation);
+  assert.equal(a.title, old.title);
+  assert.equal(a.kind, old.kind);
+  assert.deepEqual(a.nonGoals, ["Changing b's test."]);
+  assert.deepEqual(a.acceptance, grown.acceptance);
+});
+
 test("an ownership overlap a started item's growth makes still goes back to the planner, which is told what was set back", async () => {
   const { checkout, state } = await discovered();
   // As growsA, but b owns src/b.js without waiting for a.
@@ -706,30 +742,102 @@ test("a started item that isn't a reattempt item and grows goes back to the plan
   ]);
 });
 
-test("a plan with no planner answer to revise has its started items set back in the draft", async () => {
+test("a plan with no planner answer to revise has its started items set back in the draft, and keeps no answer that would show them changed", async () => {
   const { checkout, state } = await discovered();
   // As `factory reset` leaves it: no planning round to revise.
   state.done["plan:1:1"] = {};
-  const whole = {
+  const whole = (a, qaDependencies) => ({
+    ...accepted,
+    items: [a, work("b", { dependencies: ["a"] }), qa(qaDependencies)],
+  });
+  // Round 1 changes a and leaves b out of qa's reach; round 2 fixes qa.
+  const changesA = whole(
+    work("a", { acceptance: ["a() returns 1 when its own test runs."] }),
+    ["a"],
+  );
+  const reaches = whole(work("a"), ["a", "b"]);
+  const { planner, asked } = scripted(changesA, reaches, { findings: [] });
+  const deps = depsOf(checkout, planner);
+  const a = state.done.plan.items.find((item) => item.id === "a");
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.deepEqual(
+    kept.findings.map((f) => f.message),
+    [REACH],
+  );
+  const restored = [{ itemId: "a", fields: ["acceptance"] }];
+  assert.deepEqual(kept.restored, restored);
+  // The answer still holds a as the planner changed it, so it isn't kept:
+  // round 2 answers in full again, with the plan as it stands.
+  assert.equal(kept.answer, undefined);
+  assert.ok(asked[0].prompt.includes('"planInForce"'));
+
+  // Round 2 leaves a as it is: its answer decodes to its draft and is kept.
+  const second = await step(state, deps);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.ok(asked[1].prompt.includes('"planInForce"'));
+  assert.ok(!asked[1].prompt.includes('"currentPlan"'));
+  assert.ok(
+    asked[1].prompt.includes(
+      "Factory set these fields of started Work Items back to the plan being amended, as the started-item rule keeps them: a (acceptance).",
+    ),
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.restored, undefined);
+  assert.deepEqual(round.answer, reaches);
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "a"),
+    a,
+  );
+  assert.equal((await step(state, deps)).key, "amend:op-1:review");
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  assert.deepEqual(state.done["amend:op-1"].answer, reaches);
+});
+
+test("a whole plan whose accepted round had a started item set back keeps no answer, so the next amendment answers in full", async () => {
+  const { checkout, state } = await discovered();
+  state.done["plan:1:1"] = {};
+  const changesA = {
     ...accepted,
     items: [
-      work("a", { acceptance: ["a() returns 1 when its own test runs."] }),
+      work("a", { goal: "Add a, as its own test checks." }),
       work("b", { dependencies: ["a"] }),
       qa(["a", "b"]),
     ],
   };
-  const { planner } = scripted(whole);
+  const { planner } = scripted(changesA, { findings: [] });
   const deps = depsOf(checkout, planner);
-  const first = await step(state, deps);
-  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  assert.equal((await step(state, deps)).outcome.kind, "done");
   const round = state.done["amend:op-1:plan"];
-  assert.deepEqual(round.restored, [{ itemId: "a", fields: ["acceptance"] }]);
-  assert.deepEqual(
-    round.draft.items.find((item) => item.id === "a"),
-    state.done.plan.items.find((item) => item.id === "a"),
+  assert.deepEqual(round.restored, [{ itemId: "a", fields: ["goal"] }]);
+  assert.equal(round.answer, undefined);
+  assert.equal(
+    round.draft.items.find((item) => item.id === "a").goal,
+    "Add a.",
   );
-  // The planner's own answer, which the next revision edits, is as it gave it.
-  assert.deepEqual(round.answer, whole);
+  assert.equal((await step(state, deps)).key, "amend:op-1:review");
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.equal(result.answer, undefined);
+  assert.equal(
+    result.plan.items.find((item) => item.id === "a").goal,
+    "Add a.",
+  );
+
+  // The next amendment's planner gets the plan as it stands, not a's change.
+  state.kept["amend:op-2:proposal"] = {
+    ...state.kept["amend:op-1:proposal"],
+    id: "op-2",
+    at: "2026-01-01T02:00:00.000Z",
+  };
+  const next = scripted(revision());
+  const asked = await step(state, depsOf(checkout, next.planner));
+  assert.equal(asked.key, "amend:op-2:plan");
+  assert.ok(next.asked[0].prompt.includes('"planInForce"'));
+  assert.ok(!next.asked[0].prompt.includes("as its own test checks"));
 });
 
 // A round that removes a, which Factory can't set back: b takes its coverage.

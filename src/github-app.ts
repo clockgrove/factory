@@ -129,7 +129,7 @@ export function appRegistrationLink(
  * Project later is covered too.
  */
 export function appSteps(organization: boolean): string {
-  return `Open it and create the App, generate a private key on its page, install it ${organization ? "on All repositories of the organization (at the least, on the repository and every other repository of its Project)" : "on the repository and every other repository of its Project"}, then run factory setup --github-app-id ID --github-app-key PATH`;
+  return `Open it and create the App, generate a private key on its page, install it ${organization ? "on All repositories of the organization (at the least, on the repository and every other repository of its Project)" : "on the repository and every other repository of its Project"}, then run factory setup --github-app-id ID --github-app-key PATH --operator LOGIN (with --checkout and --project-id when it creates the configuration)`;
 }
 
 /** Whether `owner` is an organization, by GitHub's public read of the account (no login). */

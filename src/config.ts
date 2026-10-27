@@ -199,11 +199,14 @@ export interface CoreConfig {
   /**
    * Factory's GitHub identity. `app` names its GitHub App (github-app.ts):
    * Factory acts as the App's installation on the repository, found by
-   * the repository unless `installationId` names it. Absent, it acts as
-   * the GitHub CLI's login (or FACTORY_GITHUB_TOKEN). The App's private
-   * key is never here (github-app.ts GITHUB_APP_KEY). Operational.
+   * the repository unless `installationId` names it. The App's private
+   * key is never here (github-app.ts GITHUB_APP_KEY). `login: true` is the
+   * operator's recorded opt-out: Factory acts as the GitHub CLI's login
+   * (or FACTORY_GITHUB_TOKEN). One of the two, never both; with neither,
+   * Factory still acts as the login, and readiness blocks until the
+   * configuration names one. Operational.
    */
-  github: { app?: { id: number; installationId?: number } };
+  github: { app?: { id: number; installationId?: number }; login: boolean };
   /**
    * The GitHub logins a hold, an Objective's report and a cancel mention,
    * so GitHub notifies them. Operational.
@@ -647,6 +650,7 @@ export function loadConfig(repository: string): CoreConfig {
         app: optional(
           object({ id: whole(1), installationId: optional(whole(1)) }),
         ),
+        login: flag(false),
       }),
       operators: logins,
     },
@@ -718,6 +722,10 @@ export function loadConfig(repository: string): CoreConfig {
       problems.push(
         `autonomy.requiredEnvironment names ${name}, which policy.allowedSecretNames doesn't allow`,
       );
+  if (config.github.app && config.github.login)
+    problems.push(
+      "github.app and github.login are both set: Factory acts as its GitHub App or, by the operator's choice, as the GitHub CLI's login; remove one",
+    );
   const own = ownRepositoryProblem(config.repository, config.checkout);
   if (own) problems.push(own);
   if (process.env.FACTORY_SECRETLINT_CONFIG !== undefined)

@@ -11,7 +11,7 @@ Factory turns a GitHub issue (an Objective) into a reviewed plan of Work Items, 
 
 ## Set up
 
-You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), and the GitHub CLI logged in. See the [README](../README.md#requirements) for the full list and installation: you install the plugin, and its setup skill installs the matching `factory` CLI.
+You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubblewrap (`bwrap`), the GitHub CLI logged in, and Factory's own GitHub App (step 3). See the [README](../README.md#requirements) for the full list and installation: you install the plugin, and its setup skill installs the matching `factory` CLI.
 
 1. **A clone for Factory.** Clone the target repository to a directory only Factory uses. Its origin must name the repository: Factory checks it before every fetch and push.
 2. **The Project fields.** On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`. Factory never creates them.
@@ -22,25 +22,37 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    gh project field-create NUMBER --owner OWNER --name "Factory order" --data-type NUMBER
    ```
 
-3. **Configure.**
+3. **Factory's GitHub App.** A required preflight step, before the configuration: Factory acts on GitHub as its own App, `<slug>[bot]`, so GitHub notifies you of its holds (it doesn't notify you of comments your own account posts), and its tokens are short-lived and limited to what Factory needs.
 
    ```sh
-   factory setup --repo OWNER/NAME --checkout /absolute/clone --project-id PVT_... --json
+   factory setup --repo OWNER/NAME --github-app-link
    ```
 
-   Setup writes `~/.config/factory/OWNER__NAME.json` (or `FACTORY_CONFIG`), checks that it loads, then checks the clone's origin and the Project fields. It also runs a readiness checklist with no model calls:
+   It prints the link that registers a private App with Factory's permissions prefilled: in the organization's settings when OWNER is an organization, in your own otherwise. Open it and create the App, generate a private key on its page (GitHub downloads a `.pem` file), and install it on All repositories: Factory reads every repository of the queue's Project, and All repositories also covers one added to it later (at the least, the repository and every other repository of its Project). Note the App's ID, on its settings page. See [GitHub identity](reference/setup.md#github-identity).
+
+   Your GitHub CLI login is still needed: it runs your own commands and setup's. Factory acts as the App.
+
+4. **Configure.**
+
+   ```sh
+   factory setup --repo OWNER/NAME --checkout /absolute/clone --project-id PVT_... \
+     --github-app-id ID --github-app-key /absolute/key.pem --operator LOGIN --json
+   ```
+
+   Setup writes `~/.config/factory/OWNER__NAME.json` (or `FACTORY_CONFIG`), checks that it loads, then checks the clone's origin and the Project fields. The configuration names the App; setup keeps an owner-only copy of the key in the installation's state and never shows it. `--operator LOGIN` (repeat it for each) names who answers holds: a hold, a report and a cancel mention them. Setup also runs a readiness checklist with no model calls:
    - the sandbox;
    - the tools on the PATH, and the `factory` launcher still linking to an installed release;
    - each provider's SDK and login;
+   - Factory's GitHub App: its key, its installation and its permissions; a configuration with no App is blocked;
    - GitHub access and push;
    - merge commits, required checks, required reviews, required review thread resolution, and a recommendation to require branches to be up to date;
    - which installation serves the repository, if any.
 
    Each check that isn't `ok` names its fix. Repeat the same command after fixing; a repeat that changes nothing reports `changed: []`. Every option, and the key it sets, is in [reference/setup.md](reference/setup.md#setup).
 
-   So that you hear about every hold, name yourself with `--operator LOGIN` and give Factory a GitHub identity of its own: GitHub doesn't notify you of comments your own account posts. `factory setup --repo OWNER/NAME --github-app-link` prints the link that registers Factory's GitHub App; create it, generate its private key, install it (on an organization, on All repositories; at the least, on the repository and every other repository of its Project), then add `--github-app-id ID --github-app-key PATH`. See [GitHub identity](reference/setup.md#github-identity).
+   To have Factory act as your GitHub CLI login instead of an App, give `--github-login` in place of the App's options: the configuration records that choice (`github.login`), and readiness warns while holds would notify no one.
 
-4. **Run the service.** Either run `factory serve --repo OWNER/NAME` in a terminal you keep open, or install it as a systemd user service:
+5. **Run the service.** Either run `factory serve --repo OWNER/NAME` in a terminal you keep open, or install it as a systemd user service:
 
    ```sh
    factory setup --repo OWNER/NAME --background
@@ -388,5 +400,10 @@ claude plugin marketplace update clockgrove && claude plugin update factory@cloc
 A marketplace added at a release tag, as before 0.5.2, stays on that release: move it once (remove it, add `clockgrove/factory` without a tag and install the plugin, as the README shows). In the minutes a release is being tagged and published, the update can fail and keep your release, and setup can report the new release `unpublished`; try again in a few minutes.
 
 Then ask the setup skill to set up again: it installs the matching CLI and points the `factory` launcher on your PATH at it (the PATH line doesn't change), and with a background service runs `factory setup --repo OWNER/NAME --background` again with the new CLI. A foreground `factory serve` just restarts. Running Objectives resume where they stopped.
+
+**From 0.5.1 or earlier,** a configuration names no GitHub identity, and Factory acted as the GitHub CLI's login. It still loads and still acts as that login, but setup is blocked (so `--background` doesn't restart the service) until it names one:
+
+- **The App** (recommended): register and install it ([Set up](#set-up), step 3), drain the queue (`factory queue drain`) and wait until no Objective runs, since an Objective finds what it made by Factory's login, then run `factory setup --repo OWNER/NAME --github-app-id ID --github-app-key PATH --operator LOGIN`. Setup refuses the App while any Objective has state.
+- **The login:** `factory setup --repo OWNER/NAME --github-login` records it, with nothing to drain: Factory's identity doesn't change.
 
 With the plugin in both Claude Code and Codex, update it in both. Setup from a plugin a release behind the launcher installs its own release but leaves the launcher on the newer one and stops, naming the plugin to update; the installer's `--downgrade` moves the launcher back when you mean to go back.

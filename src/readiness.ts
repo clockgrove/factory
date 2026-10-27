@@ -727,11 +727,38 @@ async function operatorChecks(
   ];
 }
 
+/**
+ * Factory's identity is chosen: a GitHub App (`github.app`), or the
+ * operator's recorded opt-out for the GitHub CLI's login (`github.login`).
+ * A configuration with neither, such as one written before the App was
+ * the default, is blocked on setup's preflight step: Factory would act as
+ * the login no one chose, its holds notifying nobody.
+ */
+async function identityChecks(
+  config: CoreConfig,
+  github: GitHub,
+): Promise<ReadinessCheck[]> {
+  if (config.github.app || config.github.login) return [];
+  const organization =
+    (await github.ownerIsOrganization().catch(() => true)) !== false;
+  return [
+    {
+      name: "GitHub App",
+      status: "blocked",
+      detail:
+        "Factory has no GitHub App (github.app), and github.login doesn't choose the GitHub CLI's login instead",
+      fix: `Register and install Factory's GitHub App, setup's preflight step (docs/reference/setup.md#github-identity), with the link factory setup --github-app-link prints: ${appRegistrationLink(github.owner, organization)} ${appSteps(organization)}. Or keep the GitHub CLI's login: factory setup --github-login`,
+    },
+  ];
+}
+
 /** The repository's checks: access, branch rules, issue types and the installation serving it. */
 export async function repositoryChecks(
   config: CoreConfig,
   github: GitHub,
 ): Promise<ReadinessCheck[]> {
+  const identity = await identityChecks(config, github);
+  if (identity.length) return identity;
   const apps = await appChecks(config, github);
   if (apps.some((check) => check.status === "blocked")) return apps;
   const checks: ReadinessCheck[] = [...apps];

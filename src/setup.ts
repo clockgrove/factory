@@ -166,6 +166,7 @@ export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   "credential-file": "list",
   "github-app-key": "value",
   "github-app-link": "switch",
+  "github-login": "switch",
   provider: "value",
   planner: "value",
   worker: "value",
@@ -288,6 +289,17 @@ export async function setup(
 ): Promise<SetupReport> {
   const path = configPath(repository);
   const created = !existsSync(path);
+  // Factory acts as its GitHub App or, by the operator's choice, as the
+  // GitHub CLI's login: one identity.
+  const appFlags = [
+    "github-app-id",
+    "github-app-key",
+    "github-app-installation",
+  ].filter((flag) => values[flag]);
+  if (values["github-login"] && appFlags.length)
+    throw new SetupUsage(
+      `--github-login keeps the GitHub CLI's login instead of a GitHub App: drop --${appFlags.join(", --")}, or --github-login`,
+    );
   // The App's key is read and checked before anything is written.
   const keyFile = values["github-app-key"]?.at(-1);
   let key: string | undefined;
@@ -356,14 +368,20 @@ export async function setup(
     else set(option.key, value);
   }
   if (conflicts.length) return refused(path, created, ...conflicts);
+  // Choosing one identity drops the other.
+  if (values["github-login"]) {
+    set("github.app", undefined);
+    set("github.login", true);
+  } else if (values["github-app-id"]) set("github.login", undefined);
   // A running Objective finds its own comments, issues and PRs by
-  // Factory's login: as another, it would make them again.
+  // Factory's login: as another, it would make them again. The login
+  // with or without github.login is one identity.
   const running = listObjectives(installationPaths(repository).objectives);
   if (get(raw, "github.app.id") !== app && running.length)
     return refused(
       path,
       created,
-      `--github-app-id changes who Factory acts as on GitHub, and ${running.map((issue) => `#${issue}`).join(", ")} still ${running.length === 1 ? "has" : "have"} state: each finds its own comments, issues and PRs by Factory's login. Drain the queue (factory queue drain), wait until no Objective runs, then repeat`,
+      `--${values["github-login"] ? "github-login" : "github-app-id"} changes who Factory acts as on GitHub, and ${running.map((issue) => `#${issue}`).join(", ")} still ${running.length === 1 ? "has" : "have"} state: each finds its own comments, issues and PRs by Factory's login. Drain the queue (factory queue drain), wait until no Objective runs, then repeat`,
     );
   if (key !== undefined && get(raw, "github.app.id") === undefined)
     return refused(

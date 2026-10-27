@@ -23,7 +23,8 @@ You queue Objectives on a GitHub Project and answer Factory's questions from the
   - bubblewrap (`bwrap`) for the command sandbox, and passt (`pasta`) if dependency installs need the network;
   - your target's build and validation tools.
 - **Logins:**
-  - the GitHub CLI logged in with access to the target repository and its Project, or a GitHub App Factory acts as, so its holds notify you (see [GitHub identity](docs/reference/setup.md#github-identity));
+  - Factory's own GitHub App, registered and installed as setup's first step: Factory acts on GitHub as the App, so its holds notify you (see [GitHub identity](docs/reference/setup.md#github-identity));
+  - the GitHub CLI logged in with access to the target repository and its Project, for your own commands and setup's;
   - a Codex login for the default provider, or a Claude Code or GitHub Copilot login for those providers.
 - **A trusted target repository.** Workers run under your OS account inside the sandbox; the sandbox isn't a boundary against hostile code.
 
@@ -84,6 +85,8 @@ claude plugin install factory@clockgrove
 
 To stay on one release instead, add the marketplace at its tag, as those releases did. A pinned marketplace doesn't upgrade; moving it to another release takes the same remove and add.
 
+**Set up before 0.5.2?** Factory acts as its own GitHub App by default now, and setup is blocked on a configuration that names neither the App nor the GitHub CLI's login, until you register the App ([Use the plugin](#use-the-plugin), step 2) and give it to setup, or keep the login with `--github-login`. See [Upgrade](docs/USER-GUIDE.md#upgrade).
+
 ### Run setup
 
 In Codex or Claude Code, ask Factory to set up your target (see [Use the plugin](#use-the-plugin)), or run `factory:setup` in Claude Code. Before anything else, setup installs the CLI of the plugin's own release when it is missing or another version:
@@ -143,20 +146,23 @@ Use the listing for your host. `factory help` lists the installed commands. A pa
 ## Use the plugin
 
 1. **Prepare the target.** Make a clone of the target repository that only Factory uses. On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, and a number field `Factory order`.
-2. **Set up.** In Codex or Claude Code, ask:
+2. **Register Factory's GitHub App.** A required preflight step, before the repository is configured; the setup skill walks you through it first. `factory setup --repo OWNER/NAME --github-app-link` prints the link that registers a private App with the permissions Factory needs prefilled: in the organization's settings for an organization's repository, in your own otherwise. Create the App, generate its private key, and install it on All repositories: Factory reads every repository of the queue's Project, and All repositories also covers one added later. Keep the App's ID and the key's path; Factory never needs the key's content in a chat. See [GitHub identity](docs/reference/setup.md#github-identity).
+3. **Set up.** In Codex or Claude Code, ask:
 
-   > Use Factory to set up OWNER/NAME with the clone at /absolute/clone and Project PVT_.... Do not start work.
+   > Use Factory to set up OWNER/NAME with the clone at /absolute/clone and Project PVT_..., as GitHub App ID with its key at /absolute/key.pem, with me (LOGIN) as operator. Do not start work.
 
-   The setup skill installs the CLI if it needs to (see [Run setup](#run-setup)), writes the configuration and reports a readiness checklist with the fix for anything missing. To run Objectives in the background, ask it to install the background service. See [setup](docs/USER-GUIDE.md#set-up).
+   The setup skill installs the CLI if it needs to (see [Run setup](#run-setup)), writes the configuration (`factory setup --repo OWNER/NAME --checkout … --project-id … --github-app-id ID --github-app-key PATH --operator LOGIN`) and reports a readiness checklist with the fix for anything missing. To run Objectives in the background, ask it to install the background service. See [setup](docs/USER-GUIDE.md#set-up).
 
-3. **Write an Objective.** Create an issue in the target from the [Objective template](docs/templates/objective.md): a goal, observable Acceptance bullets, and optional Context, Sources and Constraints. See [writing an Objective](docs/USER-GUIDE.md#write-an-objective).
-4. **Run it.** Set the issue's `Factory` field to Queued, or ask:
+   Factory acts as the App; your GitHub CLI login still runs your own commands. To have Factory act as that login instead, say so: setup records the choice with `--github-login`, and holds then notify no one when the login is yours.
+
+4. **Write an Objective.** Create an issue in the target from the [Objective template](docs/templates/objective.md): a goal, observable Acceptance bullets, and optional Context, Sources and Constraints. See [writing an Objective](docs/USER-GUIDE.md#write-an-objective).
+5. **Run it.** Set the issue's `Factory` field to Queued, or ask:
 
    > Use Factory to run Objective #123.
 
    Factory checks the issue, plans, reviews the plan, runs the Work Items, validates and reviews each result, and merges the pull requests. A question it can't settle stops only what it covers, until you answer.
 
-5. **Follow it.** Ask "Use Factory to show the status of Objective #123", or run `factory status 123 --repo OWNER/NAME`.
+6. **Follow it.** Ask "Use Factory to show the status of Objective #123", or run `factory status 123 --repo OWNER/NAME`.
 
 Configuration and state live outside the target checkout. Factory refuses its own repository.
 

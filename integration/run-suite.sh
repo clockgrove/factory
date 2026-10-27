@@ -14,8 +14,10 @@
 # for inspection; --keep-repos always does; later runs sweep them after 24 h).
 # --capture records every model call's body for diagnosis (config capture):
 # the run's state dir then holds prompts and answers, so keep it private.
-# FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY (a key file) in the
-# environment run Factory as that GitHub App, with the gh login as operator.
+# Factory runs as a GitHub App: FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY
+# (a key file) in the environment name it, with the gh login as operator.
+# Without them a run stops at setup, unless FACTORY_SUITE_GITHUB_LOGIN=1 opts
+# out: Factory then acts as the gh login (setup --github-login).
 #
 # One parallel wave: every case of the suite starts at once and runs
 # concurrently, each within its own budget (the cases table's minutes). The
@@ -23,14 +25,15 @@
 # starting anything, stops its cases, cancels unsettled Objectives, then runs
 # cleanup and the report, so a run never passes 60 min.
 # Results: .runs/results/<PDT timestamp>.md; exit 1 on any FAIL, 3 when it
-# refuses to start (a serve already runs for a scratch repository), 2 on bad usage.
+# refuses to start (no GitHub identity, or a serve already runs for a scratch
+# repository), 2 on bad usage.
 set -uo pipefail
 {   # One block, parsed whole before it runs: an edit to this file can't change a running suite.
 SUITE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD=$(dirname "$SUITE"); SUITE_NAME=main; PROVIDER=codex; ONLY=""; DRY=""; STATE_BASE=""; CAPTURE=""; KEEP_REPOS=""; REPLAY=""; KEPT=""
 REPO_OWNER=clockgrove   # each run's repositories are made here (lib/repos.sh)
 PROJECT_ID=PVT_kwDOEvXlbc4BoR0S   # Project #7, "Factory drill": repository M's (C gets its own each run, lib/repos.sh)
-usage() { sed -n 2,26p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n 2,29p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case $1 in
     --suite) SUITE_NAME=${2:?}; shift 2 ;;
@@ -95,6 +98,27 @@ for row in "${TABLE[@]}"; do IFS='|' read -r c _ _ _ <<<"$row"; [ -n "$ONLY" ] &
 [ ${#SEL[@]} -gt 0 ] || { echo "no cases selected" >&2; exit 2; }
 # Repository C exists only for a selected case on the crash lane or the prd suite's lane Q.
 NEEDS_C=""; for row in "${SEL[@]}"; do IFS='|' read -r _ lane _ _ <<<"$row"; [[ $lane == [CQ] ]] && NEEDS_C=1; done
+# The run's GitHub identity, setup's preflight step: `app`, the suite's GitHub
+# App (FACTORY_SUITE_APP_ID, and FACTORY_SUITE_APP_KEY, its private key's
+# path), or `login`, the opt-out FACTORY_SUITE_GITHUB_LOGIN=1. Otherwise it
+# prints why a live run can't start, and fails.
+suite_identity() {
+  if [ -n "${FACTORY_SUITE_APP_ID:-}${FACTORY_SUITE_APP_KEY:-}" ]; then
+    [ "${FACTORY_SUITE_GITHUB_LOGIN:-}" != 1 ] || { echo "give the suite's GitHub App (FACTORY_SUITE_APP_ID, FACTORY_SUITE_APP_KEY) or FACTORY_SUITE_GITHUB_LOGIN=1, not both"; return 1; }
+    [ -n "${FACTORY_SUITE_APP_ID:-}" ] && [ -f "${FACTORY_SUITE_APP_KEY:-}" ] || { echo "set FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY (a key file) together"; return 1; }
+    echo app
+  elif [ "${FACTORY_SUITE_GITHUB_LOGIN:-}" = 1 ]; then
+    echo login
+  else
+    echo "Factory runs as a GitHub App, setup's preflight step: set FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY (its private key's path) for an App installed on All repositories of $REPO_OWNER ('factory setup --repo $REPO_OWNER/NAME --github-app-link' prints the link that registers one), or FACTORY_SUITE_GITHUB_LOGIN=1 to run as the gh login"
+    return 1
+  fi
+}
+# A live run stops here without one, before it creates anything.
+SUITE_IDENTITY=""
+if [ -z "$DRY" ] && [ -z "$REPLAY" ]; then
+  SUITE_IDENTITY=$(suite_identity) || { echo "$SUITE_IDENTITY" >&2; exit 3; }
+fi
 
 RUN_ID=$(TZ=America/Los_Angeles date +%Y-%m-%dT%H%M%S%Z); SFX=$(TZ=America/Los_Angeles date +%m%d%H%M)
 # This run's repositories: M (installation M, or E in the edge suite) and C (the crash lane).
@@ -122,6 +146,11 @@ budget() {
 if [ -n "$DRY" ]; then
   echo "DRY RUN ($SUITE_NAME): nothing is started, queued or written."
   echo "Build: $BUILD ($commit)"; echo "Provider: $PROVIDER"; echo "State: $STATE_BASE (fresh per run)"
+  case $(suite_identity) in
+    app) echo "GitHub identity: GitHub App $FACTORY_SUITE_APP_ID, the gh login as operator" ;;
+    login) echo "GitHub identity: the gh login (FACTORY_SUITE_GITHUB_LOGIN=1, setup --github-login)" ;;
+    *) echo "GitHub identity: none, so a live run stops at setup: $(suite_identity)" ;;
+  esac
   echo "Repositories: $M_REPO$([ -n "$NEEDS_C" ] && echo " and $C_REPO"), created from fixtures/baseline/"; echo
   for row in "${SEL[@]}"; do IFS='|' read -r c lane mins what <<<"$row"; printf '%-8s lane %s  %2s min  %s\n' "$c" "$lane" "$mins" "$what"; done
   echo; budget
@@ -383,16 +412,17 @@ git lfs version >/dev/null || { echo "git-lfs is required" >&2; exit 3; }
 login=$(gh api user --jq .login) || { echo "gh is not logged in" >&2; exit 3; }
 [ "$(gh api "orgs/$REPO_OWNER/memberships/$login" --jq .role 2>/dev/null)" = admin ] || { echo "gh login $login must be an owner of $REPO_OWNER to create its run repositories" >&2; exit 3; }
 gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | grep -qw delete_repo || { echo "the gh token needs the delete_repo scope (gh auth refresh -s delete_repo)" >&2; exit 3; }
-# Factory acts as the suite's GitHub App when FACTORY_SUITE_APP_ID and
-# FACTORY_SUITE_APP_KEY (its private key's path) are set: every installation's
-# setup gives them (lib/common.sh app_setup), with the gh login as its operator.
-# The App is installed on all of REPO_OWNER's repositories, so the run's are too.
-APP_ARGS=()
-if [ -n "${FACTORY_SUITE_APP_ID:-}${FACTORY_SUITE_APP_KEY:-}" ]; then
-  [ -n "${FACTORY_SUITE_APP_ID:-}" ] && [ -f "${FACTORY_SUITE_APP_KEY:-}" ] || { echo "set FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY (a key file) together" >&2; exit 3; }
-  APP_ARGS=(--github-app-id "$FACTORY_SUITE_APP_ID" --github-app-key "$FACTORY_SUITE_APP_KEY" --operator "$login")
+# Factory acts as the suite's GitHub App (SUITE_IDENTITY app): every
+# installation's setup gives it (lib/common.sh identity_setup), with the gh
+# login as its operator. The App is installed on all of REPO_OWNER's
+# repositories, so the run's are too. With the opt-out, setup records
+# --github-login instead.
+if [ "$SUITE_IDENTITY" = app ]; then
+  IDENTITY_ARGS=(--github-app-id "$FACTORY_SUITE_APP_ID" --github-app-key "$FACTORY_SUITE_APP_KEY" --operator "$login")
+else
+  IDENTITY_ARGS=(--github-login)
 fi
-log "suite $SUITE_NAME, provider $PROVIDER, build $BUILD ($commit), state $STATE_BASE${FACTORY_SUITE_APP_ID:+, as GitHub App $FACTORY_SUITE_APP_ID}"
+log "suite $SUITE_NAME, provider $PROVIDER, build $BUILD ($commit), state $STATE_BASE, $([ "$SUITE_IDENTITY" = app ] && echo "as GitHub App $FACTORY_SUITE_APP_ID" || echo "as the gh login $login (FACTORY_SUITE_GITHUB_LOGIN=1)")"
 [ ! -e "$STATE_BASE" ] || { echo "refused: state directory already exists: $STATE_BASE" >&2; exit 3; }
 for r in $M_REPO $C_REPO; do s=$(running_serves "$r"); [ -n "$s" ] && { echo "refused: a serve runs for $r: $s" >&2; exit 3; }; done
 trap 'INTERRUPTED=1; exit 130' INT TERM

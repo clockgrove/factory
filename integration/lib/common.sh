@@ -20,8 +20,9 @@ stopping() { [ -e "$RUN_DIR/stop" ] || [ "$(now)" -ge "$STOP_AT" ]; }
 
 # ---------- installations ----------
 # inst_define NAME REPO CONFIG: one installation (its own FACTORY_STATE_DIR).
-# Fails when the suite's GitHub App can't be given to it (app_setup): every
-# caller stops there, so no installation runs as the gh login instead.
+# Fails when the suite's GitHub identity can't be given to it (identity_setup):
+# every caller stops there, so no installation runs as an identity the run
+# didn't choose.
 inst_define() {
   local d="$RUN_DIR/inst/$1"; mkdir -p "$d"
   local repo=$2 key; key=$(echo "$repo" | tr 'A-Z' 'a-z' | sed 's#/#__#')
@@ -35,36 +36,36 @@ ROOT=$STATE_BASE/$1/$key
 CUR_CFG=$3
 EOF
   mkdir -p "$STATE_BASE/$1"
-  # A configuration the suite wrote gets the suite's GitHub App now; the prod
-  # case's own setup gives it to the one it creates.
-  [ ! -e "$3" ] || app_setup "$1"
+  # A configuration the suite wrote gets the suite's GitHub identity now; the
+  # prod case's own setup gives it to the one it creates.
+  [ ! -e "$3" ] || identity_setup "$1"
 }
-# app_setup NAME: with the suite's GitHub App (APP_ARGS, run-suite.sh), give
-# installation NAME the App, and the suite's login as its operator, through
-# `factory setup`, checked by app_given.
-app_setup() {
-  [ ${#APP_ARGS[@]} -gt 0 ] || return 0
-  ( inst "$1"; cli_t 180 setup "${APP_ARGS[@]}" --json ) >"$RUN_DIR/app-setup.$1.out" 2>"$RUN_DIR/app-setup.$1.err"
-  app_given "$1" "$RUN_DIR/app-setup.$1.out"
+# identity_setup NAME: give installation NAME the suite's GitHub identity
+# (IDENTITY_ARGS, run-suite.sh) through `factory setup`: the GitHub App, and
+# the suite's login as its operator, or the opt-out --github-login. Checked by
+# identity_given.
+identity_setup() {
+  ( inst "$1"; cli_t 180 setup "${IDENTITY_ARGS[@]}" --json ) >"$RUN_DIR/identity-setup.$1.out" 2>"$RUN_DIR/identity-setup.$1.err"
+  identity_given "$1" "$RUN_DIR/identity-setup.$1.out"
 }
-# app_given NAME REPORT: with the suite's GitHub App, installation NAME's
-# `factory setup --json` REPORT gave it the App: not refused, and its GitHub
-# App check there and not blocked. Otherwise the run fails (suite.github-app)
-# and stops (the wave's stop file): the installation would act as the gh
-# login, and the run would prove nothing about the App.
-app_given() {
-  [ ${#APP_ARGS[@]} -gt 0 ] || return 0
-  python3 - "$2" <<'PY' 2>>"$RUN_DIR/app-setup.$1.err" && return 0
-import json, sys
+# identity_given NAME REPORT: installation NAME's `factory setup --json`
+# REPORT gave it the suite's identity: not refused, no GitHub App check
+# blocked, and as the App (SUITE_IDENTITY app) that check there. Otherwise
+# the run fails (suite.github-identity) and stops (the wave's stop file): the
+# installation would act as an identity the run didn't choose, and the run
+# would prove nothing about the App.
+identity_given() {
+  SUITE_IDENTITY=$SUITE_IDENTITY python3 - "$2" <<'PY' 2>>"$RUN_DIR/identity-setup.$1.err" && return 0
+import json, os, sys
 try: d = json.load(open(sys.argv[1]))
 except ValueError: sys.exit("setup printed no report")
 app = [c for c in (d.get("readiness") or {}).get("checks", []) if c.get("name") == "GitHub App"]
-if d.get("status") == "refused" or not app or any(c.get("status") == "blocked" for c in app):
+if d.get("status") == "refused" or any(c.get("status") == "blocked" for c in app) or (os.environ["SUITE_IDENTITY"] == "app" and not app):
   sys.exit(json.dumps({"status": d.get("status"), "problems": d.get("problems"), "app": app})[:600])
 PY
   local CASE=suite INST=$1
-  record suite.github-app FAIL "setup didn't give installation $1 the GitHub App: $(tail -c 600 "$RUN_DIR/app-setup.$1.err")" "$(now)"
-  log "stopping the run: FACTORY_SUITE_APP_ID and FACTORY_SUITE_APP_KEY are set, but installation $1 isn't GitHub App $FACTORY_SUITE_APP_ID and would act as the gh login ($2, $RUN_DIR/app-setup.$1.err)"
+  record suite.github-identity FAIL "setup didn't give installation $1 the suite's GitHub identity ($SUITE_IDENTITY): $(tail -c 600 "$RUN_DIR/identity-setup.$1.err")" "$(now)"
+  log "stopping the run: installation $1 didn't get the suite's GitHub identity ($([ "$SUITE_IDENTITY" = app ] && echo "GitHub App $FACTORY_SUITE_APP_ID" || echo "the gh login, --github-login")) ($2, $RUN_DIR/identity-setup.$1.err)"
   touch "$RUN_DIR/stop"
   return 1
 }

@@ -763,7 +763,7 @@ test("the registration link prefills every permission for an organization or a u
   );
   assert.match(
     appSteps(false),
-    /install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH/,
+    /install it on the repository and every other repository of its Project, then run factory setup --github-app-id ID --github-app-key PATH --operator LOGIN/,
   );
   const { organization_projects: _projects, ...personal } = APP_PERMISSIONS;
   assert.deepEqual(missingPermissions(personal, false), []);
@@ -855,9 +855,10 @@ test("setup keeps the App's key as an owner-only copy, never shown; readiness ch
   );
   assert.doesNotMatch(first.out + first.err, /PRIVATE KEY|MII/);
   const report = JSON.parse(first.out);
+  // The App replaces the GitHub CLI's login the configuration chose.
   assert.deepEqual(
     [...report.changed].sort(),
-    ["FACTORY_GITHUB_APP_KEY", "github.app.id", "operators"],
+    ["FACTORY_GITHUB_APP_KEY", "github.app.id", "github.login", "operators"],
     first.out,
   );
   const saved = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
@@ -908,6 +909,12 @@ test("setup keeps the App's key as an owner-only copy, never shown; readiness ch
   assert.equal(other.status, "refused");
   assert.match(other.problems[0], /#5 still has state/);
   assert.match(other.problems[0], /factory queue drain/);
+  // So is going back to the GitHub CLI's login.
+  const back = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.equal(back.status, "refused");
+  assert.match(back.problems[0], /^--github-login changes who Factory acts as/);
   assert.deepEqual(
     JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8")).github,
     { app: { id: 42 } },
@@ -959,4 +966,108 @@ test("readiness warns when no operator is set, or when Factory acts as the opera
     "kirk",
   );
   assert.equal(mixed.code, 2);
+});
+
+test("a configuration naming no GitHub identity, as before 0.5.2, is blocked on the App's preflight step; --github-login records the opt-out, and with an Objective in flight the App is refused", async () => {
+  const { api } = await fakeGitHub({
+    "GET /user": () => [200, { login: "kirk" }],
+    [`GET /repos/${REPO}`]: repository,
+  });
+  const inst = installation();
+  configured(inst, api, {}, { github: undefined });
+  const setup = async (...args) =>
+    JSON.parse((await factory(inst, "setup", ...args, "--json")).out);
+  const saved = () =>
+    JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8")).github;
+  const named = (report, name) =>
+    report.readiness.checks.filter((entry) => entry.name === name);
+
+  // The upgraded configuration loads, and nothing changes who Factory is.
+  const upgraded = await setup();
+  assert.equal(upgraded.status, "blocked");
+  assert.deepEqual(upgraded.changed, []);
+  assert.equal(saved(), undefined);
+  const [identity, ...more] = named(upgraded, "GitHub App");
+  assert.deepEqual(more, []);
+  assert.equal(identity.status, "blocked");
+  assert.match(identity.fix, /preflight step/);
+  assert.match(identity.fix, /factory setup --github-app-link/);
+  assert.match(
+    identity.fix,
+    /https:\/\/github\.com\/organizations\/drill\/settings\/apps\/new\?name=/,
+  );
+  assert.match(
+    identity.fix,
+    /--github-app-id ID --github-app-key PATH --operator LOGIN/,
+  );
+  assert.match(identity.fix, /factory setup --github-login$/);
+  // Nothing is read as the login no one chose.
+  assert.deepEqual(named(upgraded, "GitHub"), []);
+  assert.deepEqual(named(upgraded, "operators"), []);
+
+  // An Objective in flight finds what it made by the login: the App would
+  // change it, so it waits for a drained queue; the opt-out doesn't.
+  mkdirSync(join(inst.root, "objectives"), { recursive: true });
+  writeFileSync(join(inst.root, "objectives", "5.json"), "{}\n");
+  const pem = join(inst.root, "downloaded.pem");
+  writeFileSync(pem, key.privateKey, { mode: 0o600 });
+  const app = ["--github-app-id", "42", "--github-app-key", pem];
+  const refused = await setup(...app);
+  assert.equal(refused.status, "refused");
+  assert.match(
+    refused.problems[0],
+    /^--github-app-id changes who Factory acts as on GitHub, and #5 still has state/,
+  );
+  assert.equal(saved(), undefined);
+  assert.equal(existsSync(join(inst.root, "github-app-key.pem")), false);
+
+  const kept = await setup("--github-login");
+  assert.notEqual(kept.status, "refused", JSON.stringify(kept.problems));
+  assert.deepEqual(kept.changed, ["github.login"]);
+  assert.deepEqual(saved(), { login: true });
+  assert.deepEqual(named(kept, "GitHub App"), []);
+  // With the opt-out, readiness warns as before: holds notify nobody.
+  const [operators] = named(kept, "operators");
+  assert.equal(operators.status, "warn");
+  assert.match(operators.detail, /holds notify nobody/);
+  assert.equal((await setup(...app)).status, "refused");
+  assert.deepEqual(saved(), { login: true });
+});
+
+test("setup takes one GitHub identity: --github-login with an App option is refused, both keys by hand don't load, and --github-login drops the App", async () => {
+  const { api } = await fakeGitHub({});
+  const inst = installation();
+  configured(inst, api, {}, { github: { app: { id: 42 } } });
+  for (const flags of [
+    ["--github-app-id", "42"],
+    ["--github-app-installation", "9"],
+  ]) {
+    const both = await factory(inst, "setup", "--github-login", ...flags);
+    assert.equal(both.code, 2, both.err);
+    assert.match(
+      both.err,
+      /--github-login keeps the GitHub CLI's login instead of a GitHub App: drop --github-app-/,
+    );
+  }
+  const config = inst.env.FACTORY_CONFIG;
+  const switched = JSON.parse(
+    (await factory(inst, "setup", "--github-login", "--json")).out,
+  );
+  assert.deepEqual([...switched.changed].sort(), [
+    "github.app",
+    "github.login",
+  ]);
+  assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).github, {
+    login: true,
+  });
+
+  const written = JSON.parse(readFileSync(config, "utf8"));
+  written.github = { app: { id: 42 }, login: true };
+  writeFileSync(config, JSON.stringify(written));
+  const loaded = JSON.parse((await factory(inst, "setup", "--json")).out);
+  assert.equal(loaded.status, "refused");
+  assert.match(
+    loaded.problems[0],
+    /github\.app and github\.login are both set/,
+  );
 });

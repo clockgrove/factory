@@ -956,16 +956,19 @@ export async function baseRerunCheck(
       fix: `Give ${workflow} on ${branch} a workflow_dispatch trigger with no required input, or name another workflow in delivery.baseRerun`,
     };
   const checks = read.checks.length ? read.checks.join(", ") : "no check";
+  const guarded = read.guarded.length
+    ? `${read.guarded.join(", ")} run${read.guarded.length === 1 ? "s" : ""} after it but skip${read.guarded.length === 1 ? "s" : ""} every job for a run Factory dispatched (github.event.workflow_run.event is workflow_dispatch)`
+    : "";
   if (read.followers.length)
     return {
       name,
       status: "warn",
-      detail: `delivery.baseRerun lets Factory run ${workflow} (${checks}) on ${branch}, and ${read.followers.join(", ")} run${read.followers.length === 1 ? "s" : ""} after it (workflow_run), so each run Factory dispatches starts ${read.followers.length === 1 ? "that" : "those"} too`,
-      fix: `Make sure nothing that runs after ${workflow} releases or deploys from a dispatched run (skip it when github.event.workflow_run.event is workflow_dispatch), or name a workflow nothing runs after, or remove delivery.baseRerun`,
+      detail: `delivery.baseRerun lets Factory run ${workflow} (${checks}) on ${branch}, and ${read.followers.join(", ")} run${read.followers.length === 1 ? "s" : ""} after it (workflow_run), so each run Factory dispatches starts ${read.followers.length === 1 ? "that" : "those"} too${guarded ? `; ${guarded}` : ""}`,
+      fix: `Give each job of ${read.followers.length === 1 ? "it" : "them"} an if that skips a run whose github.event.workflow_run.event is workflow_dispatch (or a needs on such a job), which readiness reads and then accepts; or name a workflow nothing runs after; or remove delivery.baseRerun`,
     };
   return ok(
     name,
-    `Factory may run ${workflow} (${checks}) on ${branch}'s head when a failed check's pass there is a day or more older than its failure, and compares with that run; nothing runs after it`,
+    `Factory may run ${workflow} (${checks}) on ${branch}'s head when a failed check's pass there is a day or more older than its failure, and compares with that run; ${guarded || "nothing runs after it"}`,
   );
 }
 

@@ -12,10 +12,12 @@ import { after, test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { observeCi } from "../dist/delivery.js";
 import { GitHub, GitHubError } from "../dist/github.js";
+import { skipsDispatchedRuns } from "../dist/planning/dispatch-guard.js";
 import { baseRerunWorkflow } from "../dist/planning/facts.js";
 import { baseRerunCheck } from "../dist/readiness.js";
 import {
   delivery,
+  keepBaseReruns,
   pullInput,
   rerunOutcome,
 } from "../dist/work/step-deliver.js";
@@ -525,7 +527,11 @@ test("readiness says what delivery.baseRerun lets Factory run on main, and what 
     }),
     "quality.yml",
   );
-  assert.deepEqual(defaulted, { checks: ["quality"], followers: [] });
+  assert.deepEqual(defaulted, {
+    checks: ["quality"],
+    followers: [],
+    guarded: [],
+  });
 });
 
 test("delivery.baseRerun is a workflow's file name, set by setup's --base-rerun-workflow", async () => {
@@ -619,4 +625,326 @@ test("the client dispatches a workflow on a branch and reads the file a workflow
     assert.equal(error.status, 404);
     return true;
   });
+});
+
+const now = () => new Date().toISOString();
+
+test("a run on main that ends with no result (cancelled, skipped) is no fresh pass: the finding says so and keeps the stale pass's warning", async () => {
+  for (const [what, conclusion, keep] of [
+    ["the dispatched run cancelled", "cancelled", kept(10 * MINUTE)],
+    ["the dispatched run skipped", "skipped", kept(10 * MINUTE)],
+    [
+      "the run waited for cancelled",
+      "cancelled",
+      kept(10 * MINUTE, { dispatched: false }),
+    ],
+  ]) {
+    const hub = github({
+      attempt: 2,
+      baseRuns: [
+        STALE,
+        onBase(31, "quality", conclusion, { completed_at: now() }),
+      ],
+      jobRuns: { 31: DISPATCHED_RUN },
+    });
+    const repair = await observe(hub, "quality.yml", keep);
+    assert.equal(repair.kind, "repair", what);
+    assert.deepEqual(hub.dispatched, [], what);
+    assert.match(
+      repair.finding,
+      new RegExp(
+        `, and its run of quality ended ${conclusion} at \\S+, with no fresh result\\. main's pass of quality at ${stalePass} before it is a day or more older than the failure here, and a pass that old may not hold now`,
+      ),
+      what,
+    );
+  }
+});
+
+test("after a result rereview, main's fresh pass in Factory's run repairs instead of asking to run it there again", async () => {
+  const hub = (fields) =>
+    github({
+      attempt: 2,
+      baseRuns: [
+        STALE,
+        onBase(31, "quality", "success", { completed_at: now() }),
+      ],
+      jobRuns: { 31: DISPATCHED_RUN },
+      ...fields,
+    });
+  const rereviewed = { retried: true, rereviewedAt: now() };
+  const repair = await observe(hub(), "quality.yml", {
+    ...kept(10 * MINUTE),
+    ...rereviewed,
+  });
+  assert.equal(repair.kind, "repair", JSON.stringify(repair));
+  assert.match(
+    repair.finding,
+    /Factory ran quality\.yml on main's head b{40} at \S+ \(the operator's delivery\.baseRerun\), and it passed quality there\./,
+  );
+  // Without Factory's run, the rereview's question stands (#2129).
+  const held = await observe(hub(), undefined, rereviewed);
+  assert.equal(held.kind, "hold", JSON.stringify(held));
+  assert.match(held.question, /was checked again on the operator's revalidate/);
+  // A pass on main from before the PR's failure says nothing new either.
+  const before = await observe(
+    hub({
+      baseRuns: [
+        STALE,
+        onBase(31, "quality", "success", {
+          completed_at: new Date(failedAt - MINUTE).toISOString(),
+        }),
+      ],
+    }),
+    "quality.yml",
+    { ...kept(10 * MINUTE), ...rereviewed },
+  );
+  assert.equal(before.kind, "hold", JSON.stringify(before));
+});
+
+test("on a retry, a dispatched run with no result within the hour is waited for no longer", async () => {
+  const queued = () =>
+    github({
+      attempt: 2,
+      baseRuns: [
+        STALE,
+        onBase(31, "quality", null, { status: "queued", completed_at: null }),
+      ],
+      jobRuns: { 31: DISPATCHED_RUN },
+    });
+  const repair = await observe(queued(), "quality.yml", {
+    ...kept(5 * 60 * MINUTE),
+    retried: true,
+  });
+  assert.equal(repair.kind, "repair", JSON.stringify(repair));
+  assert.match(
+    repair.finding,
+    /and quality had no fresh result there 60 minutes later\./,
+  );
+  // Within the hour it is still waited for.
+  const wait = await observe(queued(), "quality.yml", {
+    ...kept(10 * MINUTE),
+    retried: true,
+  });
+  assert.equal(wait.kind, "retry", JSON.stringify(wait));
+  assert.match(wait.reason, /^Awaiting main's fresh run of quality/);
+});
+
+test("a run of the workflow in progress on main for one failed check is waited for before a dispatch for another", async () => {
+  const stale = (id, name) =>
+    onBase(id, name, "success", { completed_at: stalePass });
+  const pr = [check(1, "test", "failure"), check(2, "lint", "failure")];
+  const running = github({
+    runs: pr,
+    baseRuns: [
+      stale(21, "lint"),
+      stale(22, "test"),
+      onBase(31, "test", null, { status: "in_progress", completed_at: null }),
+    ],
+    jobRuns: { 31: DISPATCHED_RUN },
+  });
+  const wait = await observe(running, "quality.yml");
+  assert.equal(wait.kind, "rerun", JSON.stringify(wait));
+  assert.deepEqual(running.dispatched, []);
+  assert.deepEqual(wait.baseRerun.checks, ["test"]);
+  assert.equal(wait.baseRerun.dispatched, false);
+  // It passed; lint's pass there is still stale: now it is dispatched.
+  const ended = github({
+    runs: pr,
+    baseRuns: [
+      stale(21, "lint"),
+      stale(22, "test"),
+      onBase(31, "test", "success", { completed_at: now() }),
+    ],
+    jobRuns: { 31: DISPATCHED_RUN },
+  });
+  const dispatched = await observe(ended, "quality.yml", {
+    baseRerun: {
+      ...wait.baseRerun,
+      at: new Date(Date.now() - 2 * MINUTE).toISOString(),
+    },
+  });
+  assert.equal(dispatched.kind, "rerun", JSON.stringify(dispatched));
+  assert.deepEqual(ended.dispatched, [["quality.yml", "main"]]);
+  assert.deepEqual(dispatched.baseRerun.checks, ["lint"]);
+  assert.equal(dispatched.baseRerun.dispatched, true);
+});
+
+test("a native stack's layers share one dispatch, and the merge step keeps and logs each layer's", async () => {
+  const hub = github();
+  const baseReruns = [];
+  const context = {
+    github: hub,
+    checkout: "/nonexistent",
+    signal: new AbortController().signal,
+    baseRerun: "quality.yml",
+    baseReruns,
+  };
+  const layer = (name) =>
+    observeCi(context, {
+      issue: 1,
+      item: name,
+      pr: 7,
+      head: HEAD,
+      pushedHeads: [HEAD],
+      requiredChecks: [],
+    });
+  const first = await layer("a");
+  const second = await layer("b");
+  assert.deepEqual(hub.dispatched, [["quality.yml", "main"]]);
+  assert.equal(first.baseRerun.dispatched, true);
+  assert.equal(second.kind, "rerun", JSON.stringify(second));
+  assert.equal(second.baseRerun.dispatched, false);
+  assert.equal(second.baseRerun.at, first.baseRerun.at);
+  assert.match(
+    second.reason,
+    /^Awaiting the run of quality\.yml that Factory dispatched on main's head b{40}/,
+  );
+  assert.deepEqual(
+    baseReruns.map((entry) => entry.item),
+    ["a", "b"],
+  );
+
+  // Another layer's repair is the outcome: both runs are kept and logged.
+  const logged = [];
+  const step = { log: (event) => logged.push(event) };
+  const repaired = keepBaseReruns(
+    step,
+    { kind: "repair", finding: "x", target: "item:c:work", clear: [] },
+    baseReruns,
+    undefined,
+  );
+  assert.deepEqual(repaired.keep, {
+    "item:a:baseRerun": first.baseRerun,
+    "item:b:baseRerun": second.baseRerun,
+  });
+  assert.deepEqual(
+    logged.map((event) => [event.event, event.item, event.dispatched]),
+    [
+      ["base-rerun", "a", true],
+      ["base-rerun", "b", false],
+    ],
+  );
+  // Layer a's rerun is the outcome: rerunOutcome keeps that one.
+  logged.length = 0;
+  const chosen = keepBaseReruns(
+    step,
+    {
+      kind: "retry",
+      reason: "r",
+      keep: { "item:a:baseRerun": first.baseRerun },
+    },
+    baseReruns,
+    "a",
+  );
+  assert.deepEqual(chosen.keep, {
+    "item:a:baseRerun": first.baseRerun,
+    "item:b:baseRerun": second.baseRerun,
+  });
+  assert.deepEqual(
+    logged.map((event) => event.item),
+    ["b"],
+  );
+});
+
+test("readiness accepts a follower whose every job skips a dispatched run, as Clockgrove's Guarded release does", async () => {
+  const config = {
+    repository: REPO,
+    checkout: "/nonexistent",
+    delivery: { kind: "regular", baseRerun: { workflow: "quality.yml" } },
+  };
+  // Guarded release's shape: one job releases only from a push, the
+  // others need it.
+  const release = `name: Guarded release
+on:
+  workflow_run:
+    workflows: [Quality]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  select:
+    if: \${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    steps: [{ run: node select.mjs }]
+  staging:
+    needs: select
+    if: \${{ needs.select.outputs.environment == 'staging' }}
+    uses: ./.github/workflows/deploy.yml
+  production:
+    if: \${{ false }}
+    needs: select
+    uses: ./.github/workflows/deploy.yml
+`;
+  const guarded = await baseRerunCheck(
+    config,
+    "main",
+    files({ [QUALITY]: QUALITY_YML, ".github/workflows/release.yml": release }),
+  );
+  assert.equal(guarded.status, "ok", JSON.stringify(guarded));
+  assert.match(
+    guarded.detail,
+    /\.github\/workflows\/release\.yml runs after it but skips every job for a run Factory dispatched/,
+  );
+  // A job that still runs for a dispatched run: the warning stays.
+  const deploys = await baseRerunCheck(
+    config,
+    "main",
+    files({
+      [QUALITY]: QUALITY_YML,
+      ".github/workflows/release.yml": release.replace(
+        "    if: ${{ needs.select.outputs.environment == 'staging' }}\n",
+        "    if: ${{ always() }}\n",
+      ),
+    }),
+  );
+  assert.equal(deploys.status, "warn", JSON.stringify(deploys));
+
+  const skips = (jobs) => skipsDispatchedRuns({ jobs });
+  const job = (fields = {}) => ({ "runs-on": "x", ...fields });
+  for (const [what, jobs, expected] of [
+    ["no if", { a: job() }, false],
+    ["if false", { a: job({ if: false }) }, true],
+    [
+      "push only",
+      { a: job({ if: "github.event.workflow_run.event == 'push'" }) },
+      true,
+    ],
+    [
+      "not a dispatch, any case",
+      {
+        a: job({
+          if: "${{ github['event'].workflow_run.EVENT != 'WORKFLOW_DISPATCH' }}",
+        }),
+      },
+      true,
+    ],
+    [
+      "unknown either way",
+      { a: job({ if: "github.event.workflow_run.conclusion == 'success'" }) },
+      false,
+    ],
+    [
+      "unknown or true",
+      {
+        a: job({
+          if: "github.event.workflow_run.event == 'push' || github.ref == 'refs/heads/main'",
+        }),
+      },
+      false,
+    ],
+    [
+      "needs a skipped job",
+      { a: job({ if: false }), b: job({ needs: ["a"] }) },
+      true,
+    ],
+    [
+      "needs a skipped job, always()",
+      { a: job({ if: false }), b: job({ needs: "a", if: "always()" }) },
+      false,
+    ],
+    ["text around the expression", { a: job({ if: "x ${{ false }}" }) }, false],
+    ["unparsable", { a: job({ if: "github.event_name ==" }) }, false],
+    ["no jobs", {}, false],
+  ])
+    assert.equal(skips(jobs), expected, what);
 });

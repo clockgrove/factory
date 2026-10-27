@@ -10,6 +10,7 @@ import { markdownLines } from "../markdown.js";
 import { checkObjective, type SourceRef, validPath } from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
+import { skipsDispatchedRuns } from "./dispatch-guard.js";
 import { HOST_VALIDATION_NETWORK } from "./rubric.js";
 import type {
   CoverageObligation,
@@ -866,28 +867,34 @@ export function pushCheckNames(
  * would refuse to dispatch it (missing, unparsable, no `workflow_dispatch`,
  * or an input it requires with no default), the check-run names it
  * reports, and the workflows that run after it (`on: workflow_run` naming
- * its name), which a dispatch of it starts too.
+ * its name), which a dispatch of it starts too: `followers`, or `guarded`
+ * when every job of one skips a run that a dispatch started
+ * (dispatch-guard.ts `skipsDispatchedRuns`).
  */
 export async function baseRerunWorkflow(
   files: BaseFiles,
   workflow: string,
-): Promise<{ problem?: string; checks: string[]; followers: string[] }> {
+): Promise<{
+  problem?: string;
+  checks: string[];
+  followers: string[];
+  guarded: string[];
+}> {
   const path = `${WORKFLOWS}/${workflow}`;
+  const none = { checks: [], followers: [], guarded: [] };
   const text = await files.text(path);
-  if (text === undefined)
-    return { problem: `there is no ${path}`, checks: [], followers: [] };
+  if (text === undefined) return { problem: `there is no ${path}`, ...none };
   let parsed: unknown;
   try {
     parsed = parse(text);
   } catch {
-    return { problem: `${path} can't be parsed`, checks: [], followers: [] };
+    return { problem: `${path} can't be parsed`, ...none };
   }
   const on = (parsed as { on?: unknown } | null)?.on;
   if (!events(on).includes("workflow_dispatch"))
     return {
       problem: `${path} doesn't run on workflow_dispatch`,
-      checks: [],
-      followers: [],
+      ...none,
     };
   const dispatch =
     on && typeof on === "object" && !Array.isArray(on)
@@ -910,13 +917,13 @@ export async function baseRerunWorkflow(
   if (required.length)
     return {
       problem: `${path} requires the input${required.length === 1 ? "" : "s"} ${required.join(", ")} with no default, and Factory dispatches it with none`,
-      checks: [],
-      followers: [],
+      ...none,
     };
   // GitHub names a workflow without `name` by its path.
   const named = (parsed as { name?: unknown } | null)?.name;
   const name = typeof named === "string" ? named : path;
   const followers: string[] = [];
+  const guarded: string[] = [];
   for (const other of await workflowPaths(files)) {
     if (other === path) continue;
     let follower: unknown;
@@ -939,11 +946,12 @@ export async function baseRerunWorkflow(
         (entry) => entry === name || entry === path,
       )
     )
-      followers.push(other);
+      (skipsDispatchedRuns(follower) ? guarded : followers).push(other);
   }
   return {
     checks: await checkNamesOf(files, () => true, path),
     followers,
+    guarded,
   };
 }
 

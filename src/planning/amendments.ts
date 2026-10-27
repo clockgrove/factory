@@ -170,17 +170,21 @@ interface AmendReview {
 
 /**
  * The review of proposal `id`'s current plan round, or undefined while
- * that round is unreviewed. One saved without a round predates acceptance
- * sending rounds back: it reviewed the round there is unless acceptance
- * has sent one back since.
+ * that round is unreviewed or sent back to the planner. One saved without
+ * a round predates acceptance sending rounds back: it reviewed the round
+ * there is unless acceptance has sent one back since.
  */
 function reviewOf(state: ObjectiveState, id: string): AmendReview | undefined {
   const review = state.done[`${KEY(id)}:review`] as AmendReview | undefined;
   if (!review) return undefined;
   const round = state.done[`${KEY(id)}:plan`] as AmendRound | undefined;
+  const revisions = revisionsOf(state, id);
+  // Sent back and not planned again yet: what it reviewed is being revised.
+  if (round?.round !== undefined && round.round <= revisions.length)
+    return undefined;
   const current =
     review.round === undefined
-      ? !revisionsOf(state, id).some((revision) => revision.atAcceptance)
+      ? !revisions.some((revision) => revision.atAcceptance)
       : review.round === round?.round;
   return current ? review : undefined;
 }
@@ -431,8 +435,9 @@ export function proposeAmendment(
  * settled as declined (rejected and continued past, still charged), the
  * item's `declined` fact is recorded, its planning steps' open questions
  * and waits are dropped, and the item carries on with its
- * result as collected. Refused once the amendment's review is done (its
- * acceptance may be posting), or when no such proposal is pending. The
+ * result as collected. Refused once the review of its current plan round
+ * is done (its acceptance may be posting; `reviewOf`), or when no such
+ * proposal is pending. The
  * problems, or none when it was declined.
  */
 export function declineDiscovery(

@@ -20,6 +20,7 @@ import { loadConfig } from "../dist/config.js";
 import {
   amendmentSteps,
   citedFiles,
+  declineDiscovery,
   proposalProblems,
   startedItemRule,
 } from "../dist/planning/amendments.js";
@@ -636,6 +637,41 @@ test("an amendment whose item started while it was planned goes back to its plan
   assert.deepEqual(
     asked.map((call) => call.phase),
     ["plan", "graph-review", "plan", "graph-review"],
+  );
+});
+
+test("a worker's discovery whose reviewed round acceptance sent back can be declined while it is planned again", async () => {
+  const { state } = await building({
+    kept: { "item:a:base": "0".repeat(40) },
+  });
+  const { "amend:op-1:proposal": proposal } = state.kept;
+  delete state.kept["amend:op-1:proposal"];
+  state.kept["amend:worker-a-1:proposal"] = {
+    ...proposal,
+    id: "worker-a-1",
+    worker: { itemId: "a", attempt: 1 },
+  };
+  const { draft } = state.done["plan:1:1"];
+  state.done["amend:worker-a-1:plan"] = { answer: accepted, draft, round: 1 };
+  state.done["amend:worker-a-1:review"] = { round: 1 };
+  const decline = () =>
+    declineDiscovery(state, "a", "obsolete", "octo", ACCEPTED_AT);
+  // Reviewed: acceptance may be posting it.
+  assert.deepEqual(decline(), [
+    "Amendment worker-a-1 has been reviewed and is being accepted; it can't be declined now",
+  ]);
+  // Acceptance sent the round back: its review no longer counts.
+  state.kept["amend:worker-a-1:revisions"] = [
+    {
+      answer: accepted,
+      findings: [{ source: "check", message: STARTED_A }],
+      atAcceptance: true,
+    },
+  ];
+  assert.deepEqual(decline(), []);
+  assert.equal(
+    state.done["amend:worker-a-1"].rejected,
+    "Declined by octo: obsolete",
   );
 });
 

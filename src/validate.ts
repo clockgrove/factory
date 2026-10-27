@@ -40,6 +40,8 @@ import {
   installNetworkRefusal,
   type NetworkRefusal,
   resolutionNetworkRefusal,
+  WORKSPACE_DEPENDENCY_KEYS,
+  workspaceSettings,
 } from "./package-network.js";
 import { forceRemove, openParent, within } from "./paths.js";
 import {
@@ -847,8 +849,8 @@ async function dependencyInputsChanged(
       path === "package-lock.json" ||
       path === "pnpm-workspace.yaml" ||
       path === ".npmrc" ||
-      path === "package.json" ||
-      path.endsWith("/package.json"),
+      // pnpm also reads a project's package.json5 or package.yaml.
+      /(?:^|\/)package\.(?:json|json5|yaml)$/.test(path),
   );
 }
 
@@ -1132,7 +1134,9 @@ function preparationCommands(plan: Plan): string[] {
  * command runs, its pre and post hooks, pnpmfile hooks, .npmrc, the
  * workspace configuration and the lockfile rules stay as at the accepted
  * base, unless the plan's declared commands, the Package manager
- * update or Workspace package additions authorize a change.
+ * update or Workspace package additions authorize a change. A dependency
+ * change may move dependencies, the workspace's overrides and catalogs,
+ * and the lockfile (checkWorkspaceChange).
  */
 interface PinAuthority {
   /** Exact stable same-manager pin declared by the Objective. */
@@ -1481,18 +1485,25 @@ async function checkPins(
       throw configuration(
         "Package script validation blocked: npm bootstrap requires an existing root npm package without workspaces or a manager update",
       );
+    // A dependency change may move package.json and package-lock.json, as
+    // pnpm's may (#2099): the install gets the network only for a lockfile
+    // that resolves from the configured registries alone, Factory resolves
+    // a stale one under the base's unchanged .npmrc, and the scripts it
+    // runs stay pinned below. Both stay tracked, and no workspaces appear.
     for (const path of ["package.json", "package-lock.json"]) {
-      const before = await git.bytes(base, path);
-      const now = await git.bytes(commit, path);
-      if (!before?.length)
+      if (!(await git.bytes(base, path))?.length)
         throw configuration(
-          `Package script validation blocked: npm bootstrap needs unchanged tracked ${path} from the accepted base`,
+          `Package script validation blocked: npm bootstrap needs tracked ${path} at the accepted base`,
         );
-      if (!now || !before.equals(now))
+      if (!(await git.bytes(commit, path))?.length)
         throw candidate(
-          `Package script validation blocked: npm bootstrap needs unchanged tracked ${path} from the accepted base`,
+          `Package script validation blocked: npm bootstrap needs tracked ${path} in the result tree`,
         );
     }
+    if (after?.workspaces !== undefined)
+      throw candidate(
+        "Package script validation blocked: npm bootstrap does not support workspaces",
+      );
     let lock: unknown;
     try {
       lock = JSON.parse((await file(base, "package-lock.json"))!);
@@ -1653,9 +1664,10 @@ async function checkPins(
         atPredecessor === undefined &&
         selected.every((command) => declared.has(command))
       ) &&
+      // An existing workspace's change was judged by checkWorkspaceChange.
       !(
         path === "pnpm-workspace.yaml" &&
-        authority.workspacePackageAdditions.length
+        (atBase ?? atPredecessor) !== undefined
       )
     )
       throw candidate(
@@ -1681,7 +1693,7 @@ function exactPackageDirectory(path: string): boolean {
 function parseWorkspace(
   content: string,
   refuse: (text: string) => PinRefusal,
-): { packages: string[]; config: Record<string, unknown> } {
+): { packages?: string[]; config: Record<string, unknown> } {
   let value: unknown;
   try {
     const document = parseDocument(content, {
@@ -1713,19 +1725,72 @@ function parseWorkspace(
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw refuse("Workspace YAML must be a mapping");
   const { packages, ...config } = value as Record<string, unknown>;
+  // pnpm reads a workspace file without `packages` for its settings alone.
   if (
-    !Array.isArray(packages) ||
-    packages.some((entry) => typeof entry !== "string") ||
-    new Set(packages).size !== packages.length ||
+    (packages !== undefined &&
+      (!Array.isArray(packages) ||
+        packages.some((entry) => typeof entry !== "string") ||
+        new Set(packages).size !== packages.length)) ||
     Object.hasOwn(config, "<<")
   )
     throw refuse(
       "Workspace packages must be a unique string sequence without merges",
     );
-  return { packages, config };
+  return {
+    ...(packages !== undefined && { packages: packages as string[] }),
+    config,
+  };
 }
 
-/** Keep the base's workspace security configuration across accepted predecessors. */
+/** A mapping whose every value is a string: package selectors or names to specifiers. */
+function specifierMap(value: unknown): boolean {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === "string")
+  );
+}
+
+/**
+ * Why a workspace's changed dependency keys are malformed, or undefined:
+ * `overrides` and `catalog` map names to specifiers, `catalogs` maps
+ * catalog names to such mappings. Only keys that differ from `before`.
+ */
+function dependencyKeysProblem(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): string | undefined {
+  for (const key of WORKSPACE_DEPENDENCY_KEYS) {
+    const value = after[key];
+    if (value === undefined || isDeepStrictEqual(before[key], value)) continue;
+    const valid =
+      key === "catalogs"
+        ? !!value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          Object.values(value).every(specifierMap)
+        : specifierMap(value);
+    if (!valid)
+      return key === "catalogs"
+        ? "catalogs must map catalog names to mappings of package names to version specifiers"
+        : `${key} must map package ${key === "overrides" ? "selectors" : "names"} to version specifiers`;
+  }
+  return undefined;
+}
+
+/**
+ * Keep the base's workspace security configuration across accepted
+ * predecessors. Two kinds of change are allowed. Package membership grows
+ * only by the Objective's Workspace package additions. The dependency keys
+ * (package-network.ts WORKSPACE_DEPENDENCY_KEYS: overrides and catalogs)
+ * may change with a dependency change, as package.json's dependencies may
+ * (#2099): the frozen install fetches only what its verified lockfile
+ * names, and Factory resolves that lockfile under the base's unchanged
+ * policy, with the network only when every entry names the registry. Every
+ * other setting (build approvals, release age, trust policy, registries,
+ * hooks, patches) is the operator's.
+ */
 async function checkWorkspaceChange(
   git: Revisions,
   base: string,
@@ -1748,24 +1813,49 @@ async function checkWorkspaceChange(
   // Command authority for a new workspace stays with the script pins.
   if (baseline === undefined) return;
   if (baseline === after && predecessor === after && !additions.length) return;
-  if (!additions.length)
-    throw candidate(
-      `Package script validation blocked: ${WORKSPACE} differs from the accepted base`,
-    );
   if (after === undefined)
     throw candidate(
-      "Workspace membership authority cannot remove the workspace",
+      additions.length
+        ? "Workspace membership authority cannot remove the workspace"
+        : `Package script validation blocked: ${WORKSPACE} differs from the accepted base`,
     );
   const before = parseWorkspace(baseline, configuration);
   const result = parseWorkspace(after, candidate);
-  if (!isDeepStrictEqual(before.config, result.config))
+  if (
+    !isDeepStrictEqual(
+      workspaceSettings(before.config),
+      workspaceSettings(result.config),
+    )
+  )
     throw candidate(
-      "Workspace non-membership configuration differs from the accepted base; settings other than package membership are the operator's to change on the default branch",
+      `Workspace configuration differs from the accepted base in settings other than package membership and ${WORKSPACE_DEPENDENCY_KEYS.join(", ")}; those settings (such as dependency build approvals, release age and registries) are the operator's to change on the default branch`,
+    );
+  const malformed = dependencyKeysProblem(before.config, result.config);
+  if (malformed)
+    throw candidate(
+      `Package script validation blocked: ${WORKSPACE} ${malformed}`,
+    );
+  if (!additions.length) {
+    if (!isDeepStrictEqual(before.packages, result.packages))
+      throw candidate(
+        `Package script validation blocked: ${WORKSPACE} package membership differs from the accepted base, and the Objective declares no Workspace package additions`,
+      );
+    return;
+  }
+  const existing = before.packages;
+  const members = result.packages;
+  if (!existing)
+    throw configuration(
+      "Workspace packages must be a unique string sequence without merges",
+    );
+  if (!members)
+    throw candidate(
+      "Workspace packages must be a unique string sequence without merges",
     );
   if (
     !isDeepStrictEqual(
-      result.packages.filter((entry) => before.packages.includes(entry)),
-      before.packages,
+      members.filter((entry) => existing.includes(entry)),
+      existing,
     )
   )
     throw candidate(
@@ -1773,16 +1863,14 @@ async function checkWorkspaceChange(
     );
   if (
     predecessor !== undefined &&
-    parseWorkspace(predecessor, configuration).packages.some(
-      (entry) => !result.packages.includes(entry),
+    (parseWorkspace(predecessor, configuration).packages ?? []).some(
+      (entry) => !members.includes(entry),
     )
   )
     throw candidate(
       "Workspace membership authority cannot remove predecessor entries",
     );
-  for (const entry of result.packages.filter(
-    (entry) => !before.packages.includes(entry),
-  )) {
+  for (const entry of members.filter((entry) => !existing.includes(entry))) {
     if (!additions.includes(entry))
       throw candidate(`Workspace package addition is not authorized: ${entry}`);
     const manifest = await git.text(commit, `${entry}/package.json`);

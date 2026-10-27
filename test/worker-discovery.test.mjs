@@ -521,7 +521,7 @@ test("the diagnosis rubric keeps plan changes from the operator: work outside th
     "amendment planning decides how the plan changes (a new Work Item, or a change to one), with its own independent review.",
     "Never ask the operator how the plan should change or which Work Item should provide a file: a question is only for what a person alone can decide.",
     "Return operator with a concrete question when the correction needs the operator's intent (what they want where the sources conflict or say nothing), an external fact Factory cannot see, or an authorization or prerequisite",
-    "With operator, ownership lists every file no Work Item owns that the question is about ([] when it is about none), with evidence and acceptance as for discover: Factory then takes the discovery route for those files instead of asking, unless it already did for this same failure.",
+    "With operator, ownership lists every file no Work Item owns that the question is about ([] when it is about none), with evidence and acceptance as for discover: Factory then takes the discovery route for those files instead of asking, unless the worker was already asked to propose them.",
   ])
     assert.ok(asked[0].prompt.includes(rule), rule);
 });
@@ -551,7 +551,7 @@ test("a question about a file no Work Item owns is decided discover instead, wit
   );
 });
 
-test("a question about a file no Work Item owns is checked as a discovery: without evidence it is asked again, and a file an item owns is no discovery", async () => {
+test("a question about a file no Work Item owns is checked as a discovery: without evidence it is asked again, and with a file an item owns as well it is no discovery", async () => {
   const bare = answer({ ...planQuestion, evidence: [] });
   const { planner, asked } = diagnosis(bare, discover);
   const { result } = await diagnosed(planner, [work], []);
@@ -564,7 +564,11 @@ test("a question about a file no Work Item owns is checked as a discovery: witho
 
   const companion = item("companion", { ownedPaths: ["src/companion.js"] });
   const question = "Should companion deliver src/companion.js first?";
-  const owned = diagnosis(planQuestion, answer({ question }));
+  const mixed = answer({
+    ...planQuestion,
+    ownership: ["src/companion.js", "src/more.js"],
+  });
+  const owned = diagnosis(mixed, answer({ question }));
   const held = await diagnosed(owned.planner, [work, companion], []);
   assert.deepEqual(held.result, { kind: "question", question });
   assert.equal(owned.asked.length, 2);
@@ -574,10 +578,62 @@ test("a question about a file no Work Item owns is checked as a discovery: witho
   );
 });
 
-test("once the worker was asked to propose those files for the same failure, a question about them is the operator's", async () => {
+test("a question that names only files Work Items own stays a question, with no further call", async () => {
+  // Another item's file is the operator's to decide, as before; listing it
+  // in ownership is no reason to ask again.
+  const companion = item("companion", { ownedPaths: ["src/companion.js"] });
+  const { planner, asked } = diagnosis(planQuestion);
+  const logged = [];
+  const { result } = await diagnosed(planner, [work, companion], logged);
+  assert.deepEqual(result, {
+    kind: "question",
+    question: planQuestion.question,
+  });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(
+    logged.filter((event) => event.event === "diagnosis"),
+    [{ event: "diagnosis", decision: "operator" }],
+  );
+});
+
+test("once the worker was asked to propose those files, a question about them is the operator's, whatever the failure's or the evidence's wording", async () => {
+  const reworded = answer({
+    ...discover,
+    evidence: ["npm test: cannot find module src/companion.js"],
+  });
+  const first = await diagnosed(diagnosis(reworded).planner, [work], []);
+  assert.equal(first.result.kind, "correction");
+  // The same validation fails again, its timings changed.
+  const tried = {
+    ...first.result.correction,
+    failure: `${first.result.correction.failure} (1.2ms)`,
+  };
+  const { planner, asked } = diagnosis(planQuestion);
+  const logged = [];
+  const { result } = await diagnosed(planner, [work], logged, [tried]);
+  assert.deepEqual(result, {
+    kind: "question",
+    question: planQuestion.question,
+  });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(
+    logged.filter((event) => event.event === "diagnosis"),
+    [{ event: "diagnosis", decision: "operator" }],
+  );
+});
+
+test("a repeated discovery the diagnosis is told to turn into a question is not proposed again through that question", async () => {
   const first = await diagnosed(diagnosis(discover).planner, [work], []);
   assert.equal(first.result.kind, "correction");
-  const { planner, asked } = diagnosis(planQuestion);
+  // Told the discovery was already tried and to return operator, it asks
+  // about the same file with its evidence reworded.
+  const { planner, asked } = diagnosis(
+    discover,
+    answer({
+      ...planQuestion,
+      evidence: ["npm test: cannot find module src/companion.js"],
+    }),
+  );
   const logged = [];
   const { result } = await diagnosed(planner, [work], logged, [
     first.result.correction,
@@ -586,7 +642,11 @@ test("once the worker was asked to propose those files for the same failure, a q
     kind: "question",
     question: planQuestion.question,
   });
-  assert.equal(asked.length, 1);
+  assert.equal(asked.length, 2);
+  assert.match(
+    asked[1].prompt,
+    /Your previous answer was rejected: the worker was already asked to propose those files for this same failure \(see prior\); propose a different correction, or return operator with a question\./,
+  );
   assert.deepEqual(
     logged.filter((event) => event.event === "diagnosis"),
     [{ event: "diagnosis", decision: "operator" }],

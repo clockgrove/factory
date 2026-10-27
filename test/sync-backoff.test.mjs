@@ -1,7 +1,8 @@
 // A sync job that fails runs again once its backoff ends (jobs.ts,
 // github-sync.ts): the live status comment and the Work Item issues of an
 // Objective that finished while GitHub's rate limit was spent are still
-// written, and a check-only item's issue, which no PR closes, is closed.
+// written, and a check-only item's issue, which no PR closes, is closed;
+// a withdrawal's comment edit is made, so the service can let the run go.
 // GitHub is a fake; the clock is the test's.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -11,6 +12,30 @@ import { Jobs } from "../dist/jobs.js";
 import { mark } from "../dist/markdown.js";
 import { trackingDue } from "../dist/tracking.js";
 import { item, plan, REPO, tempDir, until } from "./helpers.mjs";
+
+/** A GitHubSync on the fake `github`, with progress comments and tracking on; its log goes to `events`. */
+function syncOf(github, events, now) {
+  return new GitHubSync(
+    github,
+    {
+      repository: REPO,
+      secrets: [],
+      operators: [],
+      progress: { enabled: true, includeQuestions: true },
+      tracking: {
+        enabled: true,
+        issueType: { objective: "Objective", workItem: "Task" },
+      },
+      queue: {
+        projectId: "PVT_1",
+        options: { done: "Done", cancelled: "Cancelled" },
+      },
+    },
+    { write: (on, event) => events.push({ on, ...event }) },
+    { noteAfterMs: 0, remindAfterMs: 0 },
+    now,
+  );
+}
 
 test("a failed job is pending until it succeeds, and held only while its backoff is on", async () => {
   let clock = Date.parse("2026-10-27T01:44:00.000Z");
@@ -153,26 +178,7 @@ test("a finished Objective's status and Work Item issues are written after a rat
     blocked: () => false,
     transact: (change) => change(),
   };
-  const sync = new GitHubSync(
-    github,
-    {
-      repository: REPO,
-      secrets: [],
-      operators: [],
-      progress: { enabled: true, includeQuestions: true },
-      tracking: {
-        enabled: true,
-        issueType: { objective: "Objective", workItem: "Task" },
-      },
-      queue: {
-        projectId: "PVT_1",
-        options: { done: "Done", cancelled: "Cancelled" },
-      },
-    },
-    { write: (on, event) => events.push({ on, ...event }) },
-    { noteAfterMs: 0, remindAfterMs: 0 },
-    () => clock,
-  );
+  const sync = syncOf(github, events, () => clock);
   const view = {
     logs: tempDir("factory-backoff-logs-"),
     queue: { mode: "running" },
@@ -218,4 +224,85 @@ test("a finished Objective's status and Work Item issues are written after a rat
   assert.ok(state.modules.github.tracking.items["integrated-test"].closed);
   assert.equal(trackingDue(state, clock), false);
   assert.ok(comments.has(mark(issue, "status", startedAt)));
+});
+
+test("a withdrawal whose comment edit failed is shown once its backoff ends", async () => {
+  const issue = 7;
+  const startedAt = "2026-10-27T01:40:00.000Z";
+  let clock = Date.parse("2026-10-27T01:44:00.000Z");
+  const reset = clock + 5_000;
+  const edited = [];
+  const events = [];
+  let calls = 0;
+  const github = {
+    repository: REPO,
+    owner: REPO.split("/")[0],
+    name: REPO.split("/")[1],
+    editComment: async (on, marker, body) => {
+      calls += 1;
+      if (clock < reset)
+        throw new TransientError(
+          `GitHub PATCH comment on #${on}: 403 API rate limit exceeded`,
+          reset - clock,
+          true,
+        );
+      edited.push([marker, body]);
+    },
+  };
+  // Withdrawn before planning: the service lets it go only once its
+  // status comment shows the withdrawal (`withdrawShown`).
+  const state = {
+    version: 9,
+    issue,
+    status: "checking",
+    withdrawing: true,
+    holds: [],
+    answers: {},
+    repairs: {},
+    kept: {},
+    attempts: {},
+    appliedRequests: [],
+    retries: {},
+    done: {},
+    modules: { github: { itemId: "I_7", commentsSince: startedAt } },
+    startedAt,
+    updatedAt: startedAt,
+  };
+  const runner = {
+    state,
+    settled: false,
+    blocked: () => false,
+    transact: (change) => change(),
+  };
+  const sync = syncOf(github, events, () => clock);
+  const view = { queue: { mode: "running" }, waitsOn: () => null };
+
+  sync.status(runner, view);
+  await until(
+    () =>
+      events.some(
+        (event) =>
+          event.event === "github-sync" && event.job === `status:${issue}`,
+      ),
+    "the rate-limited edit",
+  );
+  assert.equal(sync.withdrawShown(state), false);
+
+  // Within its backoff, nothing is tried again.
+  clock += 9_999;
+  sync.status(runner, view);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(calls, 1);
+
+  // Past it, the edit is made and the run may go.
+  clock += 1;
+  sync.status(runner, view);
+  await until(() => sync.withdrawShown(state), "the withdrawal shown");
+  assert.equal(calls, 2);
+  assert.deepEqual(edited, [
+    [
+      mark(issue, "status", startedAt),
+      `${mark(issue, "status", startedAt)}\nWithdrawn before planning; queue it again to start afresh.`,
+    ],
+  ]);
 });

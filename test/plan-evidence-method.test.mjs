@@ -19,7 +19,7 @@ import { readShown } from "../dist/shown.js";
 import { tempDir } from "./helpers.mjs";
 
 const EVIDENCE_METHOD =
-  "Choosing among the methods the plan can produce to evidence a criterion (a command that checks a property of the result, or a semantic proof whose review judges the criterion itself) is the planner's choice, never an operator decision: review judges whether the chosen method can show the criterion, and one that can't is a fix finding asking for one that can. Proof that only a CI-only command, or an environment local validation lacks, can supply is not such a choice: it stays an integrated-ci proof or an operator decision, as the Work Item standard and the CI-only rule say. A perceptual quality of candidate media (that a preview depicts its model, how an image looks) is seen by the operator when choosing a set at select and judged by the owner's result review through a semantic proof of its criterion, which Factory gives that review from the Objective itself: no acceptance entry needs to state it, so it needs no command evidence, and commands check its checkable properties (format, dimensions, content).";
+  "Choosing among the methods the plan can produce to evidence a criterion (a command that checks a property of the result, or a semantic proof whose review judges the criterion itself) is the planner's choice, never an operator decision: review judges whether the chosen method can show the criterion, and one that can't is a fix finding asking for one that can. Proof that only a CI-only command, or an environment local validation lacks, can supply is not such a choice: it stays an integrated-ci proof or an operator decision, as the Work Item standard and the CI-only rule say. A perceptual quality of candidate media (that a preview depicts its model, how an image looks) is judged by the owner's result review through a semantic proof of its criterion, which Factory gives that review from the Objective itself, and seen by the operator when there are candidate sets to choose among at select (a single set is selected without asking): no acceptance entry needs to state it, so it needs no command evidence, but the owner's goal or brief states it, because its worker sees only its own item, and commands check its checkable properties (format, dimensions, content).";
 
 // The suite's recorded answer in that run (objectives/finished/2.json).
 const RECORDED_ANSWER =
@@ -105,10 +105,11 @@ test("graph review judges how a criterion is evidenced and does not undo a fix i
       "Fixture or test values the sources call policy, internal names, file layout and the choice among evidence methods the plan can produce (check 1) are the planner's choice: never an operator question.",
     ),
   );
-  // A perceptual media quality need not be in the owner's acceptance.
+  // A perceptual media quality need not be in the owner's acceptance, but
+  // its worker, who sees only its own item, is still told it.
   assert.ok(
     reviewer.includes(
-      "check that the owner's acceptance as a whole delivers it, except a perceptual quality of candidate media, which the owner's result review judges from the Objective criterion itself",
+      "check that the owner's acceptance as a whole delivers it, except a perceptual quality of candidate media, which the owner's result review judges from the Objective criterion itself and the owner's goal or brief states for its worker;",
     ),
   );
   // The CI-only and source-decision routes to the operator remain.
@@ -136,6 +137,14 @@ test("graph review judges how a criterion is evidenced and does not undo a fix i
       "An answer that leaves the choice to the planner settles a choice rule 2 leaves to the planner, such as which method the plan can produce evidences a criterion: judge the planner's choice as sound or not. For a product or authority choice, follow the answer's own terms: one that keeps the question open when that is required does not settle it.",
     ),
   );
+  // Only an answer that decides a choice settles it, so the note doesn't
+  // first say every answer settles its choice.
+  assert.ok(
+    reviewer.includes(
+      "Each answer that decides a choice settles it within the Objective: check that the graph follows it, and do not ask it again as an operator decision.",
+    ),
+  );
+  assert.equal(reviewer.includes("Each answer settles that choice"), false);
 });
 
 test("the planner decides an answered or planner-owned question instead of asking it again", async () => {
@@ -150,7 +159,7 @@ test("the planner decides an answered or planner-owned question instead of askin
     true,
   );
   const settles =
-    "An operator answer settles the question it answers. An answer that leaves the choice to you (such as choosing within the Objective) settles a choice rule 2 leaves to you, such as which method the plan can produce evidences a criterion: make that choice in the plan, keeping the current plan's choice when it is sound, and never ask it again. For a product or authority choice, follow the answer's own terms: one that keeps the question open when that is required does not settle it, so keep your recommendation in the graph and ask again only while that choice is still open. Never ask a question rule 2 leaves to you.";
+    "An operator answer that decides a question settles it. An answer that leaves the choice to you (such as choosing within the Objective) settles a choice rule 2 leaves to you, such as which method the plan can produce evidences a criterion: make that choice in the plan, keeping the current plan's choice when it is sound, and never ask it again. For a product or authority choice, follow the answer's own terms: one that keeps the question open when that is required does not settle it, so keep your recommendation in the graph and ask again only while that choice is still open. Never ask a question rule 2 leaves to you.";
   // The rule comes before the answer it governs, which arrives whole.
   assert.ok(instructions.indexOf(settles) >= 0);
   assert.ok(
@@ -164,6 +173,11 @@ test("the planner decides an answered or planner-owned question instead of askin
     lookups: { open: false, bodies: [] },
   }).prompt;
   assert.ok(planner.includes(settles));
+  // An answer that keeps a product question open does not settle it.
+  assert.equal(
+    planner.includes("An operator answer settles the question it answers"),
+    false,
+  );
   // Rule 2 and the checklist name the evidence method as the planner's, and
   // keep proof that needs CI or a missing environment with the operator.
   assert.ok(
@@ -184,7 +198,7 @@ test("the planner decides an answered or planner-owned question instead of askin
   );
   assert.ok(
     planner.includes(
-      "the owner's acceptance as a whole must deliver it, except a perceptual quality of candidate media (that a preview depicts its model), which the owner's result review judges from the Objective criterion itself, so no acceptance entry needs to state it.",
+      "the owner's acceptance as a whole must deliver it, except a perceptual quality of candidate media (that a preview depicts its model), which the owner's result review judges from the Objective criterion itself, so no acceptance entry needs to state it; the owner's goal or brief states it, because its worker sees only its own item.",
     ),
   );
   // Without an operator answer the planner is not told about one.

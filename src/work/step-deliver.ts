@@ -194,16 +194,43 @@ export function pullInput(
   };
 }
 
+/**
+ * The CI step's view of a native stack above its bottom layer: the PRs of
+ * the unit's published layers, bottom first, and the layers not published
+ * yet. Once every layer is published, the step makes the stack, so GitHub
+ * runs the default branch's workflows on the layer (delivery.ts
+ * `observeCi`, #2068).
+ */
+export function stackInput(
+  state: ObjectiveState,
+  place: StackPlace | undefined,
+): Pick<PullInput, "stack"> {
+  if (!place?.layer) return {};
+  const published = (layer: WorkItem) =>
+    state.done[stepKey(layer.id, "publish")] as PublishResult | undefined;
+  return {
+    stack: {
+      pulls: place.unit.items.flatMap((layer) => {
+        const result = published(layer);
+        return result ? [result.pr] : [];
+      }),
+      unpublished: place.unit.items
+        .filter((layer) => !published(layer))
+        .map((layer) => layer.id),
+    },
+  };
+}
+
 export async function ciStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
   place: StackPlace | undefined,
 ): Promise<Outcome> {
-  const result = await observeCi(
-    delivery(context, deps),
-    pullInput(context.state, item, context, place),
-  );
+  const result = await observeCi(delivery(context, deps), {
+    ...pullInput(context.state, item, context, place),
+    ...stackInput(context.state, place),
+  });
   switch (result.kind) {
     case "ready": {
       const flaky = passedRerun(context, item, result.head);

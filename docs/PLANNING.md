@@ -23,7 +23,7 @@ The rules live in `src/planning/rubric.ts`. The planner and the graph reviewer r
 
 **Keep:** invariants across inputs or steps (step-size independence, determinism), the real upstream producer named by its type, and existing helpers and conventions named by name. These raise result quality.
 
-**New identifiers are the worker's.** Acceptance and briefs name only identifiers that exist at the base. A new type, endpoint path, migration number, file or test name is described by role and data, unless the Objective or a pinned source fixes it.
+**New identifiers are the worker's.** Acceptance and briefs name only identifiers that exist at the base. A new type, endpoint path, migration number, file or test name is described by role and data, unless the Objective or a pinned source fixes it. The rule stops at owned paths: an item owns each new file it creates, a new test file included, by the literal path the planner chooses, or by a directory prefix ending in `/` where narrow ownership allows one, and graph review never flags either as a new identifier. Why: a reviewer that applied the rule to owned paths refused a new test file's name, its directory as too broad, and dropping the test, which left no valid plan (#2108).
 
 **Size:** one outcome per item. About 15 acceptance entries is a signal, not a target: above it, split the item or say in its brief why it is one outcome.
 

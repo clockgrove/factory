@@ -762,10 +762,12 @@ function sentAfter(
 /**
  * What the planner was given before refusing at round `n`: the round
  * before's corrections, Factory's checks' or its review's, and when that
- * round wasn't reviewed, the last review's findings too, so a refusal that
- * rests on a check and a review finding together is judged with both. A
- * first-planning refusal's review names no item, so every item id is an
- * earlier plan's.
+ * round wasn't reviewed, the last review's findings the planner was sent
+ * too, so a refusal that rests on a check and a review finding together is
+ * judged with both. Only what the decide step sent: an operator question
+ * it dropped beside fix findings, or one the operator answered, is no
+ * correction. A first-planning refusal's review names no item, so every
+ * item id is an earlier plan's.
  */
 function earlierCorrections(
   state: ObjectiveState,
@@ -777,10 +779,8 @@ function earlierCorrections(
   const sent = n > 1 ? sentAfter(state, g, n - 1, none) : undefined;
   const older =
     last && last.round < n - 1
-      ? earlierFindingsView(
-          last.round,
-          last.findings.filter((finding) => finding.source === "review"),
-          none,
+      ? (sentAfter(state, g, last.round, none)?.findings ?? []).filter(
+          (finding) => finding.source === "review",
         )
       : [];
   if (!older.length) return sent;

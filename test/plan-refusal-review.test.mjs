@@ -528,22 +528,37 @@ test("a refusal after a plan review whose findings named items is shown them apa
   assert.equal(asked.length, 5);
 });
 
+// A revision whose b owns a's source too, and neither depends on the other:
+// Factory's checks refuse it before review.
+const overlaps = {
+  items: [
+    work("b", { ownedPaths: ["src/a.js", "test/b.test.js"] }),
+    qa(["a", "b"]),
+  ],
+  itemEdits: [],
+  removedItemIds: [],
+  coverage: [],
+  sourceObligations: null,
+  requiredPreIntegrationChecks: null,
+  cannotPlan: null,
+  decisionRequired: null,
+};
+
+/** A finding the decide step sent, as a first-planning refusal's review is shown it. */
+const view = (round, f) => {
+  const ids = f.itemIds ?? (f.itemId ? [f.itemId] : []);
+  return {
+    round,
+    source: f.source,
+    kind: f.kind ?? "fix",
+    itemIds: [],
+    ...(ids.length ? { earlierItemIds: ids } : {}),
+    detail: f.message,
+  };
+};
+
 test("a refusal after a round that failed Factory's checks is judged with the check findings the planner got and the review before them (#2111)", async () => {
   const { checkout, state } = checked();
-  // b owns a's source too, and neither depends on the other.
-  const overlaps = {
-    items: [
-      work("b", { ownedPaths: ["src/a.js", "test/b.test.js"] }),
-      qa(["a", "b"]),
-    ],
-    itemEdits: [],
-    removedItemIds: [],
-    coverage: [],
-    sourceObligations: null,
-    requiredPreIntegrationChecks: null,
-    cannotPlan: null,
-    decisionRequired: null,
-  };
   const { planner, asked } = scripted(
     planned,
     objects,
@@ -577,17 +592,74 @@ test("a refusal after a round that failed Factory's checks is judged with the ch
       `Earlier corrections (round 2):\n${REFUSAL_REVIEW_LATER_ROUND}`,
     ),
   );
-  const view = (round, f) => {
-    const ids = f.itemIds ?? (f.itemId ? [f.itemId] : []);
-    return {
-      round,
-      source: f.source,
-      kind: f.kind ?? "fix",
-      itemIds: [],
-      ...(ids.length ? { earlierItemIds: ids } : {}),
-      detail: f.message,
-    };
+  assert.ok(
+    prompt.includes(
+      JSON.stringify({
+        previousFindings: [
+          {
+            round: 1,
+            source: "review",
+            kind: "fix",
+            itemIds: [],
+            earlierItemIds: ["a"],
+            detail: OBJECTED,
+          },
+          ...sent.map((f) => view(2, f)),
+        ],
+      }),
+    ),
+    prompt.slice(prompt.indexOf("Earlier corrections")),
+  );
+});
+
+test("a refusal after a round that failed Factory's checks is shown only the older review's findings the planner was given, not an operator question the decide step dropped (#2111)", async () => {
+  const { checkout, state } = checked();
+  const ASKED =
+    "Whether a's test may live under test/ is a choice the Objective leaves open";
+  // The review's objection and an operator question: the decide step sends
+  // the planner the fix and drops the question, as it does for any plan.
+  const objectsAndAsks = {
+    findings: [
+      ...objects.findings,
+      {
+        kind: "operator-decision",
+        itemIds: [],
+        evidenceIndices: [],
+        detail: ASKED,
+        question: "May a's test live under test/?",
+      },
+    ],
   };
+  const { planner, asked } = scripted(
+    planned,
+    objectsAndAsks,
+    overlaps,
+    refusesRevision,
+    { findings: [] },
+  );
+  const deps = depsOf(checkout, planner);
+  for (const key of [
+    "plan:1:1",
+    "review:1:1",
+    "decide:1:1",
+    "plan:1:2",
+    "decide:1:2",
+    "plan:1:3",
+    "review:1:3",
+  ])
+    assert.equal((await step(state, deps)).key, key);
+  assert.equal(state.done["review:1:1"].findings.length, 2);
+  assert.deepEqual(
+    state.done["decide:1:1"].corrections.map((f) => f.message),
+    [OBJECTED],
+  );
+  assert.equal(state.done["review:1:2"], undefined);
+  const sent = state.done["decide:1:2"].corrections;
+  assert.ok(sent.length);
+  assert.deepEqual(state.done["plan:1:3"].cannot, CANNOT);
+
+  const prompt = asked[4].prompt;
+  assert.ok(!prompt.includes(ASKED), prompt.slice(prompt.indexOf("Earlier")));
   assert.ok(
     prompt.includes(
       JSON.stringify({

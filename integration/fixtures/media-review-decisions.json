@@ -14,13 +14,13 @@
   {
     "step": "item:*:review",
     "answer": "accept",
-    "criterion": "^(?!.*\\b(?:tests?|npm|LFS|candidates?|sets?)\\b).*\\bunit cube\\b",
+    "criterion": "^(?!.*\\b(?:test\\w*|npm|validat\\w*|LFS|large[\\s-]+files?|gitattributes|candidates?|sets?|alternatives?|select\\w*|pick\\w*|chos\\w*|colou?rs?)\\b).*\\bunit cube\\b",
     "text": "Accepted by the integration suite's operator: the selected set passed its own test; this check covers selection, repair and Git LFS delivery, not asset geometry."
   },
   {
     "step": "item:*:review",
     "answer": "accept",
-    "criterion": "^(?!.*\\b(?:tests?|npm|LFS|candidates?|sets?)\\b).*\\bPNG preview\\b",
+    "criterion": "^(?!.*\\b(?:test\\w*|npm|validat\\w*|LFS|large[\\s-]+files?|gitattributes|candidates?|sets?|alternatives?|select\\w*|pick\\w*|chos\\w*|colou?rs?)\\b).*\\bPNG preview\\b",
     "text": "Accepted by the integration suite's operator: the selected set passed its own test; this check covers selection, repair and Git LFS delivery, not asset geometry."
   }
 ]

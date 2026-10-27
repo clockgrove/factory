@@ -113,8 +113,9 @@ def review_criteria(d, step):
 
 def decides(entry, step, option, criteria):
     """Whether fixture decision `entry` is the answer `option` of a review hold at `step`.
-    `step` is a glob; `arg` names the criterion by number, or `criterion` by a regex its
-    text must match (a Work Item's review numbers the plan's criteria, not the Objective's)."""
+    `step` is a glob; `arg` names the criterion by number and/or `criterion` by a regex its
+    text must match, case-insensitively (a Work Item's review numbers the plan's criteria,
+    not the Objective's). An entry naming neither decides nothing."""
     if not fnmatch.fnmatchcase(step, entry.get("step", "")) or entry.get("answer") != option.get("answer"):
         return False
     if "arg" in entry and entry["arg"] != option.get("arg"):

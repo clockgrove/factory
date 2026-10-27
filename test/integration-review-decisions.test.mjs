@@ -126,15 +126,31 @@ test("the media case's operator decides nothing else at a Work Item's review", (
   // LFS, the new test (even one naming the cube and the preview) and the
   // alternatives are the case's own checks: their questions stay with a
   // person, so the case reports the hold.
-  for (const index of [2, 3, 4, 5]) {
+  // So are the same checks in other words: the pick, LFS spelled out, the
+  // item's validation, a test in another tense.
+  const criteria = [
+    MODEL,
+    PREVIEW,
+    LFS,
+    TEST,
+    TEST_CUBE,
+    COLOURS,
+    "Only the picked colour's unit cube model and PNG preview are delivered.",
+    "The chosen unit cube model and its PNG preview are the only assets delivered.",
+    "The unit cube model and its PNG preview are stored in Git Large File Storage.",
+    "The repository's .gitattributes routes the unit cube model and its PNG preview.",
+    "The item's validation confirms the delivered model is a unit cube and the preview a 64x64 PNG preview.",
+    "The delivered unit cube model and PNG preview are tested when CI runs.",
+  ];
+  for (let index = 2; index < criteria.length; index++) {
     assert.deepEqual(
       autoAnswers(
         "item:cube-assets:review",
-        needsHuman([index], [MODEL, PREVIEW, LFS, TEST, TEST_CUBE, COLOURS]),
+        needsHuman([index], criteria),
         "item:cube-assets:held",
       ),
       [],
-      `criterion ${index + 1}`,
+      `criterion ${index + 1}: ${criteria[index]}`,
     );
   }
   // Without the kept review there is no criterion text to match.

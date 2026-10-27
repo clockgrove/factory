@@ -391,7 +391,7 @@ const discover = answer({
 });
 
 /** Work#1's collected result and the diagnosis of its failed validation. */
-async function diagnosed(planner, items, logged) {
+async function diagnosed(planner, items, logged, prior = []) {
   const { worktree, base } = personsMain();
   ownedChange(worktree);
   const first = await collectIn(worktree, base);
@@ -405,7 +405,7 @@ async function diagnosed(planner, items, logged) {
     base,
     commit: first.commit,
     sources: [],
-    prior: [],
+    prior,
     signal: AbortSignal.timeout(60_000),
     log: (event) => logged.push(event),
   });
@@ -490,6 +490,106 @@ test("a file another Work Item owns is never discovered: the diagnosis is asked 
   assert.match(
     asked[1].prompt,
     /Your previous answer was rejected: a discover decision's ownership names only repository files no Work Item owns, and src\/companion\.js is owned by companion\./,
+  );
+});
+
+// Live (#2078), the diagnosis asked the operator whether an item should be
+// added to own the missing file or the test changed: a plan change, which
+// amendment planning makes. Its question named the file.
+const planQuestion = answer({
+  ...discover,
+  decision: "operator",
+  question:
+    "How should the plan address the missing src/companion.js required by the existing test: should an item be added to own and provide it, or should the test dependency be removed through an authorized change?",
+});
+
+test("the diagnosis rubric keeps plan changes from the operator: work outside the owned paths is discover, and a question is for what only a person can decide", async () => {
+  const question = "Which locale should feature format dates in?";
+  const { planner, asked } = diagnosis(answer({ question }));
+  const logged = [];
+  const { result } = await diagnosed(planner, [work], logged);
+  // A question with no files no Work Item owns still holds, as before.
+  assert.deepEqual(result, { kind: "question", question });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(
+    logged.filter((event) => event.event === "diagnosis"),
+    [{ event: "diagnosis", decision: "operator" }],
+  );
+  for (const rule of [
+    "Return decision discover when the correction needs files or work outside this item's owned paths that no Work Item in the plan owns",
+    "even when that looks like a plan change (a new Work Item, a new dependency)",
+    "amendment planning decides how the plan changes (a new Work Item, or a change to one), with its own independent review.",
+    "Never ask the operator how the plan should change or which Work Item should provide a file: a question is only for what a person alone can decide.",
+    "Return operator with a concrete question when the correction needs the operator's intent (what they want where the sources conflict or say nothing), an external fact Factory cannot see, or an authorization or prerequisite",
+    "With operator, ownership lists every file no Work Item owns that the question is about ([] when it is about none), with evidence and acceptance as for discover: Factory then takes the discovery route for those files instead of asking, unless it already did for this same failure.",
+  ])
+    assert.ok(asked[0].prompt.includes(rule), rule);
+});
+
+test("a question about a file no Work Item owns is decided discover instead, with no further call", async () => {
+  const { planner, asked } = diagnosis(planQuestion);
+  const logged = [];
+  const { result } = await diagnosed(planner, [work, qa], logged);
+  assert.equal(result.kind, "correction", JSON.stringify(result));
+  assert.equal(asked.length, 1);
+  assert.equal(result.correction.source, "diagnosis");
+  assert.equal(result.correction.diagnosis, discover.diagnosis);
+  assert.equal(
+    result.correction.correction,
+    `Required validation needs src/companion.js, which no Work Item owns. Do not change them. Write .factory-discovery.json with scope in-scope, ownership ["src/companion.js"], acceptance and evidence as your instructions say, then stop. The diagnosis's evidence and acceptance, to check against the failure: ${JSON.stringify({ evidence: discover.evidence, acceptance: discover.acceptance })}`,
+  );
+  assert.deepEqual(
+    logged.filter((event) => event.event === "diagnosis"),
+    [
+      {
+        event: "diagnosis",
+        decision: "discover",
+        ownership: ["src/companion.js"],
+        rerouted: "operator",
+      },
+    ],
+  );
+});
+
+test("a question about a file no Work Item owns is checked as a discovery: without evidence it is asked again, and a file an item owns is no discovery", async () => {
+  const bare = answer({ ...planQuestion, evidence: [] });
+  const { planner, asked } = diagnosis(bare, discover);
+  const { result } = await diagnosed(planner, [work], []);
+  assert.equal(result.kind, "correction", JSON.stringify(result));
+  assert.equal(asked.length, 2);
+  assert.match(
+    asked[1].prompt,
+    /\nYour previous answer was rejected: an operator question about files no Work Item owns is decided discover instead, and a discover decision needs the reason in diagnosis, every file the fix needs in ownership, and nonempty evidence and acceptance\. Answer again\.$/,
+  );
+
+  const companion = item("companion", { ownedPaths: ["src/companion.js"] });
+  const question = "Should companion deliver src/companion.js first?";
+  const owned = diagnosis(planQuestion, answer({ question }));
+  const held = await diagnosed(owned.planner, [work, companion], []);
+  assert.deepEqual(held.result, { kind: "question", question });
+  assert.equal(owned.asked.length, 2);
+  assert.match(
+    owned.asked[1].prompt,
+    /Your previous answer was rejected: an operator question about files no Work Item owns is decided discover instead, and a discover decision's ownership names only repository files no Work Item owns, and src\/companion\.js is owned by companion\. A file this item owns is a repair, a predecessor's a predecessor blame; otherwise return operator with a question and ownership \[\]\./,
+  );
+});
+
+test("once the worker was asked to propose those files for the same failure, a question about them is the operator's", async () => {
+  const first = await diagnosed(diagnosis(discover).planner, [work], []);
+  assert.equal(first.result.kind, "correction");
+  const { planner, asked } = diagnosis(planQuestion);
+  const logged = [];
+  const { result } = await diagnosed(planner, [work], logged, [
+    first.result.correction,
+  ]);
+  assert.deepEqual(result, {
+    kind: "question",
+    question: planQuestion.question,
+  });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(
+    logged.filter((event) => event.event === "diagnosis"),
+    [{ event: "diagnosis", decision: "operator" }],
   );
 });
 

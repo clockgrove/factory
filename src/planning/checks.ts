@@ -114,7 +114,9 @@ function commandFindings(
     for (const { command } of item.validation)
       if (ciOnly.has(ciOnlyKey(command)))
         found(
-          `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
+          facts.hostNetwork
+            ? `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it runs only in CI. Leave it to CI and validate with another command; when a criterion needs it, ask through decisionRequired`
+            : `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and validate with an offline command; when a criterion needs it, ask through decisionRequired`,
           item.id,
         );
       else if (unpinnablePackageCommand(command))

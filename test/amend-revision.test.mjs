@@ -464,6 +464,28 @@ test("an amendment's review still rejects it on an operator decision, or on the 
     );
     assert.equal(state.kept["amend:op-1:revisions"].length, 1);
   }
+  {
+    // A review invalid twice rejects, and the operator still reads the
+    // planner's reason.
+    const { checkout, state } = await discovered();
+    const { planner } = scripted(refuses, { verdict: "ok" }, { verdict: "ok" });
+    const deps = depsOf(checkout, planner);
+    await step(state, deps);
+    assert.equal((await step(state, deps)).outcome.kind, "retry");
+    const again = await step(state, deps);
+    assert.equal(again.key, "amend:op-1:review");
+    assert.ok(
+      state.done["amend:op-1:review"].rejected.startsWith(
+        `${REFUSED} The amendment review answer was invalid twice: `,
+      ),
+      state.done["amend:op-1:review"].rejected,
+    );
+    await step(state, deps);
+    assert.equal(
+      state.done["amend:op-1"].rejected,
+      state.done["amend:op-1:review"].rejected,
+    );
+  }
 });
 
 // The run's slip: a's own worker proposed b, and the planner relaxed a's
@@ -1318,7 +1340,7 @@ test("a cannotPlan its review overturns goes back to the planner with the rule t
   assert.equal(planningRevisions(state).used, 2);
 });
 
-test("a refusal's review that asks an operator decision rejects with both, and the same findings twice reject too", async () => {
+test("a refusal's review that asks an operator decision rejects with both, and the same findings twice or an invalid review twice reject with the refusal too", async () => {
   {
     const { checkout, state } = await discovered();
     const { planner } = scripted(refuses, overturns("operator-decision"));

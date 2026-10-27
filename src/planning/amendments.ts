@@ -1640,6 +1640,9 @@ function amendReviewStep(
       // Every result names the round it reviewed (`reviewOf`).
       const refused = refusal(context.answer, { round: round.round });
       if (refused) return refused;
+      // A refusal's rejection, however it comes, says what the planner said.
+      const { cannot } = round;
+      const said = cannot ? `${refusalText(cannot)} ` : "";
       const inputs = amendmentInputs(state);
       const built = await planningFacts(
         state,
@@ -1650,7 +1653,7 @@ function amendReviewStep(
       if ("problems" in built)
         return done({
           round: round.round,
-          rejected: built.problems.join("; "),
+          rejected: `${said}${built.problems.join("; ")}`,
         } satisfies AmendReview);
       const { facts } = built;
       const all = decisions(state);
@@ -1699,7 +1702,6 @@ function amendReviewStep(
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
       };
-      const { cannot } = round;
       const { prompt, facts: promptFacts } = cannot
         ? renderRefusalReviewCall({ ...call, refusal: cannot })
         : renderGraphReviewCall({ ...call, draft: round.draft! });
@@ -1737,7 +1739,7 @@ function amendReviewStep(
         return state.kept[invalidKey(key)] !== undefined
           ? done({
               round: round.round,
-              rejected: `${invalidReview} twice: ${decoded.reason}`,
+              rejected: `${said}${invalidReview} twice: ${decoded.reason}`,
             } satisfies AmendReview)
           : invalidRetry(key, `${invalidReview}: ${decoded.reason}`);
       if (!decoded.findings.length)
@@ -1752,7 +1754,7 @@ function amendReviewStep(
         (findings) =>
           done({
             round: round.round,
-            rejected: `${cannot ? `${refusalText(cannot)} ` : ""}Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
+            rejected: `${said}Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
           } satisfies AmendReview),
         { restored: round.restored, refused: cannot },
       );

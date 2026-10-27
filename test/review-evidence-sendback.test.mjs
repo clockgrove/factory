@@ -436,6 +436,117 @@ test("the send-back keeps the file a question names by its path when more than 1
   assert.equal(outcome.kind, "pass");
 });
 
+test("the send-back keeps the file a question names by its exact path when more than 12 files end with that path", async () => {
+  const checkout = tempDir("factory-sendback-suffix-");
+  git(checkout, "init", "--quiet", "--initial-branch=main");
+  const names = [
+    ...["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"],
+    ...["hotel", "india", "juliet", "kilo", "lima", "mike", "november"],
+  ];
+  for (const name of names) {
+    mkdirSync(join(checkout, `packages/${name}/src`), { recursive: true });
+    writeFileSync(
+      join(checkout, `packages/${name}/src/index.ts`),
+      `export const ${name} = 0;\n`,
+    );
+  }
+  mkdirSync(join(checkout, "src"));
+  writeFileSync(join(checkout, "src/index.ts"), "export const root = 0;\n");
+  const base = commit(checkout, "packages");
+  writeFileSync(join(checkout, "src/index.ts"), "export const root = 1;\n");
+  const head = commit(checkout, "root");
+  const repo = {
+    checkout,
+    base,
+    head,
+    tree: git(checkout, "rev-parse", `${head}^{tree}`),
+  };
+  const item = workItem(
+    "Root",
+    ["The root module exports root equal to 1."],
+    ["src/index.ts"],
+  );
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      return {
+        value: {
+          findings: [
+            calls.length === 1
+              ? finding(0, "needs-human", "What does src/index.ts export?")
+              : finding(0, "pass"),
+          ],
+        },
+      };
+    },
+  };
+  const outcome = await review(repo, item, planner).run;
+  assert.equal(calls.length, 2);
+  const note = calls[1].prompt.slice(calls[0].prompt.length);
+  assert.ok(
+    note.includes('"candidate/src/index.ts"'),
+    "exact path missing from send-back",
+  );
+  assert.equal(outcome.kind, "pass");
+});
+
+test("a refusal in the answer to the send-back never replaces a question that was not sent back", async () => {
+  const repo = sharedMain();
+  const item = workItem(
+    "SharedQwfwq",
+    [
+      '`sharedQwfwq("ab")` returns `"abab"`.',
+      "Product approves the release wording.",
+    ],
+    ["test/sharedQwfwq.test.js"],
+  );
+  const calls = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      return {
+        value: {
+          findings:
+            calls.length === 1
+              ? [
+                  finding(0, "needs-human", "What does `sharedQwfwq` return?"),
+                  finding(
+                    1,
+                    "needs-human",
+                    "Has product approved the wording?",
+                  ),
+                ]
+              : [
+                  finding(0, "pass"),
+                  finding(1, "refuse", "No approval is recorded."),
+                ],
+        },
+      };
+    },
+  };
+  const { run, events } = review(repo, item, planner);
+  const outcome = await run;
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-evidence-sendback")
+      ?.criteria,
+    [0],
+  );
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(
+    outcome.questions.map((question) => [
+      question.criterionIndex,
+      question.question,
+    ]),
+    [[1, "Has product approved the wording?"]],
+  );
+  assert.deepEqual(
+    outcome.verdicts.map((verdict) => verdict.criterionIndex),
+    [0],
+  );
+});
+
 test("a refusal in the answer to the send-back replaces an earlier pass of a criterion that was not sent back", async () => {
   const repo = sharedMain();
   const item = workItem(

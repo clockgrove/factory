@@ -1627,8 +1627,9 @@ const SHORTEST_IDENTIFIER = 4;
  * backticked identifier or call whose name is its basename's stem
  * (`sharedQwfwq("ab")` names candidate/src/sharedQwfwq.js), or, for a review
  * copy under media-sets/ or inputs/, by the destination or source path its
- * receipt gives. Path matches come first, then basenames, then stems, so the
- * cap never drops a file named by its path. Only this
+ * receipt gives. Exact path matches come first, then path suffixes, then
+ * basenames, then stems, so the cap never drops a file named by its exact
+ * path for files that only end with it or share its stem. Only this
  * answer's own findings count: a criterion an operator decided, or that an
  * earlier review of this tree asked about, is settled, and a question
  * Factory asked for an invalid answer is no finding.
@@ -1740,10 +1741,14 @@ const IDENTIFIER = /[A-Za-z_$][\w$]*/g;
 const CODE_NAME =
   /^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*(?:\(.*\))?\s*;?\s*$/;
 
-/** How directly a text names a file: a path, then a basename with an extension, then a code identifier's stem. */
-const BY_PATH = 0;
-const BY_BASENAME = 1;
-const BY_STEM = 2;
+/**
+ * How directly a text names a file: its exact path, then a path it ends
+ * with, then a basename with an extension, then a code identifier's stem.
+ */
+const BY_EXACT = 0;
+const BY_SUFFIX = 1;
+const BY_BASENAME = 2;
+const BY_STEM = 3;
 
 /** Within a match class: the candidate and review copies first, the base tree last. */
 function area(path: string): number {
@@ -1778,9 +1783,18 @@ function namedFiles(
     const base = name.slice(name.lastIndexOf("/") + 1);
     let best: number | undefined;
     for (const path of paths) {
-      if (path.includes("/")) {
-        if (name === path || name.endsWith(`/${path}`)) return BY_PATH;
-      } else if (base === path) best = BY_BASENAME;
+      // src/index.ts names candidate/src/index.ts exactly, and every
+      // packages/*/src/index.ts only by suffix: the exact one ranks first.
+      if (name === path) return BY_EXACT;
+      const rank = path.includes("/")
+        ? name.endsWith(`/${path}`)
+          ? BY_SUFFIX
+          : undefined
+        : base === path
+          ? BY_BASENAME
+          : undefined;
+      if (rank !== undefined && (best === undefined || rank < best))
+        best = rank;
     }
     if (best === undefined && stems.has(base.split(".")[0]!)) best = BY_STEM;
     return best;
@@ -1830,13 +1844,15 @@ function sendBackNote(asked: readonly SentBack[], media: boolean): string {
 
 /**
  * The answer after a send-back: each sent criterion's new valid finding
- * replaces its question, and a valid refusal of any other criterion
- * replaces the earlier finding too: the send-back is the round in which the
- * reviewer was told to read the files, so its refusal is the better-informed
- * verdict (an earlier pass may come from a resumed round that read
- * nothing). Every other criterion, and a sent one the new answer left
- * invalid, keeps the earlier answer's finding. A settled criterion is
- * judged by its decision whatever either answer said.
+ * replaces its question, and a valid refusal of any other criterion that
+ * has no question replaces the earlier finding too: the send-back is the
+ * round in which the reviewer was told to read the files, so its refusal is
+ * the better-informed verdict (an earlier pass may come from a resumed round
+ * that read nothing). A question that was not sent back named nothing the
+ * root holds, so it is for the operator and stays. Every other criterion,
+ * and a sent one the new answer left invalid, keeps the earlier answer's
+ * finding. A settled criterion is judged by its decision whatever either
+ * answer said.
  */
 function sentBack(
   before: Extract<Decoded, { invalid: false }>,
@@ -1848,7 +1864,10 @@ function sentBack(
   const replaced = (index: number) => {
     const again = after.findings[index];
     return (
-      again !== undefined && (sent.has(index) || again.verdict === "refuse")
+      again !== undefined &&
+      (sent.has(index) ||
+        (again.verdict === "refuse" &&
+          before.findings[index]?.verdict !== "needs-human"))
     );
   };
   return {

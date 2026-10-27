@@ -592,10 +592,14 @@ export async function runReview(
     // reviewer once, naming those files, before it can reach the operator.
     const asked =
       review.kind === "needs-human" && !decoded.invalid
-        ? await heldEvidence(root, criteria, decoded, settled, [
-            ...receipts,
-            ...given,
-          ])
+        ? await heldEvidence(
+            root,
+            criteria,
+            decoded,
+            settled,
+            [...receipts, ...given],
+            evidence,
+          )
         : [];
     if (asked.length && !decoded.invalid) {
       run.log({
@@ -1629,10 +1633,16 @@ const SHORTEST_IDENTIFIER = 4;
  * copy under media-sets/ or inputs/, by the destination or source path its
  * receipt gives. Exact path matches come first, then path suffixes, then
  * basenames, then stems, so the cap never drops a file named by its exact
- * path for files that only end with it or share its stem. Only this
- * answer's own findings count: a criterion an operator decided, or that an
- * earlier review of this tree asked about, is settled, and a question
- * Factory asked for an invalid answer is no finding.
+ * path for files that only end with it or share its stem. A finding that
+ * cites a controller candidate or input receipt among its evidence also
+ * names every review copy that receipt lists, after the files its text
+ * names: a reviewer asked the operator whether the two offered candidate
+ * sets differ in colour, citing the candidate receipt but naming no file,
+ * while media-sets/ held both sets' previews (run
+ * 2026-10-27T142211PDT-8f9f). Only this answer's own findings count: a
+ * criterion an operator decided, or that an earlier review of this tree
+ * asked about, is settled, and a question Factory asked for an invalid
+ * answer is no finding.
  */
 async function heldEvidence(
   root: string,
@@ -1640,6 +1650,7 @@ async function heldEvidence(
   decoded: Extract<Decoded, { invalid: false }>,
   settled: (criterion: string) => Settled | undefined,
   receipts: readonly ResultEvidence[],
+  evidence: readonly ResultEvidence[],
 ): Promise<SentBack[]> {
   const asking = criteria.flatMap((criterion, criterionIndex) => {
     const finding = decoded.findings[criterionIndex];
@@ -1649,15 +1660,26 @@ async function heldEvidence(
   });
   if (!asking.length) return [];
   const aliases = copyAliases(receipts);
-  const files = (await evidenceFiles(root)).map((path) => ({
+  const listed = await evidenceFiles(root);
+  const held = new Set(listed);
+  const files = listed.map((path) => ({
     path,
     names: fileNames(path, aliases),
   }));
   return asking.flatMap(({ criterionIndex, criterion, finding }) => {
-    const named = namedFiles(
-      files,
-      `${criterion}\n${finding.detail}\n${finding.question}`,
-    );
+    const cited = finding.evidence.flatMap((index) => {
+      const row = evidence[index];
+      return row && receipts.includes(row) ? receiptCopies(row) : [];
+    });
+    const named = [
+      ...new Set([
+        ...namedFiles(
+          files,
+          `${criterion}\n${finding.detail}\n${finding.question}`,
+        ),
+        ...cited.filter((path) => held.has(path)),
+      ]),
+    ];
     return named.length
       ? [
           {
@@ -1700,31 +1722,46 @@ function copyAliases(
   receipts: readonly ResultEvidence[],
 ): Map<string, string[]> {
   const aliases = new Map<string, string[]>();
+  for (const row of receipts)
+    for (const { copy, names } of copyEntries(row))
+      aliases.set(copy, [...(aliases.get(copy) ?? []), ...names]);
+  return aliases;
+}
+
+/** The review copies one receipt row lists, in its order. */
+function receiptCopies(row: ResultEvidence): string[] {
+  return copyEntries(row).map((entry) => entry.copy);
+}
+
+/**
+ * Each review copy a receipt row lists, with the repository paths it stands
+ * for: a candidate set member's destination, an input's destination or
+ * source path. A row that is not a receipt lists none.
+ */
+function copyEntries(row: ResultEvidence): { copy: string; names: string[] }[] {
+  let receipt: unknown;
+  try {
+    receipt = JSON.parse(row.content);
+  } catch {
+    return [];
+  }
+  if (!isRecord(receipt)) return [];
+  const entries: { copy: string; names: string[] }[] = [];
   const add = (entry: unknown, keys: readonly string[]) => {
     if (!isRecord(entry) || typeof entry.reviewCopy !== "string") return;
-    const names = keys.flatMap((key) =>
-      typeof entry[key] === "string" ? [entry[key] as string] : [],
-    );
-    aliases.set(entry.reviewCopy, [
-      ...(aliases.get(entry.reviewCopy) ?? []),
-      ...names,
-    ]);
+    entries.push({
+      copy: entry.reviewCopy,
+      names: keys.flatMap((key) =>
+        typeof entry[key] === "string" ? [entry[key] as string] : [],
+      ),
+    });
   };
-  for (const row of receipts) {
-    let receipt: unknown;
-    try {
-      receipt = JSON.parse(row.content);
-    } catch {
-      continue;
-    }
-    if (!isRecord(receipt)) continue;
-    for (const set of Array.isArray(receipt.sets) ? receipt.sets : [])
-      if (isRecord(set) && Array.isArray(set.members))
-        for (const member of set.members) add(member, ["destination"]);
-    for (const input of Array.isArray(receipt.inputs) ? receipt.inputs : [])
-      add(input, ["destination", "path"]);
-  }
-  return aliases;
+  for (const set of Array.isArray(receipt.sets) ? receipt.sets : [])
+    if (isRecord(set) && Array.isArray(set.members))
+      for (const member of set.members) add(member, ["destination"]);
+  for (const input of Array.isArray(receipt.inputs) ? receipt.inputs : [])
+    add(input, ["destination", "path"]);
+  return entries;
 }
 
 /** The paths an evidence-root file answers to: its own, its repository path under candidate/ or base/, and a review copy's aliases. */

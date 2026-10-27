@@ -45,7 +45,7 @@ import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import { itemMemory } from "./shared.js";
-import { correctedSet, repairOutcome } from "./step-deliver.js";
+import { correctsMedia, repairOutcome } from "./step-deliver.js";
 import { refusalDecisions } from "./step-review.js";
 import {
   type BuildDeps,
@@ -272,26 +272,31 @@ export async function workStep(
         ? repair.outcome
         : { ...repair.outcome, keep: { ...keepAll, ...repair.outcome.keep } };
     keepAll = { ...keepAll, ...(repair?.keep ?? {}) };
-    // The correction is to a member of the kept selection (or of the kept
-    // candidates), which the worker can't change: that set no longer
-    // stands, so this attempt makes new candidates with the correction and
-    // the operator chooses again.
+    // The correction is about the kept selection (or the kept candidates),
+    // which no repair can change: those sets no longer stand, so this
+    // attempt makes new candidates with the correction, from read-only
+    // copies of them, and the operator chooses again. The facts go with the
+    // worker's result or a repair; a hold or retry before it keeps them, so
+    // its rerun decides the same from the saved diagnosis.
+    const kept = own ? [own.selection.set] : (candidates ?? []);
     const path = repair?.path;
-    const corrected = correctedSet(
-      path,
-      own ? [own.selection.set] : (candidates ?? []),
-    );
     const remade =
-      corrected && path
-        ? { set: corrected.id, path, chosen: own !== undefined }
+      path !== undefined && correctsMedia(item, path, kept)
+        ? {
+            sets: kept.map((set) => (own ? set.id.toLowerCase() : set.id)),
+            path,
+            chosen: own !== undefined,
+          }
         : undefined;
+    const replaced = remade
+      ? await sentBackInputs(item.id, kept, "replaced")
+      : [];
+    const dropped = remade
+      ? facts({ selection: null, candidates: null }, item.id)
+      : {};
     if (remade) {
       own = undefined;
       candidates = undefined;
-      keepAll = {
-        ...keepAll,
-        ...facts({ selection: null, candidates: null }, item.id),
-      };
     }
     // A kept selection whose private copies are gone can't be written
     // again: this attempt makes new candidates and the operator chooses.
@@ -322,7 +327,13 @@ export async function workStep(
       signal,
     });
     if (inputs.kind !== "done")
-      return mediaOutcome(item, inputs, context, place, keepAll);
+      return mediaOutcome(
+        item,
+        inputs,
+        context,
+        place,
+        inputs.kind === "repair" ? { ...keepAll, ...dropped } : keepAll,
+      );
     // Review gets the same inputs (InputRecord): the last ones resolved.
     keepAll = { ...keepAll, ...facts({ inputs: inputs.value }, item.id) };
 
@@ -361,6 +372,7 @@ export async function workStep(
       mediaInputs: [
         ...inputs.value,
         ...(await sentBackInputs(item.id, sentBack ?? [])),
+        ...replaced,
       ],
       ...(own
         ? {
@@ -383,7 +395,7 @@ export async function workStep(
               },
             }
           : {}),
-      ...(remade ? { remadeSet: remade } : {}),
+      ...(remade ? { remade } : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
       ...(memory ? { memory } : {}),
       ...(instructions ? { profileInstructions: instructions } : {}),
@@ -449,6 +461,7 @@ export async function workStep(
       finalResponse: result.finalResponse,
       ...(result.validated ? { validated: result.validated } : {}),
     };
+    keepAll = { ...keepAll, ...dropped };
   }
 
   // Capture before collection, which deletes the media manifest, and keep

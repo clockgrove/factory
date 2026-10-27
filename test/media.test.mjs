@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import {
   hydrateTree,
   materializeSelection,
   restoreDestinations,
+  sentBackInputs,
 } from "../dist/media.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles } from "../dist/planning/facts.js";
@@ -31,7 +33,7 @@ import { prepareWorkPrompt } from "../dist/work/prompt.js";
 import { repairContext } from "../dist/work/repair-context.js";
 import {
   aboutMedia,
-  correctedSet,
+  correctsMedia,
   repairOutcome,
 } from "../dist/work/step-deliver.js";
 import { configured, installation, REPO, tempDir } from "./helpers.mjs";
@@ -451,15 +453,31 @@ test("a repair keeps captured candidate sets unless it is about them, comes from
 // (NUL padding in its JSON chunk), the diagnosis named the GLB, and the
 // repair worker, told the choice stood and the GLB was read-only, could
 // only propose an amendment, which held for the operator.
-test("a diagnosed correction to a kept set's member drops that set, and the worker makes new candidates with it", async () => {
+test("a diagnosed correction about the kept sets drops them, and the worker makes new candidates with it from their copies", async () => {
   const media = item(["assets/badge/", "test/"]);
   const set = candidateSet(tempDir("factory-set-"), [
     "assets/badge/a.png",
     "assets/badge/b.png",
   ]);
-  assert.equal(correctedSet("assets/badge/b.png", [set]), set);
-  for (const path of [undefined, "test/badge.test.js", "assets/badge/"])
-    assert.equal(correctedSet(path, [set]), undefined, String(path));
+  // A destination, the candidate staging or the receipt: what the
+  // diagnosis is told to name for a candidate set's gap.
+  for (const path of [
+    "assets/badge/b.png",
+    ".factory-media/candidate-a/a.png",
+    ".factory-assets.json",
+    "Controller candidate receipt: badge",
+  ])
+    assert.equal(correctsMedia(media, path, [set]), true, path);
+  // Owned code, a directory, no path, or no kept sets at all.
+  for (const path of [
+    undefined,
+    "test/badge.test.js",
+    "assets/badge/",
+    "assets/badge/c.png",
+    ".factory-handoff.json",
+  ])
+    assert.equal(correctsMedia(media, path, [set]), false, String(path));
+  assert.equal(correctsMedia(media, "assets/badge/b.png", []), false);
 
   // The diagnosis saved for this repair is reused with the file it names.
   const applied = {
@@ -491,9 +509,54 @@ test("a diagnosed correction to a kept set's member drops that set, and the work
     { items: [media] },
   );
   assert.equal(reused?.path, "assets/badge/a.png");
-  assert.equal(correctedSet(reused.path, [set]), set);
+  assert.equal(correctsMedia(media, reused.path, [set]), true);
+  // An operator's answer carries no path: the choice stands.
+  const answered = await repairContext(
+    media,
+    {
+      state: {
+        ...state,
+        kept: {
+          "item:badge:diagnosis": {
+            repair: 2,
+            context: { finding: "npm test failed", operator: "Keep it." },
+            applied: [
+              applied,
+              {
+                source: "operator",
+                failure: "npm test failed",
+                diagnosis: "The operator answered the diagnosis question.",
+                correction: "Keep it.",
+              },
+            ],
+            answered: "h1",
+          },
+        },
+      },
+      signal: AbortSignal.timeout(10_000),
+      log: () => {},
+    },
+    {},
+    "base",
+    { kind: "failure", detail: "npm test failed" },
+    { items: [media] },
+  );
+  assert.equal(answered?.path, undefined);
 
-  // The worker is told to stage new sets with the correction, not that the
+  // The worker gets read-only copies of the dropped set's members (a set
+  // whose copies are gone is left out) ...
+  const lost = candidateSet(tempDir("factory-set-"), ["assets/badge/a.png"]);
+  rmSync(lost.members[0].file);
+  const copies = await sentBackInputs("badge", [set, lost], "replaced");
+  assert.deepEqual(
+    copies.map((input) => [input.origin, input.set, input.destination]),
+    [
+      ["replaced", "candidate-a", "assets/badge/a.png"],
+      ["replaced", "candidate-a", "assets/badge/b.png"],
+    ],
+  );
+
+  // ... and is told to stage new sets with the correction, not that the
   // choice stands.
   const target = checkout();
   const prompt = async (fields) => {
@@ -513,22 +576,51 @@ test("a diagnosed correction to a kept set's member drops that set, and the work
     return prepared.prompt;
   };
   const remade = await prompt({
-    remadeSet: { set: "candidate-a", path: "assets/badge/a.png", chosen: true },
+    remade: {
+      sets: ["candidate-a"],
+      path: "assets/badge/a.png",
+      chosen: true,
+    },
+    mediaInputs: copies,
   });
   assert.ok(
     remade.includes(
-      "Media: the diagnosed correction is to assets/badge/a.png, a member of candidate set candidate-a, which the operator chose for this item. You can't change a destination (Factory writes the chosen set there), so set candidate-a no longer stands and neither does that choice: make the required correction in new candidate sets, staged from scratch as follows, never at assets/badge/a.png itself. The operator chooses from the new sets.",
+      "Media: the diagnosed correction (assets/badge/a.png) is about candidate set candidate-a, which the operator chose for this item. Factory writes a set's members at their destinations exactly as it captured them, and that attempt's staging is gone, so no change in this checkout can make the correction to that set: the set and the operator's choice no longer stand. Read-only copies of its members are staged under .factory-inputs/assets (origin replaced) for reading. Make the required correction in new candidate sets, staged from scratch as follows, and leave the destinations as they are at the base: Factory writes the chosen set there. The operator chooses from the new sets.",
     ),
+    remade,
   );
   assert.ok(
     remade.includes("Produce at least 1 complete candidate AssetSets."),
   );
   assert.ok(!remade.includes("that choice stands for this repair"));
+  assert.ok(remade.includes('"origin":"replaced"'));
+  assert.equal(
+    readFileSync(
+      join(target.directory, ".factory-inputs/assets/0-a.png"),
+      "utf8",
+    ),
+    readFileSync(set.members[0].file, "utf8"),
+  );
+  // Kept candidates (nothing chosen yet) go together: they share the
+  // destinations, and capture replaces them all.
+  const candidates = await prompt({
+    remade: {
+      sets: ["candidate-a", "candidate-b"],
+      path: ".factory-assets.json",
+      chosen: false,
+    },
+  });
+  assert.ok(
+    candidates.includes(
+      "Media: the diagnosed correction (.factory-assets.json) is about the candidate sets the previous attempt staged (candidate-a, candidate-b). Factory writes a set's members at their destinations exactly as it captured them, and that attempt's staging is gone, so no change in this checkout can make the correction to those sets: they no longer stand. Make the required correction",
+    ),
+    candidates,
+  );
   const kept = await prompt({
     keptSelection: { set: "candidate-a", destinations: ["assets/badge/a.png"] },
   });
   assert.ok(kept.includes("that choice stands for this repair"));
-  assert.ok(!kept.includes("the diagnosed correction is to"));
+  assert.ok(!kept.includes("the diagnosed correction ("));
 });
 
 // Destinations are Factory's: the work step restores them to the base

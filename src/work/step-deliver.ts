@@ -551,9 +551,9 @@ export function movedLayer(
  * it comes from the select step (the operator's `repair`, or the selected
  * set couldn't be written), from publish's own Git LFS check (`media`), or
  * a refused review criterion cites a selected destination or the candidate
- * receipt. A selection that stands here still goes when the repair's
- * diagnosed correction names one of its destinations (work step,
- * `correctedSet`).
+ * receipt. A selection (or kept candidates) that stands here still goes
+ * when the repair's diagnosed correction is about it (work step,
+ * `correctsMedia`).
  *
  * Every cleared work result (the item's and each layer's above) is kept
  * as the `refused` fact, so a rebase never drops the change.
@@ -708,18 +708,28 @@ export function aboutMedia(
 }
 
 /**
- * The kept set whose member a diagnosed correction is to change: `path`,
- * the file the diagnosis names (structured, never prose), is one of its
- * destinations. A worker never writes a destination (Factory writes the
- * chosen set there), so such a correction is about the media: the set no
- * longer stands, and the attempt makes new candidates.
+ * Whether a diagnosed correction is about the kept media `sets` (the
+ * operator's selection, or captured candidates): `path`, the file the
+ * diagnosis names (structured, never prose), is one of their
+ * destinations, the candidate staging (`.factory-media/`,
+ * `.factory-assets.json`) or the item's candidate receipt. Factory writes a
+ * kept set as it was captured: a worker never writes a destination, and
+ * the staging the set came from is gone. So no repair can make such a
+ * correction to a kept set: the sets no longer stand, and the attempt
+ * makes new candidates with it.
  */
-export function correctedSet(
+export function correctsMedia(
+  item: WorkItem,
   path: string | undefined,
   sets: readonly CandidateSet[],
-): CandidateSet | undefined {
-  if (path === undefined) return undefined;
-  return sets.find((set) => set.members.some((m) => m.destination === path));
+): boolean {
+  if (path === undefined || !sets.length) return false;
+  return (
+    path === receiptPath(item.id) ||
+    path === ".factory-assets.json" ||
+    path.startsWith(".factory-media/") ||
+    sets.some((set) => set.members.some((m) => m.destination === path))
+  );
 }
 
 /**

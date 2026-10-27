@@ -66,11 +66,12 @@ export interface WorkPromptInput {
   /** A media item's repair that isn't about its candidates: the sets Factory kept, and their destinations. */
   keptCandidates?: { sets: readonly string[]; destinations: readonly string[] };
   /**
-   * A media item's repair whose correction is to `path`, a member of kept
-   * set `set` (the operator's choice when `chosen`): the set no longer
-   * stands, and the attempt makes new candidates with the correction.
+   * A media item's repair whose diagnosed correction, to `path`, is about
+   * kept sets `sets` (the operator's choice when `chosen`, else the kept
+   * candidates; work/step-deliver.ts `correctsMedia`): they no longer
+   * stand, and the attempt makes new candidates with the correction.
    */
-  remadeSet?: { set: string; path: string; chosen: boolean };
+  remade?: { sets: readonly string[]; path: string; chosen: boolean };
   /**
    * Earlier items' advisory notes for this item, with the item that wrote
    * each and that item's accepted result commit, whose bytes of each cited
@@ -450,7 +451,7 @@ function renderWorkPrompt(
     assets,
     input.keptSelection,
     input.keptCandidates,
-    input.remadeSet,
+    input.remade,
   );
   const inputInstructions = assets.length
     ? `\n\nAuthorized read-only asset inputs, staged by Factory under .factory-inputs/assets (staged is each copy's checkout path; sha256 and bytes are Factory's record of it; a selected member's destination in this checkout may hold only its Git LFS pointer, so read the staged copy). Read them; do not edit, move or commit them: ${JSON.stringify(assets)}`
@@ -508,15 +509,16 @@ function renderWorkPrompt(
  * their destinations. media.ts captureAssets checks exactly this shape. A
  * repair whose selection or kept candidates stand stages nothing and
  * leaves the destinations alone: Factory writes the chosen set again on
- * the repaired result. A repair whose correction is to a kept set's member
- * (`remade`) stages new sets that make the correction.
+ * the repaired result. A repair whose diagnosed correction is about the
+ * kept sets (`remade`) stages new sets that make the correction, from
+ * read-only copies of the kept ones.
  */
 function mediaContract(
   item: WorkItem,
   assets: readonly StagedInput[],
   kept: WorkPromptInput["keptSelection"],
   candidates: WorkPromptInput["keptCandidates"],
-  remade: WorkPromptInput["remadeSet"],
+  remade: WorkPromptInput["remade"],
 ): string {
   if (!needsSelection(item)) return "";
   if (!kept && candidates?.sets.length) {
@@ -538,7 +540,26 @@ function mediaContract(
   const previous = sentBack.length
     ? `\n\nThe operator sent back the previous attempt's candidate sets (${sentBack.join(", ")}) and asked for new ones, in the words the brief quotes. Factory captured and removed that attempt's staging, so this checkout holds no .factory-media/ or .factory-assets.json. Read-only copies of the sent-back members are staged under .factory-inputs/assets (origin sent-back), so the new sets can follow the answer about them; they are no longer candidates. Stage the new sets from scratch as follows.`
     : remade
-      ? `\n\nMedia: the diagnosed correction is to ${remade.path}, a member of candidate set ${remade.set}${remade.chosen ? ", which the operator chose for this item" : ""}. You can't change a destination (Factory writes the chosen set there), so set ${remade.set} no longer stands${remade.chosen ? " and neither does that choice" : ""}: make the required correction in new candidate sets, staged from scratch as follows, never at ${remade.path} itself. The operator chooses from the new sets.`
+      ? remadeMedia(
+          remade,
+          assets.some((asset) => asset.origin === "replaced"),
+        )
       : "";
   return `${previous}\n\nProduce at least ${item.minimumAssetSets ?? 1} complete candidate AssetSets. Candidate content and any required variation must follow the accepted brief and source requirements; preserve source bytes exactly when byte identity is required. Put candidate bytes under .factory-media/ and write .factory-assets.json at the checkout root. Use this format-neutral manifest shape, replacing every angle-bracket placeholder with the actual declared role, file, media type, and owned destination: {"sets":[{"id":"candidate-a","members":[{"role":"<expected role>","path":".factory-media/candidate-a/<file>","mediaType":"<declared media type>","destination":"<owned target path>"}],"provenance":{"source":"<source path or generated>","rights":"<basis for repository use>","visibility":"repository","lineage":["<source path or input identity>"]}}]}. Set ids are letters, digits, - and _, distinct ignoring case, and not repair, retry, replan, cancel, answer or fresh; the operator picks one by id. Each set's content must differ from every other set's. Include every expected role in each set, and give each member a distinct owned destination. Factory stores selected media in Git LFS, so each destination must be a path .gitattributes routes through Git LFS (filter=lfs); if one isn't and you own .gitattributes, add a rule that covers it. When an authoritative tool supplies actual format fields, you may add member formatMetadata using this exact optional shape: {"source":"<authoritative tool or source>","values":{}}. Put all supplied format fields inside values; do not place them beside source. Omit formatMetadata when no authoritative format fields are supplied. Source byte identity alone does not require formatMetadata: Factory records each input's byte count and sha256. You may add set-level relationships with from, toRole, and kind when outputs are related, and production evidence with model, tool, request, or parameters when those values are actually supplied. Do not invent metadata or tool identities. .factory-media/, .factory-assets.json, .factory-discovery.json and .factory-handoff.json are private staging exceptions to owned paths. Do not write, remove, or otherwise change final destinations directly. Candidate files and the manifest are staging outputs; do not commit them. Factory owns capture, whole-set selection, final destination materialization (including an authorized byte-identical same-path LFS replacement), publication, and Objective lifecycle. Do not run Factory CLI operations or inspect controller installation, configuration, status, or logs. These staging instructions do not remove explicitly owned ordinary code work. Stop after completing the authorized owned code changes, candidate files, and manifest, and report the staged candidates; do not wait for or perform selection or delivery. If the accepted brief requires a controller operation, report the conflict rather than performing it.\nSource bindings: ${JSON.stringify(sources.map(({ kind, path, role, mediaType, visibility, staged }) => ({ kind, path, role, mediaType, visibility, staged })))}\nExpected output roles: ${item.expectedOutputRoles!.join(", ")}`;
+}
+
+/**
+ * Why a repair whose diagnosed correction is about the kept sets stages
+ * new ones: Factory writes a kept set as captured, so the correction can
+ * only be made in new sets. `copies`: their members are staged read-only.
+ */
+function remadeMedia(
+  remade: NonNullable<WorkPromptInput["remade"]>,
+  copies: boolean,
+): string {
+  const { sets, path, chosen } = remade;
+  const what = chosen
+    ? `candidate set ${sets.join(", ")}, which the operator chose for this item`
+    : `the candidate sets the previous attempt staged (${sets.join(", ")})`;
+  return `\n\nMedia: the diagnosed correction (${path}) is about ${what}. Factory writes a set's members at their destinations exactly as it captured them, and that attempt's staging is gone, so no change in this checkout can make the correction to ${chosen ? "that set" : "those sets"}: ${chosen ? "the set and the operator's choice" : "they"} no longer stand.${copies ? ` Read-only copies of ${chosen ? "its" : "their"} members are staged under .factory-inputs/assets (origin replaced) for reading.` : ""} Make the required correction in new candidate sets, staged from scratch as follows, and leave the destinations as they are at the base: Factory writes the chosen set there. The operator chooses from the new sets.`;
 }

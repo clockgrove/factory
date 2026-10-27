@@ -171,8 +171,12 @@ export interface Selection {
 
 /** A file a worker gets read-only under `.factory-inputs/assets`. */
 export interface MediaInput {
-  /** An Objective source asset, a dependency's selected member, or a member of a set the operator sent back. */
-  origin: "source" | "selected" | "sent-back";
+  /**
+   * An Objective source asset, a dependency's selected member, a member of
+   * a set the operator sent back, or a member of a kept set a repair's
+   * diagnosed correction is about (`replaced`).
+   */
+  origin: "source" | "selected" | "sent-back" | "replaced";
   role: string;
   mediaType: string;
   sha256: string;
@@ -1326,17 +1330,23 @@ export function resentSet(
   return undefined;
 }
 
-/** The sent-back sets' members as read-only worker inputs; a set whose copies are gone is left out. */
+/**
+ * The sent-back sets' members as read-only worker inputs; a set whose
+ * copies are gone is left out. `replaced`: instead the kept sets a
+ * diagnosed correction is about (work/step-deliver.ts `correctsMedia`),
+ * which the attempt makes again with the correction.
+ */
 export async function sentBackInputs(
   itemId: string,
   sets: readonly CandidateSet[],
+  origin: "sent-back" | "replaced" = "sent-back",
 ): Promise<MediaInput[]> {
   const inputs: MediaInput[] = [];
   for (const set of sets) {
     if (await missingMember(set)) continue;
     for (const member of set.members)
       inputs.push({
-        origin: "sent-back",
+        origin,
         role: member.role,
         mediaType: member.mediaType,
         sha256: member.sha256,

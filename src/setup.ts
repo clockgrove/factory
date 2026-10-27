@@ -105,6 +105,7 @@ const CONFIG_OPTIONS: Record<string, Option> = {
   "day-cents": { key: "autonomy.spend.perDay.cents", read: "number" },
   "required-env": { key: "autonomy.requiredEnvironment", read: "list" },
   delivery: { key: "delivery.kind", read: "text" },
+  "base-rerun-workflow": { key: "delivery.baseRerun.workflow", read: "text" },
   "sandbox-network": { key: "sandbox.network", read: "text" },
   "package-store": { key: "sandbox.packageStore", read: "text" },
   "read-only-path": { key: "sandbox.readOnlyPaths", read: "list" },

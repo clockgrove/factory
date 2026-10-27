@@ -146,6 +146,19 @@ export interface CoreConfig {
      * ordinary PRs.
      */
     kind: "regular" | "native-stack";
+    /**
+     * Off unless set (#2098): the one workflow Factory may run on the
+     * default branch, a file in the top level of `.github/workflows` that
+     * runs on `workflow_dispatch` and that the operator declares free of
+     * side effects (nothing deploys or releases from it, and nothing runs
+     * after it). When a PR's failed check last passed on the default
+     * branch's head in a run of this workflow a day or more before it
+     * failed, Factory dispatches the workflow there and compares the PR's
+     * failure with that fresh run (delivery.ts `freshBase`). Without it,
+     * Factory runs nothing on the default branch. Frozen with an
+     * Objective: it grants Factory authority there.
+     */
+    baseRerun?: { workflow: string };
   };
   /**
    * Validation outputs captured as review evidence (review/artifacts.ts);
@@ -520,6 +533,21 @@ const logins: Check<string[]> = (value, path, problems) => {
   return names;
 };
 
+/** A workflow file name in the top level of `.github/workflows`. */
+const WORKFLOW_FILE = /^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$/;
+
+/**
+ * `delivery.baseRerun.workflow`: a workflow's file name, as GitHub's
+ * workflow dispatch takes it (`quality.yml`), not a path.
+ */
+const workflowFile: Check<string> = (value, path, problems) => {
+  if (typeof value === "string" && WORKFLOW_FILE.test(value)) return value;
+  problems.push(
+    `${path} must be a workflow's file name in .github/workflows, such as "quality.yml"`,
+  );
+  return "";
+};
+
 /**
  * `policy.secretlintConfig`: an absolute regular file, not a link, outside
  * the target checkout. Collection reads it.
@@ -617,6 +645,7 @@ export function loadConfig(repository: string): CoreConfig {
       }),
       delivery: object({
         kind: oneOf(["regular", "native-stack"] as const, "regular"),
+        baseRerun: optional(object({ workflow: workflowFile })),
       }),
       reviewArtifacts: (value, _path, found) =>
         loadReviewArtifacts(value, found),

@@ -1,5 +1,6 @@
 import {
   ACCEPT,
+  type BaseRerun,
   type DeliveryContext,
   deleteFactoryBranch,
   itemBranch,
@@ -51,10 +52,12 @@ export function delivery(
   context: StepContext,
   deps: BuildDeps,
 ): DeliveryContext {
+  const baseRerun = deps.config.delivery?.baseRerun?.workflow;
   return {
     github: deps.github,
     checkout: deps.config.checkout,
     signal: context.signal,
+    ...(baseRerun ? { baseRerun } : {}),
   };
 }
 
@@ -181,6 +184,7 @@ export function pullInput(
   const published = state.done[stepKey(item.id, "publish")] as PublishResult;
   const branch = baseBranch(state.issue, place);
   const rerun = fact(state, "ciRerun", item.id);
+  const baseRerun = fact(state, "baseRerun", item.id);
   // A result rereview (`revalidate`) of this result says the check was at
   // fault, as the operator's `retry` here does.
   const work = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
@@ -204,6 +208,7 @@ export function pullInput(
     ...(context.answer?.answer === REPAIR_SHARED ? { repairShared: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
     ...(rerun ? { rerun } : {}),
+    ...(baseRerun ? { baseRerun } : {}),
   };
 }
 
@@ -266,13 +271,25 @@ export async function ciStep(
 
 /**
  * Failed Actions jobs rerun before a repair (delivery.ts `rerunFailed`):
- * logged, and kept so no workflow run is rerun twice on the same head.
+ * logged, and kept so no workflow run is rerun twice on the same head. Or
+ * the operator's delivery.baseRerun workflow run on the default branch
+ * (delivery.ts `freshBase`): logged, and kept so it runs at most once a
+ * day per default-branch head for the item, and its run is waited for.
  */
 export function rerunOutcome(
   context: StepContext,
   item: WorkItem,
-  { rerun, reason, afterMs }: Rerun,
+  { rerun, baseRerun, reason, afterMs }: Rerun,
 ): Outcome {
+  if (baseRerun) {
+    logBaseRerun(context, item.id, baseRerun);
+    return {
+      kind: "retry",
+      reason,
+      afterMs,
+      keep: facts({ baseRerun }, item.id),
+    };
+  }
   context.log({
     event: "ci-rerun",
     item: item.id,
@@ -286,6 +303,54 @@ export function rerunOutcome(
     afterMs,
     keep: facts({ ciRerun: rerun }, item.id),
   };
+}
+
+function logBaseRerun(
+  context: StepContext,
+  item: string,
+  baseRerun: BaseRerun,
+): void {
+  context.log({
+    event: "base-rerun",
+    item,
+    base: baseRerun.base,
+    workflow: baseRerun.workflow,
+    checks: baseRerun.checks,
+    dispatched: baseRerun.dispatched,
+  });
+}
+
+/**
+ * The runs of delivery.baseRerun's workflow a native stack's merge
+ * judgement dispatched or waited for (delivery.ts `freshBase`, at most one
+ * dispatch between its layers), besides the one `outcome` is, which
+ * rerunOutcome keeps and logs: each layer's is logged and kept with
+ * `outcome`, whatever it is, so no layer dispatches again for that head.
+ */
+export function keepBaseReruns(
+  context: StepContext,
+  outcome: Outcome,
+  reruns: { item: string; baseRerun: BaseRerun }[],
+  chosen: string | undefined,
+): Outcome {
+  const others = new Map<string, BaseRerun>();
+  for (const { item, baseRerun } of reruns)
+    if (item !== chosen) others.set(item, baseRerun);
+  if (!others.size) return outcome;
+  let keep: Record<string, unknown> = {};
+  for (const [item, baseRerun] of others) {
+    logBaseRerun(context, item, baseRerun);
+    keep = { ...keep, ...facts({ baseRerun }, item) };
+  }
+  switch (outcome.kind) {
+    case "done":
+    case "retry":
+    case "hold":
+    case "repair":
+      return { ...outcome, keep: { ...outcome.keep, ...keep } };
+    default:
+      return outcome;
+  }
 }
 
 /**
@@ -396,8 +461,11 @@ export async function mergeStack(
     ...pullInput(state, layer, context, { unit, layer: at }),
     head: (state.done[stepKey(layer.id, "ci")] as { head: string }).head,
   })) as [PullInput, ...PullInput[]];
+  // The layers share one run of delivery.baseRerun's workflow per
+  // default-branch head; each layer keeps its own (keepBaseReruns).
+  const baseReruns: { item: string; baseRerun: BaseRerun }[] = [];
   const result = await mergeUnit(
-    delivery(context, deps),
+    { ...delivery(context, deps), baseReruns },
     layers,
     integrated(state, plan),
     context.answer?.answer === ACCEPT,
@@ -408,47 +476,55 @@ export async function mergeStack(
     unit,
     layer: unit.items.indexOf(layer(id)),
   });
-  switch (result.kind) {
-    case "merged": {
-      // Lower layers' branches are the upper PRs' bases: they go only
-      // once the whole unit merged.
-      const refused = await deleteBranches(context, deps, unit.items);
-      if (refused) return refused;
-      const done: MergeResult = {
-        mergeSha: result.mergeSha,
-        integratedSha: result.integratedSha,
-        at: new Date().toISOString(),
-        items: result.items,
-      };
-      const flaky = Object.assign(
-        {},
-        ...layers.map((input, at) =>
-          passedRerun(context, unit.items[at] as WorkItem, input.head),
-        ),
-      );
-      return {
-        kind: "done",
-        result: done,
-        ...(Object.keys(flaky).length ? { keep: flaky } : {}),
-      };
-    }
-    case "repair":
-      return deliveryRepair(
-        layer(result.item),
-        context,
-        placeOf(result.item),
-        result,
-        "merge",
-      );
-    case "republish":
-      return republishOutcome(layer(result.item), result.reason);
-    case "rerun":
-      return rerunOutcome(context, layer(result.item), result);
-    default: {
-      const { item: _layer, ...outcome } = result;
-      return outcome;
-    }
+  if (result.kind === "merged") {
+    // Lower layers' branches are the upper PRs' bases: they go only
+    // once the whole unit merged.
+    const refused = await deleteBranches(context, deps, unit.items);
+    if (refused) return refused;
+    const done: MergeResult = {
+      mergeSha: result.mergeSha,
+      integratedSha: result.integratedSha,
+      at: new Date().toISOString(),
+      items: result.items,
+    };
+    const flaky = Object.assign(
+      {},
+      ...layers.map((input, at) =>
+        passedRerun(context, unit.items[at] as WorkItem, input.head),
+      ),
+    );
+    return {
+      kind: "done",
+      result: done,
+      ...(Object.keys(flaky).length ? { keep: flaky } : {}),
+    };
   }
+  const outcome = (): Outcome => {
+    switch (result.kind) {
+      case "repair":
+        return deliveryRepair(
+          layer(result.item),
+          context,
+          placeOf(result.item),
+          result,
+          "merge",
+        );
+      case "republish":
+        return republishOutcome(layer(result.item), result.reason);
+      case "rerun":
+        return rerunOutcome(context, layer(result.item), result);
+      default: {
+        const { item: _layer, ...outcome } = result;
+        return outcome;
+      }
+    }
+  };
+  return keepBaseReruns(
+    context,
+    outcome(),
+    baseReruns,
+    result.kind === "rerun" && result.baseRerun ? result.item : undefined,
+  );
 }
 
 /**

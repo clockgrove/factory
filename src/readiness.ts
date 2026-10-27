@@ -21,7 +21,11 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CoreConfig } from "./config.js";
 import { credentialPath } from "./credentials.js";
-import { checkoutCredentialEntries, pushesOverSsh } from "./git.js";
+import {
+  checkoutCredentialEntries,
+  defaultHead,
+  pushesOverSsh,
+} from "./git.js";
 import { type AppInstallation, type GitHub, sameLogin } from "./github.js";
 import {
   appKey,
@@ -34,7 +38,11 @@ import { missingTypes, offeredTypes } from "./github-roles.js";
 import { currentHolder, holderText } from "./holder.js";
 import { installationPaths } from "./paths.js";
 import { hostVersion, nodePin, nodeSatisfies } from "./planning/executables.js";
-import { networkToolOfCommand } from "./planning/facts.js";
+import {
+  BaseFiles,
+  baseRerunWorkflow,
+  networkToolOfCommand,
+} from "./planning/facts.js";
 import {
   CLAUDE_LOGIN_CREDENTIALS,
   claudeLoginProbe,
@@ -871,6 +879,8 @@ export async function repositoryChecks(
               ),
       );
     }
+    const rerun = await baseRerunCheck(config, branch);
+    if (rerun) checks.push(rerun);
     // A recommendation only: Factory never changes repository settings.
     const recommend = `Recommended: turn on "Require branches to be up to date before merging" for ${branch}. Factory updates a PR that falls behind and waits for CI again`;
     if (names.length)
@@ -900,6 +910,66 @@ export async function repositoryChecks(
   }
   checks.push(await holderCheck(config));
   return checks;
+}
+
+/**
+ * The operator's delivery.baseRerun (#2098), read from the default
+ * branch's workflows at its head (fetched into the checkout): whether
+ * GitHub would dispatch the workflow, the checks it reports, and the
+ * workflows that run after it, which a dispatch Factory makes starts too.
+ * Undefined while it is unset: Factory runs nothing on the default branch.
+ * `files` stands in for the default branch's files.
+ */
+export async function baseRerunCheck(
+  config: CoreConfig,
+  branch: string,
+  files?: BaseFiles,
+): Promise<ReadinessCheck | undefined> {
+  const workflow = config.delivery?.baseRerun?.workflow;
+  if (!workflow) return undefined;
+  const name = "base rerun";
+  let read: Awaited<ReturnType<typeof baseRerunWorkflow>>;
+  try {
+    const signal = AbortSignal.timeout(120_000);
+    read = await baseRerunWorkflow(
+      files ??
+        new BaseFiles(
+          config.checkout,
+          await defaultHead(config.checkout, config.repository, signal),
+          signal,
+        ),
+      workflow,
+    );
+  } catch (error) {
+    return {
+      name,
+      status: "warn",
+      detail: `Can't read ${branch}'s workflows to check delivery.baseRerun's ${workflow}: ${errorMessage(error).split("\n")[0]}`,
+      fix: "Check the checkout and its origin, then repeat",
+    };
+  }
+  if (read.problem)
+    return {
+      name,
+      status: "warn",
+      detail: `delivery.baseRerun names ${workflow}, but on ${branch} ${read.problem}, so GitHub refuses Factory's dispatch of it and Factory compares a failed check with the pass ${branch} already shows, however old`,
+      fix: `Give ${workflow} on ${branch} a workflow_dispatch trigger with no required input, or name another workflow in delivery.baseRerun`,
+    };
+  const checks = read.checks.length ? read.checks.join(", ") : "no check";
+  const guarded = read.guarded.length
+    ? `${read.guarded.join(", ")} run${read.guarded.length === 1 ? "s" : ""} after it but skip${read.guarded.length === 1 ? "s" : ""} every job for a run Factory dispatched (github.event.workflow_run.event is workflow_dispatch)`
+    : "";
+  if (read.followers.length)
+    return {
+      name,
+      status: "warn",
+      detail: `delivery.baseRerun lets Factory run ${workflow} (${checks}) on ${branch}, and ${read.followers.join(", ")} run${read.followers.length === 1 ? "s" : ""} after it (workflow_run), so each run Factory dispatches starts ${read.followers.length === 1 ? "that" : "those"} too${guarded ? `; ${guarded}` : ""}`,
+      fix: `Give each job of ${read.followers.length === 1 ? "it" : "them"} an if that skips a run whose github.event.workflow_run.event is workflow_dispatch (or a needs on such a job), which readiness reads and then accepts; or name a workflow nothing runs after; or remove delivery.baseRerun`,
+    };
+  return ok(
+    name,
+    `Factory may run ${workflow} (${checks}) on ${branch}'s head when a failed check's pass there is a day or more older than its failure, and compares with that run; ${guarded || "nothing runs after it"}`,
+  );
 }
 
 /** Which installation serves the repository (holder.ts): one at a time. */

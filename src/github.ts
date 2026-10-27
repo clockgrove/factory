@@ -1991,15 +1991,16 @@ export class GitHub {
   }
 
   /**
-   * A workflow run's latest attempt and its status; undefined without
-   * Actions read access.
+   * A workflow run's latest attempt and its status, and the workflow file
+   * it ran (`.github/workflows/quality.yml`) where GitHub says; undefined
+   * without Actions read access.
    */
   async workflowRunAttempt(
     run: number,
     signal?: AbortSignal,
-  ): Promise<{ attempt: number; status: string } | undefined> {
+  ): Promise<{ attempt: number; status: string; path?: string } | undefined> {
     const read = await this.optional(() =>
-      this.rest<{ run_attempt?: unknown; status?: unknown }>(
+      this.rest<{ run_attempt?: unknown; status?: unknown; path?: unknown }>(
         "GET",
         this.repo(`actions/runs/${run}`),
         undefined,
@@ -2007,7 +2008,11 @@ export class GitHub {
       ),
     );
     if (typeof read?.run_attempt !== "number") return undefined;
-    return { attempt: read.run_attempt, status: String(read.status) };
+    return {
+      attempt: read.run_attempt,
+      status: String(read.status),
+      ...(typeof read.path === "string" ? { path: read.path } : {}),
+    };
   }
 
   /** Run a workflow run's failed jobs again, as its next attempt. */
@@ -2019,6 +2024,27 @@ export class GitHub {
       signal,
     );
     // The 201's body says nothing Factory reads.
+    await response.body?.cancel().catch(() => undefined);
+  }
+
+  /**
+   * Start workflow `workflow` (its file name in .github/workflows) on
+   * branch `ref`'s head with no inputs (`workflow_dispatch`). Only for the
+   * workflow the operator named in delivery.baseRerun (delivery.ts
+   * `freshBase`): Factory runs nothing else on the default branch.
+   */
+  async dispatchWorkflow(
+    workflow: string,
+    ref: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const response = await this.send(
+      "POST",
+      this.repo(`actions/workflows/${encodeURIComponent(workflow)}/dispatches`),
+      { ref },
+      signal,
+    );
+    // The 204 has no body; a 200 names the run, which Factory finds by its checks.
     await response.body?.cancel().catch(() => undefined);
   }
 

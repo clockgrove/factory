@@ -87,6 +87,12 @@ const STEP_LOG_CHARS = 4000;
 const EXCERPTED_STEPS = 2;
 /** A default branch's pass this long before a PR's failure may no longer hold. */
 const BASE_STALE_MS = 24 * 60 * MINUTE;
+/**
+ * How long a PR's failed checks wait for the run of delivery.baseRerun's
+ * workflow on the default branch (freshBase) before they are judged
+ * without it.
+ */
+const BASE_RERUN_WAIT_MS = 60 * MINUTE;
 /** A failed run's artifacts a finding reads, smallest first, and their download's bound. */
 const ARTIFACTS_READ = 5;
 const ARTIFACT_DOWNLOAD_BYTES = 1024 * 1024;
@@ -184,16 +190,45 @@ export interface CiRerun {
 }
 
 /**
- * Factory reran failed Actions jobs: a wait for their new attempt. The
- * item step keeps `rerun` (work/facts.ts `ciRerun`), passes it back as
- * PullInput.rerun, and logs it.
+ * The operator's delivery.baseRerun workflow on the default branch's head,
+ * for a fresh comparison of a PR's failed checks there (freshBase, #2098):
+ * dispatched by Factory, or a run of it already in progress there.
  */
-export interface Rerun {
+export interface BaseRerun {
+  /** The default branch's head it ran for. */
+  base: string;
+  /** The workflow's file name, as delivery.baseRerun named it. */
+  workflow: string;
+  /** The failed checks it was for. */
+  checks: string[];
+  at: string;
+  /** False: a run of it was already in progress there, so Factory dispatched none. */
+  dispatched: boolean;
+  /**
+   * The native-stack layer whose dispatch, in the same merge step, this
+   * one waits for (`dispatched` false): Factory's run, waited for as its
+   * own until it shows.
+   */
+  madeBy?: string;
+}
+
+/**
+ * Factory started a run that a failed check's judgement waits for: a wait
+ * for it. Either it reran the PR's failed Actions jobs (`rerun`, which the
+ * item step keeps as work/facts.ts `ciRerun`, passes back as
+ * PullInput.rerun, and logs `ci-rerun`), or it ran the operator's
+ * delivery.baseRerun workflow on the default branch (`baseRerun`, kept as
+ * work/facts.ts `baseRerun`, passed back as PullInput.baseRerun, and
+ * logged `base-rerun`).
+ */
+export type Rerun = {
   kind: "rerun";
   reason: string;
   afterMs: number;
-  rerun: CiRerun;
-}
+} & (
+  | { rerun: CiRerun; baseRerun?: undefined }
+  | { baseRerun: BaseRerun; rerun?: undefined }
+);
 
 /** What every delivery call needs. */
 export interface DeliveryContext {
@@ -201,6 +236,20 @@ export interface DeliveryContext {
   /** The operator's checkout; worktrees share its objects. */
   checkout: string;
   signal: AbortSignal;
+  /**
+   * delivery.baseRerun's workflow: the only one Factory may run on the
+   * default branch, for a fresh comparison (freshBase). Absent, Factory
+   * runs nothing there.
+   */
+  baseRerun?: string;
+  /**
+   * The runs of baseRerun's workflow this step's judgements dispatched or
+   * waited for, each with its Work Item: a native stack's merge judges
+   * every layer, and they share one dispatch per default-branch head
+   * (freshBase). The step keeps and logs each one (work/step-deliver.ts
+   * `mergeStack`).
+   */
+  baseReruns?: { item: string; baseRerun: BaseRerun }[];
 }
 
 /**
@@ -809,6 +858,8 @@ export interface PullInput {
   baseBranch?: string;
   /** The item's last rerun of failed Actions jobs, as kept. */
   rerun?: CiRerun;
+  /** The item's last run of delivery.baseRerun's workflow on the default branch, as kept. */
+  baseRerun?: BaseRerun;
   /**
    * The operator answered retry to this step's question, or `revalidate`
    * to the item's (a result rereview of the delivered result).
@@ -854,7 +905,9 @@ export type CiResult =
  * that failed, required or not, or a conflict with the base, is a repair
  * (#1637), once failed Actions jobs were rerun (rerunFailed), with the
  * failed runs' artifacts (failedRunArtifacts); a failed check the default
- * branch fails too is a question instead (baseFailures, #2094), and on the
+ * branch fails too is a question instead (baseFailures, #2094), a pass
+ * there too old to compare with is first run again there when the
+ * operator named its workflow (freshBase, #2098), and on the
  * operator's retry, a delivered head behind a default branch whose runs of
  * the failed checks pass is updated with it instead of repaired; after a
  * result rereview, failures that all ended before it, with nothing left
@@ -1053,6 +1106,20 @@ async function judge(
       broken,
     );
     if (base.hold && !input.repairShared) return base.hold;
+    // A pass there too old to say anything about today: with the operator's
+    // delivery.baseRerun, run that workflow there and compare with its run
+    // (#2098). Its failure there holds above on a later poll.
+    const fresh =
+      base.hold || input.repairShared
+        ? undefined
+        : await freshBase(context, input, defaultBranch, base);
+    if (fresh?.wait) return fresh.wait;
+    const note = [base.note, fresh?.note].filter(Boolean).join(" ");
+    // A run of the workflow that gave no result within the wait is waited
+    // for no longer, on a retry either.
+    const running = base.running.filter(
+      (name) => !fresh?.expired?.includes(name),
+    );
     // The operator's retry, as once the default branch is fixed: the PR's
     // failures may be the old base's, so the delivered head is brought up
     // to date with it (by GitHub, no worker) instead of being repaired, once
@@ -1063,10 +1130,10 @@ async function judge(
       head === input.head &&
       baseBranch === defaultBranch
     ) {
-      if (base.running.length)
+      if (running.length)
         return {
           kind: "retry",
-          reason: `Awaiting ${defaultBranch}'s runs of ${bounded(base.running, ", ")} at ${base.base} to compare PR #${pr}'s failed checks with them`,
+          reason: `Awaiting ${defaultBranch}'s runs of ${bounded(running, ", ")} at ${base.base} to compare PR #${pr}'s failed checks with them`,
           afterMs: CI_POLL_MS,
         };
       if (
@@ -1090,16 +1157,30 @@ async function judge(
     // A result rereview (`revalidate`) delivered the same head, and nothing
     // has run on it since: its failed jobs were rerun already (or can't
     // be), and it isn't behind a default branch that passes them. A repair
-    // would only repeat the one the operator's rereview answered (#2120).
+    // would only repeat the one the operator's rereview answered (#2120),
+    // unless the default branch passed every one of them after it failed
+    // here, in the run of delivery.baseRerun's workflow Factory made or
+    // waited for: then the failure is the change's (#2098).
     const since = Date.parse(input.rereviewedAt ?? "");
+    const passedSince =
+      fresh?.fresh === true &&
+      broken.every((check) =>
+        base.latest.some(
+          (entry) =>
+            entry.name === check.name &&
+            ["success", "neutral"].includes(entry.conclusion) &&
+            Date.parse(entry.at) >= Date.parse(check.at ?? ""),
+        ),
+      );
     if (
       !input.repairShared &&
+      !passedSince &&
       head === input.head &&
       Number.isFinite(since) &&
       broken.every((check) => !(Date.parse(check.at ?? "") >= since))
     )
       return hold(
-        `Work Item ${input.item}'s result was checked again on the operator's revalidate and delivered unchanged, and no check has run on PR #${pr} since: at ${head} it still fails ${listed(broken)}. Factory has nothing more to run there (their Actions jobs were rerun on this head already, or can't be), so a repair would only repeat the last one; it spent none.${base.note ? ` ${base.note}` : ""}\n\nIf ${defaultBranch} would fail them now too, run them again on ${defaultBranch} or fix them there (another Objective can), then answer retry; ${REPAIR_SHARED} if the failure is this Work Item's change's; or cancel.`,
+        `Work Item ${input.item}'s result was checked again on the operator's revalidate and delivered unchanged, and no check has run on PR #${pr} since: at ${head} it still fails ${listed(broken)}. Factory has nothing more to run there (their Actions jobs were rerun on this head already, or can't be), so a repair would only repeat the last one; it spent none.${note ? ` ${note}` : ""}\n\nIf ${defaultBranch} would fail them now too, run them again on ${defaultBranch} or fix them there (another Objective can), then answer retry; ${REPAIR_SHARED} if the failure is this Work Item's change's; or cancel.`,
         [
           {
             answer: "retry",
@@ -1138,7 +1219,7 @@ async function judge(
       // The log excerpts last: a long finding keeps its end (repair.ts).
       finding: [
         `Checks failed on PR #${pr} at ${head}: ${listed(broken)}${reran ? `. Factory reran the failed Actions jobs of ${bounded(reran.checks, ", ")} once on this head, and the failure stands` : ""}`,
-        ...(base.note ? [base.note] : []),
+        ...(note ? [note] : []),
         ...(artifacts ? [artifacts] : []),
         ...excerpts,
       ].join("\n\n"),
@@ -1576,8 +1657,12 @@ async function rerunFailed(
  * A failure it shares fails every PR into it, whatever the change, so no
  * repair can fix it. Factory compares the checks' latest runs and statuses
  * on the default branch's current head as GitHub already has them, and
- * runs nothing there: rerunning a workflow on the default branch can start
- * what follows a run on it (a release, a deployment). A check that failed
+ * runs nothing there of its own accord: rerunning a workflow on the
+ * default branch can start what follows a run on it (a release, a
+ * deployment). Only the workflow the operator named side-effect free in
+ * delivery.baseRerun runs there, for a pass too old to compare with
+ * (freshBase, which this gives the stale passes and the runs still
+ * running), and this then compares with its run. A check that failed
  * there too, with any failing conclusion but cancelled or stale, is a hold
  * at once, before any rerun, that names it, its failed step and excerpt,
  * and spends no repair; `retry` compares again once the default branch is
@@ -1602,13 +1687,33 @@ async function baseFailures(
   note?: string;
   /** The failed checks whose run on the default branch's head still runs. */
   running: string[];
+  /** Those runs, each with its failed check's name. */
+  unfinished: { name: string; run: CheckRun }[];
+  /** Every check run on the default branch's head that hasn't completed, whatever its name. */
+  busy: CheckRun[];
+  /** The failed checks whose latest run there passed BASE_STALE_MS or more before the failure. */
+  stale: { name: string; run: CheckRun }[];
+  /** The failed checks' latest completed results there. */
+  latest: Ended[];
   /** Every failed check passed on the default branch's head. */
   passing: boolean;
 }> {
   const { github, signal } = context;
   const { pr, head, defaultBranch } = at;
   const base = await github.branchHead(defaultBranch, signal);
-  if (base === head) return { base, running: [], passing: false };
+  if (base === head)
+    return {
+      base,
+      running: [],
+      unfinished: [],
+      busy: [],
+      stale: [],
+      latest: [],
+      passing: false,
+    };
+  const runsThere = context.baseRerun
+    ? `Factory runs only ${context.baseRerun} there, the operator's delivery.baseRerun`
+    : "Factory runs nothing there";
   const all = (await github.checkRuns(base, signal)).filter(
     (run) => run.head_sha === base,
   );
@@ -1671,8 +1776,12 @@ async function baseFailures(
           "cancel",
         ],
       ),
-      note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (Factory runs nothing there), ${checks} failed too. The operator answered ${REPAIR_SHARED}: this Work Item's change is meant to fix ${shared.length === 1 ? "it" : "them"} on ${defaultBranch} as well.`,
+      note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (${runsThere}), ${checks} failed too. The operator answered ${REPAIR_SHARED}: this Work Item's change is meant to fix ${shared.length === 1 ? "it" : "them"} on ${defaultBranch} as well.`,
       running: [],
+      unfinished: [],
+      busy: [],
+      stale: [],
+      latest: [],
       passing: false,
     };
   }
@@ -1683,8 +1792,11 @@ async function baseFailures(
         .filter((check) => check.name === name)
         .map((check) => Date.parse(check.run?.completed_at ?? "") || 0),
     );
-  let stale = false;
+  const stale: { name: string; run: CheckRun }[] = [];
+  let old = false;
   const running: string[] = [];
+  const unfinished: { name: string; run: CheckRun }[] = [];
+  const latest: Ended[] = [];
   let passing = true;
   const shown = names.map((name) => {
     const there = runs.filter((run) => run.name === name);
@@ -1699,30 +1811,383 @@ async function baseFailures(
     ) {
       passing = false;
       running.push(name);
+      for (const run of there)
+        if (run.status !== "completed") unfinished.push({ name, run });
       return `${name} is still running`;
     }
     const ended = there.length
       ? there.map((run) => ({
           conclusion: String(run.conclusion),
           at: run.completed_at ?? "",
+          run: run as CheckRun | undefined,
         }))
-      : [{ conclusion: String(status?.state), at: String(status?.updated_at) }];
-    const last = ended.sort((a, b) => b.at.localeCompare(a.at))[0]!;
+      : [
+          {
+            conclusion: String(status?.state),
+            at: String(status?.updated_at),
+            run: undefined,
+          },
+        ];
+    ended.sort((a, b) => b.at.localeCompare(a.at));
+    const last = ended[0]!;
     const done = Date.parse(last.at);
-    const passed = ["success", "neutral", "skipped"].includes(last.conclusion);
+    const passes = (conclusion: string) =>
+      ["success", "neutral", "skipped"].includes(conclusion);
+    const passed = passes(last.conclusion);
     if (!passed) passing = false;
-    const old =
+    const before =
       passed && Number.isFinite(done) && failedAt(name) - done >= BASE_STALE_MS;
-    if (old) stale = true;
+    if (before) {
+      old = true;
+      if (last.run) stale.push({ name, run: last.run });
+    }
+    // The pass before a latest run that gave no result (cancelled,
+    // skipped), when it is that old.
+    const result = (conclusion: string) =>
+      ["success", "neutral"].includes(conclusion);
+    const earlier = result(last.conclusion)
+      ? undefined
+      : ended.slice(1).find((entry) => result(entry.conclusion));
+    const earlierAt = Date.parse(earlier?.at ?? "");
+    latest.push({
+      name,
+      conclusion: last.conclusion,
+      at: last.at,
+      ...(earlier && failedAt(name) - earlierAt >= BASE_STALE_MS
+        ? { stalePass: earlier.at }
+        : {}),
+      // A later run of another workflow reporting the same name supersedes
+      // a run above, but not as that workflow's result (freshBase).
+      ended: there.length
+        ? all
+            .filter((run) => run.name === name && run.status === "completed")
+            .map((run) => ({
+              conclusion: String(run.conclusion),
+              at: run.completed_at ?? "",
+              run: run as CheckRun | undefined,
+            }))
+            .sort((a, b) => b.at.localeCompare(a.at))
+        : ended,
+    });
     const days = Math.floor((failedAt(name) - done) / (24 * 60 * MINUTE));
-    return `${name} ended ${last.conclusion}${Number.isFinite(done) ? ` at ${last.at}` : ""}${old ? `, ${days} day${days === 1 ? "" : "s"} before it failed here` : ""}`;
+    return `${name} ended ${last.conclusion}${Number.isFinite(done) ? ` at ${last.at}` : ""}${before ? `, ${days} day${days === 1 ? "" : "s"} before it failed here` : ""}`;
   });
   return {
     base,
     running,
+    unfinished,
+    busy: all.filter((run) => run.status !== "completed"),
+    stale,
+    latest,
     passing,
-    note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (Factory runs nothing there): ${shown.join("; ")}.${stale ? ` A pass that old may not hold now: a check that depends on when it runs (new advisories against locked dependencies, an expired credential, an outside service) can fail ${defaultBranch} too, and then no change to this Work Item fixes it.` : ""}`,
+    note: `On ${defaultBranch}'s head ${base}, as GitHub shows it (${runsThere}): ${shown.join("; ")}.${old ? ` A pass that old may not hold now: ${mayFailNow(defaultBranch)}` : ""}`,
   };
+}
+
+/** Why a default branch's pass from a day or more before a failure may not hold now. */
+function mayFailNow(defaultBranch: string): string {
+  return `a check that depends on when it runs (new advisories against locked dependencies, an expired credential, an outside service) can fail ${defaultBranch} too, and then no change to this Work Item fixes it.`;
+}
+
+/** A failed check's latest completed result on the default branch's head (baseFailures). */
+interface Ended {
+  name: string;
+  conclusion: string;
+  at: string;
+  /**
+   * When it last passed there BASE_STALE_MS or more before the PR's
+   * failure, when its latest run since ended with no result (cancelled).
+   */
+  stalePass?: string;
+  /** Its completed runs there, superseded ones too (or its status), newest first. */
+  ended: { conclusion: string; at: string; run: CheckRun | undefined }[];
+}
+
+/**
+ * The operator's delivery.baseRerun (#2098): a fresh comparison on the
+ * default branch, where GitHub's latest run of a PR's failed check there
+ * passed BASE_STALE_MS or more before it failed on the PR, which says
+ * nothing about a check that depends on when it runs. Factory runs only
+ * the workflow the operator named, and only for a failed check whose
+ * stale pass there was a run of that workflow (its workflow run's file),
+ * so it never starts anything else there. It dispatches the workflow on
+ * the default branch (`workflow_dispatch`, logged `base-rerun`), at most
+ * once a day per default-branch head for the item (the kept `baseRerun`),
+ * and at most once for a step's judgements of a native stack's layers
+ * (`context.baseReruns`); when a run of it there is already in progress
+ * (for a failed check, or any job of it), it dispatches none and waits for
+ * that one, then dispatches for any failed check still stale. While the
+ * run is pending, the step waits, up to BASE_RERUN_WAIT_MS; its result is
+ * each check's latest run there of that workflow since (never another
+ * workflow's run of a check of the same name), and GitHub's latest on
+ * that head, so baseFailures compares with it: a failure there
+ * holds with no repair, and a pass goes on to the rerun and the repair as
+ * usual (`fresh`). Undefined: nothing to run or wait for. `note`, for the
+ * finding: the run that passed, a run that gave no fresh result in time
+ * (`expired`: its checks, which the step no longer waits for) or that
+ * ended with none (cancelled, skipped), or a dispatch GitHub refused (404,
+ * 422: no such workflow there, or none it may dispatch); a 403 asks for
+ * Actions: write. Without the setting it does nothing.
+ */
+async function freshBase(
+  context: DeliveryContext,
+  input: PullInput,
+  defaultBranch: string,
+  compared: {
+    base: string;
+    running: string[];
+    unfinished: { name: string; run: CheckRun }[];
+    busy: CheckRun[];
+    stale: { name: string; run: CheckRun }[];
+    latest: Ended[];
+  },
+): Promise<
+  | {
+      wait?: Rerun | Retry;
+      note?: string;
+      /** The kept run's checks that had no result in BASE_RERUN_WAIT_MS. */
+      expired?: string[];
+      /** The kept run passed every check it was for, after the PR's failure. */
+      fresh?: boolean;
+    }
+  | undefined
+> {
+  const { github, signal } = context;
+  const workflow = context.baseRerun;
+  if (!workflow) return undefined;
+  const { base } = compared;
+  const now = Date.now();
+  const kept =
+    input.baseRerun?.base === base &&
+    input.baseRerun.workflow === workflow &&
+    now - Date.parse(input.baseRerun.at) < BASE_STALE_MS
+      ? input.baseRerun
+      : undefined;
+  const ran = (rerun: BaseRerun) =>
+    rerun.dispatched || rerun.madeBy !== undefined
+      ? `Factory ran ${workflow} on ${defaultBranch}'s head ${base} at ${rerun.at} (the operator's delivery.baseRerun)`
+      : `A run of ${workflow} was in progress on ${defaultBranch}'s head ${base} at ${rerun.at}`;
+  // Only the operator's workflow: a check's run there is that workflow's
+  // when its workflow run ran that file (each workflow run read once).
+  const path = `.github/workflows/${workflow}`;
+  const files = new Map<number, Promise<string | undefined>>();
+  const ofWorkflow = async (run: CheckRun | undefined) => {
+    if (run?.app?.slug !== "github-actions") return false;
+    const job = await github.workflowJob(run.id, signal);
+    if (!job) return false;
+    let file = files.get(job.run);
+    if (!file) {
+      file = github
+        .workflowRunAttempt(job.run, signal)
+        .then((attempt) => attempt?.path);
+      files.set(job.run, file);
+    }
+    return (await file) === path;
+  };
+  // A run of the workflow in progress there, whatever job of it runs: a
+  // job that needs another registers its check only once that one ended,
+  // so a run whose failed checks don't show yet can be under way.
+  let busy: boolean | undefined;
+  const underway = async () => {
+    if (busy === undefined) {
+      busy = false;
+      for (const run of compared.busy)
+        if (await ofWorkflow(run)) {
+          busy = true;
+          break;
+        }
+    }
+    return busy;
+  };
+  let passed: string | undefined;
+  if (kept) {
+    const since = Date.parse(kept.at);
+    // Each kept check's result: its latest run there that ended since and
+    // was the workflow's. A run of another workflow that reports a check
+    // of the same name is not it.
+    const results = new Map<string, { conclusion: string; at: string }>();
+    for (const name of kept.checks)
+      for (const entry of compared.latest.find((one) => one.name === name)
+        ?.ended ?? []) {
+        if (!(Date.parse(entry.at) >= since)) break;
+        if (await ofWorkflow(entry.run)) {
+          results.set(name, entry);
+          break;
+        }
+      }
+    const running = kept.checks.filter((name) =>
+      compared.running.includes(name),
+    );
+    const missing = kept.checks.filter(
+      (name) => !running.includes(name) && !results.has(name),
+    );
+    // Factory's dispatch (this item's, or another layer's) has yet to show
+    // them, or the run it waited for still runs. A run it waited for that
+    // ended without them leaves them to a dispatch of its own below.
+    const pending = [
+      ...running,
+      ...(missing.length &&
+      (kept.dispatched || kept.madeBy !== undefined || (await underway()))
+        ? missing
+        : []),
+    ];
+    const waited = now - Date.parse(kept.at);
+    if (pending.length && waited < BASE_RERUN_WAIT_MS)
+      return {
+        wait: {
+          kind: "retry",
+          reason: `Awaiting ${defaultBranch}'s fresh run of ${bounded(pending, ", ")} at ${base} (${workflow}, the operator's delivery.baseRerun) to compare PR #${input.pr}'s failed checks with it`,
+          afterMs: CI_POLL_MS,
+        },
+      };
+    // A run since that ended with no result (cancelled, as by a newer run
+    // in a cancel-in-progress concurrency group, or skipped) says nothing
+    // about the check: the comparison stays the stale pass's.
+    const empty = kept.checks.flatMap((name) => {
+      const result = results.get(name);
+      return result &&
+        !pending.includes(name) &&
+        !["success", "neutral"].includes(result.conclusion)
+        ? [
+            {
+              name,
+              ...result,
+              stalePass: compared.latest.find((entry) => entry.name === name)
+                ?.stalePass,
+            },
+          ]
+        : [];
+    });
+    if (pending.length || empty.length) {
+      const old = empty.filter((entry) => entry.stalePass);
+      return {
+        note: [
+          `${ran(kept)}, and ${[
+            ...(pending.length
+              ? [
+                  `${bounded(pending, ", ")} had no fresh result there ${BASE_RERUN_WAIT_MS / MINUTE} minutes later`,
+                ]
+              : []),
+            ...(empty.length
+              ? [
+                  `its run of ${bounded(
+                    empty.map(
+                      (entry) =>
+                        `${entry.name} ended ${entry.conclusion} at ${entry.at}`,
+                    ),
+                    ", ",
+                  )}, with no fresh result`,
+                ]
+              : []),
+          ].join("; and ")}.`,
+          ...(old.length
+            ? [
+                `${defaultBranch}'s pass of ${bounded(
+                  old.map((entry) => `${entry.name} at ${entry.stalePass}`),
+                  ", ",
+                )} before it is a day or more older than the failure here, and a pass that old may not hold now: ${mayFailNow(defaultBranch)}`,
+              ]
+            : []),
+        ].join(" "),
+        expired: pending,
+      };
+    }
+    // The workflow's own run passed each since it was kept.
+    if (
+      kept.checks.length &&
+      kept.checks.every((name) =>
+        ["success", "neutral"].includes(results.get(name)?.conclusion ?? ""),
+      )
+    )
+      passed = `${ran(kept)}, and it passed ${bounded(kept.checks, ", ")} there.`;
+    // Factory dispatched it: no more today. A run it only waited for
+    // leaves any failed check still stale to a dispatch of its own.
+    if (kept.dispatched)
+      return passed ? { note: passed, fresh: true } : undefined;
+  }
+  const inProgress: string[] = [];
+  for (const { name, run } of compared.unfinished)
+    if (!inProgress.includes(name) && (await ofWorkflow(run)))
+      inProgress.push(name);
+  const due: string[] = [];
+  for (const { name, run } of compared.stale)
+    if (await ofWorkflow(run)) due.push(name);
+  if (!inProgress.length && !due.length)
+    return passed ? { note: passed, fresh: true } : undefined;
+  const wait = (reason: string, baseRerun: BaseRerun) => {
+    context.baseReruns?.push({ item: input.item, baseRerun });
+    return {
+      wait: { kind: "rerun" as const, reason, afterMs: CI_POLL_MS, baseRerun },
+    };
+  };
+  // A run of it in progress there: no dispatch while it runs, which would
+  // start a second run there (and, in a cancel-in-progress concurrency
+  // group, cancel that one). A failed check still stale once it ended is
+  // dispatched for then.
+  if (inProgress.length)
+    return wait(
+      `Awaiting the run of ${workflow} in progress on ${defaultBranch}'s head ${base} to compare PR #${input.pr}'s failed ${bounded(inProgress, ", ")} with it`,
+      {
+        base,
+        workflow,
+        checks: inProgress,
+        at: new Date().toISOString(),
+        dispatched: false,
+      },
+    );
+  // Another layer of the native stack this step judges dispatched it for
+  // this head already: wait for that run.
+  const made = context.baseReruns?.find(
+    (entry) =>
+      entry.baseRerun.dispatched &&
+      entry.baseRerun.base === base &&
+      entry.baseRerun.workflow === workflow,
+  );
+  if (made)
+    return wait(
+      `Awaiting the run of ${workflow} that Factory dispatched on ${defaultBranch}'s head ${base} at ${made.baseRerun.at} (the operator's delivery.baseRerun) to compare PR #${input.pr}'s failed ${bounded(due, ", ")} with it`,
+      {
+        base,
+        workflow,
+        checks: due,
+        at: made.baseRerun.at,
+        dispatched: false,
+        madeBy: made.item,
+      },
+    );
+  // A run of it under way there whose jobs for the failed checks haven't
+  // registered yet: no dispatch while it runs either. Waited for as for a
+  // failed check's, then dispatched for any failed check still stale.
+  if (await underway())
+    return wait(
+      `Awaiting the run of ${workflow} in progress on ${defaultBranch}'s head ${base} to compare PR #${input.pr}'s failed ${bounded(due, ", ")} with it`,
+      {
+        base,
+        workflow,
+        checks: due,
+        at: new Date().toISOString(),
+        dispatched: false,
+      },
+    );
+  try {
+    await github.dispatchWorkflow(workflow, defaultBranch, signal);
+  } catch (error) {
+    if (error instanceof GitHubError && [404, 422].includes(error.status))
+      return {
+        note: `Factory could not run ${workflow} on ${defaultBranch} for a fresh comparison (the operator's delivery.baseRerun): GitHub refused it (HTTP ${error.status}: ${error.message}). It must be a workflow on ${defaultBranch} that runs on workflow_dispatch with no required input.`,
+      };
+    throw needing(error, "Actions: write");
+  }
+  return wait(
+    `Running ${workflow} on ${defaultBranch}'s head ${base} (the operator's delivery.baseRerun) to compare PR #${input.pr}'s failed ${bounded(due, ", ")} with a fresh run: ${defaultBranch}'s pass of ${bounded(due, ", ")} is a day or more older than the failure`,
+    {
+      base,
+      workflow,
+      checks: due,
+      at: new Date().toISOString(),
+      dispatched: true,
+    },
+  );
 }
 
 /**
@@ -2818,7 +3283,20 @@ async function judgeLayers(
   const refused: LayerResult[] = [];
   let defaultBranch = "";
   for (const [index, layer] of input.entries()) {
-    const judged = await judgeLayer(context, input, index);
+    let judged: Judged;
+    try {
+      judged = await judgeLayer(context, input, index);
+    } catch (error) {
+      // A layer judged before dispatched delivery.baseRerun's workflow:
+      // its wait is the result, so the step keeps that run (an escaped
+      // exception keeps nothing, and the next run would dispatch again).
+      // The error comes back on the next run.
+      const dispatched = refused.find(
+        (result) => result.kind === "rerun" && result.baseRerun?.dispatched,
+      );
+      if (dispatched) return dispatched;
+      throw error;
+    }
     if (judged.kind === "ready") {
       layers.push({ input: layer, head: judged.head, pull: judged.pull });
       defaultBranch = judged.defaultBranch;

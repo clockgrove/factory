@@ -12,7 +12,7 @@ import { ACCEPTED_AT, currentPlan, proposalKey } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { HoldOption, ObjectiveState } from "../state.js";
 import type { Collection } from "./collect.js";
-import { fact, facts } from "./facts.js";
+import { fact, facts, written } from "./facts.js";
 import { refusedOf } from "./refused.js";
 import { mergedBlame } from "./repair-context.js";
 import { repairOutcome } from "./step-deliver.js";
@@ -188,13 +188,16 @@ export function discoveryOutcome(
     };
   // The files it cites are read from the worker's result: the one
   // collected, the refused one it resubmitted unchanged, or the item's
-  // start when it left no change.
+  // start when it left no change. That start is this step's `keep`'s: a
+  // first attempt hasn't kept one in the state yet (its files would be read
+  // at the plan's base, which lacks what landed on main since intake), and
+  // an attempt moved onto a new start kept its previous one there.
   const commit =
     collected.kind === "collected"
       ? collected.commit
       : collected.unchanged
         ? refusedOf(state, item.id)?.commit
-        : fact(state, "base", item.id);
+        : (written(keep, "base", item.id) ?? fact(state, "base", item.id));
   return propose(
     state,
     {

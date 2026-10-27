@@ -50,10 +50,27 @@ export function workerCapability(
 export const HOST_VALIDATION_NETWORK =
   "the host's network (sandbox.network host)";
 
-/** The Validation line's network rule: what a validation command can reach. */
+/**
+ * The validation sandbox's isolation under `sandbox.network: host`: it hides
+ * the host's socket files (sandbox.ts `showsHostSockets`) but shares the
+ * host's network namespace (`--share-net`). Live (Codex, prd hostnet), the
+ * planner read "no host sockets" as no reaching the host's loopback service
+ * and held its curl criterion for the operator (#2121). Only path-bound
+ * sockets are hidden: abstract Unix sockets belong to the shared network
+ * namespace, so "runtime Unix sockets" would overstate it (security.md).
+ */
+export const HOST_VALIDATION_SANDBOX =
+  "read-only host, private HOME and /tmp, no host socket files (Unix sockets bound to a path); TCP to the host's network, its loopback services included, is not blocked";
+
+/**
+ * The Validation line's network rule: what a validation command can reach.
+ * Under host, a request to a service the Objective says the host runs needs
+ * no lifecycle harness (#2121); one the plan's own commands start still does,
+ * as GRAPH_REVIEW_CHECKS' commands check says.
+ */
 function validationNetworkRule(hostNetwork: boolean): string {
   return hostNetwork
-    ? `Validation has ${HOST_VALIDATION_NETWORK}, including services on its loopback, so a command that reaches the network may run in it.`
+    ? `Validation has ${HOST_VALIDATION_NETWORK}, including services on its loopback, so a command that reaches the network may run in it. A service the Objective says the host runs is already running: a request to it is not a service launch, needs no startup, shutdown or readiness harness, and proves its criterion by running as written. A service the plan's own commands start is a service launch, which still needs its finite harness.`
     : "A script that runs a network tool (an init, install, fetch or audit) fails in validation, which has no network: never select one.";
 }
 

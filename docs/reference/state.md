@@ -14,7 +14,7 @@ Each Objective has one JSON file: `objectives/<issue>.json` under the installati
   "frozen": { "provider", "selectedBy", "digest", "config": {/* see Frozen configuration */} },
   "done": { "<step key>": "<its result>" }, // finished steps; the check's result holds the base, `plan` the accepted plan
   "kept": { "<fact key>": "<value>" }, // facts that outlive repairs, such as item:<id>:base and item:<id>:pushed
-  "attempts": { "<step key>": { "startedAt", "run", "interrupted"? } }, // started, not finished; `run` is the service run; `interrupted`: deaths it ran at in a row (crash loop)
+  "attempts": { "<step key>": { "startedAt", "run", "interrupted"? } }, // started, not finished; `run` is the service run; `interrupted`: deaths it ran at in a row (crash loop), none a test caused at a crash point
   "retries": { "<step key>": { "count", "attempts", "since", "nextAt", "lastError", "cause", "wait"?, "grantedUntil"? } },
   "repairs": { "<target step>": { "count", "findings": [...], "from"? } }, // the latest repaired last; from: the step whose failure sent it
   "answers": { "<step key>": { "holdId", "question", "answer", "text"?, "by", "at" } },

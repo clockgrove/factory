@@ -14,6 +14,8 @@ import {
   GRAPH_REVIEW_REVISION_ROUND,
   PLANNER_CHECKLIST,
   QA_EVIDENCE_GUIDANCE,
+  REFUSAL_REVIEW_FINDINGS,
+  REFUSAL_REVIEW_INTRO,
   WORK_ITEM_ENTRY_SIGNAL,
   type WorkerCommandAccess,
   workerCapability,
@@ -28,7 +30,7 @@ import type {
   PlanningFacts,
   WorkItem,
 } from "./types.js";
-import { COMPILER_READINESS_GUIDANCE } from "./wire.js";
+import { type CannotPlan, COMPILER_READINESS_GUIDANCE } from "./wire.js";
 
 /**
  * The planner and graph-review prompts. The text is product logic, kept
@@ -284,6 +286,16 @@ const lookupGuidance = (open: boolean) =>
       : "No lookup round is left: plan with what you have."
   }\n`;
 
+/**
+ * When the planner may answer cannotPlan, and what it is never for: the
+ * planner is told both, and an amendment's refusal review judges a refusal
+ * against them.
+ */
+const CANNOT_PLAN_WHEN =
+  "cannotPlan is null unless no plan can meet the Objective as written: its outcomes contradict each other or its constraints, it needs something the repository and sources lack that no Work Item may create, or its constraints rule the outcome out.";
+const CANNOT_PLAN_LIMITS =
+  "Use decisionRequired instead whenever an operator's answer can settle the conflict; cannotPlan is only for a conflict no answer can settle, where the Objective text or the repository itself must change. Never use it to avoid large or hard work, or for a problem a revision can fix.";
+
 /** The planner prompt. The answer schema comes from the wire. */
 export function renderCompilationCall(input: CompilationInput): Rendered {
   const { facts, repository, reviewArtifacts } = input;
@@ -317,7 +329,7 @@ ${PLANNER_CHECKLIST}
 
 How to answer:
 ${compileRepositoryGuidance(repository, baseSha)}- Return only the requested choice structure and zero-based indices. Use a concise title, one-sentence goal, stage-local acceptance and non-goals. oneOutcomeReason is null unless an item has more than ${WORK_ITEM_ENTRY_SIGNAL} acceptance entries. Before review, Factory refuses an item above that without a reason, an acceptance entry that cites a line number, two items owning the same or overlapping paths when neither depends on the other, and, when the plan selects any validation command, a work item without one or a criterion proved by final review or CI whose owner runs none. The brief carries only settled decisions, cross-item contracts and evidence responsibilities the worker cannot get from the repository or the item's other fields; workers read the code themselves, so give no reading lists, line ranges or edit steps, and never recopy sources, acceptance, ownership or commands.
-- cannotPlan is null unless no plan can meet the Objective as written: its outcomes contradict each other or its constraints, it needs something the repository and sources lack that no Work Item may create, or its constraints rule the outcome out. Then reason names the concrete obstacle (the conflicting lines, the missing file, command or capability) and change says what the operator must change in the Objective or the repository; Factory asks the operator and plans no round on its own. Use decisionRequired instead whenever an operator's answer can settle the conflict; cannotPlan is only for a conflict no answer can settle, where the Objective text or the repository itself must change. Never use it to avoid large or hard work, or for a problem a revision can fix.
+- ${CANNOT_PLAN_WHEN} Then reason names the concrete obstacle (the conflicting lines, the missing file, command or capability) and change says what the operator must change in the Objective or the repository; Factory asks the operator and plans no round on its own. ${CANNOT_PLAN_LIMITS}
 - A pinned source has its complete literal body in the block labeled "source <sourceIndex>"; a source-line lineIndex is that block's numbered line.
 - Coverage: emit one top-level entry per supplied obligation, in order; array position selects obligationIndex. Choose a declared owner and a proof allowed by its actual item kind, including retained kinds. Validation indices refer to that same item. A semantic proof names no acceptance entry: the owner's review judges the obligation itself, so the owner's acceptance as a whole must deliver it. Do not duplicate coverage or obligation indices. Preserve every clause of the whole obligation. Item-local proof and acceptance are after its validation but before its delivery, LFS upload, publication, merge or hydration; they cannot depend on its own merge, later items or final validation. Native-stack predecessors are not yet merged. Use stage-local component acceptance and final-review on its implementation owner when final validation or QA evidence proves the full obligation. Final-review names a phase, not supplied runtime evidence. Never fake sibling implementations or prematurely passing checks. Add downstream/QA proof only for a named source requirement or material risk whose necessary evidence is missing from final validation/review; put that responsibility in its brief. A final-controller guarantee must cover the entire obligation. Final commands are only the installation's required commands; they run on the integrated result. A criterion that requires a command to pass ("\`npm test\` passes", or a command the Objective says the result must pass) is proved by running that exact command, unchanged, on the integrated result: a read-only QA item that depends on every item the command covers and runs it as its validation. Never weaken, replace, split or drop such a command. A command in the installation's CI-only list never runs in validation: prove it by an integrated-ci proof of a CI check that runs it, or ask the operator through decisionRequired.
 - Source obligations (rule 3): give each sourceObligations entry its pinned sourceIndex (repository files you cite are not obligation sources), the smallest firstLineIndex..lastLineIndex range of that source's numbered lines stating it, and statement null when those lines state it on their own, otherwise a short self-contained statement that keeps every clause; ranges never repeat or overlap. A covered entry has an owner, a proof allowed for the owner's kind and an environment, usually a semantic proof by the owner whose acceptance delivers it; an out-of-scope entry has a reason and the OBJECTIVE objectiveLineIndices whose constraints or out-of-scope text exclude it. Obligations that carry source and lines are retained source obligations: cover them in coverage and do not list them again. In an amendment, list each previous sourceExclusions entry again with the same lines, or cover it.
@@ -504,9 +516,9 @@ function reviewGraphView(draft: Draft, evidence: readonly ReviewEvidence[]) {
   return { ...draft, items: draft.items.map(itemView) };
 }
 
-export interface GraphReviewInput {
+/** What every plan review prompt holds: a graph's review and a refusal's. */
+interface ReviewCallInput {
   facts: PlanningFacts;
-  draft: Draft;
   /**
    * Evidence rows from planningReviewEvidence; findings cite them by index.
    * Pass the execution bounds, native prerequisites and local executable
@@ -519,8 +531,6 @@ export interface GraphReviewInput {
   finalCommands: readonly string[];
   /** The guarantees Factory's controller provides; the reviewer doesn't ask target work to duplicate them. */
   controllerCapabilities: unknown;
-  /** Absent on round 1. */
-  scope?: RevisionScope;
   repository?: RepositoryView;
   workers?: Readonly<Record<string, WorkerCommandAccess>>;
   /** The installation's selectors (`config.reviewArtifacts`), the same the planner was given. */
@@ -529,9 +539,15 @@ export interface GraphReviewInput {
   executionProfiles?: unknown;
 }
 
+export interface GraphReviewInput extends ReviewCallInput {
+  draft: Draft;
+  /** Absent on round 1. */
+  scope?: RevisionScope;
+}
+
 /** The graph-review prompt. The answer schema is graphReviewSchema (review.ts). */
 export function renderGraphReviewCall(input: GraphReviewInput): Rendered {
-  const { facts, repository, reviewArtifacts } = input;
+  const { facts, reviewArtifacts } = input;
   const hostNetwork = facts.hostNetwork === true;
   const instructions = `${GRAPH_REVIEW_INTRO}
 ${workItemStandard(hostNetwork)}
@@ -551,7 +567,6 @@ Each item is assigned an execution profile. Check that each assignment honors ex
 ${GRAPH_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
 
 Objective:\n`;
-  const evidence = `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}\nRoot package scripts at the base:\n${JSON.stringify(facts.packageCommands)}\nCI-only commands (validation never runs them):\n${JSON.stringify(facts.ciOnlyCommands)}\n${validationEnvironmentNote(hostNetwork, facts.lockfileResolution === true)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
   // Everything above repeats across revisions of one Objective. The
   // candidate and its round scope follow, so the provider cache reuses the
   // prefix.
@@ -560,8 +575,48 @@ Objective:\n`;
     [
       ["instructions", instructions],
       ["objective", facts.body],
-      ["evidence", evidence],
+      ["evidence", reviewEvidenceText(input)],
       ["graph", tail],
+      ["playbook", playbookAdvice(facts.playbook)],
+    ],
+    facts.sources.map((source) => source.content),
+  );
+}
+
+/** A plan review's evidence section: the installation's facts, the evidence rows and the repository. */
+function reviewEvidenceText(input: ReviewCallInput): string {
+  const { facts, repository, reviewArtifacts } = input;
+  return `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nCI check names a push to the default branch reports (integrated-ci's only choices):\n${JSON.stringify(facts.integratedCheckNames)}\nRoot package scripts at the base:\n${JSON.stringify(facts.packageCommands)}\nCI-only commands (validation never runs them):\n${JSON.stringify(facts.ciOnlyCommands)}\n${validationEnvironmentNote(facts.hostNetwork === true, facts.lockfileResolution === true)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
+}
+
+export interface RefusalReviewInput extends ReviewCallInput {
+  /** The amendment planner's cannotPlan answer. */
+  refusal: CannotPlan;
+}
+
+/**
+ * The review of an amendment planner's cannotPlan (amendments.ts
+ * `amendReviewStep`): whether a plan within the rules the planner was
+ * given can serve the discovery. The plan being amended is
+ * FACTORY_AMENDMENT's previousPlan, so findings name its items. The answer
+ * schema is graphReviewSchema (review.ts); no findings confirm the refusal.
+ */
+export function renderRefusalReviewCall(input: RefusalReviewInput): Rendered {
+  const { facts } = input;
+  const instructions = `${REFUSAL_REVIEW_INTRO}
+The planner's rule for cannotPlan: ${CANNOT_PLAN_WHEN} ${CANNOT_PLAN_LIMITS}
+${workItemStandard(facts.hostNetwork === true)}
+${input.workers ? `${workerCapability(input.workers)}\n` : ""}${input.decisions.length ? "\nOperator planning decisions: the controller evidence FACTORY_OPERATOR_PLANNING_DECISIONS holds the operator's recorded answers to questions the planner or an earlier plan review asked. Each answer settles that choice within the Objective, so a refusal that rests on a choice an answer settled is wrong. An answer grants no command, ownership, source or capability authority beyond the Objective.\n" : ""}
+${REFUSAL_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
+
+Objective:\n`;
+  const tail = `\nBase: ${facts.base}\nRefusal:\n${JSON.stringify(input.refusal)}\nFinal commands:\n${JSON.stringify(input.finalCommands)}`;
+  return rendered(
+    [
+      ["instructions", instructions],
+      ["objective", facts.body],
+      ["evidence", reviewEvidenceText(input)],
+      ["refusal", tail],
       ["playbook", playbookAdvice(facts.playbook)],
     ],
     facts.sources.map((source) => source.content),

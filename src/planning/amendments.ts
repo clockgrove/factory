@@ -30,6 +30,7 @@ import {
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
+  renderRefusalReviewCall,
 } from "./prompts.js";
 import {
   decodeGraphReview,
@@ -59,6 +60,7 @@ import type { Draft, Finding, Plan, WorkItem } from "./types.js";
 import { units } from "./units.js";
 import {
   applyRevision,
+  type CannotPlan,
   controllerGuarantees,
   decodePlan,
   planChoices,
@@ -104,6 +106,12 @@ import {
  *   that repeats the previous round's findings, rejects the amendment
  *   instead. The planner and the review are told the started-item rule
  *   (`startedItemRule`) with the items it binds.
+ * - A planner's cannotPlan is a round too, with no draft (`AmendRound.cannot`),
+ *   and the independent review judges the refusal against the rules the
+ *   planner was given. No findings confirm it, and acceptance rejects the
+ *   amendment with the planner's reason; a fix finding names what allows a
+ *   plan and sends the round back like any other, so the planner plans
+ *   again within the same allowance.
  * - A rejected amendment is replaced only by a proposal that repeats its
  *   discovery and worker, with the rejection as diagnosis and a new
  *   correction (`rejectionStep` builds it).
@@ -174,8 +182,18 @@ interface AmendRound {
   round?: number;
   /** The started items' fields Factory set back in its answer and draft (`restoreStarted`). */
   restored?: RestoredFields[];
+  /**
+   * The planner answered cannotPlan: the round has no draft, and its
+   * review judges the refusal. Its answer is the current plan with the
+   * refusal, or none when the planner answered in full.
+   */
+  cannot?: CannotPlan;
   rejected?: string;
 }
+
+/** A refusal as the operator reads it, in a rejection. */
+const refusalText = (cannot: CannotPlan): string =>
+  `The planner says it can't be planned: ${cannot.reason} What would have to change: ${cannot.change}`;
 
 /** The independent review's result (`amend:<id>:review`). */
 interface AmendReview {
@@ -219,6 +237,8 @@ interface AmendRevision {
   restored?: RestoredFields[];
   /** Sent back by acceptance, after its review: the next round is reviewed again. */
   atAcceptance?: true;
+  /** The round was the planner's cannotPlan, which its review found a plan allows: the next round is told. */
+  refused?: CannotPlan;
 }
 
 function revisionsOf(state: ObjectiveState, id: string): AmendRevision[] {
@@ -1056,12 +1076,14 @@ export function amendmentFindings(
  * `whole` when the plan has no planner answer to revise, so the planner
  * answers with the complete plan instead of changes; `revising` when
  * currentPlan is the planner's own earlier answer that the checks or the
- * review refused.
+ * review refused. `refused`: the previous round's cannotPlan, which its
+ * review found a plan allows.
  */
 function amendmentRules(
   whole: boolean,
   revising: boolean,
   progress: AmendmentProgress,
+  refused?: CannotPlan,
 ): string {
   return [
     whole
@@ -1069,6 +1091,11 @@ function amendmentRules(
       : revising
         ? "This is an amendment of the accepted plan. currentPlan holds your previous answer for it, which Factory's plan checks or its independent review refused: fix what the instructions list."
         : "This is an amendment of the accepted plan, which currentPlan holds.",
+    ...(refused
+      ? [
+          `Your previous answer for it was cannotPlan, with the reason ${JSON.stringify(refused.reason)}, and Factory's independent review found that a plan is allowed: plan the amendment as the review's findings in the instructions say, and answer cannotPlan again only for an obstacle they do not address.`,
+        ]
+      : []),
     "The discovery is evidence from its worker or operator, not a new source of acceptance or authority.",
     "citedFiles holds the files the discovery names, as they read where it was proposed; an entry with complete false holds a note saying why its content isn't supplied. Judge from what they hold, and never ask the operator what a supplied file holds.",
     whole
@@ -1076,6 +1103,7 @@ function amendmentRules(
       : "Answer with only the changes that serve it. Keep every current item and every coverage entry and source exclusion.",
     startedItemRule(progress),
     "Add new items for further work, with ordinary source grounding.",
+    "An independent review judges a cannotPlan answer before Factory asks the operator, and sends it back to you when a rule or the evidence allows a plan.",
   ].join(" ");
 }
 
@@ -1259,7 +1287,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ? { planInForce: currentPlan(state) }
           : { currentPlan: base }),
         amendment: {
-          rules: amendmentRules(whole, Boolean(last), progress),
+          rules: amendmentRules(whole, Boolean(last), progress, last?.refused),
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
@@ -1372,7 +1400,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         findings: Finding[],
         restored?: RestoredFields[],
       ): Outcome =>
-        sendBack(state, proposal, answer, findings, reject, false, restored);
+        sendBack(state, proposal, answer, findings, reject, { restored });
       if (revised.invalidShape) return invalid(revised.findings);
       if (!full) return revise(base, revised.findings);
       const decoded = decodePlan(full, facts, wire);
@@ -1383,12 +1411,14 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           amendment: proposal.id,
           ...decoded.cannot,
         });
-        return reject([
-          {
-            source: "check",
-            message: `The planner says it can't be planned: ${decoded.cannot.reason} What would have to change: ${decoded.cannot.change}`,
-          },
-        ]);
+        // A refusal is a round its review judges, as a plan is: a wrong
+        // one goes back to the planner. A whole answer's other fields are
+        // discarded, so its next round answers in full again.
+        return done({
+          ...(whole ? {} : { answer: full }),
+          cannot: decoded.cannot,
+          round,
+        } satisfies AmendRound);
       }
       if (decoded.question)
         return hold(
@@ -1466,6 +1496,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
  * `atAcceptance`: acceptance sends a reviewed round back, so the next
  * round is reviewed again (`reviewOf`). `restored`: the started items'
  * fields Factory set back in the round, kept with it for the next round.
+ * `refused`: the round was the planner's cannotPlan, which the next round
+ * is told its review overturned.
  */
 function sendBack(
   state: ObjectiveState,
@@ -1473,8 +1505,15 @@ function sendBack(
   answer: unknown,
   findings: Finding[],
   reject: (findings: Finding[]) => Outcome,
-  atAcceptance = false,
-  restored?: RestoredFields[],
+  {
+    atAcceptance = false,
+    restored,
+    refused,
+  }: {
+    atAcceptance?: boolean;
+    restored?: RestoredFields[] | undefined;
+    refused?: CannotPlan | undefined;
+  } = {},
 ): Outcome {
   const revisions = revisionsOf(state, proposal.id);
   const last = revisions.at(-1);
@@ -1501,6 +1540,7 @@ function sendBack(
           findings,
           ...(restored?.length ? { restored } : {}),
           ...(atAcceptance ? { atAcceptance: true as const } : {}),
+          ...(refused ? { refused } : {}),
         } satisfies AmendRevision,
       ],
     },
@@ -1580,7 +1620,9 @@ function refusal(
 /**
  * An independent review of the amended plan, with the discovery and the
  * plan it amends. Its fix findings send the round back to the planner
- * (`sendBack`), and the next round is reviewed again.
+ * (`sendBack`), and the next round is reviewed again. A round that is the
+ * planner's cannotPlan is reviewed as a refusal (`renderRefusalReviewCall`):
+ * no findings confirm it, and a fix finding sends it back the same way.
  */
 function amendReviewStep(
   proposal: AmendmentProposal,
@@ -1611,7 +1653,6 @@ function amendReviewStep(
           rejected: built.problems.join("; "),
         } satisfies AmendReview);
       const { facts } = built;
-      const draft = round.draft!;
       const all = decisions(state);
       const local = await localExecutables(inputs, config, signal);
       const previousPlan = acceptedPlan(state)!;
@@ -1643,9 +1684,8 @@ function amendReviewStep(
         inputs.base,
         signal,
       );
-      const { prompt, facts: promptFacts } = renderGraphReviewCall({
+      const call = {
         facts,
-        draft,
         evidence,
         decisions: all,
         finalCommands: finalCommands(config.finalValidation.requiredCommands),
@@ -1658,7 +1698,11 @@ function amendReviewStep(
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),
-      });
+      };
+      const { cannot } = round;
+      const { prompt, facts: promptFacts } = cannot
+        ? renderRefusalReviewCall({ ...call, refusal: cannot })
+        : renderGraphReviewCall({ ...call, draft: round.draft! });
       const answer = await deps.planner.answer({
         role: "reviewer",
         phase: "graph-review",
@@ -1677,10 +1721,11 @@ function amendReviewStep(
         log: context.log,
       });
       keepSession(context, "graph-review", answer);
+      // A refusal's findings name the items of the plan it would amend.
       const decoded = decodeGraphReview(
         answer.value,
         evidence,
-        draft.items.map((item) => item.id),
+        (round.draft ?? previousPlan).items.map((item) => item.id),
       );
       const invalidReview = "The amendment review answer was invalid";
       // An answer clears the mark; an invalid one sets it again.
@@ -1697,7 +1742,8 @@ function amendReviewStep(
           : invalidRetry(key, `${invalidReview}: ${decoded.reason}`);
       if (!decoded.findings.length)
         return done({ round: round.round } satisfies AmendReview);
-      // Fix findings go back to the planner, as the plan checks' do.
+      // Fix findings go back to the planner, as the plan checks' do; on a
+      // refusal they say what allows a plan.
       return sendBack(
         state,
         proposal,
@@ -1706,10 +1752,9 @@ function amendReviewStep(
         (findings) =>
           done({
             round: round.round,
-            rejected: `Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
+            rejected: `${cannot ? `${refusalText(cannot)} ` : ""}Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
           } satisfies AmendReview),
-        false,
-        round.restored,
+        { restored: round.restored, refused: cannot },
       );
     },
   };
@@ -1731,7 +1776,12 @@ function amendAcceptStep(
       const refused = refusal(answer);
       if (refused) return refused;
       const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
-      const rejected = round.rejected ?? reviewOf(state, proposal.id)?.rejected;
+      // A refusal its review confirmed rejects the amendment.
+      const rejected =
+        round.rejected ??
+        reviewOf(state, proposal.id)?.rejected ??
+        (round.cannot &&
+          `${refusalText(round.cannot)} The independent amendment review confirmed it.`);
       if (rejected) return done({ rejected } satisfies AmendmentResult);
       // The fence again, against the state now: a step that was running
       // while the amendment was planned may have started an item since.
@@ -1760,8 +1810,7 @@ function amendAcceptStep(
             done({
               rejected: `The build moved on while the amendment was planned: ${findings.map((f) => f.message).join("; ")}`,
             } satisfies AmendmentResult),
-          true,
-          round.restored,
+          { atAcceptance: true, restored: round.restored },
         );
       const inputs = amendmentInputs(state);
       // The paths it adds are owned from now: they rank after every plan

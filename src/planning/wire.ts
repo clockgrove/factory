@@ -564,7 +564,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     sourceObligations: sourceObligationsSchema,
     cannotPlan: {
       description:
-        "null when you return a plan. Otherwise no plan can meet the Objective as written: reason names the concrete obstacle, and change says what the operator must change in the Objective or the repository. Factory asks the operator instead of reviewing a plan, and the rest of this answer is discarded, so keep it minimal.",
+        "null when you return a plan. Otherwise no plan can meet the Objective as written: reason names the concrete obstacle, and change says what the operator must change in the Objective or the repository. Factory asks the operator instead of reviewing a plan (in an amendment, once an independent review confirms the refusal), and the rest of this answer is discarded, so keep it minimal.",
       anyOf: [
         { type: "null" },
         strict({

@@ -16,12 +16,13 @@
  *   and each issue is created once. The installation records each issue
  *   it publishes by number (`proposals/<id>.approval.json`), and the create
  *   under way before its request, so an approval reads a recorded issue by
- *   its number, never from a list that can lag the create (#2081). Another
- *   is found by its marker on its body's first line, among the issues
- *   Factory's login opened since the draft was made, and those numbered
- *   past what the issue list shows yet (or past the newest number seen
- *   before a create whose answer was lost), so an approval seconds after
- *   another, or on another machine, finds its issues
+ *   its number, never from a list that can lag the create (#2081), and
+ *   reads it again while GitHub may not serve it yet. Another is found by
+ *   its marker on its body's first line, among the issues Factory's login
+ *   opened since the draft was made, the newest the issue list shows, and
+ *   those numbered past them (or past the newest number seen before a
+ *   create whose answer was lost), so an approval seconds after another,
+ *   or on another machine, finds its issues
  *   (docs/reference/steps.md#Idempotence). Once every issue exists, each
  *   dependency becomes a blocked-by link, read before it is added.
  */
@@ -38,10 +39,16 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { CoreConfig } from "./config.js";
 import { redactDeep } from "./display.js";
 import { defaultHead, sha256 } from "./git.js";
-import { FRESH_MS, type GitHub, type IssueSummary } from "./github.js";
+import {
+  FRESH_MS,
+  type GitHub,
+  GitHubError,
+  type IssueSummary,
+} from "./github.js";
 import { takeServiceLock } from "./lock.js";
 import { code, mark, prose } from "./markdown.js";
 import { validPath } from "./objective.js";
@@ -586,12 +593,12 @@ export interface Published {
 
 /**
  * What this installation knows of a draft's approvals: the issue each
- * Objective was published as, and the create under way, saved before its
- * request with when it began and the newest issue number GitHub showed
- * then (any issue it made is numbered above that).
+ * Objective was published as, with when it was made, and the create under
+ * way, saved before its request with when it began and the newest issue
+ * number GitHub showed then (any issue it made is numbered above that).
  */
 interface ApprovalRecord {
-  issues: Record<string, number>;
+  issues: Record<string, { number: number; at: string }>;
   creating?: { key: string; at: string; after: number };
 }
 
@@ -625,7 +632,12 @@ function readApproval(path: string): ApprovalRecord {
   if (
     !object(issues) ||
     Object.values(issues).some(
-      (number) => !Number.isInteger(number) || (number as number) < 1,
+      (issue) =>
+        !object(issue) ||
+        !Number.isInteger(issue.number) ||
+        (issue.number as number) < 1 ||
+        typeof issue.at !== "string" ||
+        Number.isNaN(Date.parse(issue.at)),
     ) ||
     (creating !== undefined &&
       (!object(creating) ||
@@ -647,15 +659,36 @@ function saveApproval(path: string, record: ApprovalRecord): void {
 }
 
 /**
+ * A recorded issue, read by its number. GitHub may not serve an issue for
+ * a moment after its create (github.ts `GitHub.made`), so one made under
+ * FRESH_MS ago is read again, backing off, until GitHub serves it or
+ * FRESH_MS has passed; undefined then.
+ */
+async function recordedIssue(
+  github: GitHub,
+  recorded: { number: number; at: string },
+  signal: AbortSignal,
+): Promise<IssueSummary | undefined> {
+  const until = Date.parse(recorded.at) + FRESH_MS;
+  for (let wait = 1000; ; wait *= 2) {
+    const issue = await github.issueByNumber(recorded.number, signal);
+    if (issue || Date.now() + wait >= until) return issue;
+    await sleep(wait, undefined, { signal });
+  }
+}
+
+/**
  * Publish the reviewed draft's Objectives as issues, each once, then link
  * each dependency as blocked-by. Each issue it publishes is recorded by
  * number before the next step, and the create under way before its
  * request. An approval run again (after a crash, or by hand) reads a
- * recorded issue by its number; it finds the others by their markers,
- * among the issues Factory's login opened since the draft was made or
- * numbered past what the issue list shows yet, and adds only what is
- * missing. A create whose answer was lost under 2 min ago (`FRESH_MS`),
- * which GitHub may not show yet, refuses rather than create it again.
+ * recorded issue by its number, reading one made under 2 min ago
+ * (`FRESH_MS`) again until GitHub serves it; it finds the others by their
+ * markers, among the issues Factory's login opened since the draft was
+ * made, the newest the issue list shows, and those numbered past them,
+ * and adds only what is missing. A create whose answer was lost under
+ * 2 min ago, which GitHub may not show yet, refuses rather than create it
+ * again; one GitHub answered with a 4xx made nothing and isn't waited for.
  */
 export async function approveProposal(
   file: string,
@@ -680,22 +713,23 @@ export async function approveProposal(
     // A recorded issue is read by its number: GitHub's issue lists can lag
     // its create by seconds (#2081).
     for (const objective of proposal.objectives) {
-      const number = record.issues[objective.key];
-      if (number === undefined) continue;
-      const issue = await github.issueByNumber(number, signal);
+      if (!Object.hasOwn(record.issues, objective.key)) continue;
+      const recorded = record.issues[objective.key]!;
+      const issue = await recordedIssue(github, recorded, signal);
       if (!issue)
         throw new ProposalRefused(
-          `Objective ${objective.key} of this draft was published as #${number}, which GitHub doesn't show now (deleted or transferred, or not served yet); approve again in a minute. To publish it anew, remove ${ledger} first.`,
+          `Objective ${objective.key} of this draft was published as #${recorded.number}, which GitHub doesn't show now (deleted or transferred). To publish it anew, remove ${ledger} and approve again.`,
         );
       issues.set(objective.key, issue);
     }
     if (issues.size < proposal.objectives.length) {
-      // A create whose answer was lost, under FRESH_MS ago: GitHub may not
-      // list its issue yet, so its numbers from the newest seen before it
-      // are read too.
+      // A create of one of the draft's Objectives whose answer was lost,
+      // under FRESH_MS ago: GitHub may not list its issue yet, so its
+      // numbers from the newest seen before it are read too.
       const pending =
         record.creating &&
-        Date.now() - Date.parse(record.creating.at) < FRESH_MS
+        Date.now() - Date.parse(record.creating.at) < FRESH_MS &&
+        proposal.objectives.some(({ key }) => key === record.creating?.key)
           ? record.creating
           : undefined;
       const listed = await github.issuesByLabel(
@@ -739,16 +773,15 @@ export async function approveProposal(
         );
     }
     // What was found is recorded, and a lost create it settles is forgotten.
-    const known = Object.fromEntries(
-      [...issues].map(([key, issue]) => [key, issue.number]),
+    const unrecorded = [...issues].filter(
+      ([key]) => !Object.hasOwn(record.issues, key),
     );
-    if (
-      record.creating ||
-      Object.entries(known).some(
-        ([key, number]) => record.issues[key] !== number,
-      )
-    ) {
-      record.issues = { ...record.issues, ...known };
+    if (record.creating || unrecorded.length) {
+      for (const [key, issue] of unrecorded)
+        record.issues[key] = {
+          number: issue.number,
+          at: issue.created_at ?? new Date().toISOString(),
+        };
       delete record.creating;
       saveApproval(ledger, record);
     }
@@ -782,14 +815,31 @@ export async function approveProposal(
         after,
       };
       saveApproval(ledger, record);
-      const issue = await github.ensureIssue(
-        [],
-        proposalMark(proposal.id, objective.key),
-        { ...composeObjective(proposal.id, objective), labels: [] },
-        "propose:create",
-        signal,
-      );
-      record.issues[objective.key] = issue.number;
+      let issue: IssueSummary;
+      try {
+        issue = await github.ensureIssue(
+          [],
+          proposalMark(proposal.id, objective.key),
+          { ...composeObjective(proposal.id, objective), labels: [] },
+          "propose:create",
+          signal,
+        );
+      } catch (error) {
+        // A 4xx answer made nothing: there is no lost create to wait for.
+        if (
+          error instanceof GitHubError &&
+          error.status >= 400 &&
+          error.status < 500
+        ) {
+          delete record.creating;
+          saveApproval(ledger, record);
+        }
+        throw error;
+      }
+      record.issues[objective.key] = {
+        number: issue.number,
+        at: new Date().toISOString(),
+      };
       delete record.creating;
       saveApproval(ledger, record);
       after = Math.max(after, issue.number);

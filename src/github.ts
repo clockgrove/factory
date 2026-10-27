@@ -1031,27 +1031,41 @@ export class GitHub {
   }
 
   /**
-   * Issues numbered after the newest one the repository's issue list shows,
-   * read by number until GitHub has none yet (at most `max`): the list can
-   * lag a create by seconds, and a read by number doesn't (#1991). With
+   * The newest issues the repository's issue list shows (at most `max`),
+   * and those numbered after the newest of them, read by number until
+   * GitHub has none yet (at most `max`): the list can lag a create by
+   * seconds, and a read by number doesn't (#1991). The listed ones are
+   * returned too, because the list of all issues can show a create that
+   * the list of Factory's own (`issuesByLabel`) doesn't yet (#2081). With
    * `after` below that newest (the newest number seen before a create
-   * whose answer was lost), the issues numbered past `after` up to it are
-   * read by number too, a gap there being a deleted issue, not the end:
-   * the list may show the create while the list of Factory's own issues
-   * doesn't yet (#2081). Pull requests share the numbering and are left out.
+   * whose answer was lost), the issues numbered past `after` up to it that
+   * aren't listed are read by number too, a gap there being a deleted
+   * issue, not the end. Pull requests share the numbering and are left out.
    */
   async issuesPastList(
     signal?: AbortSignal,
     max = 20,
     after?: number,
   ): Promise<IssueSummary[]> {
-    const newest = await this.newestIssueNumber(signal);
-    const found: IssueSummary[] = [];
+    const listed = await this.rest<
+      (IssueSummary & { pull_request?: unknown })[]
+    >(
+      "GET",
+      `/repos/${this.repository}/issues?state=all&sort=created&direction=desc&per_page=${max}`,
+      undefined,
+      signal,
+    );
+    const newest = Math.max(0, ...listed.map((issue) => issue.number));
+    const shown = new Set(listed.map((issue) => issue.number));
+    const found: IssueSummary[] = listed.filter(
+      (issue) => issue.pull_request === undefined,
+    );
     for (
       let number = Math.min(newest, after ?? newest) + 1;
       number <= newest + max;
       number++
     ) {
+      if (shown.has(number)) continue;
       let issue: IssueSummary & { pull_request?: unknown };
       try {
         issue = await this.rest(

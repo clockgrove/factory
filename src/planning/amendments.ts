@@ -78,6 +78,16 @@ import {
  *   current attempt, or for an operator's proposal every failed,
  *   unpublished work item) may widen: its owned paths or dependencies
  *   strictly grow, and it may restate acceptance, brief and non-goals.
+ *   Factory applies the rule itself before checking a plan round
+ *   (`restoreStarted`): each started item keeps the accepted spec, with
+ *   its owned paths and dependencies grown by what the answer adds and,
+ *   for a grown reattempt item, the answer's acceptance, brief and
+ *   non-goals. Every other change is set back, in the round's answer and
+ *   its draft (a round whose draft was set back beyond its answer keeps
+ *   none), and recorded with the round (`restored`), logged
+ *   (`amendment-restored`), told to its review and, when it goes back, to
+ *   the planner. What that can't settle, a removed started item or one
+ *   that isn't a reattempt item grown, the fence finds.
  * - Every coverage obligation and source exclusion stays accounted for, and
  *   a started native stack keeps its layers.
  * - Every proposal is charged once, when it is taken in, against
@@ -146,7 +156,11 @@ export interface AmendmentProposal {
 
 /** The saved outcome of one amendment (`amend:<id>`). */
 export interface AmendmentResult {
-  /** The accepted plan, with the planner's full answer it decodes from. */
+  /**
+   * The accepted plan, with the planner's full answer it decodes from;
+   * none when its draft was set back beyond the answer (`restoreStarted`),
+   * so the next amendment answers in full.
+   */
   plan?: Plan;
   answer?: unknown;
   /** Why the amendment was refused. */
@@ -158,6 +172,8 @@ interface AmendRound {
   draft?: Draft;
   /** A planned round's number: once its review sends it back too, the next round is planned. */
   round?: number;
+  /** The started items' fields Factory set back in its answer and draft (`restoreStarted`). */
+  restored?: RestoredFields[];
   rejected?: string;
 }
 
@@ -191,10 +207,16 @@ function reviewOf(state: ObjectiveState, id: string): AmendReview | undefined {
 
 /** A plan round sent back to the planner (`amend:<id>:revisions`). */
 interface AmendRevision {
-  /** The round's full answer: the next round revises it. */
+  /**
+   * The round's full answer: the next round revises it. Undefined when its
+   * draft was set back beyond it (`restoreStarted`): the next round answers
+   * in full.
+   */
   answer: unknown;
   /** The plan checks', the fence's or the review's findings on it, the next round's corrections. */
   findings: Finding[];
+  /** The started items' fields Factory set back in it (`restoreStarted`): the next round is told. */
+  restored?: RestoredFields[];
   /** Sent back by acceptance, after its review: the next round is reviewed again. */
   atAcceptance?: true;
 }
@@ -737,6 +759,186 @@ function changedFields(old: WorkItem, next: WorkItem): string[] {
     .sort();
 }
 
+/** The fields of a started item Factory set back to the plan being amended (`restoreStarted`). */
+export interface RestoredFields {
+  itemId: string;
+  fields: string[];
+}
+
+/**
+ * What the started-item rule lets an answer change of a started item, in
+ * the answer's form or in the decoded draft's.
+ */
+interface StartedItemRule {
+  /** The lists that may grow, keeping every entry. */
+  grows: string[];
+  /** What a reattempt item may restate once one of them grows. */
+  restates: string[];
+  /**
+   * Every item of a kind has the same fields, the answer schema's: an
+   * item keeping its kind keeps the answer's field names (a field the
+   * accepted answer lacks is one the schema gained since).
+   */
+  schemaFields: boolean;
+}
+
+/** In the answer, `newPackages` grows owned paths and `oneOutcomeReason` is part of the brief. */
+const ANSWER_RULE: StartedItemRule = {
+  grows: ["ownedPaths", "dependencies", "newPackages"],
+  restates: ["acceptance", "brief", "nonGoals", "oneOutcomeReason"],
+  schemaFields: true,
+};
+const DRAFT_RULE: StartedItemRule = {
+  grows: ["ownedPaths", "dependencies"],
+  restates: ["acceptance", "brief", "nonGoals"],
+  schemaFields: false,
+};
+
+/**
+ * Started item `old` as the started-item rule lets `next` change it: every
+ * field as `old` has it, except that each list in `rule.grows` keeps all of
+ * `old`'s entries and takes the ones `next` adds, and, when `restates` (a
+ * reattempt item) and one of those lists grew, `rule.restates` come from
+ * `next`; with `rule.schemaFields`, an item keeping its kind has `next`'s
+ * field names. The field list comes from the items themselves, so a field
+ * either form gains is covered. `fields`: what `next` said that was set
+ * back, compared as `view` shows them (a grown list only when `next`
+ * dropped an entry, not for its order).
+ */
+function restoreItem<T extends object>(
+  old: T,
+  next: T,
+  rule: StartedItemRule,
+  restates: boolean,
+  view: (item: T) => object,
+): { item: T; fields: string[] } {
+  const before = old as Record<string, unknown>;
+  const after = next as Record<string, unknown>;
+  const item = structuredClone(before);
+  let grew = false;
+  for (const field of rule.grows) {
+    const kept = before[field];
+    const given = after[field];
+    if (!Array.isArray(kept) || !Array.isArray(given)) continue;
+    const added = given.filter((entry) => !kept.includes(entry));
+    item[field] = [...kept, ...added];
+    grew ||= added.length > 0;
+  }
+  if (restates && grew)
+    for (const field of rule.restates)
+      if (Object.hasOwn(after, field))
+        item[field] = structuredClone(after[field]);
+      else delete item[field];
+  if (rule.schemaFields && before.kind === after.kind) {
+    for (const field of Object.keys(item))
+      if (!Object.hasOwn(after, field)) delete item[field];
+    for (const field of Object.keys(after))
+      if (!Object.hasOwn(before, field))
+        item[field] = structuredClone(after[field]);
+  }
+  const said = view(next) as Record<string, unknown>;
+  const now = view(item as T) as Record<string, unknown>;
+  const fields = [...new Set([...Object.keys(said), ...Object.keys(now)])]
+    .filter((field) => {
+      const given = said[field];
+      const kept = now[field];
+      if (
+        rule.grows.includes(field) &&
+        Array.isArray(given) &&
+        Array.isArray(kept)
+      )
+        return !kept.every((entry) => given.includes(entry));
+      return !isDeepStrictEqual(given, kept);
+    })
+    .sort();
+  return { item: item as T, fields };
+}
+
+/**
+ * The amendment's items with each started one set back to the plan being
+ * amended as far as the started-item rule allows (`restoreItem`), in the
+ * answer's form or the draft's (`current` the same form), and what was set
+ * back. A started item `items` lacks stays missing, and one that isn't a
+ * reattempt item keeps the entries it added: the fence sends both back to
+ * the planner, as Factory can't decide where that work goes.
+ */
+function restoreStarted<T extends object>(
+  current: readonly T[],
+  items: readonly T[],
+  progress: AmendmentProgress,
+  rule: StartedItemRule,
+  view: (item: T) => object = (item) => item,
+): { items: T[]; restored: RestoredFields[] } {
+  const idOf = (item: T) => (isObject(item) ? item.id : undefined);
+  const restored: RestoredFields[] = [];
+  const kept = items.map((next) => {
+    const id = idOf(next);
+    const old = current.find((entry) => idOf(entry) === id);
+    if (typeof id !== "string" || !old || !progress.started.has(id))
+      return next;
+    const { item, fields } = restoreItem(
+      old,
+      next,
+      rule,
+      progress.reattempt.has(id),
+      view,
+    );
+    if (fields.length) restored.push({ itemId: id, fields });
+    return item;
+  });
+  return { items: kept, restored };
+}
+
+/**
+ * A planner's full answer with its started items set back against
+ * `accepted`, the answer the plan being amended decodes from
+ * (`restoreStarted`). Unchanged when there is no such answer or either
+ * lacks an item list: decoding reports a broken one.
+ */
+function restoreAnswer(
+  answer: unknown,
+  accepted: unknown,
+  progress: AmendmentProgress,
+): { answer: unknown; restored: RestoredFields[] } {
+  const items = (value: unknown) =>
+    isObject(value) && Array.isArray(value.items) ? value.items : undefined;
+  const current = items(accepted);
+  const next = items(answer);
+  if (!current || !next) return { answer, restored: [] };
+  // A broken entry stays as it is, for decoding to report.
+  const kept = restoreStarted(
+    current.filter(isObject),
+    next as Record<string, unknown>[],
+    progress,
+    ANSWER_RULE,
+  );
+  return {
+    answer: { ...(answer as object), items: kept.items },
+    restored: kept.restored,
+  };
+}
+
+/** Two lists of restored fields as one, by item. */
+function joinRestored(
+  ...lists: (RestoredFields[] | undefined)[]
+): RestoredFields[] {
+  const byItem = new Map<string, Set<string>>();
+  for (const { itemId, fields } of lists.flatMap((list) => list ?? []))
+    for (const field of fields)
+      byItem.set(itemId, (byItem.get(itemId) ?? new Set()).add(field));
+  return [...byItem].map(([itemId, fields]) => ({
+    itemId,
+    fields: [...fields].sort(),
+  }));
+}
+
+/** Restored fields as the planner reads them: `a (goal, title); b (brief)`. */
+function restoredText(restored: RestoredFields[]): string {
+  return restored
+    .map(({ itemId, fields }) => `${itemId} (${fields.join(", ")})`)
+    .join("; ");
+}
+
 const obligationKey = (entry: {
   source: unknown;
   statement?: string;
@@ -744,8 +946,10 @@ const obligationKey = (entry: {
 
 /**
  * The amendment fence: what an amended draft must keep of the current plan.
- * `answered` is true when the operator answered a planner question about
- * this amendment.
+ * A plan round's draft reaches it with its started items set back
+ * (`restoreStarted`), so it finds what that can't settle; at acceptance it
+ * also finds an item that started since. `answered` is true when the
+ * operator answered a planner question about this amendment.
  */
 export function amendmentFindings(
   current: Plan,
@@ -883,7 +1087,7 @@ function amendmentRules(
 export function startedItemRule(progress: AmendmentProgress): string {
   const ids = (set: Set<string>) =>
     set.size ? [...set].map((id) => JSON.stringify(id)).join(", ") : "none";
-  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry, and only when one of them grows may its acceptance, brief and non-goals be restated to match; its validation and every other field stay. Never relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory refuses an amendment that changes a started item otherwise and sends it back to the planner.`;
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry, and only when one of them grows may its acceptance, brief and non-goals be restated to match; its validation and every other field stay. Never relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
 }
 
 /**
@@ -1022,6 +1226,14 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
             ]
           : []),
         ...(last?.findings ?? []),
+        ...(last?.restored?.length
+          ? [
+              {
+                source: "check" as const,
+                message: `Factory set these fields of started Work Items back to the plan being amended, as the started-item rule keeps them: ${restoredText(last.restored)}. Keep them as that plan has them.`,
+              },
+            ]
+          : []),
         ...(invalidBefore
           ? [{ source: "check" as const, message: invalidBefore }]
           : []),
@@ -1124,9 +1336,18 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const revised = whole
         ? { answer: taken.value, findings: [] }
         : applyRevision(base, taken.value, facts, wire);
+      // The answer with its started items set back as far as the
+      // started-item rule allows, against the accepted plan's own answer;
+      // a plan with none is set back in its decoded draft only.
+      const restoredAnswer = restoreAnswer(
+        revised.answer,
+        currentAnswer(state),
+        progress,
+      );
+      const full = restoredAnswer.answer;
       const reject = (findings: Finding[]): Outcome =>
         done({
-          answer: revised.answer,
+          answer: full,
           rejected: findings.map((f) => f.message).join("; "),
         } satisfies AmendRound);
       // An invalid answer gets one retry with its error; a second in a
@@ -1146,11 +1367,15 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
             ])
           : invalidAnswer(key, findings);
       };
-      const revise = (full: unknown, findings: Finding[]): Outcome =>
-        sendBack(state, proposal, full, findings, reject);
+      const revise = (
+        answer: unknown,
+        findings: Finding[],
+        restored?: RestoredFields[],
+      ): Outcome =>
+        sendBack(state, proposal, answer, findings, reject, false, restored);
       if (revised.invalidShape) return invalid(revised.findings);
-      if (!revised.answer) return revise(base, revised.findings);
-      const decoded = decodePlan(revised.answer, facts, wire);
+      if (!full) return revise(base, revised.findings);
+      const decoded = decodePlan(full, facts, wire);
       if (decoded.invalidShape) return invalid(decoded.findings);
       if (decoded.cannot) {
         context.log({
@@ -1184,22 +1409,48 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
             "cancel",
           ],
         );
-      if (!decoded.plan) return revise(revised.answer, decoded.findings);
-      // Started work or settled coverage touched (the fence) is the
-      // planner's to restore, like the checks' findings: both go back.
+      if (!decoded.plan)
+        return revise(full, decoded.findings, restoredAnswer.restored);
+      // The draft set back too: a plan with no answer of its own, or a
+      // field the answer's form decodes differently.
+      const kept = restoreStarted(
+        plan.items,
+        decoded.plan.items,
+        progress,
+        DRAFT_RULE,
+        normalized,
+      );
+      const draft: Draft = { ...decoded.plan, items: kept.items };
+      const restored = joinRestored(restoredAnswer.restored, kept.restored);
+      // An answer the draft was set back beyond no longer decodes to it,
+      // and would show the next round, or the next amendment once this
+      // one is accepted, a started item as the planner changed it: the
+      // round keeps none, so they answer in full with the plan as it stands.
+      const saved = kept.restored.length ? undefined : full;
+      if (restored.length)
+        context.log({
+          event: "amendment-restored",
+          amendment: proposal.id,
+          round,
+          restored,
+        });
+      // What the fence still finds (a started item removed, or grown
+      // though it isn't a reattempt item; settled coverage touched) is the
+      // planner's to fix, like the checks' findings: both go back.
       const findings = [
         ...decoded.findings,
-        ...(await checkPlan(decoded.plan, facts, files, plan)),
-        ...amendmentFindings(plan, decoded.plan, progress, {
+        ...(await checkPlan(draft, facts, files, plan)),
+        ...amendmentFindings(plan, draft, progress, {
           answered: answered.length > 0,
           nativeStack: config.delivery.kind === "native-stack",
         }),
       ];
-      if (findings.length) return revise(revised.answer, findings);
+      if (findings.length) return revise(saved, findings, restored);
       return done({
-        answer: revised.answer,
-        draft: decoded.plan,
+        ...(saved === undefined ? {} : { answer: saved }),
+        draft,
         round,
+        ...(restored.length ? { restored } : {}),
       } satisfies AmendRound);
     },
   };
@@ -1213,7 +1464,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
  * asks past it), and planned again at once. An operator decision, or the
  * previous round's findings again, goes to `reject` instead.
  * `atAcceptance`: acceptance sends a reviewed round back, so the next
- * round is reviewed again (`reviewOf`).
+ * round is reviewed again (`reviewOf`). `restored`: the started items'
+ * fields Factory set back in the round, kept with it for the next round.
  */
 function sendBack(
   state: ObjectiveState,
@@ -1222,6 +1474,7 @@ function sendBack(
   findings: Finding[],
   reject: (findings: Finding[]) => Outcome,
   atAcceptance = false,
+  restored?: RestoredFields[],
 ): Outcome {
   const revisions = revisionsOf(state, proposal.id);
   const last = revisions.at(-1);
@@ -1246,6 +1499,7 @@ function sendBack(
         {
           answer,
           findings,
+          ...(restored?.length ? { restored } : {}),
           ...(atAcceptance ? { atAcceptance: true as const } : {}),
         } satisfies AmendRevision,
       ],
@@ -1377,6 +1631,9 @@ function amendReviewStep(
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
           startedItemRule: startedItemRule(progress),
+          // What Factory set back of the planner's answer: the draft holds
+          // those fields as previousPlan has them.
+          ...(round.restored?.length ? { restoredFields: round.restored } : {}),
         },
         cited: await citedFiles(config.checkout, proposal, inputs.base, signal),
       });
@@ -1451,6 +1708,8 @@ function amendReviewStep(
             round: round.round,
             rejected: `Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
           } satisfies AmendReview),
+        false,
+        round.restored,
       );
     },
   };
@@ -1502,6 +1761,7 @@ function amendAcceptStep(
               rejected: `The build moved on while the amendment was planned: ${findings.map((f) => f.message).join("; ")}`,
             } satisfies AmendmentResult),
           true,
+          round.restored,
         );
       const inputs = amendmentInputs(state);
       // The paths it adds are owned from now: they rank after every plan

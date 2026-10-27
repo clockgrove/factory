@@ -560,12 +560,14 @@ export function readRunFile(
  * numbered after their last line, which a torn last line doesn't swallow;
  * a file that already has one is left alone.
  * Only the given issues are looked at: the Objectives this start loaded.
+ * `crashPoint` is the crash point a test killed that run at, if it did.
  */
 export function endCrashedRun(
   dir: string,
   runId: string,
   issues: Iterable<number>,
   detectedBy: string,
+  crashPoint?: string,
 ): void {
   for (const issue of new Set([0, ...issues])) {
     const path = join(dir, String(issue), `${runId}.jsonl`);
@@ -587,6 +589,7 @@ export function endCrashedRun(
             event: "run-end",
             outcome: "crashed" satisfies RunEnd,
             detectedBy,
+            ...(crashPoint ? { crashPoint } : {}),
           },
         )}\n`,
       );

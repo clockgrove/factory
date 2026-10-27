@@ -208,9 +208,16 @@ test("a kept result's question is answered revalidate by the engine only where i
  * twice), with a real checkout: the refused result sits on its base, and
  * the diagnosis's model and the worker are fakes that record their calls.
  * The worker never finishes, unless `work` says what it does: reaching it
- * is where a repair starts.
+ * is where a repair starts. The item worktree is added at the kept base
+ * when the step runs, unless `holding`: then it is kept from the refused
+ * attempt and holds the refused change (uncommitted on the base, as a
+ * resubmitted result leaves it).
  */
-function servedWork(finding, answers = [], { perPath = 1, work } = {}) {
+function servedWork(
+  finding,
+  answers = [],
+  { perPath = 1, work, holding = false } = {},
+) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   const saved = process.env.FACTORY_CONFIG;
@@ -274,6 +281,13 @@ function servedWork(finding, answers = [], { perPath = 1, work } = {}) {
     },
   };
   const dir = tempDir("factory-served-");
+  if (holding) {
+    // workDir(9)/9/a (worktree.ts `worktreePath`).
+    const at = join(dir, "work", "9", "9", "a");
+    mkdirSync(join(at, ".."), { recursive: true });
+    git("worktree", "add", "--quiet", "--detach", at, base);
+    writeFileSync(join(at, "src", "a.js"), "export const a = 2;\n");
+  }
   const inner = objectiveWorkflow({
     config,
     github: {
@@ -634,6 +648,86 @@ test("past the rereview allowance, a worker that made no change after the operat
   );
   assert.match(asked.question, /I changed nothing\./);
   assert.ok(asked.options.some((option) => option.answer === "revalidate"));
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+});
+
+/** A worker whose checkout holds the refused change and that changes nothing. */
+const leaves = async (input) => {
+  assert.equal(
+    readFileSync(join(input.worktree, "src", "a.js"), "utf8"),
+    "export const a = 2;\n",
+    "the kept checkout holds the refused change",
+  );
+  return { kind: "finished", finalResponse: "Kept the change as it is." };
+};
+
+/** A worker that removes the refused change from a checkout that held it. */
+const reverts = async (input) => {
+  assert.equal(
+    readFileSync(join(input.worktree, "src", "a.js"), "utf8"),
+    "export const a = 2;\n",
+    "the kept checkout holds the refused change",
+  );
+  writeFileSync(join(input.worktree, "src", "a.js"), "export const a = 1;\n");
+  return {
+    kind: "finished",
+    finalResponse: "Removed my change to src/a.js, as the operator said.",
+  };
+};
+
+// In a checkout that held the refused change, an empty change is the
+// worker removing it: that is a change, not the worker keeping its result.
+// It was taken for "made no change", and the refused result the worker
+// dropped was checked again (and could be delivered) as a rereview.
+test("a worker that removes its refused change after the operator's guidance is refused, not taken as keeping it", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: reverts,
+    holding: true,
+  });
+  const { runner, prompts } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", "Drop your change to src/a.js.");
+  await served.run(
+    "the work step",
+    () =>
+      runner.state.done["item:a:work"] ||
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  assert.equal(prompts.length, 1);
+  assert.equal(runner.state.done["item:a:work"], undefined);
+  assert.equal(runner.state.holds.length, 0);
+  assert.equal(runner.state.repairs["item:a:work"].count, 3);
+  assert.match(
+    runner.state.repairs["item:a:work"].findings.at(-1),
+    /^Worker produced no repository change/,
+  );
+  assert.equal(runner.state.kept["allowances:rereviews"], undefined);
+});
+
+// The same kept checkout, left as it was: the refused result resubmitted.
+test("a worker that leaves its kept checkout as it was after the operator's guidance is checked again as a rereview", async () => {
+  const served = servedWork(failedChecks, operatorQuestion, {
+    perPath: 5,
+    work: leaves,
+    holding: true,
+  });
+  const { runner, prompts, commit } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "answer", KEEP);
+  await served.run(
+    "the work step",
+    () =>
+      runner.state.done["item:a:work"] ||
+      (runner.state.holds.length > 0 &&
+        runner.state.holds[0].id !== diagnosis.id) ||
+      runner.state.repairs["item:a:work"].count > 2,
+  );
+  assert.equal(prompts.length, 1);
+  assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");
+  assert.equal(runner.state.done["item:a:work"]?.commit, commit);
   assert.equal(runner.state.kept["allowances:rereviews"], 1);
 });
 

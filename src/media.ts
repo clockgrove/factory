@@ -69,7 +69,7 @@ import {
   secretSearch,
   sha256,
 } from "./git.js";
-import type { CommitAuthor } from "./github.js";
+import { type CommitAuthor, rateLimitOf } from "./github.js";
 import { namesPath, validPath } from "./objective.js";
 import {
   ContainedError,
@@ -530,10 +530,14 @@ async function attachmentSource(
       url = next.href;
       continue;
     }
-    if (response.status === 429 || response.status >= 500)
+    // A rate limit (a 429, or a 403 that says it is one) passes: retry.
+    if (
+      response.status >= 500 ||
+      rateLimitOf(response.status, response.headers, undefined)
+    )
       return {
         kind: "retry",
-        reason: `Downloading ${path}: HTTP ${response.status}`,
+        reason: `Downloading ${path}: HTTP ${response.status}${response.status < 500 ? " (GitHub's rate limit)" : ""}`,
       };
     if (!response.ok || !response.body)
       return refused(`could not be downloaded (HTTP ${response.status})`);

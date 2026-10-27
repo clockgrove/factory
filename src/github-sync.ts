@@ -1064,7 +1064,9 @@ export class GitHubSync {
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;
-    if (this.jobs.pending(`status:${issue}`)) return;
+    // Running or backing off; once a failed one's backoff ends it runs
+    // again (`pending` stays true until it succeeds, so it can't gate this).
+    if (this.jobs.held(`status:${issue}`)) return;
     this.statusTried.set(issue, now);
     this.background(
       issue,
@@ -1155,7 +1157,7 @@ export class GitHubSync {
     if (
       module.statusWithdrawn ||
       module.statusGivenUp ||
-      this.jobs.pending(`status:${issue}`)
+      this.jobs.held(`status:${issue}`)
     )
       return;
     this.background(
@@ -1211,7 +1213,8 @@ export class GitHubSync {
    * The Work Item issues (tracking.ts): projected from the plan in force
    * and each item's state by a background job, at most once per
    * STATUS_EVERY_MS while the Objective runs and at once when it has
-   * finished, and only when a write is due. A finished Objective settles
+   * finished, and only when a write is due; a pass that failed runs again
+   * once its backoff ends. A finished Objective settles
    * only once every item issue shows its end and is closed, or GitHub
    * refused that issue's close (it is never counted closed).
    */
@@ -1231,7 +1234,7 @@ export class GitHubSync {
       now - (this.trackTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS
     )
       return;
-    if (this.jobs.pending(`track:${issue}`) || !trackingDue(state)) return;
+    if (this.jobs.held(`track:${issue}`) || !trackingDue(state)) return;
     this.trackTried.set(issue, now);
     this.background(
       issue,

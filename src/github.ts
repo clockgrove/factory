@@ -132,7 +132,7 @@ const answers = new WeakMap<
   }
 >();
 /** How long GitHub may lag behind what Factory made (`GitHub.made`). */
-const FRESH_MS = 2 * 60_000;
+export const FRESH_MS = 2 * 60_000;
 /** How long a 403 without rate-limit headers, or a refused push, retries before it asks. */
 export const REFUSED_MS = 2 * 60_000;
 /**
@@ -1063,34 +1063,88 @@ export class GitHub {
   }
 
   /**
-   * Issues numbered after the newest one the repository's issue list shows,
-   * read by number until GitHub has none yet (at most `max`): the list can
-   * lag a create by seconds, and a read by number doesn't (#1991). Pull
-   * requests share the numbering and are left out.
+   * The number of the newest issue or pull request the repository's issue
+   * list shows (0 for none). The list can lag a create, so the newest may
+   * be past it; an issue created after this read is numbered above it.
    */
-  async issuesPastList(
-    signal?: AbortSignal,
-    max = 20,
-  ): Promise<IssueSummary[]> {
+  async newestIssueNumber(signal?: AbortSignal): Promise<number> {
     const [newest] = await this.rest<{ number: number }[]>(
       "GET",
       `/repos/${this.repository}/issues?state=all&sort=created&direction=desc&per_page=1`,
       undefined,
       signal,
     );
-    const found: IssueSummary[] = [];
-    for (let at = 1; at <= max; at++) {
+    return newest?.number ?? 0;
+  }
+
+  /** The issue numbered `number`, read by number; undefined when GitHub has none there, or it is a pull request. */
+  async issueByNumber(
+    number: number,
+    signal?: AbortSignal,
+  ): Promise<IssueSummary | undefined> {
+    let issue: IssueSummary & { pull_request?: unknown };
+    try {
+      issue = await this.rest(
+        "GET",
+        `/repos/${this.repository}/issues/${number}`,
+        undefined,
+        signal,
+      );
+    } catch (error) {
+      if (issueGone(error)) return undefined;
+      throw error;
+    }
+    return issue.pull_request === undefined ? issue : undefined;
+  }
+
+  /**
+   * The newest issues the repository's issue list shows (at most `max`),
+   * and those numbered after the newest of them, read by number until
+   * GitHub has none yet (at most `max`): the list can lag a create by
+   * seconds, and a read by number doesn't (#1991). The listed ones are
+   * returned too, because the list of all issues can show a create that
+   * the list of Factory's own (`issuesByLabel`) doesn't yet (#2081). With
+   * `after` below that newest (the newest number seen before a create
+   * whose answer was lost), the issues numbered past `after` up to it that
+   * aren't listed are read by number too, a gap there being a deleted
+   * issue, not the end. Pull requests share the numbering and are left out.
+   */
+  async issuesPastList(
+    signal?: AbortSignal,
+    max = 20,
+    after?: number,
+  ): Promise<IssueSummary[]> {
+    const listed = await this.rest<
+      (IssueSummary & { pull_request?: unknown })[]
+    >(
+      "GET",
+      `/repos/${this.repository}/issues?state=all&sort=created&direction=desc&per_page=${max}`,
+      undefined,
+      signal,
+    );
+    const newest = Math.max(0, ...listed.map((issue) => issue.number));
+    const shown = new Set(listed.map((issue) => issue.number));
+    const found: IssueSummary[] = listed.filter(
+      (issue) => issue.pull_request === undefined,
+    );
+    for (
+      let number = Math.min(newest, after ?? newest) + 1;
+      number <= newest + max;
+      number++
+    ) {
+      if (shown.has(number)) continue;
       let issue: IssueSummary & { pull_request?: unknown };
       try {
         issue = await this.rest(
           "GET",
-          `/repos/${this.repository}/issues/${(newest?.number ?? 0) + at}`,
+          `/repos/${this.repository}/issues/${number}`,
           undefined,
           signal,
         );
       } catch (error) {
-        if (issueGone(error)) break;
-        throw error;
+        if (!issueGone(error)) throw error;
+        if (number > newest) break;
+        continue;
       }
       if (issue.pull_request === undefined) found.push(issue);
     }

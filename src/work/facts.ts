@@ -104,6 +104,14 @@ export interface ItemFacts {
   checkFailures: string[];
   /** The latest rerun of failed Actions jobs on the item's PR (delivery.ts `rerunFailed`), so none is rerun twice. */
   ciRerun: CiRerun;
+  /**
+   * The work commit the operator's `revalidate` checks again: while it is
+   * the item's result, its CI and merge steps judge failed checks as on
+   * the operator's `retry` (step-deliver.ts `pullInput`), so a PR the
+   * default branch failed, and now passes, is brought up to date with it
+   * instead of repaired.
+   */
+  rereviewed: string;
 }
 
 /** What the Objective's own steps keep, by name. */

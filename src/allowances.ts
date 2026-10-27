@@ -205,6 +205,15 @@ export function grantRereviews(state: ObjectiveState): void {
   state.kept[GRANTED] = grants;
 }
 
+/**
+ * What a question that offers `revalidate` says of it: the engine writes it
+ * where it offers the answer (engine.ts `hold`), so the two never disagree.
+ */
+export function rereviewNote(state: ObjectiveState): string {
+  const { used, allowed } = resultRereviews(state);
+  return `If the refused result is correct and the check that refused it was at fault (for example, a check that could not see files the result has, or a failed check the default branch fails too), answer \`revalidate\`: Factory checks the same result again without running the worker. A coding item's result is validated, reviewed and delivered again, unchanged, and a PR whose failed checks the default branch now passes is brought up to date with it; a QA item is validated and reviewed again on the default branch as it is now. It isn't a repair: it is a result rereview, and this Objective has used ${used} of ${allowed} (autonomy.allowances.resultRereviews).`;
+}
+
 /** The question a `revalidate` past the allowance asks instead. */
 export function rereviewQuestion(state: ObjectiveState, key: string): string {
   const { allowed } = resultRereviews(state);

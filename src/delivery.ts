@@ -40,6 +40,7 @@ import {
   type PullRequest,
   REFUSED_MS,
   type Stack,
+  type StepTimes,
   TransientError,
   Unreadable,
 } from "./github.js";
@@ -72,6 +73,11 @@ const LISTED_CHECKS = 10;
 const EXCERPTED_CHECKS = 3;
 const LOG_TAIL_LINES = 40;
 const LOG_TAIL_CHARS = 3000;
+/** The end of each failed step's own log a finding holds, in place of the job's tail. */
+const STEP_LOG_LINES = 60;
+const STEP_LOG_CHARS = 4000;
+/** Failed steps of one job whose own log goes into the finding. */
+const EXCERPTED_STEPS = 2;
 /** A default branch's pass this long before a PR's failure may no longer hold. */
 const BASE_STALE_MS = 24 * 60 * MINUTE;
 /** A failed run's artifacts a finding reads, smallest first, and their download's bound. */
@@ -796,7 +802,10 @@ export interface PullInput {
   baseBranch?: string;
   /** The item's last rerun of failed Actions jobs, as kept. */
   rerun?: CiRerun;
-  /** The operator answered retry to this step's question. */
+  /**
+   * The operator answered retry to this step's question, or `revalidate`
+   * to the item's (a result rereview of the delivered result).
+   */
   retried?: boolean;
   /**
    * The operator answered REPAIR_SHARED to this step's question: failed
@@ -1797,9 +1806,12 @@ function bounded(items: string[], separator: string): string {
 
 /**
  * A failed check run's failure annotations and, for an Actions job, the
- * steps that failed and the tail of its log. Best effort: undefined when
- * GitHub shows none of them (no access, logs expired), and the finding
- * then names the check only.
+ * steps that failed and the end of each one's own log (stepLog), else the
+ * tail of the job's log. The job's tail is mostly the steps that run after
+ * a failure (artifact uploads, post-job cleanup), so the failed step's
+ * error, earlier in the log, never reached the diagnosis (#2120). Best
+ * effort: undefined when GitHub shows none of them (no access, logs
+ * expired), and the finding then names the check only.
  */
 async function failureExcerpt(
   context: DeliveryContext,
@@ -1809,11 +1821,13 @@ async function failureExcerpt(
   const tolerate = (error: unknown) => {
     if (context.signal.aborted) throw error;
   };
+  let steps: StepTimes[] = [];
   if (check.app?.slug === "github-actions")
     try {
       const job = await context.github.workflowJob(check.id, context.signal);
       if (job?.failedSteps.length)
         parts.push(`Failed step: ${job.failedSteps.join(", ")}`);
+      steps = job?.failedStepTimes ?? [];
     } catch (error) {
       tolerate(error);
     }
@@ -1827,23 +1841,70 @@ async function failureExcerpt(
   if (check.app?.slug === "github-actions")
     try {
       // An Actions check run's id is its job's id.
-      const log = await context.github.jobLogTail(check.id, context.signal);
-      if (log)
+      const read = await context.github.jobLogTail(check.id, context.signal);
+      // Colour codes would spend the bound without saying anything.
+      const log = read?.replace(ANSI_ESCAPE, "").trimEnd();
+      if (log) {
+        const own = steps.slice(0, EXCERPTED_STEPS).flatMap((step) => {
+          const section = stepLog(log, step);
+          return section
+            ? [`Log of failed step ${step.name}:\n${section}`]
+            : [];
+        });
         parts.push(
-          log
-            // Colour codes would spend the bound without saying anything.
-            .replace(ANSI_ESCAPE, "")
-            .trimEnd()
-            .split("\n")
-            .slice(-LOG_TAIL_LINES)
-            .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, ""))
-            .join("\n")
-            .slice(-LOG_TAIL_CHARS),
+          ...(own.length
+            ? own
+            : [
+                log
+                  .split("\n")
+                  .slice(-LOG_TAIL_LINES)
+                  .map(untimed)
+                  .join("\n")
+                  .slice(-LOG_TAIL_CHARS),
+              ]),
         );
+      }
     } catch (error) {
       tolerate(error);
     }
   return parts.length ? redact(parts.join("\n")) : undefined;
+}
+
+/** A job log line's leading timestamp, as Actions writes it. */
+const LOG_TIME = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) /;
+
+/** A job log line without its timestamp. */
+function untimed(line: string): string {
+  return line.replace(LOG_TIME, "");
+}
+
+/**
+ * The end of failed step `step`'s own lines in a job's log, by the time
+ * each line was written (a line without one has its line before's): from
+ * the second GitHub says it started to the end of the second it says it
+ * completed (GitHub reports them to the second), up to the step's last
+ * `##[error]` line there, since the next step may start within that
+ * second. Undefined when the log holds none of it (no timestamps, or the
+ * tail read starts after the step).
+ */
+export function stepLog(log: string, step: StepTimes): string | undefined {
+  const from = Date.parse(step.startedAt);
+  const to = Date.parse(step.completedAt) + 1000;
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return undefined;
+  let at = Number.NaN;
+  const lines: string[] = [];
+  for (const line of log.split("\n")) {
+    const time = LOG_TIME.exec(line)?.[1];
+    // Actions writes 7 fraction digits; a millisecond is precise enough.
+    if (time) at = Date.parse(time.replace(/(\.\d{3})\d+Z$/, "$1Z"));
+    if (at >= from && at < to) lines.push(line);
+  }
+  const own = lines.map(untimed);
+  let end = own.length;
+  while (end > 0 && !own[end - 1]!.startsWith("##[error]")) end -= 1;
+  if (end > 0) own.length = end;
+  if (!own.some((line) => line.trim())) return undefined;
+  return own.slice(-STEP_LOG_LINES).join("\n").slice(-STEP_LOG_CHARS);
 }
 
 /**

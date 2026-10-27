@@ -185,12 +185,23 @@ export async function workStep(
         ),
         keepBase,
       );
+    // Delivery judges its failed checks as on the operator's `retry`
+    // (step-deliver.ts `pullInput`): the default branch may have been
+    // what failed them.
     return {
       kind: "done",
       result: refused,
       keep: {
         ...keepBase,
-        ...facts({ finished: null, finding: null, refused: null }, item.id),
+        ...facts(
+          {
+            finished: null,
+            finding: null,
+            refused: null,
+            rereviewed: refused.commit,
+          },
+          item.id,
+        ),
       },
     };
   }

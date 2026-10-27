@@ -181,6 +181,11 @@ export function pullInput(
   const published = state.done[stepKey(item.id, "publish")] as PublishResult;
   const branch = baseBranch(state.issue, place);
   const rerun = fact(state, "ciRerun", item.id);
+  // A result rereview (`revalidate`) of this result says the check was at
+  // fault, as the operator's `retry` here does.
+  const work = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
+  const rereviewed =
+    work !== undefined && fact(state, "rereviewed", item.id) === work.commit;
   return {
     issue: state.issue,
     item: item.id,
@@ -191,7 +196,9 @@ export function pullInput(
       (c) => c.checkName,
     ),
     ...(context.answer?.answer === REPUBLISH ? { republish: true } : {}),
-    ...(context.answer?.answer === "retry" ? { retried: true } : {}),
+    ...(context.answer?.answer === "retry" || rereviewed
+      ? { retried: true }
+      : {}),
     ...(context.answer?.answer === REPAIR_SHARED ? { repairShared: true } : {}),
     ...(branch ? { baseBranch: branch } : {}),
     ...(rerun ? { rerun } : {}),

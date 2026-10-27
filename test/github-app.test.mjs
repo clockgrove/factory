@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -1032,6 +1033,21 @@ test("a configuration naming no GitHub identity, as before 0.5.2, is blocked on 
   assert.match(operators.detail, /holds notify nobody/);
   assert.equal((await setup(...app)).status, "refused");
   assert.deepEqual(saved(), { login: true });
+
+  // Once the Objective is finished, the App replaces the login.
+  mkdirSync(join(inst.root, "objectives", "finished"));
+  renameSync(
+    join(inst.root, "objectives", "5.json"),
+    join(inst.root, "objectives", "finished", "5.json"),
+  );
+  const adopted = await setup(...app);
+  assert.notEqual(adopted.status, "refused", JSON.stringify(adopted.problems));
+  assert.deepEqual([...adopted.changed].sort(), [
+    "FACTORY_GITHUB_APP_KEY",
+    "github.app.id",
+    "github.login",
+  ]);
+  assert.deepEqual(saved(), { app: { id: 42 } });
 });
 
 test("setup takes one GitHub identity: --github-login with an App option is refused, both keys by hand don't load, and --github-login drops the App", async () => {

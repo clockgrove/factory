@@ -43,7 +43,7 @@ Decide on its JSON:
 
 ## Register Factory's GitHub App
 
-Factory acts on GitHub as its own GitHub App, and registering it is the required preflight step: walk the operator through it first, before anything about the repository's configuration. Skip it only for a configuration that already names the App, or when the operator says to keep the GitHub CLI's login (below).
+Factory acts on GitHub as its own GitHub App, and registering it is the required preflight step: walk the operator through it first, before anything about the repository's configuration. Skip it only for a configuration that already names the App or the login (`github.app` or `github.login` in it), or when the operator says to keep the GitHub CLI's login (below).
 
 1. **Link:** `factory setup --repo OWNER/NAME --github-app-link --json` (it needs no configuration). Give the operator `link`: it registers a private App with every permission Factory needs prefilled, in the organization's settings when OWNER is an organization and in their own otherwise. `next` says the rest.
 2. **Register:** they open the link and create the App, keeping the prefilled permissions.

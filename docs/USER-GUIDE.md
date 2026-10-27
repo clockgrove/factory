@@ -43,7 +43,7 @@ You need Linux x64 (WSL2 works), Node.js 22.13 or later, Git and Git LFS, bubble
    - the sandbox;
    - the tools on the PATH, and the `factory` launcher still linking to an installed release;
    - each provider's SDK and login;
-   - Factory's GitHub App: its key, its installation and its permissions; a configuration with no App is blocked;
+   - Factory's GitHub App: its key, its installation and its permissions; a configuration that names neither the App nor `--github-login` is blocked;
    - GitHub access and push;
    - merge commits, required checks, required reviews, required review thread resolution, and a recommendation to require branches to be up to date;
    - which installation serves the repository, if any.

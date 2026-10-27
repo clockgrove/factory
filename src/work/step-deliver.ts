@@ -551,7 +551,9 @@ export function movedLayer(
  * it comes from the select step (the operator's `repair`, or the selected
  * set couldn't be written), from publish's own Git LFS check (`media`), or
  * a refused review criterion cites a selected destination or the candidate
- * receipt.
+ * receipt. A selection that stands here still goes when the repair's
+ * diagnosed correction names one of its destinations (work step,
+ * `correctedSet`).
  *
  * Every cleared work result (the item's and each layer's above) is kept
  * as the `refused` fact, so a rebase never drops the change.
@@ -703,6 +705,21 @@ export function aboutMedia(
     cited.has(receiptPath(item.id)) ||
     set.members.some((m) => cited.has(m.destination))
   );
+}
+
+/**
+ * The kept set whose member a diagnosed correction is to change: `path`,
+ * the file the diagnosis names (structured, never prose), is one of its
+ * destinations. A worker never writes a destination (Factory writes the
+ * chosen set there), so such a correction is about the media: the set no
+ * longer stands, and the attempt makes new candidates.
+ */
+export function correctedSet(
+  path: string | undefined,
+  sets: readonly CandidateSet[],
+): CandidateSet | undefined {
+  if (path === undefined) return undefined;
+  return sets.find((set) => set.members.some((m) => m.destination === path));
 }
 
 /**

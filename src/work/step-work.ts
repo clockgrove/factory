@@ -45,7 +45,7 @@ import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import { itemMemory } from "./shared.js";
-import { repairOutcome } from "./step-deliver.js";
+import { correctedSet, repairOutcome } from "./step-deliver.js";
 import { refusalDecisions } from "./step-review.js";
 import {
   type BuildDeps,
@@ -272,6 +272,27 @@ export async function workStep(
         ? repair.outcome
         : { ...repair.outcome, keep: { ...keepAll, ...repair.outcome.keep } };
     keepAll = { ...keepAll, ...(repair?.keep ?? {}) };
+    // The correction is to a member of the kept selection (or of the kept
+    // candidates), which the worker can't change: that set no longer
+    // stands, so this attempt makes new candidates with the correction and
+    // the operator chooses again.
+    const path = repair?.path;
+    const corrected = correctedSet(
+      path,
+      own ? [own.selection.set] : (candidates ?? []),
+    );
+    const remade =
+      corrected && path
+        ? { set: corrected.id, path, chosen: own !== undefined }
+        : undefined;
+    if (remade) {
+      own = undefined;
+      candidates = undefined;
+      keepAll = {
+        ...keepAll,
+        ...facts({ selection: null, candidates: null }, item.id),
+      };
+    }
     // A kept selection whose private copies are gone can't be written
     // again: this attempt makes new candidates and the operator chooses.
     if (own && (await missingMember(own.selection.set))) {
@@ -362,6 +383,7 @@ export async function workStep(
               },
             }
           : {}),
+      ...(remade ? { remadeSet: remade } : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
       ...(memory ? { memory } : {}),
       ...(instructions ? { profileInstructions: instructions } : {}),

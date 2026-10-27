@@ -27,7 +27,13 @@ import { BaseFiles } from "../dist/planning/facts.js";
 import { repairPath } from "../dist/repair.js";
 import { validateTree } from "../dist/validate.js";
 import { collect, FACTORY_EMAIL } from "../dist/work/collect.js";
-import { aboutMedia, repairOutcome } from "../dist/work/step-deliver.js";
+import { prepareWorkPrompt } from "../dist/work/prompt.js";
+import { repairContext } from "../dist/work/repair-context.js";
+import {
+  aboutMedia,
+  correctedSet,
+  repairOutcome,
+} from "../dist/work/step-deliver.js";
 import { configured, installation, REPO, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
@@ -439,6 +445,90 @@ test("a repair keeps captured candidate sets unless it is about them, comes from
     kept("work", "Start again.", { fresh: true }),
   ])
     assert.equal(keep[key], null);
+});
+
+// The 0.5.3 qualifier: the chosen cube's GLB failed the item's own test
+// (NUL padding in its JSON chunk), the diagnosis named the GLB, and the
+// repair worker, told the choice stood and the GLB was read-only, could
+// only propose an amendment, which held for the operator.
+test("a diagnosed correction to a kept set's member drops that set, and the worker makes new candidates with it", async () => {
+  const media = item(["assets/badge/", "test/"]);
+  const set = candidateSet(tempDir("factory-set-"), [
+    "assets/badge/a.png",
+    "assets/badge/b.png",
+  ]);
+  assert.equal(correctedSet("assets/badge/b.png", [set]), set);
+  for (const path of [undefined, "test/badge.test.js", "assets/badge/"])
+    assert.equal(correctedSet(path, [set]), undefined, String(path));
+
+  // The diagnosis saved for this repair is reused with the file it names.
+  const applied = {
+    source: "diagnosis",
+    failure: "npm test failed",
+    diagnosis: "The GLB's JSON chunk is padded with NUL bytes.",
+    path: "assets/badge/a.png",
+    correction: "Pad the JSON chunk with spaces.",
+  };
+  const state = {
+    issue: 7,
+    done: {},
+    holds: [],
+    repairs: { "item:badge:work": { count: 2, findings: ["npm test failed"] } },
+    kept: {
+      "item:badge:diagnosis": {
+        repair: 2,
+        context: { finding: "npm test failed" },
+        applied: [applied],
+      },
+    },
+  };
+  const reused = await repairContext(
+    media,
+    { state, signal: AbortSignal.timeout(10_000), log: () => {} },
+    {},
+    "base",
+    { kind: "failure", detail: "npm test failed" },
+    { items: [media] },
+  );
+  assert.equal(reused?.path, "assets/badge/a.png");
+  assert.equal(correctedSet(reused.path, [set]), set);
+
+  // The worker is told to stage new sets with the correction, not that the
+  // choice stands.
+  const target = checkout();
+  const prompt = async (fields) => {
+    const prepared = await prepareWorkPrompt({
+      checkout: target.directory,
+      worktree: target.directory,
+      objective: 7,
+      objectiveBody: "",
+      plan: { items: [media], coverage: [], finalCommands: [], decisions: [] },
+      item: media,
+      base: target.commit,
+      fixedScripts: [],
+      repair: { finding: "npm test failed" },
+      ...fields,
+    });
+    assert.equal(prepared.problem, undefined);
+    return prepared.prompt;
+  };
+  const remade = await prompt({
+    remadeSet: { set: "candidate-a", path: "assets/badge/a.png", chosen: true },
+  });
+  assert.ok(
+    remade.includes(
+      "Media: the diagnosed correction is to assets/badge/a.png, a member of candidate set candidate-a, which the operator chose for this item. You can't change a destination (Factory writes the chosen set there), so set candidate-a no longer stands and neither does that choice: make the required correction in new candidate sets, staged from scratch as follows, never at assets/badge/a.png itself. The operator chooses from the new sets.",
+    ),
+  );
+  assert.ok(
+    remade.includes("Produce at least 1 complete candidate AssetSets."),
+  );
+  assert.ok(!remade.includes("that choice stands for this repair"));
+  const kept = await prompt({
+    keptSelection: { set: "candidate-a", destinations: ["assets/badge/a.png"] },
+  });
+  assert.ok(kept.includes("that choice stands for this repair"));
+  assert.ok(!kept.includes("the diagnosed correction is to"));
 });
 
 // Destinations are Factory's: the work step restores them to the base

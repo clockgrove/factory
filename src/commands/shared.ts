@@ -19,7 +19,12 @@ import { providerNamed, Refusal, serviceLive } from "../host.js";
 import type { Paths } from "../paths.js";
 import type { Planner } from "../providers/planner.js";
 import { providerPlanner } from "../providers/selection.js";
-import { type Request, type RequestResult, writeRequest } from "../requests.js";
+import {
+  AS_LIMIT,
+  type Request,
+  type RequestResult,
+  writeRequest,
+} from "../requests.js";
 import { findState, type ObjectiveState } from "../state.js";
 import { errorMessage } from "../text.js";
 import { objectiveWorkflow } from "../workflow.js";
@@ -86,8 +91,31 @@ export function issueNumber(
   return url ? { issue, repository: url[1]! } : { issue };
 }
 
-export async function request(paths: Paths, body: Request): Promise<number> {
-  const result = await sent(paths, body);
+/**
+ * Who gives a CLI request on its user's behalf: `as` (`factory answer
+ * --as`), else FACTORY_ANSWERED_AS; one line of at most AS_LIMIT
+ * characters. Recorded beside `by` (requests.ts `StoredRequest.as`).
+ */
+export function answeredAs(as?: string): string | undefined {
+  const flag = as !== undefined;
+  const value = (as ?? process.env.FACTORY_ANSWERED_AS)?.trim();
+  if (value === undefined || (!flag && value === "")) return undefined;
+  const name = flag ? "--as" : "FACTORY_ANSWERED_AS";
+  if (!value) throw usage(`${name} needs a name, such as "Claude Code"`);
+  if (value.length > AS_LIMIT)
+    throw usage(`${name} is over ${AS_LIMIT} characters`);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  if (/[\u0000-\u001f\u007f]/.test(value))
+    throw usage(`${name} must be one line of text`);
+  return value;
+}
+
+export async function request(
+  paths: Paths,
+  body: Request,
+  as?: string,
+): Promise<number> {
+  const result = await sent(paths, body, as);
   if (!result) return 0;
   // A reset answers with what its rebuild found; each refusal of it has a
   // code, which `sent` threw.
@@ -112,9 +140,19 @@ export async function request(paths: Paths, body: Request): Promise<number> {
 export async function sent(
   paths: Paths,
   body: Request,
+  /** `--as`; without it, FACTORY_ANSWERED_AS (`answeredAs`). */
+  as?: string,
 ): Promise<RequestResult | undefined> {
   const by = process.env.USER ?? "operator";
-  const id = writeRequest(paths.requests, body, by);
+  const behalf = answeredAs(as);
+  const id = writeRequest(
+    paths.requests,
+    body,
+    by,
+    undefined,
+    undefined,
+    behalf ? { as: behalf } : {},
+  );
   if (!(await serviceLive(paths))) {
     process.stdout.write(
       "The service isn't running; the request will apply when it starts.\n",

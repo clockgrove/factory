@@ -1,6 +1,6 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
-import { displayTime } from "./display.js";
+import { answeredBy, displayTime } from "./display.js";
 import {
   CANCEL_CLEANUP,
   DEADLINE,
@@ -48,7 +48,9 @@ import {
 } from "./requests.js";
 import { resetting, statusRecordOf } from "./reset.js";
 import type {
+  ClosedHold,
   Hold,
+  HoldClosing,
   ObjectiveState,
   ObjectiveStatus,
   QueueControl,
@@ -60,6 +62,7 @@ import {
   runOf,
   sinceRun,
   TERMINAL,
+  unshownClosings,
 } from "./state.js";
 import { type ObjectiveView, statusOf } from "./status.js";
 import { errorMessage } from "./text.js";
@@ -136,6 +139,8 @@ export interface UncheckedComment {
   login: string;
   body: string;
   createdAt: string;
+  /** Its URL on GitHub: an answer's closed question links it. */
+  url?: string;
   failures: number;
   nextAt: string;
 }
@@ -554,6 +559,7 @@ export class GitHubSync {
         if (!module) return;
         this.show(runner, module, sync);
         this.ask(runner);
+        this.closings(runner);
         this.status(runner, sync);
         this.track(runner);
         this.reply(runner, module, sync);
@@ -657,6 +663,7 @@ export class GitHubSync {
     return (
       finalShown(state, this.config) &&
       !unreplied(state, module).length &&
+      !unshownClosings(state).length &&
       (!this.config.progress.enabled ||
         ((module.statusGivenUp === true ||
           module.status?.shown === state.status) &&
@@ -1045,6 +1052,7 @@ export class GitHubSync {
               hold.id,
               comment.updated_at ?? comment.created_at,
               !bound,
+              comment.html_url,
             ),
           );
         },
@@ -1076,6 +1084,72 @@ export class GitHubSync {
     this.compact.set(issue, compact);
     this.log.write(issue, {
       event: "question-compacted",
+      hold,
+      failures,
+      error: errorMessage(error),
+    });
+  }
+
+  /**
+   * Edit each closed question's comment in place to show how it closed
+   * (`closedComment`): its heading no longer says Factory needs you, it
+   * names the answer, who gave it and how, or why it closed without one,
+   * and it mentions no one, so GitHub notifies nobody of the edit. Only a
+   * comment Factory posted is edited (found by its marker), never posted:
+   * a question closed before its comment was shown has none. The job
+   * shares its question's key, so it never races the question's own post
+   * or edit. A refusal writes it compact, as a question's comment; one
+   * refused compact too is given up, and logged.
+   */
+  private closings(runner: ObjectiveRunner): void {
+    const issue = runner.state.issue;
+    for (const closed of unshownClosings(runner.state))
+      this.background(
+        issue,
+        `ask:${issue}:${closed.id}`,
+        async (signal) => {
+          const marker = mark(issue, "hold", closed.id);
+          await this.github.editComment(
+            issue,
+            marker,
+            closedComment(marker, closed, {
+              issue,
+              secrets: this.config.secrets,
+              compact: this.compact.get(issue)?.has(closed.id) === true,
+            }),
+            "sync:closed",
+            signal,
+            new Date(Date.parse(closed.askedAt) - CLOCK_SKEW_MS).toISOString(),
+          );
+          runner.transact(() => runner.closingShown(closed.id));
+        },
+        true,
+        (error) => this.closingFailed(runner, closed.id, error),
+      );
+  }
+
+  /** A closed question's edit failed: written compact, then given up (`closings`). */
+  private closingFailed(
+    runner: ObjectiveRunner,
+    hold: string,
+    error: unknown,
+  ): void {
+    const issue = runner.state.issue;
+    if (!this.compact.get(issue)?.has(hold)) {
+      this.compactAsk(issue, hold, error);
+      return;
+    }
+    if (error instanceof TransientError) return;
+    const key = `ask:${issue}:${hold}`;
+    const failures = (this.failures.get(key) ?? 0) + 1;
+    this.failures.set(key, failures);
+    const refused =
+      error instanceof GitHubError && error.status >= 400 && error.status < 500;
+    if (!refused && failures < GIVE_UP_AFTER) return;
+    this.failures.delete(key);
+    runner.transact(() => runner.closingShown(hold));
+    this.log.write(issue, {
+      event: "closed-question-given-up",
       hold,
       failures,
       error: errorMessage(error),
@@ -1599,6 +1673,7 @@ export class GitHubSync {
           login: comment.user.login,
           body: comment.body.trim().slice(0, 20_000),
           createdAt: comment.created_at,
+          ...(comment.html_url ? { url: comment.html_url } : {}),
           failures: 0,
           nextAt: new Date(now).toISOString(),
         });
@@ -1676,6 +1751,7 @@ export class GitHubSync {
         comment.login,
         `comment-${comment.id}`,
         "github",
+        comment.url ? { url: comment.url } : {},
       );
   }
 
@@ -1880,6 +1956,110 @@ export function questionComment(
   operators: readonly string[],
 ): string {
   return `${marker}\n${opening}\n\nReply with one of:\n${answers}\n\nAdd text after the answer to explain it.${notes}${mentions(operators)}`;
+}
+
+/** The most of an answer's text a closed question's comment quotes. */
+const GUIDANCE_LIMIT = 500;
+
+/**
+ * A closed question's comment (github-sync `closings`): the closing in
+ * place of "Factory needs you" or "Factory stopped" (`closingLine`), the
+ * question as it was asked, redacted, escaped and cut as its question
+ * comment was (`shownQuestion`, compact when that comment was), and the
+ * answers it offered. It mentions no one.
+ */
+export function closedComment(
+  marker: string,
+  closed: ClosedHold,
+  options: { issue: number; secrets: readonly string[]; compact?: boolean },
+): string {
+  const { issue, secrets } = options;
+  // Its summary (kept whole) once the question is gone: cut the same way,
+  // after redaction.
+  const question = shownQuestion(
+    closed.question ?? closed.summary,
+    secrets,
+    issue,
+    options.compact ? COMPACT_LIMIT : QUESTION_LIMIT,
+  );
+  const item = closed.item ? ` of Work Item ${code(closed.item)}` : "";
+  const about =
+    closed.cause === "failure"
+      ? `Step ${code(closed.step)}${item} had failed, and asked:`
+      : `It asked${closed.item ? ` about Work Item ${code(closed.item)}` : ""}:`;
+  const offered = closed.options?.length
+    ? `\n\nIts answers were ${closed.options.map((option) => code(answerForm(option))).join(", ")}.`
+    : "";
+  return `${marker}\n${closingLine(closed.closed, secrets)}\n\n${about}\n\n${question}${offered}\n\nNothing waits on this question now; ${code(`factory status ${issue}`)} shows what Factory is doing.`;
+}
+
+/**
+ * How a question closed, as its comment's first paragraph: the answer
+ * with its argument, who gave it (a comment's author by login in a code
+ * span, so no one is mentioned; a CLI answer as "the operator", never the
+ * host's user name; with `as` when someone answered on their behalf), how
+ * (a link to the `/factory` comment, or the CLI), when, and a short,
+ * redacted excerpt of its text. A question closed without an answer says
+ * why instead.
+ */
+export function closingLine(
+  closing: HoldClosing,
+  secrets: readonly string[],
+): string {
+  const at = ` at ${code(displayTime(closing.at))}`;
+  const who = answeredBy(closing, secrets);
+  const without = (why: string) => `**Closed without an answer:** ${why}${at}.`;
+  switch (closing.how) {
+    case "answered": {
+      const answer = [closing.answer ?? "", closing.arg]
+        .filter((part) => part !== undefined && part !== "")
+        .join(" ");
+      const text = closing.text
+        ? `\n\n> ${guidance(closing.text, secrets)}`
+        : "";
+      return `**Answered** ${code(`/factory ${answer}`)} by ${who}${at}.${text}`;
+    }
+    case "cancelled":
+      return without(
+        closing.by === DEADLINE
+          ? "the Objective's deadline passed, and Factory cancelled it"
+          : `${who} cancelled the Objective`,
+      );
+    case "superseded":
+      return without(
+        `Factory asked a newer question in its place${closing.next ? ` (${code(closing.next)})` : ""}`,
+      );
+    case "reset":
+      return without(
+        `${code("factory reset")} rebuilt this Objective's state, which no longer asks it`,
+      );
+    case "cleared":
+      return without("a repair cleared the work it asked about");
+    case "replanned":
+      return without("a replan cleared the work it asked about");
+    case "gate-cleared":
+      return without("what it waited on was done, so Factory went on");
+    case "moved-on":
+      return without(
+        "its step stopped waiting on what it asked about for another reason, so it no longer applies",
+      );
+    case "asked-again":
+      return without(
+        "the configuration changed again after it was asked, so Factory asks again with the changes as they are now",
+      );
+    case "declined":
+      return without(
+        `${who} declined the discovery it asked about (${code("factory decline-discovery")})`,
+      );
+  }
+}
+
+/** An answer's text as one quoted line: redacted, escaped, then cut to GUIDANCE_LIMIT. */
+function guidance(text: string, secrets: readonly string[]): string {
+  const line = prose(redact(text, secrets).replace(/\s+/g, " ").trim());
+  if (line.length <= GUIDANCE_LIMIT) return line;
+  const cut = entitySafe(line, GUIDANCE_LIMIT - 1, "end");
+  return `${line.slice(0, cut)}… (the run log keeps the rest)`;
 }
 
 /**

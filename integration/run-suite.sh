@@ -190,7 +190,7 @@ required_checks() {
   case $1 in
     codex) echo 'model-kill.plan model-kill.work happy.codex stack.predecessor-wait stack.strict security.fixes-keyword' ;;
     claude) echo 'happy.claude queue.run-command' ;;
-    holds) echo 'holds.ask holds.answer-comment holds.more queue.cancel-held' ;;
+    holds) echo 'holds.ask holds.answer-comment holds.answered-comment holds.more queue.cancel-held' ;;
     queue) echo queue.withdraw ;;
     cancel) echo 'fault.lasting-403 fault.lag-404 queue.cancel-open-pr' ;;
     media) echo media.select-repair ;;

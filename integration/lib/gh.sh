@@ -122,6 +122,14 @@ c=collections.Counter()
 for line in sys.argv[1].splitlines(): c.update(json.loads(line))
 for marker,count in sorted(c.items()): print(marker,count)' "$counts"
 }
+# The body of issue N's comment that starts with Factory's marker for KIND:ID ("hold:<id>"); empty when none.
+gh_marked_body() {
+  local data; data=$(gh api "repos/$REPO/issues/$1/comments?per_page=100" --paginate --slurp) || return 1
+  python3 -c 'import json,sys
+for page in json.load(sys.stdin):
+    for comment in page:
+        if comment["body"].startswith(sys.argv[1]): print(comment["body"]); sys.exit(0)' "<!-- factory:$1:$2 -->" <<<"$data"
+}
 marker_count() { awk -v m="$2" '$1==m{print $2; f=1} END{if(!f) print 0}' <<<"$1"; }
 marker_prefix_count() { awk -v m="$2" 'index($1,m)==1{s+=$2} END{print s+0}' <<<"$1"; }
 marker_dupes() { awk '$2>1{printf "%s x%s ", $1, $2}' <<<"$1"; }

@@ -1,4 +1,33 @@
 import { type LogEvent, redact } from "./log.js";
+import { code, prose } from "./markdown.js";
+import type { HoldClosing } from "./state.js";
+
+/**
+ * Who answered or cancelled a question, for a GitHub comment: a
+ * `/factory` comment's author by login in a code span (so no one is
+ * mentioned) with a link to the comment, a CLI request as "the operator"
+ * (never the host's user name), Factory itself, or the operator; with
+ * `as`, redacted and escaped, when someone gave it on their behalf.
+ */
+export function answeredBy(
+  closing: Pick<HoldClosing, "by" | "as" | "channel" | "comment">,
+  secrets: readonly string[],
+): string {
+  const as = closing.as ? ` (as ${prose(redact(closing.as, secrets))})` : "";
+  switch (closing.channel) {
+    case "comment": {
+      const link =
+        closing.comment && /^https:\/\/[^\s()<>]+$/.test(closing.comment)
+          ? `[a \`/factory\` comment](${closing.comment})`
+          : "a `/factory` comment";
+      return `${closing.by ? code(closing.by) : "someone"}${as} in ${link}`;
+    }
+    case "factory":
+      return "Factory itself";
+    default:
+      return `the operator${as}${closing.channel === "cli" ? " from the CLI" : ""}`;
+  }
+}
 
 /**
  * Times for people: `YYYY-MM-DD HH:MM:SS ZONE` in the host's zone, or in

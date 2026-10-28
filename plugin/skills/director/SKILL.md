@@ -26,11 +26,11 @@ factory log ISSUE [--tail N] [--follow] [--json] # what happened, from the run l
 factory diagnostics ISSUE [--summary] [--logs ITEM] [--json] # timeline, model calls, repairs and holds
 factory watch [ISSUE]                           # follow running Work Items live
 factory export-captures ISSUE [--endpoint URL]  # preview model calls as OpenTelemetry spans; sends nothing
-factory answer ISSUE ANSWER [ARG] --question HOLD_ID [--text T | --text-file ABSOLUTE_PATH]
-factory retry ISSUE [--question HOLD_ID]         # run unheld waiting steps now; with --question, answer retry
+factory answer ISSUE ANSWER [ARG] --question HOLD_ID [--text T | --text-file ABSOLUTE_PATH] [--as NAME]
+factory retry ISSUE [--question HOLD_ID] [--as NAME] # run unheld waiting steps now; with --question, answer retry
 factory propose-amendment ISSUE --file ABSOLUTE_PATH # add work the accepted plan lacks (see Steer)
-factory decline-discovery ISSUE --item ITEM --reason TEXT # decline a worker's pending discovery
-factory cancel ISSUE
+factory decline-discovery ISSUE --item ITEM --reason TEXT [--as NAME] # decline a worker's pending discovery
+factory cancel ISSUE [--as NAME]
 factory pause|drain|resume ISSUE                # this Objective only
 factory reset ISSUE                             # rebuild state from GitHub
 factory queue list|pause|resume|drain [--json]  # the whole queue
@@ -94,7 +94,7 @@ An Objective can have several holds at once: at most one per Work Item and one f
 1. Read `holds` from `status ISSUE --json`. Each option is `{answer, family, arg?, consequence, needsText?, recommended?}`, and exactly one is `recommended`. Explain an answer only with its `consequence`; never from memory.
 2. Ask with AskUserQuestion, one question per hold (several in one call when there are several holds): the hold's `question` as the text, naming its Work Item when `item` is set. Each option is one choice: label `answer` plus `arg` when set (`switch claude`), the recommended one first and labelled recommended, and `consequence` as its description. Keep free text available. Without a structured question tool, ask in plain text the same way.
 3. **More than 4 options.** AskUserQuestion takes at most 4, so ask in two steps. First ask for the family: one choice per distinct `family`, in the order the options first appear (the recommended option's family first), each described by its options' answers. Then ask for the specific option within the chosen family; a family with one option needs no second question. A family with more than 4 options (one per set id, say) offers its first 4, recommended first, and names the rest in the question text; the operator can type one of them as free text.
-4. For each hold, run `factory answer ISSUE ANSWER [ARG] --question HOLD_ID` with that hold's own id, passing the option's `arg` as ARG when it has one (never inside `--text`). For `retry`, `factory retry ISSUE --question HOLD_ID` does the same. When the option has `needsText`, ask the operator for the text and pass it with `--text`, or a long one with `--text-file` (the question says what goes in it); text on any other answer is optional and recorded as the reason. Always pass `--question`: an answer bound to an id lands only on that question, and a re-asked question gets a new id. `accept <n>`, `refuse <n>` and `retire-command <n>` name their criterion or command by number as ARG, and need the operator's reason as text.
+4. For each hold, run `factory answer ISSUE ANSWER [ARG] --question HOLD_ID` with that hold's own id, passing the option's `arg` as ARG when it has one (never inside `--text`). For `retry`, `factory retry ISSUE --question HOLD_ID` does the same. When the option has `needsText`, ask the operator for the text and pass it with `--text`, or a long one with `--text-file` (the question says what goes in it); text on any other answer is optional and recorded as the reason. Always pass `--question`: an answer bound to an id lands only on that question, and a re-asked question gets a new id. `accept <n>`, `refuse <n>` and `retire-command <n>` name their criterion or command by number as ARG, and need the operator's reason as text. When the operator chose the answer, it is theirs: pass no `--as`. When you choose it yourself because the operator asked you to operate Factory for them, add `--as` with your name (`--as "Claude Code"`, or the Codex equivalent) to `factory answer` or `factory retry`, so the question's comment, status and the report show that an agent answered on their behalf. `factory cancel` and `factory decline-discovery` take `--as` the same way.
 5. Read `status` again and report the new state. A hold that is re-asked has a new id, so ask again rather than reuse the old one.
 
 ## Refusals

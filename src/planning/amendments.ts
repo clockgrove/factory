@@ -21,6 +21,8 @@ import {
   currentPlan,
   grantsKey,
   amendmentKey as KEY,
+  answeredPlan,
+  operatorAnswers,
   ownedSince,
   proposalKey,
   proposalsOf,
@@ -1493,7 +1495,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, !whole)}${await commandInstructions(facts, config.checkout, signal)}`,
         // No planner answer to revise: the plan as Factory holds it.
         ...(whole
-          ? { planInForce: currentPlan(state) }
+          ? { planInForce: answeredPlan(currentPlan(state)) }
           : { currentPlan: base }),
         amendment: {
           rules: amendmentRules(whole, Boolean(last), progress, last?.refused),
@@ -1866,7 +1868,7 @@ function amendReviewStep(
           rejected: `${said}${built.problems.join("; ")}`,
         } satisfies AmendReview);
       const { facts } = built;
-      const all = decisions(state);
+      const all = operatorAnswers(decisions(state));
       const local = await localExecutables(inputs, config, signal);
       const previousPlan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, previousPlan, proposal);
@@ -1879,7 +1881,7 @@ function amendReviewStep(
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
-          previousPlan,
+          previousPlan: answeredPlan(previousPlan),
           // The rule the fence holds the graph to: a fix finding asks for
           // nothing it refuses.
           startedItemIds: [...progress.started],

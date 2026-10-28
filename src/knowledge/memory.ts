@@ -15,7 +15,7 @@
  */
 import { BaseFiles } from "../planning/facts.js";
 import { pathsOverlap } from "../planning/graph.js";
-import { currentPlan, decisionsOf } from "../planning/plan.js";
+import { currentPlan, decisionsOf, operatorAnswers } from "../planning/plan.js";
 import type { ObjectiveState } from "../state.js";
 import { answersOf, runOf, TERMINAL } from "../state.js";
 import { mergeOf } from "../work/merged.js";
@@ -371,7 +371,10 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
       digests: {},
     });
   }
-  for (const decision of plan?.decisions ?? [])
+  // This Objective's own decision records reach its planning, workers,
+  // repair diagnosis and reviews as human decisions (`queryMemory`), so a
+  // `more`, which only granted rounds, isn't one (`operatorAnswers`).
+  for (const decision of operatorAnswers(plan?.decisions ?? []))
     records.push({
       kind: "decision",
       objective,

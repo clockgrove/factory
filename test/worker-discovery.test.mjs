@@ -19,13 +19,16 @@ import {
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
+import { observedRecords } from "../dist/knowledge/memory.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
   continuation,
   VALIDATE_REQUEST,
   validateRequest,
 } from "../dist/providers/claude-worker.js";
+import { operatorAnswers } from "../dist/planning/plan.js";
 import { correction } from "../dist/repair.js";
+import { newObjective } from "../dist/state.js";
 import { discoveryOutcome } from "../dist/work/amend.js";
 import { collect } from "../dist/work/collect.js";
 import { prepareWorkPrompt } from "../dist/work/prompt.js";
@@ -725,6 +728,80 @@ test("the worker prompt sends a file outside the owned paths to the discovery, a
     "Validation runs on the uncommitted result, so your tests check files, never HEAD, the index or a commit of the result. If a command can't pass on any correct result, because it is malformed or needs the result committed, don't work around it in your tests: propose its replacement in .factory-discovery.json",
   ])
     assert.ok(prepared.prompt.includes(text), text);
+});
+
+// #2147: the operator's planning decisions as plan steps save them in that
+// run (Codex, main media.select-repair). Its plan review's unresolved
+// finding asked for the asset item to own the delivered files' test; the
+// operator's `more` only granted rounds, and the plan accepted after them
+// kept the test with its own item. A worker given that `more` as a human
+// decision took the finding for its requirement and proposed moving the
+// test into its item.
+const STALE =
+  "make the asset item own and validate the test that checks the delivered files";
+const MORE = {
+  question: `The plan still has 1 problem after 3 rounds, past the 2 autonomy.allowances.planningRevisions allows:\n\n1. Unresolved: this item's validation still only checks the Git LFS attributes. Add validation that checks those asset properties locally, or ${STALE}.\n\n\`more\` allows 2 more rounds.`,
+  answer: "more",
+  by: "kirk",
+  at: "2026-01-01T00:00:30.000Z",
+};
+const ANSWERED = {
+  question: "Which two colours should the candidate sets use?",
+  answer: "answer",
+  text: "Green and purple.",
+  by: "kirk",
+  at: "2026-01-01T00:00:20.000Z",
+};
+
+test("the worker prompt gives the operator's planning answers, never a `more`, whose question lists findings the accepted plan settled (#2147)", async () => {
+  const { worktree, base } = personsMain();
+  const validated = { ...work, validation: [required] };
+  const prepared = await prepareWorkPrompt({
+    checkout: worktree,
+    worktree,
+    objective: 7,
+    objectiveBody: "",
+    plan: plan([validated, qa], { base, decisions: [ANSWERED, MORE] }),
+    item: validated,
+    base,
+    fixedScripts: [],
+  });
+  assert.equal(prepared.problem, undefined);
+  assert.ok(
+    prepared.prompt.includes(
+      `Controller-bound human planning decision context: ${JSON.stringify([ANSWERED])}`,
+    ),
+  );
+  assert.ok(!prepared.prompt.includes(STALE));
+});
+
+test("operatorAnswers keeps every planning decision but a `more` (#2147)", () => {
+  const approve = { ...ANSWERED, answer: "approve", text: undefined };
+  assert.deepEqual(operatorAnswers([MORE, ANSWERED, approve, MORE]), [
+    ANSWERED,
+    approve,
+  ]);
+  assert.deepEqual(operatorAnswers([]), []);
+});
+
+test("this Objective's repository memory records the operator's planning answers as human decisions, never a `more` (#2147)", async () => {
+  // queryMemory gives an Objective's own decision records to its planning,
+  // workers, repair diagnosis and reviews.
+  const state = newObjective(7, new Date("2026-01-01T00:00:00.000Z"));
+  state.status = "working";
+  state.done.plan = plan([item("a", { ownedPaths: ["src/a.js"] })], {
+    decisions: [ANSWERED, MORE],
+  });
+  const records = await observedRecords(
+    { repository: REPO, checkout: tempDir("factory-memory-") },
+    state,
+    false,
+  );
+  const decided = records.filter((record) => record.kind === "decision");
+  assert.equal(decided.length, 1, JSON.stringify(decided));
+  assert.equal(decided[0].authority, "human-decision");
+  assert.ok(decided[0].body.includes(ANSWERED.text));
+  assert.ok(!JSON.stringify(records).includes(STALE));
 });
 
 test("a failed Validate run, the request to validate and a turn-limit continuation after a failed run send a fix outside the owned paths to the discovery, and a media item's say a failure for its absent selected set is neither (#2116)", async () => {

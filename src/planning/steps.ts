@@ -49,6 +49,7 @@ import {
   amendmentRevisions,
   currentPlan,
   generationInputs,
+  operatorAnswers,
   position,
 } from "./plan.js";
 import {
@@ -596,7 +597,7 @@ function reviewStep(
       const { facts } = built;
       // A refusal has no draft: its review judges the planner's cannotPlan.
       const { draft, cannot } = state.done[`plan:${g}:${n}`] as PlanRound;
-      const all = decisions(state);
+      const all = operatorAnswers(decisions(state));
       const local = await localExecutables(inputs, config, signal);
       const evidence = planningReviewEvidence({
         sources: facts.sources,
@@ -665,7 +666,9 @@ function reviewStep(
                     {
                       draft: last.draft,
                       findings: last.findings,
-                      decisions: decisionsBefore(state, g, last.round),
+                      decisions: operatorAnswers(
+                        decisionsBefore(state, g, last.round),
+                      ),
                     },
                     { draft: draft!, decisions: all },
                   ),

@@ -6,7 +6,7 @@ import type { AmendmentProposal, AmendmentResult } from "./amendments.js";
 import { namedBase } from "./facts.js";
 import { ownsPath } from "./graph.js";
 import type { ObjectiveInputs } from "./steps.js";
-import type { Plan, WorkItem } from "./types.js";
+import type { Plan, PlannerDecision, WorkItem } from "./types.js";
 
 /*
  * The one reader of the accepted plan. The plan step saves it at
@@ -92,6 +92,27 @@ export function decisionsOf(state: ObjectiveState): CriterionDecision[] {
   ]
     .filter((entry) => entry.plan === accepted)
     .sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/**
+ * The operator's planning decisions a model is given (a worker, a plan,
+ * amendment or result review): all but a `more`. A `more` only grants
+ * planning rounds past the allowance and decides nothing, but it is saved
+ * against the question it answered, which lists the problems open then, and
+ * the rounds after it settled those before the plan was accepted. Given as
+ * a decision, it reads as a person's requirement the accepted plan doesn't
+ * hold (#2147: a worker took one such finding for its item's requirement
+ * and proposed moving a peer's test into it). The plan keeps every decision.
+ */
+export function operatorAnswers(
+  decisions: readonly PlannerDecision[],
+): PlannerDecision[] {
+  return decisions.filter((decision) => decision.answer !== "more");
+}
+
+/** A plan as a model is given it whole: its decisions `operatorAnswers`'. */
+export function answeredPlan(plan: Plan | undefined): Plan | undefined {
+  return plan && { ...plan, decisions: operatorAnswers(plan.decisions) };
 }
 
 /**

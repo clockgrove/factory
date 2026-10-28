@@ -458,7 +458,7 @@ const OFF_VALIDATION_NETWORK =
  */
 function lockfileNote(resolves: boolean): string {
   return resolves
-    ? "a worker edits package.json dependencies and pnpm-workspace.yaml overrides/catalogs only, never the lockfile, and no one supplies one: when the install refuses the lockfile as out of date, Factory resolves it itself (pnpm install --lockfile-only or npm install --package-lock-only, scripts off, under the repository's registry and release-age policy) and commits it on the item's result; other workspace settings, such as build approvals, stay the operator's"
+    ? "a worker edits package.json dependencies and pnpm-workspace.yaml overrides/catalogs only, never the lockfile, and no one supplies one: when the install refuses the lockfile as out of date, Factory resolves it itself (pnpm install --lockfile-only or npm install --package-lock-only, scripts off, under the repository's registry and release-age policy) and commits it on the item's result; a requested version the registry has never published goes back to the worker to fix, while one the release-age policy or the registry refuses holds for the operator; other workspace settings, such as build approvals, stay the operator's"
     : "no worker or validation command can resolve a new lockfile, and with sandbox.network off neither can Factory: a change to package.json dependencies whose lockfile is out of date holds for the operator";
 }
 

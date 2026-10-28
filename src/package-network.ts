@@ -652,6 +652,55 @@ async function workspaceRefusal(
 }
 
 /**
+ * Why `commit`'s package-manager configuration is not the base's, or
+ * undefined when it is: .npmrc and the pnpmfiles byte for byte,
+ * pnpm-workspace.yaml's settings (workspaceRefusal) and the package manager
+ * package.json pins (packageManager, devEngines). Factory's lockfile
+ * resolution and its metadata lookup (validate.ts, missing-version.ts) read
+ * these in the candidate's checkout; this is how Factory knows they are the
+ * base's whatever the network setting. Unreadable is a refusal.
+ */
+export async function configurationRefusal(
+  worktree: string,
+  base: string,
+  commit: string,
+  signal?: AbortSignal,
+): Promise<NetworkRefusal | undefined> {
+  try {
+    if (await changed(worktree, base, commit, CONFIGURATION, signal))
+      return {
+        reason:
+          "its package-manager configuration (.npmrc, pnpm-workspace.yaml, pnpmfiles) differs from the base",
+      };
+    if (await changed(worktree, base, commit, [WORKSPACE], signal)) {
+      const refused = await workspaceRefusal(worktree, base, commit, signal);
+      if (refused) return refused;
+    }
+    const pins = async (revision: string) => {
+      const text = await file(worktree, revision, "package.json", signal);
+      if (text === undefined) return {};
+      const manifest = JSON.parse(text) as Record<string, unknown>;
+      return {
+        packageManager: manifest.packageManager,
+        devEngines: manifest.devEngines,
+      };
+    };
+    if (!isDeepStrictEqual(await pins(base), await pins(commit)))
+      return {
+        reason: "package.json changes its packageManager or devEngines",
+      };
+    return undefined;
+  } catch (error) {
+    if (error instanceof GitRefusal) throw error;
+    signal?.throwIfAborted();
+    return {
+      reason: `Factory could not read its package configuration: ${(error as Error).message}`,
+      unverified: true,
+    };
+  }
+}
+
+/**
  * Why a verified install of `commit` may not reach the network, judged
  * against the attempt's `base`, or undefined when it may: its package
  * inputs unchanged (the fast path; with npm, every package.json is an

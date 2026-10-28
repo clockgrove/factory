@@ -36,7 +36,9 @@ import {
 import {
   type Answer,
   type AnsweredVia,
+  type AnswerPart,
   answerForm,
+  answerList,
   answersOf,
   type Frozen,
   type Hold,
@@ -1755,6 +1757,25 @@ export class ObjectiveRunner {
         "invalid_answer",
         `\`${answer}\` needs text after it, for example \`/factory ${answer} <your text>\`.`,
       );
+    // An answer that gives several of the hold's answers at once: all it
+    // covers, with its text, or the list its text is, checked here so a
+    // list that doesn't fit is refused before the question closes.
+    let parts: AnswerPart[] | undefined;
+    if (option.covers)
+      parts = option.covers.map((covered) => ({
+        answer,
+        arg: covered,
+        ...(note ? { text: note } : {}),
+      }));
+    else if (option.list) {
+      const listed = answerList(note ?? "", hold.options);
+      if (typeof listed === "string")
+        return refused(
+          "invalid_answer",
+          `${listed} So that answer wasn't applied.`,
+        );
+      parts = listed;
+    }
     let frozen: Frozen | undefined;
     if (answer === SWITCH) {
       const provider = option.arg!;
@@ -1814,6 +1835,7 @@ export class ObjectiveRunner {
       answer,
       ...(option.arg !== undefined ? { arg: option.arg } : {}),
       ...(note ? { text: note } : {}),
+      ...(parts ? { parts } : {}),
       ...who,
       ...(via.comment ? { comment: via.comment } : {}),
     });
@@ -1865,6 +1887,7 @@ export class ObjectiveRunner {
           answer: given,
           ...(option.arg !== undefined ? { arg: option.arg } : {}),
           ...(note ? { text: note } : {}),
+          ...(parts ? { parts } : {}),
           ...who,
           at: this.now().toISOString(),
         };

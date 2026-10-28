@@ -1124,6 +1124,20 @@ async function workflowPaths(files: BaseFiles): Promise<string[]> {
 }
 
 /**
+ * The check-run names each workflow file at the commit reports, whatever
+ * triggers it, keyed by its path (".github/workflows/quality.yml", as a
+ * workflow run's `path` names it). Every job counts, a job with `needs:`
+ * too: GitHub creates its check run only once the jobs it needs end, so a
+ * run of the workflow under way may report it later (delivery.ts
+ * `reportingRuns`, #2157).
+ */
+export function workflowFileCheckNames(
+  files: BaseFiles,
+): Promise<Map<string, string[]>> {
+  return checkNamesByFile(files, () => true);
+}
+
+/**
  * The check-run names of the base's workflows whose `on` passes
  * `triggered`, or of workflow file `only` alone.
  */
@@ -1132,6 +1146,20 @@ async function checkNamesOf(
   triggered: (on: unknown) => boolean,
   only?: string,
 ): Promise<string[]> {
+  const names = new Set<string>();
+  for (const listed of (
+    await checkNamesByFile(files, triggered, only)
+  ).values())
+    for (const name of listed) names.add(name);
+  return [...names].sort();
+}
+
+/** `checkNamesOf`, per workflow file that reports any. */
+async function checkNamesByFile(
+  files: BaseFiles,
+  triggered: (on: unknown) => boolean,
+  only?: string,
+): Promise<Map<string, string[]>> {
   const paths = await workflowPaths(files);
   const parsed = new Map<string, unknown>();
   for (const path of paths) {
@@ -1143,11 +1171,12 @@ async function checkNamesOf(
       // GitHub can't run a workflow it can't parse; it reports no checks.
     }
   }
-  const names = new Set<string>();
+  const byFile = new Map<string, string[]>();
   for (const path of paths) {
     if (only !== undefined && path !== only) continue;
     const workflow = parsed.get(path);
     if (!triggered((workflow as { on?: unknown } | null)?.on)) continue;
+    const names = new Set<string>();
     for (const [id, job] of jobsOf(workflow)) {
       if (job.uses === undefined) {
         for (const name of jobNames(id, job)) names.add(name);
@@ -1169,8 +1198,9 @@ async function checkNamesOf(
           for (const name of jobNames(calleeId, callee))
             names.add(`${caller} / ${name}`);
     }
+    if (names.size) byFile.set(path, [...names].sort());
   }
-  return [...names].sort();
+  return byFile;
 }
 
 /** The names in `names` that no known source defines. */

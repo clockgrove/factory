@@ -113,6 +113,8 @@ function stackAnswers(upper, read) {
       return branch === "main" ? ["ci", "deploy"] : [];
     },
     pushTime: async () => new Date().toISOString(),
+    // No workflow run on the head can report a missing check (#2157).
+    workflowRuns: async () => [],
   };
 }
 
@@ -174,7 +176,7 @@ test("a PR on the default branch names that branch as requiring the check", asyn
   assert.equal(waited.kind, "retry", JSON.stringify(waited));
   assert.match(
     waited.holdAfter.question,
-    /^Check "deploy" has no run or status on PR #7's head \S+ 15 minutes after its push at .*, though main's branch protection requires it\. Trigger/,
+    /^Check "deploy" has no run or status on PR #7's head \S+ 15 minutes after its push at .*, though main's branch protection requires it\. No Actions workflow run on this head is of a workflow that defines "deploy" as a job\. Trigger/,
   );
   assert.ok(waited.holdAfter.since);
   assert.deepEqual(read, ["main"]);

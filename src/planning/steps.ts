@@ -1522,6 +1522,9 @@ export async function planningFacts(
     ciOnlyCommands: config.finalValidation.ciOnlyCommands,
     hostNetwork: config.sandbox.network === "host",
     lockfileResolution: config.sandbox.network !== "off",
+    ...(config.validation.formatCommand
+      ? { formatCommand: config.validation.formatCommand }
+      : {}),
     localAssetRoots: config.media.localAssetRoots,
     // No playbook in the target reads as empty. Knowledge adds the pinned
     // Dream playbook, the planning context and memory.

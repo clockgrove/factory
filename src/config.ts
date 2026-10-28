@@ -131,6 +131,15 @@ export interface CoreConfig {
      * validation step's deadline is its commands times this, plus a margin.
      */
     commandTimeoutSeconds: number;
+    /**
+     * The repository's formatter, such as `pnpm exec biome check --write .`
+     * (#2159). Factory runs it on each Work Item's result in the validation
+     * checkout, after the install and before the item's commands, with no
+     * network, and commits what it changed on the result as its own change
+     * (validate.ts `applyFormatter`), so no model formats by hand. Absent
+     * (the default): nothing is formatted. Frozen with an Objective.
+     */
+    formatCommand?: string;
   };
   finalValidation: {
     /** Commands every Objective's result must pass. */
@@ -638,6 +647,7 @@ export function loadConfig(repository: string): CoreConfig {
       }),
       validation: object({
         commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        formatCommand: optional(text()),
       }),
       finalValidation: object({
         requiredCommands: strings,

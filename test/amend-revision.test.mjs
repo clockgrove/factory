@@ -244,8 +244,10 @@ async function step(state, deps, answer, logged = []) {
 
 function depsOf(checkout, planner, posted = []) {
   const work = tempDir("factory-amend-work-");
+  const config = loaded(checkout);
   return {
-    config: loaded(checkout),
+    config,
+    provider: config.providers[config.defaultProvider],
     planner,
     github: {
       upsertComment: async (issue, marker, body) =>

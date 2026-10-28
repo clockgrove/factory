@@ -18,6 +18,7 @@ import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { planMarks, prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
+import type { ProviderConfig } from "../providers/config.js";
 import type { Planner, PlannerAnswer } from "../providers/planner.js";
 import { profileWorker, resolvedProvider } from "../providers/selection.js";
 import {
@@ -85,6 +86,7 @@ import type {
   Plan,
   PlannerDecision,
   PlanningFacts,
+  WorkItem,
 } from "./types.js";
 import {
   applyRevision,
@@ -102,6 +104,11 @@ const MINUTE = 60_000;
 /** What planning needs from the installation. */
 export interface PlanningDeps {
   config: CoreConfig;
+  /**
+   * The Objective's provider's settings (the one this workflow serves): what
+   * its workers can execute, without an execution profile (`workers`).
+   */
+  provider: ProviderConfig;
   github: GitHub;
   planner: Planner;
   /** A private directory for one Objective's working files. */
@@ -263,47 +270,77 @@ function decisionsBefore(
   return decisions(state, (key) => compareKeys(key, `decide:${g}:${m}`) < 0);
 }
 
-/** Workers get a sandboxed shell (docs/DESIGN.md). */
-const WORKERS = { default: "shell" } as const;
-
 /** The execution profile ids the planner is offered: every configured one. */
 const profileIds = (config: CoreConfig): string[] =>
   Object.keys(config.execution.profiles ?? {});
 
 /**
+ * What `provider`'s worker can execute, by kind. A Codex worker has its
+ * shell and Validate; a Claude worker's shell needs Write and Validate
+ * granted, and its Validate alone runs only the validation commands; a
+ * Copilot worker has no shell, and Validate when its tools list it. The
+ * host's sandbox is checked when a worker runs.
+ */
+export function workerAccess(provider: ProviderConfig): WorkerCommandAccess {
+  const worker = resolvedProvider(provider).worker;
+  const claude = worker.kind === "claude" && worker.settings;
+  const granted = (tool: string) =>
+    claude &&
+    claude.tools!.includes(tool as never) &&
+    claude.allowedTools!.includes(tool as never);
+  return worker.kind === "codex"
+    ? "shell"
+    : worker.kind === "claude"
+      ? granted("Write") && granted("Validate")
+        ? "shell"
+        : granted("Validate")
+          ? "validation-only"
+          : "none"
+      : worker.kind === "copilot"
+        ? worker.tools.includes("Validate")
+          ? "validation-only"
+          : "none"
+        : "undeclared";
+}
+
+/**
  * What the workers the planner may assign can execute: the Objective's
- * provider's (a sandboxed shell, as before), or with execution profiles,
- * each profile's provider's worker by kind. A Claude worker's shell needs
- * Write and Validate granted; the host's sandbox is checked when it runs.
+ * provider's (`provider`), or with execution profiles, each profile's
+ * provider's (`workerAccess`).
  */
 export function workers(
   config: CoreConfig,
+  provider: ProviderConfig,
 ): Readonly<Record<string, WorkerCommandAccess>> {
   const offered = profileIds(config);
-  if (!offered.length) return WORKERS;
+  if (!offered.length) return { default: workerAccess(provider) };
   return Object.fromEntries(
-    offered.map((id) => {
-      const provider =
-        config.providers[config.execution.profiles![id]!.provider]!;
-      const worker = resolvedProvider(provider).worker;
-      const claude = worker.kind === "claude" && worker.settings;
-      const granted = (tool: string) =>
-        claude &&
-        claude.tools!.includes(tool as never) &&
-        claude.allowedTools!.includes(tool as never);
-      const access: WorkerCommandAccess =
-        worker.kind === "codex"
-          ? "shell"
-          : worker.kind === "claude"
-            ? granted("Write") && granted("Validate")
-              ? "shell"
-              : "validation-only"
-            : worker.kind === "copilot"
-              ? "validation-only"
-              : "undeclared";
-      return [id, access];
-    }),
+    offered.map((id) => [
+      id,
+      workerAccess(config.providers[config.execution.profiles![id]!.provider]!),
+    ]),
   );
+}
+
+/**
+ * Whether `item`'s worker has Validate: its execution profile's provider's
+ * worker, else the Objective's (`provider`), when it can run the item's
+ * declared commands and the item has any. The repair diagnosis tells a
+ * worker to use it only then (repair.ts `workerShellRule`).
+ */
+export function itemValidates(
+  config: CoreConfig,
+  provider: ProviderConfig,
+  item: WorkItem,
+): boolean {
+  const profile = item.executionProfile?.id;
+  const settings =
+    profile === undefined
+      ? provider
+      : config.providers[config.execution.profiles?.[profile]?.provider ?? ""];
+  if (!settings || !item.validation.length) return false;
+  const access = workerAccess(settings);
+  return access === "shell" || access === "validation-only";
 }
 
 /**
@@ -472,7 +509,7 @@ function planRoundStep(
         data,
         revising,
         repository,
-        workers: workers(config),
+        workers: workers(config, deps.provider),
         citedSections: cited,
         localExecutables: local.observations,
         reviewArtifacts: inputs.reviewArtifacts,
@@ -625,7 +662,7 @@ function reviewStep(
         ),
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
-        workers: workers(config),
+        workers: workers(config, deps.provider),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),

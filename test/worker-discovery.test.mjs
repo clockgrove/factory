@@ -27,7 +27,7 @@ import {
   validateRequest,
 } from "../dist/providers/claude-worker.js";
 import { operatorAnswers } from "../dist/planning/plan.js";
-import { correction } from "../dist/repair.js";
+import { correction, workerShellRule } from "../dist/repair.js";
 import { newObjective } from "../dist/state.js";
 import { discoveryOutcome } from "../dist/work/amend.js";
 import { collect } from "../dist/work/collect.js";
@@ -443,7 +443,7 @@ const discover = answer({
 });
 
 /** Work#1's collected result and the diagnosis of its failed validation. */
-async function diagnosed(planner, items, logged, prior = []) {
+async function diagnosed(planner, items, logged, prior = [], validate = true) {
   const { worktree, base } = personsMain();
   ownedChange(worktree);
   const first = await collectIn(worktree, base);
@@ -458,6 +458,7 @@ async function diagnosed(planner, items, logged, prior = []) {
     commit: first.commit,
     sources: [],
     prior,
+    validate,
     signal: AbortSignal.timeout(60_000),
     log: (event) => logged.push(event),
   });
@@ -574,8 +575,30 @@ test("the diagnosis rubric keeps plan changes from the operator: work outside th
     "Never ask the operator how the plan should change or which Work Item should provide a file: a question is only for what a person alone can decide.",
     "Return operator with a concrete question when the correction needs the operator's intent (what they want where the sources conflict or say nothing), an external fact Factory cannot see, or an authorization or prerequisite",
     "With operator, ownership lists every file no Work Item owns that the question is about ([] when it is about none), with evidence and acceptance as for discover: Factory then takes the discovery route for those files instead of asking, unless the worker was already asked to propose them.",
+    // #2156: live (#800), a Codex worker found no registry in its own
+    // shell, and the diagnosis asked the operator to restore it.
+    workerShellRule(true),
+    "A tool, dependency, package registry or network unavailable in the worker's own shell is never an operator question and never a correction by itself: decide repair",
+    "tell the worker to check its result with its Validate tool (run_validation), which runs the item's commands after the exact locked install, instead of installing dependencies or running the commands in its shell.",
+    // Its own sentence, before the operator rule.
+    "running the commands in its shell. Return operator with a concrete question",
   ])
     assert.ok(asked[0].prompt.includes(rule), rule);
+});
+
+test("the diagnosis never tells a worker without Validate to use it: Factory's validation reruns the commands and returns their output (#2156)", async () => {
+  const question = "Which locale should feature format dates in?";
+  const { planner, asked } = diagnosis(answer({ question }));
+  await diagnosed(planner, [work], [], [], false);
+  const prompt = asked[0].prompt;
+  for (const rule of [
+    workerShellRule(false),
+    "A tool, dependency, package registry or network unavailable in the worker's own shell is never an operator question and never a correction by itself: decide repair",
+    "tell the worker that it has no tool that runs the item's commands, and that Factory's validation runs them after the exact locked install once it finishes and returns any failure's output, so it should neither install dependencies nor ask for another environment. Return operator with a concrete question",
+  ])
+    assert.ok(prompt.includes(rule), rule);
+  assert.ok(!prompt.includes("Validate tool"), prompt);
+  assert.ok(!prompt.includes("run_validation"), prompt);
 });
 
 test("a question about a file no Work Item owns is decided discover instead, with no further call", async () => {
@@ -722,10 +745,16 @@ test("the worker prompt sends a file outside the owned paths to the discovery, a
   for (const text of [
     "Stop and report if acceptance is impossible; when what blocks it is a change outside the owned paths, propose that change in .factory-discovery.json",
     "(script-run files, existing tests, source files existing tests import, new packages)",
-    "If a command needs an unavailable service, tool or credential, report the exact command and reason. If it needs a file the repository's own files require (such as a source file a test imports) outside your owned paths, do not write it, and do not just report it: propose it in .factory-discovery.json",
+    "If a command needs an unavailable service, tool or credential, report the exact command and reason; a dependency or tool missing only from your own shell is not one, since Factory's validation, and Validate, install the locked dependencies before they run the commands. If it needs a file the repository's own files require (such as a source file a test imports) outside your owned paths, do not write it, and do not just report it: propose it in .factory-discovery.json",
     "when that output's path is in a peer's ownedPaths (a peer with no ownedPaths, such as a QA or final-validation item, owns no file)",
+    // #2156: every worker is told how to check its result: Validate when it
+    // has one; otherwise Factory's validation, never a promise that its own
+    // shell can run the commands.
+    "check your result with every exact required command below before finishing, through your Validate tool (run_validation) when you have one, which runs them as Factory will, after the exact locked install; without one, Factory runs them after you finish and returns any failure's output to you, and a command you run yourself in the checkout may lack the dependencies it needs, which is no failure of your result; fix failures within owned paths.",
     // #2107: a command no correct result can pass goes to the discovery.
-    "Validation runs on the uncommitted result, so your tests check files, never HEAD, the index or a commit of the result. If a command can't pass on any correct result, because it is malformed or needs the result committed, don't work around it in your tests: propose its replacement in .factory-discovery.json",
+    // #2156: HEAD where Factory validates is the result; live (#800), a
+    // worker took a check of HEAD for one no result could pass.
+    "Factory collects your uncommitted result as a new commit and validates that commit in a fresh checkout: there HEAD is your result, so a check that reads HEAD's tree sees it and a diff against HEAD shows nothing, while HEAD in your own checkout doesn't hold your uncommitted changes. Write your tests to check files, never HEAD, the index or a commit of the result. If a command can't pass on any correct result, because it is malformed or depends on more of the commit than its files (such as its message), don't work around it in your tests: propose its replacement in .factory-discovery.json",
   ])
     assert.ok(prepared.prompt.includes(text), text);
 });

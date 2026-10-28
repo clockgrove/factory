@@ -1,5 +1,5 @@
 /**
- * A worker's own Validate, shared by the Claude and Copilot workers: the
+ * A worker's own Validate, shared by the Claude, Copilot and Codex workers: the
  * Work Item's declared commands through `validateTree` on a snapshot commit
  * of the worker's current files, in a fresh checkout, plus the handoff
  * decode collection will apply. The worker names no command: only the
@@ -50,9 +50,6 @@ export function formattedNote(formatted: {
   return `Factory applied the repository's formatter (\`${formatted.command}\`) to ${formatted.files.length} of your files for this run (${files}${formatted.files.length > 20 ? ` and ${formatted.files.length - 20} more` : ""}), and the commands ran on the formatted files. It does the same when it validates your result after you finish, and commits the formatting itself, so don't format by hand or spend turns on formatting.`;
 }
 
-/** The tool's name, as both workers serve it. */
-export const VALIDATION_TOOL_NAME = "run_validation";
-
 export const VALIDATION_TOOL_DESCRIPTION =
   "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.";
 
@@ -86,10 +83,85 @@ export function validationToolDescription(item: WorkItem): string {
   return `${VALIDATION_TOOL_DESCRIPTION}${selectedMediaNote(item)}`;
 }
 
+export const VALIDATE_REQUEST = `Run Validate on your final files, fix any failures, then give your final report. ${UNOWNED_FIX}`;
+
+/**
+ * The request to validate for `item`'s worker: a media item's also says
+ * what a failure for its absent selected set means (`selectedMediaNote`).
+ */
+export function validateRequest(item: WorkItem): string {
+  return `${VALIDATE_REQUEST}${selectedMediaNote(item)}`;
+}
+
+/** Turns that return a handoff manifest collection would reject. */
+const MAX_HANDOFF_REFUSALS = 2;
+
+/**
+ * What a worker's finished turn still owes before its result is returned,
+ * asked on the same conversation, as the Claude and Codex workers do: a
+ * handoff manifest collection would reject is refused twice, then a result
+ * no passing Validate covered gets one request to validate (only when the
+ * worker has Validate). `next` gives the request, or undefined when the
+ * result is returned as it is.
+ */
+export class FinishRequests {
+  private handoffRefusals = 0;
+  private validationRequested = false;
+
+  constructor(
+    private readonly validator: SelfValidation,
+    /** The worker has Validate. */
+    private readonly validating: boolean,
+    private readonly item: WorkItem,
+    /**
+     * How this worker calls Validate, after the request: a Codex worker's
+     * model may not see the tool listed (codex-validate.ts
+     * `CODEX_VALIDATE_CALL`).
+     */
+    private readonly call = "",
+  ) {}
+
+  /** `race` bounds each check, as the turn's watchdog does. */
+  async next(
+    race: <T>(operation: Promise<T>) => Promise<T>,
+  ): Promise<string | undefined> {
+    if (this.handoffRefusals < MAX_HANDOFF_REFUSALS) {
+      const handoff = await race(this.validator.checkHandoff());
+      if (!handoff.passed) {
+        this.handoffRefusals += 1;
+        return `Your result is not finished. ${handoff.text}\nThen give your final report.`;
+      }
+    }
+    if (
+      this.validating &&
+      !this.validationRequested &&
+      (await race(this.validator.finalTree())) === false
+    ) {
+      this.validationRequested = true;
+      return `${validateRequest(this.item)}${this.call && ` ${this.call}`}`;
+    }
+    return undefined;
+  }
+}
+
 /** Validate keeps the tail: failures report last. */
 const VALIDATION_OUTPUT_CHARS = 8_000;
-/** Enough of a note to see which criterion and sub-clauses it answers. */
-const NOTE_EXCERPT_CHARS = 600;
+/**
+ * Note excerpts in the criterion map, longest first: enough of a note to see
+ * which criterion and sub-clauses it answers, then shorter ones, then none,
+ * while the map is over its bound.
+ */
+const NOTE_EXCERPTS = [600, 200, 0] as const;
+/**
+ * The most one Validate result holds, in characters, for every worker
+ * (#2156). Codex keeps 10,000 tokens of a tool's output for its models
+ * (each model's truncation_policy, and code mode's `exec` default), counted
+ * as 4 bytes a token, and cuts the middle of anything longer, which would
+ * drop part of the criterion map; the Claude Agent SDK's MCP cap is larger.
+ * So the whole result stays under Codex's limit, with room for the exec
+ * wrapper, and the same for all three workers.
+ */
+export const VALIDATE_RESULT_CHARS = 30_000;
 
 /** Plain text: the first line names the failed command; the tail holds the failures. */
 function bounded(output: string): string {
@@ -100,12 +172,16 @@ function bounded(output: string): string {
 
 /**
  * Each criterion's exact text beside the note recorded for its index, so the
- * final self-review compares against the criterion, not a paraphrase.
- * Criteria are never cut; long note summaries are, since the worker has them.
+ * final self-review compares against the criterion, not a paraphrase, within
+ * `bound` characters. A criterion is never cut: past the bound, note
+ * excerpts shorten (the worker has its notes), then the criteria that don't
+ * fit are named, never shown in part, for the worker to compare from its
+ * instructions (#2156).
  */
-function criterionMap(
+export function criterionMap(
   acceptance: readonly string[],
   notes: readonly HandoffNote[] = [],
+  bound = Number.POSITIVE_INFINITY,
 ): string {
   const summaries = new Map(
     notes
@@ -115,23 +191,42 @@ function criterionMap(
   const missing = acceptance.flatMap((_, index) =>
     summaries.has(index) ? [] : [index],
   );
-  const lines = acceptance.map((criterion, index) => {
-    const summary = summaries.get(index);
-    const note =
-      summary === undefined
-        ? "none recorded"
-        : summary.length <= NOTE_EXCERPT_CHARS
-          ? summary
-          : `${summary.slice(0, NOTE_EXCERPT_CHARS)} [${summary.length - NOTE_EXCERPT_CHARS} more characters]`;
-    return `[${index}] ${criterion}\nnote [${index}]: ${note}`;
-  });
-  return `Check each acceptance criterion's exact text against the verification note recorded for its index. The reviewer checks every sub-clause of this text, not a paraphrase: a note that answers another criterion, merges criteria or omits a sub-clause leaves that criterion unproved. Add any missing proof, then fix the note.${missing.length ? ` No note yet for criteria ${missing.join(", ")}.` : ""}\n${lines.join("\n")}`;
+  const head = `Check each acceptance criterion's exact text against the verification note recorded for its index. The reviewer checks every sub-clause of this text, not a paraphrase: a note that answers another criterion, merges criteria or omits a sub-clause leaves that criterion unproved. Add any missing proof, then fix the note.${missing.length ? ` No note yet for criteria ${missing.join(", ")}.` : ""}`;
+  const lines = (excerpt: number) =>
+    acceptance.map((criterion, index) => {
+      const summary = summaries.get(index);
+      const note =
+        summary === undefined
+          ? "none recorded"
+          : summary.length <= excerpt
+            ? summary
+            : excerpt
+              ? `${summary.slice(0, excerpt)} [${summary.length - excerpt} more characters]`
+              : `recorded (${summary.length} characters; not repeated here)`;
+      return `[${index}] ${criterion}\nnote [${index}]: ${note}`;
+    });
+  let shown: string[] = [];
+  for (const excerpt of NOTE_EXCERPTS) {
+    shown = lines(excerpt);
+    const map = `${head}\n${shown.join("\n")}`;
+    if (map.length <= bound) return map;
+  }
+  // Even without notes the criteria are over the bound: whole ones while
+  // they fit, then the rest named.
+  const rest = (from: number) =>
+    `Criteria [${from}] to [${acceptance.length - 1}] are not repeated here, to keep this result within the tool output limit: compare each with its note from the acceptance list in your instructions.`;
+  let length = head.length + 1 + rest(acceptance.length).length;
+  let fits = 0;
+  while (fits < shown.length && length + shown[fits]!.length + 1 <= bound)
+    length += shown[fits++]!.length + 1;
+  return [head, ...shown.slice(0, fits), rest(fits)].join("\n");
 }
 
 export interface HandoffCheck {
   passed: boolean;
   text?: string;
-  criteria?: string;
+  /** Each criterion beside its note, within a bound (`criterionMap`). */
+  criteria?: (bound: number) => string;
 }
 
 /**
@@ -240,10 +335,16 @@ export class SelfValidation {
     if (handoff.text)
       if (handoff.passed) parts.push(handoff.text);
       else parts.unshift(handoff.text);
-    // Self-review follows a passing run; after the bounded output, so never cut.
-    if (passed && handoff.criteria) parts.push(handoff.criteria);
     if (passed && !handoff.passed)
       parts.unshift("Validation failed. Fix this before you finish.");
+    // Self-review follows a passing run, last and within what the result has
+    // left (VALIDATE_RESULT_CHARS), so no worker's harness cuts it.
+    if (passed && handoff.criteria)
+      parts.push(
+        handoff.criteria(
+          VALIDATE_RESULT_CHARS - parts.join("\n\n").length - "\n\n".length,
+        ),
+      );
     // The handoff is outside the tree; the final check decodes it again.
     if (passed) {
       this.passedTrees.add(tree);
@@ -279,7 +380,7 @@ export class SelfValidation {
         passed: true,
         ...(count && {
           text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${count} acceptance criteria there, using the schema in your instructions.`,
-          criteria: criterionMap(item.acceptance),
+          criteria: (bound: number) => criterionMap(item.acceptance, [], bound),
         }),
       };
     const verified = notes.filter(
@@ -294,7 +395,10 @@ export class SelfValidation {
     return {
       passed: true,
       text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.${unanswered.length ? ` No design note yet for ${unanswered.join(", ")}.` : ""}`,
-      ...(count && { criteria: criterionMap(item.acceptance, notes) }),
+      ...(count && {
+        criteria: (bound: number) =>
+          criterionMap(item.acceptance, notes, bound),
+      }),
     };
   }
 

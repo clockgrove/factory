@@ -2,6 +2,7 @@ import { overrun } from "../allowances.js";
 import { hold, type Outcome, type StepContext } from "../engine.js";
 import { revisionsLeft } from "../planning/amendments.js";
 import { currentPlan } from "../planning/plan.js";
+import { itemValidates } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import {
   type Correction,
@@ -11,6 +12,7 @@ import {
   repeated,
 } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
+import { hasGitlink } from "../worktree.js";
 import { AMEND } from "./amend.js";
 import { fact, facts, type ItemFacts } from "./facts.js";
 import { mergeOf } from "./merged.js";
@@ -95,6 +97,14 @@ export async function repairContext(
     | undefined;
   const sources = await pinnedSources(state, deps, signal);
   const answer = answered?.text;
+  const commit = refusedOf(state, item.id)?.commit ?? previous?.commit ?? base;
+  // The worker has Validate as it runs (work/self-validate.ts): never in a
+  // checkout with a gitlink, and taken as absent when Git can't tell.
+  const validate =
+    itemValidates(deps.config, deps.provider, item) &&
+    !(await hasGitlink(deps.config.checkout, { commit, signal }).catch(
+      () => true,
+    ));
   let result = await correction({
     planner: deps.planner,
     plan,
@@ -102,10 +112,11 @@ export async function repairContext(
     finding,
     checkout: deps.config.checkout,
     base,
-    commit: refusedOf(state, item.id)?.commit ?? previous?.commit ?? base,
+    commit,
     sources,
     prior: applied,
     ...(answer ? { operatorAnswer: answer } : {}),
+    validate,
     memory: () =>
       itemMemory("diagnosis", item, context, deps, base, sources, [
         finding.kind === "review"

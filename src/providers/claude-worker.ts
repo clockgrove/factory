@@ -50,13 +50,18 @@ import { validationDeadlineMs } from "../validate.js";
 import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
+  FinishRequests,
   SelfValidation,
   selectedMediaNote,
   UNOWNED_FIX,
-  VALIDATION_TOOL_NAME,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
+import {
+  COLLECTED_RESULT,
+  shellDependencies,
+  VALIDATION_TOOL_NAME,
+} from "../work/validate-tool.js";
 import {
   targetOf,
   type Worker,
@@ -179,13 +184,19 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 /** What the shell's network is, for its prompt and tool description. */
-const shellNetwork = (sandbox: SandboxConfig) =>
+const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
   sandbox.network === "host"
     ? "it shares the host's network, so services on the host's loopback are reachable"
     : "the network is off and only loopback works";
 
-const shellPrompt = (sandbox: SandboxConfig) =>
-  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}): use it to inspect, compute, build and test. Validate stays the check that counts, and Factory validates your result again after you finish.`;
+/**
+ * The truth about the worker's own shell (#2156), as a Codex worker is told
+ * (codex-worker.ts `codexShellNote`): it differs from Factory's validation
+ * environment, has no installed dependencies, and isn't where the result is
+ * validated. A worker has the shell only with Validate granted.
+ */
+export const shellPrompt = (sandbox: Pick<SandboxConfig, "network">) =>
+  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead.`;
 
 /**
  * Compaction summarizes the first user turn, so the exact contract also
@@ -202,15 +213,8 @@ function systemPrompt(
 const CREDENTIAL_RESTART =
   "\n\nAn earlier session of this attempt stopped on a transient provider authentication error. Its uncommitted changes are already in your working tree: continue from them rather than starting over.";
 
-export const VALIDATE_REQUEST = `Run Validate on your final files, fix any failures, then give your final report. ${UNOWNED_FIX}`;
-
-/**
- * The request to validate for `item`'s worker: a media item's also says
- * what a failure for its absent selected set means (`selectedMediaNote`).
- */
-export function validateRequest(item: WorkItem): string {
-  return `${VALIDATE_REQUEST}${selectedMediaNote(item)}`;
-}
+// Shared with the Codex worker (work/self-validate.ts FinishRequests).
+export { VALIDATE_REQUEST, validateRequest } from "../work/self-validate.js";
 
 /**
  * `failed`: Validate's last run on the worker's current files failed.
@@ -229,8 +233,6 @@ export function continuation(
 
 /** Continuations of one attempt's conversation after a turn-limit stop. */
 const MAX_TURN_LIMIT_CONTINUATIONS = 2;
-/** Turns that return a handoff manifest collection would reject. */
-const MAX_HANDOFF_REFUSALS = 2;
 /**
  * Backoff before each fresh query after the API rejected the login (401).
  * Clients sharing one login rotate its OAuth token; a fresh query re-reads
@@ -1366,8 +1368,11 @@ export class ClaudeWorker implements Worker {
       return session[Symbol.asyncIterator]();
     };
     let continuations = 0;
-    let handoffRefusals = 0;
-    let validationRequested = false;
+    const finish = new FinishRequests(
+      attempt.validator,
+      attempt.grants.validate,
+      input.item,
+    );
     let credentialRetries = 0;
     // A query's results report its running total; credential retries add queries.
     let spentUsd = 0;
@@ -1563,24 +1568,13 @@ export class ClaudeWorker implements Worker {
           );
           continue;
         }
-        if (!error && handoffRefusals < MAX_HANDOFF_REFUSALS) {
-          const handoff = await watchdog.race(attempt.validator.checkHandoff());
-          if (!handoff.passed) {
-            handoffRefusals += 1;
-            send(
-              `Your result is not finished. ${handoff.text}\nThen give your final report.`,
-            );
-            continue;
-          }
-        }
-        if (
+        // A handoff collection would reject, or a result no passing
+        // Validate covered: asked again in the same conversation.
+        const request =
           !error &&
-          attempt.grants.validate &&
-          !validationRequested &&
-          (await watchdog.race(attempt.validator.finalTree())) === false
-        ) {
-          validationRequested = true;
-          send(validateRequest(attempt.input.item));
+          (await finish.next((operation) => watchdog.race(operation)));
+        if (request) {
+          send(request);
           continue;
         }
         break;

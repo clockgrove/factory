@@ -174,8 +174,10 @@ function scripted(...answers) {
 
 function depsOf(checkout, planner, posted = []) {
   const dir = tempDir("factory-plan-refusal-work-");
+  const config = loaded(checkout);
   return {
-    config: loaded(checkout),
+    config,
+    provider: config.providers[config.defaultProvider],
     planner,
     github: {
       renderedIssue: async () => ({ body_html: HTML, state: "open" }),

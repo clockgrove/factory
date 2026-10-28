@@ -175,6 +175,7 @@ export async function serveInstallation(
         frozen: freezeConfig(config, each)!,
         workflow: objectiveWorkflow({
           config,
+          provider: settings,
           github,
           planner: providerPlanner(settings),
           workDir: (issue) => join(paths.root, "work", String(issue)),

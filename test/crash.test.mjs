@@ -2,7 +2,7 @@
 // check that a restart finishes the work exactly once.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -46,35 +46,23 @@ for (const point of CRASH_POINTS) {
     const crashing = serve(inst, point);
     // Drive the path: wait for the hold, then cancel. The crash can come at
     // any moment along the way.
-    let killedByTest = false;
     const holdOrDeath = await Promise.race([
       crashing.exit.then(() => "died"),
       until(() => stateOf(inst, 11).holds.length, "hold")
         .then(() => "held")
         .catch(() => "no hold"),
     ]);
-    if (holdOrDeath === "held") {
-      cli(inst, "cancel", "11");
-      await Promise.race([
-        crashing.exit,
-        until(
-          () => stateOf(inst, 11).done["cancel:cleanup"] === true,
-          "cleanup",
-        )
-          // The crash point may come just after the save the test sees.
-          .then(() => new Promise((resolve) => setTimeout(resolve, 500)))
-          .then(() => {
-            if (crashing.child.exitCode !== null || crashing.child.signalCode)
-              return;
-            killedByTest = true;
-            crashing.child.kill("SIGKILL");
-          })
-          .catch(() => {}),
-      ]);
-    }
-    const death = await crashing.exit;
+    if (holdOrDeath === "held") cli(inst, "cancel", "11");
+    // The service must kill itself at the point. The point can come well
+    // after the last save the test could see (a slow runner took seconds
+    // past the cleanup save, #2145), so wait for that death itself, bounded:
+    // past the bound the point was never reached, and the wait kills the
+    // service and fails with what it wrote.
+    const death = await exited(
+      crashing,
+      `the service set to crash at ${point} (never reached?)`,
+    );
     assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
-    assert.equal(killedByTest, false, `${point} was never reached`);
 
     const service = serve(inst);
     if (stateOf(inst, 11).status !== "cancelled") {
@@ -144,6 +132,25 @@ for (const point of HOLDER_POINTS) {
     const holder = () =>
       JSON.parse(git("--git-dir", bare, "log", "-1", "--format=%B", record()))
         .installation;
+    // A service serves once its run has written service.json, which comes
+    // after it holds the record (host.ts: holderFor, then the run). A stop
+    // before that, while the record is still being taken, keeps the record.
+    const serving = (service) => {
+      try {
+        const path = join(actor.root, "service.json");
+        return JSON.parse(readFileSync(path, "utf8")).pid === service.child.pid;
+      } catch {
+        return false;
+      }
+    };
+    // Waited for by the event, never a fixed delay: on a slow runner the
+    // record's Git pushes take seconds (#2145).
+    const served = async (service, what) => {
+      const ended = () =>
+        service.child.exitCode !== null || service.child.signalCode !== null;
+      await until(() => ended() || serving(service), what, 30_000);
+      assert.ok(!ended(), `${what}: it exited first\n${service.stderr()}`);
+    };
 
     const takeover = point.startsWith("holder:takeover");
     const actor = takeover ? second : first;
@@ -159,21 +166,17 @@ for (const point of HOLDER_POINTS) {
     }
     const crashing = serve(actor, point, [], flags);
     if (point.startsWith("holder:release")) {
-      // The release push comes at a clean stop of a running service: a stop
-      // that comes while the record is still being taken keeps it instead.
-      await until(
-        () => record() && existsSync(join(actor.root, "service.json")),
-        "the installation serves",
-      );
+      // The release push comes at a clean stop of a running service.
+      await served(crashing, "the installation serves");
       crashing.child.kill("SIGTERM");
     }
     const death = await exited(crashing, point);
     assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
 
+    // The same installation restarted with the same flags serves on.
     const restarted = serve(actor, undefined, [], flags);
-    await until(() => record(), "the restart holds the repository");
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    assert.equal(restarted.child.exitCode, null, restarted.stderr());
+    await served(restarted, "the restart serves");
+    assert.ok(record(), "the restart holds the repository");
     if (takeover) assert.notEqual(holder(), firstId, "the take-over holds");
     assert.equal((await stopped(restarted)).code, 0);
     assert.equal(record(), "", "a clean stop frees the repository");

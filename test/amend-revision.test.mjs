@@ -316,7 +316,7 @@ test("an amendment whose new item the integrated QA item doesn't reach goes back
   assert.equal(planningRevisions(state).used, 2);
 });
 
-// #2138: the operator's planning decisions as plan steps save them in that
+// #2147: the operator's planning decisions as plan steps save them in that
 // run (Codex, main media.select-repair). Its plan review's unresolved
 // finding asked for the asset item to own the delivered files' test; the
 // operator's `more` only granted rounds, and the plan accepted after them
@@ -339,7 +339,7 @@ const ANSWERED = {
   at: "2026-01-01T00:00:20.000Z",
 };
 
-test("an amendment's review is given the operator's planning answers, never a `more` (#2138)", async () => {
+test("an amendment's review is given the operator's planning answers, never a `more` (#2147)", async () => {
   const { checkout, state } = await building();
   // Round 1's review left a finding past the allowance: the operator's kept
   // answer and the `more` that sent it, then round 2 accepted.

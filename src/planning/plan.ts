@@ -101,7 +101,7 @@ export function decisionsOf(state: ObjectiveState): CriterionDecision[] {
  * against the question it answered, which lists the problems open then, and
  * the rounds after it settled those before the plan was accepted. Given as
  * a decision, it reads as a person's requirement the accepted plan doesn't
- * hold (#2138: a worker took one such finding for its item's requirement
+ * hold (#2147: a worker took one such finding for its item's requirement
  * and proposed moving a peer's test into it). The plan keeps every decision.
  */
 export function operatorAnswers(

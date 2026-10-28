@@ -19,6 +19,7 @@ import {
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
+import { observedRecords } from "../dist/knowledge/memory.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
   continuation,
@@ -27,6 +28,7 @@ import {
 } from "../dist/providers/claude-worker.js";
 import { operatorAnswers } from "../dist/planning/plan.js";
 import { correction } from "../dist/repair.js";
+import { newObjective } from "../dist/state.js";
 import { discoveryOutcome } from "../dist/work/amend.js";
 import { collect } from "../dist/work/collect.js";
 import { prepareWorkPrompt } from "../dist/work/prompt.js";
@@ -728,7 +730,7 @@ test("the worker prompt sends a file outside the owned paths to the discovery, a
     assert.ok(prepared.prompt.includes(text), text);
 });
 
-// #2138: the operator's planning decisions as plan steps save them in that
+// #2147: the operator's planning decisions as plan steps save them in that
 // run (Codex, main media.select-repair). Its plan review's unresolved
 // finding asked for the asset item to own the delivered files' test; the
 // operator's `more` only granted rounds, and the plan accepted after them
@@ -751,7 +753,7 @@ const ANSWERED = {
   at: "2026-01-01T00:00:20.000Z",
 };
 
-test("the worker prompt gives the operator's planning answers, never a `more`, whose question lists findings the accepted plan settled (#2138)", async () => {
+test("the worker prompt gives the operator's planning answers, never a `more`, whose question lists findings the accepted plan settled (#2147)", async () => {
   const { worktree, base } = personsMain();
   const validated = { ...work, validation: [required] };
   const prepared = await prepareWorkPrompt({
@@ -773,13 +775,33 @@ test("the worker prompt gives the operator's planning answers, never a `more`, w
   assert.ok(!prepared.prompt.includes(STALE));
 });
 
-test("operatorAnswers keeps every planning decision but a `more` (#2138)", () => {
+test("operatorAnswers keeps every planning decision but a `more` (#2147)", () => {
   const approve = { ...ANSWERED, answer: "approve", text: undefined };
   assert.deepEqual(operatorAnswers([MORE, ANSWERED, approve, MORE]), [
     ANSWERED,
     approve,
   ]);
   assert.deepEqual(operatorAnswers([]), []);
+});
+
+test("this Objective's repository memory records the operator's planning answers as human decisions, never a `more` (#2147)", async () => {
+  // queryMemory gives an Objective's own decision records to its planning,
+  // workers, repair diagnosis and reviews.
+  const state = newObjective(7, new Date("2026-01-01T00:00:00.000Z"));
+  state.status = "working";
+  state.done.plan = plan([item("a", { ownedPaths: ["src/a.js"] })], {
+    decisions: [ANSWERED, MORE],
+  });
+  const records = await observedRecords(
+    { repository: REPO, checkout: tempDir("factory-memory-") },
+    state,
+    false,
+  );
+  const decided = records.filter((record) => record.kind === "decision");
+  assert.equal(decided.length, 1, JSON.stringify(decided));
+  assert.equal(decided[0].authority, "human-decision");
+  assert.ok(decided[0].body.includes(ANSWERED.text));
+  assert.ok(!JSON.stringify(records).includes(STALE));
 });
 
 test("a failed Validate run, the request to validate and a turn-limit continuation after a failed run send a fix outside the owned paths to the discovery, and a media item's say a failure for its absent selected set is neither (#2116)", async () => {

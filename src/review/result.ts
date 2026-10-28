@@ -32,6 +32,7 @@ import {
 } from "../media.js";
 import { validPath } from "../objective.js";
 import { coverageCriterion, isRecord } from "../planning/graph.js";
+import { operatorAnswers } from "../planning/plan.js";
 import { TREE_READ_GUIDANCE } from "../planning/prompts.js";
 import {
   exportTree,
@@ -1310,13 +1311,14 @@ function decisionRows(
   plan: Plan,
   criteria: readonly CriterionDecision[] = [],
 ): ResultEvidence[] {
+  const planning = operatorAnswers(plan.decisions);
   return [
-    ...(plan.decisions.length
+    ...(planning.length
       ? [
           {
             origin: "controller" as const,
             path: "Operator planning decisions",
-            content: JSON.stringify(plan.decisions),
+            content: JSON.stringify(planning),
             complete: true,
           },
         ]

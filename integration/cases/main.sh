@@ -222,7 +222,7 @@ case_holds() {
   # The answered question's comment, edited in place: the answer, its
   # author and comment, and no mention left to notify anyone again.
   local ab; ab=$(gh_marked_body "$n" "hold:$hid")
-  [[ $ab == *'**Answered** `/factory answer` by `'*"#issuecomment-$cid)"* ]] && [[ $ab != *'Factory needs you'* ]] && [[ $ab != *@* ]]; rec_if holds.answered-comment $? "#$n question $hid's comment after comment $cid answered it: $(head -c 300 <<<"$ab" | tr '\n' ' ')" "$t0"
+  [[ $ab == *'**Answered** `/factory answer` by `'*"#issuecomment-$cid)"* ]] && [[ $ab != *'Factory needs you'* ]] && ! body_mentions "$ab"; rec_if holds.answered-comment $? "#$n question $hid's comment after comment $cid answered it: $(head -c 300 <<<"$ab" | tr '\n' ' ')" "$t0"
   if [ -z "$more" ]; then record holds.more UNREACHABLE "no hold offered more after $answers answers (status $(st phase "$n"))" "$t0"
   else [ "${rounds:-0}" = 1 ]; rec_if holds.more $? "more at the allowance after $answers answers; planning rounds after it before the next question: ${rounds:-none}" "$t0"; fi
   wait_phase "$n" '^(building|finishing|done)$' 900 >/dev/null

@@ -130,6 +130,14 @@ for page in json.load(sys.stdin):
     for comment in page:
         if comment["body"].startswith(sys.argv[1]): print(comment["body"]); sys.exit(0)' "<!-- factory:$1:$2 -->" <<<"$data"
 }
+# Whether comment BODY @-mentions anyone, as GitHub would notify them: an @
+# that starts a login at the start or after a character no login or code span
+# ends with. The leading Factory marker is not text, and the @ in a hold id's
+# timestamp (decide:1:1@2026-...) follows a digit, so neither is a mention.
+body_mentions() {
+  local body=${1#'<!-- factory:'*' -->'} re='(^|[^[:alnum:]_`])@[[:alnum:]]'
+  [[ $body =~ $re ]]
+}
 marker_count() { awk -v m="$2" '$1==m{print $2; f=1} END{if(!f) print 0}' <<<"$1"; }
 marker_prefix_count() { awk -v m="$2" 'index($1,m)==1{s+=$2} END{print s+0}' <<<"$1"; }
 marker_dupes() { awk '$2>1{printf "%s x%s ", $1, $2}' <<<"$1"; }

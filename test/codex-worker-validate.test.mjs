@@ -5,20 +5,17 @@
 // as designed. Claude and Copilot workers had Validate all along.
 //
 // Codex itself runs here, as the worker launches it (its own home and
-// configuration, its namespace launcher): as an app server, which serves the
-// worker's MCP tools to a client with no model call, and as `codex exec`
-// against a scripted Responses endpoint with a production model's metadata,
-// so a model-issued call runs Validate as a worker's model would.
+// configuration, its namespace launcher), as an app server: that serves the
+// worker's MCP tools to a client with no model call, so Codex's own MCP
+// client runs Factory's Validate through the configuration the worker gets.
+// What a model is shown needs a model: no fake provider runs here
+// (AGENTS.md), so that is the Codex worker integration cases'.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
-import zlib from "node:zlib";
-import { Codex } from "@openai/codex-sdk";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { itemValidates, workers } from "../dist/planning/steps.js";
@@ -179,6 +176,13 @@ test("a Codex worker's Codex runs Validate through Factory's MCP server: the ite
     config,
     new RegExp(`\\ntool_timeout_sec = ${validation.deadlineMs / 1000}\\n`),
   );
+  // Never deferred: on Codex's production models (tool_mode
+  // code_mode_only) a deferred MCP tool is named nowhere in the model's
+  // request, as #800's worker found; kept out of the deferred tools, it is
+  // declared in exec's description. Codex reads the variant (one of
+  // code_mode, deferred, direct) when the app server below loads this
+  // configuration, and refuses an unknown one.
+  assert.ok(config.includes('\nomit_tools_from = ["deferred"]\n'), config);
   const socket = JSON.parse(config.match(/\nargs = (.*)\n/)[1]).at(-1);
   // Only this user reaches the socket's directory.
   assert.equal(statSync(dirname(socket)).mode & 0o777, 0o700);
@@ -330,6 +334,11 @@ test("a Codex worker's prompt tells the truth about its own shell: network, depe
       // names the exact call (see the `codex exec` test below).
       assert.equal(note.includes(CODEX_VALIDATE_CALL), validating);
     }
+  // Codex names an MCP tool mcp__<server>__<tool>, the server's - as _.
+  assert.equal(
+    CODEX_VALIDATION_TOOL_ID,
+    "mcp__factory_validation__run_validation",
+  );
   assert.ok(
     CODEX_VALIDATE_CALL.includes(
       "Inside exec, call it as `const result = await tools.mcp__factory_validation__run_validation({});",
@@ -502,75 +511,12 @@ test("Validate's criterion map stays within its bound and never cuts a criterion
   assert.equal(few, criterionMap(acceptance.slice(0, 3), notes.slice(0, 3)));
 });
 
-const MODELS = fileURLToPath(
-  new URL("fixtures/codex-0.160.0-models.json", import.meta.url),
-);
-
-/**
- * A Responses endpoint answering each request with the next scripted output
- * item (then a final message), keeping every request's body.
- */
-async function scriptedResponses(script) {
-  const requests = [];
-  const server = createServer((request, response) => {
-    const chunks = [];
-    request.on("data", (chunk) => chunks.push(chunk));
-    request.on("end", () => {
-      let body = Buffer.concat(chunks);
-      const encoding = request.headers["content-encoding"];
-      if (encoding === "zstd") body = zlib.zstdDecompressSync(body);
-      if (encoding === "gzip") body = zlib.gunzipSync(body);
-      if (request.method !== "POST" || !request.url.endsWith("/responses")) {
-        response.writeHead(404).end();
-        return;
-      }
-      requests.push(JSON.parse(body.toString("utf8")));
-      const n = requests.length;
-      const item = script[n - 1] ?? {
-        type: "message",
-        role: "assistant",
-        id: `msg_${n}`,
-        content: [{ type: "output_text", text: "Done." }],
-      };
-      const event = (data) =>
-        response.write(
-          `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`,
-        );
-      response.writeHead(200, { "content-type": "text/event-stream" });
-      event({ type: "response.created", response: { id: `resp_${n}` } });
-      event({ type: "response.output_item.done", item });
-      event({
-        type: "response.completed",
-        response: {
-          id: `resp_${n}`,
-          usage: {
-            input_tokens: 1,
-            input_tokens_details: { cached_tokens: 0 },
-            output_tokens: 1,
-            output_tokens_details: { reasoning_tokens: 0 },
-            total_tokens: 2,
-          },
-        },
-      });
-      response.end();
-    });
-  });
-  await new Promise((listening) => server.listen(0, "127.0.0.1", listening));
-  return {
-    url: `http://127.0.0.1:${server.address().port}/v1`,
-    requests,
-    close: () => new Promise((closed) => server.close(closed)),
-  };
-}
-
-// Live (#800), the worker said no Factory validation tool was exposed: on
-// Codex's production models (tool_mode code_mode_only) an MCP tool is by
-// default a deferred nested tool of `exec`, named nowhere in the request.
-// The tool is declared in exec's description, the worker is told the exact
-// call, and a model making it runs Validate.
-test("a Codex worker's model on a production model's metadata sees Validate declared and the exact call, and making it inside exec runs Validate, its whole result reaching the model uncut (#2156)", async () => {
+// Codex keeps 10,000 tokens of a tool's output (each production model's
+// truncation_policy) and cuts the middle of a longer one: a 47,176-character
+// result for 30 long criteria reached the model cut. Every worker's result
+// now fits VALIDATE_RESULT_CHARS.
+test("a Validate result for an item with long acceptance fits within VALIDATE_RESULT_CHARS, with the run's outcome first and whole criteria after (#2156)", async () => {
   const { worktree, base } = changedCheckout();
-  // Long acceptance: the result would pass Codex's 10,000-token tool output.
   const long = item("long", {
     ownedPaths: ["src/feature.js"],
     validation: [required],
@@ -580,8 +526,8 @@ test("a Codex worker's model on a production model's metadata sees Validate decl
         `Criterion ${index}: ${"the result does this exact thing and also that ".repeat(30)}`,
     ),
   });
-  const runs = [];
   const log = new RunLog(logs, "2026-01-01T00-00-00-000Z-2", CAPTURE_OFF, []);
+  const runs = [];
   const validation = await CodexValidate.start(
     {
       worktree,
@@ -604,101 +550,28 @@ test("a Codex worker's model on a production model's metadata sees Validate decl
     },
   );
   assert.ok(validation instanceof CodexValidate, JSON.stringify(validation));
-  const call = CODEX_VALIDATE_CALL.match(/`([^`]+)`/)[1];
-  const endpoint = await scriptedResponses([
-    {
-      type: "custom_tool_call",
-      id: "ctc_1",
-      status: "completed",
-      call_id: "call_1",
-      name: "exec",
-      input: call,
-    },
-  ]);
-  const home = codexWorkerHome(
-    worktree,
-    false,
-    [],
-    sandbox,
-    undefined,
-    validation.config(),
-  );
   try {
-    const codex = new Codex({
-      codexPathOverride: home.launcher,
-      env: { ...home.env, FACTORY_TEST_RESPONSES_KEY: "test" },
-      config: {
-        model_provider: "scripted",
-        model_providers: {
-          scripted: {
-            name: "scripted",
-            base_url: endpoint.url,
-            wire_api: "responses",
-            env_key: "FACTORY_TEST_RESPONSES_KEY",
-            supports_websockets: false,
-            request_max_retries: 0,
-            stream_max_retries: 0,
-          },
-        },
-        model_catalog_json: MODELS,
-      },
-    });
-    const thread = codex.startThread({
-      workingDirectory: worktree,
-      approvalPolicy: "never",
-      model: "gpt-6.1-sol",
-      modelReasoningEffort: "low",
-    });
-    const turn = await thread.run(
-      `Implement the feature.${codexShellNote(false, true, long)}`,
-    );
-    assert.equal(turn.finalResponse, "Done.");
-    assert.equal(endpoint.requests.length, 2);
-    const [first, second] = endpoint.requests.map((request) =>
-      JSON.stringify(request),
-    );
-    // The model is told the exact call and the tool's id.
-    assert.ok(first.includes(JSON.stringify(call).slice(1, -1)), first);
-    assert.ok(first.includes(CODEX_VALIDATION_TOOL_ID));
-    // The tool itself is declared to the model, never deferred: it is a
-    // nested tool of exec, described with exec's declaration.
-    const exec = endpoint.requests[0].input
-      .filter((entry) => entry.type === "additional_tools")
-      .flatMap((entry) => entry.tools)
-      .flatMap((tool) => tool.tools ?? [tool])
-      .find((tool) => tool.name === "exec");
-    assert.ok(exec, first.slice(0, 2000));
+    const { text, isError } = await validation.validator.call();
+    assert.equal(isError, false, text);
+    assert.ok(text.length <= VALIDATE_RESULT_CHARS, String(text.length));
     assert.ok(
-      exec.description.includes(
-        `### \`${CODEX_VALIDATION_TOOL_ID}\`\nRun this work item's declared validation commands`,
+      text.startsWith(
+        `All 1 declared validation commands passed:\n- ${required.command}`,
       ),
-      exec.description.slice(-3000),
+      text.slice(0, 500),
     );
-    // Its call ran Validate on the worker's files.
+    assert.ok(text.includes(`[0] ${long.acceptance[0]}\n`));
+    assert.match(
+      text,
+      /Criteria \[\d+\] to \[29\] are not repeated here, to keep this result within the tool output limit/,
+    );
     assert.deepEqual(
       runs
         .filter((event) => event.event === "worker-validate")
         .map((event) => event.passed),
       [true],
     );
-    // What the model got back is the whole result, which Codex didn't cut.
-    const output = endpoint.requests[1].input
-      .filter((entry) => entry.type === "custom_tool_call_output")
-      .flatMap((entry) => entry.output)
-      .map((part) => part.text)
-      .join("");
-    assert.ok(
-      output.includes(
-        `All 1 declared validation commands passed:\n- ${required.command}`,
-      ),
-      output.slice(0, 2000),
-    );
-    assert.ok(!/truncated/i.test(output), output.slice(0, 2000));
-    assert.ok(output.includes("are not repeated here"), second.slice(-2000));
-    assert.ok(output.includes(`[0] ${long.acceptance[0]}\n`));
   } finally {
-    await endpoint.close();
     await validation.close();
-    rmSync(home.root, { recursive: true, force: true });
   }
 });

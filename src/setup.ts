@@ -110,6 +110,7 @@ const CONFIG_OPTIONS: Record<string, Option> = {
   "package-store": { key: "sandbox.packageStore", read: "text" },
   "read-only-path": { key: "sandbox.readOnlyPaths", read: "list" },
   "sandbox-env": { key: "sandbox.environment", read: "env" },
+  "format-command": { key: "validation.formatCommand", read: "text" },
   "required-command": { key: "finalValidation.requiredCommands", read: "list" },
   "ci-only-command": { key: "finalValidation.ciOnlyCommands", read: "list" },
   "allowed-secret": { key: "policy.allowedSecretNames", read: "list" },

@@ -9,7 +9,11 @@ import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
-import { type RegeneratedLockfile, validationDeadlineMs } from "../validate.js";
+import {
+  type AppliedFormatter,
+  type RegeneratedLockfile,
+  validationDeadlineMs,
+} from "../validate.js";
 import type { HandoffNote } from "./collect.js";
 import { fact, facts, itemsWith } from "./facts.js";
 import { finalReviewStep, finalStep, reportStep } from "./finish.js";
@@ -108,6 +112,13 @@ export interface ValidateResult {
    * review and publish it (`candidate`).
    */
   regenerated?: RegeneratedLockfile;
+  /**
+   * Factory's commit on the candidate with the repository's formatter's
+   * output (validate.ts `applyFormatter`), on top of `regenerated` when
+   * both are made: the commands ran on it, so later steps review and
+   * publish it (`candidate`).
+   */
+  formatted?: AppliedFormatter;
 }
 
 export interface PublishResult {
@@ -343,14 +354,18 @@ export function selection(state: ObjectiveState) {
 }
 
 /**
- * The commit later steps use: the validate step's, which adds a lockfile
- * Factory resolved; else the selection's, which adds the chosen media;
- * else the work commit.
+ * The commit later steps use: the validate step's, which adds the
+ * formatter's output or a lockfile Factory resolved (the formatting commit
+ * is the later); else the selection's, which adds the chosen media; else
+ * the work commit.
  */
 export function candidate(state: ObjectiveState, id: string): string {
+  const validated = state.done[stepKey(id, "validate")] as
+    | ValidateResult
+    | undefined;
   return (
-    (state.done[stepKey(id, "validate")] as ValidateResult | undefined)
-      ?.regenerated?.commit ??
+    validated?.formatted?.commit ??
+    validated?.regenerated?.commit ??
     selection(state)(id)?.commit ??
     (state.done[stepKey(id, "work")] as WorkResult).commit
   );
@@ -387,7 +402,11 @@ export function itemStep(
         : phase === "ci"
           ? 10 * MINUTE
           : phase === "validate"
-            ? validationDeadlineMs(item, commandTimeoutMs(deps))
+            ? validationDeadlineMs(
+                item,
+                commandTimeoutMs(deps),
+                deps.config.validation.formatCommand !== undefined,
+              )
             : 45 * MINUTE,
     run: async (context) => {
       const outcome = await run(item, context, deps, place);

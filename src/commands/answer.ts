@@ -17,8 +17,9 @@ export const spec: Command = {
     question: "value",
     text: "value",
     "text-file": "value",
+    as: "value",
   },
-  help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance)",
+  help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance); --as NAME (or FACTORY_ANSWERED_AS) records who answers on your behalf, such as an agent, beside your login",
   check: (args, command) => {
     const answer = args.positional[2];
     const file = args.flags["text-file"];
@@ -45,14 +46,18 @@ export const spec: Command = {
     const arg = args.positional[3];
     const { question } = args.flags;
     const text = answerText(args);
-    return await request(paths, {
-      kind: "answer",
-      issue: issueOf(args),
-      answer: args.positional[2]!,
-      ...(arg ? { arg } : {}),
-      ...(text ? { text } : {}),
-      ...(question !== undefined ? { question } : {}),
-    });
+    return await request(
+      paths,
+      {
+        kind: "answer",
+        issue: issueOf(args),
+        answer: args.positional[2]!,
+        ...(arg ? { arg } : {}),
+        ...(text ? { text } : {}),
+        ...(question !== undefined ? { question } : {}),
+      },
+      args.flags.as,
+    );
   },
 };
 

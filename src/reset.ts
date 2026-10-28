@@ -39,7 +39,10 @@ import {
   type Frozen,
   newObjective,
   type ObjectiveState,
+  keptClosings,
   planProblem,
+  RESET_KEY,
+  recordClosed,
   TERMINAL,
 } from "./state.js";
 import { fact, facts } from "./work/facts.js";
@@ -61,7 +64,7 @@ import { commandRefusal } from "./work/retire.js";
  * plan and restore what merged under it; a plan that review changed is a
  * new plan, and nothing of the old one carries over.
  */
-export const RESET = "reset";
+export const RESET = RESET_KEY;
 
 /** What the resetting record keeps for its rebuild (`kept.reset`). */
 export interface ResetRecord {
@@ -99,6 +102,8 @@ export function resetRecord(
   if (deadline) state.deadline = deadline;
   if (old?.control) state.control = old.control;
   if (old) state.appliedRequests = old.appliedRequests;
+  // Their comments are still shown as closed while it rebuilds.
+  if (old?.closedHolds) state.closedHolds = old.closedHolds;
   const module = (old?.modules.github as GitHubModule | undefined) ?? github;
   if (module) {
     const { askedUnreadable: _asked, ...rest } = module;
@@ -511,7 +516,45 @@ function carried(
     ...live.appliedRequests.filter((applied) => applied.id !== request),
     { id: request, ...result },
   ].slice(-50);
+  closedByReset(
+    state,
+    live,
+    (live.kept[RESET] as ResetRecord | undefined)?.old,
+    new Date().toISOString(),
+  );
   return state;
+}
+
+/**
+ * The closed questions of the record that replaces a resetting one
+ * (`carried`): the live record's (its comments' progress is the sync's),
+ * then the base's it lacks, and every question the old state had open
+ * that the new record doesn't, closed as `reset`, so its comment says
+ * the reset closed it. A restored old state keeps its questions open; a
+ * cancel before the rebuild lands closes them as cancelled instead
+ * (engine.ts `cancel`).
+ */
+export function closedByReset(
+  state: ObjectiveState,
+  live: Pick<ObjectiveState, "closedHolds">,
+  old: Pick<ObjectiveState, "holds"> | undefined,
+  at: string,
+): void {
+  const known = new Map(
+    [...(state.closedHolds ?? []), ...(live.closedHolds ?? [])].map((entry) => [
+      entry.id,
+      entry,
+    ]),
+  );
+  // Bounded as recordClosed bounds them: no unshown closing is lost.
+  const merged = keptClosings(
+    [...known.values()].sort((a, b) => a.closed.at.localeCompare(b.closed.at)),
+  );
+  if (merged.length) state.closedHolds = merged;
+  else delete state.closedHolds;
+  for (const hold of old?.holds ?? [])
+    if (!state.holds.some((open) => open.id === hold.id))
+      recordClosed(state, hold, { how: "reset", at });
 }
 
 /** What `rebuild` read from GitHub, for `rebuildFrom`. */

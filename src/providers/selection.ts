@@ -183,6 +183,9 @@ export function providerWorker(
           config: worker.settings as ClaudeWorkerConfig,
           allowedSecretNames,
           commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
+          ...(config.validation.formatCommand
+            ? { formatCommand: config.validation.formatCommand }
+            : {}),
           worktreeRead:
             profile !== undefined &&
             config.execution.profiles?.[profile]?.worktreeRead === true,
@@ -198,6 +201,9 @@ export function providerWorker(
             blocks,
             repository: config.repository,
             commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
+            ...(config.validation.formatCommand
+              ? { formatCommand: config.validation.formatCommand }
+              : {}),
           },
         });
       case "openai-agents":

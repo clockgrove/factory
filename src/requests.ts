@@ -9,7 +9,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { isObject } from "./checked.js";
 import type { DreamWrite } from "./knowledge/dream.js";
-import { writeAtomic } from "./state.js";
+import { type AnsweredVia, writeAtomic } from "./state.js";
 
 /**
  * Operator requests: the CLI writes one file per request, and the service
@@ -166,7 +166,29 @@ export interface StoredRequest {
   by: string;
   /** `github`: written for a `/factory` comment, so `by` is its author's login. Absent: the CLI. */
   source?: "github";
+  /**
+   * Who gave it on `by`'s behalf (`factory answer --as`, or
+   * FACTORY_ANSWERED_AS for any CLI request), such as an agent operating
+   * Factory for a person: recorded beside `by` (state.ts `AnsweredVia`).
+   */
+  as?: string;
+  /** The `/factory` comment's URL (`source: "github"`). */
+  url?: string;
   request: Request;
+}
+
+/** The most of `as` a request carries (`answeredAs`). */
+export const AS_LIMIT = 100;
+
+/** How a stored request answers (state.ts `AnsweredVia`): its channel, `as` and comment. */
+export function answeredVia(stored: StoredRequest): AnsweredVia {
+  return {
+    channel: stored.source === "github" ? "comment" : "cli",
+    ...(stored.as ? { as: stored.as } : {}),
+    ...(stored.source === "github" && stored.url
+      ? { comment: stored.url }
+      : {}),
+  };
 }
 
 export function writeRequest(
@@ -176,6 +198,8 @@ export function writeRequest(
   /** A fixed id makes writing the same request twice harmless. */
   fixedId?: string,
   source?: StoredRequest["source"],
+  /** Who gave it on `by`'s behalf, and a comment's URL. */
+  extra: Pick<StoredRequest, "as" | "url"> = {},
 ): string {
   mkdirSync(dir, { recursive: true });
   const at = new Date().toISOString();
@@ -186,6 +210,8 @@ export function writeRequest(
     at,
     by,
     ...(source ? { source } : {}),
+    ...(extra.as ? { as: extra.as } : {}),
+    ...(extra.url ? { url: extra.url } : {}),
     request,
   };
   writeAtomic(join(dir, `${id}.json`), JSON.stringify(stored));
@@ -288,6 +314,9 @@ function requestProblem(value: unknown, id: string): string | undefined {
     if (typeof value[key] !== "string") return `its ${key} isn't text`;
   if (value.source !== undefined && value.source !== "github")
     return "its source isn't github";
+  for (const key of ["as", "url"])
+    if (value[key] !== undefined && typeof value[key] !== "string")
+      return `its ${key} isn't text`;
   const request = value.request;
   if (!isObject(request)) return "its request isn't an object";
   const kind = request.kind as Request["kind"];

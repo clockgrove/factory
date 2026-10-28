@@ -69,6 +69,7 @@ Reuse choices the operator already gave. Ask once, together, for what is missing
   - limits: `--max-active`, `--workers`, `--validations`;
   - delivery: `--delivery regular|native-stack`, and `--base-rerun-workflow FILE` only when the operator names a `workflow_dispatch` workflow free of side effects that Factory may run on the default branch for a fresh comparison of a failed check (off by default: Factory runs nothing there; readiness warns of anything that runs after it);
   - the sandbox: `--sandbox-network`, `--package-store`, `--read-only-path`, `--sandbox-env`;
+  - the repository's formatter: `--format-command CMD`, when the repository has one (a `format` package script, say; name the tool itself, such as `pnpm exec biome check --write .`), confirmed with the operator. Factory then formats every result itself and commits the change, so no model formats by hand;
   - final commands: `--required-command`, `--ci-only-command`;
   - worker settings, such as `--codex-network host` or `--claude-model`.
 

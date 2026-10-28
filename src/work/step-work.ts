@@ -394,6 +394,9 @@ export async function workStep(
       fixedScripts: scripts.map((script) => script.name),
       ...(pin ? { packageManagerUpdate: pin } : {}),
       ciOnlyCommands: config.finalValidation.ciOnlyCommands,
+      ...(config.validation.formatCommand
+        ? { formatCommand: config.validation.formatCommand }
+        : {}),
       ...(repair ? { repair: repair.context } : {}),
       mediaInputs: [
         ...inputs.value,

@@ -37,6 +37,7 @@ import { declineDiscovery, proposeAmendment } from "./planning/amendments.js";
 import { pathsOverlap } from "./planning/graph.js";
 import { currentPlan, rankedPaths } from "./planning/plan.js";
 import {
+  answeredVia,
   type DreamRequest,
   isCancel,
   pendingRequests,
@@ -736,12 +737,13 @@ export async function serve(options: ServeOptions): Promise<number> {
       const resetting = state.kept?.[RESET] as ResetRecord | undefined;
       const endedBefore = state.ended;
       let refusal: RequestResult | null = null;
+      const via = answeredVia(stored);
       switch (request.kind) {
         case "cancel":
-          refusal = runner.cancel(stored.by);
+          refusal = runner.cancel(stored.by, via);
           break;
         case "retry":
-          refusal = runner.retryNow(stored.by, request.question);
+          refusal = runner.retryNow(stored.by, request.question, via);
           break;
         case "answer":
           refusal = runner.answer(
@@ -751,6 +753,7 @@ export async function serve(options: ServeOptions): Promise<number> {
             request.writtenAt,
             request.question,
             request.arg,
+            via,
           );
           break;
         case "pause":
@@ -780,6 +783,7 @@ export async function serve(options: ServeOptions): Promise<number> {
                   request.reason,
                   stored.by,
                   stored.at,
+                  via,
                 );
           if (problems.length)
             refusal = refused(
@@ -817,6 +821,8 @@ export async function serve(options: ServeOptions): Promise<number> {
       event: "request",
       request,
       by: stored.by,
+      ...(stored.as ? { as: stored.as } : {}),
+      ...(stored.url ? { url: stored.url } : {}),
       ...result,
     });
     return result;

@@ -168,6 +168,8 @@ export interface ClaudeWorkerOptions {
   allowedSecretNames?: readonly string[];
   /** Each Validate command's limit: `validation.commandTimeoutSeconds`, in ms. */
   commandTimeoutMs: number;
+  /** The repository's formatter, which Validate applies first (`validation.formatCommand`). */
+  formatCommand?: string;
   /** The item's execution profile serves `read_file` (providers/config.ts `worktreeRead`). */
   worktreeRead?: boolean;
 }
@@ -1330,7 +1332,11 @@ export class ClaudeWorker implements Worker {
       attempt.grants.validate || attempt.grants.shell
         ? Math.max(
             ACTIVE_TOOL_IDLE_MS,
-            validationDeadlineMs(input.item, attempt.options.commandTimeoutMs),
+            validationDeadlineMs(
+              input.item,
+              attempt.options.commandTimeoutMs,
+              attempt.options.formatCommand !== undefined,
+            ),
           )
         : ACTIVE_TOOL_IDLE_MS,
     );

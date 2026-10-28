@@ -26,10 +26,10 @@ import {
   type SelfValidateOptions,
   SelfValidation,
   selectedMediaNote,
-  VALIDATION_TOOL_NAME,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
+import { VALIDATION_TOOL_NAME } from "../work/validate-tool.js";
 import {
   targetOf,
   type Worker,

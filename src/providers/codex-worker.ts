@@ -3,8 +3,11 @@
  * SDK and the operator's `codex login`. Shell commands and edits run in
  * Codex's own sandbox under Factory's permission profile (workspace
  * writable, `.git` read-only, network host or off), not in Factory's
- * bubblewrap; Factory's validation still decides. Factory collects and
- * commits the result.
+ * bubblewrap. Validate, which runs the item's declared commands through
+ * `validateTree` on a snapshot commit of its current files as the Claude
+ * and Copilot workers' does, is served to Codex as an MCP tool
+ * (codex-validate.ts); Factory's validation still decides. Factory collects
+ * and commits the result.
  */
 import { spawn } from "node:child_process";
 import {
@@ -32,7 +35,14 @@ import {
   runsAsRoot,
   toolchainDirectories,
 } from "../sandbox.js";
+import type { WorkItem } from "../planning/types.js";
 import { errorMessage } from "../text.js";
+import {
+  FinishRequests,
+  type SelfValidateOptions,
+  selectedMediaNote,
+} from "../work/self-validate.js";
+import { VALIDATION_TOOL_NAME } from "../work/validate-tool.js";
 import {
   ACTIVITY_INTERVAL_MS,
   type Worker,
@@ -52,6 +62,7 @@ import {
   trimCodexHome,
 } from "./codex.js";
 import { CodexStderr, withStderr } from "./codex-stderr.js";
+import { CodexValidate } from "./codex-validate.js";
 import {
   addCodexTelemetry,
   type CodexBaseline,
@@ -114,11 +125,36 @@ export interface CodexWorkerOptions {
   /** Turns Codex child agents off, for a prompt that says they are. */
   childAgents?: "disabled";
   idleMs?: number;
+  /**
+   * What Validate needs: the plan, its pins and the validation settings.
+   * Absent: no Validate and no handoff check.
+   */
+  validation?: SelfValidateOptions;
 }
 
-// Codex's sandbox mounts only granted paths: no /tmp (#1647).
-const TMP_SUFFIX =
-  "\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment: it has a private writable $TMPDIR but no /tmp or /var/tmp. Factory's validation runs the same commands with a writable /tmp. When a command fails here only because it uses /tmp, do not change files or propose ownership for that alone: report the command and that it needs /tmp; Factory's validation still decides.";
+/**
+ * The truth about the worker's own shell, after its prompt (#1647, #2156):
+ * Codex's sandbox, not Factory's validation environment. Live (#800), a
+ * Codex worker without Validate tried `pnpm install` in it, found no
+ * registry, and its repair ended with an operator question about an
+ * environment working as designed.
+ */
+export function codexShellNote(
+  network: boolean,
+  validating: boolean,
+  item: WorkItem,
+): string {
+  const reach = network
+    ? "It shares the host's network."
+    : "It has no network: no package registry, and no service on the host's loopback.";
+  const dependencies = network
+    ? "The repository's dependencies are not installed in your checkout. You may install them there to run a command, but Factory's validation never uses what you install: it runs the exact locked install itself."
+    : "The repository's dependencies are not installed in your checkout, and without a network they can't be: package installs, and the linters, type checkers, test runners, builds and generators that need the dependencies, don't run in your shell.";
+  const check = validating
+    ? `Your ${VALIDATION_TOOL_NAME} tool (Validate) runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell, fix what it reports, and finish only after it passes on your final files.`
+    : "You have no tool that runs the declared validation: Factory runs it after you finish.";
+  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${dependencies} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp. Do not commit: Factory collects your uncommitted changes as a new commit on your checkout's HEAD and validates that commit in a fresh checkout, so a check of HEAD there sees your result, while HEAD in your checkout doesn't hold your uncommitted changes. ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? `check with ${VALIDATION_TOOL_NAME} instead` : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}`;
+}
 
 const real = (path: string) => realpathSync(path);
 
@@ -197,15 +233,18 @@ ${set.length ? `\n[shell_environment_policy.set]\n${set.join("\n")}\n` : ""}`;
  * worktree's own git metadata read-only, the private HOME and TMPDIR, and the worktree with its `.git`
  * entry read-only. Not the operator's HOME, logins, SSH keys or gh config,
  * Factory's state, nor the rest of the checkout's git directory. Throws a
- * setup problem; the caller holds with it.
+ * setup problem; the caller holds with it. The worker, readiness's probe
+ * and the tests of Validate start Codex in it.
  */
-function workerHome(
+export function codexWorkerHome(
   worktree: string,
   network: boolean,
   keep: readonly string[],
   sandbox: Pick<SandboxConfig, "readOnlyPaths" | "environment">,
   /** A retained conversation's home (privateCodexHome `root`). */
   root?: string,
+  /** Validate's MCP server registration (codex-validate.ts CodexValidate.config). */
+  mcp = "",
 ): WorkerHome {
   const workspace = real(worktree);
   const source: NodeJS.ProcessEnv = {
@@ -274,7 +313,7 @@ ${shellPolicy(source, network, sandbox.environment, [
   "TMPDIR",
   "CODEX_HOME",
   ...Object.keys(packageCacheEnvironment(join(home, ".cache"))),
-])}`;
+])}${mcp}`;
     },
     finish: ({ root, home, env }) => {
       // Package caches stay in the private HOME, never in the worktree.
@@ -378,7 +417,7 @@ export async function codexSandboxProblem(
     outside = mkdtempSync(join(tmpdir(), "factory-probe-outside-"));
     const sealedFile = join(outside, "sealed");
     writeFileSync(sealedFile, "sealed", { mode: 0o600 });
-    home = workerHome(worktree, network, keep, sandbox);
+    home = codexWorkerHome(worktree, network, keep, sandbox);
     let port = 0;
     if (!network) {
       await new Promise<void>((listening, failed) => {
@@ -557,6 +596,34 @@ export class CodexWorker implements Worker {
         ),
       );
     }
+    // Validate, as the Claude worker's (codex-validate.ts): its handoff
+    // check always, the tool when the item allows it.
+    const validation =
+      this.options.validation &&
+      (await CodexValidate.start(input, this.options.validation));
+    if (validation && !(validation instanceof CodexValidate)) return validation;
+    input.log({
+      event: "worker-start",
+      provider: "codex",
+      model: this.model.model,
+      effort: this.model.effort,
+      network: this.options.network ?? "off",
+      validate: Boolean(validation?.tool),
+    });
+    try {
+      return await this.converse(input, record, Codex, validation);
+    } finally {
+      await validation?.close();
+    }
+  }
+
+  private async converse(
+    input: WorkerInput,
+    record: Record<string, unknown>,
+    Codex: typeof import("@openai/codex-sdk").Codex,
+    validation: CodexValidate | undefined,
+  ): Promise<WorkerResult> {
+    const validating = Boolean(validation?.tool);
     const keep = this.options.allowedSecretNames ?? [];
     const secrets = this.options.secrets ?? [];
     let home: WorkerHome;
@@ -575,12 +642,13 @@ export class CodexWorker implements Worker {
             session.id,
           ) !== undefined,
       );
-      home = workerHome(
+      home = codexWorkerHome(
         input.worktree,
         this.options.network === "host",
         keep,
         this.options.sandbox,
         conversation && codexHomeOf(conversation.dir),
+        validation?.config(),
       );
     } catch (error) {
       return outcome(
@@ -590,9 +658,13 @@ export class CodexWorker implements Worker {
         ),
       );
     }
+    const idleMs = this.options.idleMs ?? WORKER_IDLE_MS;
+    // A running Validate sends no events: its silence is bounded by the
+    // item's whole validation deadline, as for Claude and Copilot.
     const watchdog = new IdleWatchdog(
-      this.options.idleMs ?? WORKER_IDLE_MS,
+      idleMs,
       input.signal,
+      validation?.tool ? Math.max(idleMs, validation.deadlineMs) : undefined,
     );
     let events: AsyncGenerator<ThreadEvent> | undefined;
     // A continued thread out of context runs again fresh (`run`).
@@ -637,7 +709,7 @@ export class CodexWorker implements Worker {
       );
     // The SDK hides the child: the group its launcher records is killed on
     // an abort, and a service exit kills it even before its first event.
-    const group = new LaunchedGroup(home.pidFile, watchdog.signal);
+    let group = new LaunchedGroup(home.pidFile, watchdog.signal);
     try {
       const tier =
         this.model.serviceTier === "fast"
@@ -668,54 +740,89 @@ export class CodexWorker implements Worker {
       const thread = turn.resumed
         ? codex.resumeThread(turn.resumed.id, options)
         : codex.startThread(options);
-      // The abort kills the launcher's group, and with it the namespace.
-      ({ events } = await watchdog.race(
-        thread.runStreamed(turn.prompt + TMP_SUFFIX, {
-          signal: watchdog.signal,
-        }),
-      ));
       let finalResponse = "";
-      let completed = false;
-      let streamError: string | undefined;
       const operations = new Tallies();
       record.sdkOperations = operations.value;
-      for (;;) {
-        const next = await watchdog.race(events.next());
-        if (next.done) break;
-        const event = next.value;
-        input.output(event);
-        const item =
-          event.type === "item.started" ||
-          event.type === "item.updated" ||
-          event.type === "item.completed"
-            ? event.item
-            : undefined;
-        watchdog.progress(item ? `${event.type}:${item.type}` : event.type);
-        if (event.type === "thread.started") record.thread = event.thread_id;
-        if (modelItem(item)) firstToken(record, callStarted);
-        if (item?.type === "agent_message") finalResponse = item.text;
-        if (item) codexActivity(input, event.type, item);
-        if (item && SDK_OPERATIONS.has(item.type)) {
-          operations.add(item.type, item.id);
-          record.sdkOperations = operations.value;
+      // A handoff collection would reject, or a result no passing Validate
+      // covered, is asked again on the same thread (FinishRequests).
+      const finish =
+        validation &&
+        new FinishRequests(validation.validator, validating, input.item);
+      let request =
+        turn.prompt +
+        codexShellNote(this.options.network === "host", validating, input.item);
+      for (let run = 0; ; run++) {
+        if (run) {
+          // Each run is a codex process of its own: the last one's group
+          // ends, and the next is tracked from its own launcher record.
+          group.end();
+          rmSync(home.pidFile, { force: true });
+          group = new LaunchedGroup(home.pidFile, watchdog.signal);
         }
-        if (event.type === "turn.completed") {
-          completed = true;
-          record.tokens = baseline
-            ? turnTokens(codexTokens(event.usage), baseline.tokens)
-            : codexTokens(event.usage);
-          codexTurnUsage(record, event.usage);
+        // The abort kills the launcher's group, and with it the namespace.
+        ({ events } = await watchdog.race(
+          thread.runStreamed(request, { signal: watchdog.signal }),
+        ));
+        let completed = false;
+        let streamError: string | undefined;
+        for (;;) {
+          const next = await watchdog.race(events.next());
+          if (next.done) break;
+          const event = next.value;
+          input.output(event);
+          const item =
+            event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed"
+              ? event.item
+              : undefined;
+          // A running Validate is a running tool (the watchdog's tool bound).
+          watchdog.progress(
+            item ? `${event.type}:${item.type}` : event.type,
+            item?.type === "mcp_tool_call"
+              ? { id: item.id, active: event.type !== "item.completed" }
+              : undefined,
+          );
+          if (event.type === "thread.started") record.thread = event.thread_id;
+          if (modelItem(item)) firstToken(record, callStarted);
+          if (item?.type === "agent_message") finalResponse = item.text;
+          if (item) codexActivity(input, event.type, item);
+          if (item && SDK_OPERATIONS.has(item.type)) {
+            operations.add(item.type, item.id);
+            record.sdkOperations = operations.value;
+          }
+          if (event.type === "turn.completed") {
+            completed = true;
+            // A thread's counts are cumulative from its first run, so
+            // the last run's, less a continued thread's baseline, are
+            // this turn's.
+            record.tokens = baseline
+              ? turnTokens(codexTokens(event.usage), baseline.tokens)
+              : codexTokens(event.usage);
+            codexTurnUsage(record, event.usage);
+          }
+          if (event.type === "turn.failed") return failure(event.error.message);
+          // A stream error can precede a CLI retry; read through to the
+          // terminal turn and natural EOF before it counts.
+          if (event.type === "error") streamError = event.message;
         }
-        if (event.type === "turn.failed") return failure(event.error.message);
-        // A stream error can precede a CLI retry; read through to the
-        // terminal turn and natural EOF before it counts.
-        if (event.type === "error") streamError = event.message;
+        if (!completed)
+          return streamError
+            ? failure(streamError)
+            : { kind: "retry", reason: "Codex ended without a completed turn" };
+        const next = await finish?.next((operation) =>
+          watchdog.race(operation),
+        );
+        if (!next) break;
+        request = next;
       }
-      if (!completed)
-        return streamError
-          ? failure(streamError)
-          : { kind: "retry", reason: "Codex ended without a completed turn" };
       captureResponse(record, finalResponse);
+      // The tree a passing Validate covered: a validate step failure on it
+      // runs once more before it counts (work/step-validate.ts).
+      const tree = validating
+        ? await validation?.validator.finalTree()
+        : undefined;
+      if (validating) record.finalTreeValidated = Boolean(tree);
       const threadId =
         (record.thread as string | undefined) ?? turn.resumed?.id;
       const session =
@@ -733,6 +840,7 @@ export class CodexWorker implements Worker {
         kind: "finished",
         finalResponse,
         ...(session ? { session } : {}),
+        ...(tree && { validated: { tree, commands: [...input.commands] } }),
       };
     } catch (error) {
       if (error instanceof ResumeOverflow) throw error;

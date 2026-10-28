@@ -273,8 +273,11 @@ const profileIds = (config: CoreConfig): string[] =>
 /**
  * What the workers the planner may assign can execute: the Objective's
  * provider's (a sandboxed shell, as before), or with execution profiles,
- * each profile's provider's worker by kind. A Claude worker's shell needs
- * Write and Validate granted; the host's sandbox is checked when it runs.
+ * each profile's provider's worker by kind. A Codex worker has its shell
+ * and Validate; a Claude worker's shell needs Write and Validate granted,
+ * and its Validate alone runs only the validation commands; a Copilot
+ * worker has no shell, and Validate when its tools list it. The host's
+ * sandbox is checked when a worker runs.
  */
 export function workers(
   config: CoreConfig,
@@ -297,9 +300,13 @@ export function workers(
           : worker.kind === "claude"
             ? granted("Write") && granted("Validate")
               ? "shell"
-              : "validation-only"
+              : granted("Validate")
+                ? "validation-only"
+                : "none"
             : worker.kind === "copilot"
-              ? "validation-only"
+              ? worker.tools.includes("Validate")
+                ? "validation-only"
+                : "none"
               : "undeclared";
       return [id, access];
     }),

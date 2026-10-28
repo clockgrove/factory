@@ -1,5 +1,5 @@
 /**
- * A worker's own Validate, shared by the Claude and Copilot workers: the
+ * A worker's own Validate, shared by the Claude, Copilot and Codex workers: the
  * Work Item's declared commands through `validateTree` on a snapshot commit
  * of the worker's current files, in a fresh checkout, plus the handoff
  * decode collection will apply. The worker names no command: only the
@@ -39,9 +39,6 @@ export interface SelfValidateOptions {
   commandTimeoutMs: number;
 }
 
-/** The tool's name, as both workers serve it. */
-export const VALIDATION_TOOL_NAME = "run_validation";
-
 export const VALIDATION_TOOL_DESCRIPTION =
   "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.";
 
@@ -73,6 +70,61 @@ export function selectedMediaNote(item: WorkItem): string {
 /** The Validate tool's description for `item`'s worker. */
 export function validationToolDescription(item: WorkItem): string {
   return `${VALIDATION_TOOL_DESCRIPTION}${selectedMediaNote(item)}`;
+}
+
+export const VALIDATE_REQUEST = `Run Validate on your final files, fix any failures, then give your final report. ${UNOWNED_FIX}`;
+
+/**
+ * The request to validate for `item`'s worker: a media item's also says
+ * what a failure for its absent selected set means (`selectedMediaNote`).
+ */
+export function validateRequest(item: WorkItem): string {
+  return `${VALIDATE_REQUEST}${selectedMediaNote(item)}`;
+}
+
+/** Turns that return a handoff manifest collection would reject. */
+const MAX_HANDOFF_REFUSALS = 2;
+
+/**
+ * What a worker's finished turn still owes before its result is returned,
+ * asked on the same conversation, as the Claude and Codex workers do: a
+ * handoff manifest collection would reject is refused twice, then a result
+ * no passing Validate covered gets one request to validate (only when the
+ * worker has Validate). `next` gives the request, or undefined when the
+ * result is returned as it is.
+ */
+export class FinishRequests {
+  private handoffRefusals = 0;
+  private validationRequested = false;
+
+  constructor(
+    private readonly validator: SelfValidation,
+    /** The worker has Validate. */
+    private readonly validating: boolean,
+    private readonly item: WorkItem,
+  ) {}
+
+  /** `race` bounds each check, as the turn's watchdog does. */
+  async next(
+    race: <T>(operation: Promise<T>) => Promise<T>,
+  ): Promise<string | undefined> {
+    if (this.handoffRefusals < MAX_HANDOFF_REFUSALS) {
+      const handoff = await race(this.validator.checkHandoff());
+      if (!handoff.passed) {
+        this.handoffRefusals += 1;
+        return `Your result is not finished. ${handoff.text}\nThen give your final report.`;
+      }
+    }
+    if (
+      this.validating &&
+      !this.validationRequested &&
+      (await race(this.validator.finalTree())) === false
+    ) {
+      this.validationRequested = true;
+      return validateRequest(this.item);
+    }
+    return undefined;
+  }
 }
 
 /** Validate keeps the tail: failures report last. */

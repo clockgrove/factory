@@ -4,8 +4,12 @@
  * guidance only: code checks the plan's structure, never this prose.
  */
 
-/** What a configured worker can execute. */
-export type WorkerCommandAccess = "shell" | "validation-only" | "undeclared";
+/** What a configured worker can execute (planning/steps.ts `workers`). */
+export type WorkerCommandAccess =
+  | "shell"
+  | "validation-only"
+  | "none"
+  | "undeclared";
 
 /**
  * Acceptance entries above which an item states why it is one outcome. A
@@ -19,12 +23,17 @@ export const WORK_ITEM_ENTRY_SIGNAL = 15;
 export const QA_EVIDENCE_GUIDANCE =
   "Read-only QA has no implementation turn or interpreter for brief prose: it executes only declared validation commands and named CI checks. Required dependency inspection and runtime artifacts need complete supplied source or an explicitly selected validation-evidence mechanism. A brief promising inspection or retention does not execute it. A passing cacheable command does not by itself establish fresh execution or missing runtime facts; absent proof remains unavailable.";
 
-/** One phrase per worker command access; the shell-less phrase is what the planner must plan around. */
+/**
+ * One phrase per worker command access; the shell-less phrases are what the
+ * planner must plan around. A shell worker's checkout has no installed
+ * dependencies (#2156): what needs them runs through Validate.
+ */
 const COMMAND_ACCESS: Record<WorkerCommandAccess, string> = {
   shell:
-    "have a sandboxed shell: besides the item's validation commands, they can run commands in the checkout.",
+    "have a sandboxed shell and Validate: Validate runs the item's validation commands as Factory will, after the exact locked install, and returns their output and the Git-ignored files they write under the item's owned paths; the shell runs other commands in the checkout, where the repository's dependencies are not installed.",
   "validation-only":
-    "cannot run arbitrary commands: they run only the item's validation commands and read and write files in the checkout.",
+    "cannot run arbitrary commands: through Validate they run only the item's validation commands, and they read and write files in the checkout.",
+  none: "cannot run any command, not even the item's validation commands: Factory runs those after they finish and returns a failure's output to them; they read and write files in the checkout.",
   undeclared:
     "use an adapter that declares no shell, so plan as if they cannot run arbitrary commands: they run only the item's validation commands and read and write files in the checkout.",
 };

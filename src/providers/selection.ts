@@ -101,7 +101,7 @@ export function profileWorker(
         kind: worker.kind,
         model: worker.model!,
         effort: worker.effort!,
-        tools: ["sandboxed shell"],
+        tools: ["sandboxed shell", "Validate"],
         network: worker.network,
       };
     case "claude": {
@@ -212,6 +212,13 @@ export function providerWorker(
           network,
           allowedSecretNames,
           secrets: config.secrets,
+          validation: {
+            sandbox: config.sandbox,
+            plan,
+            blocks,
+            repository: config.repository,
+            commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
+          },
         });
       }
     }

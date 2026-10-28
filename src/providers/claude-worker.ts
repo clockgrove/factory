@@ -42,15 +42,15 @@ import type { SandboxConfig } from "../config.js";
 import { errored, hold } from "../engine.js";
 import { openParent, pathInsideRoot, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
-import type { Plan, WorkItem } from "../planning/types.js";
+import type { WorkItem } from "../planning/types.js";
 import { runSandboxed, sandboxAvailable } from "../sandbox.js";
-import type { ObjectiveBlock } from "../shown.js";
 import { BoundedText, errorMessage, headAndTail } from "../text.js";
 import { validationDeadlineMs } from "../validate.js";
 import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
   FinishRequests,
+  type SelfValidateOptions,
   SelfValidation,
   selectedMediaNote,
   UNOWNED_FIX,
@@ -154,22 +154,12 @@ export const DEFAULT_CLAUDE_WORKER: ClaudeWorkerConfig = {
   maxTurns: 400,
 };
 
-export interface ClaudeWorkerOptions {
+/** Validate's settings (the repository's formatter among them), and the worker's own. */
+export interface ClaudeWorkerOptions extends SelfValidateOptions {
   /** Resolved (selection.ts resolvedProvider): what the Objective froze. */
   config: ClaudeWorkerConfig;
-  sandbox: SandboxConfig;
-  /** The accepted plan: Validate's pins and the handoff's peers. */
-  plan: Plan;
-  /** The Objective's shown structure as planned: its package-manager and workspace pins. */
-  blocks: readonly ObjectiveBlock[];
-  /** Origin's `owner/name`: Validate fetches Git LFS objects the local store lacks from it. */
-  repository: string;
   /** Operator variables the worker's commands may see, by name. */
   allowedSecretNames?: readonly string[];
-  /** Each Validate command's limit: `validation.commandTimeoutSeconds`, in ms. */
-  commandTimeoutMs: number;
-  /** The repository's formatter, which Validate applies first (`validation.formatCommand`). */
-  formatCommand?: string;
   /** The item's execution profile serves `read_file` (providers/config.ts `worktreeRead`). */
   worktreeRead?: boolean;
 }
@@ -1083,6 +1073,13 @@ export class ClaudeWorker implements Worker {
 
   constructor(private readonly options: ClaudeWorkerOptions) {
     this.config = options.config;
+  }
+
+  get validation(): SelfValidateOptions | undefined {
+    return claudeGrants(this.config, this.options.worktreeRead === true)
+      .validate
+      ? this.options
+      : undefined;
   }
 
   async run(input: WorkerInput): Promise<WorkerResult> {

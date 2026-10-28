@@ -47,7 +47,11 @@ import {
 import { redact } from "./log.js";
 import { inert, prose, readRunMarks, runMarks } from "./markdown.js";
 import { lfsObjectsHoldingSecrets, lfsPushIfPointers } from "./media.js";
-import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
+import {
+  BaseFiles,
+  workflowCheckNames,
+  workflowFileCheckNames,
+} from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
 import { errorMessage } from "./text.js";
 import { FACTORY_EMAIL } from "./work/collect.js";
@@ -1314,25 +1318,36 @@ async function judge(
     const upper = baseBranch !== defaultBranch;
     const above =
       upper && missing.length ? (input.stack?.unpublished ?? []) : [];
+    // A missing check that a workflow run still under way on the head can
+    // report is a wait on that run, never the question: a job with
+    // `needs:` registers only once the jobs it needs end, which can be
+    // long after the push (#2157). The engine's limit on a wait bounds it.
+    const reporting =
+      missing.length && !above.length
+        ? await reportingRuns(context, head, missing)
+        : undefined;
+    const unreporting = missing.filter((name) => !reporting?.running.has(name));
     let settle: HoldAfter | undefined;
-    if (missing.length && !above.length) {
+    if (unreporting.length && !above.length) {
       const pushedAt = upper
         ? undefined
         : await github.pushTime(pull.head.ref, head, signal);
       const pushed = Number.isFinite(Date.parse(pushedAt ?? ""));
       // The default branch requires them, a stack layer above its bottom too.
-      const requiring = absent.length
+      const requiring = absent.some((name) => unreporting.includes(name))
         ? "the plan requires it"
         : `${defaultBranch}'s branch protection requires it${upper ? ", for every layer of a native stack" : ""}`;
+      const why = reporting ? unreportedWhy(reporting, unreporting) : "";
       settle = {
         ms: CHECK_SETTLE_MS,
         question: `Check ${bounded(
-          missing.map((name) => JSON.stringify(name)),
+          unreporting.map((name) => JSON.stringify(name)),
           ", ",
-        )} has no run or status on PR #${pr}'s head ${head} ${CHECK_SETTLE_MS / MINUTE} minutes after ${pushed ? `its push at ${pushedAt}` : "Factory began waiting"}, though ${requiring}. Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
+        )} has no run or status on PR #${pr}'s head ${head} ${CHECK_SETTLE_MS / MINUTE} minutes after ${pushed ? `its push at ${pushedAt}` : "Factory began waiting"}, though ${requiring}.${why ? ` ${why}` : ""} Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
         ...(pushed ? { since: pushedAt! } : {}),
       };
     }
+    const underway = reporting ? runningNote(reporting) : "";
     // Jobs held for an environment's approval, or a review the branch
     // requires once every required check is there: people outside Factory
     // decide, so there is no deadline.
@@ -1365,7 +1380,7 @@ async function judge(
               missing.map((name) => JSON.stringify(name)),
               ", ",
             )} may run on this layer only once ${stacking}`
-          : waiting,
+          : `${waiting}${underway ? `. ${underway}` : ""}`,
       afterMs: CI_POLL_MS,
       ...(gate
         ? { wait: { kind: "gate", gate, human: true } }
@@ -1423,6 +1438,180 @@ async function renamedChecks(
       ", ",
     )} has not reported on PR #${at.pr}'s head ${at.head} and is no longer a job in ${at.baseBranch}'s GitHub workflows (at ${tip}), so it will never report. Restore the job under that name on ${at.baseBranch}, then answer retry; or cancel.`,
   );
+}
+
+/** A workflow run's statuses before it completes, as GitHub reports them. */
+const UNFINISHED_RUN = new Set([
+  "queued",
+  "in_progress",
+  "waiting",
+  "pending",
+  "requested",
+]);
+
+/** An Actions workflow run on a PR's head, as a wait or a question names it. */
+interface HeadRun {
+  id: number;
+  /** The workflow's name, else its file's path. */
+  workflow: string;
+  status: string;
+  conclusion?: string;
+}
+
+/** What the head's workflow runs say of checks with no run or status on it (`reportingRuns`). */
+interface Reporting {
+  /** GitHub showed the head's workflow runs (Actions read access). */
+  shown: boolean;
+  /** Each check an unfinished run of a workflow that defines it may still report, with that run. */
+  running: Map<string, HeadRun>;
+  /** Each check's completed runs of workflows that define it. */
+  ended: Map<string, HeadRun[]>;
+}
+
+/** The check names of each workflow file at a head, per checkout: most recent last. */
+const headCheckNames = new Map<string, Promise<Map<string, string[]>>>();
+/** Heads whose workflow files `headCheckNames` keeps. */
+const HEAD_CHECK_NAMES_KEPT = 32;
+
+/**
+ * The check names each workflow file at `head` defines as a job, read once
+ * per head (a commit's files never change) from the checkout, which holds
+ * every head Factory delivers.
+ */
+function checkNamesAt(
+  context: DeliveryContext,
+  head: string,
+): Promise<Map<string, string[]>> {
+  const key = `${context.checkout}\n${head}`;
+  let read = headCheckNames.get(key);
+  if (read) {
+    headCheckNames.delete(key);
+    headCheckNames.set(key, read);
+    return read;
+  }
+  read = workflowFileCheckNames(
+    new BaseFiles(context.checkout, head, context.signal),
+  );
+  headCheckNames.set(key, read);
+  read.catch(() => {
+    if (headCheckNames.get(key) === read) headCheckNames.delete(key);
+  });
+  while (headCheckNames.size > HEAD_CHECK_NAMES_KEPT)
+    headCheckNames.delete(headCheckNames.keys().next().value!);
+  return read;
+}
+
+/**
+ * What the head's Actions workflow runs say of `missing`, the required or
+ * plan-named checks with no run or status on it (#2157). A check is
+ * `running` when a run on the head is unfinished (queued, in progress,
+ * waiting, pending or requested) and its workflow, as the head's own file
+ * defines it, has the check as a job: GitHub creates a job's check run only
+ * once the jobs it `needs:` end, so the run may report it yet. Otherwise
+ * `ended` holds the completed runs of workflows that define it, so a
+ * question can say whether any run could have reported it. One read of the
+ * head's workflow runs a poll, and the head's workflow files only when it
+ * has any.
+ */
+async function reportingRuns(
+  context: DeliveryContext,
+  head: string,
+  missing: string[],
+): Promise<Reporting> {
+  const running = new Map<string, HeadRun>();
+  const ended = new Map<string, HeadRun[]>();
+  const listed = await context.github.workflowRuns(head, context.signal);
+  if (!listed) return { shown: false, running, ended };
+  const runs = listed.filter(
+    (run) =>
+      typeof run?.id === "number" &&
+      typeof run.path === "string" &&
+      (run.head_sha === undefined || run.head_sha === head),
+  );
+  if (!runs.length) return { shown: true, running, ended };
+  const defined = await checkNamesAt(context, head);
+  for (const run of runs) {
+    // GitHub can give the file with the ref it ran at ("…yml@refs/heads/main").
+    const path = String(run.path).replace(/@.*$/, "");
+    const names = defined.get(path);
+    if (!names) continue;
+    const status = String(run.status);
+    const entry: HeadRun = {
+      id: run.id as number,
+      workflow: typeof run.name === "string" && run.name ? run.name : path,
+      status,
+      ...(typeof run.conclusion === "string"
+        ? { conclusion: run.conclusion }
+        : {}),
+    };
+    for (const name of missing) {
+      if (!names.includes(name)) continue;
+      if (UNFINISHED_RUN.has(status)) {
+        if (!running.has(name)) running.set(name, entry);
+      } else ended.set(name, [...(ended.get(name) ?? []), entry]);
+    }
+  }
+  return { shown: true, running, ended };
+}
+
+/** "workflow run 40703915553 (Quality, in_progress)". */
+function headRun(run: HeadRun): string {
+  return `workflow run ${run.id} (${run.workflow}, ${run.conclusion ?? run.status})`;
+}
+
+/**
+ * The wait's account of the missing checks an unfinished run may still
+ * report, naming each run: what the run log and status show.
+ */
+function runningNote(reporting: Reporting): string {
+  const byRun = new Map<number, { run: HeadRun; names: string[] }>();
+  for (const [name, run] of reporting.running) {
+    const group = byRun.get(run.id) ?? { run, names: [] };
+    group.names.push(JSON.stringify(name));
+    byRun.set(run.id, group);
+  }
+  return bounded(
+    [...byRun.values()].map(
+      ({ run, names }) =>
+        `${bounded(names, ", ")} ${names.length === 1 ? "has" : "have"} not registered yet; ${headRun(run)} on this head defines ${names.length === 1 ? "it" : "them"} and is under way`,
+    ),
+    "; ",
+  );
+}
+
+/**
+ * Why checks with no run or status hold: no workflow run on the head can
+ * report them, or every one that could has completed without them.
+ */
+function unreportedWhy(reporting: Reporting, unreporting: string[]): string {
+  if (!reporting.shown)
+    return "GitHub does not show this head's Actions workflow runs.";
+  const quoted = (names: string[]) =>
+    bounded(
+      names.map((name) => JSON.stringify(name)),
+      ", ",
+    );
+  const ended = unreporting.filter((name) => reporting.ended.get(name)?.length);
+  const none = unreporting.filter((name) => !ended.includes(name));
+  const runs = [
+    ...new Map(
+      ended
+        .flatMap((name) => reporting.ended.get(name)!)
+        .map((run) => [run.id, run]),
+    ).values(),
+  ];
+  return [
+    ...(none.length
+      ? [
+          `No Actions workflow run on this head is of a workflow that defines ${quoted(none)} as a job.`,
+        ]
+      : []),
+    ...(ended.length
+      ? [
+          `Every workflow run on this head whose workflow defines ${quoted(ended)} completed without reporting it: ${bounded(runs.map(headRun), ", ")}.`,
+        ]
+      : []),
+  ].join(" ");
 }
 
 /**

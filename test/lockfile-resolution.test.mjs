@@ -163,30 +163,29 @@ chmodSync(join(tools, "pnpm"), 0o755);
 // writes the one that matches.
 writeFileSync(
   join(tools, "fake-npm.cjs"),
-  `const { readFileSync, writeFileSync } = require("node:fs");
+  `const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2).join(" ");
 const dependencies = JSON.parse(readFileSync("package.json", "utf8")).dependencies ?? {};
 const expected = ${npmLockfile.toString()}(dependencies);
+// A release-age policy in the checkout's .npmrc.
+const policy = existsSync(".npmrc") && /^(?:min-release-age|before)=/m.test(readFileSync(".npmrc", "utf8"));
 if (args === "ci --ignore-scripts") {
   if (readFileSync("package-lock.json", "utf8") === expected) process.exit(0);
   console.error("npm error \`npm ci\` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with \`npm install\` before continuing.");
   process.exit(1);
 }
 ${FAKE_VIEW}
-// npm 11.19's ETARGET (captured): a version the registry doesn't have, and
-// (8.0.0) one its release-age policy keeps out.
+// npm 11.19's ETARGET (captured): a version the registry doesn't have, and,
+// under a release-age policy, 7.1.0 (published yesterday), which it keeps
+// out. Under the policy npm adds " with a date before <date>" to every
+// ETARGET, the missing version's too.
 const target = (line) => "npm error code ETARGET\\nnpm error notarget " + line + "\\nnpm error notarget In most cases you or one of your dependencies are requesting a package version that doesn't exist.\\n";
 if (args === "install --package-lock-only --ignore-scripts --no-audit --no-fund") {
-  for (const [name, spec] of Object.entries(dependencies)) {
-    if (/^[~^]?99\\./.test(spec)) {
-      console.error(target("No matching version found for " + name + "@" + spec + "."));
+  for (const [name, spec] of Object.entries(dependencies))
+    if (/^[~^]?99\\./.test(spec) || (policy && spec === "7.1.0")) {
+      console.error(target("No matching version found for " + name + "@" + spec + (policy ? " with a date before 10/29/2016, 10:51:59 PM." : ".")));
       process.exit(1);
     }
-    if (spec === "8.0.0") {
-      console.error(target("No matching version found for " + name + "@" + spec + " with a date before 10/29/2016, 10:20:08 PM."));
-      process.exit(1);
-    }
-  }
   writeFileSync("package-lock.json", expected);
   process.exit(0);
 }
@@ -439,7 +438,7 @@ for (const network of ["host", "package-install"])
     assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 1500));
     assert.match(
       result.detail,
-      /Factory resolved pnpm-lock\.yaml with `pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts`, which failed \(1\): no published version of is-number satisfies `99\.0\.0`\. Factory looked is-number up in the configured registry \(`pnpm view 'is-number' versions time --json`\): none of its 16 published versions satisfies the range your change requests\. The newest are 7\.1\.0, 7\.0\.0, 6\.0\.0, 5\.0\.0, /,
+      /Factory resolved pnpm-lock\.yaml with `pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts`, which failed \(1\): no published version of is-number satisfies `99\.0\.0`\. Factory looked is-number up in the configured registry \(`pnpm view 'is-number' versions time --json`\): none of its 16 published versions satisfies the range your change requests\. The newest releases are 7\.1\.0, 7\.0\.0, 6\.0\.0, 5\.0\.0, /,
     );
     assert.match(
       result.detail,
@@ -515,32 +514,43 @@ test("a missing version the candidate doesn't itself request (a dependency's own
   assert.equal(lookups(events).length, 0);
 });
 
-test("npm: a version no published release satisfies goes back to the worker; a release-age refusal holds without a lookup", async () => {
-  const npmBase = {
+test("npm: a version no published release satisfies goes back to the worker, under a release-age policy too; a too-young one holds", async () => {
+  const npmBase = (npmrc) => ({
     "package.json": manifest({ "left-pad": "1.0.0" }),
     "package-lock.json": npmLockfile({ "left-pad": "1.0.0" }),
-  };
-  const missing = await validate({
-    baseFiles: npmBase,
-    candidate: { "left-pad": "1.0.0", "is-number": "^99.1.0" },
-    commands: [NPM_BOOTSTRAP],
+    ...(npmrc === undefined ? {} : { ".npmrc": npmrc }),
   });
-  assert.equal(
-    missing.result.kind,
-    "failed",
-    JSON.stringify(missing.result).slice(0, 1500),
-  );
-  assert.match(
-    missing.result.detail,
-    /which failed \(1\): no published version of is-number satisfies `\^99\.1\.0`\. Factory looked is-number up in the configured registry \(`npm view 'is-number' versions time --json`\): none of its 16 published versions/,
-  );
-  assert.deepEqual(
-    lookups(missing.events).map((event) => event.verdict),
-    ["missing"],
-  );
+  for (const [npmrc, range] of [
+    [undefined, "^99.1.0"],
+    ["min-release-age=3650\n", "^99.0.0"],
+    ["before=2015-01-01\n", "99.0.0"],
+  ]) {
+    const missing = await validate({
+      baseFiles: npmBase(npmrc),
+      candidate: { "left-pad": "1.0.0", "is-number": range },
+      commands: [NPM_BOOTSTRAP],
+    });
+    assert.equal(
+      missing.result.kind,
+      "failed",
+      JSON.stringify(missing.result).slice(0, 1500),
+    );
+    assert.match(
+      missing.result.detail,
+      new RegExp(
+        `which failed \\(1\\): no published version of is-number satisfies \`${range.replace(/[.^]/g, "\\$&")}\`\\. Factory looked is-number up in the configured registry \\(\`npm view 'is-number' versions time --json\`\\): none of its 16 published versions`,
+      ),
+    );
+    // npm's own output, the policy's date included, never reaches the worker.
+    assert.doesNotMatch(missing.result.detail, /with a date before|ETARGET/);
+    assert.deepEqual(
+      lookups(missing.events).map((event) => event.verdict),
+      ["missing"],
+    );
+  }
   const young = await validate({
-    baseFiles: npmBase,
-    candidate: { "left-pad": "1.0.0", "is-number": "8.0.0" },
+    baseFiles: npmBase("min-release-age=3650\n"),
+    candidate: { "left-pad": "1.0.0", "is-number": "7.1.0" },
     commands: [NPM_BOOTSTRAP],
   });
   assert.equal(
@@ -549,8 +559,14 @@ test("npm: a version no published release satisfies goes back to the worker; a r
     JSON.stringify(young.result).slice(0, 1500),
   );
   assert.match(young.result.question, /with a date before/);
-  assert.match(young.result.question, /named a release-age policy/);
-  assert.equal(lookups(young.events).length, 0);
+  assert.match(
+    young.result.question,
+    /Factory looked is-number up in the registry: 7\.1\.0, published 2026-10-26T00:00:00\.000Z, satisfies `7\.1\.0`, so the version exists/,
+  );
+  assert.deepEqual(
+    lookups(young.events).map((event) => event.verdict),
+    ["satisfied"],
+  );
 });
 
 test("a resolution the candidate's own inputs kept offline fails the candidate, however it failed", async () => {

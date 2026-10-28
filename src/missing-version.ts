@@ -12,7 +12,9 @@
  *
  * What reaches the worker is Factory's own text: the package name and
  * range the candidate declared (checked), and at most NEWEST_SHOWN of the
- * registry's versions, each one semver parsed and printed canonically.
+ * registry's release versions, each one semver parsed and printed only as
+ * its digits and dots (a prerelease's tag is free text whoever published
+ * it chose, so no prerelease is named).
  */
 import { posix } from "node:path";
 import { parse as parseVersion, rcompare, satisfies, validRange } from "semver";
@@ -27,8 +29,13 @@ const NAME_LIMIT = 214;
 const RANGE_LIMIT = 128;
 /** The newest published versions a repair names. */
 export const NEWEST_SHOWN = 10;
-/** The longest version a repair names. */
-const VERSION_LIMIT = 64;
+/**
+ * A version a repair may name: a release, `major.minor.patch` and nothing
+ * else (semver's canonical form has already dropped build metadata). A
+ * prerelease tag is free text its publisher chose, so it never reaches the
+ * worker.
+ */
+const RELEASE = /^\d+\.\d+\.\d+$/;
 
 /**
  * An npm package name Factory passes to the lookup: scoped or not, starting
@@ -49,8 +56,8 @@ const squeeze = (text: string) => text.replace(/\s+/g, "");
 /**
  * The `name@range` a no-matching-version refusal names, with whitespace
  * removed (pnpm wraps its message at hyphens and spaces), or undefined
- * when the output isn't exactly one such refusal or says a release-age
- * policy refused it.
+ * when the output isn't exactly one such refusal or is pnpm's release-age
+ * refusal.
  *
  * pnpm 12.6:
  *   Error: ERR_PNPM_NO_MATCHING_VERSION … No matching version found for is-
@@ -58,7 +65,11 @@ const squeeze = (text: string) => text.replace(/\s+/g, "");
  * (a release-age refusal is ERR_PNPM_NO_MATURE_MATCHING_VERSION). npm 11.19:
  *   npm error code ETARGET
  *   npm error notarget No matching version found for is-number@99.0.0.
- * (a release-age refusal adds ` with a date before <date>`).
+ * Under a release-age policy (`min-release-age`, `before`) npm adds
+ * ` with a date before <date>` to every ETARGET, a version that was never
+ * published included, so the suffix can't say whose refusal it is: the
+ * request is read through it and the lookup tells them apart (a version
+ * the policy keeps out still satisfies the range, which holds).
  */
 export function refusedRequest(
   manager: PackageManager,
@@ -81,11 +92,10 @@ export function refusedRequest(
     ];
   } else {
     if (!/^npm error code ETARGET$/m.test(output)) return undefined;
-    if (/with a date before|min-release-age|release age/i.test(flat))
-      return undefined;
+    if (/min-release-age|release age/i.test(flat)) return undefined;
     found = [
       ...output.matchAll(
-        /^npm error notarget No matching version found for (.+)\.$/gm,
+        /^npm error notarget No matching version found for (.+?)(?: with a date before .+)?\.$/gm,
       ),
     ];
   }
@@ -316,7 +326,7 @@ export function judgeLookup(range: string, stdout: string): Lookup {
     kind: "missing",
     published: published.size,
     newest: [...published.keys()]
-      .filter((version) => version.length <= VERSION_LIMIT)
+      .filter((version) => RELEASE.test(version))
       .sort(rcompare)
       .slice(0, NEWEST_SHOWN),
   };
@@ -330,7 +340,7 @@ export function repairMessage(
 ): string {
   const { name, range } = request;
   const newest = lookup.newest.length
-    ? ` The newest are ${lookup.newest.join(", ")}.`
+    ? ` The newest releases are ${lookup.newest.join(", ")}.`
     : "";
   return `no published version of ${name} satisfies \`${range}\`. Factory looked ${name} up in the configured registry (\`${lookupCommand(manager, name)}\`): none of its ${lookup.published} published version${lookup.published === 1 ? "" : "s"} satisfies the range your change requests.${newest} Request a version of ${name} that is published; leave the lockfile as it is, since Factory resolves it again.`;
 }

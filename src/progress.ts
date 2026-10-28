@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { isObject } from "./checked.js";
-import { displayTime, redactDeep } from "./display.js";
+import { answeredBy, displayTime, redactDeep } from "./display.js";
 import { type LogEvent, logFiles, readNew } from "./log.js";
 import { code, digest, prose } from "./markdown.js";
 import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
@@ -204,7 +204,7 @@ export function decisionsOf(state: ObjectiveState): ProgressInput["decisions"] {
 }
 
 /** Work Items, questions and decisions the comment lists; past these, it names the rest. */
-const LISTED = { items: 50, holds: 20, decisions: 20 };
+const LISTED = { items: 50, holds: 20, decisions: 20, recent: 5 };
 /** A worker that reported within this is active; else quiet. */
 const QUIET_MS = 5 * 60_000;
 /** The body's limit, below the plan comment's (planning/steps.ts COMMENT_LIMIT). */
@@ -437,6 +437,31 @@ function render(
       lines.push(
         `- ${decision.question ? `${text(decision.question)} ` : ""}→ ${code(decision.answer)}${decision.text ? `: ${text(decision.text)}` : ""}, by ${prose(decision.by)} at ${when(decision.at)}`,
       );
+  }
+  // A view from before 0.5.8 has none.
+  const recent = (view.recentDecisions ?? []).slice(-LISTED.recent);
+  if (recent.length) {
+    lines.push(
+      "",
+      "**Recent decisions**",
+      ...recent.map((decision) => {
+        const { closed } = decision;
+        const id = code(decision.id);
+        const linked =
+          decision.url && /^https:\/\/[^\s()<>]+$/.test(decision.url)
+            ? `[${id}](${decision.url})`
+            : id;
+        // Redacted already, with the rest of the input.
+        const who = answeredBy(closed, []);
+        const what =
+          closed.how === "answered"
+            ? `${code([closed.answer, closed.arg].filter(Boolean).join(" "))} by ${who}`
+            : closed.how === "cancelled"
+              ? `closed: cancelled${closed.by === "deadline" ? " at its deadline" : ` by ${who}`}`
+              : `closed without an answer (${closed.how})`;
+        return `- ${linked}: ${text(decision.summary)} → ${what}, ${when(closed.at)}`;
+      }),
+    );
   }
   const calls = input.calls.planner + input.calls.worker;
   const details = [

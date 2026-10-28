@@ -107,6 +107,8 @@ export interface Hold {
   shownAt?: string;
   /** The comment shows the short form `/factory <answer>` (it was the one open question). */
   shortForm?: boolean;
+  /** Its issue comment's URL, once GitHub showed it: the closed question links it (`ClosedHold.url`). */
+  url?: string;
   /**
    * A human gate's question: its step keeps polling while it is open, and
    * it closes by itself once the step no longer waits on the gate.
@@ -132,6 +134,25 @@ export function answersOf(hold: Pick<Hold, "options">): string[] {
   return [...new Set(hold.options.map((option) => option.answer))];
 }
 
+/**
+ * How an answer reached Factory: `factory answer` (or `factory retry
+ * --question`, `factory cancel`), a `/factory` comment, or Factory itself
+ * (`rereview-kept`).
+ */
+export type AnswerChannel = "cli" | "comment" | "factory";
+
+/**
+ * Who answered, beyond `by` (docs/reference/holds.md#Answered questions):
+ * `as` names who gave the answer on `by`'s behalf (`factory answer --as`,
+ * FACTORY_ANSWERED_AS), such as an agent operating Factory for a person;
+ * `comment` is a `/factory` comment's URL.
+ */
+export interface AnsweredVia {
+  channel: AnswerChannel;
+  as?: string;
+  comment?: string;
+}
+
 export interface Answer {
   holdId: string;
   /** The question this answers, as it was asked. */
@@ -140,8 +161,123 @@ export interface Answer {
   /** The option's argument, for a parameterized answer (`accept 2`). */
   arg?: string;
   text?: string;
+  /** A comment's author's GitHub login, the CLI's host user, or `factory`. */
   by: string;
+  /** Who gave it on `by`'s behalf (`AnsweredVia`). */
+  as?: string;
+  channel?: AnswerChannel;
   at: string;
+}
+
+/**
+ * How a question closed: `answered`, or without an answer: `superseded`
+ * (a newer question of its step replaced it), `cancelled` (the Objective
+ * was), `reset` (`factory reset` rebuilt the state without it), `cleared`
+ * or `replanned` (a repair or a replan cleared the work it asked about),
+ * `gate-cleared` (the human gate it waited on cleared by itself),
+ * `asked-again` (`adopt` met a configuration that changed again) and
+ * `declined` (`factory decline-discovery` settled its amendment).
+ */
+export type ClosedHow =
+  | "answered"
+  | "superseded"
+  | "cancelled"
+  | "reset"
+  | "cleared"
+  | "replanned"
+  | "gate-cleared"
+  | "asked-again"
+  | "declined";
+
+export interface HoldClosing {
+  how: ClosedHow;
+  at: string;
+  /** The answer token, for `answered`. */
+  answer?: string;
+  /** Its option's argument (`switch NAME`, `accept 2`). */
+  arg?: string;
+  /** Its text, kept to CLOSED_TEXT_LIMIT characters. */
+  text?: string;
+  /** Who answered or cancelled (as `Answer.by`); `deadline` when the deadline cancelled. */
+  by?: string;
+  as?: string;
+  channel?: AnswerChannel;
+  /** The `/factory` comment's URL. */
+  comment?: string;
+  /** `superseded`: the question that replaced it. */
+  next?: string;
+}
+
+/**
+ * A question that closed, kept for its comment and the run's history
+ * (`closedHolds`): its comment is edited to show the closing, the live
+ * status comment lists the latest, and the report the answers.
+ */
+export interface ClosedHold {
+  id: string;
+  step: string;
+  item?: string;
+  cause: HoldCause;
+  askedAt: string;
+  /** The question's first line, cut to 300 characters (unredacted, as saved). */
+  summary: string;
+  /** The question and its options, kept until its comment shows the closing (`shown`). */
+  question?: string;
+  options?: HoldOption[];
+  /** Its comment's URL (`Hold.url`). */
+  url?: string;
+  closed: HoldClosing;
+  /** Its comment shows the closing, had none, or was given up on. */
+  shown?: true;
+}
+
+/** Closed questions kept, newest last. */
+export const CLOSED_KEPT = 30;
+/** The most of an answer's text a closed question keeps. */
+export const CLOSED_TEXT_LIMIT = 2_000;
+
+/**
+ * Record that `hold` closed (`closing`) in `state.closedHolds`, newest
+ * last, keeping CLOSED_KEPT. A hold recorded already keeps its first
+ * closing. Every way a question closes comes here, so its comment shows it.
+ */
+export function recordClosed(
+  state: Pick<ObjectiveState, "closedHolds">,
+  hold: Hold,
+  closing: HoldClosing,
+): void {
+  const closed = state.closedHolds ?? [];
+  if (closed.some((entry) => entry.id === hold.id)) return;
+  const first = hold.question.split("\n")[0]!.trim();
+  const text =
+    closing.text !== undefined && closing.text.length > CLOSED_TEXT_LIMIT
+      ? `${closing.text.slice(0, CLOSED_TEXT_LIMIT - 1)}…`
+      : closing.text;
+  state.closedHolds = [
+    ...closed,
+    {
+      id: hold.id,
+      step: hold.step,
+      ...(hold.item !== undefined ? { item: hold.item } : {}),
+      cause: hold.cause,
+      askedAt: hold.askedAt,
+      summary: first.length > 300 ? `${first.slice(0, 299)}…` : first,
+      question: hold.question,
+      options: hold.options,
+      ...(hold.url ? { url: hold.url } : {}),
+      closed: {
+        ...closing,
+        ...(text !== undefined ? { text } : {}),
+      },
+    },
+  ].slice(-CLOSED_KEPT);
+}
+
+/** The closed questions whose comment doesn't show the closing yet. */
+export function unshownClosings(
+  state: Pick<ObjectiveState, "closedHolds">,
+): ClosedHold[] {
+  return (state.closedHolds ?? []).filter((entry) => !entry.shown);
 }
 
 /**
@@ -204,6 +340,8 @@ export interface ObjectiveState {
   frozen?: Frozen;
   /** Open questions, oldest first: at most one for the Objective and one per Work Item. */
   holds: Hold[];
+  /** The latest closed questions, newest last (`recordClosed`); absent until one closes. */
+  closedHolds?: ClosedHold[];
   /**
    * The latest GitHub time at which any question's comment was shown
    * (posted or edited), closed questions included. An answer that names no
@@ -652,6 +790,20 @@ function stateProblem(value: unknown, issue: number): string | undefined {
       )
     )
       return `holds has a question that isn't one: ${JSON.stringify(hold).slice(0, 200)}`;
+  }
+  if (value.closedHolds !== undefined) {
+    if (!Array.isArray(value.closedHolds)) return "closedHolds isn't a list";
+    for (const closed of value.closedHolds as unknown[])
+      if (
+        !isObject(closed) ||
+        !["id", "step", "summary", "askedAt"].every(
+          (key) => typeof closed[key] === "string",
+        ) ||
+        !isObject(closed.closed) ||
+        typeof closed.closed.how !== "string" ||
+        typeof closed.closed.at !== "string"
+      )
+        return `closedHolds has a closed question that isn't one: ${JSON.stringify(closed).slice(0, 200)}`;
   }
   // The accepted plan and each accepted amendment's (planning/plan.ts).
   for (const [key, entry] of Object.entries(value.done as object))

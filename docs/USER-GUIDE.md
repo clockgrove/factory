@@ -271,11 +271,15 @@ factory export-captures N --endpoint https://collector.example.com --send --auth
 A hold is posted on the issue as one comment listing its answers, each with what it does and one marked recommended. `factory status N` shows the same, with the hold's id.
 
 ```sh
-factory answer N ANSWER [ARG] --question HOLD_ID [--text "..." | --text-file /absolute/file]
+factory answer N ANSWER [ARG] --question HOLD_ID [--text "..." | --text-file /absolute/file] [--as NAME]
 factory retry N [--question HOLD_ID]
 ```
 
 Or comment on the issue: `/factory ANSWER [--question HOLD_ID] [ARG] [text]` (it needs write access to the repository). The `--question` id binds the answer to the question you read, so a late answer never lands on a newer question.
+
+Once a question is answered, Factory edits its comment in place: the heading changes from "Factory needs you" to the answer, who gave it, from the CLI or which `/factory` comment, when, and the start of any text, and the edit mentions no one, so GitHub sends no new notification. A question that closes without an answer (a newer one replaced it, the Objective was cancelled or reset, a repair or replan cleared its work) says that instead. The live status comment lists the latest decisions with links to their questions, `factory status N` shows them, and the final report lists the answers.
+
+When an agent answers for you (the director skill, or a script), give `--as NAME` (or set `FACTORY_ANSWERED_AS`, which applies to every request the CLI writes): it is recorded beside your login in the state, the run log, status, the question's comment and the report, so GitHub shows "the operator (as Claude Code)" rather than you. A CLI answer shows on GitHub as "the operator", never the host's user name; a comment answer shows its author's login.
 
 Common answers:
 

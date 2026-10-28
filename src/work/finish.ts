@@ -11,7 +11,8 @@ import {
 import { defaultHead } from "../git.js";
 import { GitHubError, issueGone, TransientError } from "../github.js";
 import { roleMemory } from "../knowledge/index.js";
-import { mentions } from "../markdown.js";
+import { answeredBy, displayTime } from "../display.js";
+import { code, mentions } from "../markdown.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
@@ -515,7 +516,12 @@ export function reportStep(deps: BuildDeps): Step {
       await github.ensureComment(
         state.issue,
         marker,
-        reportComment(marker, state, deps.config.operators),
+        reportComment(
+          marker,
+          state,
+          deps.config.operators,
+          deps.config.secrets,
+        ),
         "report:comment",
         signal,
         sinceRun(state),
@@ -536,6 +542,7 @@ export function reportComment(
   marker: string,
   state: ObjectiveState,
   operators: readonly string[],
+  secrets: readonly string[] = [],
 ): string {
   const plan = currentPlan(state)!;
   const final = state.done.final as FinalResult;
@@ -555,6 +562,7 @@ export function reportComment(
     0,
   );
   const decided = decisionLines(decisionsOf(state));
+  const answered = answeredLines(state, secrets);
   // CI flakes: checks that failed, then passed on their one rerun.
   const flaky = plan.items.flatMap((item) => {
     const rerun = fact(state, "ciRerun", item.id);
@@ -564,7 +572,7 @@ export function reportComment(
         ]
       : [];
   });
-  return `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${flaky.length ? `\n\nPossibly flaky CI checks, which failed and then passed when Factory reran their failed Actions jobs once:\n${flaky.join("\n")}` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${
+  return `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\`${final.commands.length ? ` (${final.commands.map((c) => `\`${c}\``).join(", ")})` : ""}.${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${flaky.length ? `\n\nPossibly flaky CI checks, which failed and then passed when Factory reran their failed Actions jobs once:\n${flaky.join("\n")}` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${answered.length ? `\n\nQuestions answered:\n${answered.join("\n")}` : ""}${
     plan.retired?.length
       ? `\n\nRetired final validation commands:\n${retiredLines(plan)
           .map((line) => `- ${line}`)
@@ -579,6 +587,43 @@ export function reportComment(
           .join("\n")}`
       : ""
   }${final.media ? `\n\n${final.media}` : ""}${mentions(operators)}`;
+}
+
+/** The answered questions the report lists, newest last. */
+const REPORT_ANSWERS = 20;
+
+/**
+ * The report's answered questions (state.ts `closedHolds`): each with its
+ * comment, its answer, and who gave it, on whose behalf and how
+ * (display.ts `answeredBy`); the earlier ones past REPORT_ANSWERS are
+ * counted.
+ */
+export function answeredLines(
+  state: Pick<ObjectiveState, "closedHolds">,
+  secrets: readonly string[],
+): string[] {
+  const answered = (state.closedHolds ?? []).filter(
+    (entry) => entry.closed.how === "answered",
+  );
+  const shown = answered.slice(-REPORT_ANSWERS);
+  return [
+    ...(answered.length > shown.length
+      ? [
+          `- ${answered.length - shown.length} earlier, in the issue's question comments.`,
+        ]
+      : []),
+    ...shown.map((entry) => {
+      const id = code(entry.id);
+      const linked =
+        entry.url && /^https:\/\/[^\s()<>]+$/.test(entry.url)
+          ? `[${id}](${entry.url})`
+          : id;
+      const answer = [entry.closed.answer, entry.closed.arg]
+        .filter(Boolean)
+        .join(" ");
+      return `- ${linked}: ${code(answer)} by ${answeredBy(entry.closed, secrets)}, at ${code(displayTime(entry.closed.at))}`;
+    }),
+  ];
 }
 
 /**

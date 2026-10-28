@@ -35,15 +35,18 @@ import {
 } from "./spend.js";
 import {
   type Answer,
+  type AnsweredVia,
   answerForm,
   answersOf,
   type Frozen,
   type Hold,
   type HoldCause,
+  type HoldClosing,
   type HoldOption,
   type ObjectiveState,
   type ObjectiveStatus,
   type Retry,
+  recordClosed,
   saveState,
   TERMINAL,
   type Wait,
@@ -1094,7 +1097,7 @@ export class ObjectiveRunner {
       for (const polled of state.holds.filter(
         (open) => open.polls && open.step === key,
       ))
-        this.close(polled);
+        this.close(polled, { how: "gate-cleared" });
     // Saved with the outcome, so a death right after still counts as progress.
     state.finishedRun = this.run.id;
     if ("keep" in outcome && outcome.keep) {
@@ -1191,7 +1194,7 @@ export class ObjectiveRunner {
         for (const moot of state.holds.filter((hold) =>
           outcome.clear.includes(hold.step),
         ))
-          this.close(moot);
+          this.close(moot, { how: replan ? "replanned" : "cleared" });
         state.repairs ??= {};
         // A replan starts again: the cleared steps' history goes, and
         // nothing counts against an allowance (`check` included).
@@ -1240,6 +1243,7 @@ export class ObjectiveRunner {
       question,
       answer: REVALIDATE,
       by: "factory",
+      channel: "factory",
       at,
     };
     delete state.retries[key];
@@ -1574,6 +1578,9 @@ export class ObjectiveRunner {
       (option) => `\`${answerForm(option)}\`: ${option.consequence}`,
     );
     const id = `${key}@${now}`;
+    // The step's earlier question, asked again: its comment says so.
+    if (open)
+      recordClosed(state, open, { how: "superseded", at: now, next: id });
     // Logged once saved, so the log never shows a question the state lost.
     this.afterSave.push(() =>
       this.log.write(state.issue, {
@@ -1612,18 +1619,36 @@ export class ObjectiveRunner {
 
   /**
    * Question `id`'s issue comment now shows it, since `at` by GitHub's
-   * clock, in the short form or naming its id (github-sync `ask`). A
-   * question closed meanwhile was still shown: it counts for `lastShownAt`.
+   * clock, in the short form or naming its id (github-sync `ask`), at
+   * `url`. A question closed meanwhile was still shown: it counts for
+   * `lastShownAt`.
    */
-  shown(id: string, at: string, shortForm: boolean): void {
+  shown(id: string, at: string, shortForm: boolean, url?: string): void {
     const hold = this.state.holds.find((open) => open.id === id);
     if (hold) {
       hold.shownAt = at;
       if (shortForm) hold.shortForm = true;
       else delete hold.shortForm;
+      if (url) hold.url = url;
     }
+    // Closed meanwhile: its closing links the comment too.
+    const closed = this.state.closedHolds?.find((entry) => entry.id === id);
+    if (closed && url) closed.url = url;
     if (!(Date.parse(this.state.lastShownAt ?? "") >= Date.parse(at)))
       this.state.lastShownAt = at;
+  }
+
+  /**
+   * Closed question `id`'s comment shows its closing (github-sync
+   * `closings`), had none to edit, or was given up on: its question and
+   * options, kept for that edit, go.
+   */
+  closingShown(id: string): void {
+    const closed = this.state.closedHolds?.find((entry) => entry.id === id);
+    if (!closed) return;
+    closed.shown = true;
+    delete closed.question;
+    delete closed.options;
   }
 
   /**
@@ -1644,8 +1669,10 @@ export class ObjectiveRunner {
     question?: string,
     /** The option's argument (`switch NAME`), passed apart from the text. */
     arg?: string,
+    /** How it came and on whose behalf (`AnsweredVia`); absent: the CLI. */
+    via: AnsweredVia = { channel: "cli" },
   ): RequestResult | null {
-    if (answer === "cancel") return this.cancel(by);
+    if (answer === "cancel") return this.cancel(by, via);
     const finished = this.finishedRefusal();
     if (finished) return finished;
     const issue = this.state.issue;
@@ -1738,7 +1765,7 @@ export class ObjectiveRunner {
       if (live.digest !== this.state.kept[ADOPTS]) {
         // The configuration changed again after the question named it:
         // its step asks again, naming the changes as they are now.
-        this.close(hold);
+        this.close(hold, { how: "asked-again" });
         delete this.state.kept[ADOPTS];
         this.settle();
         return refused(
@@ -1759,7 +1786,19 @@ export class ObjectiveRunner {
       answer === MORE ? askedFor(this.state, hold.id) : undefined;
     const given = granting === "rereviews" ? REVALIDATE : answer;
     const retry = this.state.retries[hold.step];
-    this.close(hold);
+    const who = {
+      by,
+      ...(via.as ? { as: via.as } : {}),
+      channel: via.channel,
+    };
+    this.close(hold, {
+      how: "answered",
+      answer,
+      ...(option.arg !== undefined ? { arg: option.arg } : {}),
+      ...(note ? { text: note } : {}),
+      ...who,
+      ...(via.comment ? { comment: via.comment } : {}),
+    });
     if (answer === WAIT && retry) {
       // A limit is the account's: waiting for it is every step's answer.
       for (const other of Object.values(this.state.retries))
@@ -1808,7 +1847,7 @@ export class ObjectiveRunner {
           answer: given,
           ...(option.arg !== undefined ? { arg: option.arg } : {}),
           ...(note ? { text: note } : {}),
-          by,
+          ...who,
           at: this.now().toISOString(),
         };
       }
@@ -1841,8 +1880,12 @@ export class ObjectiveRunner {
    * to the original start, so moving it would post the reminder again,
    * and its question is timed from it (a granted `wait` puts it off).
    */
-  private close(hold: Hold): void {
+  private close(hold: Hold, closing: Omit<HoldClosing, "at">): void {
     this.state.holds = this.state.holds.filter((open) => open !== hold);
+    recordClosed(this.state, hold, {
+      ...closing,
+      at: this.now().toISOString(),
+    });
     this.pause(
       Date.parse(hold.askedAt),
       (key) => key !== hold.step && this.stops(hold, key),
@@ -1971,11 +2014,21 @@ export class ObjectiveRunner {
    * Cancel at once: stop running steps and mark the Objective cancelled.
    * Cleanup steps follow. A finished Objective stays as it is.
    */
-  cancel(by: string): RequestResult | null {
+  cancel(by: string, via?: AnsweredVia): RequestResult | null {
     if (this.state.status === "cancelled") return null;
     const finished = this.finishedRefusal();
     if (finished) return finished;
     this.state.status = "cancelled";
+    // Each open question closes with the Objective: its comment says who cancelled.
+    for (const open of this.state.holds)
+      recordClosed(this.state, open, {
+        how: "cancelled",
+        at: this.now().toISOString(),
+        by,
+        ...(via?.as ? { as: via.as } : {}),
+        ...(via ? { channel: via.channel } : {}),
+        ...(via?.comment ? { comment: via.comment } : {}),
+      });
     this.state.holds = [];
     this.state.attempts = {};
     this.state.retries = {};
@@ -1993,7 +2046,11 @@ export class ObjectiveRunner {
    * run the waiting steps no open question stops now. A bare retry never
    * answers a question: while one stops every step, it is refused.
    */
-  retryNow(by: string, question?: string): RequestResult | null {
+  retryNow(
+    by: string,
+    question?: string,
+    via?: AnsweredVia,
+  ): RequestResult | null {
     const finished = this.finishedRefusal();
     if (finished) return finished;
     const issue = this.state.issue;
@@ -2005,7 +2062,15 @@ export class ObjectiveRunner {
           "invalid_answer",
           `#${issue}'s question ${hold.id} has no retry answer. Answers: ${answersOf(hold).join(", ")}.`,
         );
-      return this.answer("retry", undefined, by, undefined, question);
+      return this.answer(
+        "retry",
+        undefined,
+        by,
+        undefined,
+        question,
+        undefined,
+        via,
+      );
     }
     if (holds.some((hold) => hold.item === undefined))
       return refused(

@@ -36,6 +36,7 @@ import {
   type Frozen,
   findState,
   type Hold,
+  type HoldClosing,
   type Loaded,
   listAllObjectives,
   loadQueueControl,
@@ -123,6 +124,13 @@ export interface ObjectiveView {
   /** The operator's `accept <n>` and `refuse <n>` of single criteria under the current plan, with their reasons. */
   decisions: CriterionDecision[];
   /**
+   * The latest questions that closed, newest last (at most
+   * RECENT_DECISIONS): each with how it closed (its answer, who gave it,
+   * on whose behalf and how, or why it closed without one) and its
+   * comment's URL.
+   */
+  recentDecisions: RecentDecision[];
+  /**
    * Each autonomy allowance, used and allowed with the operator's grants:
    * across the Objective, and repairs per repair path (target step).
    */
@@ -155,6 +163,55 @@ export interface ObjectiveView {
   /** The latest run log event. */
   lastEvent: LogEvent | null;
   error?: string;
+}
+
+/** A closed question, as status shows it (state.ts `ClosedHold`). */
+export interface RecentDecision {
+  id: string;
+  step: string;
+  item?: string;
+  /** The question's first line. */
+  summary: string;
+  askedAt: string;
+  /** Its issue comment, once GitHub showed it. */
+  url?: string;
+  /** How it closed; its text cut to 300 characters. */
+  closed: HoldClosing;
+}
+
+/** The closed questions status lists. */
+export const RECENT_DECISIONS = 10;
+
+/** The latest closed questions (`ObjectiveView.recentDecisions`). */
+export function recentDecisions(state: ObjectiveState): RecentDecision[] {
+  return (state.closedHolds ?? [])
+    .slice(-RECENT_DECISIONS)
+    .map(({ id, step, item, summary, askedAt, url, closed }) => ({
+      id,
+      step,
+      ...(item !== undefined ? { item } : {}),
+      summary,
+      askedAt,
+      ...(url ? { url } : {}),
+      closed:
+        closed.text !== undefined && closed.text.length > 300
+          ? { ...closed, text: `${closed.text.slice(0, 299)}…` }
+          : closed,
+    }));
+}
+
+/** One closed question as a line of text: what closed it, who and how, when, and what it asked. */
+export function decisionText(decision: RecentDecision): string {
+  const { closed } = decision;
+  const who = closed.by
+    ? ` by ${closed.by}${closed.as ? ` (as ${closed.as})` : ""}`
+    : "";
+  const how = closed.channel ? ` via ${closed.channel}` : "";
+  const what =
+    closed.how === "answered"
+      ? `answered ${[closed.answer, closed.arg].filter(Boolean).join(" ")}${closed.text ? ` (${closed.text.replace(/\s+/g, " ")})` : ""}`
+      : `closed: ${closed.how}${closed.next ? ` by ${closed.next}` : ""}`;
+  return `${decision.id}: ${what}${who}${how} at ${displayTime(closed.at)}; it asked: ${decision.summary}`;
 }
 
 /** The running service's record, from `service.json`. */
@@ -352,6 +409,7 @@ export function statusOf(
       flakyRerun: [],
       finalSkipped: [],
       decisions: [],
+      recentDecisions: [],
       nextAction: {
         command: context.setAside
           ? `factory retry ${issue}`
@@ -395,6 +453,7 @@ export function statusOf(
     flakyRerun: flakyReruns(state),
     finalSkipped: (state.done.final as FinalResult | undefined)?.skipped ?? [],
     decisions: decisionsOf(state),
+    recentDecisions: recentDecisions(state),
     allowances: {
       planningRevisions: planningRevisions(state),
       implementationRepairs: implementationRepairs(state),
@@ -834,6 +893,11 @@ function objectiveText(row: ObjectiveView): string[] {
     );
   for (const line of decisionLines(row.decisions, displayTime))
     lines.push(`  Decided: ${line}`);
+  if (row.recentDecisions.length)
+    lines.push(
+      "  Recent decisions:",
+      ...row.recentDecisions.map((decision) => `    ${decisionText(decision)}`),
+    );
   if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
   return lines;
 }

@@ -35,8 +35,19 @@ import {
   rewrittenMedia,
   type SelectedMember,
 } from "./media.js";
+import {
+  declaredRequests,
+  holdNote,
+  judgeLookup,
+  lookupCommand,
+  lookupRefusal,
+  matchRequest,
+  refusedRequest,
+  repairMessage,
+} from "./missing-version.js";
 import { declaration, onlyEntry } from "./objective.js";
 import {
+  configurationRefusal,
   installNetworkRefusal,
   type NetworkRefusal,
   resolutionNetworkRefusal,
@@ -872,27 +883,7 @@ type Resolution =
   | { kind: "failed"; detail: string; output: string }
   | Extract<Outcome, { kind: "hold" }>;
 
-/**
- * Resolve the lockfile of `commit`, whose bootstrap refused it as out of
- * date after the candidate changed its dependencies (#2095). No worker has
- * the network to, so Factory runs the package manager's lockfile-only
- * resolution (LOCKFILE_RESOLUTION) in the validation checkout as the
- * install runs: scripts and hooks off, the package store writable, and the
- * network only as the install would get it from these inputs, through
- * pasta, and only when every manifest the candidate changed names registry
- * packages alone (package-network.ts `resolutionNetworkRefusal`). The
- * repository's own policy (registries, minimum release age, provenance)
- * applies unchanged: the candidate can't change its configuration. The
- * lockfile is committed on the candidate as Factory's change, and the
- * caller validates that commit.
- *
- * With sandbox.network off nothing can resolve it: a hold naming
- * package-install. A resolution the package manager refuses (the
- * repository's minimum release age, a version the registry lacks) holds
- * with its message; one that ran offline because of the candidate's own
- * inputs is the candidate's to repair.
- */
-async function resolveLockfile(context: {
+interface ResolutionContext {
   input: ValidateInput;
   worktree: string;
   commit: string;
@@ -910,7 +901,33 @@ async function resolveLockfile(context: {
     file: RunFile,
     network: boolean,
   ): ReturnType<typeof runSandboxed>;
-}): Promise<Resolution> {
+}
+
+/**
+ * Resolve the lockfile of `commit`, whose bootstrap refused it as out of
+ * date after the candidate changed its dependencies (#2095). No worker has
+ * the network to, so Factory runs the package manager's lockfile-only
+ * resolution (LOCKFILE_RESOLUTION) in the validation checkout as the
+ * install runs: scripts and hooks off, the package store writable, and the
+ * network only as the install would get it from these inputs, through
+ * pasta, and only when every manifest the candidate changed names registry
+ * packages alone (package-network.ts `resolutionNetworkRefusal`). The
+ * repository's own policy (registries, minimum release age, provenance)
+ * applies unchanged: the candidate can't change its configuration. The
+ * lockfile is committed on the candidate as Factory's change, and the
+ * caller validates that commit.
+ *
+ * With sandbox.network off nothing can resolve it: a hold naming
+ * package-install. A resolution the package manager refuses (the
+ * repository's minimum release age, a version the registry lacks) holds
+ * with its message, unless the registry says no published version
+ * satisfies a range the candidate declares (missingVersion): that is the
+ * candidate's to repair. So is one that ran offline because of the
+ * candidate's own inputs.
+ */
+async function resolveLockfile(
+  context: ResolutionContext,
+): Promise<Resolution> {
   const { input, worktree, commit, failed, output } = context;
   const { signal } = input;
   const { command, lockfile } = LOCKFILE_RESOLUTION[context.manager];
@@ -1009,8 +1026,20 @@ async function resolveLockfile(context: {
         output: `${offline}${resolution}`,
       };
     }
+    // A version no published release satisfies is the worker's typo, but
+    // pnpm and npm can refuse a release-age policy's version the same way:
+    // only the registry's own answer, asked as the resolution asked it,
+    // tells them apart (#2099).
+    const lookedUp =
+      !overflow && run.offline === undefined && (online || network === "host")
+        ? await missingVersion(context, resolution, online)
+        : undefined;
+    if (lookedUp?.kind === "repair") {
+      const detail = `${ran}: ${lookedUp.message}`;
+      return { kind: "failed", detail, output: detail };
+    }
     return hold(
-      `${ran}. The package manager refused it:\n${overflow ?? failedOutput(resolution)}\n\nThe repository's package policy (such as its minimum release age) or the registry refuses what the change asks for, and Factory never relaxes that policy. Answer \`retry\` once the registry or the policy on the default branch allows it, replan to plan the dependency change again, or cancel.`,
+      `${ran}. The package manager refused it:\n${overflow ?? failedOutput(resolution)}\n\n${lookedUp ? `${lookedUp.note}\n\n` : ""}The repository's package policy (such as its minimum release age) or the registry refuses what the change asks for, and Factory never relaxes that policy. Answer \`retry\` once the registry or the policy on the default branch allows it, replan to plan the dependency change again, or cancel.`,
       ["retry", "replan", "cancel"],
     );
   }
@@ -1049,6 +1078,135 @@ async function resolveLockfile(context: {
   }
   input.log({ event: "lockfile-resolved", lockfile, commit: made });
   return { kind: "regenerated", commit: made, tree, lockfile };
+}
+
+/**
+ * Whether a failed resolution refused a version no published release
+ * satisfies (#2099 item 5): `repair` with the worker's message, or `hold`
+ * with what the hold adds; undefined when the output isn't a
+ * no-matching-version refusal at all. The refusal must name a specifier
+ * the candidate declares in the package inputs it changed, a plain semver
+ * range with no prerelease (missing-version.ts). The lookup
+ * (`pnpm view`/`npm view <name> versions time --json`) then runs exactly
+ * as the resolution ran: the same sandbox and network grant (`online`),
+ * in the same checkout, whose package configuration must be the base's
+ * (configurationRefusal). It sends the registry nothing the resolution
+ * didn't: the package's name. Only when its answer lists no version that
+ * satisfies the range is it a repair; a version that satisfies it (one
+ * the release-age policy keeps out, say), a failed, timed-out, truncated
+ * or unreadable lookup, and every step Factory can't read exactly hold.
+ */
+async function missingVersion(
+  context: ResolutionContext,
+  resolution: string,
+  online: boolean,
+): Promise<
+  | { kind: "repair"; message: string }
+  | { kind: "hold"; note: string }
+  | undefined
+> {
+  const { input, worktree, commit, manager } = context;
+  const { signal } = input;
+  const held = (note: string) => ({ kind: "hold" as const, note });
+  const request = refusedRequest(manager, resolution);
+  if (request === undefined) {
+    const code =
+      manager === "pnpm"
+        ? /\bERR_PNPM_NO_MATCHING_VERSION\b/
+        : /^npm error code ETARGET$/m;
+    return code.test(resolution)
+      ? held(
+          "Factory couldn't read exactly one package and range the package manager found no version for, or the message named a release-age policy, so it didn't look the package up.",
+        )
+      : undefined;
+  }
+  const configured = await configurationRefusal(
+    worktree,
+    input.plan.base,
+    commit,
+    signal,
+  );
+  if (configured)
+    return held(
+      `Factory didn't look the package up, because ${configured.reason}.`,
+    );
+  let declared: Awaited<ReturnType<typeof declaredRequests>>;
+  try {
+    declared = await declaredRequests(
+      worktree,
+      input.plan.base,
+      commit,
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof GitRefusal) throw error;
+    signal.throwIfAborted();
+    declared = undefined;
+  }
+  if (!declared)
+    return held(
+      "Factory didn't look the package up, because it couldn't read the package inputs the change made.",
+    );
+  const requested = matchRequest(request, declared);
+  if (!requested)
+    return held(
+      "Factory didn't look the package up, because the version refused isn't exactly one the change itself requests.",
+    );
+  const refused = lookupRefusal(requested);
+  if (refused)
+    return held(
+      `Factory didn't look ${requested.name} up, because ${refused}.`,
+    );
+  const command = lookupCommand(manager, requested.name);
+  const file = input.runFile("validation-lockfile-lookup");
+  let run: Awaited<ReturnType<typeof runSandboxed>>;
+  try {
+    run = await context.run(command, file, online);
+  } catch (error) {
+    file.remove();
+    throw error;
+  }
+  file.close();
+  const judged =
+    run.kind === "fault"
+      ? ({
+          kind: "unknown",
+          reason: `the sandbox couldn't run it: ${run.detail}`,
+        } as const)
+      : run.exitCode !== 0 ||
+          run.timedOut ||
+          run.diskOverflow ||
+          run.offline !== undefined ||
+          run.truncated.stdout
+        ? ({
+            kind: "unknown",
+            reason: `\`${command}\` failed (${run.diskOverflow ? "disk budget" : run.timedOut ? "time limit" : run.offline !== undefined ? "offline" : run.truncated.stdout ? "output cut" : run.exitCode})`,
+          } as const)
+        : judgeLookup(requested.range, run.stdout);
+  input.log({
+    event: "lockfile-resolution-lookup",
+    command,
+    network:
+      input.sandbox.network === "host"
+        ? "host"
+        : online
+          ? "registry"
+          : "offline",
+    range: requested.range,
+    verdict: judged.kind,
+    ...(judged.kind === "unknown" ? { reason: judged.reason } : {}),
+    ...(judged.kind === "missing" ? { published: judged.published } : {}),
+    ...(judged.kind === "satisfied" ? { version: judged.version } : {}),
+    ...(run.kind === "ran"
+      ? { exitCode: run.exitCode, output: file.file }
+      : {}),
+  });
+  if (judged.kind === "missing")
+    return {
+      kind: "repair",
+      message: repairMessage(manager, requested, judged),
+    };
+  return held(holdNote(requested, judged));
 }
 
 // ---------------------------------------------------------------------------

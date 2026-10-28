@@ -762,6 +762,8 @@ export interface SummaryReport {
   wallMs: number;
   roles: Record<string, Usage>;
   phases: Record<string, Usage & { steps: number; stepMs: number }>;
+  /** Hedged planner calls by `role phase`: started, won, lost and their tokens. */
+  hedges: Record<string, HedgeCount>;
   repairs: Record<string, number>;
   holds: HoldSpan[];
   holdWaitMs: number;
@@ -794,6 +796,7 @@ class Summary {
   private to?: string;
   private readonly roles: SummaryReport["roles"] = {};
   private readonly phases: SummaryReport["phases"] = {};
+  private readonly hedges: SummaryReport["hedges"] = {};
   private readonly repairs: Record<string, number> = {};
   private readonly holds = new Map<string, HoldSpan>();
   private readonly open = new Map<string, LogEvent>();
@@ -832,6 +835,7 @@ class Summary {
         this.roles[role] ??= emptyUsage();
         addUsage(this.roles[role], event);
         addUsage(this.phase(phase), event);
+        addHedge(this.hedges, event);
         break;
       }
       case "hold": {
@@ -907,6 +911,7 @@ class Summary {
         this.from && this.to ? Date.parse(this.to) - Date.parse(this.from) : 0,
       roles: this.roles,
       phases: this.phases,
+      hedges: this.hedges,
       repairs: this.repairs,
       holds,
       holdWaitMs: holds.reduce((sum, hold) => sum + (hold.waitMs ?? 0), 0),
@@ -927,6 +932,57 @@ export function addUsage(usage: Usage, event: LogEvent): void {
   const cost = num(event.costUsd);
   if (cost === undefined) usage.costUnknown += 1;
   else usage.costUsd = (usage.costUsd ?? 0) + cost;
+}
+
+/** The hedged planner calls of one role and phase (providers/planner.ts HedgedPlanner). */
+export interface HedgeCount {
+  /** Second calls started: their `model-usage` carries `hedge`. */
+  hedged: number;
+  /** Hedges that answered first: the first call ended aborted as `hedged`. */
+  won: number;
+  /** Hedges aborted as `hedged` because the first call answered first. */
+  lost: number;
+  /** Tokens the hedges reported, won or lost. */
+  tokens: number;
+  /** Hedges that reported no token total: `tokens` leaves them out. */
+  tokensUnknown: number;
+}
+
+/** The error of a call that HedgedPlanner aborted because the other attempt answered first. */
+const HEDGE_ABORT = /\bhedged$/;
+
+/** Counts a `model-usage` event toward its role and phase's hedges (key `role phase`); other calls add nothing. */
+export function addHedge(
+  hedges: Record<string, HedgeCount>,
+  event: LogEvent,
+): void {
+  const hedge = (num(event.hedge) ?? 0) > 0;
+  const aborted = HEDGE_ABORT.test(str(event.error) ?? "");
+  if (!hedge && !aborted) return;
+  const key = `${str(event.role) ?? "unknown"} ${str(event.phase) ?? "unknown"}`;
+  hedges[key] ??= { hedged: 0, won: 0, lost: 0, tokens: 0, tokensUnknown: 0 };
+  const row = hedges[key];
+  if (!hedge) {
+    row.won += 1;
+    return;
+  }
+  row.hedged += 1;
+  if (aborted) row.lost += 1;
+  const total = num(
+    (event.tokens as Record<string, unknown> | undefined)?.total,
+  );
+  if (total === undefined) row.tokensUnknown += 1;
+  else row.tokens += total;
+}
+
+/** One line per role and phase that hedged. */
+export function hedgeLines(hedges: Record<string, HedgeCount>): string[] {
+  return Object.entries(hedges)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(
+      ([key, row]) =>
+        `  ${key}: ${row.hedged} hedged · ${row.won} won · ${row.lost} lost · ${count(row.tokens)} tokens in hedges${row.tokensUnknown ? ` (${row.tokensUnknown} unreported)` : ""}`,
+    );
 }
 
 /**
@@ -986,6 +1042,10 @@ export function summaryText(report: SummaryReport): string {
       ([phase, usage]) =>
         `  ${phase}: ${usage.steps} steps, ${duration(usage.stepMs)} wall${usage.calls ? ` · ${usageText(usage)}` : ""}`,
     ),
+  );
+  section(
+    "Hedges by role and phase (a hedge wins when it answers first):",
+    hedgeLines(report.hedges),
   );
   section(
     "Repairs:",

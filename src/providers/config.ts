@@ -22,10 +22,15 @@ import {
 import type { ClaudeWorkerConfig } from "./claude-worker.js";
 import type { CodexEffort } from "./codex.js";
 import {
+  type HedgeSeconds,
   type ModelChoice,
+  PLANNER_PHASES,
   type PlannerModels,
   REVIEW_PHASES,
 } from "./planner.js";
+
+/** The longest `hedgeSeconds`: past the planners' own idle limits, a hedge would never start. */
+export const MAX_HEDGE_SECONDS = 3600;
 
 export const PLANNERS = ["codex", "claude", "copilot"] as const;
 export type PlannerKind = (typeof PLANNERS)[number];
@@ -84,8 +89,15 @@ export type WorkerConfig =
       itemBudgetCents?: number;
     };
 
-/** A planner with the model choices given; each adapter has defaults. */
-export type ProviderConfig = { worker: WorkerConfig } & (
+/**
+ * A planner with the model choices given; each adapter has defaults.
+ * `hedgeSeconds` replaces a phase's hedge threshold (planner.ts
+ * DEFAULT_HEDGE_SECONDS); absent, every phase has its default.
+ */
+export type ProviderConfig = {
+  worker: WorkerConfig;
+  hedgeSeconds?: HedgeSeconds;
+} & (
   | { planner: "claude"; models?: Partial<ClaudePlannerOptions> }
   | { planner: "codex"; models?: Partial<PlannerModels<CodexEffort>> }
   | { planner: "copilot"; models?: Partial<PlannerModels> }
@@ -230,10 +242,22 @@ function providerConfig(
       planner: oneOf(PLANNERS, "codex"),
       models: (entry: unknown) => entry,
       worker: (entry: unknown) => entry,
+      // Seconds of silence before a phase's call is hedged; 0 never hedges it.
+      hedgeSeconds: optional(
+        object(
+          Object.fromEntries(
+            PLANNER_PHASES.map((phase) => [
+              phase,
+              optional(whole(0, undefined, MAX_HEDGE_SECONDS)),
+            ]),
+          ),
+        ),
+      ),
     },
     problems,
   );
   const { planner } = provider;
+  const hedgeSeconds = provider.hedgeSeconds as HedgeSeconds | undefined;
   const models =
     provider.models === undefined
       ? undefined
@@ -252,6 +276,7 @@ function providerConfig(
   return {
     planner,
     ...(models ? { models } : {}),
+    ...(hedgeSeconds ? { hedgeSeconds } : {}),
     worker,
   } as ProviderConfig;
 }

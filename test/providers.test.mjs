@@ -66,6 +66,82 @@ test("setup completes a half-given model choice and sets Copilot's idle bound; r
   );
 });
 
+test("a provider's hedgeSeconds sets a phase's hedge threshold on every planner kind, is checked, and is operational", async () => {
+  const inst = installation();
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    {
+      providers: {
+        codex: {
+          planner: "codex",
+          worker: { kind: "codex" },
+          hedgeSeconds: { diagnosis: 150, "graph-review": 0 },
+        },
+      },
+    },
+  );
+  const accepted = JSON.parse(cli(inst, "setup", "--json").out);
+  assert.notEqual(accepted.status, "refused", JSON.stringify(accepted));
+  assert.deepEqual(read(inst).providers.codex.hedgeSeconds, {
+    diagnosis: 150,
+    "graph-review": 0,
+  });
+
+  const config = read(inst);
+  config.providers.codex.hedgeSeconds = { work: 5, plan: -1, dream: 4000 };
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  const refused = JSON.parse(cli(inst, "setup", "--json").out);
+  assert.equal(refused.status, "refused");
+  const problems = refused.problems.join("\n");
+  assert.match(problems, /hedgeSeconds\.work is not a setting/);
+  assert.match(
+    problems,
+    /hedgeSeconds\.plan must be a whole number from 0 to 3600/,
+  );
+  assert.match(
+    problems,
+    /hedgeSeconds\.dream must be a whole number from 0 to 3600/,
+  );
+
+  // Each planner kind is built with the configured thresholds over the defaults.
+  const { providerPlanner, freezeConfig } = await import(
+    "../dist/providers/selection.js"
+  );
+  const hedgeSeconds = { diagnosis: 150, "graph-review": 0 };
+  for (const [planner, kind] of [
+    ["codex", "codex"],
+    ["claude", "claude"],
+    ["copilot", "copilot"],
+  ]) {
+    const built = providerPlanner({
+      planner,
+      worker: { kind },
+      hedgeSeconds,
+    });
+    assert.equal(built.policy.silenceMs.diagnosis, 150_000, planner);
+    assert.equal(built.policy.silenceMs["graph-review"], 0, planner);
+    assert.equal(built.policy.silenceMs.plan, 120_000, planner);
+    assert.equal(built.policy.silenceMs["result-review"], 0, planner);
+    const unset = providerPlanner({ planner, worker: { kind } });
+    assert.equal(unset.policy.silenceMs.diagnosis, 0, planner);
+  }
+
+  // A running Objective doesn't hold over it: the key isn't frozen.
+  const base = {
+    providers: { codex: { planner: "codex", worker: { kind: "codex" } } },
+    defaultProvider: "codex",
+    execution: {},
+  };
+  const hedged = structuredClone(base);
+  hedged.providers.codex.hedgeSeconds = hedgeSeconds;
+  assert.equal(
+    freezeConfig(hedged, "codex").digest,
+    freezeConfig(base, "codex").digest,
+  );
+});
+
 // Offline: the SDK answers from local state, with no model call.
 test("Claude readiness asks the SDK for its login: none is blocked, and so is a service credential it can't read", async () => {
   const inst = installation();

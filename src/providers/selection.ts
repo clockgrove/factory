@@ -41,6 +41,7 @@ import {
 import { ClaudeManagedWorker, OpenAIManagedWorker } from "./managed.js";
 import {
   HedgedPlanner,
+  hedgePolicy,
   type ModelChoice,
   type Planner,
   type PlannerModels,
@@ -141,21 +142,25 @@ export function profileWorker(
   }
 }
 
-/** The provider's planner, hedged against stalled calls. */
+/** The provider's planner, hedged against stalled calls in the phases its `hedgeSeconds` (or the default) hedges. */
 export function providerPlanner(provider: ProviderConfig): Planner {
   const resolved = resolvedProvider(provider);
+  const policy = hedgePolicy(resolved.hedgeSeconds);
   switch (resolved.planner) {
     case "claude":
       return new HedgedPlanner(
         new ClaudePlanner(resolved.models as ClaudePlannerOptions),
+        policy,
       );
     case "copilot":
       return new HedgedPlanner(
         new CopilotPlanner(resolved.models as PlannerModels),
+        policy,
       );
     default:
       return new HedgedPlanner(
         new CodexPlanner(resolved.models as PlannerModels<CodexEffort>),
+        policy,
       );
   }
 }
@@ -283,6 +288,8 @@ export const OPERATIONAL: readonly string[] = [
   "provider.worker.timeoutSeconds",
   "provider.worker.idleSeconds",
   "provider.worker.settings.maxTurns",
+  // When a stalled planner call is hedged: a duplicate call, never the answer's terms.
+  "provider.hedgeSeconds",
   // Content capture observes calls; it changes no run.
   "capture",
   // Who Factory acts as on GitHub, and whom its holds notify. What an

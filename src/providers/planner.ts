@@ -467,18 +467,47 @@ export class IdleWatchdog {
   }
 }
 
+/** A provider's `hedgeSeconds`: seconds of silence before a phase's call is hedged; 0 never hedges it. */
+export type HedgeSeconds = Partial<Record<PlannerPhase, number>>;
+
+/**
+ * The phases hedged by default, and after how much silence. Diagnosis,
+ * result review and final review aren't: they think for minutes between
+ * events (diagnosis up to 200 s with none), so every hedge of theirs in
+ * Clockgrove #800 started a duplicate that lost to the first call (10 of
+ * 10, 2.3M tokens).
+ */
+export const DEFAULT_HEDGE_SECONDS: Readonly<Record<PlannerPhase, number>> = {
+  plan: 120,
+  "graph-review": 45,
+  "result-review": 0,
+  "objective-review": 0,
+  diagnosis: 0,
+  dream: 120,
+  propose: 120,
+};
+
 /** When to hedge: after this much silence (any provider event resets it), or this long in all. */
 export interface HedgePolicy {
-  /** Silence before hedging, by role. Reviews answer with ~10 s between events. */
-  silenceMs: Record<PlannerCall["role"], number>;
-  /** For a provider that reports no events during a call: hedge after this long. */
+  /** Silence before hedging, by phase; a phase without a positive value is never hedged. */
+  silenceMs: Partial<Record<PlannerPhase, number>>;
+  /**
+   * For a provider that reports no events during a call: hedge after this
+   * long, or after the phase's silence if that is longer.
+   */
   wallMs: number;
 }
 
-const DEFAULT_HEDGE: HedgePolicy = {
-  silenceMs: { reviewer: 45_000, planner: 120_000 },
-  wallMs: 180_000,
-};
+/** The hedge policy for a provider's `hedgeSeconds`: each phase given replaces its default. */
+export function hedgePolicy(seconds: HedgeSeconds = {}): HedgePolicy {
+  const merged = { ...DEFAULT_HEDGE_SECONDS, ...seconds };
+  return {
+    silenceMs: Object.fromEntries(
+      Object.entries(merged).map(([phase, s]) => [phase, s * 1000]),
+    ),
+    wallMs: 180_000,
+  };
+}
 
 /**
  * A planner whose stalled calls are hedged. Codex's Responses stream
@@ -486,15 +515,20 @@ const DEFAULT_HEDGE: HedgePolicy = {
  * the model has started its final message, the terminal event never comes,
  * and the call would wait out a 5-minute idle limit. When the first call
  * goes silent past the policy, an identical second call starts; the first
- * answer wins and the other is aborted. Healthy calls never trigger it.
+ * answer wins and the other is aborted. A phase whose healthy calls go
+ * quiet for longer than any threshold worth having isn't hedged
+ * (DEFAULT_HEDGE_SECONDS): its call goes straight to the inner planner.
  */
 export class HedgedPlanner implements Planner {
   constructor(
     private readonly inner: Planner,
-    private readonly policy: HedgePolicy = DEFAULT_HEDGE,
+    private readonly policy: HedgePolicy = hedgePolicy(),
   ) {}
 
   answer(call: PlannerCall): Promise<PlannerAnswer> {
+    const silenceMs = this.policy.silenceMs[call.phase] ?? 0;
+    if (silenceMs <= 0) return this.inner.answer(call);
+    const wallMs = Math.max(this.policy.wallMs, silenceMs);
     const controllers = [new AbortController(), new AbortController()];
     const started = Date.now();
     let lastEvent = started;
@@ -557,22 +591,27 @@ export class HedgedPlanner implements Planner {
         { once: true },
       );
       start(0);
-      const timer = setInterval(() => {
-        if (settled || hedged) return;
-        const now = Date.now();
-        const silent = now - lastEvent;
-        const stalled = sawEvent
-          ? silent >= this.policy.silenceMs[call.role]
-          : now - started >= this.policy.wallMs;
-        if (!stalled) return;
-        hedged = true;
-        call.log({
-          event: "planner-hedge",
-          silentMs: silent,
-          afterMs: now - started,
-        });
-        start(1);
-      }, 5_000);
+      const timer = setInterval(
+        () => {
+          if (settled || hedged) return;
+          const now = Date.now();
+          const silent = now - lastEvent;
+          const stalled = sawEvent
+            ? silent >= silenceMs
+            : now - started >= wallMs;
+          if (!stalled) return;
+          hedged = true;
+          call.log({
+            event: "planner-hedge",
+            role: call.role,
+            phase: call.phase,
+            silentMs: silent,
+            afterMs: now - started,
+          });
+          start(1);
+        },
+        Math.min(5_000, silenceMs),
+      );
     });
   }
 }

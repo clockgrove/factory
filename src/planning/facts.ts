@@ -508,21 +508,121 @@ function networkToolIn(body: string): string | undefined {
 export function networkToolOfCommand(
   command: string,
   scripts: Record<string, unknown>,
+): string | undefined {
+  return throughScripts(command, scripts, networkToolIn);
+}
+
+/**
+ * What `find` reports of a command, or of the root package scripts it
+ * runs, to a fixed depth: command words, never prose.
+ */
+function throughScripts(
+  command: string,
+  scripts: Record<string, unknown>,
+  find: (body: string) => string | undefined,
   depth = 0,
 ): string | undefined {
-  const direct = networkToolIn(command);
+  const direct = find(command);
   if (direct) return direct;
   const invocation = packageScriptInvocation(command);
   const body = invocation ? scripts[invocation.name] : undefined;
   if (typeof body !== "string" || depth > 3) return undefined;
-  const own = networkToolIn(body);
+  const own = find(body);
   if (own) return own;
   for (const segment of body.split(/&&|\|\||[;|\n&]/))
     if (packageScriptInvocation(segment.trim())) {
-      const nested = networkToolOfCommand(segment.trim(), scripts, depth + 1);
+      const nested = throughScripts(segment.trim(), scripts, find, depth + 1);
       if (nested) return nested;
     }
   return undefined;
+}
+
+/** Flags that make a formatter or linter rewrite the files it checks. */
+const WRITE_FLAGS = new Set(["--write", "--fix", "--apply", "--apply-unsafe"]);
+/** Formatters that rewrite files unless a flag makes them only check, with those flags. */
+const WRITES_UNLESS: Record<string, readonly string[]> = {
+  "cargo fmt": ["--check"],
+  rustfmt: ["--check"],
+  black: ["--check", "--diff"],
+  "ruff format": ["--check", "--diff"],
+  "deno fmt": ["--check"],
+  "dprint fmt": [],
+  "terraform fmt": ["-check", "--check"],
+  "tofu fmt": ["-check", "--check"],
+  isort: ["--check", "--check-only", "-c", "--diff"],
+};
+/** Formatters that rewrite files with one of these flags. */
+const WRITES_WITH: Record<string, readonly string[]> = {
+  prettier: ["-w"],
+  gofmt: ["-w"],
+  "clang-format": ["-i"],
+};
+
+/** A segment's command words: assignments and runner prefixes (npx, pnpm exec, uv run, python -m) left out. */
+function commandWords(segment: string): string[] {
+  let words = segment
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  for (;;) {
+    const first = words[0]?.replace(/^.*\//, "");
+    if (first === "npx" || first === "bunx")
+      words = words.slice(1).filter((word, index) => index || !/^-/.test(word));
+    else if (
+      ["pnpm", "npm", "yarn", "bun"].includes(first ?? "") &&
+      words[1] === "exec"
+    )
+      words = words.slice(2);
+    else if ((first === "uv" || first === "poetry") && words[1] === "run")
+      words = words.slice(2);
+    else if (/^python3?$/.test(first ?? "") && words[1] === "-m")
+      words = words.slice(2);
+    else return words;
+  }
+}
+
+/** The file-writing formatter or fix a script body runs, from its command words; never prose. */
+function writingToolIn(body: string): string | undefined {
+  for (const segment of body.split(/&&|\|\||[;|\n&(){}`]|\$\(/)) {
+    const words = commandWords(segment);
+    const tool = words[0]?.replace(/^.*\//, "");
+    // Printed text names flags without running them.
+    if (!tool || tool === "echo" || tool === "printf") continue;
+    const flags = words.slice(1);
+    const flag = (word: string) => word.split("=")[0]!;
+    const written = flags.find((word) => WRITE_FLAGS.has(flag(word)));
+    if (written) return `${tool} ${flag(written)}`;
+    const subcommand = flags.find((word) => !word.startsWith("-"));
+    const named =
+      subcommand && WRITES_UNLESS[`${tool} ${subcommand}`]
+        ? `${tool} ${subcommand}`
+        : WRITES_UNLESS[tool]
+          ? tool
+          : undefined;
+    if (
+      named &&
+      !flags.some((word) => WRITES_UNLESS[named]!.includes(flag(word)))
+    )
+      return named;
+    const writes = WRITES_WITH[tool]?.find((option) => flags.includes(option));
+    if (writes) return `${tool} ${writes}`;
+  }
+  return undefined;
+}
+
+/**
+ * The formatter or fix that a validation command runs in a mode that
+ * rewrites files, directly or through root package scripts, such as
+ * `biome --write` for `pnpm run format` whose script is
+ * `biome check --write .`: validation refuses a command that changes the
+ * result (validate.ts), so the plan check refuses it first. Only the
+ * shapes it knows; anything else is left to validation.
+ */
+export function writingToolOfCommand(
+  command: string,
+  scripts: Record<string, unknown>,
+): string | undefined {
+  return throughScripts(command, scripts, writingToolIn);
 }
 
 // ── Scoped commands ─────────────────────────────────────────────────────
@@ -625,11 +725,13 @@ async function packageCommands(
  * with `lockfileResolution`, Factory resolves an out-of-date lockfile itself.
  * `lockfileResolution` is set exactly when `sandbox.network` isn't off
  * (steps.ts `planningFacts`), so without it or `hostNetwork` the network is
- * off and even the install runs offline (validate.ts).
+ * off and even the install runs offline (validate.ts). With `formatCommand`
+ * Factory applies the repository's formatter to each result itself.
  */
 export function validationEnvironmentNote(
   hostNetwork: boolean,
   lockfileResolution: boolean,
+  formatCommand?: string,
 ): string {
   const environment = {
     ...VALIDATION_ENVIRONMENT,
@@ -639,8 +741,23 @@ export function validationEnvironmentNote(
         ? {}
         : { network: OFF_VALIDATION_NETWORK }),
     lockfile: lockfileNote(lockfileResolution),
+    formatting: formattingNote(formatCommand),
   };
   return `Validation environment (differs from hosted CI): ${JSON.stringify(environment)}`;
+}
+
+/**
+ * Who formats a result: the planner's and the graph reviewer's
+ * `formatting` entry. Either way a validation command that rewrites
+ * tracked files fails validation (validate.ts), and the plan check refuses
+ * one it can see (planning/checks.ts).
+ */
+function formattingNote(formatCommand: string | undefined): string {
+  const checkOnly =
+    "every validation command only checks: one that rewrites tracked files (a formatter or linter in its write or fix mode, such as --write or --fix) changes the result and fails validation, so use its check-only form (a format check, lint or check script)";
+  return formatCommand
+    ? `Factory applies the repository's formatter (${formatCommand}) to each Work Item's result itself, after the install and before its validation commands, and commits what it changes: no worker formats by hand, and no plan needs a formatting step or item; ${checkOnly}`
+    : checkOnly;
 }
 
 /**
@@ -652,9 +769,10 @@ function ciOnlyInstructions(
   ciOnlyCommands: readonly string[],
   hostNetwork: boolean,
   lockfileResolution: boolean,
+  formatCommand: string | undefined,
 ): string {
   return (
-    `\n\n${validationEnvironmentNote(hostNetwork, lockfileResolution)}` +
+    `\n\n${validationEnvironmentNote(hostNetwork, lockfileResolution, formatCommand)}` +
     (ciOnlyCommands.length
       ? `\n\n${hostNetwork ? "The installation runs these commands only in CI" : "These commands need network and run only in CI; validation runs offline"}, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
       : "")
@@ -684,6 +802,7 @@ export async function commandInstructions(
       facts.ciOnlyCommands,
       facts.hostNetwork === true,
       facts.lockfileResolution === true,
+      facts.formatCommand,
     ) +
     packageCommandInstructions(
       facts.packageCommands,
@@ -1080,6 +1199,8 @@ export interface FactsArgs {
   hostNetwork?: boolean;
   /** `sandbox.network` isn't off: Factory resolves an out-of-date lockfile itself. */
   lockfileResolution?: boolean;
+  /** `validation.formatCommand`: Factory applies the repository's formatter itself. */
+  formatCommand?: string;
   /** The approved playbook text. */
   playbook?: string;
   /** The operator's media.localAssetRoots. */
@@ -1129,6 +1250,7 @@ export async function buildFacts(
     ciOnlyCommands,
     ...(args.hostNetwork ? { hostNetwork: true as const } : {}),
     ...(args.lockfileResolution ? { lockfileResolution: true as const } : {}),
+    ...(args.formatCommand ? { formatCommand: args.formatCommand } : {}),
     checkNames: await workflowCheckNames(files),
     integratedCheckNames: await pushCheckNames(
       files,

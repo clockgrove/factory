@@ -20,6 +20,7 @@ import {
   unknownCheckMessage,
   unknownCheckNames,
   unpinnablePackageCommand,
+  writingToolOfCommand,
 } from "./facts.js";
 import {
   ancestors,
@@ -129,8 +130,8 @@ function commandFindings(
 // ── Boundaries ──────────────────────────────────────────────────────────
 
 /**
- * The checks that need the base's package scripts: network and
- * validation-scope. Structural only: command words and script bodies.
+ * The checks that need the base's package scripts: network, file-writing
+ * and validation-scope. Structural only: command words and script bodies.
  */
 async function boundaryFindings(
   items: readonly WorkItem[],
@@ -150,6 +151,14 @@ async function boundaryFindings(
       if (tool)
         found(
           `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: validate with an offline command instead${offline.length ? ` (root package scripts: ${listCommands(offline)})` : ""}, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
+          item.id,
+        );
+      // A command that rewrites tracked files fails validation's mutation
+      // check on any result it reformats (#2159).
+      const writer = writingToolOfCommand(command, scripts);
+      if (writer)
+        found(
+          `Work Item ${item.id} validation runs ${command}, which rewrites tracked files (${writer}): validation refuses a command that changes the result. ${facts.formatCommand ? `Factory applies the repository's formatter (${facts.formatCommand}) to every result before validation, so no item formats; ` : ""}validate with a check-only command instead (a format check, lint or check script${offline.length ? `; root package scripts: ${listCommands(offline.filter((other) => !writingToolOfCommand(other, scripts)))}` : ""})`,
           item.id,
         );
       const scope = commandScope(command, scripts);

@@ -52,6 +52,7 @@ Installation options, each setting one key:
 | `--base-rerun-workflow FILE`                                                                   | `delivery.baseRerun.workflow`                              |
 | `--sandbox-network off\|package-install\|host`, `--package-store DIR`                          | `sandbox.network`, `sandbox.packageStore`                  |
 | `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`             |
+| `--format-command CMD`                                                                         | `validation.formatCommand`                                 |
 | `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                                        |
 | `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                                |
 | `--github-app-id ID`, `--github-app-installation ID`                                           | `github.app.id`, `github.app.installationId`               |
@@ -59,6 +60,8 @@ Installation options, each setting one key:
 | `--operator LOGIN`...                                                                          | `operators`                                                |
 
 An option marked `...` repeats, and the values given replace the whole list. `--github-app-key PATH` sets no key: see [GitHub identity](#github-identity).
+
+`--format-command CMD` names the repository's formatter, such as `pnpm exec biome check --write .` (off by default: nothing is formatted). Factory runs it on every Work Item's result before validation and commits what it changes, so no model formats by hand (see [Steps](steps.md)). Name the tool itself rather than a package script: a script is read from the result, so the worker could change what it runs. It is frozen with each Objective: a change holds a running one once, as any frozen key does (see [Frozen configuration](state.md#frozen-configuration)).
 
 Provider options need `--provider NAME`. They add the provider or change it:
 

@@ -80,6 +80,8 @@ export interface PassedValidation {
   commands: readonly string[];
   /** The lockfile Factory resolved for the item's dependency change and committed on its result (validate.ts). */
   regenerated?: { commit: string; lockfile: string };
+  /** The repository's formatter's output, which Factory committed on the item's result (validate.ts). */
+  formatted?: { commit: string; command: string; files: readonly string[] };
 }
 
 /**
@@ -1362,8 +1364,8 @@ function changeIndexRow(
   };
 }
 
-/** The commands that passed on the reviewed tree. */
-function validationRow(validation: PassedValidation): ResultEvidence {
+/** The commands that passed on the reviewed tree, and Factory's own changes they ran on. */
+export function validationRow(validation: PassedValidation): ResultEvidence {
   return {
     origin: "controller",
     path: "Validation command passes",
@@ -1382,6 +1384,15 @@ function validationRow(validation: PassedValidation): ResultEvidence {
           commitSha: validation.regenerated.commit,
           scope:
             "The worker's dependency change left this lockfile out of date, and no worker has the network to resolve one, so Factory resolved it under the repository's unchanged package policy and committed it as the result's last commit. It is Factory's change, not the worker's: it needs no owned path, and it is judged only as the dependency change it records.",
+        },
+      }),
+      ...(validation.formatted && {
+        appliedFormatter: {
+          command: validation.formatted.command,
+          files: validation.formatted.files,
+          commitSha: validation.formatted.commit,
+          scope:
+            "Factory ran the operator's formatter on the result before these commands, with no network and no model, and committed what it changed (only files the worker changed within its owned paths) as the result's last commit. It is Factory's change, not the worker's: it needs no owned path, changes layout only as the repository's formatter does, and is never a finding.",
         },
       }),
     }),

@@ -821,6 +821,7 @@ export class CopilotWorker implements Worker {
           toolIdleMs: validationDeadlineMs(
             input.item,
             this.options.validation!.commandTimeoutMs,
+            this.options.validation!.formatCommand !== undefined,
           ),
         }),
         signal: input.signal,

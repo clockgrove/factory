@@ -37,6 +37,17 @@ export interface SelfValidateOptions {
   repository: string;
   /** Each command's limit: `validation.commandTimeoutSeconds`, in ms. */
   commandTimeoutMs: number;
+  /** The repository's formatter (`validation.formatCommand`): applied before the commands, as after the worker finishes. */
+  formatCommand?: string;
+}
+
+/** What the worker hears when Factory formatted its files for a Validate run. */
+export function formattedNote(formatted: {
+  command: string;
+  files: readonly string[];
+}): string {
+  const files = formatted.files.slice(0, 20).join(", ");
+  return `Factory applied the repository's formatter (\`${formatted.command}\`) to ${formatted.files.length} of your files for this run (${files}${formatted.files.length > 20 ? ` and ${formatted.files.length - 20} more` : ""}), and the commands ran on the formatted files. It does the same when it validates your result after you finish, and commits the formatting itself, so don't format by hand or spend turns on formatting.`;
 }
 
 /** The tool's name, as both workers serve it. */
@@ -202,6 +213,11 @@ export class SelfValidation {
       predecessor: input.base !== options.plan.base ? input.base : undefined,
       // Resolved here as after the worker finishes, but never committed.
       lockfile: {},
+      // Formatted here as after the worker finishes; the commit is
+      // never pinned or delivered.
+      ...(options.formatCommand
+        ? { format: { command: options.formatCommand } }
+        : {}),
       signal,
       log: input.log,
       runFile: input.runFile,
@@ -220,6 +236,7 @@ export class SelfValidation {
       parts.push(
         `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
       );
+    if (result.formatted) parts.push(formattedNote(result.formatted));
     if (handoff.text)
       if (handoff.passed) parts.push(handoff.text);
       else parts.unshift(handoff.text);

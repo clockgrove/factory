@@ -6,7 +6,7 @@ import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
 import { headAndTail } from "../text.js";
-import { lockfileRef, validateTree } from "../validate.js";
+import { formatRef, lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
@@ -63,6 +63,17 @@ export async function validateStep(
       ref: lockfileRef(state.issue, item.id),
       author: () => deps.github.commitAuthor(signal),
     },
+    // The repository's formatter, which Factory applies so no model
+    // formats by hand: its output is committed on the candidate too.
+    ...(config.validation.formatCommand
+      ? {
+          format: {
+            command: config.validation.formatCommand,
+            ref: formatRef(state.issue, item.id),
+            author: () => deps.github.commitAuthor(signal),
+          },
+        }
+      : {}),
     sandbox: config.sandbox,
     commandTimeoutMs: commandTimeoutMs(deps),
     signal,
@@ -76,6 +87,7 @@ export async function validateStep(
         commands: result.commands,
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
+        ...(result.formatted ? { formatted: result.formatted } : {}),
       };
       return { kind: "done", result: done };
     }

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { answeredBy } from "../dist/display.js";
+import { answeredBy, redactDeep } from "../dist/display.js";
 import { hold, ObjectiveRunner } from "../dist/engine.js";
 import { GitHubError } from "../dist/github.js";
 import {
@@ -23,14 +23,15 @@ import {
   pendingRequests,
   writeRequest,
 } from "../dist/requests.js";
-import { closedByReset } from "../dist/reset.js";
+import { closedByReset, resetRecord } from "../dist/reset.js";
 import {
   CLOSED_KEPT,
+  keptClosings,
   newObjective,
   recordClosed,
   unshownClosings,
 } from "../dist/state.js";
-import { recentDecisions } from "../dist/status.js";
+import { decisionText, recentDecisions } from "../dist/status.js";
 import { answeredLines, reportComment } from "../dist/work/finish.js";
 import {
   cli,
@@ -63,10 +64,10 @@ const MENTION = /@[\w-]/;
  * A runner on a fresh Objective whose steps never run, on a clock that
  * moves a second each read, so each asking has its own id.
  */
-function runner() {
+function runner(state = newObjective(7, new Date())) {
   let at = Date.now();
   return new ObjectiveRunner(
-    newObjective(7, new Date()),
+    state,
     { steps: () => [], status: () => "building" },
     tempDir("factory-answered-"),
     { write() {} },
@@ -237,7 +238,130 @@ test("a superseded question, a cleared one and a cancelled Objective's questions
   assert.equal(expired.closed.channel, undefined);
 });
 
-test("closed questions are kept bounded, once each, with their text cut; a reset closes the questions it drops", () => {
+test("a human gate's question closes as gate-cleared only when the gate cleared; a question in its place supersedes it", () => {
+  const gate = () => ({
+    ...hold("Waiting on a required review of the PR."),
+    polls: true,
+  });
+  const how = (run, id) =>
+    run.state.closedHolds.find((c) => c.id === id)?.closed;
+  // The step finished: the gate cleared.
+  const done = runner();
+  done.apply("item:a:merge", gate());
+  const [cleared] = done.state.holds;
+  // Still waiting on the gate: it stays open.
+  done.apply("item:a:merge", {
+    kind: "retry",
+    reason: "still waiting",
+    wait: { kind: "gate" },
+  });
+  assert.equal(done.state.holds[0].id, cleared.id);
+  done.apply("item:a:merge", { kind: "done" });
+  assert.equal(how(done, cleared.id).how, "gate-cleared");
+
+  // The step asked something else: superseded by that question, named.
+  const asks = runner();
+  asks.apply("item:a:merge", gate());
+  const [waited] = asks.state.holds;
+  asks.apply(
+    "item:a:merge",
+    hold("The merge failed: the branch conflicts with main."),
+  );
+  const [failed] = asks.state.holds;
+  assert.notEqual(failed.id, waited.id);
+  assert.deepEqual(
+    { how: how(asks, waited.id).how, next: how(asks, waited.id).next },
+    { how: "superseded", next: failed.id },
+  );
+  assert.match(
+    closingLine(how(asks, waited.id), []),
+    /Factory asked a newer question in its place \(`item:a:merge@/,
+  );
+  assert.doesNotMatch(closingLine(how(asks, waited.id), []), /was done/);
+
+  // It asked, but another open question stops it: nothing took its place.
+  const behind = runner();
+  behind.apply("plan", hold("An Objective-wide question."));
+  behind.state.holds.push({
+    id: "item:a:merge@gate",
+    step: "item:a:merge",
+    item: "a",
+    question: "Waiting on a required review.",
+    options: offered("wait", "cancel"),
+    cause: "question",
+    askedAt: new Date().toISOString(),
+    polls: true,
+  });
+  behind.apply("item:a:merge", hold("The merge failed."));
+  assert.equal(how(behind, "item:a:merge@gate").how, "moved-on");
+  assert.equal(how(behind, "item:a:merge@gate").next, undefined);
+
+  // It failed another way: it moved on, and says so.
+  const transient = runner();
+  transient.apply("item:a:merge", gate());
+  const [left] = transient.state.holds;
+  transient.apply("item:a:merge", {
+    kind: "retry",
+    reason: "GitHub 502",
+  });
+  assert.equal(how(transient, left.id).how, "moved-on");
+  assert.match(
+    closingLine(how(transient, left.id), []),
+    /^\*\*Closed without an answer:\*\* its step stopped waiting on what it asked about for another reason/,
+  );
+});
+
+test("a cancel while a reset stands closes the old state's open questions too", () => {
+  const old = newObjective(7, new Date());
+  const asked = {
+    id: "item:a:work@2026-10-28T18:44:22.876Z",
+    step: "item:a:work",
+    item: "a",
+    question: "Retry a?",
+    options: offered("retry", "cancel"),
+    cause: "question",
+    askedAt: "2026-10-28T18:44:22.876Z",
+    url: COMMENT.replace("99", "5"),
+  };
+  old.holds = [asked];
+  old.status = "holding";
+  const record = resetRecord(
+    7,
+    {
+      id: "reset-1",
+      at: new Date().toISOString(),
+      by: "kirk",
+      request: { kind: "reset", issue: 7 },
+    },
+    old,
+    true,
+    undefined,
+    undefined,
+    undefined,
+  );
+  assert.equal(record.status, "resetting");
+  assert.deepEqual(record.holds, []);
+  const run = runner(record);
+  assert.equal(
+    run.transact(() =>
+      run.cancel("kirk", { channel: "cli", as: "Claude Code" }),
+    ),
+    null,
+  );
+  assert.equal(run.state.status, "cancelled");
+  const [closed] = unshownClosings(run.state);
+  assert.equal(closed.id, asked.id);
+  assert.equal(closed.url, asked.url);
+  const { at: _at, ...closing } = closed.closed;
+  assert.deepEqual(closing, {
+    how: "cancelled",
+    by: "kirk",
+    as: "Claude Code",
+    channel: "cli",
+  });
+});
+
+test("closed questions are kept once each, whole, and bounded without losing one not shown yet; a reset closes the questions it drops", () => {
   const state = { closedHolds: undefined };
   const asked = (n) => ({
     id: `s@${n}`,
@@ -247,20 +371,36 @@ test("closed questions are kept bounded, once each, with their text cut; a reset
     cause: "question",
     askedAt: "2026-10-28T00:00:00.000Z",
   });
+  // Kept whole: only a display cuts it, after redaction.
   recordClosed(state, asked(0), {
     how: "answered",
     at: "2026-10-28T00:01:00.000Z",
     text: "x".repeat(5_000),
   });
-  assert.equal(state.closedHolds[0].closed.text.length, 2_000);
+  assert.equal(state.closedHolds[0].closed.text.length, 5_000);
   recordClosed(state, asked(0), { how: "cancelled", at: "later" });
   assert.equal(state.closedHolds.length, 1, "a question closes once");
   assert.equal(state.closedHolds[0].closed.how, "answered");
+  // More than CLOSED_KEPT close before any comment shows it: none is lost.
   for (let n = 1; n <= CLOSED_KEPT + 5; n++)
     recordClosed(state, asked(n), { how: "answered", at: `t${n}` });
-  assert.equal(state.closedHolds.length, CLOSED_KEPT);
-  assert.equal(state.closedHolds.at(-1).id, `s@${CLOSED_KEPT + 5}`);
-  assert.equal(unshownClosings(state).length, CLOSED_KEPT);
+  assert.equal(state.closedHolds.length, CLOSED_KEPT + 6);
+  assert.equal(unshownClosings(state).length, CLOSED_KEPT + 6);
+  assert.equal(state.closedHolds[0].id, "s@0");
+  // Shown ones past CLOSED_KEPT go, oldest first; unshown ones stay.
+  for (const entry of state.closedHolds.slice(0, -1)) entry.shown = true;
+  const trimmed = keptClosings(state.closedHolds);
+  assert.equal(trimmed.length, CLOSED_KEPT + 1);
+  assert.equal(trimmed.at(-1).id, `s@${CLOSED_KEPT + 5}`);
+  assert.ok(!trimmed.at(-1).shown);
+  assert.equal(trimmed[0].id, "s@5");
+  // An unshown one older than every shown one kept stays too.
+  const mixed = keptClosings([
+    { ...state.closedHolds[0], shown: undefined },
+    ...state.closedHolds.slice(1, -1),
+  ]);
+  assert.equal(mixed[0].id, "s@0");
+  assert.equal(mixed.length, CLOSED_KEPT + 1);
 
   // A reset: the live record's closings win, the base's others are kept,
   // and a question the old state had open that the rebuilt one lacks is
@@ -415,6 +555,91 @@ test("an answered question's comment shows the answer, who, how, when and a reda
   assert.equal(
     answeredBy({ by: "octo", channel: "comment", comment: "javascript:x" }, []),
     "`octo` in a `/factory` comment",
+  );
+});
+
+test("a secret across where a summary or an answer's text would be cut is never shown in part: they are cut only after redaction", () => {
+  const SECRET = "PROBE-SECRET-0123456789abcdefXYZ";
+  const state = newObjective(7, new Date());
+  recordClosed(
+    state,
+    {
+      id: "q@1",
+      step: "item:a:work",
+      item: "a",
+      question: `${"a".repeat(290)}${SECRET}\nMore.`,
+      options: offered("retry", "cancel"),
+      cause: "question",
+      askedAt: "2026-10-28T00:00:00.000Z",
+    },
+    {
+      how: "answered",
+      at: "2026-10-28T00:01:00.000Z",
+      answer: "retry",
+      text: `${"\n".repeat(1_985)}${SECRET} and after`,
+      by: "kirk",
+      channel: "cli",
+    },
+  );
+  const [closed] = state.closedHolds;
+  // The edited question comment: its quote of the text.
+  const comment = closedComment(mark(7, "hold", closed.id), closed, {
+    issue: 7,
+    secrets: [SECRET],
+  });
+  assert.doesNotMatch(comment, /PROBE-SEC/);
+  assert.match(comment, /^> \[REDACTED\] and after$/m);
+  // Once shown, its summary stands for the question: redacted, then cut.
+  const summaryOnly = closedComment(
+    mark(7, "hold", closed.id),
+    { ...closed, question: undefined, options: undefined },
+    { issue: 7, secrets: [SECRET] },
+  );
+  assert.doesNotMatch(summaryOnly, /PROBE-SEC/);
+  // The live status comment's recent decisions.
+  const { body } = statusComment(
+    "<!-- marker -->",
+    {
+      view: {
+        issue: 7,
+        phase: "building",
+        mode: "running",
+        nextAction: { reason: "Work goes on." },
+        items: [],
+        waiting: [],
+        holds: [],
+        recentDecisions: recentDecisions(state),
+      },
+      activity: {},
+      calls: { planner: 0, worker: 0, tokens: 0 },
+      running: [],
+      decisions: [],
+    },
+    [SECRET],
+    { questions: true },
+    Date.now(),
+  );
+  assert.match(body, /\*\*Recent decisions\*\*/);
+  assert.doesNotMatch(body, /PROBE-SEC/);
+  // A pattern secret cut in two would escape its pattern too.
+  const token = `ghp_${"A".repeat(36)}`;
+  const tokens = { closedHolds: undefined };
+  recordClosed(
+    tokens,
+    {
+      id: "q@2",
+      step: "s",
+      question: `${"b".repeat(294)} ${token}`,
+      options: [],
+      cause: "question",
+      askedAt: "t",
+    },
+    { how: "cancelled", at: "2026-10-28T00:01:00.000Z", by: "kirk" },
+  );
+  assert.ok(tokens.closedHolds[0].summary.endsWith(token), "kept whole");
+  assert.doesNotMatch(
+    decisionText(redactDeep(recentDecisions(tokens)[0], [])),
+    /ghp_/,
   );
 });
 
@@ -658,7 +883,9 @@ test("status, the live status comment and the report list the recent decisions w
       ["q@333", "superseded", undefined],
     ],
   );
-  assert.equal(recent[1].closed.text.length, 300, "status cuts the text");
+  // The view keeps it whole (it is redacted after); its line cuts it.
+  assert.equal(recent[1].closed.text.length, 1_000);
+  assert.match(decisionText(recent[1]), /\(y{299}…\) by octo via comment/);
   assert.equal(
     recent[0].url,
     `https://github.com/${REPO}/issues/7#issuecomment-3`,
@@ -773,11 +1000,9 @@ test("factory answer --as and FACTORY_ANSWERED_AS record who answered on the ope
     "Claude Code",
   );
   assert.equal(answered.code, 0, answered.err);
-  // The environment names it for any CLI request.
-  inst.env.FACTORY_ANSWERED_AS = "Codex";
-  const retried = cli(inst, "retry", "31", "--question", "qb");
+  // `factory retry --question` takes --as too.
+  const retried = cli(inst, "retry", "31", "--question", "qb", "--as", "Codex");
   assert.equal(retried.code, 0, retried.err);
-  delete inst.env.FACTORY_ANSWERED_AS;
   const state = stateOf(inst, 31);
   const closed = Object.fromEntries(
     state.closedHolds.map((c) => [c.id, c.closed]),
@@ -803,6 +1028,10 @@ test("factory answer --as and FACTORY_ANSWERED_AS record who answered on the ope
     text,
     /Recent decisions:\n {4}qa: answered retry by \S+ \(as Claude Code\) via cli at /,
   );
+  // The environment names it for any CLI request: a cancel here.
+  inst.env.FACTORY_ANSWERED_AS = "Codex env";
+  assert.equal(cli(inst, "cancel", "31").code, 0);
+  delete inst.env.FACTORY_ANSWERED_AS;
   // The run log's request event carries it beside `by`.
   const logs = join(inst.logs, "31");
   const events = readdirSync(logs)
@@ -815,9 +1044,16 @@ test("factory answer --as and FACTORY_ANSWERED_AS record who answered on the ope
     )
     .filter((event) => event.event === "request");
   assert.deepEqual(
-    events.map((event) => event.as),
-    ["Claude Code", "Codex"],
+    events.map((event) => [event.request.kind, event.as]),
+    [
+      ["answer", "Claude Code"],
+      ["retry", "Codex"],
+      ["cancel", "Codex env"],
+    ],
   );
-  assert.equal(cli(inst, "cancel", "31").code, 0);
+  // `factory cancel --as` is a usage the CLI knows, refused only when bad.
+  const bad = cli(inst, "cancel", "31", "--as", "");
+  assert.equal(bad.code, 2);
+  assert.equal(refusal(bad), "usage");
   await stopped(service);
 });

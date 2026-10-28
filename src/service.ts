@@ -783,6 +783,7 @@ export async function serve(options: ServeOptions): Promise<number> {
                   request.reason,
                   stored.by,
                   stored.at,
+                  via,
                 );
           if (problems.length)
             refusal = refused(

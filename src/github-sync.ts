@@ -1974,15 +1974,14 @@ export function closedComment(
   options: { issue: number; secrets: readonly string[]; compact?: boolean },
 ): string {
   const { issue, secrets } = options;
-  const question =
-    closed.question !== undefined
-      ? shownQuestion(
-          closed.question,
-          secrets,
-          issue,
-          options.compact ? COMPACT_LIMIT : QUESTION_LIMIT,
-        )
-      : prose(redact(closed.summary, secrets));
+  // Its summary (kept whole) once the question is gone: cut the same way,
+  // after redaction.
+  const question = shownQuestion(
+    closed.question ?? closed.summary,
+    secrets,
+    issue,
+    options.compact ? COMPACT_LIMIT : QUESTION_LIMIT,
+  );
   const item = closed.item ? ` of Work Item ${code(closed.item)}` : "";
   const about =
     closed.cause === "failure"
@@ -2040,6 +2039,10 @@ export function closingLine(
       return without("a replan cleared the work it asked about");
     case "gate-cleared":
       return without("what it waited on was done, so Factory went on");
+    case "moved-on":
+      return without(
+        "its step stopped waiting on what it asked about for another reason, so it no longer applies",
+      );
     case "asked-again":
       return without(
         "the configuration changed again after it was asked, so Factory asks again with the changes as they are now",

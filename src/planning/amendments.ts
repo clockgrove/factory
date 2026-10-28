@@ -7,7 +7,11 @@ import { code, prose } from "../markdown.js";
 import { validPath } from "../objective.js";
 import { logRefused } from "../providers/usage.js";
 import { EVIDENCE_NAMED_BYTES, namesPath, treeFiles } from "../repair.js";
-import { type ObjectiveState, recordClosed } from "../state.js";
+import {
+  type AnsweredVia,
+  type ObjectiveState,
+  recordClosed,
+} from "../state.js";
 import { fact, facts } from "../work/facts.js";
 import { hostGit, hostGitExit } from "../worktree.js";
 import { checkPlan } from "./checks.js";
@@ -545,6 +549,8 @@ export function declineDiscovery(
   reason: string,
   by: string,
   at: string,
+  /** How the request came and on whose behalf (requests.ts `answeredVia`): its closed questions keep it. */
+  via?: AnsweredVia,
 ): string[] {
   const attempt = itemAttempt(state, itemId);
   const pending = amendmentStatus(state, `worker-${itemId}-${attempt}`);
@@ -566,7 +572,14 @@ export function declineDiscovery(
   // would stop every step for an amendment that no longer runs.
   const moot = (step: string) => step.startsWith(`${key}:`);
   for (const open of state.holds.filter((hold) => moot(hold.step)))
-    recordClosed(state, open, { how: "declined", at, by });
+    recordClosed(state, open, {
+      how: "declined",
+      at,
+      by,
+      ...(via?.as ? { as: via.as } : {}),
+      ...(via ? { channel: via.channel } : {}),
+      ...(via?.comment ? { comment: via.comment } : {}),
+    });
   state.holds = state.holds.filter((open) => !moot(open.step));
   for (const step of Object.keys(state.retries))
     if (moot(step)) delete state.retries[step];

@@ -43,8 +43,10 @@ import {
   type HoldCause,
   type HoldClosing,
   type HoldOption,
+  keptClosings,
   type ObjectiveState,
   type ObjectiveStatus,
+  RESET_KEY,
   type Retry,
   recordClosed,
   saveState,
@@ -1092,12 +1094,24 @@ export class ObjectiveRunner {
     const now = this.now();
     delete state.attempts[key];
     // A human gate's question closes by itself once its step no longer
-    // waits on a human gate: the gate cleared, or something else came.
-    if (!(outcome.kind === "retry" && outcome.wait?.kind === "gate"))
-      for (const polled of state.holds.filter(
-        (open) => open.polls && open.step === key,
-      ))
-        this.close(polled, { how: "gate-cleared" });
+    // waits on a human gate: the gate cleared (the step finished or went
+    // on), or something else came. A question in its place supersedes it
+    // (`next` is set once `hold` asks it, below); anything else moved on.
+    const polled = (
+      outcome.kind === "retry" && outcome.wait?.kind === "gate"
+        ? []
+        : state.holds.filter((open) => open.polls && open.step === key)
+    ).map((open) => open.id);
+    for (const id of polled)
+      this.close(state.holds.find((open) => open.id === id)!, {
+        how:
+          outcome.kind === "done" ||
+          (outcome.kind === "retry" && outcome.progress)
+            ? "gate-cleared"
+            : outcome.kind === "hold" && !neverAsks
+              ? "superseded"
+              : "moved-on",
+      });
     // Saved with the outcome, so a death right after still counts as progress.
     state.finishedRun = this.run.id;
     if ("keep" in outcome && outcome.keep) {
@@ -1174,10 +1188,12 @@ export class ObjectiveRunner {
         else this.retry(key, outcome);
         break;
       case "hold":
-        if (outcome.rereview && this.rereview(key, outcome.question)) break;
-        // Free only when this question was recorded: one another hold
-        // stops is asked again, and frees it then.
-        if (this.hold(key, outcome)) markFree(state, outcome.free);
+        if (!(outcome.rereview && this.rereview(key, outcome.question)))
+          if (this.hold(key, outcome))
+            // Free only when this question was recorded: one another hold
+            // stops is asked again, and frees it then.
+            markFree(state, outcome.free);
+        this.supersede(polled, key);
         break;
       case "repair": {
         delete state.retries[key];
@@ -1641,7 +1657,8 @@ export class ObjectiveRunner {
   /**
    * Closed question `id`'s comment shows its closing (github-sync
    * `closings`), had none to edit, or was given up on: its question and
-   * options, kept for that edit, go.
+   * options, kept for that edit, go, and the shown ones past CLOSED_KEPT
+   * with them (`keptClosings`).
    */
   closingShown(id: string): void {
     const closed = this.state.closedHolds?.find((entry) => entry.id === id);
@@ -1649,6 +1666,7 @@ export class ObjectiveRunner {
     closed.shown = true;
     delete closed.question;
     delete closed.options;
+    this.state.closedHolds = keptClosings(this.state.closedHolds!);
   }
 
   /**
@@ -1893,6 +1911,22 @@ export class ObjectiveRunner {
   }
 
   /**
+   * Human gate questions `ids` of step `key`, closed as `superseded` when
+   * the step asked instead (`applyChange`): each names the question asked
+   * in its place, or, when none was (another open question stops the step,
+   * or the engine answered it itself), says the step moved on.
+   */
+  private supersede(ids: string[], key: string): void {
+    const asked = this.state.holds.find((open) => open.step === key);
+    for (const id of ids) {
+      const closed = this.state.closedHolds?.find((entry) => entry.id === id);
+      if (closed?.closed.how !== "superseded") continue;
+      if (asked) closed.closed.next = asked.id;
+      else closed.closed.how = "moved-on";
+    }
+  }
+
+  /**
    * The service imposes a wait (service.ts: another Objective's owned
    * paths) on the steps `stops` names, from the first call until `waited`.
    * It is timed in memory, so a restart counts the wait before it.
@@ -2019,8 +2053,14 @@ export class ObjectiveRunner {
     const finished = this.finishedRefusal();
     if (finished) return finished;
     this.state.status = "cancelled";
-    // Each open question closes with the Objective: its comment says who cancelled.
-    for (const open of this.state.holds)
+    // Each open question closes with the Objective: its comment says who
+    // cancelled. A reset that hasn't landed keeps the old state's open
+    // questions aside (reset.ts `closedByReset` closes them when it lands,
+    // which a cancel replaces): they close here too.
+    const resetting = this.state.kept?.[RESET_KEY] as
+      | { old?: Pick<ObjectiveState, "holds"> }
+      | undefined;
+    for (const open of [...this.state.holds, ...(resetting?.old?.holds ?? [])])
       recordClosed(this.state, open, {
         how: "cancelled",
         at: this.now().toISOString(),

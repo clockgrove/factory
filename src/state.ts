@@ -175,8 +175,10 @@ export interface Answer {
  * was), `reset` (`factory reset` rebuilt the state without it), `cleared`
  * or `replanned` (a repair or a replan cleared the work it asked about),
  * `gate-cleared` (the human gate it waited on cleared by itself),
- * `asked-again` (`adopt` met a configuration that changed again) and
- * `declined` (`factory decline-discovery` settled its amendment).
+ * `moved-on` (its human gate's step stopped waiting on the gate some
+ * other way, without the gate clearing or a newer question taking its
+ * place), `asked-again` (`adopt` met a configuration that changed again)
+ * and `declined` (`factory decline-discovery` settled its amendment).
  */
 export type ClosedHow =
   | "answered"
@@ -186,6 +188,7 @@ export type ClosedHow =
   | "cleared"
   | "replanned"
   | "gate-cleared"
+  | "moved-on"
   | "asked-again"
   | "declined";
 
@@ -196,7 +199,7 @@ export interface HoldClosing {
   answer?: string;
   /** Its option's argument (`switch NAME`, `accept 2`). */
   arg?: string;
-  /** Its text, kept to CLOSED_TEXT_LIMIT characters. */
+  /** Its text, whole (at most MAX_ANSWER_TEXT): cut only where it is shown, after redaction. */
   text?: string;
   /** Who answered or cancelled (as `Answer.by`); `deadline` when the deadline cancelled. */
   by?: string;
@@ -219,7 +222,7 @@ export interface ClosedHold {
   item?: string;
   cause: HoldCause;
   askedAt: string;
-  /** The question's first line, cut to 300 characters (unredacted, as saved). */
+  /** The question's first line, whole and unredacted, as saved: cut only where it is shown, after redaction. */
   summary: string;
   /** The question and its options, kept until its comment shows the closing (`shown`). */
   question?: string;
@@ -231,15 +234,24 @@ export interface ClosedHold {
   shown?: true;
 }
 
-/** Closed questions kept, newest last. */
+/**
+ * The key in `kept` of a resetting record's reset (reset.ts `RESET`,
+ * `ResetRecord`), whose `old` state's questions stay open until the
+ * rebuild lands (reset.ts `closedByReset`) or a cancel closes them.
+ */
+export const RESET_KEY = "reset";
+
+/** Shown closed questions kept, newest last (`keptClosings`). */
 export const CLOSED_KEPT = 30;
-/** The most of an answer's text a closed question keeps. */
-export const CLOSED_TEXT_LIMIT = 2_000;
 
 /**
  * Record that `hold` closed (`closing`) in `state.closedHolds`, newest
- * last, keeping CLOSED_KEPT. A hold recorded already keeps its first
- * closing. Every way a question closes comes here, so its comment shows it.
+ * last (`keptClosings` bounds them). A hold recorded already keeps its
+ * first closing. Every way a question closes comes here, so its comment
+ * shows it. Its summary and text are kept whole: they are redacted only
+ * where they are shown, so they are cut only there, after redaction (a
+ * cut first could leave part of a secret that redaction no longer
+ * matches). An answer's text is at most MAX_ANSWER_TEXT (engine.ts).
  */
 export function recordClosed(
   state: Pick<ObjectiveState, "closedHolds">,
@@ -248,12 +260,7 @@ export function recordClosed(
 ): void {
   const closed = state.closedHolds ?? [];
   if (closed.some((entry) => entry.id === hold.id)) return;
-  const first = hold.question.split("\n")[0]!.trim();
-  const text =
-    closing.text !== undefined && closing.text.length > CLOSED_TEXT_LIMIT
-      ? `${closing.text.slice(0, CLOSED_TEXT_LIMIT - 1)}…`
-      : closing.text;
-  state.closedHolds = [
+  state.closedHolds = keptClosings([
     ...closed,
     {
       id: hold.id,
@@ -261,16 +268,29 @@ export function recordClosed(
       ...(hold.item !== undefined ? { item: hold.item } : {}),
       cause: hold.cause,
       askedAt: hold.askedAt,
-      summary: first.length > 300 ? `${first.slice(0, 299)}…` : first,
+      summary: hold.question.split("\n")[0]!.trim(),
       question: hold.question,
       options: hold.options,
       ...(hold.url ? { url: hold.url } : {}),
-      closed: {
-        ...closing,
-        ...(text !== undefined ? { text } : {}),
-      },
+      closed: closing,
     },
-  ].slice(-CLOSED_KEPT);
+  ]);
+}
+
+/**
+ * Closed questions (oldest first) bounded: every one whose comment doesn't
+ * show its closing yet, so none is lost before its edit (the sync edits
+ * it or gives it up: `closingShown`), and the newest CLOSED_KEPT shown.
+ */
+export function keptClosings(entries: ClosedHold[]): ClosedHold[] {
+  let shown = 0;
+  const kept: ClosedHold[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    if (entry.shown && ++shown > CLOSED_KEPT) continue;
+    kept.push(entry);
+  }
+  return kept.reverse();
 }
 
 /** The closed questions whose comment doesn't show the closing yet. */

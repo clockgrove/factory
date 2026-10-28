@@ -19,7 +19,7 @@ Each Objective has one JSON file: `objectives/<issue>.json` under the installati
   "repairs": { "<target step>": { "count", "findings": [...], "from"? } }, // the latest repaired last; from: the step whose failure sent it
   "answers": { "<step key>": { "holdId", "question", "answer", "text"?, "by", "as"?, "channel"?, "at" } },
   "holds": [], // open questions, oldest first: { "id", "step", "item"?, "question", "options": [...], "cause", "askedAt", "shownAt"?, "shortForm"?, "url"? }
-  "closedHolds": [], // optional: the latest 30 closed questions, newest last: { "id", "step", "item"?, "cause", "askedAt", "summary", "question"?, "options"?, "url"?, "closed": { "how", "at", "answer"?, "arg"?, "text"?, "by"?, "as"?, "channel"?, "comment"?, "next"? }, "shown"? } (see Answered questions in Holds)
+  "closedHolds": [], // optional: closed questions, newest last (each not yet shown on GitHub, and the latest 30 shown): { "id", "step", "item"?, "cause", "askedAt", "summary", "question"?, "options"?, "url"?, "closed": { "how", "at", "answer"?, "arg"?, "text"?, "by"?, "as"?, "channel"?, "comment"?, "next"? }, "shown"? } (see Answered questions in Holds)
   "lastShownAt": "<latest GitHub time any question's comment was shown>",
   "appliedRequests": [/* the latest applied requests, so none applies twice */],
   "control": { "mode": "paused | draining", "by", "at" }, // optional: the operator's pause or drain

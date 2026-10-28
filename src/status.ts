@@ -170,19 +170,24 @@ export interface RecentDecision {
   id: string;
   step: string;
   item?: string;
-  /** The question's first line. */
+  /** The question's first line, whole: the view is redacted, then each display cuts it. */
   summary: string;
   askedAt: string;
   /** Its issue comment, once GitHub showed it. */
   url?: string;
-  /** How it closed; its text cut to 300 characters. */
+  /** How it closed, its text whole (cut, like the summary, only where it is shown). */
   closed: HoldClosing;
 }
 
 /** The closed questions status lists. */
 export const RECENT_DECISIONS = 10;
 
-/** The latest closed questions (`ObjectiveView.recentDecisions`). */
+/**
+ * The latest closed questions (`ObjectiveView.recentDecisions`). Nothing
+ * is cut here: the view is redacted after (`readStatus`, progress.ts
+ * `statusComment`), and a cut before redaction could leave part of a
+ * secret it no longer matches.
+ */
 export function recentDecisions(state: ObjectiveState): RecentDecision[] {
   return (state.closedHolds ?? [])
     .slice(-RECENT_DECISIONS)
@@ -193,14 +198,26 @@ export function recentDecisions(state: ObjectiveState): RecentDecision[] {
       summary,
       askedAt,
       ...(url ? { url } : {}),
-      closed:
-        closed.text !== undefined && closed.text.length > 300
-          ? { ...closed, text: `${closed.text.slice(0, 299)}…` }
-          : closed,
+      closed,
     }));
 }
 
-/** One closed question as a line of text: what closed it, who and how, when, and what it asked. */
+/** The most of a decision's summary or text a status line shows. */
+const DECISION_TEXT = 300;
+
+/** `value` as one line, cut to DECISION_TEXT: for a view already redacted. */
+function decisionLine(value: string): string {
+  const line = value.replace(/\s+/g, " ").trim();
+  return line.length > DECISION_TEXT
+    ? `${line.slice(0, DECISION_TEXT - 1)}…`
+    : line;
+}
+
+/**
+ * One closed question as a line of text: what closed it, who and how,
+ * when, and what it asked. `decision` is from a redacted view; the text
+ * and summary are cut here, after that redaction.
+ */
 export function decisionText(decision: RecentDecision): string {
   const { closed } = decision;
   const who = closed.by
@@ -209,9 +226,9 @@ export function decisionText(decision: RecentDecision): string {
   const how = closed.channel ? ` via ${closed.channel}` : "";
   const what =
     closed.how === "answered"
-      ? `answered ${[closed.answer, closed.arg].filter(Boolean).join(" ")}${closed.text ? ` (${closed.text.replace(/\s+/g, " ")})` : ""}`
+      ? `answered ${[closed.answer, closed.arg].filter(Boolean).join(" ")}${closed.text ? ` (${decisionLine(closed.text)})` : ""}`
       : `closed: ${closed.how}${closed.next ? ` by ${closed.next}` : ""}`;
-  return `${decision.id}: ${what}${who}${how} at ${displayTime(closed.at)}; it asked: ${decision.summary}`;
+  return `${decision.id}: ${what}${who}${how} at ${displayTime(closed.at)}; it asked: ${decisionLine(decision.summary)}`;
 }
 
 /** The running service's record, from `service.json`. */

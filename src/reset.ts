@@ -39,7 +39,9 @@ import {
   type Frozen,
   newObjective,
   type ObjectiveState,
+  keptClosings,
   planProblem,
+  RESET_KEY,
   recordClosed,
   TERMINAL,
 } from "./state.js";
@@ -62,7 +64,7 @@ import { commandRefusal } from "./work/retire.js";
  * plan and restore what merged under it; a plan that review changed is a
  * new plan, and nothing of the old one carries over.
  */
-export const RESET = "reset";
+export const RESET = RESET_KEY;
 
 /** What the resetting record keeps for its rebuild (`kept.reset`). */
 export interface ResetRecord {
@@ -528,7 +530,9 @@ function carried(
  * (`carried`): the live record's (its comments' progress is the sync's),
  * then the base's it lacks, and every question the old state had open
  * that the new record doesn't, closed as `reset`, so its comment says
- * the reset closed it. A restored old state keeps its questions open.
+ * the reset closed it. A restored old state keeps its questions open; a
+ * cancel before the rebuild lands closes them as cancelled instead
+ * (engine.ts `cancel`).
  */
 export function closedByReset(
   state: ObjectiveState,
@@ -542,8 +546,9 @@ export function closedByReset(
       entry,
     ]),
   );
-  const merged = [...known.values()].sort((a, b) =>
-    a.closed.at.localeCompare(b.closed.at),
+  // Bounded as recordClosed bounds them: no unshown closing is lost.
+  const merged = keptClosings(
+    [...known.values()].sort((a, b) => a.closed.at.localeCompare(b.closed.at)),
   );
   if (merged.length) state.closedHolds = merged;
   else delete state.closedHolds;

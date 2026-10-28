@@ -1299,7 +1299,10 @@ test("a worker's discovery whose reviewed round acceptance sent back can be decl
   state.done["amend:worker-a-1:plan"] = { answer: accepted, draft, round: 1 };
   state.done["amend:worker-a-1:review"] = { round: 1 };
   const decline = () =>
-    declineDiscovery(state, "a", "obsolete", "octo", ACCEPTED_AT);
+    declineDiscovery(state, "a", "obsolete", "octo", ACCEPTED_AT, {
+      channel: "cli",
+      as: "Claude Code",
+    });
   // Reviewed: acceptance may be posting it.
   assert.deepEqual(decline(), [
     "Amendment worker-a-1 has been reviewed and is being accepted; it can't be declined now",
@@ -1312,11 +1315,29 @@ test("a worker's discovery whose reviewed round acceptance sent back can be decl
       atAcceptance: true,
     },
   ];
+  // An open question of its planning steps closes as declined, with who
+  // declined, on whose behalf and how (#2158).
+  state.holds.push({
+    id: "amend:worker-a-1:plan@1",
+    step: "amend:worker-a-1:plan",
+    question: "Plan it?",
+    options: [],
+    cause: "question",
+    askedAt: ACCEPTED_AT,
+  });
   assert.deepEqual(decline(), []);
   assert.equal(
     state.done["amend:worker-a-1"].rejected,
     "Declined by octo: obsolete",
   );
+  assert.ok(!state.holds.some((h) => h.id === "amend:worker-a-1:plan@1"));
+  const closed = state.closedHolds.find(
+    (c) => c.id === "amend:worker-a-1:plan@1",
+  ).closed;
+  assert.equal(closed.how, "declined");
+  assert.equal(closed.by, "octo");
+  assert.equal(closed.as, "Claude Code");
+  assert.equal(closed.channel, "cli");
 });
 
 /** A commit on the checkout's main after the plan's base, with `files`. */

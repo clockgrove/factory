@@ -316,6 +316,58 @@ test("an amendment whose new item the integrated QA item doesn't reach goes back
   assert.equal(planningRevisions(state).used, 2);
 });
 
+// #2147: the operator's planning decisions as plan steps save them in that
+// run (Codex, main media.select-repair). Its plan review's unresolved
+// finding asked for the asset item to own the delivered files' test; the
+// operator's `more` only granted rounds, and the plan accepted after them
+// kept the test with its own item. A worker given that `more` as a human
+// decision took the finding for its requirement and proposed moving the
+// test into its item.
+const STALE =
+  "make the asset item own and validate the test that checks the delivered files";
+const MORE = {
+  question: `The plan still has 1 problem after 3 rounds, past the 2 autonomy.allowances.planningRevisions allows:\n\n1. Unresolved: this item's validation still only checks the Git LFS attributes. Add validation that checks those asset properties locally, or ${STALE}.\n\n\`more\` allows 2 more rounds.`,
+  answer: "more",
+  by: "kirk",
+  at: "2026-01-01T00:00:30.000Z",
+};
+const ANSWERED = {
+  question: "Which two colours should the candidate sets use?",
+  answer: "answer",
+  text: "Green and purple.",
+  by: "kirk",
+  at: "2026-01-01T00:00:20.000Z",
+};
+
+test("an amendment's review is given the operator's planning answers, never a `more` (#2147)", async () => {
+  const { checkout, state } = await building();
+  // Round 1's review left a finding past the allowance: the operator's kept
+  // answer and the `more` that sent it, then round 2 accepted.
+  state.done["decide:1:1"] = {
+    corrections: [],
+    grant: 2,
+    decision: ANSWERED,
+    more: MORE,
+  };
+  state.done["plan:1:2"] = state.done["plan:1:1"];
+  state.done["decide:1:2"] = { accept: true };
+  state.done.plan = { ...state.done.plan, decisions: [ANSWERED, MORE] };
+  const { planner, asked } = scripted(revision([work("b"), qa(["a", "b"])]), {
+    findings: [],
+  });
+  const deps = depsOf(checkout, planner);
+  const planned = await step(state, deps);
+  assert.equal(planned.key, "amend:op-1:plan");
+  assert.equal(planned.outcome.kind, "done", JSON.stringify(planned.outcome));
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.equal(asked[1].role, "reviewer");
+  const sent = JSON.stringify(asked[1]);
+  assert.ok(sent.includes("FACTORY_OPERATOR_PLANNING_DECISIONS"));
+  assert.ok(sent.includes(ANSWERED.text));
+  assert.ok(!sent.includes(STALE));
+});
+
 test("an amendment's check findings still reject when they repeat; past the allowance its next round asks first", async () => {
   // The same findings twice.
   {

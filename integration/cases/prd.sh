@@ -397,8 +397,13 @@ print("; ".join(out) or "none")' "$tries")
 replay_discovery() { local n; n=$(case_issues | head -1); [ -z "$n" ] || discovery_check "$n" "$(now)"; }
 
 # PRD 7: a Work Item's question stops only that item and its dependents: with
-# the base's merge refused (lasting 403), the independent item merges and the
-# dependent never starts; after the refusal ends, retry finishes the Objective.
+# the base's merge refused (lasting 405: not mergeable, the PR's own cause),
+# the independent item merges and the dependent never starts; after the
+# refusal ends, retry finishes the Objective. The refusal must be the item's
+# own: a 403 is a permission refusal, which asks for the whole Objective
+# (docs/reference/holds.md Scope), so it stops the independent item's merge
+# too, and the case passed only when that merge came within the 2 minutes
+# before the 403 asked (run 2026-10-27T172454PDT-60d1 lost that race).
 case_scope() {
   local t0 id n; t0=$(now); id=$(uid)
   local HOLD_POLICY="d2 review decide more"
@@ -415,14 +420,19 @@ case_scope() {
   local pr=""; local end=$(( $(now) + 1500 ))
   while [ -z "$pr" ] && [ "$(now)" -lt "$end" ] && ! stopping; do pr=$(p_pr "$n" "$base" OPEN); [ -n "$pr" ] || sleep 10; done
   [ -n "$pr" ] || { record holds.item-scope FAIL "#$n: $base never opened a PR" "$t0"; cancel_wait "$n"; return; }
-  prule_add "PUT ^/repos/$REPO/pulls/$pr/merge\$ status=403"
+  prule_add "PUT ^/repos/$REPO/pulls/$pr/merge\$ status=405"
   local p; p=$(HOLD_POLICY="" wait_phase "$n" "^hold:item:$base:" 900)
+  # An item hold names its item; an Objective-wide one names none and stops
+  # the independent item too, so there is nothing to wait for.
   local hj; hj=$(st hold "$n" "item:$base:*")
+  local scope; scope=$(hold_field "$hj" item)
+  local shown="item $scope"; [ -n "$scope" ] || shown=$([ "$hj" = null ] && echo none || echo Objective)
   local merged=""; end=$(( $(now) + 1200 ))
+  [ "$scope" = "$base" ] || end=0
   while [ -z "$merged" ] && [ "$(now)" -lt "$end" ] && ! stopping; do merged=$(p_pr "$n" "$solo" MERGED); [ -n "$merged" ] || sleep 15; done
   local top_work; top_work=$(st events "$n" event=start "step=item:$top:work"); local still; still=$(st hold "$n" "item:$base:*")
-  [[ $p == hold:item:$base:* ]] && [ -n "$merged" ] && [ "$top_work" = 0 ] && [ "$still" != null ]
-  rec_if holds.item-scope $? "#$n base $base held ($p) on PR #$pr's refused merge; independent $solo merged as PR #${merged:-none}; dependent $top work starts $top_work; base still held: $([ "$still" != null ] && echo yes || echo no)" "$t0"
+  [[ $p == hold:item:$base:* ]] && [ "$scope" = "$base" ] && [ -n "$merged" ] && [ "$top_work" = 0 ] && [ "$still" != null ]
+  rec_if holds.item-scope $? "#$n base $base held ($p, scope $shown) on PR #$pr's refused merge; independent $solo merged as PR #${merged:-none}; dependent $top work starts $top_work; base still held: $([ "$still" != null ] && echo yes || echo no)" "$t0"
   prule_clear
   [ "$still" != null ] && answer_t 60 "$n" retry --question "$(hold_field "$still" id)" >/dev/null 2>&1
   wait_phase "$n" 'done|cancelled|failed' 1500 >/dev/null

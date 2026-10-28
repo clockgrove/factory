@@ -334,6 +334,12 @@ export interface CommitStatus {
 }
 
 export interface WorkflowRun {
+  id?: unknown;
+  /** The workflow's name. */
+  name?: unknown;
+  /** The workflow file that ran, as ".github/workflows/quality.yml". */
+  path?: unknown;
+  head_sha?: unknown;
   status?: unknown;
   conclusion?: unknown;
 }

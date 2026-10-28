@@ -42,7 +42,7 @@ import {
   type SelfValidateOptions,
   selectedMediaNote,
 } from "../work/self-validate.js";
-import { VALIDATION_TOOL_NAME } from "../work/validate-tool.js";
+import { COLLECTED_RESULT, shellDependencies } from "../work/validate-tool.js";
 import {
   ACTIVITY_INTERVAL_MS,
   type Worker,
@@ -62,7 +62,7 @@ import {
   trimCodexHome,
 } from "./codex.js";
 import { CodexStderr, withStderr } from "./codex-stderr.js";
-import { CodexValidate } from "./codex-validate.js";
+import { CODEX_VALIDATE_CALL, CodexValidate } from "./codex-validate.js";
 import {
   addCodexTelemetry,
   type CodexBaseline,
@@ -147,13 +147,10 @@ export function codexShellNote(
   const reach = network
     ? "It shares the host's network."
     : "It has no network: no package registry, and no service on the host's loopback.";
-  const dependencies = network
-    ? "The repository's dependencies are not installed in your checkout. You may install them there to run a command, but Factory's validation never uses what you install: it runs the exact locked install itself."
-    : "The repository's dependencies are not installed in your checkout, and without a network they can't be: package installs, and the linters, type checkers, test runners, builds and generators that need the dependencies, don't run in your shell.";
   const check = validating
-    ? `Your ${VALIDATION_TOOL_NAME} tool (Validate) runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell, fix what it reports, and finish only after it passes on your final files.`
+    ? `Your Validate tool runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell, fix what it reports, and finish only after it passes on your final files. ${CODEX_VALIDATE_CALL}`
     : "You have no tool that runs the declared validation: Factory runs it after you finish.";
-  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${dependencies} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp. Do not commit: Factory collects your uncommitted changes as a new commit on your checkout's HEAD and validates that commit in a fresh checkout, so a check of HEAD there sees your result, while HEAD in your checkout doesn't hold your uncommitted changes. ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? `check with ${VALIDATION_TOOL_NAME} instead` : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}`;
+  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${shellDependencies(network)} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp. ${COLLECTED_RESULT} ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? "check with Validate instead" : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}`;
 }
 
 const real = (path: string) => realpathSync(path);
@@ -747,7 +744,12 @@ export class CodexWorker implements Worker {
       // covered, is asked again on the same thread (FinishRequests).
       const finish =
         validation &&
-        new FinishRequests(validation.validator, validating, input.item);
+        new FinishRequests(
+          validation.validator,
+          validating,
+          input.item,
+          CODEX_VALIDATE_CALL,
+        );
       let request =
         turn.prompt +
         codexShellNote(this.options.network === "host", validating, input.item);

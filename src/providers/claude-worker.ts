@@ -57,7 +57,11 @@ import {
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
-import { VALIDATION_TOOL_NAME } from "../work/validate-tool.js";
+import {
+  COLLECTED_RESULT,
+  shellDependencies,
+  VALIDATION_TOOL_NAME,
+} from "../work/validate-tool.js";
 import {
   targetOf,
   type Worker,
@@ -178,13 +182,19 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 /** What the shell's network is, for its prompt and tool description. */
-const shellNetwork = (sandbox: SandboxConfig) =>
+const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
   sandbox.network === "host"
     ? "it shares the host's network, so services on the host's loopback are reachable"
     : "the network is off and only loopback works";
 
-const shellPrompt = (sandbox: SandboxConfig) =>
-  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}): use it to inspect, compute, build and test. Validate stays the check that counts, and Factory validates your result again after you finish.`;
+/**
+ * The truth about the worker's own shell (#2156), as a Codex worker is told
+ * (codex-worker.ts `codexShellNote`): it differs from Factory's validation
+ * environment, has no installed dependencies, and isn't where the result is
+ * validated. A worker has the shell only with Validate granted.
+ */
+export const shellPrompt = (sandbox: Pick<SandboxConfig, "network">) =>
+  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead.`;
 
 /**
  * Compaction summarizes the first user turn, so the exact contract also
@@ -202,10 +212,7 @@ const CREDENTIAL_RESTART =
   "\n\nAn earlier session of this attempt stopped on a transient provider authentication error. Its uncommitted changes are already in your working tree: continue from them rather than starting over.";
 
 // Shared with the Codex worker (work/self-validate.ts FinishRequests).
-export {
-  VALIDATE_REQUEST,
-  validateRequest,
-} from "../work/self-validate.js";
+export { VALIDATE_REQUEST, validateRequest } from "../work/self-validate.js";
 
 /**
  * `failed`: Validate's last run on the worker's current files failed.

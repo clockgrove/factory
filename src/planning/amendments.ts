@@ -1526,7 +1526,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         data,
         revising: !whole,
         repository,
-        workers: workers(config),
+        workers: workers(config, deps.provider),
         citedFiles: cited.flatMap((file, at) =>
           file.complete
             ? [{ label: `cited file ${at}`, content: file.content }]
@@ -1913,7 +1913,7 @@ function amendReviewStep(
         ),
         reviewArtifacts: inputs.reviewArtifacts,
         repository,
-        workers: workers(config),
+        workers: workers(config, deps.provider),
         ...(offeredProfiles(config)
           ? { executionProfiles: offeredProfiles(config) }
           : {}),

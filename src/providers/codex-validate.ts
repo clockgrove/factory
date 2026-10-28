@@ -9,7 +9,8 @@
  * private (0700) under the host's temporary directory, which the worker's
  * shell is never granted, so only Codex reaches it. The tool takes no
  * arguments, as the Claude and Copilot workers' Validate: only the item's
- * declared commands run.
+ * declared commands run. Its result is bounded as theirs is, below the
+ * tool output Codex keeps (self-validate.ts `VALIDATE_RESULT_CHARS`).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -29,6 +30,23 @@ import { detail, PlannerError, providerOutcome } from "./planner.js";
 
 /** Factory's MCP server for Validate, as the worker's Codex names it. */
 export const CODEX_VALIDATION_SERVER = "factory-validation";
+
+/**
+ * The tool's stable id, as Codex names an MCP tool to the model:
+ * `mcp__<server>__<tool>`, the server's `-` read as `_`.
+ */
+export const CODEX_VALIDATION_TOOL_ID = `mcp__${CODEX_VALIDATION_SERVER.replaceAll("-", "_")}__${VALIDATION_TOOL_NAME}`;
+
+/**
+ * How a Codex worker calls Validate (#2156). Codex's production models
+ * (`tool_mode` code_mode_only) see only `exec`, and call an MCP tool as
+ * `tools.<id>` inside an exec script. By default such a tool is a deferred
+ * nested tool, named nowhere in the model's request: live (#800), a worker
+ * told only of "run_validation" found no such tool. The server's
+ * `omit_tools_from = ["deferred"]` (codexMcpServerConfig) lists it in
+ * exec's description, and the worker is also given the exact call.
+ */
+export const CODEX_VALIDATE_CALL = `Validate is the MCP tool ${VALIDATION_TOOL_NAME} of Factory's server ${CODEX_VALIDATION_SERVER}, id ${CODEX_VALIDATION_TOOL_ID}, and takes no arguments. Inside exec, call it as \`const result = await tools.${CODEX_VALIDATION_TOOL_ID}({}); text(result.content.map((part) => part.text).join(""));\`; where your tools list ${VALIDATION_TOOL_NAME} directly, call it there.`;
 
 /**
  * One Codex worker attempt's Validate: the shared runs (`validator`, whose
@@ -331,8 +349,11 @@ function send(connection: Socket, message: Record<string, unknown>): void {
  * for Codex 0.160: the relay as its stdio command, required (a server that
  * doesn't start fails the turn, rather than leaving a worker told it has
  * Validate without it), its one tool enabled and approved (the worker runs
- * with approval policy never), and a call allowed `toolTimeoutSeconds`
- * (Codex's default is 60 s; a validation takes minutes).
+ * with approval policy never), a call allowed `toolTimeoutSeconds`
+ * (Codex's default is 60 s; a validation takes minutes), and the tool never
+ * deferred: `omit_tools_from` (`code_mode`, `deferred` or `direct`) keeps it
+ * out of the deferred tools, so a code-mode model sees it declared in exec's
+ * description, as a Claude worker's Validate is always loaded (#2156).
  */
 function codexMcpServerConfig(
   name: string,
@@ -349,5 +370,6 @@ startup_timeout_sec = 30
 tool_timeout_sec = ${Math.ceil(toolTimeoutSeconds)}
 enabled_tools = ${JSON.stringify([toolName])}
 default_tools_approval_mode = "approve"
+omit_tools_from = ["deferred"]
 `;
 }

@@ -251,6 +251,13 @@ export interface AppliedFormatter {
   command: string;
   /** The files it changed, every one changed by the result and owned by the item. */
   files: string[];
+  /**
+   * Files the result changed that configure a formatter or fixer
+   * (`formatterConfiguration`): the formatter ran under the result's own
+   * configuration, so its commit is not layout alone by Factory's word and
+   * result review judges its diff. Absent when the result changed none.
+   */
+  configuration?: string[];
 }
 
 /** Factory's commit on the candidate with the lockfile it resolved (`lockfile`). */
@@ -281,6 +288,13 @@ export type Validation =
   | {
       kind: "failed";
       tree: string;
+      /**
+       * The tree validation started from, before Factory's own commits
+       * (a resolved lockfile, the formatter's output): what a worker's own
+       * Validate passed, when it passed this result. `validateTree` sets it
+       * on every failure.
+       */
+      candidateTree?: string;
       commands: string[];
       /** The commands that passed before the failure. */
       results: CommandResult[];
@@ -309,6 +323,21 @@ export type Validation =
  * restore, or LFS files over the bound are media's hold (hydrateTree).
  */
 export async function validateTree(input: ValidateInput): Promise<Validation> {
+  const result = await validateCandidate(input);
+  if (result.kind !== "failed") return result;
+  // `tree` is Factory's last commit's when it made one; the rerun of a
+  // tree the worker's Validate passed compares the candidate's own.
+  return {
+    ...result,
+    candidateTree: await revParse(
+      input.checkout,
+      `${input.commit}^{tree}`,
+      input.signal,
+    ),
+  };
+}
+
+async function validateCandidate(input: ValidateInput): Promise<Validation> {
   const { checkout, plan, item } = input;
   // A regenerated lockfile moves both to Factory's commit on the candidate.
   let { commit } = input;
@@ -514,6 +543,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         baseline,
         hydrated,
         linked,
+        installed: formatAt === 1,
         run: (command, file) =>
           sandboxed(command, file, {
             install: false,
@@ -527,12 +557,16 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           commit,
           command: formatter!.command,
           files: applied.files,
+          ...(applied.configuration.length > 0 && {
+            configuration: applied.configuration,
+          }),
         };
         // The new commit's checkout is clean again, formatted.
         baseline = await status(worktree, signal);
         return undefined;
       }
-      if (applied.kind === "unchanged") return undefined;
+      if (applied.kind === "unchanged" || applied.kind === "skipped")
+        return undefined;
       if (applied.kind === "failed")
         return {
           kind: "failed",
@@ -1365,10 +1399,18 @@ export const FORMAT_COMMIT_MESSAGE =
 
 /** What running the repository's formatter came to. */
 type Formatting =
-  /** Factory's commit of the candidate, formatted. */
-  | { kind: "formatted"; commit: string; tree: string; files: string[] }
+  /** Factory's commit of the candidate, formatted; `configuration` as AppliedFormatter's. */
+  | {
+      kind: "formatted";
+      commit: string;
+      tree: string;
+      files: string[];
+      configuration: string[];
+    }
   /** The formatter left the checkout as it was. */
   | { kind: "unchanged" }
+  /** With no install before it, the formatter couldn't run and changed nothing: validation goes on unformatted. */
+  | { kind: "skipped" }
   /** The candidate's fault: the formatter failed, or changed what it may not. */
   | { kind: "failed"; detail: string; output: string }
   | Extract<Outcome, { kind: "hold" }>;
@@ -1384,6 +1426,8 @@ interface FormatContext {
   baseline: Buffer;
   hydrated: ReadonlySet<string>;
   linked: readonly LfsFile[];
+  /** The item's exact install ran first, so the repository's dependencies are there. */
+  installed: boolean;
   /** Runs the formatter as a validation command runs, with no network. */
   run(command: string, file: RunFile): ReturnType<typeof runSandboxed>;
 }
@@ -1396,12 +1440,17 @@ interface FormatContext {
  * the validation sandbox with no network, as `resolveLockfile` resolves a
  * dependency change's lockfile. It may change only files the result
  * changed (against the item's base) that the item owns; a change to any
- * other file, or any new, deleted or renamed one, fails the candidate with
- * the bounded diff. A formatter that exits non-zero, outlasts its limit or
- * overflows the disk budget fails the candidate with its output. What it
- * changed is committed on the candidate as Factory's change
- * (FORMAT_COMMIT_MESSAGE), pinned at `format.ref`, and the caller
- * validates, and later steps review and publish, that commit.
+ * other file the result changed, or any new, deleted or renamed one, fails
+ * the candidate with the bounded diff. A change to a file the result left
+ * as at its base means the base isn't formatted, which no repair can fix:
+ * that holds for the operator, with the diff. A formatter that exits
+ * non-zero, outlasts its limit or overflows the disk budget fails the
+ * candidate with its output; but with no install before it (an item whose
+ * commands don't start with one), a formatter that failed and changed
+ * nothing is skipped, logged, since it may need the dependencies the
+ * install brings. What it changed is committed on the candidate as
+ * Factory's change (FORMAT_COMMIT_MESSAGE), pinned at `format.ref`, and the
+ * caller validates, and later steps review and publish, that commit.
  */
 async function applyFormatter(context: FormatContext): Promise<Formatting> {
   const { input, format, item, worktree, commit } = context;
@@ -1452,6 +1501,26 @@ async function applyFormatter(context: FormatContext): Promise<Formatting> {
   };
   if (!passed) {
     input.log(logged);
+    // Without the install, a dependency formatter can't run at all, and
+    // the worker can't change the item's commands: never its repair.
+    if (
+      !context.installed &&
+      !run.diskOverflow &&
+      !movedLinks(worktree, context.linked).length &&
+      !statusChanges(
+        context.baseline,
+        await status(worktree, signal),
+        context.hydrated,
+      ).length
+    ) {
+      input.log({
+        event: "format-skipped",
+        command,
+        reason:
+          "the formatter failed with no install before it and changed nothing; the item's commands don't start with the exact install, so the repository's dependencies may be missing",
+      });
+      return { kind: "skipped" };
+    }
     const failed = `The repository's formatter failed (${run.diskOverflow ? "disk budget" : run.timedOut ? "time limit" : run.exitCode}): ${command}: `;
     return {
       kind: "failed",
@@ -1501,12 +1570,33 @@ async function applyFormatter(context: FormatContext): Promise<Formatting> {
     changedByResult.has(change.path) &&
     ownsPath(change.path, item.ownedPaths);
   const refused = changes.filter((change) => !allowed(change));
-  if (refused.length) {
-    const diff = await boundedDiff(worktree, refused, signal);
-    const detail = `The repository's formatter \`${command}\` changed files other than those the result changed within the item's owned paths: ${describeChanges(refused)}. Factory applies the formatter only to the files a result changes and owns, so these must already be as it formats them.${diff ? `\n\n${diff}` : ""}`;
+  // A file the result left as at its base, reformatted in place: the base
+  // isn't formatted, and no repair of this result can change that.
+  const unformattedBase = (change: StatusChange) =>
+    change.status === " M" && !changedByResult.has(change.path);
+  const candidates = refused.filter((change) => !unformattedBase(change));
+  if (candidates.length) {
+    const diff = await boundedDiff(worktree, candidates, signal);
+    const detail = `The repository's formatter \`${command}\` changed files other than those the result changed within the item's owned paths: ${describeChanges(candidates)}. Factory applies the formatter only to the files a result changes and owns, so these must already be as it formats them.${diff ? `\n\n${diff}` : ""}`;
     return { kind: "failed", detail, output: detail };
   }
+  if (refused.length) {
+    const diff = await boundedDiff(worktree, refused, signal);
+    return objectiveWide(
+      hold(
+        `The repository's formatter \`${command}\` changes files this result didn't change: ${describeChanges(refused)}. The commit the item was built on (${input.base ?? input.plan.base}) isn't formatted as the formatter formats it, and Factory formats only the files a result changes, so no repair can fix this. Format the default branch with \`${command}\` and merge that, then answer replan to plan again from it; or cancel.${diff ? `\n\n${diff}` : ""}`,
+        ["replan", "cancel"],
+      ),
+    );
+  }
   const files = changes.map((change) => change.path).sort();
+  const configuration = await formatterConfiguration(
+    new Revisions(input.checkout, commit, signal),
+    input.base ?? input.plan.base,
+    commit,
+    [...changedByResult],
+    signal,
+  );
   const made = await commitFactoryChange(
     input,
     worktree,
@@ -1514,8 +1604,73 @@ async function applyFormatter(context: FormatContext): Promise<Formatting> {
     FORMAT_COMMIT_MESSAGE,
     format,
   );
-  input.log({ event: "format-applied", command, commit: made.commit, files });
-  return { kind: "formatted", ...made, files };
+  input.log({
+    event: "format-applied",
+    command,
+    commit: made.commit,
+    files,
+    ...(configuration.length > 0 && { configuration }),
+  });
+  return { kind: "formatted", ...made, files, configuration };
+}
+
+/**
+ * The basenames of files that configure a formatter or fixer: the
+ * formatter Factory runs reads the result's own copies, so a result that
+ * changes one can make the formatting commit more than layout (a lint rule
+ * with a fix, say).
+ */
+const FORMATTER_CONFIGURATION =
+  /^(?:\.?biome\.jsonc?|\.prettierrc(?:\..+)?|prettier\.config\.[cm]?[jt]s|\.editorconfig|\.?dprint\.jsonc?|\.eslintrc(?:\..+)?|eslint\.config\.[cm]?[jt]s|\.stylelintrc(?:\..+)?|stylelint\.config\.[cm]?[jt]s|\.?rustfmt\.toml|\.clang-format|\.clang-tidy|pyproject\.toml|\.?ruff\.toml|setup\.cfg|\.flake8|\.isort\.cfg|deno\.jsonc?|\.golangci\.ya?ml|\.rubocop\.yml|\.swiftformat|\.swift-format|\.scalafmt\.conf|\.php-cs-fixer(?:\.dist)?\.php)$/;
+
+/** The package.json keys formatters and fixers read their configuration from. */
+const PACKAGE_FORMATTER_KEYS = [
+  "prettier",
+  "eslintConfig",
+  "stylelint",
+  "biome",
+] as const;
+
+/**
+ * Which of `changed` (the files the result changed from `base`) configure
+ * a formatter or fixer: a FORMATTER_CONFIGURATION file, or a package.json
+ * whose PACKAGE_FORMATTER_KEYS differ from the base's (one that doesn't
+ * parse counts).
+ */
+async function formatterConfiguration(
+  revisions: Revisions,
+  base: string,
+  commit: string,
+  changed: readonly string[],
+  signal: AbortSignal,
+): Promise<string[]> {
+  const found: string[] = [];
+  for (const path of [...changed].sort()) {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    if (FORMATTER_CONFIGURATION.test(name)) found.push(path);
+    else if (name === "package.json") {
+      const keys = async (revision: string) => {
+        const text = await revisions.text(revision, path);
+        if (text === undefined) return {};
+        const parsed: unknown = JSON.parse(text);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+          throw new Error("not an object");
+        const manifest = parsed as Record<string, unknown>;
+        return Object.fromEntries(
+          PACKAGE_FORMATTER_KEYS.map((key) => [key, manifest[key]]),
+        );
+      };
+      try {
+        if (!isDeepStrictEqual(await keys(base), await keys(commit)))
+          found.push(path);
+      } catch (error) {
+        if (error instanceof GitRefusal) throw error;
+        signal.throwIfAborted();
+        found.push(path);
+      }
+    }
+  }
+  return found;
 }
 
 /**

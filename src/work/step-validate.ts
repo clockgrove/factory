@@ -94,12 +94,8 @@ export async function validateStep(
     case "failed": {
       // The worker's own Validate passed this exact tree with these
       // commands: run once more before calling it the result's fault.
-      const sameAsWorker =
-        work.validated?.tree === result.tree &&
-        JSON.stringify(work.validated.commands) ===
-          JSON.stringify(result.commands);
       const rerun =
-        sameAsWorker &&
+        passedByWorker(work.validated, result) &&
         rerunOnce(
           result,
           fact(state, "flaky", item.id),
@@ -137,6 +133,23 @@ export async function validateStep(
     default:
       return result;
   }
+}
+
+/**
+ * Whether the worker's own Validate passed the tree this failed validation
+ * started from, with the same commands. The worker's Validate records its
+ * snapshot's tree, before Factory's commits (the formatter's output, a
+ * resolved lockfile), so the comparison is with the candidate's tree,
+ * never the tree Factory's last commit made.
+ */
+export function passedByWorker(
+  validated: WorkResult["validated"],
+  result: { tree: string; candidateTree?: string; commands: readonly string[] },
+): boolean {
+  return (
+    validated?.tree === (result.candidateTree ?? result.tree) &&
+    JSON.stringify(validated.commands) === JSON.stringify(result.commands)
+  );
 }
 
 /**

@@ -81,7 +81,13 @@ export interface PassedValidation {
   /** The lockfile Factory resolved for the item's dependency change and committed on its result (validate.ts). */
   regenerated?: { commit: string; lockfile: string };
   /** The repository's formatter's output, which Factory committed on the item's result (validate.ts). */
-  formatted?: { commit: string; command: string; files: readonly string[] };
+  formatted?: {
+    commit: string;
+    command: string;
+    files: readonly string[];
+    /** Formatter configuration the result changed: review judges the formatting commit's diff. */
+    configuration?: readonly string[];
+  };
 }
 
 /**
@@ -1391,8 +1397,16 @@ export function validationRow(validation: PassedValidation): ResultEvidence {
           command: validation.formatted.command,
           files: validation.formatted.files,
           commitSha: validation.formatted.commit,
-          scope:
-            "Factory ran the operator's formatter on the result before these commands, with no network and no model, and committed what it changed (only files the worker changed within its owned paths) as the result's last commit. It is Factory's change, not the worker's: it needs no owned path, changes layout only as the repository's formatter does, and is never a finding.",
+          ...(validation.formatted.configuration?.length
+            ? {
+                resultConfiguration: validation.formatted.configuration,
+                scope:
+                  "Factory ran the operator's formatter on the result before these commands, with no network and no model, and committed what it changed (only files the worker changed within its owned paths) as the result's last commit. It needs no owned path. But the worker changed the formatter's configuration (resultConfiguration), and the formatter ran under it, so this commit is not layout alone by Factory's word: judge its diff as part of the worker's change, and a change beyond layout (such as a lint fix that changes behaviour) is the worker's finding.",
+              }
+            : {
+                scope:
+                  "Factory ran the operator's formatter on the result before these commands, with no network and no model, and committed what it changed (only files the worker changed within its owned paths) as the result's last commit. It is Factory's change, not the worker's: it needs no owned path, changes layout only as the repository's formatter, under the base's configuration, does, and is never a finding.",
+              }),
         },
       }),
     }),

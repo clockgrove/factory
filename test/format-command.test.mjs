@@ -41,6 +41,7 @@ import {
 } from "../dist/validate.js";
 import { prepareWorkPrompt } from "../dist/work/prompt.js";
 import { formattedNote, SelfValidation } from "../dist/work/self-validate.js";
+import { passedByWorker, rerunOnce } from "../dist/work/step-validate.js";
 import { candidate } from "../dist/work/steps.js";
 import {
   cli,
@@ -301,10 +302,17 @@ test("the formatter runs after the exact install, which it may need, and after a
   }
 });
 
-test("a formatter that fails fails the candidate with its output, before any command runs", async () => {
+const INSTALLABLE = {
+  ...BASE,
+  "package.json": `${JSON.stringify({ name: "target", private: true })}\n`,
+  "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+};
+
+test("a formatter that fails fails the candidate with its output, before any of the item's commands after the install runs", async () => {
   const { result, events, checkout } = await validate({
+    baseFiles: INSTALLABLE,
     format: "fmt --fail",
-    commands: ["true"],
+    commands: [BOOTSTRAP, "true"],
   });
   assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 2000));
   assert.match(
@@ -315,7 +323,12 @@ test("a formatter that fails fails the candidate with its output, before any com
   // No command failed: nothing to rerun or retire.
   assert.equal(result.failed, undefined);
   assert.equal(result.formatted, undefined);
-  assert.equal(named(events, "validation-command").length, 0);
+  // Only the install ran.
+  assert.deepEqual(
+    named(events, "validation-command").map((event) => event.command),
+    [BOOTSTRAP],
+  );
+  assert.equal(named(events, "format-skipped").length, 0);
   const [ran] = named(events, "format-result");
   assert.equal(ran.passed, false);
   assert.equal(ran.exitCode, 2);
@@ -325,24 +338,66 @@ test("a formatter that fails fails the candidate with its output, before any com
   assert.equal(pinned(checkout), false);
 });
 
-test("a formatter change to a file the result didn't change, or outside the item's owned paths, is refused with the diff", async () => {
+test("with no install before it, a formatter that can't run is skipped, never charged to the worker, and the item's commands run unformatted", async () => {
+  // The item's commands don't install: a dependency formatter can't run.
+  const { result, events, checkout } = await validate({
+    baseFiles: INSTALLABLE,
+    commands: ["grep -q b src/a.js"],
+    format: "fmt --needs-install",
+  });
+  assert.equal(result.kind, "passed", JSON.stringify(result).slice(0, 2000));
+  assert.equal(result.formatted, undefined);
+  assert.equal(pinned(checkout), false);
+  assert.deepEqual(
+    events
+      .filter((event) =>
+        [
+          "format",
+          "format-result",
+          "format-skipped",
+          "validation-command",
+        ].includes(event.event),
+      )
+      .map((event) => event.event),
+    ["format", "format-result", "format-skipped", "validation-command"],
+  );
+  assert.equal(named(events, "format-result")[0].exitCode, 127);
+  assert.match(
+    named(events, "format-skipped")[0].reason,
+    /no install before it and changed nothing/,
+  );
+  // A formatter that runs without an install still formats.
+  const global = await validate({ commands: ["grep -q b src/a.js"] });
+  assert.equal(global.result.kind, "passed");
+  assert.deepEqual(global.result.formatted?.files, ["src/a.js"]);
+});
+
+test("a formatter change to a file the result didn't change holds for the operator; one the result changed outside the item's owned paths is refused with the diff", async () => {
   // The base's other.js isn't formatted; the result changed only src/a.js.
+  // No repair can format the base: the operator's to fix.
   const untouched = await validate({
     baseFiles: { ...BASE, "other.js": "other  \n" },
   });
   assert.equal(
     untouched.result.kind,
-    "failed",
+    "hold",
     JSON.stringify(untouched.result).slice(0, 2000),
   );
-  assert.match(
-    untouched.result.detail,
-    /^The repository's formatter `fmt` changed files other than those the result changed within the item's owned paths: \+ M other\.js\. /,
+  assert.equal(untouched.result.scope, "objective");
+  assert.deepEqual(
+    untouched.result.options.map((option) => option.answer),
+    ["replan", "cancel"],
   );
-  assert.doesNotMatch(untouched.result.detail, /\+ M src\/a\.js/);
-  assert.match(untouched.result.detail, /\n-other {2}\n\+other(?:\n|$)/);
-  assert.match(untouched.result.detail, /diff --git a\/other\.js b\/other\.js/);
-  assert.equal(untouched.result.formatted, undefined);
+  assert.match(
+    untouched.result.question,
+    /^The repository's formatter `fmt` changes files this result didn't change: \+ M other\.js\. The commit the item was built on \([0-9a-f]{40}\) isn't formatted as the formatter formats it/,
+  );
+  assert.doesNotMatch(untouched.result.question, /\+ M src\/a\.js/);
+  assert.match(untouched.result.question, /\n-other {2}\n\+other(?:\n|$)/);
+  assert.match(
+    untouched.result.question,
+    /diff --git a\/other\.js b\/other\.js/,
+  );
   assert.equal(pinned(untouched.checkout), false);
   assert.equal(named(untouched.events, "validation-command").length, 0);
   // The result changed lib/b.js too, which the item doesn't own.
@@ -465,8 +520,24 @@ test("later steps review and publish the formatting commit, which result review 
   );
   assert.match(
     row.appliedFormatter.scope,
-    /It is Factory's change, not the worker's: it needs no owned path/,
+    /It is Factory's change, not the worker's: it needs no owned path, changes layout only .* and is never a finding\.$/,
   );
+  assert.equal(row.appliedFormatter.resultConfiguration, undefined);
+  // The worker changed the formatter's configuration: review judges the
+  // formatting commit's diff as the worker's change.
+  const configuredRow = JSON.parse(
+    validationRow({
+      tree: "t",
+      commands: ["true"],
+      formatted: { ...formatted, configuration: ["biome.json"] },
+    }).content,
+  ).appliedFormatter;
+  assert.deepEqual(configuredRow.resultConfiguration, ["biome.json"]);
+  assert.match(
+    configuredRow.scope,
+    /the worker changed the formatter's configuration \(resultConfiguration\), and the formatter ran under it, so this commit is not layout alone by Factory's word: judge its diff as part of the worker's change/,
+  );
+  assert.doesNotMatch(configuredRow.scope, /never a finding/);
   assert.equal(
     JSON.parse(validationRow({ tree: "t", commands: [] }).content)
       .appliedFormatter,
@@ -478,6 +549,85 @@ test("later steps review and publish the formatting commit, which result review 
     validationDeadlineMs(work, 1000, true) - validationDeadlineMs(work, 1000),
     1000,
   );
+});
+
+test("a result that changes the formatter's configuration is formatted under it, and the formatting commit says so", async () => {
+  const manifest = (fields) =>
+    `${JSON.stringify({ name: "target", private: true, ...fields })}\n`;
+  const baseFiles = {
+    ...BASE,
+    "biome.json": "{}\n",
+    "package.json": manifest({}),
+  };
+  const ownedPaths = ["src/", "biome.json", "package.json"];
+  // biome.json, and package.json's prettier key, configure a formatter.
+  const reconfigured = await validate({
+    baseFiles,
+    ownedPaths,
+    change: {
+      "src/a.js": "a  \n",
+      "biome.json": '{"linter":{"enabled":true}}\n',
+      "package.json": manifest({ prettier: { semi: false } }),
+    },
+  });
+  assert.equal(reconfigured.result.kind, "passed");
+  assert.deepEqual(reconfigured.result.formatted.files, ["src/a.js"]);
+  assert.deepEqual(reconfigured.result.formatted.configuration, [
+    "biome.json",
+    "package.json",
+  ]);
+  assert.deepEqual(
+    named(reconfigured.events, "format-applied")[0].configuration,
+    ["biome.json", "package.json"],
+  );
+  // A dependency change to package.json configures nothing.
+  const dependency = await validate({
+    baseFiles,
+    ownedPaths,
+    change: {
+      "src/a.js": "a  \n",
+      "package.json": manifest({ dependencies: { left: "1.0.0" } }),
+    },
+  });
+  assert.equal(dependency.result.kind, "passed");
+  assert.deepEqual(dependency.result.formatted.files, ["src/a.js"]);
+  assert.equal(dependency.result.formatted.configuration, undefined);
+  assert.equal(
+    named(dependency.events, "format-applied")[0].configuration,
+    undefined,
+  );
+});
+
+test("a failure after the formatter changed the result is rerun once when the worker's own Validate passed the candidate", async () => {
+  // The worker's Validate records its snapshot's tree: the candidate's,
+  // before Factory's formatting commit.
+  const { result, checkout, built } = await validate({ commands: ["false"] });
+  assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 2000));
+  const candidateTree = git(checkout, "rev-parse", `${built}^{tree}`);
+  assert.equal(result.candidateTree, candidateTree);
+  assert.notEqual(result.tree, candidateTree);
+  assert.equal(
+    result.tree,
+    git(checkout, "rev-parse", "refs/factory/1/a/format^{tree}"),
+  );
+  assert.ok(
+    passedByWorker({ tree: candidateTree, commands: ["false"] }, result),
+  );
+  assert.ok(
+    !passedByWorker({ tree: candidateTree, commands: ["true"] }, result),
+  );
+  assert.ok(
+    !passedByWorker({ tree: result.tree, commands: ["false"] }, result),
+  );
+  assert.ok(!passedByWorker(undefined, result));
+  const rerun = rerunOnce(result, undefined, "failed", (flaky) => ({ flaky }));
+  assert.equal(rerun?.kind, "retry");
+  assert.deepEqual(rerun.keep, {
+    flaky: { tree: result.tree, command: "false" },
+  });
+  // Without formatting, the candidate's tree is the tree validated.
+  const plain = await validate({ format: null, commands: ["false"] });
+  assert.equal(plain.result.candidateTree, plain.result.tree);
 });
 
 test("validation.formatCommand is set by setup's --format-command, absent by default, and frozen with an Objective", async () => {
@@ -731,6 +881,21 @@ test("the worker prompt says formatting is applied after it finishes, so it neve
   assert.ok(
     !formatted.includes(
       "For format failures, use the repository's formatter on changed files.",
+    ),
+  );
+  // A worker with no validation tool (Codex, or a Claude or Copilot worker
+  // without Validate) runs the commands in its shell: it runs exactly the
+  // configured formatter first, so a check chained after a format check
+  // (`biome check . && tsc`) still reaches the checks after it.
+  assert.ok(
+    formatted.includes(
+      "Factory's validation tool, when you have one, applies that formatter to its snapshot first. When you run the validation commands yourself in a shell instead, run exactly `pnpm exec biome check --write .` once in the checkout first (after an install the commands start with), so they check your files as Factory will; it is one deterministic command, not hand formatting. Then undo any change it made to a file you didn't change or don't own.",
+    ),
+    formatted,
+  );
+  assert.ok(
+    formatted.includes(
+      "run no other formatter or linter in a mode that rewrites files",
     ),
   );
   // Without validation commands, the worker hears it all the same.

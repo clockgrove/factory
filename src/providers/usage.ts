@@ -71,6 +71,27 @@ export function addTokens(a: Tokens, b: Tokens): Tokens {
   };
 }
 
+/**
+ * A call's own tokens with its child threads' (`childTokens`) added: each
+ * count both report is summed; a split the children don't report (Codex
+ * records no cache writes for a thread) stays the call's own; a count the
+ * call itself doesn't report stays unknown.
+ */
+export function withChildTokens(own: Tokens, children: Tokens): Tokens {
+  const known = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value);
+  const add = (x: unknown, y: unknown) =>
+    known(x) ? x + (known(y) ? y : 0) : null;
+  return {
+    input: add(own.input, children.input),
+    output: add(own.output, children.output),
+    cached: add(own.cached, children.cached),
+    cacheWrite: add(own.cacheWrite, children.cacheWrite),
+    reasoning: add(own.reasoning, children.reasoning),
+    total: add(own.total, children.total),
+  };
+}
+
 /** Counts distinct ids by name: an id seen again (started, then completed) counts once. */
 export class Tallies {
   private readonly seen = new Set<string>();
@@ -106,6 +127,11 @@ export class Tallies {
  * - `stage`: where a failed call failed (`FailureStage`).
  * - `imageOutputs`: images the model produced.
  * - `providerUsage`: the provider's own usage breakdown, numbers only (`providerUsage`).
+ * - `childTokens`: the part of `tokens` the call's child threads spent, with
+ *   their count (`threads`), where the provider reports them apart (Codex's
+ *   `spawn_agent` threads; a continued session's only by what they added
+ *   since the call it continues). Null otherwise: a Claude call's sub-agents
+ *   are in `tokens` through its per-model usage, not split out.
  */
 export function usageRecord(fields: {
   role: ModelRole;
@@ -120,6 +146,7 @@ export function usageRecord(fields: {
     callId: randomUUID(),
     ...fields,
     tokens: null,
+    childTokens: null,
     costUsd: null,
     sdkOperations: null,
     nativeToolActivity: null,

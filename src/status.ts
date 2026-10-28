@@ -28,6 +28,7 @@ import {
   amountText,
   type Ceiling,
   ceilings,
+  childText,
   type Day,
   readDay,
 } from "./spend.js";
@@ -142,9 +143,10 @@ export interface ObjectiveView {
   };
   /**
    * Model spend so far, and each configured spend limit (spend.ts) with
-   * what it has used and allows with the operator's grants.
+   * what it has used and allows with the operator's grants; `childTokens`:
+   * how many of its tokens child threads spent, when any.
    */
-  spend?: Amount & { limits: Ceiling[] };
+  spend?: Amount & { childTokens?: number; limits: Ceiling[] };
   /** A reset rebuilding the state from GitHub. */
   reset?: { requestedAt: string; hadState: boolean };
   /**
@@ -482,6 +484,9 @@ export function statusOf(
           spend: {
             tokens: state.spend?.tokens ?? 0,
             cents: state.spend?.cents ?? 0,
+            ...(state.spend?.childTokens
+              ? { childTokens: state.spend.childTokens }
+              : {}),
             limits: ceilings(state, context.day),
           },
         }
@@ -871,7 +876,7 @@ function objectiveText(row: ObjectiveView): string[] {
         `${scope === "perObjective" ? "this Objective" : "today (UTC)"} ${amountText(unit, used)} of ${amountText(unit, allowed)}`,
     );
     lines.push(
-      `  Spend: ${amountText("tokens", row.spend.tokens)}, ${amountText("cents", row.spend.cents)}; ${limits.length ? `limits: ${limits.join(", ")}` : "no limit set"}`,
+      `  Spend: ${amountText("tokens", row.spend.tokens)}${row.spend.childTokens ? ` (${childText(row.spend)})` : ""}, ${amountText("cents", row.spend.cents)}; ${limits.length ? `limits: ${limits.join(", ")}` : "no limit set"}`,
     );
   }
   for (const hold of row.holds)

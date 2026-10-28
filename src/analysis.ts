@@ -7,6 +7,7 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { ChildThreads, childTokensOf } from "./child-threads.js";
 import {
   type ActivityCounts,
   addUsage,
@@ -316,7 +317,12 @@ export interface CallGroup {
       costUsd: number;
     }
   >;
-  /** Codex child threads (`providerUsage.descendants`), summed: their own view, never in `usage`. */
+  /**
+   * Codex child threads (`childTokens`, or an older call's
+   * `providerUsage.descendants` by its increase over the call it
+   * continues: child-threads.ts), summed. They are in `usage`, but for
+   * `outside`: those of calls whose own count is unknown.
+   */
   descendants: {
     calls: number;
     threads: number;
@@ -325,6 +331,7 @@ export interface CallGroup {
     output: number;
     reasoning: number;
     total: number;
+    outside: number;
   };
   /** Calls with the provider's own usage breakdown (`providerUsage`). */
   providerUsageCalls: number;
@@ -542,6 +549,7 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
       output: 0,
       reasoning: 0,
       total: 0,
+      outside: 0,
     },
     providerUsageCalls: 0,
     currencies: {},
@@ -681,10 +689,8 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
     sum.cacheWrite += row.cacheWrite;
     sum.costUsd += row.costUsd;
   }
-  const descendants = (
-    event.providerUsage as { descendants?: Record<string, unknown> } | null
-  )?.descendants;
-  if (descendants && typeof descendants === "object") {
+  const children = childTokensOf(event);
+  if (children) {
     const d = group.descendants;
     d.calls += 1;
     for (const key of [
@@ -695,16 +701,19 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
       "reasoning",
       "total",
     ] as const)
-      d[key] += num(descendants[key]) ?? 0;
+      d[key] += num(children[key]) ?? 0;
+    // A call whose own count is unknown has its children outside the totals.
+    if (num(tokens.total) === undefined) d.outside += num(children.total) ?? 0;
   }
 }
 
 /**
  * A call's tokens and cost by model: Claude's `modelUsage`, Copilot's
  * per-model usage, else the whole call under its reported (or configured)
- * model. A resumed Claude call's `modelUsage` is its session's running
- * total, so it counts as the whole call. Input includes cache reads and
- * writes, as in `tokens`.
+ * model, less its Codex child threads (`childTokens`), a row of their own.
+ * A resumed Claude call's `modelUsage` is its session's running total, so
+ * it counts as the whole call. Input includes cache reads and writes, as
+ * in `tokens`.
  */
 function modelBreakdown(event: LogEvent): [
   string,
@@ -759,19 +768,40 @@ function modelBreakdown(event: LogEvent): [
       ]);
   }
   const tokens = (event.tokens ?? {}) as Record<string, unknown>;
-  return [
+  // Codex child threads' model isn't reported: their tokens are a row of
+  // their own, out of the call's model's (#2168).
+  const children =
+    num(tokens.total) === undefined ? undefined : childTokensOf(event);
+  const less = (key: "input" | "output" | "cached" | "cacheWrite") =>
+    Math.max(0, n(tokens[key]) - (children ? n(children[key]) : 0));
+  const rows: ReturnType<typeof modelBreakdown> = [
     [
       str(event.reportedModel) ?? str(event.model) ?? "unknown",
       {
-        input: n(tokens.input),
-        output: n(tokens.output),
-        cached: n(tokens.cached),
-        cacheWrite: n(tokens.cacheWrite),
+        input: less("input"),
+        output: less("output"),
+        cached: less("cached"),
+        cacheWrite: less("cacheWrite"),
         costUsd: n(event.costUsd),
       },
     ],
   ];
+  if (children)
+    rows.push([
+      CHILD_ROW,
+      {
+        input: n(children.input),
+        output: n(children.output),
+        cached: n(children.cached),
+        cacheWrite: n(children.cacheWrite),
+        costUsd: 0,
+      },
+    ]);
+  return rows;
 }
+
+/** The by-model row of Codex child threads, whose model isn't reported. */
+const CHILD_ROW = "child threads (model unreported)";
 
 function settle(group: CallGroup, rates: Rates): CallGroup {
   const { cache, usage, efficiency } = group;
@@ -834,6 +864,8 @@ class Analysis {
   >();
   private readonly attempts: Attempt[] = [];
   private readonly open = new Map<string, LogEvent>();
+  /** Older Codex calls' child threads, counted as today's (child-threads.ts). */
+  private readonly children = new ChildThreads();
   /** A step's last retry outcome, until its next start. */
   private readonly retrying = new Map<string, number>();
   private readonly retryWaits: Interval[] = [];
@@ -944,7 +976,8 @@ class Analysis {
         ...(str(event.outcome) ? { outcome: String(event.outcome) } : {}),
       });
     if (event.event === "model-usage") {
-      this.call(event, at);
+      // Before the filters: a resumed call continues its thread's last one.
+      this.call(this.children.counted(event), at);
       return;
     }
     // A refused answer (the semantic stage) counts on its call's groups.
@@ -1283,6 +1316,7 @@ const LIMITATIONS = [
   "Times overlap: each time figure is a union, so concurrent steps, calls and waits count once; never add them up.",
   "A count a provider doesn't report is unknown, not 0: tokens and cost sum only the calls that report them, and each figure says how many did. Cached input and reasoning output are parts of input and output, never extra tokens.",
   "Cost is the provider's list cost when it reports one (Claude, Claude managed), not a bill; subscription use is unknown.",
+  "Tokens include each call's child threads (Codex spawn_agent) and sub-agents (Claude), a resumed call's only by what they added since the call it continues; an older log's Codex child threads, logged apart, are counted the same way.",
   "nativeToolActivity (model-visible tool calls) and sdkOperations (the SDK's own items) are two views of the same work and are never added; one tool call can run many commands.",
   "Sequence numbers count per run file: a gap is a line lost to a failed write (log-health counts them too); a run with no run-end is still running, or died and no later start has seen it yet.",
   "A refused answer (stage semantic) is a call that succeeded and that Factory's checks then refused; it counts beside the call's outcome, not instead of it.",
@@ -1370,7 +1404,7 @@ function groupText(group: CallGroup, indent: string): string[] {
     }`,
     ...(group.descendants.calls
       ? [
-          `${indent}Codex child threads: ${group.descendants.threads} in ${group.descendants.calls} calls · ${count(group.descendants.total)} tokens (${count(group.descendants.input)} in, ${count(group.descendants.cached)} cached, ${count(group.descendants.output)} out, ${count(group.descendants.reasoning)} reasoning), not in the totals`,
+          `${indent}Codex child threads: ${group.descendants.threads} in ${group.descendants.calls} calls · ${count(group.descendants.total)} tokens (${count(group.descendants.input)} in, ${count(group.descendants.cached)} cached, ${count(group.descendants.output)} out, ${count(group.descendants.reasoning)} reasoning), ${group.descendants.outside ? `in the totals but for ${count(group.descendants.outside)} of calls with no count of their own` : "in the totals"}`,
         ]
       : []),
     `${indent}efficiency: ${

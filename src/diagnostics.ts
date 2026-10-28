@@ -8,6 +8,7 @@
  * Every event is redacted as it is read. It never writes anything.
  */
 import { join } from "node:path";
+import { ChildThreads, childTokensOf } from "./child-threads.js";
 import { displayTime, duration, redactDeep } from "./display.js";
 import { itemOf } from "./engine.js";
 import {
@@ -419,6 +420,15 @@ function modelText(event: LogEvent): string {
   const tokens = event.tokens as Record<string, number | null> | null;
   const total = tokens?.total;
   const cached = tokens?.cached;
+  const children = childTokensOf(event);
+  const parts = [
+    typeof cached === "number" && cached
+      ? `${count(cached)} cached`
+      : undefined,
+    children
+      ? `${count(children.total ?? 0)} by ${children.threads} child thread${children.threads === 1 ? "" : "s"}`
+      : undefined,
+  ].filter(Boolean);
   const cost = num(event.costUsd);
   const ms = num(event.ms);
   return [
@@ -436,8 +446,10 @@ function modelText(event: LogEvent): string {
     str(event.outcome),
     ms === undefined ? undefined : duration(ms),
     typeof total === "number"
-      ? `${count(total)} tokens${typeof cached === "number" && cached ? ` (${count(cached)} cached)` : ""}`
-      : "tokens unknown",
+      ? `${count(total)} tokens${parts.length ? ` (${parts.join(", ")})` : ""}`
+      : children
+        ? `tokens unknown (${parts.join(", ")})`
+        : "tokens unknown",
     cost === undefined ? undefined : `$${cost.toFixed(2)}`,
     str(event.error) ? oneLine(String(event.error), TEXT) : undefined,
   ]
@@ -514,6 +526,8 @@ class Timeline {
     string,
     { activity: Activity; event: LogEvent }
   >();
+  /** Older Codex calls' child threads, counted as today's (child-threads.ts). */
+  private readonly children = new ChildThreads();
 
   constructor(private readonly item?: string) {}
 
@@ -547,6 +561,8 @@ class Timeline {
   add(event: LogEvent): Entry[] {
     const run = String(event.run);
     if (!this.runStart.has(run)) this.runStart.set(run, Date.parse(event.at));
+    // Every call, shown or not, so a resumed one's continues its own.
+    const counted = this.children.counted(event);
     const item = itemOfEvent(event);
     if (this.item !== undefined && item !== this.item) return [];
     const step = str(event.step);
@@ -662,7 +678,7 @@ class Timeline {
         ];
       }
       case "model-usage":
-        return [entry("model", modelText(event))];
+        return [entry("model", modelText(counted))];
       case "worker-activity": {
         if (this.item !== undefined)
           return [entry("activity", activityText(item ?? "-", fold(event)))];
@@ -725,6 +741,8 @@ export interface Usage {
   };
   /** Calls that reported no total. */
   tokensUnknown: number;
+  /** Of `tokens.total`, what the calls' child threads spent (child-threads.ts). */
+  childTokens: number;
   /** Null when no call reported a cost. */
   costUsd: number | null;
   costUnknown: number;
@@ -783,6 +801,7 @@ export const emptyUsage = (): Usage => ({
     total: 0,
   },
   tokensUnknown: 0,
+  childTokens: 0,
   costUsd: null,
   costUnknown: 0,
 });
@@ -800,10 +819,13 @@ class Summary {
   private readonly spans: StepSpan[] = [];
   /** The last event of each run: where its unfinished steps stop. */
   private readonly lastAt = new Map<string, string>();
+  /** Older Codex calls' child threads, counted as today's (child-threads.ts). */
+  private readonly children = new ChildThreads();
 
   constructor(private readonly issue: number) {}
 
-  add(event: LogEvent): void {
+  add(read: LogEvent): void {
+    const event = this.children.counted(read);
     const run = String(event.run);
     if (!this.lastAt.has(run)) this.runs.push(run);
     this.lastAt.set(run, event.at);
@@ -924,6 +946,9 @@ export function addUsage(usage: Usage, event: LogEvent): void {
   for (const name of Object.keys(usage.tokens) as (keyof Usage["tokens"])[])
     usage.tokens[name] += num(tokens[name]) ?? 0;
   if (num(tokens.total) === undefined) usage.tokensUnknown += 1;
+  // A call whose own count is unknown keeps its children out of the total.
+  if (num(tokens.total) !== undefined)
+    usage.childTokens += childTokensOf(event)?.total ?? 0;
   const cost = num(event.costUsd);
   if (cost === undefined) usage.costUnknown += 1;
   else usage.costUsd = (usage.costUsd ?? 0) + cost;
@@ -953,7 +978,7 @@ export function usageText(usage: Usage): string {
   const t = usage.tokens;
   return [
     `${usage.calls} calls`,
-    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, cache writes ${count(t.cacheWrite)}, out ${count(t.output)}, reasoning ${count(t.reasoning)})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
+    `${count(t.total)} tokens (in ${count(t.input)}, cached ${count(t.cached)}, cache writes ${count(t.cacheWrite)}, out ${count(t.output)}, reasoning ${count(t.reasoning)}${usage.childTokens ? `; child threads ${count(usage.childTokens)} of the total` : ""})${usage.tokensUnknown ? `, ${usage.tokensUnknown} calls unreported` : ""}`,
     usage.costUsd === null
       ? "cost unknown"
       : `$${usage.costUsd.toFixed(2)}${usage.costUnknown ? ` (+${usage.costUnknown} calls unknown)` : ""}`,

@@ -326,7 +326,7 @@ Model spend can have a limit per Objective and per day, in tokens, list cost or 
 | `perDay.tokens`            | tokens of every Objective's model calls in this installation, per UTC day |
 | `perDay.cents`             | their list cost, in whole cents, per UTC day                              |
 
-`factory setup --objective-tokens N --objective-cents N --day-tokens N --day-cents N` sets them. When a limit is reached, the Objective holds before its next model call with `more` (allow as much again) and `cancel`; calls already running finish. A cost limit counts only calls whose provider reports a cost. `factory status` shows each Objective's spend against its limits, and the spend today.
+`factory setup --objective-tokens N --objective-cents N --day-tokens N --day-cents N` sets them. When a limit is reached, the Objective holds before its next model call with `more` (allow as much again) and `cancel`; calls already running finish. A cost limit counts only calls whose provider reports a cost. Tokens count each call's child threads and sub-agents too (a Codex worker's `spawn_agent` threads, a Claude call's sub-agents), and the question says how many of the Objective's tokens child threads spent. `factory status` shows each Objective's spend against its limits, and the spend today.
 
 ## Amend a plan
 

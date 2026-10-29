@@ -1,0 +1,1145 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "clockgrove-800",
+  "definitionDigest": "529edb24161e46aab27259da1fe767959a600416def364c781c6e7ef04b87bdb",
+  "run": {
+    "id": "clockgrove-800-backfill",
+    "label": "clockgrove#800, Factory 0.5.7→0.5.8, operator-assisted",
+    "group": "clockgrove#800, Factory 0.5.7→0.5.8, operator-assisted",
+    "source": "backfill",
+    "repository": "clockgrove/clockgrove",
+    "issue": 800
+  },
+  "factory": {
+    "versions": [
+      "0.5.7",
+      "0.5.8"
+    ],
+    "commits": {
+      "0.5.7": "78335902564579f8fe3c4fd7d2ab37ef561b2d71",
+      "0.5.8": "29c871f754999766eb75d718163b8a50533434bf"
+    },
+    "runs": [
+      {
+        "run": "2026-10-28T05-05-54-542Z-12429",
+        "factoryVersion": "0.5.7",
+        "sourceDigest": "71e33eb9c3627a58a96ce78a130f95e2ef309ca425e66f86b91ce85f76f50407",
+        "end": "handed-off",
+        "startedAt": "2026-10-28T11:06:00.481Z",
+        "endedAt": "2026-10-28T17:38:09.750Z"
+      },
+      {
+        "run": "2026-10-28T17-38-11-192Z-3327850",
+        "factoryVersion": "0.5.7",
+        "sourceDigest": "71e33eb9c3627a58a96ce78a130f95e2ef309ca425e66f86b91ce85f76f50407",
+        "end": "handed-off",
+        "startedAt": "2026-10-28T17:38:13.999Z",
+        "endedAt": "2026-10-28T21:49:19.272Z"
+      },
+      {
+        "run": "2026-10-28T21-49-20-745Z-264148",
+        "factoryVersion": "0.5.8",
+        "sourceDigest": "754278b85f0b84fdff347fd7511100d1d45f38fe4457c9dec7557d87d7840ffa",
+        "end": "stopped",
+        "startedAt": "2026-10-28T21:50:24.224Z",
+        "endedAt": "2026-10-29T05:34:22.343Z"
+      }
+    ],
+    "rotatedRuns": []
+  },
+  "models": [
+    {
+      "role": "planner",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "calls": 39
+    },
+    {
+      "role": "reviewer",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "calls": 30
+    },
+    {
+      "role": "worker",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "calls": 28
+    }
+  ],
+  "startedAt": "2026-10-28T11:06:05.510Z",
+  "endedAt": "2026-10-28T23:15:31.894Z",
+  "outcome": "done",
+  "totals": {
+    "wallMs": 43766384,
+    "activeWallMs": 30843883,
+    "excludedMs": 12922501,
+    "outages": [
+      {
+        "from": "2026-10-28T17:38:09.750Z",
+        "to": "2026-10-28T17:38:13.999Z",
+        "ms": 4249,
+        "afterRun": "2026-10-28T05-05-54-542Z-12429",
+        "runEnd": "handed-off"
+      },
+      {
+        "from": "2026-10-28T21:49:19.272Z",
+        "to": "2026-10-28T21:50:24.224Z",
+        "ms": 64952,
+        "afterRun": "2026-10-28T17-38-11-192Z-3327850",
+        "runEnd": "handed-off"
+      }
+    ],
+    "pauses": [
+      {
+        "from": "2026-10-28T18:15:07.659Z",
+        "to": "2026-10-28T21:50:25.911Z",
+        "ms": 12918252
+      }
+    ],
+    "modelMs": 16373193,
+    "tokens": {
+      "total": 106172314,
+      "own": 89291214,
+      "childThreads": 16881100,
+      "childThreadCount": 10,
+      "counted": 89291214,
+      "input": 105651615,
+      "cached": 97394048,
+      "uncached": 8257567,
+      "output": 520699,
+      "reasoning": 176255,
+      "calls": 97,
+      "unknownCalls": 7,
+      "spendLedger": 89227422
+    },
+    "cacheHitRate": 0.9218415449683377,
+    "costUsd": null,
+    "criteria": 32,
+    "tokensPerCriterion": 3317884.8125,
+    "repairs": 25,
+    "planning": {
+      "rounds": 2,
+      "generations": 1,
+      "revisions": 9
+    },
+    "amendments": {
+      "proposed": 4,
+      "accepted": 2,
+      "rejected": 1,
+      "unchanged": 1,
+      "plannerAnswers": 7
+    },
+    "holds": {
+      "total": 38,
+      "scripted": 15,
+      "operator": 23,
+      "open": 0,
+      "waitMs": 3268968,
+      "operatorWaitMs": 2644477,
+      "byKind": {
+        "diagnosis": {
+          "count": 9,
+          "waitMs": 751338,
+          "scripted": false
+        },
+        "allowance": {
+          "count": 10,
+          "waitMs": 419335,
+          "scripted": true
+        },
+        "spend": {
+          "count": 3,
+          "waitMs": 156907,
+          "scripted": true
+        },
+        "review": {
+          "count": 12,
+          "waitMs": 1099508,
+          "scripted": false
+        },
+        "ci": {
+          "count": 1,
+          "waitMs": 72339,
+          "scripted": false
+        },
+        "config": {
+          "count": 2,
+          "waitMs": 48249,
+          "scripted": true
+        },
+        "qa": {
+          "count": 1,
+          "waitMs": 721292,
+          "scripted": false
+        }
+      }
+    },
+    "validation": {
+      "runs": 25,
+      "passed": 8,
+      "firstPassRate": 0.32
+    },
+    "ci": {
+      "rounds": 8,
+      "published": 5,
+      "reruns": 3,
+      "flaky": 2,
+      "passedFirstTime": 1,
+      "firstPassRate": 0.2
+    },
+    "final": {
+      "runs": 1,
+      "passed": 1,
+      "review": {
+        "outcome": "pass",
+        "criteria": 23
+      }
+    }
+  },
+  "items": [
+    {
+      "id": "living-scene",
+      "kind": "work",
+      "criteria": 12,
+      "outcome": "merged",
+      "pr": 905,
+      "startedAt": "2026-10-28T11:15:06.142Z",
+      "endedAt": "2026-10-28T14:30:51.310Z",
+      "wallMs": 11745168,
+      "activeWallMs": 11745168,
+      "modelMs": 5430271,
+      "tokens": {
+        "total": 32846667,
+        "own": 29499710,
+        "childThreads": 3346957,
+        "childThreadCount": 4,
+        "counted": 29499710,
+        "input": 32662916,
+        "cached": 29514496,
+        "uncached": 3148420,
+        "output": 183751,
+        "reasoning": 50003,
+        "calls": 40,
+        "unknownCalls": 0
+      },
+      "tokensPerCriterion": 2737222.25,
+      "repairs": 12,
+      "amendments": 2,
+      "holds": {
+        "total": 13,
+        "operator": 9,
+        "operatorWaitMs": 784033,
+        "waitMs": 911736
+      },
+      "validation": {
+        "runs": 10,
+        "passed": 4,
+        "firstPassRate": 0.4
+      },
+      "workerValidation": {
+        "runs": 0,
+        "passed": 0
+      },
+      "ci": {
+        "rounds": 4,
+        "published": 2,
+        "reruns": 2,
+        "flaky": 1,
+        "passedFirstTime": 0,
+        "firstPassRate": 0
+      },
+      "reviews": {
+        "runs": 4,
+        "passed": 1,
+        "firstPass": true
+      }
+    },
+    {
+      "id": "entity-selection",
+      "kind": "work",
+      "criteria": 8,
+      "outcome": "merged",
+      "pr": 906,
+      "startedAt": "2026-10-28T14:30:52.271Z",
+      "endedAt": "2026-10-28T17:37:53.841Z",
+      "wallMs": 11221570,
+      "activeWallMs": 11221570,
+      "modelMs": 5922259,
+      "tokens": {
+        "total": 39784617,
+        "own": 31075957,
+        "childThreads": 8708660,
+        "childThreadCount": 3,
+        "counted": 31075957,
+        "input": 39579638,
+        "cached": 36390400,
+        "uncached": 3189238,
+        "output": 204979,
+        "reasoning": 71786,
+        "calls": 44,
+        "unknownCalls": 7
+      },
+      "tokensPerCriterion": 4973077.125,
+      "repairs": 11,
+      "amendments": 2,
+      "holds": {
+        "total": 19,
+        "operator": 12,
+        "operatorWaitMs": 1037004,
+        "waitMs": 1325627
+      },
+      "validation": {
+        "runs": 10,
+        "passed": 2,
+        "firstPassRate": 0.2
+      },
+      "workerValidation": {
+        "runs": 0,
+        "passed": 0
+      },
+      "ci": {
+        "rounds": 2,
+        "published": 2,
+        "reruns": 0,
+        "flaky": 0,
+        "passedFirstTime": 1,
+        "firstPassRate": 0.5
+      },
+      "reviews": {
+        "runs": 2,
+        "passed": 0,
+        "firstPass": false
+      }
+    },
+    {
+      "id": "recorded-why",
+      "kind": "work",
+      "criteria": 8,
+      "outcome": "merged",
+      "pr": 908,
+      "startedAt": "2026-10-28T17:37:54.609Z",
+      "endedAt": "2026-10-28T22:52:30.725Z",
+      "wallMs": 18876116,
+      "activeWallMs": 5953615,
+      "modelMs": 4211387,
+      "tokens": {
+        "total": 29347543,
+        "own": 24522060,
+        "childThreads": 4825483,
+        "childThreadCount": 3,
+        "counted": 24522060,
+        "input": 29240384,
+        "cached": 28127232,
+        "uncached": 1113152,
+        "output": 107159,
+        "reasoning": 45398,
+        "calls": 6,
+        "unknownCalls": 0
+      },
+      "tokensPerCriterion": 3668442.875,
+      "repairs": 2,
+      "amendments": 0,
+      "holds": {
+        "total": 3,
+        "operator": 1,
+        "operatorWaitMs": 102148,
+        "waitMs": 262064
+      },
+      "validation": {
+        "runs": 3,
+        "passed": 1,
+        "firstPassRate": 0.3333333333333333
+      },
+      "workerValidation": {
+        "runs": 6,
+        "passed": 1
+      },
+      "ci": {
+        "rounds": 2,
+        "published": 1,
+        "reruns": 1,
+        "flaky": 1,
+        "passedFirstTime": 0,
+        "firstPassRate": 0
+      },
+      "reviews": {
+        "runs": 1,
+        "passed": 1,
+        "firstPass": true
+      }
+    },
+    {
+      "id": "pilot-predeclaration",
+      "kind": "qa",
+      "criteria": 4,
+      "outcome": "settled",
+      "pr": null,
+      "startedAt": "2026-10-28T22:52:31.365Z",
+      "endedAt": "2026-10-28T23:04:52.644Z",
+      "wallMs": 741279,
+      "activeWallMs": 741279,
+      "modelMs": 14149,
+      "tokens": {
+        "total": 101943,
+        "own": 101943,
+        "childThreads": 0,
+        "childThreadCount": 0,
+        "counted": 101943,
+        "input": 101544,
+        "cached": 49792,
+        "uncached": 51752,
+        "output": 399,
+        "reasoning": 44,
+        "calls": 1,
+        "unknownCalls": 0
+      },
+      "tokensPerCriterion": 25485.75,
+      "repairs": 0,
+      "amendments": 0,
+      "holds": {
+        "total": 1,
+        "operator": 1,
+        "operatorWaitMs": 721292,
+        "waitMs": 721292
+      },
+      "validation": {
+        "runs": 2,
+        "passed": 1,
+        "firstPassRate": 0.5
+      },
+      "workerValidation": {
+        "runs": 0,
+        "passed": 0
+      },
+      "ci": {
+        "rounds": 0,
+        "published": 0,
+        "reruns": 0,
+        "flaky": 0,
+        "passedFirstTime": 0,
+        "firstPassRate": null
+      },
+      "reviews": {
+        "runs": 1,
+        "passed": 1,
+        "firstPass": true
+      }
+    }
+  ],
+  "objective": {
+    "tokens": {
+      "total": 4091544,
+      "own": 4091544,
+      "childThreads": 0,
+      "childThreadCount": 0,
+      "counted": 4091544,
+      "input": 4067133,
+      "cached": 3312128,
+      "uncached": 755005,
+      "output": 24411,
+      "reasoning": 9024,
+      "calls": 6,
+      "unknownCalls": 0
+    },
+    "modelMs": 795127
+  },
+  "operator": {
+    "decisions": [
+      {
+        "question": "item:living-scene:work@2026-10-28T11:36:30.702Z",
+        "kind": "diagnosis",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T11:36:30.709Z",
+        "answeredAt": "2026-10-28T11:38:17.520Z",
+        "waitMs": 106811,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T11:57:07.757Z",
+        "kind": "allowance",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "failure",
+        "askedAt": "2026-10-28T11:57:07.767Z",
+        "answeredAt": "2026-10-28T11:58:07.098Z",
+        "waitMs": 59331,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T12:03:21.018Z",
+        "kind": "diagnosis",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T12:03:21.025Z",
+        "answeredAt": "2026-10-28T12:06:08.646Z",
+        "waitMs": 167621,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T12:18:18.066Z",
+        "kind": "diagnosis",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T12:18:18.074Z",
+        "answeredAt": "2026-10-28T12:18:31.304Z",
+        "waitMs": 13230,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T12:49:03.268Z",
+        "kind": "diagnosis",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T12:49:03.276Z",
+        "answeredAt": "2026-10-28T12:50:37.075Z",
+        "waitMs": 93799,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T12:50:38.098Z",
+        "kind": "allowance",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "failure",
+        "askedAt": "2026-10-28T12:50:38.109Z",
+        "answeredAt": "2026-10-28T12:51:19.327Z",
+        "waitMs": 41218,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T13:36:59.771Z",
+        "kind": "spend",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T13:36:59.782Z",
+        "answeredAt": "2026-10-28T13:37:13.866Z",
+        "waitMs": 14084,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:living-scene:work@2026-10-28T13:38:14.140Z",
+        "kind": "allowance",
+        "step": "item:living-scene:work",
+        "item": "living-scene",
+        "cause": "failure",
+        "askedAt": "2026-10-28T13:38:14.149Z",
+        "answeredAt": "2026-10-28T13:38:27.219Z",
+        "waitMs": 13070,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:living-scene:review@2026-10-28T13:53:09.025Z",
+        "kind": "review",
+        "step": "item:living-scene:review",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T13:53:09.033Z",
+        "answeredAt": "2026-10-28T13:57:29.986Z",
+        "waitMs": 260953,
+        "answer": "refuse",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:review@2026-10-28T14:12:41.068Z",
+        "kind": "review",
+        "step": "item:living-scene:review",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T14:12:41.078Z",
+        "answeredAt": "2026-10-28T14:13:27.741Z",
+        "waitMs": 46663,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:review@2026-10-28T14:13:28.047Z",
+        "kind": "review",
+        "step": "item:living-scene:review",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T14:13:28.055Z",
+        "answeredAt": "2026-10-28T14:13:46.889Z",
+        "waitMs": 18834,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:review@2026-10-28T14:13:47.159Z",
+        "kind": "review",
+        "step": "item:living-scene:review",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T14:13:47.168Z",
+        "answeredAt": "2026-10-28T14:13:50.951Z",
+        "waitMs": 3783,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:living-scene:ci@2026-10-28T14:28:57.663Z",
+        "kind": "ci",
+        "step": "item:living-scene:ci",
+        "item": "living-scene",
+        "cause": "question",
+        "askedAt": "2026-10-28T14:28:57.672Z",
+        "answeredAt": "2026-10-28T14:30:10.011Z",
+        "waitMs": 72339,
+        "answer": "retry",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "amend:worker-entity-selection-1:plan@2026-10-28T14:50:14.860Z",
+        "kind": "allowance",
+        "step": "amend:worker-entity-selection-1:plan",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T14:50:14.868Z",
+        "answeredAt": "2026-10-28T14:50:32.955Z",
+        "waitMs": 18087,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T15:25:04.659Z",
+        "kind": "diagnosis",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T15:25:04.671Z",
+        "answeredAt": "2026-10-28T15:26:10.536Z",
+        "waitMs": 65865,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T15:26:11.570Z",
+        "kind": "allowance",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "failure",
+        "askedAt": "2026-10-28T15:26:11.581Z",
+        "answeredAt": "2026-10-28T15:26:38.730Z",
+        "waitMs": 27149,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T15:30:28.630Z",
+        "kind": "diagnosis",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T15:30:28.641Z",
+        "answeredAt": "2026-10-28T15:31:36.227Z",
+        "waitMs": 67586,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T15:31:36.230Z",
+        "kind": "spend",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T15:31:36.242Z",
+        "answeredAt": "2026-10-28T15:31:48.317Z",
+        "waitMs": 12075,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T15:38:53.252Z",
+        "kind": "diagnosis",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T15:38:53.265Z",
+        "answeredAt": "2026-10-28T15:40:35.027Z",
+        "waitMs": 101762,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T15:40:36.065Z",
+        "kind": "allowance",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "failure",
+        "askedAt": "2026-10-28T15:40:36.074Z",
+        "answeredAt": "2026-10-28T15:41:05.240Z",
+        "waitMs": 29166,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T16:21:51.372Z",
+        "kind": "allowance",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "failure",
+        "askedAt": "2026-10-28T16:21:51.384Z",
+        "answeredAt": "2026-10-28T16:22:04.474Z",
+        "waitMs": 13090,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T16:34:35.279Z",
+        "kind": "allowance",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "failure",
+        "askedAt": "2026-10-28T16:34:35.292Z",
+        "answeredAt": "2026-10-28T16:36:57.071Z",
+        "waitMs": 141779,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T16:50:44.956Z",
+        "kind": "diagnosis",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T16:50:44.967Z",
+        "answeredAt": "2026-10-28T16:51:17.483Z",
+        "waitMs": 32516,
+        "answer": "answer",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:01:32.773Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:01:32.784Z",
+        "answeredAt": "2026-10-28T17:12:52.696Z",
+        "waitMs": 679912,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:12:53.197Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:12:53.209Z",
+        "answeredAt": "2026-10-28T17:12:56.801Z",
+        "waitMs": 3592,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:12:57.303Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:12:57.316Z",
+        "answeredAt": "2026-10-28T17:13:00.895Z",
+        "waitMs": 3579,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:13:01.381Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:13:01.394Z",
+        "answeredAt": "2026-10-28T17:13:04.988Z",
+        "waitMs": 3594,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:work@2026-10-28T17:13:19.143Z",
+        "kind": "allowance",
+        "step": "item:entity-selection:work",
+        "item": "entity-selection",
+        "cause": "failure",
+        "askedAt": "2026-10-28T17:13:19.153Z",
+        "answeredAt": "2026-10-28T17:14:06.430Z",
+        "waitMs": 47277,
+        "answer": "more",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:26:49.295Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:26:49.307Z",
+        "answeredAt": "2026-10-28T17:27:56.935Z",
+        "waitMs": 67628,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:27:57.325Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:27:57.338Z",
+        "answeredAt": "2026-10-28T17:28:01.018Z",
+        "waitMs": 3680,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:28:01.480Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:28:01.492Z",
+        "answeredAt": "2026-10-28T17:28:05.102Z",
+        "waitMs": 3610,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "item:entity-selection:review@2026-10-28T17:28:05.479Z",
+        "kind": "review",
+        "step": "item:entity-selection:review",
+        "item": "entity-selection",
+        "cause": "question",
+        "askedAt": "2026-10-28T17:28:05.492Z",
+        "answeredAt": "2026-10-28T17:28:09.172Z",
+        "waitMs": 3680,
+        "answer": "accept",
+        "by": "kirk",
+        "as": null,
+        "policy": false
+      },
+      {
+        "question": "config@2026-10-28T17:38:14.053Z",
+        "kind": "config",
+        "step": "config",
+        "item": null,
+        "cause": "question",
+        "askedAt": "2026-10-28T17:38:14.070Z",
+        "answeredAt": "2026-10-28T17:38:36.171Z",
+        "waitMs": 22101,
+        "answer": "adopt",
+        "by": "kirk",
+        "as": null,
+        "policy": true
+      },
+      {
+        "question": "config@2026-10-28T21:50:25.936Z",
+        "kind": "config",
+        "step": "config",
+        "item": null,
+        "cause": "question",
+        "askedAt": "2026-10-28T21:50:25.947Z",
+        "answeredAt": "2026-10-28T21:50:52.095Z",
+        "waitMs": 26148,
+        "answer": "adopt",
+        "by": "kirk",
+        "as": "Claude Code (for kirk)",
+        "policy": true
+      },
+      {
+        "question": "item:recorded-why:work@2026-10-28T21:50:52.103Z",
+        "kind": "spend",
+        "step": "item:recorded-why:work",
+        "item": "recorded-why",
+        "cause": "question",
+        "askedAt": "2026-10-28T21:50:52.113Z",
+        "answeredAt": "2026-10-28T21:53:02.861Z",
+        "waitMs": 130748,
+        "answer": "more",
+        "by": "kirk",
+        "as": "Claude Code (for kirk, approved in chat)",
+        "policy": true
+      },
+      {
+        "question": "item:recorded-why:work@2026-10-28T21:53:27.388Z",
+        "kind": "diagnosis",
+        "step": "item:recorded-why:work",
+        "item": "recorded-why",
+        "cause": "question",
+        "askedAt": "2026-10-28T21:53:27.399Z",
+        "answeredAt": "2026-10-28T21:55:09.547Z",
+        "waitMs": 102148,
+        "answer": "revalidate",
+        "by": "kirk",
+        "as": "Claude Code (for kirk)",
+        "policy": false
+      },
+      {
+        "question": "item:recorded-why:work@2026-10-28T21:55:09.533Z",
+        "kind": "allowance",
+        "step": "item:recorded-why:work",
+        "item": "recorded-why",
+        "cause": "failure",
+        "askedAt": "2026-10-28T21:55:09.547Z",
+        "answeredAt": "2026-10-28T21:55:38.715Z",
+        "waitMs": 29168,
+        "answer": "more",
+        "by": "kirk",
+        "as": "Claude Code (for kirk)",
+        "policy": true
+      },
+      {
+        "question": "item:pilot-predeclaration:validate@2026-10-28T22:52:33.150Z",
+        "kind": "qa",
+        "step": "item:pilot-predeclaration:validate",
+        "item": "pilot-predeclaration",
+        "cause": "question",
+        "askedAt": "2026-10-28T22:52:33.163Z",
+        "answeredAt": "2026-10-28T23:04:34.455Z",
+        "waitMs": 721292,
+        "answer": "retry",
+        "by": "kirk",
+        "as": "Claude Code (for kirk)",
+        "policy": false
+      }
+    ],
+    "actions": [
+      {
+        "kind": "decline-discovery",
+        "at": "2026-10-28T11:49:22.074Z",
+        "item": "living-scene",
+        "by": "kirk",
+        "as": null
+      },
+      {
+        "kind": "pause",
+        "at": "2026-10-28T18:15:07.659Z",
+        "by": "kirk",
+        "as": null
+      },
+      {
+        "kind": "resume",
+        "at": "2026-10-28T21:50:25.911Z",
+        "by": "kirk",
+        "as": null
+      }
+    ]
+  },
+  "telemetry": {
+    "criticalPathMs": 24389158,
+    "hedges": {
+      "planner plan": {
+        "hedged": 1,
+        "won": 0,
+        "lost": 1,
+        "tokens": 462731,
+        "tokensUnknown": 0
+      },
+      "reviewer result-review": {
+        "hedged": 3,
+        "won": 0,
+        "lost": 3,
+        "tokens": 1036752,
+        "tokensUnknown": 0
+      },
+      "reviewer graph-review": {
+        "hedged": 1,
+        "won": 0,
+        "lost": 1,
+        "tokens": 0,
+        "tokensUnknown": 1
+      },
+      "planner diagnosis": {
+        "hedged": 4,
+        "won": 0,
+        "lost": 4,
+        "tokens": 141072,
+        "tokensUnknown": 2
+      },
+      "reviewer objective-review": {
+        "hedged": 1,
+        "won": 0,
+        "lost": 1,
+        "tokens": 657254,
+        "tokensUnknown": 0
+      }
+    },
+    "time": {
+      "stepsMs": 24474292,
+      "retryWaitMs": 3147424,
+      "holdWaitMs": 3268968,
+      "modelMs": 15971937,
+      "validationMs": 9405614,
+      "idleMs": 35683519
+    },
+    "retries": {
+      "waits": 134,
+      "continuations": 15,
+      "waitMs": 3147424
+    },
+    "validationCommands": {
+      "commands": 263,
+      "failed": 13,
+      "ms": 9405614
+    },
+    "github": {
+      "jobs": 61,
+      "runs": 2196,
+      "calls": 3879,
+      "retries": 1,
+      "rateLimited": 0,
+      "failed": 2,
+      "bytes": 5166430,
+      "ms": 1563007,
+      "requestMs": 2071262,
+      "traced": {
+        "200": 1246,
+        "201": 8,
+        "202": 1,
+        "302": 4,
+        "403": 113,
+        "network timeout": 1
+      }
+    },
+    "cacheByItem": {
+      "entity-selection": 0.9378,
+      "living-scene": 0.9113,
+      "objective": 0.7584,
+      "pilot-predeclaration": 0.4903,
+      "recorded-why": 0.9619
+    }
+  },
+  "checks": [
+    {
+      "name": "tokens, own and child threads",
+      "scorecard": 106172314,
+      "diagnostics": 106172314,
+      "ok": true
+    },
+    {
+      "name": "child-thread tokens",
+      "scorecard": 16881100,
+      "diagnostics": 16881100,
+      "ok": true
+    },
+    {
+      "name": "model calls",
+      "scorecard": 97,
+      "diagnostics": 97,
+      "ok": true
+    },
+    {
+      "name": "model time (ms)",
+      "scorecard": 16373193,
+      "diagnostics": 16373193,
+      "ok": true
+    },
+    {
+      "name": "holds",
+      "scorecard": 38,
+      "diagnostics": 38,
+      "ok": true
+    },
+    {
+      "name": "hold waits (ms)",
+      "scorecard": 3268968,
+      "diagnostics": 3268968,
+      "ok": true
+    },
+    {
+      "name": "repairs (state against the log's repair outcomes)",
+      "scorecard": 25,
+      "diagnostics": 25,
+      "ok": true
+    }
+  ],
+  "unavailable": [
+    {
+      "metric": "costUsd",
+      "reason": "no model call reported a cost (Codex reports none)"
+    },
+    {
+      "metric": "tokens of some calls",
+      "reason": "7 model call(s) reported no token count (aborted or failed); the token totals leave them out"
+    }
+  ]
+}

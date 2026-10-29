@@ -7,13 +7,18 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!integration/fixtures", "!integration/objectives"]
+    "includes": [
+      "**",
+      "!integration/fixtures",
+      "!integration/objectives",
+      "!bench/results"
+    ]
   },
   "formatter": {
     "indentStyle": "space"
   },
   "linter": {
-    "includes": ["src/**/*.ts", "integration/**/*.mjs"],
+    "includes": ["src/**/*.ts", "integration/**/*.mjs", "bench/**/*.mjs"],
     "rules": {
       "preset": "recommended",
       "complexity": {

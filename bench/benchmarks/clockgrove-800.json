@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "id": "clockgrove-800",
+  "title": "Clockgrove #800, Wave 4 living yard",
+  "source": {
+    "repository": "clockgrove/clockgrove",
+    "base": "46a206678b4b8446aeb162553b07151647a28536",
+    "lfs": true
+  },
+  "objective": {
+    "issue": 800,
+    "title": "Wave 4: observers watch the living yard, select an entity and see why it acted (remaining work)",
+    "bodySha256": "e22ce1842efcaee0b92f9febbaf510371374b2ed087fcd504a996822b675f6a9",
+    "labels": ["factory:objective"]
+  },
+  "repository": {
+    "owner": "clockgrove",
+    "namePrefix": "bench-clockgrove-800",
+    "description": "Test only: a Factory benchmark run of clockgrove/clockgrove#800 (clockgrove/factory#2200). Never deployed.",
+    "mergeSettings": {
+      "allow_merge_commit": true,
+      "allow_squash_merge": true,
+      "allow_rebase_merge": true,
+      "allow_auto_merge": false,
+      "delete_branch_on_merge": false,
+      "has_issues": true,
+      "has_projects": true,
+      "has_wiki": false
+    }
+  },
+  "ci": {
+    "rulesets": ["protected-main"],
+    "variables": ["QUALITY_RUNNER"],
+    "keepWorkflows": [".github/workflows/quality.yml"]
+  },
+  "memory": {
+    "seed": "before-objective",
+    "before": "2026-10-28T11:06:00Z"
+  },
+  "factory": {
+    "provider": "codex",
+    "planner": "codex",
+    "worker": {
+      "kind": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "network": "host"
+    },
+    "models": {
+      "planner": { "model": "gpt-6.1-sol", "effort": "high" },
+      "reviewer": { "model": "gpt-6.1-sol", "effort": "medium" }
+    },
+    "sandbox": {
+      "network": "package-install",
+      "readOnlyPaths": ["${toolchain}/ms-playwright"],
+      "environment": {
+        "PLAYWRIGHT_BROWSERS_PATH": "${toolchain}/ms-playwright"
+      }
+    },
+    "toolchain": {
+      "paths": [
+        "${toolchain}/postgresql-18.6/bin",
+        "${toolchain}/opentofu-1.13.1/bin"
+      ],
+      "executables": ["pg_ctl", "postgres", "psql", "tofu"]
+    },
+    "formatCommand": "pnpm exec biome check --write .",
+    "requiredCommands": [
+      "pnpm check",
+      "pnpm test",
+      "pnpm run verify:docs",
+      "pnpm run test:db",
+      "pnpm run test:runtime",
+      "pnpm run db:verify",
+      "pnpm run infra:validate",
+      "env CI=true node node_modules/vitest/vitest.mjs run --config tests/ci/vitest.browser.config.ts"
+    ],
+    "ciOnlyCommands": [
+      "pnpm run verify:supply-chain",
+      "pnpm run test:long-run",
+      "pnpm run qualify:wave0",
+      "pnpm run qualify:wave1",
+      "pnpm run qualify:wave1:long-runs",
+      "pnpm run qualify:wave2"
+    ],
+    "allowances": {
+      "planningRevisions": 4,
+      "implementationRepairs": 6,
+      "perPath": 3,
+      "resultRereviews": 1
+    },
+    "spend": {
+      "objectiveTokens": 200000000,
+      "dayTokens": 400000000
+    }
+  },
+  "operatorPolicy": {
+    "as": "factory-bench operator policy",
+    "answers": {
+      "spend": "more",
+      "allowance": "more",
+      "config": "adopt"
+    },
+    "otherwise": "pause"
+  },
+  "baseline": "clockgrove#800, Factory 0.5.7→0.5.8, operator-assisted",
+  "hillClimb": {
+    "primary": ["tokens.total", "activeWallMs"],
+    "guards": [
+      "done",
+      "repairs",
+      "holds.operator",
+      "validation.firstPassRate",
+      "ci.firstPassRate"
+    ]
+  },
+  "budget": {
+    "tokens": [60000000, 100000000],
+    "hours": [4, 8]
+  }
+}

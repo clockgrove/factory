@@ -816,15 +816,32 @@ export async function repositoryChecks(
           },
     );
     const { names, strict } = await github.checksPolicy(branch);
+    // Strict is unknown only when the login can't read the classic
+    // protection and no ruleset requires up-to-date branches. A classic
+    // rule the branch read shows, but not whether it requires checks, is
+    // one Factory can't see, with the checks and the up-to-date rule it
+    // may set (#2181). A branch only rulesets protect has none: it keeps
+    // the required-checks warning.
+    const unseen =
+      !names.length &&
+      strict === undefined &&
+      (await github.classicRuleHidden(branch)) === true;
     checks.push(
       names.length
         ? ok("required checks", `${branch} requires ${names.join(", ")}`)
-        : {
-            name: "required checks",
-            status: "warn",
-            detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes and any checks that register on it pass`,
-            fix: `Require the CI checks on ${branch} in a ruleset`,
-          },
+        : unseen
+          ? {
+              name: "branch protection",
+              status: "warn",
+              detail: `GitHub shows a classic branch protection rule on ${branch}, but neither its rulesets nor the branch read show a required check or the up-to-date rule. ${github.isApp ? `A classic branch protection rule is unreadable to ${login}: GitHub shows it only with Administration access, which Factory's GitHub App doesn't ask for` : `${login} can't read a classic branch protection rule (GitHub requires admin access)`}, so Factory doesn't know which checks to wait for or whether a PR must be up to date, though GitHub still enforces such a rule when Factory merges`,
+              fix: `Move ${branch}'s classic branch protection rule into a ruleset (the repository's Settings, Rules, Rulesets), which Factory reads with read access${github.isApp ? ", rather than granting the App Administration" : ""}`,
+            }
+          : {
+              name: "required checks",
+              status: "warn",
+              detail: `${branch} requires no status checks, so a PR merges once Factory's own validation passes and any checks that register on it pass`,
+              fix: `Require the CI checks on ${branch} in a ruleset`,
+            },
     );
     const reviews = await github.requiredReviews(branch);
     const rules = reviews.map((review) => review.rule).join(" and ");

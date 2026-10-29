@@ -465,9 +465,11 @@ export class GitHub {
   private readonly heldUntil = new Map<string, number>();
   /**
    * Set once GitHub refused (403) a read of the repository's classic
-   * branch protection: the login may not read it (a GitHub App without
-   * Administration access never may). Never cleared: for the rest of the
-   * service run no protection route is read again, and each read takes
+   * branch protection that Factory expected it to answer: a user's login
+   * without admin access, or a GitHub App whose Administration access was
+   * withdrawn since its installation was read (an App never granted it
+   * asks nothing, `readsClassicProtection`). Never cleared: for the rest of
+   * the service run no protection route is read again, and each read takes
    * its fallback (`classicProtection`, #2174). A restart reads again.
    */
   private protectionRefused = false;
@@ -840,13 +842,16 @@ export class GitHub {
    * The GitHub App's installation, read once with the App's JWT: the one
    * `installationId` names, else the one on the repository. Throws a
    * GitHubError (401) naming the fix when the App isn't installed there.
+   * Its permissions are kept fresh: each later read of the installation
+   * (`canPush`) replaces them, and so does each installation token Factory
+   * mints (`mint`, about every 45 minutes), with the token's own.
    */
   async appInstallation(signal?: AbortSignal): Promise<AppInstallation> {
     this.installed ??= await this.readInstallation(signal);
     return this.installed;
   }
 
-  /** `appInstallation`, read now. */
+  /** `appInstallation`, read now; the read replaces the one kept. */
   private async readInstallation(
     signal?: AbortSignal,
   ): Promise<AppInstallation> {
@@ -874,17 +879,28 @@ export class GitHub {
       throw new TransientError(
         `GitHub GET ${path}: an installation Factory can't read`,
       );
-    const permissions = isObject(found.permissions) ? found.permissions : {};
-    return {
+    this.installed = {
       id: found.id,
       slug: found.app_slug,
-      permissions: Object.fromEntries(
-        Object.entries(permissions).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        ),
-      ),
+      permissions: permissionsOf(found.permissions) ?? {},
       suspended: typeof found.suspended_at === "string",
     };
+    return this.installed;
+  }
+
+  /**
+   * Whether Factory reads the repository's classic branch protection: a
+   * user's login is asked (GitHub answers, or refuses with 403); a GitHub
+   * App only while its installation grants Administration (read or
+   * write), which GitHub requires for every classic protection route, so
+   * an App without it would only be refused (#2181). The rulesets and the
+   * branch read need no Administration access.
+   */
+  private async readsClassicProtection(signal?: AbortSignal): Promise<boolean> {
+    if (!this.app) return true;
+    const granted = (await this.appInstallation(signal)).permissions
+      .administration;
+    return granted === "read" || granted === "write";
   }
 
   /**
@@ -2149,6 +2165,41 @@ export class GitHub {
   }
 
   /**
+   * Whether the branch read (`GET branches/{b}`, which needs only read
+   * access) shows a classic branch protection rule on `branch` without
+   * showing that it requires no status checks. Its `protected` flag is set
+   * by a ruleset alone too, so it can't say; `protection.enabled` is true
+   * only for a classic rule (false on a branch only rulesets protect), and
+   * the rule's `required_status_checks` enforcement level "off" says it
+   * requires none, hence no up-to-date branch either. Undefined when
+   * GitHub doesn't say.
+   */
+  async classicRuleHidden(
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<boolean | undefined> {
+    const read = await this.optional(() =>
+      this.rest<{
+        protection?: {
+          enabled?: unknown;
+          required_status_checks?: { enforcement_level?: unknown } | null;
+        };
+      }>(
+        "GET",
+        this.repo(`branches/${encodeURIComponent(branch)}`),
+        undefined,
+        signal,
+      ),
+    );
+    const enabled = read?.protection?.enabled;
+    if (typeof enabled !== "boolean") return undefined;
+    return (
+      enabled &&
+      read?.protection?.required_status_checks?.enforcement_level !== "off"
+    );
+  }
+
+  /**
    * The rules on `branch` that require approving reviews: each ruleset
    * whose pull_request rule requires one, and the classic protection's
    * required reviews. A bypass doesn't count: GitHub reports the PR BLOCKED
@@ -2288,16 +2339,19 @@ export class GitHub {
   /**
    * A read of the classic branch protection at `path` (under the
    * repository): undefined on a 404 (unprotected, or not that setting);
-   * REFUSED on a 403, the login may not read it. The first 403 stops every
-   * later protection read for the rest of the service run, which then
-   * takes REFUSED at once, and is noted once as a
-   * `branch-protection-unreadable` event in the scope that met it.
+   * REFUSED on a 403, the login may not read it. A GitHub App without
+   * Administration access takes REFUSED at once, with no request
+   * (`readsClassicProtection`). The first 403 stops every later protection
+   * read for the rest of the service run, which then takes REFUSED at
+   * once, and is noted once as a `branch-protection-unreadable` event in
+   * the scope that met it.
    */
   private async classicProtection<T>(
     path: string,
     signal?: AbortSignal,
   ): Promise<T | typeof REFUSED | undefined> {
-    if (this.protectionRefused) return REFUSED;
+    if (this.protectionRefused || !(await this.readsClassicProtection(signal)))
+      return REFUSED;
     try {
       return await expecting([403, 404], () =>
         this.rest<T>("GET", this.repo(path), undefined, signal),
@@ -2805,7 +2859,11 @@ export class GitHub {
   /** `POST /app/installations/{id}/access_tokens` with the App's JWT. */
   private async mint(): Promise<string> {
     const { id } = await this.appInstallation();
-    const made = await this.rest<{ token?: unknown; expires_at?: unknown }>(
+    const made = await this.rest<{
+      token?: unknown;
+      expires_at?: unknown;
+      permissions?: unknown;
+    }>(
       "POST",
       `/app/installations/${id}/access_tokens`,
       undefined,
@@ -2818,6 +2876,11 @@ export class GitHub {
       );
     const expires = Date.parse(String(made.expires_at));
     this.token = made.token;
+    // What the token may do is what the installation grants now: a
+    // permission granted or withdrawn since it was read counts from here.
+    const permissions = permissionsOf(made.permissions);
+    if (permissions && this.installed)
+      this.installed = { ...this.installed, permissions };
     // GitHub's tokens last an hour; a time it doesn't give is taken as that.
     this.expires = Number.isNaN(expires) ? Date.now() + 60 * 60_000 : expires;
     return this.token;
@@ -2828,6 +2891,16 @@ export class GitHub {
 export function sameLogin(a: string, b: string): boolean {
   const plain = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
   return plain(a) === plain(b);
+}
+
+/** An installation's or a token's `permissions`, by name; undefined when GitHub gave none. */
+function permissionsOf(value: unknown): Record<string, string> | undefined {
+  if (!isObject(value)) return undefined;
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
 }
 
 /** A stack as GitHub returns it; a shape Factory can't read is Unreadable. */

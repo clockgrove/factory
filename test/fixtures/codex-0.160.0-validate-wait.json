@@ -1,0 +1,856 @@
+{
+  "source": "Codex 0.160.0, gpt-6.1-sol (effort medium) through @openai/codex-sdk 0.160.0, calling Factory's Validate as an MCP tool (registered with tool_timeout_sec = 900) that took 180 s with Codex's default exec yield, as 0.5.8 configured it (polling), or 45 s with [features.code_mode] default_exec_yield_time_ms = 3600000 (blocking), #2167. Only the entries codexTelemetry reads are kept.",
+  "polling": [
+    {
+      "timestamp": "2026-10-28T23:44:50.594Z",
+      "type": "turn_context",
+      "payload": {
+        "model": "gpt-6.1-sol"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:44:52.723Z",
+      "type": "response_item",
+      "payload": {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call_4a518324a94d4b9a8311be94c15c722b",
+        "input": "const result = await tools.mcp__factory_validation__run_validation({}); text(result.content.map((part) => part.text).join(\"\"));\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:23.777Z",
+      "type": "response_item",
+      "payload": {
+        "type": "custom_tool_call_output",
+        "call_id": "call_4a518324a94d4b9a8311be94c15c722b",
+        "output": "Script running with cell ID 1\nWall time 31.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:23.780Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 11262,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 56,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11318
+          },
+          "last_token_usage": {
+            "input_tokens": 11262,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 56,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11318
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:24.855Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_308e4362123e451d8304f48ef1fbe004",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":1000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:25.859Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_308e4362123e451d8304f48ef1fbe004",
+        "output": "Script running with cell ID 1\nWall time 1.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:25.861Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 22608,
+            "cached_input_tokens": 11136,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 87,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 22695
+          },
+          "last_token_usage": {
+            "input_tokens": 11346,
+            "cached_input_tokens": 11136,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11377
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:27.427Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_30f13e74090d452c8deed074be335653",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":1000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:28.431Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_30f13e74090d452c8deed074be335653",
+        "output": "Script running with cell ID 1\nWall time 1.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:28.433Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 34013,
+            "cached_input_tokens": 22272,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 131,
+            "reasoning_output_tokens": 11,
+            "total_tokens": 34144
+          },
+          "last_token_usage": {
+            "input_tokens": 11405,
+            "cached_input_tokens": 11136,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 44,
+            "reasoning_output_tokens": 11,
+            "total_tokens": 11449
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:30.423Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_21bd6a14d981484283e4b20d63bc6c78",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:41.427Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_21bd6a14d981484283e4b20d63bc6c78",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:41.431Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 45490,
+            "cached_input_tokens": 33536,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 173,
+            "reasoning_output_tokens": 20,
+            "total_tokens": 45663
+          },
+          "last_token_usage": {
+            "input_tokens": 11477,
+            "cached_input_tokens": 11264,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 42,
+            "reasoning_output_tokens": 9,
+            "total_tokens": 11519
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:43.120Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_23fe36bbc64442b0848598f85595303d",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:54.123Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_23fe36bbc64442b0848598f85595303d",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:54.126Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 57037,
+            "cached_input_tokens": 44928,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 204,
+            "reasoning_output_tokens": 20,
+            "total_tokens": 57241
+          },
+          "last_token_usage": {
+            "input_tokens": 11547,
+            "cached_input_tokens": 11392,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11578
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:56.181Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_1c8a16754a964097a1fc726147296ffa",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":1000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:57.185Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_1c8a16754a964097a1fc726147296ffa",
+        "output": "Script running with cell ID 1\nWall time 1.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:57.187Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 68643,
+            "cached_input_tokens": 56320,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 267,
+            "reasoning_output_tokens": 32,
+            "total_tokens": 68910
+          },
+          "last_token_usage": {
+            "input_tokens": 11606,
+            "cached_input_tokens": 11392,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 63,
+            "reasoning_output_tokens": 12,
+            "total_tokens": 11669
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:45:59.171Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_8bfd6dfc9d0d4cdd8d3886c4e58859f2",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:10.175Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_8bfd6dfc9d0d4cdd8d3886c4e58859f2",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:10.178Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 80340,
+            "cached_input_tokens": 67840,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 315,
+            "reasoning_output_tokens": 47,
+            "total_tokens": 80655
+          },
+          "last_token_usage": {
+            "input_tokens": 11697,
+            "cached_input_tokens": 11520,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 48,
+            "reasoning_output_tokens": 15,
+            "total_tokens": 11745
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:11.500Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_c76e8d97f10647d1b864a81f2692c950",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:22.504Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_c76e8d97f10647d1b864a81f2692c950",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:22.507Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 92113,
+            "cached_input_tokens": 79360,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 346,
+            "reasoning_output_tokens": 47,
+            "total_tokens": 92459
+          },
+          "last_token_usage": {
+            "input_tokens": 11773,
+            "cached_input_tokens": 11520,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11804
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:23.691Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_f1f338a4cc1d461e987403cbce0b0427",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:34.695Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_f1f338a4cc1d461e987403cbce0b0427",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:34.703Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 103945,
+            "cached_input_tokens": 91008,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 377,
+            "reasoning_output_tokens": 47,
+            "total_tokens": 104322
+          },
+          "last_token_usage": {
+            "input_tokens": 11832,
+            "cached_input_tokens": 11648,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11863
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:36.128Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_c43f079313b544dd847ecee47cec9b4e",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:47.132Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_c43f079313b544dd847ecee47cec9b4e",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:47.136Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 115836,
+            "cached_input_tokens": 102656,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 408,
+            "reasoning_output_tokens": 47,
+            "total_tokens": 116244
+          },
+          "last_token_usage": {
+            "input_tokens": 11891,
+            "cached_input_tokens": 11648,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11922
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:46:49.326Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_03f6244bfe984388bf3bc1d24661a909",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:00.331Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_03f6244bfe984388bf3bc1d24661a909",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:00.334Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 127786,
+            "cached_input_tokens": 114432,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 459,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 128245
+          },
+          "last_token_usage": {
+            "input_tokens": 11950,
+            "cached_input_tokens": 11776,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 51,
+            "reasoning_output_tokens": 18,
+            "total_tokens": 12001
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:01.824Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_3e75026257ce40d793c7348e63044efb",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:12.828Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_3e75026257ce40d793c7348e63044efb",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:12.831Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 139815,
+            "cached_input_tokens": 126208,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 509,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 140324
+          },
+          "last_token_usage": {
+            "input_tokens": 12029,
+            "cached_input_tokens": 11776,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 50,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 12079
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:14.159Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_93d6df47ac054b7b9de7ccd2910e6f5d",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:25.164Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_93d6df47ac054b7b9de7ccd2910e6f5d",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:25.167Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 151922,
+            "cached_input_tokens": 138112,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 540,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 152462
+          },
+          "last_token_usage": {
+            "input_tokens": 12107,
+            "cached_input_tokens": 11904,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 12138
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:26.751Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_dcb6bb08cf6345c98c6466a6b7e4aa71",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:37.754Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_dcb6bb08cf6345c98c6466a6b7e4aa71",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:37.757Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 164088,
+            "cached_input_tokens": 150016,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 571,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 164659
+          },
+          "last_token_usage": {
+            "input_tokens": 12166,
+            "cached_input_tokens": 11904,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 12197
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:39.048Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_7df21a7c4e714ea0b5c4017e1db2f567",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:50.051Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_7df21a7c4e714ea0b5c4017e1db2f567",
+        "output": "Script running with cell ID 1\nWall time 11.0 seconds\nOutput:\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:50.054Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 176313,
+            "cached_input_tokens": 162048,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 602,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 176915
+          },
+          "last_token_usage": {
+            "input_tokens": 12225,
+            "cached_input_tokens": 12032,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 12256
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:51.778Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "wait",
+        "call_id": "call_5ce4c22306c6474dbc44155c00d7a426",
+        "arguments": "{\"cell_id\":\"1\",\"max_tokens\":10000,\"yield_time_ms\":10000}"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:52.812Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "call_5ce4c22306c6474dbc44155c00d7a426",
+        "output": [
+          {
+            "type": "input_text",
+            "text": "Script completed\nWall time 1.0 seconds\nOutput:\n"
+          },
+          {
+            "type": "input_text",
+            "text": "Validation passed: npm test (3 suites, 42 tests) ok."
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:52.813Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 188597,
+            "cached_input_tokens": 174080,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 633,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 189230
+          },
+          "last_token_usage": {
+            "input_tokens": 12284,
+            "cached_input_tokens": 12032,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 31,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 12315
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:47:54.232Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 200950,
+            "cached_input_tokens": 186240,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 652,
+            "reasoning_output_tokens": 65,
+            "total_tokens": 201602
+          },
+          "last_token_usage": {
+            "input_tokens": 12353,
+            "cached_input_tokens": 12160,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 19,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 12372
+          },
+          "model_context_window": 475000
+        }
+      }
+    }
+  ],
+  "blocking": [
+    {
+      "timestamp": "2026-10-28T23:53:55.742Z",
+      "type": "turn_context",
+      "payload": {
+        "model": "gpt-6.1-sol"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:53:57.392Z",
+      "type": "response_item",
+      "payload": {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call_8585a54f68034107997da2ea4f7b34d2",
+        "input": "const result = await tools.mcp__factory_validation__run_validation({}); text(result.content.map((part) => part.text).join(\"\"));\n"
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:54:42.455Z",
+      "type": "response_item",
+      "payload": {
+        "type": "custom_tool_call_output",
+        "call_id": "call_8585a54f68034107997da2ea4f7b34d2",
+        "output": [
+          {
+            "type": "input_text",
+            "text": "Script completed\nWall time 45.1 seconds\nOutput:\n"
+          },
+          {
+            "type": "input_text",
+            "text": "Validation passed: npm test (3 suites, 42 tests) ok."
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:54:42.457Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 11266,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 56,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11322
+          },
+          "last_token_usage": {
+            "input_tokens": 11266,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 56,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11322
+          },
+          "model_context_window": 475000
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-28T23:54:44.320Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 22626,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 75,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 22701
+          },
+          "last_token_usage": {
+            "input_tokens": 11360,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 19,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 11379
+          },
+          "model_context_window": 475000
+        }
+      }
+    }
+  ]
+}

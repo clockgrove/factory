@@ -70,6 +70,12 @@ const CALLS = new Set([
 ]);
 
 /**
+ * Code mode's tool that only waits on a running `exec` cell, and so on the
+ * tool call the cell awaits: each call is a round of its own (#2167).
+ */
+const CODE_MODE_WAIT = "wait";
+
+/**
  * The telemetry of `thread` in the Codex home `codexHome`, or undefined
  * when its session record isn't there.
  */
@@ -144,7 +150,7 @@ export function codexTelemetry(
       calls.add(name, typeof id === "string" ? id : undefined);
       if (typeof id === "string") {
         names.set(id, { name, at });
-        tools.call(id);
+        tools.call(id, name === CODE_MODE_WAIT);
       }
     }
     if (

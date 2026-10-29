@@ -422,7 +422,13 @@ test("the run log: tail, follow, and status reads its end", async () => {
         requestBytes: 300,
         promptComponents: { prompt: 200, schema: 100 },
         promptDigest: "p1",
-        nativeTools: { rounds: 2, outputs: 3, failures: 1, ms: 50 },
+        nativeTools: {
+          rounds: 2,
+          waitRounds: 1,
+          outputs: 3,
+          failures: 1,
+          ms: 50,
+        },
         sessionMode: "fresh",
         sessionTurn: 1,
       },
@@ -529,6 +535,13 @@ test("the run log: tail, follow, and status reads its end", async () => {
   assert.deepEqual(analysis.calls.stages, { semantic: 1 });
   assert.equal(analysis.calls.modelMismatches, 1);
   assert.equal(analysis.calls.toolStats.failures, 1);
+  // Rounds that only waited on a running tool call (#2167).
+  assert.equal(analysis.calls.toolStats.waitRounds, 1);
+  assert.equal(analysis.calls.toolStats.waitRoundsReported, 1);
+  assert.match(
+    cli(inst, "diagnostics", "54", "--analyze").out,
+    /native tool calls: 2 rounds \(1 only waiting on a running tool, 1\/1 calls report it\) · 3 outputs/,
+  );
   assert.equal(analysis.calls.request.components.schema, 100);
   const [history] = analysis.history.runs;
   assert.equal(

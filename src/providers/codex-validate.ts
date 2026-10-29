@@ -359,6 +359,15 @@ function send(connection: Socket, message: Record<string, unknown>): void {
  * deferred: `omit_tools_from` (`code_mode`, `deferred` or `direct`) keeps it
  * out of the deferred tools, so a code-mode model sees it declared in exec's
  * description, as a Claude worker's Validate is always loaded (#2156).
+ *
+ * A code-mode model calls the tool from an `exec` cell, and `exec` yields
+ * to the model when its script still runs after its yield time (about 30 s
+ * by default); the model can then only poll the cell with `wait`, at most
+ * 10 s a call, each a round over its whole context. Live (#800, #2167), 65
+ * such rounds during 27 minutes of Validate cost an estimated 6M tokens. With the
+ * default yield at the call's own timeout, a cell blocks until Validate
+ * answers, as Claude's does: no round while it runs. The `code_mode` table
+ * without `enabled` leaves code mode as the model's metadata chooses.
  */
 function codexMcpServerConfig(
   name: string,
@@ -366,15 +375,19 @@ function codexMcpServerConfig(
   toolName: string,
   toolTimeoutSeconds: number,
 ): string {
+  const timeout = Math.ceil(toolTimeoutSeconds);
   return `
 [mcp_servers.${name}]
 command = ${JSON.stringify(process.execPath)}
 args = ${JSON.stringify(["-e", MCP_RELAY, server.socket])}
 required = true
 startup_timeout_sec = 30
-tool_timeout_sec = ${Math.ceil(toolTimeoutSeconds)}
+tool_timeout_sec = ${timeout}
 enabled_tools = ${JSON.stringify([toolName])}
 default_tools_approval_mode = "approve"
 omit_tools_from = ["deferred"]
+
+[features.code_mode]
+default_exec_yield_time_ms = ${timeout * 1000}
 `;
 }

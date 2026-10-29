@@ -733,6 +733,7 @@ export function repairOutcome(
           diagnosis: null,
           workSession: null,
           reviewSession: null,
+          diagnosisSession: null,
         },
         item.id,
       )

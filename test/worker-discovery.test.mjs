@@ -722,9 +722,10 @@ test("a repeated discovery the diagnosis is told to turn into a question is not 
     asked[1].prompt,
     /Your previous answer was rejected: the worker was already asked to propose those files for this same failure \(see prior\); propose a different correction, or return operator with a question\./,
   );
+  // The failure repeated unchanged after that discovery (#2173).
   assert.deepEqual(
     logged.filter((event) => event.event === "diagnosis"),
-    [{ event: "diagnosis", decision: "operator" }],
+    [{ event: "diagnosis", decision: "operator", unchanged: true }],
   );
 });
 

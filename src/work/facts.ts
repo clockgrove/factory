@@ -96,6 +96,8 @@ export interface ItemFacts {
   workSession: Session;
   /** The result reviewer's retained conversation, which a re-review continues. */
   reviewSession: Session;
+  /** The repair diagnosis's retained conversation, which its re-asks and the item's next diagnosis continue. */
+  diagnosisSession: Session;
   /**
    * The latest CI check failures this item's results were repaired for
    * (failed-checks findings of its CI or merge step, newest last). Result

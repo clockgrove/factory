@@ -5,6 +5,7 @@ import { currentPlan } from "../planning/plan.js";
 import { itemValidates } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import {
+  type CarriedAnswer,
   type Correction,
   type CorrectionResult,
   correction,
@@ -12,16 +13,17 @@ import {
   repeated,
 } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
+import { headAndTail } from "../text.js";
 import { hasGitlink } from "../worktree.js";
 import { AMEND } from "./amend.js";
-import { fact, facts, type ItemFacts } from "./facts.js";
+import { fact, facts, type ItemFacts, itemsWith } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
 import { refusedOf } from "./refused.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
 import { refusalOffers } from "./step-review.js";
-import { withKeep } from "./step-work.js";
+import { retained, secondLook, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
   multiLayer,
@@ -105,27 +107,46 @@ export async function repairContext(
     !(await hasGitlink(deps.config.checkout, { commit, signal }).catch(
       () => true,
     ));
-  let result = await correction({
-    planner: deps.planner,
-    plan,
+  // The item's diagnoses continue one conversation; `retry` (diagnose
+  // again) is an independent second look, which starts it fresh.
+  const conversation = retained(
+    state,
+    deps,
+    `diagnosis-${item.id}`,
     item,
-    finding,
-    checkout: deps.config.checkout,
-    base,
-    commit,
-    sources,
-    prior: applied,
-    ...(answer ? { operatorAnswer: answer } : {}),
-    validate,
-    memory: () =>
-      itemMemory("diagnosis", item, context, deps, base, sources, [
-        finding.kind === "review"
-          ? finding.refused.map((r) => r.detail).join("\n")
-          : finding.detail,
-      ]),
-    signal,
-    log: context.log,
-  });
+    secondLook(context) ? undefined : fact(state, "diagnosisSession", item.id),
+  );
+  let result: CorrectionResult;
+  try {
+    result = await correction({
+      planner: deps.planner,
+      plan,
+      item,
+      finding,
+      checkout: deps.config.checkout,
+      base,
+      commit,
+      sources,
+      prior: applied,
+      ...(answer ? { operatorAnswer: answer } : {}),
+      validate,
+      memory: () =>
+        itemMemory("diagnosis", item, context, deps, base, sources, [
+          finding.kind === "review"
+            ? finding.refused.map((r) => r.detail).join("\n")
+            : finding.detail,
+        ]),
+      operatorAnswers: carriedAnswers(state, item.id),
+      ...(conversation ? { conversation } : {}),
+      signal,
+      log: context.log,
+    });
+  } finally {
+    // The conversation the diagnosis left, kept whatever this attempt ends
+    // in, a provider failure included.
+    if (conversation?.kept !== undefined)
+      context.keep(facts({ diagnosisSession: conversation.kept }, item.id));
+  }
   // A predecessor correction that already failed for the same failure is
   // never repeated: it asks, like a repeated correction of this item.
   if (
@@ -208,6 +229,58 @@ export async function repairContext(
     keep,
     ...(result.correction.path ? { path: result.correction.path } : {}),
   };
+}
+
+/** The operator answers a diagnosis carries from other items: their whole size, and each one's. */
+const CARRIED_BYTES = 24_000;
+const CARRIED_FAILURE = { head: 400, tail: 600 };
+const CARRIED_ANSWER = { head: 3000, tail: 1000 };
+
+/**
+ * The operator's answers to the diagnosis questions of the Objective's
+ * other Work Items (each item's saved corrections from `operator`), with
+ * the failure each answered, for `item`'s diagnosis: the latest that fit
+ * within CARRIED_BYTES, each bounded, oldest first, an answer given twice
+ * once. The item's own answers are already its prior corrections. Live
+ * (#800), entity-selection hit the contract drift the operator had told
+ * living-scene how to fix 3.5 hours earlier, and its diagnosis asked again
+ * (#2173).
+ */
+export function carriedAnswers(
+  state: ObjectiveState,
+  item: string,
+): CarriedAnswer[] {
+  const answers = itemsWith(state, "diagnosis")
+    .filter((id) => id !== item)
+    .flatMap((id) =>
+      (fact(state, "diagnosis", id)?.applied ?? [])
+        .filter((tried) => tried.source === "operator")
+        .map((tried) => ({
+          item: id,
+          failure: headAndTail(
+            tried.failure,
+            CARRIED_FAILURE.head,
+            CARRIED_FAILURE.tail,
+          ),
+          answer: headAndTail(
+            tried.correction,
+            CARRIED_ANSWER.head,
+            CARRIED_ANSWER.tail,
+          ),
+        })),
+    );
+  const carried: CarriedAnswer[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  for (const entry of [...answers].reverse()) {
+    if (seen.has(entry.answer)) continue;
+    const size = entry.item.length + entry.failure.length + entry.answer.length;
+    if (total + size > CARRIED_BYTES) break;
+    seen.add(entry.answer);
+    total += size;
+    carried.unshift(entry);
+  }
+  return carried;
 }
 
 /**

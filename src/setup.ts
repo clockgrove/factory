@@ -15,8 +15,8 @@ import {
   hostCapacity,
 } from "./capacity.js";
 import { isObject } from "./checked.js";
-import { configPath, loadConfig } from "./config.js";
-import { originRefusal } from "./git.js";
+import { type CoreConfig, configPath, loadConfig } from "./config.js";
+import { originRefusal, shellWord } from "./git.js";
 import {
   appKeyFile,
   appRegistrationLink,
@@ -51,6 +51,9 @@ import {
 import { errorMessage } from "./text.js";
 import {
   droppedDirectories,
+  hasMiseConfig,
+  type MiseToolchain,
+  miseInstall,
   miseToolchain,
   toolchainPath,
 } from "./toolchain.js";
@@ -421,26 +424,23 @@ export async function setup(
     }
   }
   const config = loadConfig(repository);
-  // The PATH the service runs with: the checkout's mise pins, then
-  // toolchain.path, then this shell's. With --background, readiness checks
-  // it and the unit records it (systemd.ts unitText).
+  // The environment the service runs with: its PATH the checkout's mise
+  // pins, then toolchain.path, then this shell's. With --background,
+  // readiness checks it and the unit records it (systemd.ts unitText).
   const toolchain = existsSync(config.checkout)
     ? miseToolchain(config.checkout)
     : undefined;
-  const servicePath = toolchainPath(
-    process.env.PATH,
-    toolchain?.status === "resolved" ? toolchain.tools : [],
-    config.toolchain.path,
-  );
+  const environment = serviceEnvironment(config, toolchain);
+  const servicePath = environment.PATH ?? "";
   // One that would lose a directory the unit has now is refused before
   // anything is kept, so the next setup starts from the same file.
   const dropped =
-    service &&
-    !values["drop-path"] &&
-    droppedPath(repository, servicePath, config.toolchain.path);
-  if (dropped) {
+    service && !values["drop-path"]
+      ? droppedPath(repository, servicePath, config, toolchain)
+      : [];
+  if (dropped.length) {
     restore();
-    return refused(path, created, dropped);
+    return refused(path, created, ...dropped);
   }
   if (key !== undefined && keepAppKey(installationPaths(repository).root, key))
     changed.push(GITHUB_APP_KEY);
@@ -462,8 +462,9 @@ export async function setup(
     if (refusal) problems.push(refusal.message);
   }
   if (service) {
-    for (const name of unkeptLogins(config)) delete process.env[name];
-    if (servicePath) process.env.PATH = servicePath;
+    for (const name of Object.keys(process.env))
+      if (!(name in environment)) delete process.env[name];
+    Object.assign(process.env, environment);
   }
   const github = factoryGitHub(config);
   try {
@@ -476,7 +477,13 @@ export async function setup(
     github,
     service,
     toolchain && { toolchain, service: !!service },
-    servicePath,
+    {
+      service: servicePath,
+      // Without --background, the installed unit keeps the PATH it has.
+      installed: service
+        ? undefined
+        : unitServicePath(installationPaths(repository)),
+    },
   );
   return {
     status: problems.length || !ready.ready ? "blocked" : "configured",
@@ -493,23 +500,145 @@ export async function setup(
 }
 
 /**
- * Why the unit can't take `servicePath`, or undefined: it would drop
- * directories the installed unit's PATH has now (toolchain.ts
+ * The environment the service unit records (systemd.ts unitText), and
+ * that `--background`'s readiness runs in: `env` without the logins the
+ * unit doesn't keep (systemd.ts `unkeptLogins`), its PATH the checkout's
+ * mise pins, then toolchain.path, then `env`'s PATH (#2182).
+ */
+export function serviceEnvironment(
+  config: CoreConfig,
+  toolchain: MiseToolchain | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const environment = { ...env };
+  for (const name of unkeptLogins(config)) delete environment[name];
+  const path = toolchainPath(
+    env.PATH,
+    toolchain?.status === "resolved" ? toolchain.tools : [],
+    config.toolchain.path,
+  );
+  if (path) environment.PATH = path;
+  return environment;
+}
+
+/** A Windows directory WSL adds to a shell's PATH (interop's appendWindowsPath). */
+const WSL_WINDOWS_DIRECTORY = /^\/mnt\/[a-z]\//i;
+
+/**
+ * Why the unit can't take `servicePath`: the directories it would drop
+ * that the installed unit's PATH has now (toolchain.ts
  * `droppedDirectories`), such as a toolchain only the shell that last ran
- * setup had (#2182). The fix it names keeps `kept`, toolchain.path now,
- * since the list given replaces the whole list.
+ * setup had (#2182), as `lostPathProblems` names them; empty when it
+ * drops none.
  */
 function droppedPath(
   repository: string,
   servicePath: string,
-  kept: readonly string[],
-): string | undefined {
+  config: CoreConfig,
+  toolchain: MiseToolchain | undefined,
+): string[] {
   const before = unitServicePath(installationPaths(repository));
-  if (before === undefined) return undefined;
-  const lost = droppedDirectories(before, servicePath);
-  if (!lost.length) return undefined;
-  const them = lost.length === 1 ? "it" : "them";
-  return `The service's PATH would lose ${lost.join(", ")}: the unit has ${them} now, and neither toolchain.path nor this shell's PATH does. Keep ${them} with ${[...kept, ...lost].map((directory) => `--toolchain-path ${directory}`).join(" ")} (saved in toolchain.path, so every later setup keeps ${them}), or run setup from a shell that has ${them} on its PATH; or give --drop-path to drop ${them}`;
+  return before === undefined
+    ? []
+    : lostPathProblems(
+        droppedDirectories(before, servicePath),
+        config,
+        toolchain,
+      );
+}
+
+/**
+ * One problem for each kind of directory in `lost`, each naming how to
+ * keep it, or `--drop-path`:
+ *
+ * - A toolchain's directory is kept with --toolchain-path (shell-quoted, so
+ *   the flags paste), which keeps toolchain.path too, since the list given
+ *   replaces the whole list.
+ * - A mise install of a pin is kept by the pin: its fix is mise's
+ *   (`mise install`, `mise trust`, mise on the PATH), never toolchain.path,
+ *   which would hold an old version past the next pin.
+ * - A Windows directory WSL added isn't offered toolchain.path: ahead of
+ *   the shell's PATH, its tools (Windows' npm) would shadow Linux's.
+ */
+export function lostPathProblems(
+  lost: readonly string[],
+  config: Pick<CoreConfig, "checkout" | "toolchain">,
+  toolchain: MiseToolchain | undefined,
+): string[] {
+  const them = (list: readonly string[]) => (list.length === 1 ? "it" : "them");
+  const pinned = lost.filter((directory) => miseInstall(directory));
+  const windows = lost.filter(
+    (directory) =>
+      !pinned.includes(directory) && WSL_WINDOWS_DIRECTORY.test(directory),
+  );
+  const others = lost.filter(
+    (directory) => !pinned.includes(directory) && !windows.includes(directory),
+  );
+  const problems: string[] = [];
+  if (others.length)
+    problems.push(
+      `The service's PATH would lose ${others.join(", ")}: the unit has ${them(others)} now, and neither toolchain.path nor this shell's PATH does. To keep ${them(others)}, give ${[...config.toolchain.path, ...others].map((directory) => `--toolchain-path ${shellWord(directory)}`).join(" ")} (saved in toolchain.path, which goes after the mise pins and before the shell's PATH, so every later setup keeps ${them(others)}), or run setup from a shell that has ${them(others)} on its PATH; if the service doesn't need ${them(others)}, give --drop-path`,
+    );
+  if (pinned.length) {
+    const tools = [
+      ...new Set(pinned.map((directory) => miseInstall(directory)!)),
+    ];
+    problems.push(
+      `The service's PATH would lose ${pinned.join(", ")}, mise's install of ${tools.join(", ")}: the unit has ${them(pinned)} now, and the PATH setup would write takes no mise install of ${tools.length === 1 ? "that tool" : "those tools"}. ${misePinsLost(config.checkout, toolchain, tools)}; or, to run ${tools.length === 1 ? "it" : "them"} from this shell's PATH instead, give --drop-path`,
+    );
+  }
+  if (windows.length)
+    problems.push(
+      `The service's PATH would lose ${windows.join(", ")}, Windows ${windows.length === 1 ? "directory" : "directories"} WSL adds to a shell's PATH: the unit has ${them(windows)} now, and this shell's PATH doesn't. Run setup from a shell that has ${them(windows)} on its PATH, or, if the service doesn't need ${them(windows)}, give --drop-path`,
+    );
+  return problems;
+}
+
+/**
+ * Why the PATH setup would write takes none of `tools` from the checkout's
+ * mise pins, and mise's fix for it.
+ */
+function misePinsLost(
+  checkout: string,
+  toolchain: MiseToolchain | undefined,
+  tools: readonly string[],
+): string {
+  if (!toolchain)
+    return hasMiseConfig(checkout)
+      ? `mise isn't on this shell's PATH, so setup can't put ${checkout}'s pins first: run setup from a shell that has mise on its PATH`
+      : `${checkout} has no mise configuration now, so nothing pins ${tools.join(", ")} there`;
+  if (toolchain.status === "untrusted")
+    return `mise doesn't trust ${toolchain.file}, so setup can't put the checkout's pins first: if you trust it (a mise configuration can run code), run \`mise trust ${shellWord(toolchain.file)}\`, then repeat`;
+  if (toolchain.status === "failed")
+    return `mise can't resolve the checkout's pins (${toolchain.detail}): run \`mise ls --current\` in ${checkout} and fix what it reports, then repeat`;
+  const missing = toolchain.missing.filter((tool) => tools.includes(tool.name));
+  const unpinned = tools.filter(
+    (name) =>
+      !missing.some((tool) => tool.name === name) &&
+      !toolchain.tools.some((tool) => tool.name === name),
+  );
+  const installed = tools.filter(
+    (name) =>
+      !unpinned.includes(name) && !missing.some((tool) => tool.name === name),
+  );
+  return [
+    ...(installed.length
+      ? [
+          `mise resolves ${checkout}'s pin of ${installed.join(", ")} to ${toolchain.tools
+            .filter((tool) => installed.includes(tool.name))
+            .flatMap((tool) => tool.bins)
+            .join(", ")}, which the new PATH takes instead`,
+        ]
+      : []),
+    ...(missing.length
+      ? [
+          `${missing.map((tool) => `${tool.name} ${tool.version}`).join(", ")}, pinned in ${[...new Set(missing.map((tool) => tool.source))].join(", ")}, ${missing.length === 1 ? "isn't" : "aren't"} installed: run \`mise install\` in ${checkout}, then repeat`,
+        ]
+      : []),
+    ...(unpinned.length
+      ? [`${checkout} no longer pins ${unpinned.join(", ")}`]
+      : []),
+  ].join("; ");
 }
 
 /** Whether the installation's background unit loads setup's copy of the App's key. */

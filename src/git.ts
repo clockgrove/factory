@@ -76,7 +76,7 @@ const URL_CREDENTIAL =
   /^(?:https?:\/\/[^/@\s]+@|[a-z][a-z\d+.-]*:\/\/[^/@:\s]*:[^/@\s]*@)/i;
 
 /** A word as a POSIX shell reads it back, quoted only when it needs it. */
-const shellWord = (word: string) =>
+export const shellWord = (word: string): string =>
   /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 
 /** What Git couldn't read, and the command that shows why. */

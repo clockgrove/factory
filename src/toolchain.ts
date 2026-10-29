@@ -78,12 +78,13 @@ function real(path: string): string {
   }
 }
 
+/** Whether the checkout has a mise configuration. */
+export const hasMiseConfig = (checkout: string): boolean =>
+  MISE_CONFIGS.some((name) => existsSync(join(checkout, name)));
+
 /** Whether mise manages the checkout: it has a mise configuration, and mise is on the PATH. */
 export function miseManages(checkout: string): boolean {
-  return (
-    MISE_CONFIGS.some((name) => existsSync(join(checkout, name))) &&
-    !!executable("mise")
-  );
+  return hasMiseConfig(checkout) && !!executable("mise");
 }
 
 /**
@@ -202,20 +203,38 @@ export function toolchainPath(
 }
 
 /** The mise tool whose install a directory lies in (`…/mise/installs/TOOL/…`), or undefined. */
-const miseInstall = (directory: string) =>
+export const miseInstall = (directory: string): string | undefined =>
   /\/mise\/installs\/([^/]+)\//.exec(`${directory}/`)?.[1];
+
+/**
+ * Whether `path` has `directory`, as written or by real path: on a
+ * merged-/usr host, /bin is /usr/bin.
+ */
+export function pathHas(path: string, directory: string): boolean {
+  const entries = path.split(":");
+  if (entries.includes(directory)) return true;
+  const target = real(directory);
+  return entries.some((entry) => isAbsolute(entry) && real(entry) === target);
+}
 
 /**
  * The directories of `before` (the service unit's PATH now) that `after`
  * (the PATH setup would write) leaves out, in `before`'s order. A directory
- * that no longer exists, or a mise install of a tool `after` takes from
- * another mise install (a moved pin), isn't lost.
+ * `after` has by another name (a link to it), one that no longer exists,
+ * or a mise install of a tool `after` takes from another mise install (a
+ * moved pin), isn't lost.
  */
 export function droppedDirectories(before: string, after: string): string[] {
-  const kept = after.split(":");
+  const kept = after.split(":").filter((entry) => isAbsolute(entry));
+  const targets = new Set(kept.map(real));
   const tools = new Set(kept.map(miseInstall).filter(Boolean));
   return [...new Set(before.split(":"))].filter((directory) => {
-    if (!isAbsolute(directory) || kept.includes(directory)) return false;
+    if (
+      !isAbsolute(directory) ||
+      kept.includes(directory) ||
+      targets.has(real(directory))
+    )
+      return false;
     const tool = miseInstall(directory);
     return !(tool && tools.has(tool)) && isDirectory(directory);
   });

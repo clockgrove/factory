@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { CoreConfig } from "./config.js";
+import { type CoreConfig, configPath } from "./config.js";
 import { credentialPath } from "./credentials.js";
 import {
   checkoutCredentialEntries,
@@ -58,6 +58,7 @@ import {
   type MiseToolchain,
   misePinFix,
   onPathOf,
+  pathHas,
 } from "./toolchain.js";
 import { danglingLauncher } from "./worktree.js";
 
@@ -102,17 +103,14 @@ export async function readiness(
    * whether they are on this PATH, the one `--background` gives the service.
    */
   mise?: { toolchain: MiseToolchain; service: boolean },
-  /**
-   * The PATH the service unit runs with (setup.ts): the mise pins, then
-   * toolchain.path, then the setup shell's.
-   */
-  servicePath: string = process.env.PATH ?? "",
+  /** The service's PATH (`toolchainChecks`). */
+  path: ServicePath = { service: process.env.PATH ?? "" },
 ): Promise<Readiness> {
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
     ...(mise ? miseChecks(config.checkout, mise.toolchain, mise.service) : []),
-    ...toolchainChecks(config.toolchain, servicePath),
+    ...toolchainChecks(config.toolchain, path, configPath(config.repository)),
     ...(await nodeVersionCheck(config.checkout, !!mise)),
     ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
@@ -396,54 +394,102 @@ function miseChecks(
   return checks;
 }
 
+/** The PATH the service runs with, for `toolchainChecks`. */
+export interface ServicePath {
+  /**
+   * The PATH `--background` gives the service unit (setup.ts
+   * `serviceEnvironment`): the mise pins, then toolchain.path, then the
+   * setup shell's.
+   */
+  service: string;
+  /**
+   * Without `--background`, the installed unit's PATH, which the running
+   * service keeps until `--background` rewrites the unit; undefined with
+   * `--background` or without a unit.
+   */
+  installed?: string;
+}
+
 /**
  * The configuration's toolchain (#2182) on the PATH the service runs with:
  * each toolchain.path entry is a directory (`warn`: a typo or a moved
  * toolchain adds nothing), and each toolchain.executables name resolves
- * there (`blocked`: validation that starts it fails). Empty while neither
- * is set.
+ * there (`blocked`: validation that starts it fails). Without
+ * `--background`, an installed unit runs on its own PATH: what only the
+ * PATH `--background` would write has is `warn`, until it does. Empty
+ * while neither list is set. `file` is the configuration file, where a
+ * name no longer needed is removed (setup can't empty a list).
  */
 export function toolchainChecks(
   toolchain: CoreConfig["toolchain"],
-  servicePath: string,
+  path: ServicePath,
+  file: string,
 ): ReadinessCheck[] {
   const name = "toolchain";
   const checks: ReadinessCheck[] = [];
+  const them = (list: readonly string[]) => (list.length === 1 ? "it" : "them");
   const absent = toolchain.path.filter((directory) => !isDirectory(directory));
   if (absent.length)
     checks.push({
       name,
       status: "warn",
-      detail: `toolchain.path names ${absent.join(", ")}, which ${absent.length === 1 ? "isn't a directory" : "aren't directories"}, so the service's PATH gains nothing from ${absent.length === 1 ? "it" : "them"}`,
-      fix: "Install the toolchain there, or give factory setup --toolchain-path DIR... with the directories that hold it (the list given replaces the whole list)",
+      detail: `toolchain.path names ${absent.join(", ")}, which ${absent.length === 1 ? "isn't a directory" : "aren't directories"}, so the service's PATH gains nothing from ${them(absent)}`,
+      fix: `Install the toolchain there, or give factory setup --toolchain-path DIR... with the directories that hold it (the list given replaces the whole list); to drop ${them(absent)}, remove ${them(absent)} from toolchain.path in ${file}`,
     });
+  const { installed } = path;
+  const running = installed ?? path.service;
   const found = toolchain.executables.map(
-    (executable) => [executable, onPathOf(executable, servicePath)] as const,
+    (executable) => [executable, onPathOf(executable, running)] as const,
   );
-  const missing = found.filter(([, file]) => !file).map(([each]) => each);
+  const unfound = found.filter(([, at]) => !at).map(([each]) => each);
+  const present = toolchain.path.filter(
+    (directory) => !absent.includes(directory),
+  );
+  // Without --background, what only the PATH it would write has.
+  const pending: { directories: string[]; executables: string[] } =
+    installed === undefined
+      ? { directories: [], executables: [] }
+      : {
+          directories: present.filter(
+            (directory) => !pathHas(installed, directory),
+          ),
+          executables: unfound.filter((each) => onPathOf(each, path.service)),
+        };
+  const missing = unfound.filter((each) => !pending.executables.includes(each));
   if (missing.length)
     checks.push({
       name,
       status: "blocked",
-      detail: `Not on the PATH the service runs with: ${missing.join(", ")} (toolchain.executables), so validation that starts ${missing.length === 1 ? "it" : "them"} fails`,
-      fix: "Install them, or add their directory to the service's PATH with factory setup --toolchain-path DIR... (kept in toolchain.path, after the mise pins)",
+      detail: `Not on the PATH the service runs with: ${missing.join(", ")} (toolchain.executables), so validation that starts ${them(missing)} fails`,
+      fix: `Install ${them(missing)}, or add ${missing.length === 1 ? "its" : "their"} directory to the service's PATH with factory setup --toolchain-path DIR... (kept in toolchain.path, after the mise pins and before the shell's PATH); if the service no longer needs ${them(missing)}, remove ${them(missing)} from toolchain.executables in ${file}`,
     });
-  const present = toolchain.path.filter(
-    (directory) => !absent.includes(directory),
-  );
-  if (!missing.length && (present.length || found.length))
+  const waiting = [
+    ...pending.directories.map((directory) => `${directory} (toolchain.path)`),
+    ...pending.executables.map(
+      (each) =>
+        `${each}'s directory (toolchain.executables; ${onPathOf(each, path.service)} on the PATH --background would write)`,
+    ),
+  ];
+  if (waiting.length)
+    checks.push({
+      name,
+      status: "warn",
+      detail: `The installed unit's PATH lacks ${waiting.join(", ")}, so the running service doesn't have ${them(waiting)} yet`,
+      fix: "Run factory setup --background: it writes the unit with them and restarts the service",
+    });
+  if (!missing.length && !waiting.length && (present.length || found.length))
     checks.push(
       ok(
         name,
         [
           ...(present.length
             ? [
-                `${present.join(", ")} on the service's PATH after the mise pins`,
+                `${present.join(", ")} on ${installed === undefined ? "the service's PATH after the mise pins" : "the installed unit's PATH"}`,
               ]
             : []),
           ...(found.length
             ? [
-                `found ${found.map(([each, file]) => `${each} (${file})`).join(", ")}`,
+                `found ${found.map(([each, at]) => `${each} (${at})`).join(", ")}`,
               ]
             : []),
         ].join("; "),

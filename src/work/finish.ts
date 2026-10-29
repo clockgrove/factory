@@ -839,7 +839,11 @@ export async function removeWorkFiles(
     // No worktrees.
   }
   for (const name of names)
-    if (!name.endsWith(".shell") && !name.endsWith(".validation"))
+    if (
+      !name.endsWith(".shell") &&
+      !name.endsWith(".validation") &&
+      !name.endsWith(".packages")
+    )
       await removeWorktree(checkout, join(root, name), signal);
   const refs = (
     await hostGit(

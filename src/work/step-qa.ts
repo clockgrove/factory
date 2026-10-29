@@ -95,6 +95,7 @@ export async function qaValidateStep(
     checkout: config.checkout,
     repository: config.repository,
     directory: `${worktreePath(workDir, state.issue, item.id)}.validation`,
+    installStore: `${worktreePath(workDir, state.issue, item.id)}.packages`,
     commit: head,
     item,
     plan,

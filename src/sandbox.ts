@@ -1131,6 +1131,13 @@ export interface SandboxOptions {
    */
   packageInstall?: boolean;
   /**
+   * Only with `packageInstall` and without `sandbox.packageStore`: the
+   * package store and caches' root Factory keeps for this install across
+   * one item's validations (validate.ts `installStore`), writable to it in
+   * place of the private HOME's. No other command mounts it.
+   */
+  installStore?: string;
+  /**
    * The install may reach the network: in its own network namespace through
    * pasta, or, without pasta, not at all. Only with `packageInstall`.
    */
@@ -1313,6 +1320,24 @@ function launch(
   // in the checkout.
   Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
   const writable = [checkout, temporary, home];
+  // Factory's kept store for the exact install: beside the checkout, never
+  // in it, and its own mount, so pnpm copies packages into node_modules (a
+  // hard link can't cross mounts) and no later command can write the
+  // store's files through them.
+  if (options.packageInstall && options.installStore && !config.packageStore) {
+    const store = realpathSync(options.installStore);
+    if (
+      [checkout, temporary, home].some(
+        (path) => within(store, path) || within(path, store),
+      )
+    )
+      throw new Refusal(
+        `the install's package store ${store} overlaps the checkout or the command's private directories`,
+        "Report it: Factory keeps the store beside the validation checkout",
+      );
+    writable.push(store);
+    Object.assign(env, packageCacheEnvironment(store));
+  }
   let readOnlyStore: string | undefined;
   if (config.packageStore) {
     // Not in a shared temporary directory, nor in any directory others can

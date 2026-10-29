@@ -297,6 +297,8 @@ export class SelfValidation {
       checkout: input.worktree,
       repository: options.repository,
       directory: `${input.worktree}.validation`,
+      // The validate step keeps the same store (step-validate.ts).
+      installStore: `${input.worktree}.packages`,
       commit,
       item: input.item,
       plan: options.plan,

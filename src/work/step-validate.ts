@@ -45,6 +45,8 @@ export async function validateStep(
     checkout: config.checkout,
     repository: config.repository,
     directory: `${worktree}.validation`,
+    // The worker's Validate keeps the same store (self-validate.ts).
+    installStore: `${worktree}.packages`,
     commit: candidate(state, item.id),
     item,
     plan,

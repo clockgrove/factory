@@ -7,7 +7,7 @@ import type { WorkItem } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
 import { headAndTail } from "../text.js";
 import { formatRef, lockfileRef, validateTree } from "../validate.js";
-import { addWorktree, worktreePath } from "../worktree.js";
+import { addWorktree, installStorePath, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaValidateStep } from "./step-qa.js";
@@ -46,7 +46,7 @@ export async function validateStep(
     repository: config.repository,
     directory: `${worktree}.validation`,
     // The worker's Validate keeps the same store (self-validate.ts).
-    installStore: `${worktree}.packages`,
+    installStore: installStorePath(worktree),
     commit: candidate(state, item.id),
     item,
     plan,

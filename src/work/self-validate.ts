@@ -16,7 +16,7 @@ import type { Plan, WorkItem } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, headAndTail } from "../text.js";
 import { validateTree } from "../validate.js";
-import { hasGitlink } from "../worktree.js";
+import { hasGitlink, installStorePath } from "../worktree.js";
 import {
   type HandoffNote,
   handoffPeers,
@@ -298,7 +298,7 @@ export class SelfValidation {
       repository: options.repository,
       directory: `${input.worktree}.validation`,
       // The validate step keeps the same store (step-validate.ts).
-      installStore: `${input.worktree}.packages`,
+      installStore: installStorePath(input.worktree),
       commit,
       item: input.item,
       plan: options.plan,

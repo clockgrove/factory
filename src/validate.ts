@@ -28,7 +28,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
-import { GitRefusal } from "./git.js";
+import { GitRefusal, readBlobs } from "./git.js";
 import type { CommitAuthor } from "./github.js";
 import type { RunFile } from "./log.js";
 import {
@@ -722,6 +722,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           : undefined);
       const passed = run.exitCode === 0 && !overflow;
       if (passed) whole.remove();
+      // A store over the disk budget is never kept: the next install of the
+      // item starts from an empty one.
+      if (store && run.diskOverflow) await forceRemove(input.installStore!);
       input.log({
         event: "validation-result",
         index,
@@ -1202,6 +1205,14 @@ function dependencyInput(path: string): boolean {
  * the command and of every dependency input's path, mode and blob there,
  * so a change to any lockfile, manifest or package configuration, or to
  * the command, makes another.
+ *
+ * A package from the checkout itself (a `file:` tarball or directory) is
+ * fetched from the commit's files, and pnpm and npm then serve it from the
+ * store by the integrity the lockfile records, never reading the file
+ * again: a result that changed only the vendored tarball would install the
+ * old package from a kept store, where an empty one fails the integrity
+ * check. So when any dependency input names `file:`, the key covers every
+ * path, mode and blob of the commit: only the very same tree reuses it.
  */
 export async function installKey(
   checkout: string,
@@ -1219,9 +1230,18 @@ export async function installKey(
     .split("\0")
     .filter(Boolean);
   // `<mode> <type> <object>\t<path>`, in Git's path order.
-  for (const entry of entries)
-    if (dependencyInput(entry.slice(entry.indexOf("\t") + 1)))
-      hash.update(`${entry}\0`);
+  const inputs = entries.filter((entry) =>
+    dependencyInput(entry.slice(entry.indexOf("\t") + 1)),
+  );
+  const bodies = await readBlobs(
+    (args, input) => hostGit(checkout, args, { input, signal }),
+    inputs
+      .map((entry) => entry.split(/[ \t]/))
+      .filter(([, type]) => type === "blob")
+      .map(([, , object]) => object!),
+  );
+  const local = bodies.some((body) => body.includes("file:"));
+  for (const entry of local ? entries : inputs) hash.update(`${entry}\0`);
   return hash.digest("hex");
 }
 

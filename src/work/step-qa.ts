@@ -8,7 +8,7 @@ import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
 import { type ResultReview, reviewQa } from "../review/result.js";
 import { validateTree } from "../validate.js";
-import { worktreePath } from "../worktree.js";
+import { installStorePath, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import {
   integrationProblem,
@@ -95,7 +95,7 @@ export async function qaValidateStep(
     checkout: config.checkout,
     repository: config.repository,
     directory: `${worktreePath(workDir, state.issue, item.id)}.validation`,
-    installStore: `${worktreePath(workDir, state.issue, item.id)}.packages`,
+    installStore: installStorePath(worktreePath(workDir, state.issue, item.id)),
     commit: head,
     item,
     plan,

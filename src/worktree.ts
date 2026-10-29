@@ -418,6 +418,16 @@ export function worktreePath(
   return join(workDir, String(issue), item);
 }
 
+/**
+ * The install's package store kept beside a Work Item's `worktree` across
+ * its validations (validate.ts `installStore`, #2169): the worker's
+ * Validate, the validate step and a QA item's validate step all keep it
+ * here, so each reuses what the others fetched.
+ */
+export function installStorePath(worktree: string): string {
+  return `${worktree}.packages`;
+}
+
 /** `checkout`'s Git directory and common Git directory, absolute. */
 async function gitDirectories(
   checkout: string,
@@ -679,7 +689,7 @@ export async function removeWorktree(
       worktree,
       `${worktree}.shell`,
       `${worktree}.validation`,
-      `${worktree}.packages`,
+      installStorePath(worktree),
     ].map(forceRemove),
   );
   await hostGit(checkout, ["worktree", "prune"], { signal });

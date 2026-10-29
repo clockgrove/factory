@@ -25,8 +25,22 @@ import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
 import { installKey, keptStore, validateTree } from "../dist/validate.js";
 import { SelfValidation } from "../dist/work/self-validate.js";
-import { addWorktree, removeWorktree } from "../dist/worktree.js";
-import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
+import { qaValidateStep, validateStep } from "../dist/work/steps.js";
+import {
+  addWorktree,
+  installStorePath,
+  removeWorktree,
+  worktreePath,
+} from "../dist/worktree.js";
+import {
+  configured,
+  githubOrigin,
+  installation,
+  item,
+  plan,
+  REPO,
+  tempDir,
+} from "./helpers.mjs";
 
 const BOOTSTRAP = "pnpm install --frozen-lockfile --ignore-scripts";
 const NPM_BOOTSTRAP = "npm ci --ignore-scripts";
@@ -60,10 +74,11 @@ mkdirSync(store, { recursive: true });
 let reused = 0;
 let downloaded = 0;
 for (const name of lock.split("\\n").filter((line) => line.includes("@"))) {
-  const file = join(store, name.replace("/", "+"));
+  const file = join(store, name.replaceAll("/", "+"));
   if (existsSync(file)) reused++;
   else {
-    writeFileSync(file, name);
+    // A "big" package takes 2 MiB of the store.
+    writeFileSync(file, name.includes("big") ? Buffer.alloc(2 * 1024 ** 2) : name);
     downloaded++;
   }
 }
@@ -118,9 +133,10 @@ function sandboxConfig(fields = {}) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
-  const { sandbox } = loadConfig(REPO);
+  const config = loadConfig(REPO);
   delete process.env.FACTORY_CONFIG;
-  return { inst, sandbox: { ...sandbox, network: "off", ...fields } };
+  const sandbox = { ...config.sandbox, network: "off", ...fields };
+  return { inst, config: { ...config, sandbox }, sandbox };
 }
 
 /**
@@ -424,4 +440,225 @@ test("a kept store is reused only under its own key", async () => {
   // A store whose cache is gone isn't reused, whatever its key says.
   rmSync(fresh.root, { recursive: true });
   assert.equal((await keptStore(directory, "b".repeat(64))).reused, false);
+});
+
+// A package from the checkout (a `file:` tarball) is served from the store
+// by the lockfile's integrity, never read again: a result that changed
+// only the vendored tarball installed the old package from a kept store,
+// where an empty one fails the integrity check.
+const VENDORED = {
+  "package.json": `${JSON.stringify({
+    name: "target",
+    private: true,
+    dependencies: { foo: "file:vendor/foo-1.0.0.tgz" },
+  })}\n`,
+  "pnpm-lock.yaml":
+    "left-pad@1.0.0\nfoo@file:vendor/foo-1.0.0.tgz\n  resolution: {integrity: sha512-v1, tarball: file:vendor/foo-1.0.0.tgz}\n",
+  "vendor/foo-1.0.0.tgz": "v1",
+};
+
+test("a vendored tarball the result changed alone keys the install anew", async () => {
+  const { checkout } = target();
+  const signal = AbortSignal.timeout(30_000);
+  const key = (commit) => installKey(checkout, commit, BOOTSTRAP, signal);
+  const vendored = commit(checkout, VENDORED);
+  const original = await key(vendored);
+  // The same tree keeps its key.
+  assert.equal(await key(vendored), original);
+  // The tarball's bytes changed, the manifest and lockfile left alone.
+  const changed = commit(checkout, { "vendor/foo-1.0.0.tgz": "v2" });
+  assert.notEqual(await key(changed), original);
+  // With a local package, any file of the tree keys it: only the very same
+  // tree reuses the store.
+  const source = commit(checkout, { "src/index.js": "export const b = 1;\n" });
+  assert.notEqual(await key(source), await key(changed));
+  // Without one, the key still covers the dependency inputs alone.
+  const { checkout: plain, base } = target();
+  const edited = commit(plain, { "src/index.js": "export const c = 1;\n" });
+  assert.equal(
+    await installKey(plain, edited, BOOTSTRAP, signal),
+    await installKey(plain, base, BOOTSTRAP, signal),
+  );
+});
+
+test("a changed vendored tarball installs from an empty store", {
+  skip,
+}, async () => {
+  const { checkout } = target();
+  const base = commit(checkout, VENDORED);
+  const built = commit(checkout, { "src/index.js": "export const a = 1;\n" });
+  assert.equal(
+    install(await validate(checkout, base, built)).installStore,
+    "new",
+  );
+  assert.equal(
+    install(await validate(checkout, base, built)).installStore,
+    "reused",
+  );
+  const changed = commit(checkout, { "vendor/foo-1.0.0.tgz": "v2" });
+  assert.deepEqual(
+    { ...install(await validate(checkout, base, changed)), store: undefined },
+    { installStore: "new", reused: 0, downloaded: 2, store: undefined },
+  );
+});
+
+test("the kept store counts against the install's HOME budget, and one over it is not kept", {
+  skip,
+}, async () => {
+  const { checkout } = target();
+  // The base's own lockfile: the install's failure is the environment's.
+  const base = commit(checkout, {
+    "pnpm-lock.yaml": "left-pad@1.0.0\nbig@1.0.0\n",
+  });
+  const built = commit(checkout, { "src/index.js": "export const a = 1;\n" });
+  const tight = sandboxConfig();
+  tight.sandbox.limits = { ...tight.sandbox.limits, homeMiB: 1 };
+  const { result } = await validate(checkout, base, built, { sandbox: tight });
+  assert.equal(result.kind, "retry", JSON.stringify(result).slice(0, 1500));
+  assert.match(
+    result.reason,
+    /Validation command failed \(disk budget\).*HOME and the install's package store hold 2\.0 MiB, more than sandbox\.limits\.homeMiB \(1 MiB\)/s,
+  );
+  assert.equal(existsSync(installStorePath(checkout)), false);
+  // Within the budget, the next install starts from an empty store.
+  assert.deepEqual(
+    { ...install(await validate(checkout, base, built)), store: undefined },
+    { installStore: "new", reused: 0, downloaded: 2, store: undefined },
+  );
+  // Files count too: the store's entries against sandbox.limits.files.
+  const few = sandboxConfig();
+  few.sandbox.limits = { ...few.sandbox.limits, files: 1 };
+  rmSync(installStorePath(checkout), { recursive: true });
+  const counted = await validate(checkout, base, built, { sandbox: few });
+  assert.equal(counted.result.kind, "retry");
+  assert.match(
+    counted.result.reason,
+    /HOME, the install's package store and TMPDIR hold more than sandbox\.limits\.files \(1\) files/,
+  );
+  assert.equal(existsSync(installStorePath(checkout)), false);
+});
+
+/** The step context and dependencies a Work Item's steps run with. */
+function stepRun(config, state, events) {
+  const log = new RunLog(
+    config.inst.logs,
+    "2026-01-01T00-00-00-000Z-1",
+    CAPTURE_OFF,
+    [],
+  );
+  const workDir = tempDir("factory-work-");
+  return {
+    workDir,
+    deps: {
+      config: { ...config.config, checkout: config.checkout },
+      workDir: () => workDir,
+      github: {},
+    },
+    context: {
+      state,
+      signal: AbortSignal.timeout(120_000),
+      log: (event) => events.push(event),
+      runFile: (kind) => log.runFile(1, `item:a:validate#1.${kind}`),
+    },
+  };
+}
+
+const installEvents = (events) =>
+  events
+    .filter(
+      (event) => event.event === "validation-command" && event.index === 0,
+    )
+    .map((event) => event.installStore);
+
+test("the validate step reuses the store the worker's Validate filled beside the item's worktree", {
+  skip,
+}, async () => {
+  const configured = sandboxConfig();
+  const { checkout, base } = target();
+  const work = item("a", {
+    ownedPaths: ["src/**"],
+    validation: [{ command: BOOTSTRAP }],
+  });
+  const accepted = plan([work], { base });
+  const state = {
+    issue: 7,
+    done: { check: { shown: { blocks: [] } }, plan: accepted },
+    kept: {},
+  };
+  const events = [];
+  const { workDir, deps, context } = stepRun(
+    { ...configured, checkout },
+    state,
+    events,
+  );
+  // The worker's worktree, where the work step put it, and its Validate.
+  const worktree = worktreePath(workDir, state.issue, work.id);
+  await addWorktree(checkout, worktree, base, context.signal);
+  writeFileSync(join(worktree, "src/index.js"), "export const a = 1;\n");
+  const validator = new SelfValidation(
+    { ...context, worktree, item: work, base },
+    {
+      sandbox: configured.sandbox,
+      plan: accepted,
+      blocks: [],
+      repository: REPO,
+      commandTimeoutMs: 60_000,
+    },
+    context.signal,
+  );
+  const answer = await validator.call();
+  assert.equal(answer.isError, false, answer.text);
+  // The work step's collected result, then the validate step on it.
+  const collected = commit(worktree, {});
+  state.done["item:a:work"] = {
+    base,
+    commit: collected,
+    tree: git(worktree, "rev-parse", "HEAD^{tree}"),
+    notes: [],
+    sets: [],
+  };
+  const outcome = await validateStep(work, context, deps, undefined);
+  assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
+  assert.deepEqual(installEvents(events), ["new", "reused"]);
+  assert.equal(
+    readdirSync(join(installStorePath(worktree), "cache", "pnpm-store")).length,
+    2,
+  );
+});
+
+test("a QA item's validate step keeps its store beside the item's worktree, reused when it runs again", {
+  skip,
+}, async () => {
+  const configured = sandboxConfig();
+  // The default branch, served by a bare origin: QA checks its head.
+  const root = tempDir("factory-qa-");
+  const bare = join(root, "origin.git");
+  git(root, "init", "--quiet", "--bare", "-b", "main", bare);
+  git(root, "clone", "--quiet", bare, "checkout");
+  const checkout = join(root, "checkout");
+  const base = commit(checkout, BASE);
+  git(checkout, "push", "--quiet", "origin", "HEAD:main");
+  githubOrigin(checkout, bare);
+  const qa = item("q", {
+    kind: "qa",
+    validation: [{ command: BOOTSTRAP }],
+  });
+  const state = {
+    issue: 8,
+    done: { check: { shown: { blocks: [] } }, plan: plan([qa], { base }) },
+    kept: {},
+  };
+  const events = [];
+  const { workDir, deps, context } = stepRun(
+    { ...configured, checkout },
+    state,
+    events,
+  );
+  for (let run = 0; run < 2; run++) {
+    const outcome = await qaValidateStep(qa, context, deps);
+    assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
+  }
+  assert.deepEqual(installEvents(events), ["new", "reused"]);
+  const kept = installStorePath(worktreePath(workDir, state.issue, qa.id));
+  assert.equal(readdirSync(join(kept, "cache", "pnpm-store")).length, 2);
 });

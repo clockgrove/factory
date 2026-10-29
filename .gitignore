@@ -4,3 +4,4 @@ dist/
 .factory/
 integration/.runs/
 test/.tools-*/
+bench/reports/

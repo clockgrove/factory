@@ -68,7 +68,7 @@ function needsHuman(asked = [0, 1, 2, 3]) {
  * only what nobody settled and so calls no reviewer here (the planner
  * throws if it is called).
  */
-function reviewStep(reviews) {
+function reviewStep(reviews, asked) {
   return {
     key: KEY,
     deadlineMs: 60_000,
@@ -98,7 +98,7 @@ function reviewStep(reviews) {
             signal: AbortSignal.timeout(60_000),
             log() {},
           })
-        : needsHuman();
+        : needsHuman(asked);
       reviews.push(review);
       const held = (asked) => facts({ held: asked }, "a");
       return withKeep(
@@ -115,14 +115,17 @@ function reviewStep(reviews) {
   };
 }
 
-/** An engine running that step, which `runStep` runs once with the step's answer. */
-function harness() {
+/**
+ * An engine running that step, which `runStep` runs once with the step's
+ * answer; its first review asks about `asked` (criterion indices).
+ */
+function harness(asked) {
   const state = newObjective(800, new Date());
   state.status = "building";
   state.done.plan = PLAN;
   state.kept[ACCEPTED_AT] = ACCEPTED;
   const reviews = [];
-  const step = reviewStep(reviews);
+  const step = reviewStep(reviews, asked);
   const runner = new ObjectiveRunner(
     state,
     { steps: () => [step], status: () => "building" },
@@ -440,6 +443,143 @@ test("an answer that doesn't fit is refused and the question stays open", async 
   );
   assert.equal(runner.state.closedHolds, undefined);
   assert.equal(runner.state.answers[KEY], undefined);
+});
+
+const COMMENT = {
+  channel: "comment",
+  comment: "https://github.com/o/r/issues/800#issuecomment-2",
+};
+
+test("a list's criteria can be written with spaces after the commas", async () => {
+  const { runner, runStep, answer } = harness();
+  await runStep();
+  const [hold] = runner.state.holds;
+  assert.deepEqual(answerList("accept 1, 2 Ran it", hold.options), [
+    { answer: "accept", arg: "1", text: "Ran it" },
+    { answer: "accept", arg: "2", text: "Ran it" },
+  ]);
+  assert.equal(
+    answer(hold, "decide", "accept 1 , 2,3 Ran it.\nrefuse 4 Not copied."),
+    null,
+  );
+  assert.deepEqual(
+    runner.state.answers[KEY].parts.map((part) => [
+      part.answer,
+      part.arg,
+      part.text,
+    ]),
+    [
+      ["accept", "1", "Ran it."],
+      ["accept", "2", "Ran it."],
+      ["accept", "3", "Ran it."],
+      ["refuse", "4", "Not copied."],
+    ],
+  );
+});
+
+test("an entry whose reason names more criteria is refused, never half applied", async () => {
+  const { runner, runStep, answer } = harness();
+  await runStep();
+  const [hold] = runner.state.holds;
+  for (const [text, more] of [
+    ["accept 1 and 2 Ran it", "2"],
+    ["accept 1,2 Ran the journey.\nrefuse 3 and 4 Never exercised.", "4"],
+    ["refuse 3 & 4 Never exercised.", "4"],
+    ["accept 1 2 Ran it", "2"],
+  ]) {
+    const why = answerList(text, hold.options);
+    assert.equal(typeof why, "string", text);
+    assert.ok(why.includes(`names ${more} in its reason`), why);
+    const refused = answer(hold, "decide", text);
+    assert.equal(refused?.code, "invalid_answer", text);
+  }
+  // A reason may start with a word that isn't one of its criteria.
+  assert.deepEqual(answerList("accept 1 and it passed", hold.options), [
+    { answer: "accept", arg: "1", text: "and it passed" },
+  ]);
+  assert.deepEqual(answerList("accept 1 5 runs passed", hold.options), [
+    { answer: "accept", arg: "1", text: "5 runs passed" },
+  ]);
+  // A comment naming one criterion and then another is refused the same.
+  const refused = answer(hold, "accept", "1 and 2 Ran it", undefined, COMMENT);
+  assert.equal(refused?.code, "invalid_answer");
+  assert.match(refused.message, /names 2 in its reason/);
+  assert.deepEqual(
+    runner.state.holds.map((open) => open.id),
+    [hold.id],
+  );
+  assert.equal(runner.state.answers[KEY], undefined);
+});
+
+test("accept all on a question about one criterion is refused from a comment and the CLI alike", async () => {
+  const { runner, runStep, answer } = harness([2]);
+  await runStep();
+  const [hold] = runner.state.holds;
+  assert.deepEqual(hold.options.map(form), ["accept 3", "refuse 3", "cancel"]);
+  for (const refused of [
+    answer(hold, "accept", `all ${RECEIPT}`, undefined, COMMENT),
+    answer(hold, "accept", `ALL ${RECEIPT}`, undefined, COMMENT),
+    answer(hold, "accept", RECEIPT, "all"),
+  ]) {
+    assert.equal(refused?.code, "invalid_answer");
+    assert.equal(
+      refused.message,
+      "This question offers no `accept all`. Name one: `accept 3 <text>`.",
+    );
+  }
+  assert.deepEqual(
+    runner.state.holds.map((open) => open.id),
+    [hold.id],
+  );
+  assert.equal(runner.state.answers[KEY], undefined);
+  // Its own answer still works from a comment, with or without the number.
+  assert.equal(
+    answer(hold, "accept", `3 ${RECEIPT}`, undefined, COMMENT),
+    null,
+  );
+  assert.deepEqual(
+    [runner.state.answers[KEY].arg, runner.state.answers[KEY].text],
+    ["3", RECEIPT],
+  );
+});
+
+test("the CLI's text starting with `all` never accepts every criterion", async () => {
+  const { runner, runStep, answer } = harness();
+  await runStep();
+  const [hold] = runner.state.holds;
+  // `factory answer 800 accept --question ID --text "all evidence ..."`.
+  const refused = answer(
+    hold,
+    "accept",
+    "all evidence is in the receipt for criterion 2",
+  );
+  assert.equal(refused?.code, "invalid_answer");
+  assert.match(refused.message, /^Name one: `accept all <text>`/);
+  assert.deepEqual(
+    runner.state.holds.map((open) => open.id),
+    [hold.id],
+  );
+  assert.equal(runner.state.answers[KEY], undefined);
+  assert.equal(decisionsOf(runner).length, 0);
+});
+
+test("a decide that refuses one criterion sends the result to repair, and says so", async () => {
+  const { runner, runStep, answer } = harness();
+  await runStep();
+  const [hold] = runner.state.holds;
+  const decide = hold.options.find((option) => option.answer === "decide");
+  assert.match(
+    decide.consequence,
+    /asked again together only when it refuses none; a refusal decides this result/,
+  );
+  assert.match(
+    DECIDE_ALL_NOTE,
+    /When an answer refuses none, the criteria it leaves undecided are asked again together/,
+  );
+  assert.equal(answer(hold, "decide", "refuse 1 Not run."), null);
+  await runStep();
+  assert.deepEqual(runner.state.done[KEY], { refused: [1] });
+  assert.deepEqual(runner.state.holds, [], "the rest aren't asked now");
 });
 
 test("the answered question's comment, status, the report and memory show each criterion's answer", async () => {

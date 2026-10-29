@@ -162,12 +162,43 @@ export function answersOf(hold: Pick<Hold, "options">): string[] {
 const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
+ * The argument of the answers that give every criterion a question lists
+ * at once (`accept all`, `HoldOption.covers`). Only a question that offers
+ * it takes it: one about a single criterion offers `accept <n>` alone.
+ */
+export const ALL = "all";
+
+/**
+ * The argument a reason starts with, when it is one of `args`: after
+ * `and`, `&` or a comma, or alone when it is a number (`accept 1 and 2
+ * <reason>`, `accept 1 2 <reason>`; a provider's name may start a reason).
+ * An answer that names one argument and then such a reason would read as
+ * deciding several while it decides one, so it is refused.
+ */
+export function leadingArg(
+  reason: string | undefined,
+  args: readonly string[],
+): string | undefined {
+  const lead = reason
+    ? /^(and\s+|&\s*|,\s*)?([^\s,.;:&]+)(?=[\s,.;:]|$)/i.exec(reason)
+    : null;
+  return lead &&
+    args.includes(lead[2]!) &&
+    (lead[1] !== undefined || /^\d+$/.test(lead[2]!))
+    ? lead[2]
+    : undefined;
+}
+
+/**
  * The parts a `list` option's text gives (`HoldOption.list`), or why it
  * gives none. Each entry reads `<answer> <arg>[,<arg>...] <text>`, one per
  * line, or after a `;` that the next entry follows (`accept 1,2 It ran;
- * refuse 3 It didn't`); a leading `-` or `*` is a list bullet. Each names
- * options of `options` with an argument (not another covering or list
- * one), each argument once, with text where its option needs it.
+ * refuse 3 It didn't`); a leading `-` or `*` is a list bullet, and a comma
+ * may have spaces around it (`accept 1, 2 It ran`). Each names options of
+ * `options` with an argument (not another covering or list one), each
+ * argument once, with text where its option needs it. An entry whose
+ * text starts with another argument (`accept 1 and 2 It ran`) is refused,
+ * never read as deciding only the first (`leadingArg`).
  */
 export function answerList(
   text: string,
@@ -193,12 +224,17 @@ export function answerList(
   const parts: AnswerPart[] = [];
   const seen = new Set<string>();
   for (const entry of entries) {
-    const match = /^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(entry);
+    const match =
+      /^(\S+)\s+([^\s,]+(?:\s*,\s*[^\s,]+)*)(?:\s+([\s\S]*))?$/.exec(entry);
     const answer = match ? match[1]!.toLowerCase() : undefined;
     if (!match || answer === undefined || !answers.includes(answer))
       return `"${entry.slice(0, 80)}" isn't an entry of the list: each reads \`<answer> <n>[,<n>...] <text>\`, one per line or after \`;\`, naming answers this question offers: ${forms}.`;
     const reason = match[3]?.trim();
-    for (const arg of match[2]!.split(",").filter(Boolean)) {
+    const listed = match[2]!.split(/\s*,\s*/);
+    const more = leadingArg(reason, args);
+    if (more !== undefined)
+      return `"${entry.slice(0, 80)}" names ${more} in its reason: list the criteria an entry decides comma-separated before its reason, \`${answer} ${[...listed, more].join(",")} <text>\`.`;
+    for (const arg of listed) {
       const option = single.find(
         (one) => one.answer === answer && one.arg === arg,
       );

@@ -15,7 +15,12 @@ import {
   type ResultReview,
   reviewResult,
 } from "../review/result.js";
-import type { Answer, HoldOption, ObjectiveState } from "../state.js";
+import {
+  ALL,
+  type Answer,
+  type HoldOption,
+  type ObjectiveState,
+} from "../state.js";
 import { hostGitExit, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { mergeOf } from "./merged.js";
@@ -257,10 +262,7 @@ export const DECIDE_NOTE =
 
 /** What a hold asking for several criteria's decisions says about them. */
 export const DECIDE_ALL_NOTE =
-  "One answer can decide them all on this exact result: `accept all <reason>` when every criterion listed is met, `refuse all <reason>` when none is, or `decide` with one entry per line (or after `;`), each `accept <n>[,<n>...] <reason>` or `refuse <n>[,<n>...] <reason>`, to decide each with its own reason. `accept <n> <reason>` or `refuse <n> <reason>` decides one. Criteria an answer leaves undecided are asked again together, and only they are judged again. Final review, the report and status list each criterion's decision with its reason.";
-
-/** The argument of the answers that decide every criterion a question lists: `accept all`. */
-export const ALL = "all";
+  "One answer can decide them all on this exact result: `accept all <reason>` when every criterion listed is met, `refuse all <reason>` when none is, or `decide` with one entry per line (or after `;`), each `accept <n>[,<n>...] <reason>` or `refuse <n>[,<n>...] <reason>`, to decide each with its own reason. `accept <n> <reason>` or `refuse <n> <reason>` decides one. When an answer refuses none, the criteria it leaves undecided are asked again together, and only they are judged again; a refusal decides this result, and they are judged again on the next one. Final review, the report and status list each criterion's decision with its reason.";
 
 /** The answer that decides several criteria, each with its own reason: `decide <list>`. */
 export const DECIDE = "decide";
@@ -303,7 +305,7 @@ export function wholeOffers(
       answer: DECIDE,
       family: "decide",
       list: true,
-      consequence: `Decides the criteria your text lists, one entry per line (or after \`;\`): \`accept <n>[,<n>...] <reason>\` records them as met by this result, \`refuse <n>[,<n>...] <reason>\` as unmet, ${refuses}. Criteria it leaves out are asked again together.`,
+      consequence: `Decides the criteria your text lists, one entry per line (or after \`;\`): \`accept <n>[,<n>...] <reason>\` records them as met by this result, \`refuse <n>[,<n>...] <reason>\` as unmet, ${refuses}. Criteria it leaves out are asked again together only when it refuses none; a refusal decides this result, and they are judged again on the next one.`,
       needsText: true,
     },
   ];

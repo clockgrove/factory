@@ -14,10 +14,12 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
 import { freezeConfig } from "../dist/providers/selection.js";
+import { LaunchedGroup } from "../dist/sandbox.js";
 
 export const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 export const REPO = "drill/target";
@@ -56,6 +58,60 @@ after(async () => {
   await Promise.all(exits);
   for (const dir of directories) rmSync(dir, { recursive: true, force: true });
 });
+
+/**
+ * Codex's app server, started as Factory starts codex from a private Codex
+ * `home` (its launcher, environment and configuration), and a JSON-RPC
+ * client for it. No model is called unless a turn is started.
+ */
+export function codexAppServer(home, cwd) {
+  const child = spawn(home.launcher, ["app-server"], {
+    cwd,
+    env: home.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const group = new LaunchedGroup(home.pidFile, new AbortController().signal);
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const pending = new Map();
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (message.id === undefined || !pending.has(message.id)) return;
+    const { resolve, reject } = pending.get(message.id);
+    pending.delete(message.id);
+    if (message.error) reject(new Error(JSON.stringify(message.error)));
+    else resolve(message.result);
+  });
+  let next = 0;
+  return {
+    request(method, params) {
+      const id = next++;
+      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        setTimeout(
+          () =>
+            reject(new Error(`${method} timed out: ${stderr.slice(-2000)}`)),
+          120_000,
+        ).unref();
+      });
+    },
+    notify(method) {
+      child.stdin.write(`${JSON.stringify({ method })}\n`);
+    },
+    end() {
+      child.stdin.end();
+      group.end();
+    },
+  };
+}
 
 /** A new directory under tmpdir(), removed when the test file ends. */
 export function tempDir(prefix) {

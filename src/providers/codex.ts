@@ -135,17 +135,22 @@ hooks = false
 
 /**
  * The same configuration for a call that reads a tree itself: only the shell
- * is on, inside the read-only, network-less permission profile below. Codex
- * runs shell calls through its code-mode host, so the shell needs that host.
+ * and view_image are on, inside the read-only, network-less permission
+ * profile below. Codex runs shell calls through its code-mode host, so the
+ * shell needs that host. view_image shows the model an image in the tree, as
+ * Claude's Read and Copilot's view do (#2193); it reads through the same
+ * profile as the shell, so it sees no file the shell can't.
  */
-const READ_SHELL_CONFIG = CODEX_PLANNING_CONFIG.replace(
+const READ_TOOLS_CONFIG = CODEX_PLANNING_CONFIG.replace(
   "shell_tool = false",
   "shell_tool = true",
-).replace("code_mode_host = false", "code_mode_host = true");
+)
+  .replace("view_image = false", "view_image = true")
+  .replace("code_mode_host = false", "code_mode_host = true");
 
 /** Read tools keep provider authentication in the parent, never in tools. */
 const CODEX_TREE_REVIEW_CONFIG = `allow_login_shell = false
-${READ_SHELL_CONFIG}
+${READ_TOOLS_CONFIG}
 [shell_environment_policy]
 inherit = "all"
 ignore_default_excludes = false
@@ -402,9 +407,9 @@ export function codexHomeOf(conversationDir: string): string {
 
 /**
  * A planning call's home with a working directory. `readDir` turns on the
- * read-only shell over that directory alone.
+ * read-only shell and view_image over that directory alone.
  */
-function codexHome(
+export function codexHome(
   readDir: string | undefined,
   root: string | undefined,
 ): {

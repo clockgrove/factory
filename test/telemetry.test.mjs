@@ -775,6 +775,116 @@ test("status --json details each Work Item's attempt, commits, last error, repai
   );
 });
 
+test("diagnostics counts hedges won and lost per role and phase, in the summary and the analysis", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const log = new RunLog(inst.logs, "2026-01-01T00-00-00-000Z-8");
+  const usage = (step, callId, role, phase, fields) =>
+    log.write(72, {
+      step,
+      attemptId: `${step}#1`,
+      event: "model-usage",
+      callId,
+      role,
+      phase,
+      provider: "codex",
+      model: "gpt-6.1-sol",
+      ...fields,
+    });
+  // A diagnosis whose hedge lost, as all ten in Clockgrove #800 did: the
+  // first call answered and the hedge was aborted.
+  usage("item:a:work", "d1", "planner", "diagnosis", {
+    outcome: "done",
+    tokens: { total: 1000 },
+  });
+  usage("item:a:work", "d2", "planner", "diagnosis", {
+    outcome: "error",
+    error: "Error: hedged",
+    hedge: 1,
+    tokens: { total: 400 },
+  });
+  // A result review whose hedge won: it answered, and the stalled first
+  // call was aborted.
+  usage("item:a:review", "r1", "reviewer", "result-review", {
+    outcome: "error",
+    error: "Error: hedged",
+    tokens: { total: 300 },
+  });
+  usage("item:a:review", "r2", "reviewer", "result-review", {
+    outcome: "done",
+    hedge: 1,
+    tokens: { total: 200 },
+  });
+  // Unhedged calls add nothing.
+  usage("item:a:review", "r3", "reviewer", "result-review", {
+    outcome: "done",
+    tokens: { total: 50 },
+  });
+  // A lost hedge aborted before it reported tokens: unknown, not 0.
+  usage("plan:1:1", "g1", "reviewer", "graph-review", {
+    outcome: "done",
+    tokens: { total: 90 },
+  });
+  usage("plan:1:1", "g2", "reviewer", "graph-review", {
+    outcome: "error",
+    error: "Error: hedged",
+    hedge: 1,
+  });
+  const expected = {
+    "planner diagnosis": {
+      hedged: 1,
+      won: 0,
+      lost: 1,
+      tokens: 400,
+      tokensUnknown: 0,
+    },
+    "reviewer graph-review": {
+      hedged: 1,
+      won: 0,
+      lost: 1,
+      tokens: 0,
+      tokensUnknown: 1,
+    },
+    "reviewer result-review": {
+      hedged: 1,
+      won: 1,
+      lost: 0,
+      tokens: 200,
+      tokensUnknown: 0,
+    },
+  };
+  const analysis = JSON.parse(
+    cli(inst, "diagnostics", "72", "--analyze", "--json").out,
+  );
+  assert.deepEqual(analysis.hedges, expected);
+  const text = cli(inst, "diagnostics", "72", "--analyze").out;
+  assert.match(
+    text,
+    /Hedges by role and phase[^\n]*\n {2}planner diagnosis: 1 hedged · 0 won · 1 lost · 400 tokens in hedges\n {2}reviewer graph-review: 1 hedged · 0 won · 1 lost · 0 tokens in hedges \(1 unreported\)\n {2}reviewer result-review: 1 hedged · 1 won · 0 lost · 200 tokens in hedges\n/,
+  );
+  // A filter selects the calls counted.
+  const filtered = JSON.parse(
+    cli(
+      inst,
+      "diagnostics",
+      "72",
+      "--analyze",
+      "--json",
+      "--filter",
+      "role=planner",
+    ).out,
+  );
+  assert.deepEqual(Object.keys(filtered.hedges), ["planner diagnosis"]);
+  const summary = JSON.parse(
+    cli(inst, "diagnostics", "72", "--summary", "--json").out,
+  );
+  assert.deepEqual(summary.hedges, expected);
+  assert.match(
+    cli(inst, "diagnostics", "72", "--summary").out,
+    /reviewer result-review: 1 hedged · 1 won · 0 lost/,
+  );
+});
+
 test("a follow reads new run-log lines in bounded chunks, a line longer than a chunk included, and leaves a line still being written for the next read", () => {
   const logs = tempDir("factory-follow-");
   mkdirSync(join(logs, "7"));

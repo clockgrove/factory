@@ -220,6 +220,8 @@ export interface PlanningFacts {
   packageCommands: string[];
   /** Installation commands that need network and run only in CI. */
   ciOnlyCommands: string[];
+  /** The installation's required final commands (facts.ts `finalCommands`); absent reads as none. */
+  finalCommands?: string[];
   /** `sandbox.network: host`: validation reaches the host's network. */
   hostNetwork?: true;
   /** `sandbox.network` isn't off: Factory resolves an out-of-date lockfile itself (validate.ts). */

@@ -10,6 +10,7 @@ import { localAssetPlace } from "../sandbox.js";
 import {
   type BaseFiles,
   ciOnlyKey,
+  commandRuns,
   commandScope,
   listCommands,
   namedBase,
@@ -47,13 +48,18 @@ type Found = (message: string, itemId?: string) => void;
  * Every deterministic problem with a draft, as findings. Reads the base
  * through `files` (plain `git show base:path`). Empty means the draft goes
  * to review. A finding with kind operator-decision is one only a person can
- * answer; every other finding goes back to the planner.
+ * answer; every other finding goes back to the planner. `accepted` is the
+ * plan an amendment revises, so the proof checks judge only what the
+ * amendment adds or changes; `started` names its items the started-item
+ * rule binds.
  */
 export async function checkPlan(
   draft: Draft,
   facts: PlanningFacts,
   files: BaseFiles,
   previous?: Draft,
+  accepted?: Draft,
+  started?: ReadonlySet<string>,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   const found: Found = (message, itemId) =>
@@ -74,6 +80,8 @@ export async function checkPlan(
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
+  await finalProofFindings(draft, facts, files, found, accepted, started);
+  await qaRequirementFindings(draft, files, found, accepted);
   return findings;
 }
 
@@ -204,6 +212,675 @@ function integratedBaseFindings(
           `Work Item ${item.id} validation runs ${command}, which compares with the plan's base (${named}): integrated commands run on the shared default branch, which includes other Objectives' merges, so a diff from the base counts their changes too, and Factory itself enforces each item's owned paths. Drop the base-relative check and prove the behaviour with a command that exercises it, not the diff`,
           item.id,
         );
+    }
+  }
+}
+
+// ── Final-only proof ────────────────────────────────────────────────────
+
+/** A final or CI-only command and the test files and configurations it runs (facts.ts `commandRuns`). */
+interface Suite {
+  command: string;
+  runs: string[];
+}
+
+/** Files an item owns that a suite runs and nothing of its proves. */
+interface ProofGap {
+  suite: Suite;
+  owned: string[];
+}
+
+/**
+ * final-only proof (#2170): a Work Item that owns, by its exact path, a
+ * test file or runner configuration that a final or CI-only command runs
+ * (facts.ts `commandRuns`) and that none of its own validation commands
+ * names never sees that test's proof in its own validation: its review
+ * judges the item without it, and the test first runs after the item
+ * merged. Live, two items owned the browser test only final validation
+ * ran, and their reviews held twelve times for proof the operator ran by
+ * hand. So the item runs the final command itself. A CI-only command,
+ * which validation never runs, is proved by CI instead: published-ci with
+ * the item as its target, or integrated-ci on a QA item after it.
+ *
+ * An amendment answers for what it changes: an item the accepted plan
+ * has is judged only on the gaps that plan's item lacked, such as a test
+ * an amendment gives it (live, entity-selection was given the browser
+ * test that way). A started item keeps its validation (the started-item
+ * rule), so its finding asks for a new item to take the test instead.
+ */
+async function finalProofFindings(
+  draft: Draft,
+  facts: PlanningFacts,
+  files: BaseFiles,
+  found: Found,
+  accepted?: Draft,
+  started?: ReadonlySet<string>,
+): Promise<void> {
+  const commands = [
+    ...new Set([...(facts.finalCommands ?? []), ...facts.ciOnlyCommands]),
+  ];
+  if (!commands.length) return;
+  const scripts = await files.scripts();
+  const runs = (command: string) => commandRuns(command, files, scripts);
+  const suites: Suite[] = (
+    await Promise.all(
+      commands.map(async (command) => ({ command, runs: await runs(command) })),
+    )
+  ).filter((suite) => suite.runs.length);
+  if (!suites.length) return;
+  const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
+  const gaps = async (item: WorkItem, plan: Draft): Promise<ProofGap[]> => {
+    const ciProved = plan.coverage.some(
+      ({ itemId, proof }) =>
+        (proof?.kind === "published-ci" && proof.targetItem === item.id) ||
+        (proof?.kind === "integrated-ci" &&
+          ancestors(plan.items, itemId).has(item.id)),
+    );
+    const validated = new Set(
+      item.validation.map(({ command }) => ciOnlyKey(command)),
+    );
+    const named = new Set(
+      (
+        await Promise.all(item.validation.map(({ command }) => runs(command)))
+      ).flat(),
+    );
+    const open: ProofGap[] = [];
+    for (const suite of suites) {
+      if (validated.has(ciOnlyKey(suite.command))) continue;
+      const owned = suite.runs.filter(
+        (path) => item.ownedPaths.includes(path) && !named.has(path),
+      );
+      if (!owned.length) continue;
+      // One command that runs them is enough: no second finding for them.
+      for (const path of owned) named.add(path);
+      if (!ciOnly.has(ciOnlyKey(suite.command)) || !ciProved)
+        open.push({ suite, owned });
+    }
+    return open;
+  };
+  const gapKey = (suite: Suite, path: string) =>
+    JSON.stringify([ciOnlyKey(suite.command), path]);
+  const before = new Map(accepted?.items.map((item) => [item.id, item]) ?? []);
+  for (const item of draft.items) {
+    if ((item.kind ?? "work") !== "work") continue;
+    let open = await gaps(item, draft);
+    const old = before.get(item.id);
+    if (old && accepted) {
+      const had = new Set(
+        (await gaps(old, accepted)).flatMap(({ suite, owned }) =>
+          owned.map((path) => gapKey(suite, path)),
+        ),
+      );
+      open = open
+        .map(({ suite, owned }) => ({
+          suite,
+          owned: owned.filter((path) => !had.has(gapKey(suite, path))),
+        }))
+        .filter(({ owned }) => owned.length);
+    }
+    for (const { suite, owned } of open) {
+      const them = owned.length > 1 ? "those files" : "that file";
+      if (ciOnly.has(ciOnlyKey(suite.command)))
+        found(
+          `Work Item ${item.id} owns ${owned.join(", ")}, which only the CI-only command ${suite.command} runs, and validation never runs a CI-only command, so nothing proves the item with ${them}: prove it by CI, with published-ci on the check that runs that command (from a read-only QA item that depends on ${item.id}, targetItem ${item.id}) or integrated-ci on a QA item after it, or validate it with an offline command that names ${them}`,
+          item.id,
+        );
+      else if (started?.has(item.id))
+        found(
+          `Work Item ${item.id} has started, and this amendment gives it ${owned.join(", ")}, which the final command ${suite.command} runs and none of its validation commands names: its review would judge the item without that test's proof, and the started-item rule keeps its validation, so it can't add that command. Leave ${them} out of ${item.id}'s owned paths, and put the change to ${them} in a new Work Item that owns ${them}, depends on ${item.id} and runs \`${suite.command}\` among its validation commands`,
+          item.id,
+        );
+      else
+        found(
+          `Work Item ${item.id} owns ${owned.join(", ")}, which the final command ${suite.command} runs and none of its validation commands names: its review judges the item without that test's proof, which first runs in final validation, after the item merged. Add \`${suite.command}\` to its validation commands (after the install, when it needs one), or validate it with a command that names ${them}`,
+          item.id,
+        );
+    }
+  }
+}
+
+// ── QA requirements ─────────────────────────────────────────────────────
+
+/**
+ * A quoted string in a command, in the program around it (the command, or
+ * a quoted program it runs) with every quoted string's text masked; `host`
+ * is the masked text before that program, when it is a quoted one.
+ */
+interface Quoted {
+  value: string;
+  program: string;
+  start: number;
+  end: number;
+  host?: string;
+}
+
+/** A backslash escape's character; any other escape stays as written, so a regular expression keeps its `\d`. */
+const ESCAPES: Record<string, string> = {
+  n: "\n",
+  t: "\t",
+  '"': '"',
+  "'": "'",
+  "\\": "\\",
+};
+
+/**
+ * The quoted strings of a program, with the program they are in, and the
+ * program itself masked. A quoted string that holds the other quote and a
+ * call is a program itself (the body of `python3 -c '...'` or
+ * `node -e "..."`), so its own strings are read in it instead.
+ */
+function quotedIn(program: string): { masked: string; strings: Quoted[] } {
+  const own: Omit<Quoted, "program">[] = [];
+  const nested: Quoted[] = [];
+  let masked = "";
+  let at = 0;
+  while (at < program.length) {
+    const quote = program[at]!;
+    if (quote !== '"' && quote !== "'") {
+      masked += quote;
+      at += 1;
+      continue;
+    }
+    let end = at + 1;
+    let value = "";
+    while (end < program.length && program[end] !== quote)
+      if (program[end] === "\\" && end + 1 < program.length) {
+        const next = program[end + 1]!;
+        value += ESCAPES[next] ?? `\\${next}`;
+        end += 2;
+      } else {
+        value += program[end];
+        end += 1;
+      }
+    if (end >= program.length) {
+      masked += program.slice(at);
+      break;
+    }
+    const inner = program.slice(at + 1, end);
+    if (inner.includes(quote === '"' ? "'" : '"') && inner.includes("("))
+      nested.push(
+        ...quotedIn(inner).strings.map((entry) => ({ host: masked, ...entry })),
+      );
+    else own.push({ value, start: at, end: end + 1 });
+    masked += `${quote}${"_".repeat(end - at - 1)}${quote}`;
+    at = end + 1;
+  }
+  return {
+    masked,
+    strings: [
+      ...own.map((entry) => ({ ...entry, program: masked })),
+      ...nested,
+    ],
+  };
+}
+
+/** Where one statement of a program ends: shell and script separators, in masked text. */
+const STATEMENT_END = /;|\n|&&|\|\|/g;
+
+/** The statement of `program` (masked) that holds `at`. */
+function statementAt(program: string, at: number): [number, number] {
+  let start = 0;
+  for (const match of program.matchAll(STATEMENT_END)) {
+    if (match.index >= at) return [start, match.index];
+    start = match.index + match[0].length;
+  }
+  return [start, program.length];
+}
+
+/** Every statement of `program` (masked). */
+function statements(program: string): string[] {
+  return program.split(STATEMENT_END);
+}
+
+/** A statement that negates what it tests: `not in`, `!s.includes(...)`, `! grep`, `grep -v`. */
+const NEGATED = /\bnot\b|!(?!=)|\bgrep\b[^|;&]*\s-[A-Za-z]*v|\bnone\s*\(/;
+/** A conditional statement, whose test fails the check only when negated (`if "x" not in s: exit(1)`). */
+const CONDITIONAL = /^\s*(?:if|elif|while|until)\b|^\s*\[\[?\s/;
+/** A string a call prints or fails with: a message, never a requirement. */
+const MESSAGE =
+  /(?:\b(?:print|exit|fail|die|warn|log|error|info|debug|write|SystemExit)|Error|Exception)\s*\(\s*$|\b(?:echo|printf)(?:\s+-\w+)*\s+$|\bthrow\s+$/;
+/** An assertion whose argument after the condition, when last, is its message: `assert(c, "m")`, `assert.ok(c, "m")`, `console.assert(c, "m")`. */
+const ASSERT_CALL = /^(?:console\.)?assert(?:\.ok)?$/;
+/** An assertion method whose argument after the two compared, when last, is its message: `assert.equal(a, b, "m")`. */
+const ASSERT_METHOD = /^assert(?:\.\w+)+$/;
+/** A module a program loads: `require("fs")`, `import("x")`, `from "x"`. */
+const MODULE = /\b(?:require|import)\s*\(\s*$|\b(?:from|import)\s+$/;
+/** A string a check can't look for literally: a regular expression, an encoding name. */
+const NOT_LITERAL =
+  /^\^|[^\\]\$$|\\[dDsSwWbB]|\.\*|\.\+|\[[^\]]*\]|\(\?|^(?:utf-?(?:8|16)|ascii|latin-?1|binary|base64|hex)$/i;
+/** A string that is an expression, not text: a jq filter's `.name == "x"`. */
+const EXPRESSION = /\s(?:===?|!==?|<=|>=)\s/;
+/** A string a call takes as a regular expression: Python's `re`, JavaScript's `RegExp` and string `match`/`search`. */
+const REGEX_CALL =
+  /\bre\.(?:search|match|fullmatch|findall|finditer|compile|sub|subn|split)\s*\(\s*$|\bRegExp\s*\(\s*$|\.(?:match|matchAll|search)\s*\(\s*$/;
+/** A command whose quoted argument is a query, not text: jq and its kin. */
+const QUERY_TOOL =
+  /^\s*(?:(?:if|elif|while|until|then|do|!)\s+)*(?:\w+=\S*\s+)*(?:jq|yq|gojq|jaq|xq|tomlq|dasel)\b/;
+/** grep (or ripgrep) at the head of a pipeline command. */
+const GREP_COMMAND =
+  /^\s*(?:(?:if|elif|while|until|then|do|!)\s+)*(?:\w+=\S*\s+)*(?:command\s+)?(grep|egrep|fgrep|rg)\b/;
+/** A command that compares without case: `grep -i`, `.lower()`, `toLowerCase()`, `re.I`, a RegExp's `i` flag. */
+const CASELESS =
+  /\.(?:lower|casefold|upper)\s*\(|\bto(?:Locale)?(?:Lower|Upper)Case\s*\(|\bre\.(?:I|IGNORECASE)\b|\(\?[a-z]*i|\b(?:grep|egrep|fgrep)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--ignore-case\b)|\brg\b[^|;&\n]*\s(?:-[A-Za-z]*[iS]|--(?:ignore|smart)-case\b)|\bRegExp\s*\([^)]*,\s*["'`][a-z]*i/;
+/** After a statement: `&& exit 1` (or `&& false`), which fails the check when the statement passes. */
+const FAILS_AFTER =
+  /^&&\s*\{?\s*(?:(?:echo|printf)\b(?:[^;\n&|]|>&\d)*(?:;|&&)\s*)?(?:exit\s+[1-9]|false\b|return\s+[1-9])/;
+/** A data or document file, which a QA check reads for text; code it runs is never one. */
+const DATA_FILE =
+  /\.(?:md|mdx|markdown|txt|rst|adoc|json|ya?ml|toml|csv|tsv|html?|xml|ini|cfg)$/i;
+
+/** Whether a statement requires what it tests to be there. */
+function positive(statement: string): boolean {
+  return CONDITIONAL.test(statement)
+    ? NEGATED.test(statement)
+    : !NEGATED.test(statement);
+}
+
+/** Text a QA check requires of a file: as shown to the planner, and whether a text holds it. */
+interface Requirement {
+  text: string;
+  holds: (text: string) => boolean;
+}
+
+/** How a string is matched: as text, or as grep's basic or an extended regular expression (Python's and JavaScript's are extended). */
+type Dialect = "fixed" | "basic" | "extended";
+
+/** The masked pipeline command (one of `a | b`) of a program that holds `start`, within the statement `[from, to)`, and where it begins. */
+function commandAt(
+  program: string,
+  from: number,
+  to: number,
+  start: number,
+): { command: string; at: number } {
+  const head = program.lastIndexOf("|", start);
+  const tail = program.indexOf("|", start);
+  const at = head >= from ? head + 1 : from;
+  return {
+    command: program.slice(at, tail >= 0 && tail < to ? tail : to),
+    at,
+  };
+}
+
+/**
+ * The dialect of grep's pattern, when the string at `at` in `command` is
+ * it; "other" when the command is grep and the string is anything else (a
+ * file, or one of several patterns, which grep takes as alternatives);
+ * undefined when the command isn't grep.
+ */
+function grepDialect(
+  command: string,
+  at: number,
+): Dialect | "other" | undefined {
+  const tool = command.match(GREP_COMMAND);
+  if (!tool) return undefined;
+  const rest = command.slice(tool[0].length);
+  const words = command.slice(tool[0].length, at).trim().split(/\s+/);
+  const options = rest.split(/\s+/).filter((word) => word.startsWith("-"));
+  if (
+    words.some((word) => word && !word.startsWith("-")) ||
+    options.some((option) =>
+      /^-[A-Za-z]*[ef]|^--(?:regexp|file)\b/.test(option),
+    )
+  )
+    return "other";
+  const short = options
+    .filter((option) => /^-[A-Za-z]+$/.test(option))
+    .join("");
+  const name = tool[1]!;
+  if (
+    name === "fgrep" ||
+    /F/.test(short) ||
+    options.includes("--fixed-strings")
+  )
+    return "fixed";
+  return name === "egrep" ||
+    name === "rg" ||
+    /[EP]/.test(short) ||
+    options.some((option) => /^--(?:extended|perl)-regexp\b/.test(option))
+    ? "extended"
+    : "basic";
+}
+
+/** A character as a regular expression that matches only it. */
+const literalSource = (character: string) =>
+  character.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/**
+ * A regular expression that only spells out text, escaped punctuation and
+ * `.` for any character, as that text (`### 1\.1` as `### 1.1`) and a
+ * source that matches what it matches; undefined for one that uses
+ * anything more (alternation, groups, classes, quantifiers, anchors or
+ * class escapes such as `\d`), which no acceptance quotes as text.
+ */
+function patternText(
+  pattern: string,
+  dialect: "basic" | "extended",
+): { text: string; source: string } | undefined {
+  let text = "";
+  let source = "";
+  for (let at = 0; at < pattern.length; at += 1) {
+    const character = pattern[at]!;
+    if (character === "\\") {
+      const next = pattern[at + 1];
+      // grep's basic expressions spell these operators escaped.
+      if (
+        next === undefined ||
+        /[A-Za-z0-9]/.test(next) ||
+        (dialect === "basic" && "(){}|+?<>`'".includes(next))
+      )
+        return undefined;
+      text += next;
+      source += literalSource(next);
+      at += 1;
+    } else if (
+      "[]*^$".includes(character) ||
+      (dialect === "extended" && "(){}|+?".includes(character))
+    )
+      return undefined;
+    else if (character === ".") {
+      text += ".";
+      source += "[^\\n]";
+    } else {
+      text += character;
+      source += literalSource(character);
+    }
+  }
+  return { text, source };
+}
+
+/**
+ * The call a string is a direct argument of, in masked program text: its
+ * callee, the argument's index, whether it is the last one, and where the
+ * call closes; undefined when it is no call's argument.
+ */
+function callAround(
+  program: string,
+  start: number,
+  end: number,
+): { callee: string; index: number; last: boolean; close: number } | undefined {
+  let depth = 0;
+  let index = 0;
+  let open = -1;
+  for (let at = start - 1; at >= 0 && open < 0; at -= 1) {
+    const character = program[at]!;
+    if (")]}".includes(character)) depth += 1;
+    else if ("([{".includes(character)) {
+      if (depth > 0) depth -= 1;
+      else if (character === "(") open = at;
+      else return undefined;
+    } else if (character === "," && depth === 0) index += 1;
+  }
+  if (open < 0) return undefined;
+  const callee = program
+    .slice(0, open)
+    .match(/([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*$/)?.[1]
+    ?.replace(/\s+/g, "");
+  if (!callee) return undefined;
+  depth = 0;
+  let last = true;
+  for (let at = end; at < program.length; at += 1) {
+    const character = program[at]!;
+    if ("([{".includes(character)) depth += 1;
+    else if (")]}".includes(character)) {
+      if (depth === 0) return { callee, index, last, close: at };
+      depth -= 1;
+    } else if (
+      character === "," &&
+      depth === 0 &&
+      !program
+        .slice(at + 1)
+        .trimStart()
+        .startsWith(")")
+    )
+      last = false;
+  }
+  return undefined;
+}
+
+/**
+ * What a count or index lookup compared after it tests for its string:
+ * presence (`count("x") > 0`, `indexOf("x") !== -1`), absence
+ * (`count("x") == 0`, `find("x") == -1`), or neither, when the comparison
+ * says nothing either way.
+ */
+function lookupPolarity(
+  method: string,
+  after: string,
+): "present" | "absent" | "unclear" {
+  const compared = after.match(/^\s*(===?|!==?|<=|>=|<|>)\s*(-?\d+)(?![\d.])/);
+  if (method === "count") {
+    if (!compared)
+      // Used as a truth value, a count is there when it is not zero.
+      return /^\s*(?:[)\],:;]|and\b|or\b|&&|\|\||$)/.test(after)
+        ? "present"
+        : "unclear";
+    const [, operator, number] = compared;
+    const value = Number(number);
+    if (
+      ((operator === "==" || operator === "===" || operator === "<=") &&
+        value === 0) ||
+      (operator === "<" && value === 1)
+    )
+      return "absent";
+    if (
+      (operator === ">" && value >= 0) ||
+      (operator === ">=" && value >= 1) ||
+      ((operator === "==" || operator === "===") && value >= 1) ||
+      ((operator === "!=" || operator === "!==") && value === 0)
+    )
+      return "present";
+    return "unclear";
+  }
+  if (!compared) return "unclear";
+  const [, operator, number] = compared;
+  const value = Number(number);
+  if (
+    ((operator === "==" || operator === "===") && value === -1) ||
+    (operator === "<" && value === 0)
+  )
+    return "absent";
+  if (
+    ((operator === "!=" || operator === "!==") && value === -1) ||
+    (operator === ">=" && value === 0) ||
+    (operator === ">" && value === -1)
+  )
+    return "present";
+  return "unclear";
+}
+
+/** The last pipeline command of masked text: what a quoted program in it is given to. */
+function lastCommand(text: string): string {
+  return text.split(/;|\n|&&|\|\||\|/).at(-1) ?? "";
+}
+
+/**
+ * The text a quoted string requires of the file a check reads, or
+ * undefined when it requires none: a path, a message, a module, a
+ * prefixed or keyword string, a query tool's filter, an expression, a
+ * regular expression that is more than text, an encoding, or a string in
+ * a statement that tests for its absence, or whose polarity isn't plain.
+ * A grep pattern without -F, or a string a call takes as a regular
+ * expression, is matched as one; a check that ignores case (`caseless`)
+ * is matched without it. A string assigned to a list is judged by the
+ * statements that use the list.
+ */
+function requirement(
+  { value, program, start, end, host }: Quoted,
+  caseless: boolean,
+): Requirement | undefined {
+  const before = program.slice(0, start);
+  if (
+    !/[A-Za-z0-9]/.test(value) ||
+    value.trim().length < 2 ||
+    EXPRESSION.test(value) ||
+    (/^\S+$/.test(value) &&
+      (value.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(value))) ||
+    /(?:^|[^\w])[rbfu]{1,2}$/i.test(before) ||
+    /\w=$/.test(before) ||
+    MESSAGE.test(before) ||
+    MODULE.test(before)
+  )
+    return undefined;
+  const [from, to] = statementAt(program, start);
+  const statement = program.slice(from, to);
+  const { command, at } = commandAt(program, from, to, start);
+  if (
+    QUERY_TOOL.test(command) ||
+    (host !== undefined && QUERY_TOOL.test(lastCommand(host)))
+  )
+    return undefined;
+  const grep = grepDialect(command, start - at);
+  if (grep === "other") return undefined;
+  const dialect: Dialect =
+    grep ?? (REGEX_CALL.test(before) ? "extended" : "fixed");
+  // `assert condition, "message"`: the string after the condition.
+  if (
+    /^\s*assert\b/.test(statement) &&
+    /,\s*$/.test(program.slice(from, start)) &&
+    !program.slice(end, to).trim()
+  )
+    return undefined;
+  const call = callAround(program, start, end);
+  if (
+    call?.last &&
+    ((ASSERT_CALL.test(call.callee) && call.index >= 1) ||
+      (ASSERT_METHOD.test(call.callee) && call.index >= 2))
+  )
+    return undefined;
+  // A RegExp's flags.
+  if (call && /(?:^|\.)RegExp$/.test(call.callee) && call.index >= 1)
+    return undefined;
+  let wanted: boolean;
+  const list = statement.match(
+    /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_]\w*)\s*=\s*[([{]/,
+  );
+  if (list) {
+    const uses = statements(program).filter(
+      (other) =>
+        other !== statement && new RegExp(`\\b${list[1]}\\b`).test(other),
+    );
+    wanted = uses.length ? uses.every(positive) : positive(statement);
+  } else wanted = positive(statement);
+  // `grep -q X file && exit 1`: the statement passing fails the check.
+  if (FAILS_AFTER.test(program.slice(to))) wanted = !wanted;
+  const method = call?.callee.match(
+    /\.(count|indexOf|lastIndexOf|find|rfind|search)$/,
+  )?.[1];
+  if (call && method && call.index === 0) {
+    const polarity = lookupPolarity(method, program.slice(call.close + 1, to));
+    if (polarity === "unclear") return undefined;
+    if (polarity === "absent") wanted = !wanted;
+  }
+  if (!wanted) return undefined;
+  if (dialect === "fixed") {
+    if (NOT_LITERAL.test(value)) return undefined;
+    const needle = caseless ? value.toLowerCase() : value;
+    return {
+      text: value,
+      holds: (text) => (caseless ? text.toLowerCase() : text).includes(needle),
+    };
+  }
+  const pattern = patternText(value, dialect);
+  if (!pattern) return undefined;
+  const expression = new RegExp(pattern.source, caseless ? "i" : "");
+  return { text: pattern.text, holds: (text) => expression.test(text) };
+}
+
+/**
+ * qa-requirements (#2170): a read-only QA item changes nothing, so every
+ * string its command requires of a file it reads must be there already at
+ * the base, or be written by a Work Item it depends on that owns the file
+ * and whose acceptance names the file and quotes the string. Live, a QA
+ * check required "#817" in the Wave 4 plan's §1.1, which no item was
+ * asked to write: QA refused the integrated result, and the operator
+ * fixed the plan by hand. Read only for the data and document files the
+ * command names that the base tracks or a Work Item before it owns, and
+ * only the strings it tests for (`requirement`); a command that runs a script
+ * or a package command names none.
+ */
+async function qaRequirementFindings(
+  draft: Draft,
+  files: BaseFiles,
+  found: Found,
+  accepted?: Draft,
+): Promise<void> {
+  const { items } = draft;
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const tracked = new Set(await files.paths());
+  for (const qa of items) {
+    if (qa.kind !== "qa") continue;
+    const kept = accepted?.items.find((item) => item.id === qa.id);
+    if (
+      kept &&
+      JSON.stringify(kept.validation) === JSON.stringify(qa.validation)
+    )
+      continue;
+    const writers = [...ancestors(items, qa.id)]
+      .map((id) => byId.get(id)!)
+      .filter((item) => (item.kind ?? "work") === "work");
+    for (const { command } of qa.validation) {
+      const { masked, strings } = quotedIn(command);
+      const named = [
+        ...new Set(
+          [
+            ...strings.map(({ value }) => value),
+            ...masked.split(/[\s;&|()<>]+/),
+          ]
+            .map((word) => word.replace(/^\.\//, ""))
+            .filter(
+              (path) =>
+                validPath(path) &&
+                DATA_FILE.test(path) &&
+                (tracked.has(path) ||
+                  writers.some((item) => ownsPath(path, item.ownedPaths))),
+            ),
+        ),
+      ];
+      if (!named.length) continue;
+      const texts = await Promise.all(
+        named.map(async (path) => (await files.text(path)) ?? ""),
+      );
+      const asked = ({ holds }: Requirement) =>
+        writers.some((item) =>
+          named.some(
+            (path) =>
+              ownsPath(path, item.ownedPaths) &&
+              item.acceptance.some(
+                (entry) =>
+                  holds(entry) &&
+                  (entry.includes(path) ||
+                    entry.includes(path.slice(path.lastIndexOf("/") + 1))),
+              ),
+          ),
+        );
+      const caseless = CASELESS.test(command);
+      const missing = [
+        ...new Set(
+          strings
+            .flatMap((quoted) => requirement(quoted, caseless) ?? [])
+            .filter(
+              (wanted) =>
+                !texts.some((text) => wanted.holds(text)) && !asked(wanted),
+            )
+            .map(({ text }) => text),
+        ),
+      ];
+      if (!missing.length) continue;
+      const owners = writers.filter((item) =>
+        named.some((path) => ownsPath(path, item.ownedPaths)),
+      );
+      const file =
+        named.find((path) =>
+          owners.some((item) => ownsPath(path, item.ownedPaths)),
+        ) ?? named[0]!;
+      const shown = missing
+        .slice(0, MAX_DIAGNOSTIC_HEADINGS)
+        .map(diagnosticValue);
+      const more = missing.length - shown.length;
+      found(
+        `QA item ${qa.id} validation runs a check that requires ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""} in ${named.join(" or ")}, which the base lacks, and no Work Item ${qa.id} depends on is asked to write ${missing.length > 1 ? "them" : "it"}: a read-only QA item changes nothing, so the check fails on the integrated result. Give ${owners.length ? `the Work Item that owns ${file} (${owners.map((item) => item.id).join(" or ")})` : `a Work Item ${qa.id} depends on, owning ${file},`} an acceptance entry that names ${file} and quotes ${missing.length > 1 ? "each string" : "the string"}, or drop the requirement from the check`,
+        qa.id,
+      );
     }
   }
 }

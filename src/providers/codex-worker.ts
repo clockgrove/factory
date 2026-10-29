@@ -531,6 +531,10 @@ export class CodexWorker implements Worker {
     this.model = options.model;
   }
 
+  get validation(): SelfValidateOptions | undefined {
+    return this.options.validation;
+  }
+
   async run(input: WorkerInput): Promise<WorkerResult> {
     try {
       return await this.once(input);

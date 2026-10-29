@@ -8,6 +8,7 @@
 // workers, since each call started fresh.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -103,6 +104,20 @@ function diagnose(repo, model, fields = {}) {
 const headings = (prompt) =>
   prompt.split("\n\n").map((part) => part.split("\n", 1)[0]);
 
+/** A paragraph's content digest, as its heading carries it. */
+const digest = (text) =>
+  createHash("sha256").update(text).digest("hex").slice(0, 12);
+
+/** The paragraph names a continued turn's manifest lists as gone. */
+const gone = (sent) =>
+  [
+    ...(
+      /No longer part of the request, so disregard them: (.*)\.\n/.exec(
+        sent,
+      )?.[1] ?? ""
+    ).matchAll(/"((?:[^"\\]|\\.)*)"/g),
+  ].map((match) => JSON.parse(`"${match[1]}"`));
+
 // --- 1. Carry operator answers forward ----------------------------------
 
 const drift =
@@ -160,12 +175,13 @@ test("an operator's answer to another Work Item's diagnosis question reaches the
   const parts = prompt.split("\n\n");
   const at = (heading) => parts.findIndex((part) => part.startsWith(heading));
   const answers = parts[at("The operator's answers")];
+  const json = JSON.stringify({ operatorAnswers: carried });
   assert.equal(
     answers,
-    `The operator's answers to other Work Items' questions (1):\n${JSON.stringify({ operatorAnswers: carried })}`,
+    `The operator's answers to other Work Items' questions, 1 (${digest(json)}):\n${json}`,
   );
   // Objective-wide, so before the Work Item and its failure.
-  assert.ok(at("The operator's answers") < at("Work Item a:"));
+  assert.ok(at("The operator's answers") < at("Work Item a ("));
   for (const rule of [
     "operatorAnswers, when present, are the operator's answers to earlier diagnosis questions of this Objective's other Work Items, each with the failure it answered",
     "When one settles this failure, decide from it instead of asking the operator again",
@@ -237,7 +253,7 @@ test("an operator decision without a question is refused and asked again: Factor
   assert.equal(model.asked.length, 2);
   assert.match(
     model.asked[1].prompt,
-    /\n\nRejected answer:\nYour previous answer was rejected: an operator decision needs a question that names the failure \(the failing command, check or criterion, and what it reported\) and the decision it needs from the operator\. Answer again\.$/,
+    /\n\nRejected answer 1 of 2 \([0-9a-f]{12}\):\nYour previous answer was rejected: an operator decision needs a question that names the failure \(the failing command, check or criterion, and what it reported\) and the decision it needs from the operator\. Answer again\.$/,
   );
   assert.deepEqual(
     logged.filter((event) => event.event === "diagnosis-rejected").length,
@@ -260,28 +276,35 @@ test("an operator decision without a question is refused and asked again: Factor
 
 // --- 3. Escalate unchanged repeats ---------------------------------------
 
+/** A correction repair 1 ran, saved as repairContext stamps it. */
 const formatted = {
   source: "diagnosis",
   failure: "npm test failed: sum is 3",
   diagnosis: "The formatter rewrites src/a.js.",
   path: "src/a.js",
   correction: "Format src/a.js with two-space indentation.",
+  repair: 1,
 };
 
 test("a failure that repeats unchanged after its last correction is escalated, never repaired again (#2173)", async () => {
+  // Repair 2 diagnoses what repair 1's attempt, which ran the correction, left.
   assert.equal(
-    unchangedFailure("npm test failed: sum is 3", [formatted]),
+    unchangedFailure("npm test failed: sum is 3", [formatted], 2),
     true,
   );
   // Only the last correction counts: one in between moved the failure.
   assert.equal(
-    unchangedFailure("npm test failed: sum is 3", [
-      formatted,
-      { ...formatted, failure: "npm run lint: 2 errors" },
-    ]),
+    unchangedFailure(
+      "npm test failed: sum is 3",
+      [
+        formatted,
+        { ...formatted, failure: "npm run lint: 2 errors", repair: 2 },
+      ],
+      3,
+    ),
     false,
   );
-  assert.equal(unchangedFailure("npm test failed: sum is 3", []), false);
+  assert.equal(unchangedFailure("npm test failed: sum is 3", [], 2), false);
 
   // Live (#800): the formatter's change repeated unchanged, and the
   // diagnosis chose another repair of it.
@@ -293,6 +316,7 @@ test("a failure that repeats unchanged after its last correction is escalated, n
   );
   const { result, logged } = diagnose(checkout(), model, {
     prior: [formatted],
+    repair: 2,
   });
   assert.deepEqual(await result, { kind: "question", question });
   assert.equal(model.asked.length, 2);
@@ -313,8 +337,10 @@ test("a failure that repeats unchanged after its last correction is escalated, n
 
   // A diagnosis that keeps choosing repair asks, naming what was tried.
   const stubborn = planner(repair("Format it again, harder."));
-  const held = await diagnose(checkout(), stubborn, { prior: [formatted] })
-    .result;
+  const held = await diagnose(checkout(), stubborn, {
+    prior: [formatted],
+    repair: 2,
+  }).result;
   assert.equal(held.kind, "question");
   assert.equal(stubborn.asked.length, 3);
   assert.match(
@@ -331,9 +357,65 @@ test("a failure that repeats unchanged after its last correction is escalated, n
   const moved = planner(repair("Fix the sum."));
   const fixed = await diagnose(checkout(), moved, {
     prior: [{ ...formatted, failure: "npm run lint: 2 errors" }],
+    repair: 2,
   }).result;
   assert.equal(fixed.kind, "correction");
   assert.doesNotMatch(moved.asked[0].prompt, /"failureRepeatedUnchanged"/);
+});
+
+test("a failure that comes back after an attempt that ran no correction (a conflict replay, an amended attempt) is repaired, not escalated (#2173)", async () => {
+  // Repair 1 ran the correction and its result passed; repair 2 was a
+  // conflict replay (or an amended attempt), which adds no correction, and
+  // its result brought the same failure back: the correction is not the
+  // one that left it.
+  assert.equal(
+    unchangedFailure("npm test failed: sum is 3", [formatted], 3),
+    false,
+  );
+  const model = planner(
+    repair("Reapply the numeric value of a on top of the new base's change."),
+  );
+  const { result, logged } = diagnose(checkout(), model, {
+    prior: [formatted],
+    repair: 3,
+  });
+  const fixed = await result;
+  assert.equal(fixed.kind, "correction");
+  assert.equal(
+    fixed.correction.correction,
+    "Reapply the numeric value of a on top of the new base's change.",
+  );
+  assert.equal(model.asked.length, 1);
+  assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
+  assert.deepEqual(
+    logged.filter((event) => event.event === "diagnosis-rejected"),
+    [],
+  );
+  // The same correction again is still refused as a repeat.
+  const again = planner(repair(formatted.correction));
+  const asked = await diagnose(checkout(), again, {
+    prior: [formatted],
+    repair: 3,
+  }).result;
+  assert.equal(asked.kind, "question");
+  assert.match(
+    again.asked[1].prompt,
+    /that correction already failed for this same failure/,
+  );
+
+  // A correction saved before corrections carried their repair (0.5.8
+  // state) is never taken as the failed attempt's.
+  const unstamped = { ...formatted };
+  delete unstamped.repair;
+  assert.equal(
+    unchangedFailure("npm test failed: sum is 3", [unstamped], 2),
+    false,
+  );
+  // Nor is any without the repair being diagnosed.
+  assert.equal(
+    unchangedFailure("npm test failed: sum is 3", [formatted], undefined),
+    false,
+  );
 });
 
 // --- 4. Stable prompt prefix, and a conversation that caches ------------
@@ -383,19 +465,27 @@ test("the diagnosis request puts its stable parts first and continues the item's
 
   // Instructions, then the Objective's parts, the item's, and the attempt's.
   const [first, again] = model.sent;
-  assert.deepEqual(headings(first.prompt).slice(1), [
-    "The Objective's sources:",
-    "The plan's ownership:",
-    "Work Item a:",
-    `The failed result (${repo.commit.slice(0, 12)}):`,
-    "The corrections already tried (0):",
-    headings(first.prompt)[6],
-    headings(first.prompt)[7],
-  ]);
-  assert.match(headings(first.prompt)[6], /^The failure \([0-9a-f]{12}\):$/);
-  assert.match(
-    headings(first.prompt)[7],
-    /^Candidate file src\/a\.js \([0-9a-f]{12}\):$/,
+  // Each named by its part and its content's digest.
+  const named = [
+    "The Objective's sources",
+    "The plan's ownership",
+    "Work Item a",
+    `The failed result ${repo.commit.slice(0, 12)}`,
+    "The corrections already tried, 0",
+    "The failure",
+    "Candidate file src/a.js",
+  ];
+  const listed = headings(first.prompt).slice(1);
+  assert.equal(listed.length, named.length, listed.join("\n"));
+  named.forEach((name, n) => {
+    assert.ok(listed[n].startsWith(`${name} (`), listed[n]);
+    assert.match(listed[n].slice(name.length), /^ \([0-9a-f]{12}\):$/);
+  });
+  // The digest is of the paragraph's content.
+  const [, sources] = first.prompt.split("\n\n");
+  assert.equal(
+    sources.split("\n", 1)[0],
+    `The Objective's sources (${digest(sources.slice(sources.indexOf("\n") + 1))}):`,
   );
   assert.ok(first.prompt.startsWith("Diagnose this failed Work Item"));
   assert.equal(first.resumed, false);
@@ -403,7 +493,10 @@ test("the diagnosis request puts its stable parts first and continues the item's
 
   // The re-ask continues it: the rejection is new, the sources are not.
   assert.equal(again.resumed, true);
-  assert.ok(again.sent.includes("Rejected answer:\nYour previous answer"));
+  assert.match(
+    again.sent,
+    /Rejected answer 1 of 2 \([0-9a-f]{12}\):\nYour previous answer/,
+  );
   assert.ok(!again.sent.includes("Stable source text."));
   assert.ok(!again.sent.includes("Diagnose this failed Work Item"));
   assert.ok(again.sent.length * 10 < again.prompt.length);
@@ -429,9 +522,13 @@ test("the diagnosis request puts its stable parts first and continues the item's
   assert.ok(!turn.sent.includes("Stable source text."));
   assert.ok(!turn.sent.includes('"planOwnership"'));
   // The rejection and the old failure left the request, by name.
-  assert.match(
+  assert.ok(
+    gone(turn.sent).some((name) => /^Rejected answer 1 of 2 \(/.test(name)),
     turn.sent,
-    /No longer part of the request, so disregard them: .*"Rejected answer:"/,
+  );
+  assert.ok(
+    gone(turn.sent).some((name) => name.startsWith("The failure (")),
+    turn.sent,
   );
 
   // Another item's request shares the same instructions and Objective parts.
@@ -454,4 +551,107 @@ test("the diagnosis request puts its stable parts first and continues the item's
   const theirs = peer.asked[0].prompt.split("\n\n");
   assert.equal(theirs[0], mine[0]);
   assert.equal(theirs[1], mine[1]);
+});
+
+/** A new retained diagnosis conversation for item `a`. */
+const session = () => ({
+  dir: join(tempDir("factory-diagnosis-session-"), "diagnosis-a"),
+  scope: "scope",
+  policy: DEFAULT_SESSIONS,
+});
+
+/** The heading of `prompt`'s paragraph that starts with `start`. */
+const headingOf = (prompt, start) =>
+  headings(prompt).find((heading) => heading.startsWith(start));
+
+test("each re-ask's rejection is its own named paragraph: a changed one is never disregarded by its own name, and a repeated one continues the conversation (#2173)", async () => {
+  const question =
+    "npm test fails with sum is 3: should sum round half up, as the sources' example shows, or truncate?";
+  // Rejected for two different reasons, then answered.
+  const changed = conversing(
+    answer({}),
+    answer({
+      decision: "repair",
+      diagnosis: "b is wrong.",
+      path: "src/b.js",
+      correction: "Change b.",
+    }),
+    answer({ question }),
+  );
+  assert.deepEqual(
+    await diagnose(checkout(), changed, { conversation: session() }).result,
+    { kind: "question", question },
+  );
+  const [, second, third] = changed.sent;
+  assert.equal(second.resumed, true);
+  assert.equal(third.resumed, true);
+  const current = headingOf(third.prompt, "Rejected answer");
+  assert.match(current, /^Rejected answer 2 of 2 \([0-9a-f]{12}\):$/);
+  assert.ok(
+    third.sent.includes(
+      `${current}\nYour previous answer was rejected: a repair's path must name one file the Work Item owns`,
+    ),
+  );
+  // The earlier rejection is gone by its own name, never by the current one's.
+  assert.deepEqual(gone(third.sent), [
+    headingOf(second.prompt, "Rejected answer"),
+  ]);
+  assert.ok(!gone(third.sent).includes(current));
+
+  // Rejected twice for the same reason: the third call still continues,
+  // sending only the new rejection.
+  const silent = conversing(answer({}));
+  const held = await diagnose(checkout(), silent, { conversation: session() })
+    .result;
+  assert.equal(held.kind, "question");
+  const [, again, last] = silent.sent;
+  assert.equal(again.resumed, true);
+  assert.equal(last.resumed, true);
+  assert.notEqual(last.prompt, again.prompt);
+  assert.ok(last.sent.length * 10 < last.prompt.length);
+  assert.match(last.sent, /\nRejected answer 2 of 2 \([0-9a-f]{12}\):\n/);
+  assert.ok(
+    !gone(last.sent).includes(headingOf(last.prompt, "Rejected answer")),
+  );
+});
+
+test("carried answers and tried corrections that change at the same count are new paragraphs by name, never disregarded (#2173)", async () => {
+  const repo = checkout();
+  const question =
+    "npm test fails with sum is 3: should sum round half up, as the sources' example shows, or truncate?";
+  const conversation = session();
+  const first = conversing(answer({ question }));
+  await diagnose(repo, first, {
+    conversation,
+    prior: [formatted],
+    operatorAnswers: [{ item: "b", failure: "f1", answer: "old answer" }],
+  }).result;
+  // The next diagnosis: one carried answer replaced by another (the bound
+  // evicted it, or its item's facts were cleared), one correction replaced.
+  const next = conversing(answer({ question }));
+  await diagnose(repo, next, {
+    finding: { kind: "failure", detail: "npm test failed: sum is 4" },
+    prior: [{ ...formatted, correction: "Format src/a.js with tabs." }],
+    operatorAnswers: [{ item: "c", failure: "f2", answer: "new answer" }],
+    conversation: {
+      ...session(),
+      dir: conversation.dir,
+      previous: conversation.kept,
+    },
+  }).result;
+  const [turn] = next.sent;
+  assert.equal(turn.resumed, true);
+  assert.ok(turn.sent.includes('"answer":"new answer"'));
+  assert.ok(turn.sent.includes("Format src/a.js with tabs."));
+  const was = gone(turn.sent);
+  for (const start of [
+    "The operator's answers to other Work Items' questions, 1 (",
+    "The corrections already tried, 1 (",
+  ]) {
+    const now = headingOf(turn.prompt, start);
+    const before = headingOf(first.sent[0].prompt, start);
+    assert.ok(now && before && now !== before, `${before} -> ${now}`);
+    assert.ok(was.includes(before), `${before} not gone: ${was.join(" | ")}`);
+    assert.ok(!was.includes(now), `${now} disregarded`);
+  }
 });

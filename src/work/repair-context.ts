@@ -128,6 +128,7 @@ export async function repairContext(
       commit,
       sources,
       prior: applied,
+      repair: history.count,
       ...(answer ? { operatorAnswer: answer } : {}),
       validate,
       memory: () =>
@@ -206,7 +207,10 @@ export async function repairContext(
       diagnosis: {
         repair: history.count,
         context: repairContextValue,
-        applied: [...applied, result.correction],
+        // Stamped with the repair that runs it, so the next diagnosis
+        // knows whether the failure it gets came from this correction's
+        // attempt (repair.ts `unchangedFailure`).
+        applied: [...applied, { ...result.correction, repair: history.count }],
         ...(answered ? { answered: answered.holdId } : {}),
       },
     },
@@ -364,6 +368,7 @@ export function blameOutcome(
       ),
     );
   const work = stepKey(predecessor.id, "work");
+  const repairs = (state.repairs?.[work]?.count ?? 0) + 1;
   const diagnosed = fact(state, "diagnosis", predecessor.id);
   const refused = fact(state, "refused", item.id);
   // The predecessor's correction is kept as diagnosed for its next repair,
@@ -387,9 +392,14 @@ export function blameOutcome(
         ...facts(
           {
             diagnosis: {
-              repair: (state.repairs?.[work]?.count ?? 0) + 1,
+              repair: repairs,
               context,
-              applied: [...(diagnosed?.applied ?? []), blame.correction],
+              // The predecessor's repair `repairs` runs it; this item's
+              // copy below is a blame it never ran, so it has no repair.
+              applied: [
+                ...(diagnosed?.applied ?? []),
+                { ...blame.correction, repair: repairs },
+              ],
             },
           },
           predecessor.id,

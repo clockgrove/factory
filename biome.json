@@ -7,12 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": [
-      "**",
-      "!integration/fixtures",
-      "!integration/objectives",
-      "!bench/results"
-    ]
+    "includes": ["**", "!integration/fixtures", "!integration/objectives"]
   },
   "formatter": {
     "indentStyle": "space"

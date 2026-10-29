@@ -1,7 +1,9 @@
 /**
- * Benchmark definitions (bench/benchmarks/<id>.json, schema in
- * bench/README.md): loaded and checked once, where they enter. Every other
- * bench module trusts what `loadDefinition` returns. A definition names
+ * Benchmark definitions (<benchmarks>/<id>.json, schema in bench/README.md):
+ * loaded and checked once, where they enter. Every other bench module
+ * trusts what `loadDefinition` returns. Definitions live outside the
+ * Factory repository (bench/lib/home.mjs); bench/examples/ has an invented
+ * one. A definition names
  * the work (source repository, base commit, Objective), how the test
  * repository mirrors the source (merge settings, rulesets, variables,
  * workflows kept), how memory is seeded, the Factory settings, the
@@ -10,11 +12,13 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SCRIPTABLE } from "./holds.mjs";
+import { missingDir } from "./home.mjs";
 import { METRICS } from "./metrics.mjs";
 
+/** This directory, bench/: the scripts and the example definition, never a benchmark's data. */
 export const BENCH_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** A definition that doesn't hold: every problem, each with its field. */
@@ -271,11 +275,20 @@ export function definitionProblems(value) {
   return problems;
 }
 
-/** The definition `id` (bench/benchmarks/<id>.json) or the file `path`, checked. */
-export function loadDefinition(idOrPath) {
-  const file = idOrPath.endsWith(".json")
-    ? idOrPath
-    : join(BENCH_DIR, "benchmarks", `${idOrPath}.json`);
+/**
+ * The definition file `path` (any path ending in .json), or `id` in the
+ * definitions directory `benchmarks` (<benchmarks>/<id>.json), checked.
+ */
+export function loadDefinition(idOrPath, benchmarks) {
+  let file = idOrPath;
+  if (!idOrPath.endsWith(".json")) {
+    if (!benchmarks)
+      throw new Error(
+        `Benchmark ${idOrPath}: ${missingDir("benchmarks", "definitions")}`,
+      );
+    file = join(benchmarks, `${idOrPath}.json`);
+  }
+  file = resolve(file);
   const text = readFileSync(file, "utf8");
   let value;
   try {
@@ -287,6 +300,7 @@ export function loadDefinition(idOrPath) {
   if (problems.length) throw new DefinitionError(file, problems);
   return {
     ...value,
+    file,
     digest: createHash("sha256").update(text).digest("hex"),
   };
 }

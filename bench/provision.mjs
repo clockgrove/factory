@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 /**
- * `node bench/provision.mjs --benchmark ID --host FILE --factory PATH [--run-id ID]
+ * `node bench/provision.mjs --benchmark ID|FILE --host FILE --factory PATH [--run-id ID]
  *  [--label TEXT] [--group NAME] [--dry-run]`: set up one benchmark run
  * (bench/lib/provision.mjs) and print its run directory. PATH is an
  * installed Factory CLI (a release) or a Factory checkout with a build (a
- * candidate). --dry-run prints every GitHub, Git and setup action and does
- * none of them. Running it again with the same --run-id carries on.
+ * candidate). A definition given by ID is looked up in --benchmarks DIR, or
+ * benchmarks/ in --bench-home DIR or FACTORY_BENCH_HOME; the run record
+ * keeps the results directory (--results DIR, or the home's results/) that
+ * bench/run.mjs scores into (bench/lib/home.mjs); without one it refuses
+ * before creating anything. --dry-run prints every
+ * GitHub, Git and setup action and does none of them. Running it again
+ * with the same --run-id carries on.
  */
 import { parseArgs } from "node:util";
 import { loadDefinition } from "./lib/definition.mjs";
+import { benchDirs, DIR_OPTIONS, missingDir } from "./lib/home.mjs";
 import {
   loadHost,
   provision,
@@ -18,6 +24,7 @@ import {
 
 const { values } = parseArgs({
   options: {
+    ...DIR_OPTIONS,
     benchmark: { type: "string" },
     host: { type: "string" },
     factory: { type: "string" },
@@ -35,7 +42,21 @@ for (const flag of ["benchmark", "host", "factory"])
     process.exit(64);
   }
 
-const definition = loadDefinition(values.benchmark);
+const dirs = benchDirs(values);
+// A run is never provisioned without a place to be scored into.
+if (!dirs.results) {
+  process.stderr.write(
+    `Where to score the run into: ${missingDir("results", "results")}\n`,
+  );
+  process.exit(64);
+}
+let definition;
+try {
+  definition = loadDefinition(values.benchmark, dirs.benchmarks);
+} catch (error) {
+  process.stderr.write(`${error.message}\n`);
+  process.exit(64);
+}
 const host = loadHost(values.host);
 const factory = resolveFactory(values.factory);
 // A run id is part of a repository name: lowercase, digits and -.
@@ -66,6 +87,7 @@ const record = await provision({
   runId,
   label: values.label ?? `${definition.id} ${runId}, Factory ${build}`,
   group: values.group ?? `Factory ${build}`,
+  resultsDir: dirs.results,
   runner,
 });
 runner.print(

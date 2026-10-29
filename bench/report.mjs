@@ -1,25 +1,34 @@
 #!/usr/bin/env node
 /**
- * Reports from bench/results/<benchmark>/*.json.
+ * Reports from <results>/<benchmark>/*.json.
  *
- *   node bench/report.mjs --benchmark ID [--run RUN_ID] [--out DIR]
+ *   node bench/report.mjs --benchmark ID|FILE [--run RUN_ID] [--out DIR]
  *     Each run's report against the baseline (RUN_ID.html, RUN_ID.md; only
  *     RUN_ID with --run) and the history page (history.html, history.md),
- *     into DIR (default bench/reports/<benchmark>/, not committed).
+ *     into DIR (default reports/<benchmark>/ in the bench home).
  *
- *   node bench/report.mjs compare --benchmark ID --candidate GROUP [--baseline GROUP]
+ *   node bench/report.mjs compare --benchmark ID|FILE --candidate GROUP [--baseline GROUP]
  *     The hill-climb decision for a group of runs against the baseline
  *     group (the definition's, by default): prints it and exits 0 when
  *     accepted, 3 when not.
  *
- * A partial card (a run that hadn't ended when scored) is reported and
- * plotted, marked, but never compared. A card of another scorecard version
- * is left out, with a warning.
+ * The results are --results DIR, or results/ in --bench-home DIR or
+ * FACTORY_BENCH_HOME; a definition given by ID is looked up in --benchmarks
+ * DIR the same way (bench/lib/home.mjs). A partial card (a run that hadn't
+ * ended when scored) is reported and plotted, marked, but never compared. A
+ * card of another scorecard version is left out, with a warning.
  */
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
+import { loadDefinition } from "./lib/definition.mjs";
+import { benchDirs, DIR_OPTIONS, missingDir } from "./lib/home.mjs";
 import {
   value,
   historyMarkdown,
@@ -32,22 +41,38 @@ import { isPartial, SCORECARD_VERSION, verdict } from "./lib/metrics.mjs";
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
+    ...DIR_OPTIONS,
     benchmark: { type: "string" },
     run: { type: "string" },
     out: { type: "string" },
-    results: { type: "string" },
     candidate: { type: "string" },
     baseline: { type: "string" },
   },
 });
-if (!values.benchmark) {
-  process.stderr.write(
-    "--benchmark is required; see the header of bench/report.mjs\n",
-  );
+const fail = (message) => {
+  process.stderr.write(`${message}\nSee the header of bench/report.mjs.\n`);
   process.exit(64);
+};
+if (!values.benchmark) fail("--benchmark is required");
+const dirs = benchDirs(values);
+if (!dirs.results)
+  fail(`Where the scorecards are: ${missingDir("results", "results")}`);
+let definition;
+try {
+  definition = loadDefinition(values.benchmark, dirs.benchmarks);
+} catch (error) {
+  fail(error.message);
 }
-const definition = loadDefinition(values.benchmark);
-const resultsDir = values.results ?? join(BENCH_DIR, "results", definition.id);
+const comparing = positionals[0] === "compare";
+if (!comparing && !values.out && !dirs.reports)
+  fail(
+    "Where to write the reports: give --out DIR, or --bench-home DIR or FACTORY_BENCH_HOME (reports go to its reports/<benchmark>/).",
+  );
+const resultsDir = join(dirs.results, definition.id);
+if (!existsSync(resultsDir))
+  fail(
+    `No scorecards of ${definition.id}: ${resultsDir} does not exist. Score a run into ${dirs.results} with bench/score.mjs first, or give the results directory that has them.`,
+  );
 const warn = (text) => process.stderr.write(`Warning: ${text}\n`);
 const cards = readdirSync(resultsDir)
   .filter((name) => name.endsWith(".json"))
@@ -64,7 +89,7 @@ const cards = readdirSync(resultsDir)
   })
   .map(([, card]) => card);
 
-if (positionals[0] === "compare") {
+if (comparing) {
   const baselineGroup = values.baseline ?? definition.baseline;
   const ended = (group) =>
     cards.filter((c) => {
@@ -104,7 +129,7 @@ if (positionals[0] === "compare") {
   process.exit(decision.accept ? 0 : 3);
 }
 
-const out = values.out ?? join(BENCH_DIR, "reports", definition.id);
+const out = values.out ?? join(dirs.reports, definition.id);
 mkdirSync(out, { recursive: true });
 const chosen = values.run
   ? cards.filter((c) => c.run.id === values.run)

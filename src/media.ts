@@ -13,7 +13,8 @@
  *   select    selectionQuestion / readSelection → materializeSelection
  *   validate  validationMembers → hydrateTree (every LFS file of the fresh
  *             checkout) → commands → rewrittenMedia
- *   review    candidateReceipts (result review, and final review of merged items)
+ *   review    candidateReceipts (result review, with its delivered
+ *             dependencies' selections, and final review of merged items)
  *   publish   lfsPushIfPointers, called by delivery's publish before it pushes
  *   final     validationMembers → verifyOriginMedia
  *
@@ -2132,6 +2133,12 @@ export interface CandidateRecord {
   item: WorkItem;
   sets: readonly CandidateSet[];
   selection: Selection;
+  /**
+   * A dependency's delivered selection, in a dependent item's result review
+   * (step-review.ts reviewCandidates): its receipt describes and copies the
+   * selected set only, since that item's own review judged the alternatives.
+   */
+  dependency?: true;
 }
 
 /** Bounds for the candidate copies one review's evidence root holds. */
@@ -2169,29 +2176,51 @@ const SELECTION_CHECKS = [
  * operator's selection. Factory's private copy of each member within the
  * review bounds goes to `media-sets/<item>/<set>/` under `root`, checked
  * against its recorded digest, so the reviewer can compare the sets' bytes.
- * Returns one receipt per item, as JSON text.
+ * A dependency's record (CandidateRecord.dependency) describes and copies
+ * only its selected set: an unselected alternative never reaches a
+ * dependent item's review. Selected members are copied first, so the
+ * alternatives never spend the bound before a delivered member. Returns
+ * one receipt per item, as JSON text.
  */
 export async function candidateReceipts(
   root: string,
   records: readonly CandidateRecord[],
 ): Promise<{ item: string; content: string }[]> {
+  const shown = records.map(({ sets, selection, dependency }) =>
+    dependency ? sets.filter((set) => set.id === selection.set.id) : sets,
+  );
+  const where = (item: WorkItem, set: CandidateSet, file: string) =>
+    `media-sets/${safeName(item.id)}/${set.id.toLowerCase()}/${basename(file)}`;
   let budget = REVIEW_CANDIDATE_BYTES;
+  const copied = new Set<string>();
+  for (const chosen of [true, false])
+    for (const [index, { item, selection }] of records.entries())
+      for (const set of shown[index] ?? [])
+        if ((set.id === selection.set.id) === chosen)
+          for (const member of set.members) {
+            const relative = where(item, set, member.file);
+            if (await reviewCopy(root, relative, member, budget)) {
+              budget -= member.bytes;
+              copied.add(relative);
+            }
+          }
   const receipts = [];
-  for (const { item, sets, selection } of records) {
+  for (const [
+    index,
+    { item, sets, selection, dependency },
+  ] of records.entries()) {
     const described = [];
-    for (const set of sets) {
+    for (const set of shown[index] ?? []) {
       const members = [];
       for (const member of set.members) {
-        const relative = `media-sets/${safeName(item.id)}/${set.id.toLowerCase()}/${basename(member.file)}`;
-        const copied = await reviewCopy(root, relative, member, budget);
-        if (copied) budget -= member.bytes;
+        const relative = where(item, set, member.file);
         members.push({
           role: member.role,
           destination: member.destination,
           mediaType: member.mediaType,
           bytes: member.bytes,
           sha256: member.sha256,
-          reviewCopy: copied ? relative : null,
+          reviewCopy: copied.has(relative) ? relative : null,
           ...(member.formatMetadata !== undefined && {
             declaredFormatMetadata: member.formatMetadata,
           }),
@@ -2223,6 +2252,10 @@ export async function candidateReceipts(
         record:
           "Factory controller candidate receipt: built by Factory from the sets it captured and the operator's answer, not written by the worker. Fields named declared* are the worker's manifest declarations, checked only for shape.",
         workItem: item.id,
+        ...(dependency && {
+          deliveredDependency:
+            "This item is a dependency of the Work Item under review, and the reviewed base holds its accepted result. sets lists only its selected set, the one delivered; capturedSets counts every set it captured. Its own review judged its alternatives and selection.",
+        }),
         minimumSets: item.minimumAssetSets ?? 1,
         expectedRoles: item.expectedOutputRoles ?? [],
         capturedSets: sets.length,

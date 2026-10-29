@@ -4,3 +4,7 @@ dist/
 .factory/
 integration/.runs/
 test/.tools-*/
+# A benchmark's definitions, results and reports live outside the repository (bench/lib/home.mjs).
+bench/benchmarks/
+bench/results/
+bench/reports/

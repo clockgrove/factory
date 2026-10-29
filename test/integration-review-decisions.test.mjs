@@ -122,6 +122,28 @@ test("the media case's operator accepts the preview criterion at the item's resu
   assert.equal(choice.arg, "4");
 });
 
+// Live (Codex, main media, run 2026-10-28T191001PDT-2b02, #2193), the plan
+// named the delivered assets "the selected": the reviewer asked about
+// criterion 2, purely perceptual, and the fixture refused it for the word
+// alone, so the hold stood. "Selected" naming the asset is no claim about
+// the selection; criterion 4, about the new test, stays with a person.
+test("the media case's operator accepts a perceptual criterion that names the selected asset", () => {
+  const criteria = [
+    "The delivered model and preview destinations are routed through Git LFS, as reported by `git check-attr filter -- assets/cubeQiczx.glb assets/cubeQiczx-preview.png`.",
+    "The selected `assets/cubeQiczx-preview.png` is a 64x64 PNG preview depicting the cube.",
+    "The selected `assets/cubeQiczx.glb` is a valid glTF 2.0 binary containing exactly one mesh that is a unit cube centred at the origin.",
+    "A new automated test verifies the delivered model and preview meet the specified format, geometry and image-size requirements.",
+  ];
+  const answers = (asked) =>
+    autoAnswers(
+      "item:cube-assets-test:review",
+      needsHuman(asked, criteria),
+      "item:cube-assets-test:held",
+    ).map((choice) => [choice.answer, choice.arg]);
+  assert.deepEqual(answers([1, 3]), [["accept", "2"]]);
+  assert.deepEqual(answers([2]), [["accept", "3"]]);
+});
+
 test("the media case's operator decides nothing else at a Work Item's review", () => {
   // LFS, the new test (even one naming the cube and the preview) and the
   // alternatives are the case's own checks: their questions stay with a
@@ -141,6 +163,11 @@ test("the media case's operator decides nothing else at a Work Item's review", (
     "The repository's .gitattributes routes the unit cube model and its PNG preview.",
     "The item's validation confirms the delivered model is a unit cube and the preview a 64x64 PNG preview.",
     "The delivered unit cube model and PNG preview are tested when CI runs.",
+    // The selection itself, however the asset is named.
+    "Only the selected unit cube model and PNG preview are delivered.",
+    "The selected unit cube model and PNG preview are the only assets delivered.",
+    "The operator's selection of the unit cube model and PNG preview is delivered.",
+    "Factory selects the unit cube model and PNG preview to deliver.",
   ];
   for (let index = 2; index < criteria.length; index++) {
     assert.deepEqual(

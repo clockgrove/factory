@@ -30,7 +30,13 @@ import {
   writingToolOfCommand,
 } from "../dist/planning/facts.js";
 import { renderGraphReviewCall } from "../dist/planning/prompts.js";
-import { freezeConfig } from "../dist/providers/selection.js";
+import { CodexValidate } from "../dist/providers/codex-validate.js";
+import { WORKERS } from "../dist/providers/config.js";
+import {
+  freezeConfig,
+  profileWorker,
+  providerWorker,
+} from "../dist/providers/selection.js";
 import { validationRow } from "../dist/review/result.js";
 import { readShown } from "../dist/shown.js";
 import {
@@ -143,7 +149,7 @@ function environment() {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
-  const { sandbox } = loadConfig(REPO);
+  const config = loadConfig(REPO);
   delete process.env.FACTORY_CONFIG;
   const log = new RunLog(
     inst.logs,
@@ -151,7 +157,7 @@ function environment() {
     CAPTURE_OFF,
     [],
   );
-  return { sandbox, log };
+  return { sandbox: config.sandbox, log, config };
 }
 
 const BASE = {
@@ -960,6 +966,194 @@ test("a Claude or Copilot worker's own Validate formats its snapshot first and s
     formattedNote({ command: "fmt", files: ["src/a.js"] }),
     /^Factory applied the repository's formatter \(`fmt`\) to 1 of your files for this run \(src\/a\.js\)[\s\S]*so don't format by hand or spend turns on formatting\.$/,
   );
+  // The worker's own file is as it left it.
+  assert.equal(readFileSync(join(worktree, "src/a.js"), "utf8"), "a  \nb\n");
+});
+
+// clockgrove/clockgrove#800 (Factory 0.5.8): the Codex worker's Validate
+// (#2156) got no formatter from its provider, so its first run stopped on
+// `pnpm run format` rewriting a test file, and the model reformatted it by
+// hand before validating again (#2166).
+const WORKER_FIXTURES = {
+  codex: { planner: "codex", worker: { kind: "codex", network: "off" } },
+  // Claude's defaults grant Validate.
+  claude: { planner: "claude", worker: { kind: "claude", settings: {} } },
+  copilot: {
+    planner: "copilot",
+    worker: {
+      kind: "copilot",
+      model: "m",
+      effort: "medium",
+      tools: ["view", "Validate"],
+      idleSeconds: 900,
+    },
+  },
+  "openai-agents": {
+    planner: "codex",
+    worker: {
+      kind: "openai-agents",
+      model: "m",
+      effort: "medium",
+      containerSize: "small",
+      apiKeyEnv: "OPENAI_API_KEY",
+      timeoutSeconds: 3600,
+      maxRuns: 3,
+    },
+  },
+  "claude-managed-agents": {
+    planner: "claude",
+    worker: {
+      kind: "claude-managed-agents",
+      agentId: "agent_1",
+      agentVersion: 1,
+      environmentId: "env_1",
+      workspaceId: "ws_1",
+      credentialEnv: "ANTHROPIC_API_KEY",
+      timeoutSeconds: 3600,
+      maxRuns: 3,
+    },
+  },
+};
+
+/** The configuration with `formatCommand` as the repository's formatter, or none. */
+function formatting(config, formatCommand) {
+  const { formatCommand: _, ...validation } = config.validation;
+  return {
+    ...config,
+    validation: { ...validation, ...(formatCommand ? { formatCommand } : {}) },
+  };
+}
+
+test("every worker kind with Validate runs it with the configured formatter, and the planner is told it has Validate exactly when it does (#2166)", () => {
+  // A worker kind added later fails here until it is covered.
+  assert.deepEqual(Object.keys(WORKER_FIXTURES).sort(), [...WORKERS].sort());
+  const { config } = environment();
+  const work = item("a", {
+    ownedPaths: ["src/"],
+    validation: [{ command: "true" }],
+  });
+  const cases = [
+    ...Object.entries(WORKER_FIXTURES),
+    // Without the Validate tool granted, no Validate settings.
+    [
+      "copilot without Validate",
+      {
+        ...WORKER_FIXTURES.copilot,
+        worker: { ...WORKER_FIXTURES.copilot.worker, tools: ["view"] },
+      },
+    ],
+    [
+      "claude without Validate",
+      {
+        planner: "claude",
+        worker: {
+          kind: "claude",
+          settings: { tools: ["Read", "Edit"], allowedTools: ["Read", "Edit"] },
+        },
+      },
+    ],
+  ];
+  for (const formatCommand of ["fmt --write .", undefined]) {
+    const configured = formatting(config, formatCommand);
+    const validating = [];
+    for (const [name, provider] of cases) {
+      const worker = providerWorker(provider, configured)(plan([work]), []);
+      const tools = profileWorker(provider, false, "off").tools;
+      assert.equal(
+        worker.validation !== undefined,
+        tools.includes("Validate"),
+        `${name}: ${tools.join(", ")}`,
+      );
+      if (!worker.validation) continue;
+      validating.push(name);
+      assert.equal(worker.validation.formatCommand, formatCommand, name);
+      assert.equal(
+        worker.validation.commandTimeoutMs,
+        configured.validation.commandTimeoutSeconds * 1000,
+        name,
+      );
+      assert.equal(worker.validation.repository, configured.repository, name);
+    }
+    assert.deepEqual(validating, ["codex", "claude", "copilot"]);
+  }
+});
+
+test("a Codex worker's own Validate formats its snapshot first, as a Claude or Copilot worker's does, and its deadline allows for the formatter (#2166)", async () => {
+  const { config, log } = environment();
+  const worktree = tempDir("factory-format-codex-validate-");
+  git(worktree, "init", "--quiet");
+  const base = commit(worktree, BASE);
+  write(worktree, { "src/a.js": "a  \nb\n" });
+  const work = item("a", {
+    ownedPaths: ["src/"],
+    validation: [{ command: "! grep -qE '[[:space:]]$' src/a.js" }],
+  });
+  const input = {
+    worktree,
+    prompt: "",
+    item: work,
+    commands: work.validation.map((check) => check.command),
+    base,
+    signal: AbortSignal.timeout(120_000),
+    log: () => {},
+    activity: () => {},
+    output: () => {},
+    runFile: (kind) => log.runFile(1, `item:a:work#1.${kind}`),
+  };
+  const commandTimeoutMs = config.validation.commandTimeoutSeconds * 1000;
+  const started = async (formatCommand) => {
+    const worker = providerWorker(
+      WORKER_FIXTURES.codex,
+      formatting(config, formatCommand),
+    )(plan([work], { base }), []);
+    const validation = await CodexValidate.start(input, worker.validation);
+    assert.ok(validation instanceof CodexValidate, JSON.stringify(validation));
+    assert.equal(validation.tool, true);
+    return validation;
+  };
+  const unformatted = await started(undefined);
+  const formatted = await started("fmt");
+  try {
+    // The formatter is one more command in the call's limit, and in
+    // Codex's own limit on it.
+    assert.equal(
+      unformatted.deadlineMs,
+      validationDeadlineMs(work, commandTimeoutMs),
+    );
+    assert.equal(
+      formatted.deadlineMs,
+      validationDeadlineMs(work, commandTimeoutMs, true),
+    );
+    assert.equal(
+      formatted.deadlineMs - unformatted.deadlineMs,
+      commandTimeoutMs,
+    );
+    assert.match(
+      formatted.config(),
+      new RegExp(`\\ntool_timeout_sec = ${formatted.deadlineMs / 1000}\\n`),
+    );
+    // The run Codex's tool makes formats the snapshot first, so the check
+    // passes without the model formatting by hand.
+    const run = await formatted.validator.call();
+    assert.equal(run.isError, false, run.text);
+    assert.ok(
+      run.text.startsWith("All 1 declared validation commands passed"),
+      run.text,
+    );
+    assert.ok(
+      run.text.includes(formattedNote({ command: "fmt", files: ["src/a.js"] })),
+      run.text,
+    );
+    // Without a formatter, the same files fail the check: the #800 run.
+    const plain = await unformatted.validator.call();
+    assert.ok(plain.text.startsWith("Validation failed."), plain.text);
+    assert.ok(
+      !plain.text.includes("Factory applied the repository's formatter"),
+    );
+  } finally {
+    await formatted.close();
+    await unformatted.close();
+  }
   // The worker's own file is as it left it.
   assert.equal(readFileSync(join(worktree, "src/a.js"), "utf8"), "a  \nb\n");
 });

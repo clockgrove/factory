@@ -11,6 +11,7 @@ import type { WorkItem } from "../planning/types.js";
 import type { Conversation, Session } from "../providers/session.js";
 import type { PromptFacts } from "../providers/usage.js";
 import type { Answer, HoldOption, Wait } from "../state.js";
+import type { SelfValidateOptions } from "./self-validate.js";
 
 /**
  * What a paid worker has spent on one Work Item across attempts and
@@ -91,6 +92,11 @@ export type WorkerResult = (
 
 export interface Worker {
   run(input: WorkerInput): Promise<WorkerResult>;
+  /**
+   * What the worker's Validate runs with (work/self-validate.ts), the
+   * repository's formatter included; absent for a worker with no Validate.
+   */
+  readonly validation?: SelfValidateOptions;
 }
 
 /**

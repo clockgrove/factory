@@ -537,9 +537,10 @@ test("the run log: tail, follow, and status reads its end", async () => {
   assert.equal(analysis.calls.toolStats.failures, 1);
   // Rounds that only waited on a running tool call (#2167).
   assert.equal(analysis.calls.toolStats.waitRounds, 1);
+  assert.equal(analysis.calls.toolStats.waitRoundsReported, 1);
   assert.match(
     cli(inst, "diagnostics", "54", "--analyze").out,
-    /native tool calls: 2 rounds \(1 only waiting on a running tool\) · 3 outputs/,
+    /native tool calls: 2 rounds \(1 only waiting on a running tool, 1\/1 calls report it\) · 3 outputs/,
   );
   assert.equal(analysis.calls.request.components.schema, 100);
   const [history] = analysis.history.runs;

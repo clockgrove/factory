@@ -1,5 +1,5 @@
 {
-  "source": "Codex 0.160.0, gpt-6.1-sol (effort medium) through @openai/codex-sdk 0.160.0, calling Factory's Validate as an MCP tool that took 180 s (polling) or 45 s (blocking), #2167. Only the entries codexTelemetry reads are kept.",
+  "source": "Codex 0.160.0, gpt-6.1-sol (effort medium) through @openai/codex-sdk 0.160.0, calling Factory's Validate as an MCP tool (registered with tool_timeout_sec = 900) that took 180 s with Codex's default exec yield, as 0.5.8 configured it (polling), or 45 s with [features.code_mode] default_exec_yield_time_ms = 3600000 (blocking), #2167. Only the entries codexTelemetry reads are kept.",
   "polling": [
     {
       "timestamp": "2026-10-28T23:44:50.594Z",

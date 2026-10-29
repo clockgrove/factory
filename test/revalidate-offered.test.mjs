@@ -421,6 +421,13 @@ test("accept on a spent repair allowance diagnoses what still stands once, as un
     runner.state.kept["item:a:diagnosis"].applied.map((c) => c.correction),
     ["Correction 0.", "Correction 2."],
   );
+  // Saved with the repair that runs it, so the next diagnosis can tell
+  // whether its failure came from this correction's attempt (#2173); the
+  // one saved before corrections carried it has none.
+  assert.deepEqual(
+    runner.state.kept["item:a:diagnosis"].applied.map((c) => c.repair),
+    [undefined, 2],
+  );
   // `more`: the worker repairs with that diagnosis, and none runs again.
   served.answer(second, "more");
   await served.run("the worker", () => prompts.length > 0);

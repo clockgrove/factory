@@ -18,6 +18,7 @@ import {
   type Tally,
   type Tokens,
   tokens,
+  withChildTokens,
 } from "./usage.js";
 
 /** The end of a session record read: its last token count is at the end. */
@@ -37,8 +38,10 @@ export interface CodexTelemetry {
   imageOutputs: number;
   /** The last `token_count`'s info: total and last-response usage. */
   usage?: Record<string, unknown>;
-  /** Child (sub-agent) threads' own last totals, summed; their own view, never added to `tokens`. */
+  /** Child (sub-agent) threads' own last totals, summed: cumulative over every turn the home held. */
   descendants?: Record<string, number>;
+  /** Each child thread's own last totals, by its session record (`childTokens` takes a turn's increase). */
+  children?: Record<string, ChildUsage>;
   /** Each tool output's call name and text, in order, for capture. */
   outputs: { name: string; output: string }[];
   /** The record was larger than the bound: earlier tool calls were not read. */
@@ -170,6 +173,9 @@ export function codexTelemetry(
         });
     }
   }
+  const children = descendantUsage(
+    records.filter((path) => path !== file).slice(0, MAX_CHILDREN),
+  );
   return {
     // A continued thread's counts are cumulative over its earlier turns.
     ...(total &&
@@ -186,9 +192,10 @@ export function codexTelemetry(
     ...(reportedModel ? { reportedModel } : {}),
     imageOutputs,
     ...(info ? { usage: info } : {}),
-    descendants: descendantUsage(
-      records.filter((path) => path !== file).slice(0, MAX_CHILDREN),
-    ),
+    ...(children && {
+      descendants: children.sum,
+      children: children.byRecord,
+    }),
     outputs,
     ...(partial ? { partial: true as const } : {}),
     ...(compacted ? { compacted: true as const } : {}),
@@ -333,10 +340,27 @@ function readTail(
   }
 }
 
-/** Each child record's last `total_token_usage`, summed, with the thread count; undefined for none. */
-function descendantUsage(
-  files: readonly string[],
-): Record<string, number> | undefined {
+/** One child thread's last `total_token_usage`. */
+export interface ChildUsage {
+  input: number;
+  cached: number;
+  output: number;
+  reasoning: number;
+  total: number;
+}
+
+const CHILD_KEYS = ["input", "cached", "output", "reasoning", "total"] as const;
+
+/**
+ * Each child record's last `total_token_usage`, by record, and summed with
+ * the thread count; undefined for none.
+ */
+function descendantUsage(files: readonly string[]):
+  | {
+      sum: Record<string, number>;
+      byRecord: Record<string, ChildUsage>;
+    }
+  | undefined {
   const sum = {
     threads: 0,
     input: 0,
@@ -345,6 +369,7 @@ function descendantUsage(
     reasoning: 0,
     total: 0,
   };
+  const byRecord: Record<string, ChildUsage> = {};
   // The last token_count is near a record's end: 64 KiB first, wider
   // only when it isn't there, within one budget across all children.
   let budget = CHILD_BYTES;
@@ -360,18 +385,67 @@ function descendantUsage(
           typeof usage[key] === "number" && Number.isFinite(usage[key])
             ? (usage[key] as number)
             : 0;
+        const child: ChildUsage = {
+          input: n("input_tokens"),
+          cached: n("cached_input_tokens"),
+          output: n("output_tokens"),
+          reasoning: n("reasoning_output_tokens"),
+          total: n("total_tokens"),
+        };
+        byRecord[file] = child;
         sum.threads += 1;
-        sum.input += n("input_tokens");
-        sum.cached += n("cached_input_tokens");
-        sum.output += n("output_tokens");
-        sum.reasoning += n("reasoning_output_tokens");
-        sum.total += n("total_tokens");
+        for (const key of CHILD_KEYS) sum[key] += child[key];
         break;
       }
       if (!tail.partial) break;
     }
   }
-  return sum.threads ? sum : undefined;
+  return sum.threads ? { sum, byRecord } : undefined;
+}
+
+/**
+ * The tokens a call's child threads spent (`childTokens`): each child
+ * record's last totals less what it held before the call (`before`, a
+ * continued thread's baseline: its earlier turns' children), with the
+ * threads that spent any. Undefined when none did.
+ */
+export function childTokens(
+  now: Record<string, ChildUsage> | undefined,
+  before: Record<string, ChildUsage> = {},
+): (Tokens & { threads: number }) | undefined {
+  const sum: ChildUsage = {
+    input: 0,
+    cached: 0,
+    output: 0,
+    reasoning: 0,
+    total: 0,
+  };
+  let threads = 0;
+  for (const [file, usage] of Object.entries(now ?? {})) {
+    const earlier = before[file];
+    const added = Object.fromEntries(
+      CHILD_KEYS.map((key) => [
+        key,
+        Math.max(0, usage[key] - (earlier?.[key] ?? 0)),
+      ]),
+    ) as unknown as ChildUsage;
+    if (!added.total && !added.input && !added.output) continue;
+    threads += 1;
+    for (const key of CHILD_KEYS) sum[key] += added[key];
+  }
+  if (!threads) return undefined;
+  return {
+    ...tokens({
+      input: sum.input,
+      output: sum.output,
+      cached: sum.cached,
+      reasoning: sum.reasoning,
+      // Codex records no cache writes for a thread.
+      cacheWrite: null,
+      total: sum.total,
+    }),
+    threads,
+  };
 }
 
 /** The read bytes across all child records of one call. */
@@ -404,17 +478,20 @@ function lastTotalUsage(
  * Add the native telemetry of the record's `thread` to a `model-usage`
  * record: its tool calls, and its tokens when the SDK reported none (a
  * call that ended before `turn.completed`). `tokenSource` says which.
+ * Its child threads' tokens (`childTokens`, a continued thread's only by
+ * what they added since `baseline`) go into `tokens`, as a Claude call's
+ * sub-agents do (#2168).
  */
 export function addCodexTelemetry(
   record: Record<string, unknown>,
   codexHome: string,
-  /** A continued thread's record size before this turn (codexTelemetry). */
-  from = 0,
+  /** A continued thread before this turn (codexBaseline). */
+  baseline?: CodexBaseline,
 ): void {
   const native = codexTelemetry(
     codexHome,
     typeof record.thread === "string" ? record.thread : undefined,
-    from,
+    baseline?.size,
   );
   if (record.tokens) record.tokenSource = "sdk";
   if (!native) return;
@@ -438,6 +515,13 @@ export function addCodexTelemetry(
     record.tokens = native.tokens;
     record.tokenSource = "native";
   }
+  const children = childTokens(native.children, baseline?.children);
+  if (children) {
+    record.childTokens = children;
+    // Unknown stays unknown: the spend then charges the children alone (spend.ts amountOf).
+    if (record.tokens)
+      record.tokens = withChildTokens(record.tokens as Tokens, children);
+  }
 }
 
 /**
@@ -448,6 +532,8 @@ export function addCodexTelemetry(
 export interface CodexBaseline {
   size: number;
   tokens?: Tokens;
+  /** Its child threads' totals so far: a resumed call's own are what follows. */
+  children?: Record<string, ChildUsage>;
 }
 
 export function codexBaseline(
@@ -461,8 +547,12 @@ export function codexBaseline(
   } catch {
     return { size: 0 };
   }
-  const tokens = codexTelemetry(codexHome, thread)?.tokens;
-  return { size, ...(tokens && { tokens }) };
+  const native = codexTelemetry(codexHome, thread);
+  return {
+    size,
+    ...(native?.tokens && { tokens: native.tokens }),
+    ...(native?.children && { children: native.children }),
+  };
 }
 
 /** A continued turn's own counts: cumulative `total` less `baseline`; unknown without one. */

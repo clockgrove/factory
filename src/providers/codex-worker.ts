@@ -876,7 +876,7 @@ export class CodexWorker implements Worker {
       // Commands the worker left running end with its turn.
       group.end();
       saveModelsCache(join(home.root, "codex-home"));
-      addCodexTelemetry(record, join(home.root, "codex-home"), baseline?.size);
+      addCodexTelemetry(record, join(home.root, "codex-home"), baseline);
       // A retained conversation's Codex state stays for the item's next
       // repair; its HOME, caches and scratch go now, as for any turn.
       // A later turn may have taken the directory: then it isn't this one's.

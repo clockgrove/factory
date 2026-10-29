@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -17,6 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { loadDefinition } from "../bench/lib/definition.mjs";
+import { HOME_ENV } from "../bench/lib/home.mjs";
 import {
   enableOnlyKeptWorkflows,
   harnessRun,
@@ -24,6 +26,7 @@ import {
   resolveFactory,
   seedMemory,
 } from "../bench/lib/provision.mjs";
+import { EXAMPLE } from "./bench-fixture.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), "bench-provision-"));
@@ -50,12 +53,23 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
     .map((p) => join(p, "git"))
     .find((p) => existsSync(p));
   symlinkSync(git, join(bin, "git"));
+  // Definitions and results live in a bench home outside the repository.
+  const home = join(dir, "bench-home");
+  mkdirSync(join(home, "benchmarks"), { recursive: true });
+  writeFileSync(
+    join(home, "benchmarks", "acme-widgets-42.json"),
+    readFileSync(EXAMPLE),
+  );
+  const env = { ...process.env, PATH: bin };
+  delete env[HOME_ENV];
   const run = spawnSync(
     process.execPath,
     [
       join(root, "bench", "provision.mjs"),
+      "--bench-home",
+      home,
       "--benchmark",
-      "clockgrove-800",
+      "acme-widgets-42",
       "--host",
       host,
       "--factory",
@@ -64,39 +78,50 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
       "t1",
       "--dry-run",
     ],
-    { encoding: "utf8", env: { ...process.env, PATH: bin } },
+    { encoding: "utf8", env },
   );
   assert.equal(run.status, 0, run.stderr);
   const out = run.stdout;
-  const repo = "clockgrove/bench-clockgrove-800-t1";
+  const repo = "acme/bench-widgets-42-t1";
   // This checkout's build is a candidate, recorded with its commit and build digest.
   assert.match(out, /"kind": "candidate"/);
   assert.match(out, /"commit": "[0-9a-f]{40}"/);
   assert.match(out, /"distSha256": "[0-9a-f]{64}"/);
+  // The record names the definition it ran and where run.mjs scores it into.
+  assert.ok(
+    out.includes(
+      `"definitionFile": ${JSON.stringify(join(home, "benchmarks", "acme-widgets-42.json"))}`,
+    ),
+    out,
+  );
+  assert.ok(
+    out.includes(`"resultsDir": ${JSON.stringify(join(home, "results"))}`),
+    out,
+  );
   const steps = [
-    "check: read clockgrove/clockgrove#800",
-    "would: check its title and body digest (e22ce1842efc)",
-    "git clone --no-checkout https://github.com/clockgrove/clockgrove.git",
+    "check: read acme/widgets#42",
+    "would: check its title and body digest (d0f6c906d9b1)",
+    "git clone --no-checkout https://github.com/acme/widgets.git",
     `gh repo create ${repo} --private`,
     `gh api -X PUT repos/${repo}/actions/permissions -F enabled=false`,
-    "-F allow_merge_commit=true -F allow_squash_merge=true -F allow_rebase_merge=true -F allow_auto_merge=false -F delete_branch_on_merge=false",
-    `push --no-verify https://github.com/${repo}.git 46a206678b4b8446aeb162553b07151647a28536:refs/heads/main`,
+    "-F allow_merge_commit=true -F allow_squash_merge=true -F allow_rebase_merge=false -F allow_auto_merge=false -F delete_branch_on_merge=true",
+    `push --no-verify https://github.com/${repo}.git 0123456789abcdef0123456789abcdef01234567:refs/heads/main`,
     "lfs push --object-id",
-    "would: mirror the ruleset protected-main",
-    `gh variable set QUALITY_RUNNER --repo ${repo} --body <clockgrove/clockgrove's value>`,
+    "would: mirror the ruleset protect-main",
+    `gh variable set TEST_RUNNER --repo ${repo} --body <acme/widgets's value>`,
     "check: the base tree's workflow files",
     "-F enabled=true -f allowed_actions=all",
-    "would: disable every workflow but .github/workflows/quality.yml",
-    "workflows again: only .github/workflows/quality.yml active",
-    "would: create the Project Factory bench clockgrove-800 t1",
+    "would: disable every workflow but .github/workflows/test.yml",
+    "workflows again: only .github/workflows/test.yml active",
+    "would: create the Project Factory bench acme-widgets-42 t1",
     "--name 'Factory admission' --data-type TEXT",
     `gh label create factory:objective --repo ${repo}`,
     "would: configure Factory (setup)",
-    "--codex-network host --sandbox-network package-install --read-only-path /opt/toolchain/ms-playwright",
-    "--toolchain-path /opt/toolchain/postgresql-18.6/bin",
-    "--objective-tokens 200000000 --day-tokens 400000000 --json",
+    "--codex-network host --sandbox-network package-install --read-only-path /opt/toolchain/browsers",
+    "--toolchain-path /opt/toolchain/node-24/bin",
+    "--objective-tokens 40000000 --day-tokens 80000000 --json",
     "would: seed memory from",
-    "without #800's entries or any from 2026-10-28T11:06:00Z on",
+    "without #42's entries or any from 2031-03-04T09:00:00Z on",
     "would: start the background service (setup --background)",
     "--background --json",
     "would: file the Objective",
@@ -111,19 +136,65 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
   // The service runs on its own configuration and state, never ~/.config/factory.
   assert.match(
     out,
-    /FACTORY_CONFIG=\S+\/bench\/clockgrove-800\/t1\/factory\.json FACTORY_STATE_DIR=\S+\/bench\/clockgrove-800\/t1\/state factory setup/,
+    /FACTORY_CONFIG=\S+\/bench\/acme-widgets-42\/t1\/factory\.json FACTORY_STATE_DIR=\S+\/bench\/acme-widgets-42\/t1\/state factory setup/,
   );
   assert.ok(!existsSync(join(dir, "bench")), "a dry run creates nothing");
+  assert.ok(!existsSync(join(home, "results")), "a dry run creates nothing");
+});
+
+/** `node bench/<script> ...args` without the environment's bench home. */
+function benchCli(script, args) {
+  const env = { ...process.env };
+  delete env[HOME_ENV];
+  return spawnSync(process.execPath, [join(root, "bench", script), ...args], {
+    encoding: "utf8",
+    env,
+  });
+}
+
+test("provisioning refuses without a results directory, before anything else", () => {
+  const refused = benchCli("provision.mjs", [
+    "--benchmark",
+    EXAMPLE,
+    "--host",
+    join(dir, "no-host.json"),
+    "--factory",
+    join(root, "dist", "cli.js"),
+    "--dry-run",
+  ]);
+  assert.equal(refused.status, 64, refused.stderr);
+  assert.match(
+    refused.stderr,
+    /Where to score the run into: no results directory\./,
+  );
+  assert.equal(refused.stdout, "");
+});
+
+test("run.mjs refuses a run whose definition it can't load, without a stack", () => {
+  const runDir = join(dir, "run-nope");
+  mkdirSync(runDir);
+  writeFileSync(
+    join(runDir, "run.json"),
+    JSON.stringify({
+      issue: 42,
+      benchmark: "nope",
+      resultsDir: join(dir, "run-nope-results"),
+    }),
+  );
+  const refused = benchCli("run.mjs", ["--run-dir", runDir]);
+  assert.equal(refused.status, 64, refused.stderr);
+  assert.match(refused.stderr, /^Benchmark nope: no definitions directory/);
+  assert.doesNotMatch(refused.stderr, /\n\s+at /);
 });
 
 // --- the workflows: nothing deploy-capable may stay enabled ------------------
 
-const definition = loadDefinition("clockgrove-800");
-const REPO = "clockgrove/bench-clockgrove-800-w";
+const definition = loadDefinition(EXAMPLE);
+const REPO = "acme/bench-widgets-42-w";
 const BASE_FILES = [
   ".github/workflows/deploy.yml",
-  ".github/workflows/qualification.yml",
-  ".github/workflows/quality.yml",
+  ".github/workflows/nightly.yml",
+  ".github/workflows/test.yml",
   ".github/workflows/release.yml",
 ];
 const listing = (states) =>
@@ -187,7 +258,7 @@ test("a workflow still active after disabling is refused", () => {
     n === 1
       ? listing({})
       : listing({
-          ".github/workflows/qualification.yml": "disabled_manually",
+          ".github/workflows/nightly.yml": "disabled_manually",
           ".github/workflows/release.yml": "disabled_manually",
         }),
   );
@@ -201,7 +272,7 @@ test("a workflow still active after disabling is refused", () => {
 test("only the kept workflows stay active", () => {
   const off = {
     ".github/workflows/deploy.yml": "disabled_manually",
-    ".github/workflows/qualification.yml": "disabled_manually",
+    ".github/workflows/nightly.yml": "disabled_manually",
     ".github/workflows/release.yml": "disabled_manually",
   };
   const runner = new StubRunner((_, n) =>
@@ -229,11 +300,11 @@ test("memory is seeded without the Objective's entries or any made at or after t
   const add = db.prepare("INSERT INTO memory VALUES (?, ?, ?)");
   const text = db.prepare("INSERT INTO memory_text VALUES (?)");
   for (const [id, objective, created] of [
-    ["before-799", 799, "2026-10-27T22:59:00.000Z"],
-    ["before-830", 830, "2026-10-28T00:30:00.000Z"],
-    ["the-objective", 800, "2026-10-27T10:00:00.000Z"],
-    ["just-after", 854, "2026-10-28T01:00:00.500Z"],
-    ["after", 1, "2026-10-28T02:00:00.000Z"],
+    ["before-17", 17, "2031-03-03T22:59:00.000Z"],
+    ["before-30", 30, "2031-03-04T08:30:00.000Z"],
+    ["the-objective", 42, "2031-03-03T10:00:00.000Z"],
+    ["just-after", 54, "2031-03-04T09:00:00.500Z"],
+    ["after", 1, "2031-03-04T10:00:00.000Z"],
   ]) {
     add.run(id, objective, created);
     text.run(id);
@@ -241,11 +312,11 @@ test("memory is seeded without the Objective's entries or any made at or after t
   db.close();
   // The same instant in UTC and with an offset: the same cut.
   for (const [n, before] of [
-    [1, "2026-10-28T01:00:00Z"],
-    [2, "2026-10-27T20:00:00-05:00"],
+    [1, "2031-03-04T09:00:00Z"],
+    [2, "2031-03-04T04:00:00-05:00"],
   ]) {
     const target = join(dir, `seeded-${n}`, "knowledge.sqlite");
-    assert.deepEqual(await seedMemory(source, target, 800, before), {
+    assert.deepEqual(await seedMemory(source, target, 42, before), {
       kept: 2,
       removed: 3,
     });
@@ -255,7 +326,7 @@ test("memory is seeded without the Objective's entries or any made at or after t
         .prepare("SELECT id FROM memory_text ORDER BY id")
         .all()
         .map((row) => row.id),
-      ["before-799", "before-830"],
+      ["before-17", "before-30"],
     );
     seeded.close();
   }

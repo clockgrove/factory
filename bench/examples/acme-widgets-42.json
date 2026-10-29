@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "id": "acme-widgets-42",
+  "title": "acme/widgets #42, widget queries and CSV export (an invented example)",
+  "source": {
+    "repository": "acme/widgets",
+    "base": "0123456789abcdef0123456789abcdef01234567",
+    "lfs": true
+  },
+  "objective": {
+    "issue": 42,
+    "title": "Query widgets and export the results as CSV",
+    "bodySha256": "d0f6c906d9b194969a5412d7f941dad33470d252bb5515d765aa95d5314f7be0",
+    "labels": ["factory:objective"]
+  },
+  "repository": {
+    "owner": "acme",
+    "namePrefix": "bench-widgets-42",
+    "description": "Test only: a Factory benchmark run of acme/widgets#42. Never deployed.",
+    "mergeSettings": {
+      "allow_merge_commit": true,
+      "allow_squash_merge": true,
+      "allow_rebase_merge": false,
+      "allow_auto_merge": false,
+      "delete_branch_on_merge": true,
+      "has_issues": true,
+      "has_projects": true,
+      "has_wiki": false
+    }
+  },
+  "ci": {
+    "rulesets": ["protect-main"],
+    "variables": ["TEST_RUNNER"],
+    "keepWorkflows": [".github/workflows/test.yml"]
+  },
+  "memory": {
+    "seed": "before-objective",
+    "before": "2031-03-04T09:00:00Z"
+  },
+  "factory": {
+    "provider": "codex",
+    "planner": "codex",
+    "worker": {
+      "kind": "codex",
+      "model": "gpt-test",
+      "effort": "medium",
+      "network": "host"
+    },
+    "models": {
+      "planner": { "model": "gpt-test", "effort": "high" },
+      "reviewer": { "model": "gpt-test", "effort": "medium" }
+    },
+    "sandbox": {
+      "network": "package-install",
+      "readOnlyPaths": ["${toolchain}/browsers"],
+      "environment": {
+        "BROWSERS_PATH": "${toolchain}/browsers"
+      }
+    },
+    "toolchain": {
+      "paths": ["${toolchain}/node-24/bin"],
+      "executables": ["node", "npm"]
+    },
+    "formatCommand": "npm run format",
+    "requiredCommands": ["npm test", "npm run lint"],
+    "ciOnlyCommands": ["npm run test:e2e"],
+    "allowances": {
+      "planningRevisions": 5,
+      "implementationRepairs": 6,
+      "perPath": 2,
+      "resultRereviews": 1
+    },
+    "spend": {
+      "objectiveTokens": 40000000,
+      "dayTokens": 80000000
+    }
+  },
+  "operatorPolicy": {
+    "as": "factory-bench operator policy",
+    "answers": {
+      "spend": "more",
+      "allowance": "more",
+      "config": "adopt"
+    },
+    "otherwise": "pause"
+  },
+  "baseline": "acme/widgets#42, Factory 0.5.7→0.5.8, operator-assisted",
+  "hillClimb": {
+    "primary": ["tokens.total", "activeWallMs"],
+    "guards": [
+      "done",
+      "repairs",
+      "holds.operator",
+      "validation.firstPassRate",
+      "ci.firstPassRate"
+    ]
+  },
+  "budget": {
+    "tokens": [10000000, 20000000],
+    "hours": [2, 4]
+  }
+}

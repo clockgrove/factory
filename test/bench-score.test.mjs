@@ -1,117 +1,153 @@
-// The scorecard of Clockgrove #800 from its real, trimmed state and run log
-// (bench-fixture.mjs). Three run files: two restarts, one inside an operator
-// pause; Codex calls whose resumed sessions repeat their child threads'
-// cumulative usage. The numbers are #800's post-mortem's.
+// The scorecard of an invented Objective, acme/widgets#42 (bench-fixture.mjs,
+// written by fixtures/bench/generate.mjs). Three run files: two restarts,
+// the second inside an operator pause; Codex calls whose resumed sessions
+// repeat their child threads' cumulative usage; holds of every kind, each
+// waiting with nothing running; repairs, amendments, CI reruns and a merge
+// conflict with the base branch.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { BENCH_DIR } from "../bench/lib/definition.mjs";
-import { fixtureCard, fixtureCopy } from "./bench-fixture.mjs";
+import { HOME_ENV } from "../bench/lib/home.mjs";
+import {
+  EXAMPLE,
+  FIXTURE_STATE,
+  fixtureCard,
+  fixtureCopy,
+} from "./bench-fixture.mjs";
+import { fixtureFiles } from "./fixtures/bench/generate.mjs";
 
-test("#800 scores: tokens with each resumed session's child threads counted once", async () => {
+test("the committed fixture is what its generator writes", () => {
+  const files = fixtureFiles();
+  for (const [path, text] of files) {
+    const committed = readFileSync(join(FIXTURE_STATE, path), "utf8");
+    // The state is JSON the formatter may lay out differently.
+    if (path.endsWith(".json"))
+      assert.deepEqual(JSON.parse(committed), JSON.parse(text), path);
+    else assert.equal(committed, text, path);
+  }
+  const committed = readdirSync(FIXTURE_STATE, { recursive: true })
+    .filter((path) => statSync(join(FIXTURE_STATE, path)).isFile())
+    .sort();
+  assert.deepEqual(committed, [...files.keys()].sort());
+});
+
+test("tokens: each resumed session's child threads counted once", async () => {
   const card = await fixtureCard();
   const { tokens } = card.totals;
   assert.equal(card.outcome, "done");
   assert.deepEqual(card.factory.versions, ["0.5.7", "0.5.8"]);
   // What the 0.5.7/0.5.8 spend limit counted: the calls' own tokens.
-  assert.equal(tokens.counted, 89_291_214);
-  assert.equal(tokens.own, 89_291_214);
-  // Two resumed sessions repeat 503,819 and 1,069,102 child tokens: 18,454,021 summed naively.
-  assert.equal(tokens.childThreads, 16_881_100);
-  assert.equal(tokens.total, 106_172_314);
-  // The spend ledger never charged the call aborted by the first restart.
-  assert.equal(tokens.spendLedger, 89_227_422);
-  assert.equal(tokens.unknownCalls, 7);
+  assert.equal(tokens.counted, 17_844_000);
+  assert.equal(tokens.own, 17_844_000);
+  // Resumed sessions repeat 400,000, 300,000 and 520,000 cumulative child
+  // tokens, and two report 650,000 and 210,000 after 400,000 and 150,000:
+  // 3,540,000 summed naively, 1,770,000 counted once.
+  assert.equal(tokens.childThreads, 1_770_000);
+  assert.equal(tokens.childThreadCount, 9);
+  assert.equal(tokens.total, 19_614_000);
+  // The spend ledger never charged the call the first restart replaced.
+  assert.equal(tokens.spendLedger, 17_844_000 - 55_000);
+  assert.equal(tokens.unknownCalls, 2);
   assert.ok(
     card.checks.every((check) => check.ok),
     JSON.stringify(card.checks),
   );
 });
 
-test("#800 scores: active time leaves out the outages, the pause and waits for an answer", async () => {
+test("active time leaves out the outages, the pause and waits for an answer", async () => {
   const card = await fixtureCard();
   const { totals } = card;
   assert.equal(card.partial, false);
-  assert.equal(totals.wallMs, 43_766_384);
+  // Admitted 09:00:04, ended 12:01:47.790.
+  assert.equal(totals.wallMs, 10_903_790);
   assert.deepEqual(
     totals.outages.map((outage) => [outage.ms, outage.runEnd]),
     [
-      [4_249, "handed-off"],
-      [64_952, "handed-off"],
+      [6_500, "handed-off"],
+      [55_000, "handed-off"],
     ],
   );
   assert.deepEqual(
     totals.pauses.map((pause) => pause.ms),
-    [12_918_252],
+    [2_480_000],
   );
   // The second outage falls inside the pause: excluded once.
-  assert.equal(totals.downtimeMs, 12_918_252 + 4_249);
+  assert.equal(totals.downtimeMs, 2_480_000 + 6_500);
   // A hold open and no step in progress: Factory waits on whoever answers.
-  // The read-only QA hold (asked 22:52:33, answered 23:04:34) is the longest.
-  assert.equal(totals.holdBlocked.length, 36);
+  // Every hold here waits so; the read-only QA hold is the longest.
+  assert.equal(totals.holdBlocked.length, 12);
   assert.deepEqual(
-    totals.holdBlocked.find((span) => span.from.startsWith("2026-10-28T22:5")),
+    totals.holdBlocked.find((span) => span.from.startsWith("2031-03-04T11:39")),
     {
-      from: "2026-10-28T22:52:33.163Z",
-      to: "2026-10-28T23:04:34.455Z",
-      ms: 721_292,
+      from: "2031-03-04T11:39:43.070Z",
+      to: "2031-03-04T11:51:13.070Z",
+      ms: 690_000,
     },
   );
-  assert.equal(totals.holdBlockedMs, 3_196_627);
+  assert.equal(totals.holdBlockedMs, 2_807_000);
   assert.equal(totals.excludedMs, totals.downtimeMs + totals.holdBlockedMs);
-  assert.equal(totals.activeWallMs, 27_647_256);
+  assert.equal(totals.activeWallMs, 10_903_790 - 2_486_500 - 2_807_000);
   // The operator's waits stay a guard of their own.
-  assert.equal(totals.holds.operatorWaitMs, 2_644_477);
-  const pilot = card.items.find((item) => item.id === "pilot-predeclaration");
-  assert.equal(pilot.holdBlockedMs, 721_292);
-  assert.equal(pilot.activeWallMs, 19_987);
+  assert.equal(totals.holds.operatorWaitMs, 2_340_000);
+  const smoke = card.items.find((item) => item.id === "release-smoke");
+  assert.equal(smoke.holdBlockedMs, 690_000);
+  assert.equal(smoke.activeWallMs, 18_820);
+  // An item's active time also leaves out the Objective's own waits in its
+  // span: export-csv's include the changed configuration's 22 s.
+  const exportCsv = card.items.find((item) => item.id === "export-csv");
+  assert.equal(exportCsv.holdBlockedMs, 1_250_000 + 22_000);
 });
 
 test("a hold's wait leaves out the downtime inside it; the raw wait is kept for the check", async () => {
-  // The fixture with an operator pause inside the QA hold, 22:55 to 23:00.
+  // The fixture with an operator pause inside the QA hold, 11:45 to 11:50.
   const stateDir = fixtureCopy((dir) => {
-    const logs = join(dir, "logs", "800");
+    const logs = join(dir, "logs", "42");
     const file = join(
       logs,
-      readdirSync(logs).find((name) => name.startsWith("2026-10-28T21-49")),
+      readdirSync(logs).find((name) => name.startsWith("2031-03-04T10-34")),
     );
     const request = (at, seq, kind) =>
       JSON.stringify({
         at,
         seq,
         event: "request",
-        by: "kirk",
+        by: "operator",
         message: "ok",
-        request: { kind, issue: 800 },
+        request: { kind, issue: 42 },
       });
     const lines = readFileSync(file, "utf8").split("\n");
     const after = lines.findIndex((line) =>
-      line.includes('"id":"item:pilot-predeclaration:validate@'),
+      line.includes('"id":"item:release-smoke:validate@'),
     );
     lines.splice(
       after + 1,
       0,
-      request("2026-10-28T22:55:00.000Z", 9001, "pause"),
-      request("2026-10-28T23:00:00.000Z", 9002, "resume"),
+      request("2031-03-04T11:45:00.000Z", 9001, "pause"),
+      request("2031-03-04T11:50:00.000Z", 9002, "resume"),
     );
     writeFileSync(file, lines.join("\n"));
   });
   after(() => rmSync(dirname(stateDir), { recursive: true, force: true }));
   const card = await fixtureCard({}, stateDir);
   const qa = card.operator.decisions.find((d) => d.kind === "qa");
-  assert.equal(qa.rawWaitMs, 721_292);
-  assert.equal(qa.waitMs, 721_292 - 300_000);
-  assert.equal(card.totals.holds.byKind.qa.waitMs, 421_292);
-  assert.equal(card.totals.holds.operatorWaitMs, 2_644_477 - 300_000);
-  assert.equal(card.totals.holds.rawWaitMs, 3_268_968);
+  assert.equal(qa.rawWaitMs, 690_000);
+  assert.equal(qa.waitMs, 690_000 - 300_000);
+  assert.equal(card.totals.holds.byKind.qa.waitMs, 390_000);
+  assert.equal(card.totals.holds.operatorWaitMs, 2_340_000 - 300_000);
+  assert.equal(card.totals.holds.rawWaitMs, 2_807_000);
   assert.ok(
     card.checks.every((check) => check.ok),
     JSON.stringify(card.checks),
@@ -140,9 +176,19 @@ test("a Factory build changed since provisioning is named in the card's gaps", a
   );
 });
 
+/** bench/score.mjs with `args`, never reading the environment's bench home. */
+function scoreCli(args) {
+  const env = { ...process.env };
+  delete env[HOME_ENV];
+  return spawnSync(process.execPath, [join(BENCH_DIR, "score.mjs"), ...args], {
+    encoding: "utf8",
+    env,
+  });
+}
+
 test("an Objective that hasn't ended scores a partial card", async () => {
   const stateDir = fixtureCopy((dir) => {
-    const file = join(dir, "objectives", "finished", "800.json");
+    const file = join(dir, "objectives", "finished", "42.json");
     const state = JSON.parse(readFileSync(file, "utf8"));
     state.status = "building";
     delete state.ended;
@@ -153,72 +199,172 @@ test("an Objective that hasn't ended scores a partial card", async () => {
   assert.equal(card.outcome, "running");
   assert.equal(card.partial, true);
   assert.equal(card.unavailable[0].metric, "every total");
-  // The CLI never writes it into results/.
-  const id = `partial-${process.pid}`;
-  const out = join(BENCH_DIR, "results", "clockgrove-800", `${id}.json`);
-  after(() => rmSync(out, { force: true }));
-  const run = spawnSync(
-    process.execPath,
-    [
-      join(BENCH_DIR, "score.mjs"),
-      "--benchmark",
-      "clockgrove-800",
-      "--state-dir",
-      stateDir,
-      "--issue",
-      "800",
-      "--run-id",
-      id,
-      "--label",
-      "partial",
-    ],
-    { encoding: "utf8" },
-  );
+  // The CLI never writes it into the results.
+  const results = mkdtempSync(join(tmpdir(), "bench-results-"));
+  after(() => rmSync(results, { recursive: true, force: true }));
+  const run = scoreCli([
+    "--benchmark",
+    EXAMPLE,
+    "--results",
+    results,
+    "--state-dir",
+    stateDir,
+    "--issue",
+    "42",
+    "--run-id",
+    "partial",
+    "--label",
+    "partial",
+  ]);
   assert.equal(run.status, 65, run.stderr);
   assert.match(run.stderr, /is running, not ended: .*partial/);
-  assert.ok(!existsSync(out));
+  assert.deepEqual(readdirSync(results), []);
 });
 
-test("#800 scores: repairs, holds by kind, validation, CI and per Work Item", async () => {
+test("scorecards go only where they are told: outside the Factory repository", () => {
+  const args = [
+    "--state-dir",
+    FIXTURE_STATE,
+    "--issue",
+    "42",
+    "--run-id",
+    "nowhere",
+    "--label",
+    "nowhere",
+  ];
+  // No results directory: refused, nothing written.
+  const refused = scoreCli(["--benchmark", EXAMPLE, ...args]);
+  assert.equal(refused.status, 64, refused.stderr);
+  assert.match(
+    refused.stderr,
+    /no results directory\. Benchmark definitions and results live outside the Factory repository: give --results DIR, or --bench-home DIR/,
+  );
+  assert.ok(
+    !existsSync(join(BENCH_DIR, "results", "acme-widgets-42", "nowhere.json")),
+  );
+  // A definition by id needs its directory too.
+  const byId = scoreCli(["--benchmark", "acme-widgets-42", "--print", ...args]);
+  assert.equal(byId.status, 64, byId.stderr);
+  assert.match(byId.stderr, /no definitions directory/);
+  // A bench home has both.
+  const home = mkdtempSync(join(tmpdir(), "bench-home-"));
+  after(() => rmSync(home, { recursive: true, force: true }));
+  const benchmarks = join(home, "benchmarks");
+  mkdirSync(benchmarks);
+  writeFileSync(
+    join(benchmarks, "acme-widgets-42.json"),
+    readFileSync(EXAMPLE, "utf8"),
+  );
+  const scored = scoreCli([
+    "--bench-home",
+    home,
+    "--benchmark",
+    "acme-widgets-42",
+    ...args,
+  ]);
+  assert.equal(scored.status, 0, scored.stderr);
+  const card = JSON.parse(
+    readFileSync(
+      join(home, "results", "acme-widgets-42", "nowhere.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(card.totals.tokens.total, 19_614_000);
+});
+
+test("a harness run is scored where its record says, unless a flag says otherwise", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bench-run-results-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const runDir = join(dir, "run1");
+  mkdirSync(runDir);
+  const recorded = join(dir, "recorded");
+  writeFileSync(
+    join(runDir, "run.json"),
+    JSON.stringify({
+      runId: "r1",
+      label: "r1",
+      group: "r1",
+      repository: "acme/widgets",
+      issue: 42,
+      stateDir: FIXTURE_STATE,
+      definitionFile: EXAMPLE,
+      resultsDir: recorded,
+    }),
+  );
+  const exported = join(dir, "exported");
+  const score = (...args) =>
+    spawnSync(
+      process.execPath,
+      [join(BENCH_DIR, "score.mjs"), "--run-dir", runDir, ...args],
+      { encoding: "utf8", env: { ...process.env, [HOME_ENV]: exported } },
+    );
+  const card = (results) => join(results, "acme-widgets-42", "r1.json");
+  // An exported bench home doesn't override what provisioning recorded.
+  const run = score();
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(existsSync(card(recorded)));
+  assert.ok(!existsSync(exported));
+  // A flag does.
+  const flagged = join(dir, "flagged");
+  assert.equal(score("--results", flagged).status, 0);
+  assert.ok(existsSync(card(flagged)));
+  const home = join(dir, "home");
+  assert.equal(score("--bench-home", home).status, 0);
+  assert.ok(existsSync(card(join(home, "results"))));
+  assert.ok(!existsSync(exported));
+});
+
+test("repairs, holds by kind, validation, CI and per Work Item", async () => {
   const card = await fixtureCard();
   const { totals } = card;
-  assert.equal(totals.repairs, 25);
-  assert.equal(totals.holds.total, 38);
-  assert.equal(totals.holds.scripted, 15);
-  assert.equal(totals.holds.operator, 23);
+  // tokenizer's worker validation, validation and review sent it back;
+  // query-api's push conflicted with its base; export-csv's validation.
+  assert.equal(totals.repairs, 5);
+  assert.equal(totals.holds.total, 12);
+  assert.equal(totals.holds.scripted, 6);
+  assert.equal(totals.holds.operator, 6);
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(totals.holds.byKind).map(([kind, k]) => [kind, k.count]),
     ),
     {
-      diagnosis: 9,
-      allowance: 10,
-      spend: 3,
-      review: 12,
+      diagnosis: 2,
+      allowance: 3,
+      review: 2,
+      spend: 2,
+      config: 1,
       ci: 1,
-      config: 2,
       qa: 1,
     },
   );
-  assert.equal(totals.criteria, 32);
+  // The plan as amended: tokenizer's amendment added a criterion.
+  assert.equal(totals.criteria, 19);
   assert.deepEqual(totals.planning, {
     rounds: 2,
     generations: 1,
-    revisions: 9,
+    revisions: 6,
   });
-  // The QA hold is no verdict run but counts as pilot-predeclaration's result not
-  // passing its first validation; the operator's retry validated the same result again.
+  assert.deepEqual(totals.amendments, {
+    proposed: 3,
+    accepted: 1,
+    rejected: 1,
+    unchanged: 1,
+    plannerAnswers: 4,
+  });
+  // export-csv's spend hold in validation is no verdict: its next run is
+  // the result's first validation. The QA hold counts as release-smoke's
+  // result not passing; the operator's retry validated the same result again.
   assert.deepEqual(totals.validation, {
-    runs: 24,
-    passed: 8,
-    holds: 1,
-    passRate: 8 / 24,
-    results: 24,
-    passedFirstTime: 7,
-    firstPassRate: 7 / 24,
+    runs: 8,
+    passed: 6,
+    holds: 2,
+    passRate: 6 / 8,
+    results: 8,
+    passedFirstTime: 5,
+    firstPassRate: 5 / 8,
   });
   assert.deepEqual(
-    card.items.find((item) => item.id === "pilot-predeclaration").validation,
+    card.items.find((item) => item.id === "release-smoke").validation,
     {
       runs: 1,
       passed: 1,
@@ -229,15 +375,18 @@ test("#800 scores: repairs, holds by kind, validation, CI and per Work Item", as
       firstPassRate: 0,
     },
   );
-  // entity-selection's first push conflicted with its base before any check
-  // ran: not a CI result. One of the four pushes whose checks ran passed.
-  assert.equal(totals.ci.published, 5);
+  // query-api's first push conflicted with its base before any check ran:
+  // not a CI result. tokenizer's was rerun and export-csv's held; one of
+  // the three pushes whose checks ran passed.
+  assert.equal(totals.ci.published, 4);
+  assert.equal(totals.ci.rounds, 5);
   assert.equal(totals.ci.conflicts, 1);
   assert.equal(totals.ci.passedFirstTime, 1);
-  assert.equal(totals.ci.firstPassRate, 0.25);
+  assert.equal(totals.ci.firstPassRate, 1 / 3);
   assert.deepEqual(
     card.items.map((item) => [
       item.id,
+      item.outcome,
       item.tokens.own,
       item.tokens.childThreads,
       item.repairs,
@@ -246,17 +395,28 @@ test("#800 scores: repairs, holds by kind, validation, CI and per Work Item", as
       Math.round(item.activeWallMs / 60_000),
     ]),
     [
-      ["living-scene", 29_499_710, 3_346_957, 12, 13, 10, 182],
-      ["entity-selection", 31_075_957, 8_708_660, 11, 19, 10, 165],
-      ["recorded-why", 24_522_060, 4_825_483, 2, 3, 3, 94],
-      ["pilot-predeclaration", 101_943, 0, 0, 1, 1, 0],
+      ["tokenizer", "merged", 7_059_000, 740_000, 3, 3, 3, 34],
+      ["query-api", "merged", 2_590_000, 300_000, 1, 1, 2, 14],
+      ["export-csv", "merged", 4_715_000, 730_000, 1, 6, 2, 28],
+      ["release-smoke", "settled", 90_000, 0, 0, 1, 1, 0],
     ],
   );
-  assert.equal(card.operator.decisions.length, 38);
+  // Planning and the final review are the Objective's own.
+  assert.equal(card.objective.tokens.total, 3_390_000);
+  assert.equal(card.operator.decisions.length, 12);
   assert.deepEqual(
     card.operator.actions.map((action) => action.kind),
     ["decline-discovery", "pause", "resume"],
   );
+  assert.deepEqual(card.telemetry.hedges, {
+    "reviewer objective-review": {
+      hedged: 1,
+      won: 0,
+      lost: 1,
+      tokens: 600_000,
+      tokensUnknown: 0,
+    },
+  });
   assert.deepEqual(
     card.unavailable.map((gap) => gap.metric),
     ["costUsd", "tokens of some calls"],

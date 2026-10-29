@@ -429,6 +429,7 @@ export async function provision({
   runId,
   label,
   group,
+  resultsDir = null,
   runner,
 }) {
   const owner = def.repository.owner;
@@ -453,7 +454,10 @@ export async function provision({
   const cache = join(host.cacheDir, source.replace("/", "__"));
   const record = {
     benchmark: def.id,
+    definitionFile: def.file ?? null,
     definitionDigest: def.digest,
+    // Where bench/run.mjs scores the run into; outside the Factory repository.
+    resultsDir,
     runId,
     label,
     group,

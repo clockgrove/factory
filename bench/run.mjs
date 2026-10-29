@@ -8,8 +8,12 @@
  *     configuration: `adopt`) are answered with `factory answer --as
  *     <policy>`. Any other hold pauses for the operator: it is recorded and
  *     printed, and this exits 2. Run it again after answering; it carries
- *     on. At the end it scores the run into bench/results/ and exits 0
- *     (done) or 1 (cancelled).
+ *     on. At the end it scores the run into <results>/<benchmark>/ and
+ *     exits 0 (done) or 1 (cancelled). The results directory is --results
+ *     DIR or results/ in --bench-home DIR when given, otherwise the one
+ *     provisioning recorded; FACTORY_BENCH_HOME's results/ only when the
+ *     record names none (bench/lib/home.mjs). A missing results directory
+ *     or definition exits 64.
  *
  *   node bench/run.mjs answer --run-dir DIR --question ID ANSWER [ARG]
  *     [--text-file ABSOLUTE_PATH] [--as NAME]
@@ -31,12 +35,19 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
 import { policyAnswer } from "./lib/holds.mjs";
+import {
+  benchDirs,
+  DIR_OPTIONS,
+  missingDir,
+  runResultsDir,
+} from "./lib/home.mjs";
 import { harnessRun } from "./lib/provision.mjs";
 import { scoreRun } from "./lib/score.mjs";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
+    ...DIR_OPTIONS,
     "run-dir": { type: "string" },
     interval: { type: "string", default: "60" },
     question: { type: "string" },
@@ -53,7 +64,24 @@ if (!values["run-dir"]) {
 const runDir = values["run-dir"];
 const recordFile = join(runDir, "run.json");
 const record = JSON.parse(readFileSync(recordFile, "utf8"));
-const definition = loadDefinition(record.benchmark);
+const dirs = benchDirs(values);
+const resultsDir = runResultsDir(values, record.resultsDir ?? null);
+if (positionals[0] !== "answer" && !resultsDir) {
+  process.stderr.write(
+    `Where to score the run into: ${missingDir("results", "results")}\n`,
+  );
+  process.exit(64);
+}
+let definition;
+try {
+  definition = loadDefinition(
+    record.definitionFile ?? record.benchmark,
+    dirs.benchmarks,
+  );
+} catch (error) {
+  process.stderr.write(`${error.message}\n`);
+  process.exit(64);
+}
 const policy = definition.operatorPolicy;
 const log = join(runDir, "decisions.jsonl");
 const now = () => new Date().toISOString();
@@ -147,12 +175,7 @@ for (;;) {
       run: harnessRun(record),
       factoryRepo: dirname(BENCH_DIR),
     });
-    const out = join(
-      BENCH_DIR,
-      "results",
-      definition.id,
-      `${record.runId}.json`,
-    );
+    const out = join(resultsDir, definition.id, `${record.runId}.json`);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, `${JSON.stringify(card, null, 2)}\n`);
     process.stdout.write(`#${issue} ${view.status}; scored into ${out}\n`);

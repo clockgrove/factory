@@ -1,0 +1,329 @@
+{
+  "version": 9,
+  "issue": 42,
+  "status": "done",
+  "frozen": {
+    "digest": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+    "config": {
+      "repository": "acme/widgets",
+      "provider": {
+        "planner": "codex",
+        "worker": {
+          "model": "gpt-test",
+          "effort": "medium",
+          "kind": "codex",
+          "network": "host"
+        },
+        "models": {
+          "planner": {
+            "model": "gpt-test",
+            "effort": "high"
+          },
+          "reviewer": {
+            "model": "gpt-test",
+            "effort": "medium"
+          }
+        }
+      }
+    },
+    "provider": "codex",
+    "selectedBy": "defaultProvider"
+  },
+  "holds": [],
+  "answers": {},
+  "retries": {},
+  "repairs": {
+    "item:tokenizer:work": {
+      "count": 3,
+      "findings": [],
+      "from": "item:tokenizer:review"
+    },
+    "item:query-api:work": {
+      "count": 1,
+      "findings": [],
+      "from": "item:query-api:ci"
+    },
+    "item:export-csv:work": {
+      "count": 1,
+      "findings": [],
+      "from": "item:export-csv:validate"
+    }
+  },
+  "kept": {
+    "plan:acceptedAt": "2031-03-04T09:07:27.100Z",
+    "amend:worker-tokenizer-1:proposal": {
+      "id": "worker-tokenizer-1",
+      "actor": "Work Item tokenizer's worker",
+      "at": "2031-03-04T09:14:40.000Z",
+      "plan": "2031-03-04T09:07:27.100Z"
+    },
+    "amend:worker-export-csv-1:proposal": {
+      "id": "worker-export-csv-1",
+      "actor": "Work Item export-csv's worker",
+      "at": "2031-03-04T10:18:43.270Z",
+      "plan": "2031-03-04T09:07:27.100Z"
+    },
+    "amend:worker-export-csv-2:proposal": {
+      "id": "worker-export-csv-2",
+      "actor": "Work Item export-csv's worker",
+      "at": "2031-03-04T11:17:53.770Z",
+      "plan": "2031-03-04T09:07:27.100Z"
+    }
+  },
+  "done": {
+    "plan": {
+      "base": "0123456789abcdef0123456789abcdef01234567",
+      "items": [
+        {
+          "kind": "work",
+          "id": "tokenizer",
+          "title": "Tokenize widget queries",
+          "goal": "Tokenize widget queries",
+          "acceptance": [
+            "A query splits into field, operator and value tokens",
+            "Quoted values keep their spaces",
+            "An unknown operator is an error naming its position",
+            "Tokens carry their source offsets"
+          ],
+          "nonGoals": [],
+          "citations": [],
+          "dependencies": [],
+          "ownedPaths": ["src/query/tokenizer.ts", "test/tokenizer.test.ts"],
+          "validation": [
+            {
+              "command": "npm test -- tokenizer"
+            }
+          ],
+          "brief": "",
+          "priority": 1
+        },
+        {
+          "kind": "work",
+          "id": "query-api",
+          "title": "Serve widget queries over the API",
+          "goal": "Serve widget queries over the API",
+          "acceptance": [
+            "GET /widgets takes a q parameter",
+            "A malformed q answers 400 with the tokenizer's message",
+            "Results are paged 50 at a time",
+            "The page cursor is opaque",
+            "Queries time out after 2 seconds",
+            "The OpenAPI document describes q"
+          ],
+          "nonGoals": [],
+          "citations": [],
+          "dependencies": ["tokenizer"],
+          "ownedPaths": ["src/api/widgets.ts", "openapi.yaml"],
+          "validation": [
+            {
+              "command": "npm test -- api"
+            }
+          ],
+          "brief": "",
+          "priority": 1
+        },
+        {
+          "kind": "work",
+          "id": "export-csv",
+          "title": "Export query results as CSV",
+          "goal": "Export query results as CSV",
+          "acceptance": [
+            "GET /widgets.csv streams the same results as CSV",
+            "The header row names every column",
+            "Values with commas are quoted",
+            "Dates are ISO 8601 in UTC",
+            "An export over 10,000 rows is refused"
+          ],
+          "nonGoals": [],
+          "citations": [],
+          "dependencies": ["query-api"],
+          "ownedPaths": ["src/api/export.ts"],
+          "validation": [
+            {
+              "command": "npm test -- export"
+            }
+          ],
+          "brief": "",
+          "priority": 1
+        },
+        {
+          "kind": "qa",
+          "id": "release-smoke",
+          "title": "Smoke-check the release build",
+          "goal": "Smoke-check the release build",
+          "acceptance": [
+            "The release build starts",
+            "A sample query answers",
+            "A sample export downloads"
+          ],
+          "nonGoals": [],
+          "citations": [],
+          "dependencies": ["export-csv"],
+          "ownedPaths": [],
+          "validation": [],
+          "brief": "",
+          "priority": 1
+        }
+      ],
+      "coverage": [],
+      "requiredPreIntegrationChecks": [],
+      "sourceExclusions": [],
+      "finalCommands": ["npm test", "npm run lint"],
+      "decisions": [],
+      "ownedSince": {}
+    },
+    "amend:worker-tokenizer-1": {
+      "plan": {
+        "base": "0123456789abcdef0123456789abcdef01234567",
+        "items": [
+          {
+            "kind": "work",
+            "id": "tokenizer",
+            "title": "Tokenize widget queries",
+            "goal": "Tokenize widget queries",
+            "acceptance": [
+              "A query splits into field, operator and value tokens",
+              "Quoted values keep their spaces",
+              "An unknown operator is an error naming its position",
+              "Tokens carry their source offsets",
+              "An empty query yields no tokens"
+            ],
+            "nonGoals": [],
+            "citations": [],
+            "dependencies": [],
+            "ownedPaths": ["src/query/tokenizer.ts", "test/tokenizer.test.ts"],
+            "validation": [
+              {
+                "command": "npm test -- tokenizer"
+              }
+            ],
+            "brief": "",
+            "priority": 1
+          },
+          {
+            "kind": "work",
+            "id": "query-api",
+            "title": "Serve widget queries over the API",
+            "goal": "Serve widget queries over the API",
+            "acceptance": [
+              "GET /widgets takes a q parameter",
+              "A malformed q answers 400 with the tokenizer's message",
+              "Results are paged 50 at a time",
+              "The page cursor is opaque",
+              "Queries time out after 2 seconds",
+              "The OpenAPI document describes q"
+            ],
+            "nonGoals": [],
+            "citations": [],
+            "dependencies": ["tokenizer"],
+            "ownedPaths": ["src/api/widgets.ts", "openapi.yaml"],
+            "validation": [
+              {
+                "command": "npm test -- api"
+              }
+            ],
+            "brief": "",
+            "priority": 1
+          },
+          {
+            "kind": "work",
+            "id": "export-csv",
+            "title": "Export query results as CSV",
+            "goal": "Export query results as CSV",
+            "acceptance": [
+              "GET /widgets.csv streams the same results as CSV",
+              "The header row names every column",
+              "Values with commas are quoted",
+              "Dates are ISO 8601 in UTC",
+              "An export over 10,000 rows is refused"
+            ],
+            "nonGoals": [],
+            "citations": [],
+            "dependencies": ["query-api"],
+            "ownedPaths": ["src/api/export.ts"],
+            "validation": [
+              {
+                "command": "npm test -- export"
+              }
+            ],
+            "brief": "",
+            "priority": 1
+          },
+          {
+            "kind": "qa",
+            "id": "release-smoke",
+            "title": "Smoke-check the release build",
+            "goal": "Smoke-check the release build",
+            "acceptance": [
+              "The release build starts",
+              "A sample query answers",
+              "A sample export downloads"
+            ],
+            "nonGoals": [],
+            "citations": [],
+            "dependencies": ["export-csv"],
+            "ownedPaths": [],
+            "validation": [],
+            "brief": "",
+            "priority": 1
+          }
+        ],
+        "coverage": [],
+        "requiredPreIntegrationChecks": [
+          {
+            "checkName": "lint",
+            "source": {
+              "path": "CONTRIBUTING.md"
+            }
+          }
+        ],
+        "sourceExclusions": [],
+        "finalCommands": ["npm test", "npm run lint"],
+        "decisions": [],
+        "ownedSince": {}
+      }
+    },
+    "amend:worker-export-csv-1": {
+      "rejected": "rejected"
+    },
+    "amend:worker-export-csv-2": {
+      "unchanged": true
+    },
+    "item:tokenizer:merge": {
+      "mergeSha": "m",
+      "integratedSha": "m",
+      "at": "2031-03-04T09:52:15.600Z"
+    },
+    "item:query-api:merge": {
+      "mergeSha": "m",
+      "integratedSha": "m",
+      "at": "2031-03-04T10:09:01.000Z"
+    },
+    "item:export-csv:merge": {
+      "mergeSha": "m",
+      "integratedSha": "m",
+      "at": "2031-03-04T11:39:40.670Z"
+    },
+    "item:release-smoke:merge": {
+      "settled": "qa"
+    }
+  },
+  "attempts": {},
+  "appliedRequests": [],
+  "modules": {},
+  "updatedAt": "2031-03-04T12:01:47.790Z",
+  "startedAt": "2031-03-04T09:00:04.000Z",
+  "stepRuns": {},
+  "finishedRun": "2031-03-04T10-34-12-170Z-4388",
+  "spend": {
+    "tokens": 17789000,
+    "cents": 0,
+    "granted": {
+      "tokens": 12000000
+    }
+  },
+  "closedHolds": [],
+  "ended": {
+    "at": "2031-03-04T12:01:47.790Z"
+  }
+}

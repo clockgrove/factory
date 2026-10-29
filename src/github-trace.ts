@@ -29,6 +29,12 @@ export interface Transport {
   requests?: NotedRequest[];
   unnoted?: number;
   every?: true;
+  /**
+   * What the client learned once for the rest of the service run, in this
+   * scope (`GitHub` `protectionRefused`): each an event of its own, after
+   * the requests' (`requestEvents`).
+   */
+  notices?: Record<string, unknown>[];
 }
 
 /** Why a request failed: no answer (`dns`, `tls`, `timeout`, `connection`, `aborted`), or the answer's status. */
@@ -175,7 +181,7 @@ export function note(
   return noted;
 }
 
-/** A scope's traced requests as `github-request` events, its unnoted count as one more. */
+/** A scope's traced requests as `github-request` events, its unnoted count as one more, then its notices. */
 export function requestEvents(
   job: string,
   counted: Transport,
@@ -189,6 +195,7 @@ export function requestEvents(
     ...(counted.unnoted
       ? [{ event: "github-request", job, unnoted: counted.unnoted }]
       : []),
+    ...(counted.notices ?? []).map((notice) => ({ job, ...notice })),
   ];
 }
 

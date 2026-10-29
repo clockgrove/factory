@@ -14,6 +14,7 @@ import { deliveryChange, profilesLacking } from "../planning/plan.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { type ObjectiveState, TERMINAL } from "../state.js";
+import type { SelfValidateOptions } from "../work/self-validate.js";
 import type { Worker } from "../work/worker.js";
 import {
   ClaudePlanner,
@@ -41,6 +42,7 @@ import {
 import { ClaudeManagedWorker, OpenAIManagedWorker } from "./managed.js";
 import {
   HedgedPlanner,
+  hedgePolicy,
   type ModelChoice,
   type Planner,
   type PlannerModels,
@@ -141,21 +143,25 @@ export function profileWorker(
   }
 }
 
-/** The provider's planner, hedged against stalled calls. */
+/** The provider's planner, hedged against stalled calls in the phases its `hedgeSeconds` (or the default) hedges. */
 export function providerPlanner(provider: ProviderConfig): Planner {
   const resolved = resolvedProvider(provider);
+  const policy = hedgePolicy(resolved.hedgeSeconds);
   switch (resolved.planner) {
     case "claude":
       return new HedgedPlanner(
         new ClaudePlanner(resolved.models as ClaudePlannerOptions),
+        policy,
       );
     case "copilot":
       return new HedgedPlanner(
         new CopilotPlanner(resolved.models as PlannerModels),
+        policy,
       );
     default:
       return new HedgedPlanner(
         new CodexPlanner(resolved.models as PlannerModels<CodexEffort>),
+        policy,
       );
   }
 }
@@ -173,19 +179,24 @@ export function providerWorker(
     const worker = resolvedProvider(
       profileProvider(config, profile) ?? provider,
     ).worker;
+    // One set of Validate settings for every worker that has the tool, so
+    // none runs it without the repository's formatter (#2166).
+    const validation: SelfValidateOptions = {
+      sandbox: config.sandbox,
+      plan,
+      blocks,
+      repository: config.repository,
+      commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
+      ...(config.validation.formatCommand
+        ? { formatCommand: config.validation.formatCommand }
+        : {}),
+    };
     switch (worker.kind) {
       case "claude":
         return new ClaudeWorker({
-          sandbox: config.sandbox,
-          plan,
-          blocks,
-          repository: config.repository,
+          ...validation,
           config: worker.settings as ClaudeWorkerConfig,
           allowedSecretNames,
-          commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
-          ...(config.validation.formatCommand
-            ? { formatCommand: config.validation.formatCommand }
-            : {}),
           worktreeRead:
             profile !== undefined &&
             config.execution.profiles?.[profile]?.worktreeRead === true,
@@ -195,16 +206,7 @@ export function providerWorker(
           model: { model: worker.model, effort: worker.effort },
           tools: worker.tools,
           idleMs: worker.idleSeconds * 1000,
-          validation: {
-            sandbox: config.sandbox,
-            plan,
-            blocks,
-            repository: config.repository,
-            commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
-            ...(config.validation.formatCommand
-              ? { formatCommand: config.validation.formatCommand }
-              : {}),
-          },
+          validation,
         });
       case "openai-agents":
         return new OpenAIManagedWorker(worker);
@@ -218,13 +220,7 @@ export function providerWorker(
           network,
           allowedSecretNames,
           secrets: config.secrets,
-          validation: {
-            sandbox: config.sandbox,
-            plan,
-            blocks,
-            repository: config.repository,
-            commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
-          },
+          validation,
         });
       }
     }
@@ -283,6 +279,8 @@ export const OPERATIONAL: readonly string[] = [
   "provider.worker.timeoutSeconds",
   "provider.worker.idleSeconds",
   "provider.worker.settings.maxTurns",
+  // When a stalled planner call is hedged: a duplicate call, never the answer's terms.
+  "provider.hedgeSeconds",
   // Content capture observes calls; it changes no run.
   "capture",
   // Who Factory acts as on GitHub, and whom its holds notify. What an

@@ -15,7 +15,12 @@ import {
   type ResultReview,
   reviewResult,
 } from "../review/result.js";
-import type { Answer, HoldOption, ObjectiveState } from "../state.js";
+import {
+  ALL,
+  type Answer,
+  type HoldOption,
+  type ObjectiveState,
+} from "../state.js";
 import { hostGitExit, worktreePath } from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { mergeOf } from "./merged.js";
@@ -221,10 +226,12 @@ export async function dependencyResults(
 }
 
 /**
- * Pass is done, refused goes to `refused`, needs-human asks: one
- * `accept <n>` and one `refuse <n>` per open criterion (`refuses` says
- * what a refusal does), keeping the review asked with `held` until it is
- * answered.
+ * Pass is done, refused goes to `refused`, needs-human asks once for
+ * every criterion it needs judged (#2171): `accept all` and `refuse all`
+ * decide them all with one reason, `decide` with a list decides several
+ * each with its own, and one `accept <n>` and one `refuse <n>` per open
+ * criterion decide one (`refuses` says what a refusal does). It keeps the
+ * review asked with `held` until it is answered.
  */
 export function reviewOutcome(
   review: ResultReview,
@@ -239,18 +246,70 @@ export function reviewOutcome(
     (q) =>
       `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}${q.detail ? `\n   ${q.detail}` : ""}`,
   );
+  const whole = wholeOffers(review, refuses);
   return {
     ...hold(
-      `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n${DECIDE_NOTE}`,
-      [...criterionOffers(review, refuses), "cancel"],
+      `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n${whole.length ? DECIDE_ALL_NOTE : DECIDE_NOTE}`,
+      [...whole, ...criterionOffers(review, refuses), "cancel"],
     ),
     keep: held(review),
   };
 }
 
-/** What a hold asking for criterion decisions says about them. */
+/** What a hold asking for one criterion's decision says about it. */
 export const DECIDE_NOTE =
-  "Answer `accept <n> <reason>` when criterion n is met by this result, or `refuse <n> <reason>` when it isn't. Each answer decides one criterion on this exact result, and the review goes on once every open one is decided, judging again only what is still undecided. Final review, the report and status list each decision with its reason.";
+  "Answer `accept <n> <reason>` when criterion n is met by this result, or `refuse <n> <reason>` when it isn't. The answer decides it on this exact result. Final review, the report and status list each decision with its reason.";
+
+/** What a hold asking for several criteria's decisions says about them. */
+export const DECIDE_ALL_NOTE =
+  "One answer can decide them all on this exact result: `accept all <reason>` when every criterion listed is met, `refuse all <reason>` when none is, or `decide` with one entry per line (or after `;`), each `accept <n>[,<n>...] <reason>` or `refuse <n>[,<n>...] <reason>`, to decide each with its own reason. `accept <n> <reason>` or `refuse <n> <reason>` decides one. When an answer refuses none, the criteria it leaves undecided are asked again together, and only they are judged again; a refusal decides this result, and they are judged again on the next one. Final review, the report and status list each criterion's decision with its reason.";
+
+/** The answer that decides several criteria, each with its own reason: `decide <list>`. */
+export const DECIDE = "decide";
+
+/**
+ * The answers to a needs-human review that decide several of its open
+ * criteria at once (#2171), when it asks about more than one: `accept
+ * all` and `refuse all` with one reason, and `decide` with a list of
+ * `accept <n>` and `refuse <n>` entries, each with its own. The engine
+ * gives them as the per-criterion answers `criterionOffers` lists
+ * (`HoldOption.covers`, `HoldOption.list`), recorded per criterion.
+ */
+export function wholeOffers(
+  review: Extract<ResultReview, { kind: "needs-human" }>,
+  refuses: string,
+): HoldOption[] {
+  if (review.questions.length < 2) return [];
+  const numbers = review.questions.map((entry) =>
+    String(entry.criterionIndex + 1),
+  );
+  const named = `${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)}`;
+  return [
+    {
+      answer: ACCEPT,
+      family: "accept",
+      arg: ALL,
+      covers: numbers,
+      consequence: `Records criteria ${named} as met by this result, each with your reason; reviews of this exact result count them as passed.`,
+      needsText: true,
+    },
+    {
+      answer: REFUSE,
+      family: "refuse",
+      arg: ALL,
+      covers: numbers,
+      consequence: `Records criteria ${named} as unmet by this result, each with your reason, ${refuses}.`,
+      needsText: true,
+    },
+    {
+      answer: DECIDE,
+      family: "decide",
+      list: true,
+      consequence: `Decides the criteria your text lists, one entry per line (or after \`;\`): \`accept <n>[,<n>...] <reason>\` records them as met by this result, \`refuse <n>[,<n>...] <reason>\` as unmet, ${refuses}. Criteria it leaves out are asked again together only when it refuses none; a refusal decides this result, and they are judged again on the next one.`,
+      needsText: true,
+    },
+  ];
+}
 
 /** What `refuse <n>` does at a Work Item's review. */
 export const REFUSES_ITEM =
@@ -322,11 +381,13 @@ export const REFUSE = "refuse";
 
 /**
  * The operator's criterion decisions of one review scope (Work Item
- * `itemId`, else final review) under the plan accepted now, with an
- * `accept <n>` or `refuse <n>` answer to the question about `held`
- * recorded once (keyed by its hold id), and the keep that saves them.
- * `earlier`: the review answered, whose verdicts on its tree stand; any
- * other run of the step reviews afresh.
+ * `itemId`, else final review) under the plan accepted now, with the
+ * answer to the question about `held` recorded once (keyed by its hold
+ * id): one decision for `accept <n>` or `refuse <n>`, and one per
+ * criterion for an answer that gave several (`accept all`, `refuse all`,
+ * `decide`: `Answer.parts`); and the keep that saves them. `earlier`: the
+ * review answered, whose verdicts on its tree stand; any other run of the
+ * step reviews afresh.
  */
 export function criterionDecisions(
   context: StepContext,
@@ -344,37 +405,52 @@ export function criterionDecisions(
       ? fact(state, "final-review:decisions")
       : fact(state, "decisions", itemId)) ?? []
   ).filter((entry) => entry.plan === accepted);
-  const outcome = answer?.answer;
-  if (
-    !answer ||
-    !held ||
-    held.kind === "pass" ||
-    answer.arg === undefined ||
-    (outcome !== ACCEPT && outcome !== REFUSE)
-  )
+  const given = (
+    answer?.parts ??
+    (answer?.arg === undefined
+      ? []
+      : [
+          {
+            answer: answer.answer,
+            arg: answer.arg,
+            ...(answer.text ? { text: answer.text } : {}),
+          },
+        ])
+  ).filter((part) => part.answer === ACCEPT || part.answer === REFUSE);
+  if (!answer || !held || held.kind === "pass" || !given.length)
     return { decisions: kept, keep: {} };
   const open = [
     ...(held.kind === "refused" ? held.refused : []),
     ...held.questions,
-  ].find((entry) => String(entry.criterionIndex + 1) === answer.arg);
-  const decisions =
-    open && !kept.some((entry) => entry.holdId === answer.holdId)
-      ? [
-          ...kept,
-          {
-            criterion: open.criterion,
-            outcome:
-              outcome === REFUSE ? ("refuse" as const) : ("accept" as const),
-            reason: answer.text ?? "",
-            by: answer.by,
-            at: answer.at,
-            tree: held.tree,
-            ...(itemId === undefined ? {} : { itemId }),
-            holdId: answer.holdId,
-            plan: accepted,
-          },
-        ]
-      : kept;
+  ];
+  const decisions = kept.some((entry) => entry.holdId === answer.holdId)
+    ? kept
+    : [
+        ...kept,
+        ...given.flatMap((part) => {
+          const entry = open.find(
+            (each) => String(each.criterionIndex + 1) === part.arg,
+          );
+          return entry
+            ? [
+                {
+                  criterion: entry.criterion,
+                  outcome:
+                    part.answer === REFUSE
+                      ? ("refuse" as const)
+                      : ("accept" as const),
+                  reason: part.text ?? "",
+                  by: answer.by,
+                  at: answer.at,
+                  tree: held.tree,
+                  ...(itemId === undefined ? {} : { itemId }),
+                  holdId: answer.holdId,
+                  plan: accepted,
+                },
+              ]
+            : [];
+        }),
+      ];
   return {
     decisions,
     earlier: held,

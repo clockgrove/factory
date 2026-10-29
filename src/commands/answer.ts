@@ -19,7 +19,7 @@ export const spec: Command = {
     "text-file": "value",
     as: "value",
   },
-  help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance); --as NAME (or FACTORY_ANSWERED_AS) records who answers on your behalf, such as an agent, beside your login",
+  help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`, `accept 2`, `accept all`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance); --as NAME (or FACTORY_ANSWERED_AS) records who answers on your behalf, such as an agent, beside your login",
   check: (args, command) => {
     const answer = args.positional[2];
     const file = args.flags["text-file"];

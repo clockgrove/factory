@@ -255,6 +255,8 @@ export interface ToolView {
 export interface ToolStats {
   reportedCalls: number;
   rounds: number;
+  /** Rounds that only waited on a running tool call (#2167). */
+  waitRounds: number;
   outputs: number;
   failures: number;
   missingOutputs: number;
@@ -522,6 +524,7 @@ function emptyGroup(key: CallGroup["key"]): CallGroup {
     toolStats: {
       reportedCalls: 0,
       rounds: 0,
+      waitRounds: 0,
       outputs: 0,
       failures: 0,
       missingOutputs: 0,
@@ -619,6 +622,7 @@ function addCall(group: CallGroup, rates: Rates, event: LogEvent): void {
     const t = group.toolStats;
     t.reportedCalls += 1;
     t.rounds += num(tools.rounds) ?? 0;
+    t.waitRounds += num(tools.waitRounds) ?? 0;
     t.outputs += num(tools.outputs) ?? 0;
     t.failures += num(tools.failures) ?? 0;
     t.missingOutputs += num(tools.missingOutputs) ?? 0;
@@ -1340,7 +1344,7 @@ function groupText(group: CallGroup, indent: string): string[] {
     `${indent}native tools: ${toolText(group.nativeTools)}`,
     ...(group.toolStats.reportedCalls
       ? [
-          `${indent}native tool calls: ${group.toolStats.rounds} rounds · ${group.toolStats.outputs} outputs · ${group.toolStats.failures} failed · ${group.toolStats.missingOutputs} unanswered · ${duration(group.toolStats.ms)} · ${group.toolStats.reportedCalls}/${group.usage.calls} calls reported`,
+          `${indent}native tool calls: ${group.toolStats.rounds} rounds (${group.toolStats.waitRounds} only waiting on a running tool) · ${group.toolStats.outputs} outputs · ${group.toolStats.failures} failed · ${group.toolStats.missingOutputs} unanswered · ${duration(group.toolStats.ms)} · ${group.toolStats.reportedCalls}/${group.usage.calls} calls reported`,
         ]
       : []),
     ...(group.request.reportedCalls

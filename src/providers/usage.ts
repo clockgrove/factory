@@ -254,22 +254,30 @@ export function firstToken(
  * the model responses that asked for at least one tool; `outputs`, the
  * calls whose result was seen; `failures`, those the tool or provider
  * reported failed; `missingOutputs`, calls never answered; `ms`, the
- * summed time from each call to its result. With capture on each output
- * goes to the capture file too (`captureToolOutput`), never to the log.
+ * summed time from each call to its result; `waitRounds`, the rounds
+ * whose every call only waited on a tool call still running (Codex code
+ * mode's `wait`, #2167), each a model response over the whole context
+ * that did nothing else. A blocking tool call (Claude's and Copilot's
+ * Validate) has none. With capture on each output goes to the capture
+ * file too (`captureToolOutput`), never to the log.
  */
 export class NativeTools {
   private readonly open = new Map<string, number>();
   private readonly answered = new Set<string>();
   private pending = false;
+  /** Every call of the pending response only waited. */
+  private waiting = false;
   private rounds = 0;
+  private waitRounds = 0;
   private outputs = 0;
   private failures = 0;
   private ms = 0;
 
-  /** The model asked for tool call `id`. */
-  call(id: string, at = Date.now()): void {
+  /** The model asked for tool call `id`; `waiting`: it only waits on a running one. */
+  call(id: string, waiting = false): void {
     if (this.open.has(id) || this.answered.has(id)) return;
-    this.open.set(id, at);
+    this.open.set(id, Date.now());
+    this.waiting = (this.pending ? this.waiting : true) && waiting;
     this.pending = true;
   }
 
@@ -288,11 +296,13 @@ export class NativeTools {
   /** A model response ended: it was a round if it asked for a tool. */
   response(): void {
     if (this.pending) this.rounds += 1;
+    if (this.pending && this.waiting) this.waitRounds += 1;
     this.pending = false;
   }
 
   get value(): {
     rounds: number;
+    waitRounds: number;
     outputs: number;
     failures: number;
     missingOutputs: number;
@@ -300,6 +310,7 @@ export class NativeTools {
   } {
     return {
       rounds: this.rounds + (this.pending ? 1 : 0),
+      waitRounds: this.waitRounds + (this.pending && this.waiting ? 1 : 0),
       outputs: this.outputs,
       failures: this.failures,
       missingOutputs: this.open.size,

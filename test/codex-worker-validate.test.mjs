@@ -12,7 +12,13 @@
 // (AGENTS.md), so that is the Codex worker integration cases'.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
@@ -183,6 +189,16 @@ test("a Codex worker's Codex runs Validate through Factory's MCP server: the ite
   // code_mode, deferred, direct) when the app server below loads this
   // configuration, and refuses an unknown one.
   assert.ok(config.includes('\nomit_tools_from = ["deferred"]\n'), config);
+  // A code-mode model calls Validate from an exec cell, which would yield
+  // to the model after about 30 s and leave it polling with `wait` (#2167):
+  // the cell's default yield is the call's own timeout, so it blocks. Codex
+  // reads it when the app server below loads this configuration.
+  assert.ok(
+    config.includes(
+      `\n[features.code_mode]\ndefault_exec_yield_time_ms = ${validation.deadlineMs}\n`,
+    ),
+    config,
+  );
   const socket = JSON.parse(config.match(/\nargs = (.*)\n/)[1]).at(-1);
   // Only this user reaches the socket's directory.
   assert.equal(statSync(dirname(socket)).mode & 0o777, 0o700);
@@ -264,6 +280,50 @@ test("a Codex worker's Codex runs Validate through Factory's MCP server: the ite
     await validation.close();
     rmSync(home.root, { recursive: true, force: true });
   }
+});
+
+// Live (Clockgrove #800), one Codex worker call made 65 `wait` rounds
+// during 27 minutes of Validate, an estimated 6M tokens: Codex code mode's
+// exec yielded after about 30 s and the model polled the running call. The
+// fixture is the session record of a live Codex 0.160.0 thread whose
+// Validate (a stand-in MCP tool that sleeps) took 180 s as 0.5.8
+// configured it, and 45 s with the exec yield Factory now sets: the
+// model's rounds while Validate ran, as the worker's model-usage event
+// reports them.
+test("a running Validate costs a Codex worker no model rounds, and the rounds spent only waiting on a running tool are reported (#2167)", async () => {
+  const { codexTelemetry } = await import(
+    "../dist/providers/codex-telemetry.js"
+  );
+  const recorded = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/codex-0.160.0-validate-wait.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const telemetry = (rollout) => {
+    const home = tempDir("factory-codex-home-");
+    const day = join(home, "sessions", "2026", "10", "28");
+    mkdirSync(day, { recursive: true });
+    writeFileSync(
+      join(day, "rollout-2026-10-28T16-44-49-thread.jsonl"),
+      rollout.map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+    );
+    return codexTelemetry(home, "thread");
+  };
+  // As 0.5.8 configured it: exec yielded, and 15 of the 16 rounds only
+  // waited on the running call.
+  const polling = telemetry(recorded.polling);
+  assert.deepEqual(polling.nativeToolActivity.byName, { exec: 1, wait: 15 });
+  assert.equal(polling.nativeTools.rounds, 16);
+  assert.equal(polling.nativeTools.waitRounds, 15);
+  // With the yield at the call's timeout: one round to call it, none while
+  // it ran.
+  const blocking = telemetry(recorded.blocking);
+  assert.deepEqual(blocking.nativeToolActivity.byName, { exec: 1 });
+  assert.equal(blocking.nativeTools.rounds, 1);
+  assert.equal(blocking.nativeTools.waitRounds, 0);
+  assert.equal(blocking.nativeTools.outputs, 1);
+  assert.ok(blocking.nativeTools.ms >= 45_000, blocking.nativeTools.ms);
 });
 
 test("a Codex worker without declared commands has no Validate, and its prompt says so", async () => {

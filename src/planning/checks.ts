@@ -10,6 +10,7 @@ import { localAssetPlace } from "../sandbox.js";
 import {
   type BaseFiles,
   ciOnlyKey,
+  commandRuns,
   commandScope,
   listCommands,
   namedBase,
@@ -47,13 +48,17 @@ type Found = (message: string, itemId?: string) => void;
  * Every deterministic problem with a draft, as findings. Reads the base
  * through `files` (plain `git show base:path`). Empty means the draft goes
  * to review. A finding with kind operator-decision is one only a person can
- * answer; every other finding goes back to the planner.
+ * answer; every other finding goes back to the planner. `accepted` is the
+ * plan an amendment revises: its items keep their accepted spec (the
+ * started-item rule), so the proof checks judge only the items an
+ * amendment adds or changes.
  */
 export async function checkPlan(
   draft: Draft,
   facts: PlanningFacts,
   files: BaseFiles,
   previous?: Draft,
+  accepted?: Draft,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   const found: Found = (message, itemId) =>
@@ -74,6 +79,8 @@ export async function checkPlan(
   await citationFindings(items, facts.sources, files, found);
   await mediaFindings(items, facts, files, found);
   gateFindings(draft, facts, found);
+  await finalProofFindings(draft, facts, files, found, accepted);
+  await qaRequirementFindings(draft, files, found, accepted);
   return findings;
 }
 
@@ -204,6 +211,323 @@ function integratedBaseFindings(
           `Work Item ${item.id} validation runs ${command}, which compares with the plan's base (${named}): integrated commands run on the shared default branch, which includes other Objectives' merges, so a diff from the base counts their changes too, and Factory itself enforces each item's owned paths. Drop the base-relative check and prove the behaviour with a command that exercises it, not the diff`,
           item.id,
         );
+    }
+  }
+}
+
+// ── Final-only proof ────────────────────────────────────────────────────
+
+/**
+ * final-only proof (#2170): a Work Item that owns, by its exact path, a
+ * test file or runner configuration that a final or CI-only command runs
+ * (facts.ts `commandRuns`) and that none of its own validation commands
+ * names never sees that test's proof in its own validation: its review
+ * judges the item without it, and the test first runs after the item
+ * merged. Live, two items owned the browser test only final validation
+ * ran, and their reviews held twelve times for proof the operator ran by
+ * hand. So the item runs the final command itself. A CI-only command,
+ * which validation never runs, is proved by CI instead: published-ci with
+ * the item as its target, or integrated-ci on a QA item after it.
+ */
+async function finalProofFindings(
+  draft: Draft,
+  facts: PlanningFacts,
+  files: BaseFiles,
+  found: Found,
+  accepted?: Draft,
+): Promise<void> {
+  const commands = [
+    ...new Set([...(facts.finalCommands ?? []), ...facts.ciOnlyCommands]),
+  ];
+  if (!commands.length) return;
+  const scripts = await files.scripts();
+  const runs = (command: string) => commandRuns(command, files, scripts);
+  const suites = (
+    await Promise.all(
+      commands.map(async (command) => ({ command, runs: await runs(command) })),
+    )
+  ).filter((suite) => suite.runs.length);
+  if (!suites.length) return;
+  const ciOnly = new Set(facts.ciOnlyCommands.map(ciOnlyKey));
+  const kept = new Set(accepted?.items.map((item) => item.id) ?? []);
+  const { items, coverage } = draft;
+  const ciProved = (id: string) =>
+    coverage.some(
+      ({ itemId, proof }) =>
+        (proof?.kind === "published-ci" && proof.targetItem === id) ||
+        (proof?.kind === "integrated-ci" && ancestors(items, itemId).has(id)),
+    );
+  for (const item of items) {
+    if ((item.kind ?? "work") !== "work" || kept.has(item.id)) continue;
+    const validated = new Set(
+      item.validation.map(({ command }) => ciOnlyKey(command)),
+    );
+    const named = new Set(
+      (
+        await Promise.all(item.validation.map(({ command }) => runs(command)))
+      ).flat(),
+    );
+    for (const suite of suites) {
+      if (validated.has(ciOnlyKey(suite.command))) continue;
+      const owned = suite.runs.filter(
+        (path) => item.ownedPaths.includes(path) && !named.has(path),
+      );
+      if (!owned.length) continue;
+      // One command that runs them is enough: no second finding for them.
+      for (const path of owned) named.add(path);
+      const them = owned.length > 1 ? "those files" : "that file";
+      if (!ciOnly.has(ciOnlyKey(suite.command)))
+        found(
+          `Work Item ${item.id} owns ${owned.join(", ")}, which the final command ${suite.command} runs and none of its validation commands names: its review judges the item without that test's proof, which first runs in final validation, after the item merged. Add \`${suite.command}\` to its validation commands (after the install, when it needs one), or validate it with a command that names ${them}`,
+          item.id,
+        );
+      else if (!ciProved(item.id))
+        found(
+          `Work Item ${item.id} owns ${owned.join(", ")}, which only the CI-only command ${suite.command} runs, and validation never runs a CI-only command, so nothing proves the item with ${them}: prove it by CI, with published-ci on the check that runs that command (from a read-only QA item that depends on ${item.id}, targetItem ${item.id}) or integrated-ci on a QA item after it, or validate it with an offline command that names ${them}`,
+          item.id,
+        );
+    }
+  }
+}
+
+// ── QA requirements ─────────────────────────────────────────────────────
+
+/** A quoted string in a command, in the program around it (the command, or a quoted program it runs) with every quoted string's text masked. */
+interface Quoted {
+  value: string;
+  program: string;
+  start: number;
+  end: number;
+}
+
+/** A backslash escape's character; any other escape stays as written, so a regular expression keeps its `\d`. */
+const ESCAPES: Record<string, string> = {
+  n: "\n",
+  t: "\t",
+  '"': '"',
+  "'": "'",
+  "\\": "\\",
+};
+
+/**
+ * The quoted strings of a program, with the program they are in, and the
+ * program itself masked. A quoted string that holds the other quote and a
+ * call is a program itself (the body of `python3 -c '...'` or
+ * `node -e "..."`), so its own strings are read in it instead.
+ */
+function quotedIn(program: string): { masked: string; strings: Quoted[] } {
+  const own: Omit<Quoted, "program">[] = [];
+  const nested: Quoted[] = [];
+  let masked = "";
+  let at = 0;
+  while (at < program.length) {
+    const quote = program[at]!;
+    if (quote !== '"' && quote !== "'") {
+      masked += quote;
+      at += 1;
+      continue;
+    }
+    let end = at + 1;
+    let value = "";
+    while (end < program.length && program[end] !== quote)
+      if (program[end] === "\\" && end + 1 < program.length) {
+        const next = program[end + 1]!;
+        value += ESCAPES[next] ?? `\\${next}`;
+        end += 2;
+      } else {
+        value += program[end];
+        end += 1;
+      }
+    if (end >= program.length) {
+      masked += program.slice(at);
+      break;
+    }
+    const inner = program.slice(at + 1, end);
+    if (inner.includes(quote === '"' ? "'" : '"') && inner.includes("("))
+      nested.push(...quotedIn(inner).strings);
+    else own.push({ value, start: at, end: end + 1 });
+    masked += `${quote}${"_".repeat(end - at - 1)}${quote}`;
+    at = end + 1;
+  }
+  return {
+    masked,
+    strings: [
+      ...own.map((entry) => ({ ...entry, program: masked })),
+      ...nested,
+    ],
+  };
+}
+
+/** Where one statement of a program ends: shell and script separators, in masked text. */
+const STATEMENT_END = /;|\n|&&|\|\|/g;
+
+/** The statement of `program` (masked) that holds `at`. */
+function statementAt(program: string, at: number): [number, number] {
+  let start = 0;
+  for (const match of program.matchAll(STATEMENT_END)) {
+    if (match.index >= at) return [start, match.index];
+    start = match.index + match[0].length;
+  }
+  return [start, program.length];
+}
+
+/** Every statement of `program` (masked). */
+function statements(program: string): string[] {
+  return program.split(STATEMENT_END);
+}
+
+/** A statement that negates what it tests: `not in`, `!s.includes(...)`, `! grep`, `grep -v`. */
+const NEGATED = /\bnot\b|!(?!=)|\bgrep\b[^|;&]*\s-[A-Za-z]*v|\bnone\s*\(/;
+/** A conditional statement, whose test fails the check only when negated (`if "x" not in s: exit(1)`). */
+const CONDITIONAL = /^\s*(?:if|elif|while|until)\b|^\s*\[\[?\s/;
+/** A string a call prints or fails with: a message, never a requirement. */
+const MESSAGE =
+  /(?:\b(?:print|exit|fail|die|warn|log|error|info|debug|SystemExit)|Error|Exception)\s*\(\s*$|\b(?:echo|printf)(?:\s+-\w+)*\s+$/;
+/** A module a program loads: `require("fs")`, `import("x")`, `from "x"`. */
+const MODULE = /\b(?:require|import)\s*\(\s*$|\b(?:from|import)\s+$/;
+/** A string a check can't look for literally: a regular expression, an encoding name. */
+const NOT_LITERAL =
+  /^\^|[^\\]\$$|\\[dDsSwWbB]|\.\*|\.\+|\[[^\]]*\]|\(\?|^(?:utf-?(?:8|16)|ascii|latin-?1|binary|base64|hex)$/i;
+/** A data or document file, which a QA check reads for text; code it runs is never one. */
+const DATA_FILE =
+  /\.(?:md|mdx|markdown|txt|rst|adoc|json|ya?ml|toml|csv|tsv|html?|xml|ini|cfg)$/i;
+
+/** Whether a statement requires what it tests to be there. */
+function positive(statement: string): boolean {
+  return CONDITIONAL.test(statement)
+    ? NEGATED.test(statement)
+    : !NEGATED.test(statement);
+}
+
+/**
+ * Whether a quoted string is text the check requires to be present: not a
+ * path, a message, a prefixed or keyword string, a regular expression or
+ * an encoding, and in a statement that tests for it rather than its
+ * absence. A string assigned to a list is judged by the statements that
+ * use the list.
+ */
+function required({ value, program, start, end }: Quoted): boolean {
+  const before = program.slice(0, start);
+  if (
+    !/[A-Za-z0-9]/.test(value) ||
+    value.trim().length < 2 ||
+    NOT_LITERAL.test(value) ||
+    (/^\S+$/.test(value) &&
+      (value.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(value))) ||
+    /(?:^|[^\w])[rbfu]{1,2}$/i.test(before) ||
+    /\w=$/.test(before) ||
+    MESSAGE.test(before) ||
+    MODULE.test(before)
+  )
+    return false;
+  const [from, to] = statementAt(program, start);
+  const statement = program.slice(from, to);
+  // `assert condition, "message"`: the string after the condition.
+  if (
+    /^\s*assert\b/.test(statement) &&
+    /,\s*$/.test(program.slice(from, start)) &&
+    !program.slice(end, to).trim()
+  )
+    return false;
+  const list = statement.match(
+    /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_]\w*)\s*=\s*[([{]/,
+  );
+  if (!list) return positive(statement);
+  const uses = statements(program).filter(
+    (other) =>
+      other !== statement && new RegExp(`\\b${list[1]}\\b`).test(other),
+  );
+  return uses.length ? uses.every(positive) : positive(statement);
+}
+
+/**
+ * qa-requirements (#2170): a read-only QA item changes nothing, so every
+ * string its command requires of a file it reads must be there already at
+ * the base, or be written by a Work Item it depends on that owns the file
+ * and whose acceptance names the file and quotes the string. Live, a QA
+ * check required "#817" in the Wave 4 plan's §1.1, which no item was
+ * asked to write: QA refused the integrated result, and the operator
+ * fixed the plan by hand. Read only for the data and document files the
+ * command names that the base tracks or a Work Item before it owns, and
+ * only the strings it tests for (`required`); a command that runs a script
+ * or a package command names none.
+ */
+async function qaRequirementFindings(
+  draft: Draft,
+  files: BaseFiles,
+  found: Found,
+  accepted?: Draft,
+): Promise<void> {
+  const { items } = draft;
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const tracked = new Set(await files.paths());
+  for (const qa of items) {
+    if (qa.kind !== "qa") continue;
+    const kept = accepted?.items.find((item) => item.id === qa.id);
+    if (
+      kept &&
+      JSON.stringify(kept.validation) === JSON.stringify(qa.validation)
+    )
+      continue;
+    const writers = [...ancestors(items, qa.id)]
+      .map((id) => byId.get(id)!)
+      .filter((item) => (item.kind ?? "work") === "work");
+    for (const { command } of qa.validation) {
+      const { masked, strings } = quotedIn(command);
+      const named = [
+        ...new Set(
+          [
+            ...strings.map(({ value }) => value),
+            ...masked.split(/[\s;&|()<>]+/),
+          ]
+            .map((word) => word.replace(/^\.\//, ""))
+            .filter(
+              (path) =>
+                validPath(path) &&
+                DATA_FILE.test(path) &&
+                (tracked.has(path) ||
+                  writers.some((item) => ownsPath(path, item.ownedPaths))),
+            ),
+        ),
+      ];
+      if (!named.length) continue;
+      const texts = await Promise.all(
+        named.map(async (path) => (await files.text(path)) ?? ""),
+      );
+      const asked = (value: string) =>
+        writers.some((item) =>
+          named.some(
+            (path) =>
+              ownsPath(path, item.ownedPaths) &&
+              item.acceptance.some(
+                (entry) =>
+                  entry.includes(value) &&
+                  (entry.includes(path) ||
+                    entry.includes(path.slice(path.lastIndexOf("/") + 1))),
+              ),
+          ),
+        );
+      const missing = [
+        ...new Set(strings.filter(required).map(({ value }) => value)),
+      ].filter(
+        (value) => !texts.some((text) => text.includes(value)) && !asked(value),
+      );
+      if (!missing.length) continue;
+      const owners = writers.filter((item) =>
+        named.some((path) => ownsPath(path, item.ownedPaths)),
+      );
+      const file =
+        named.find((path) =>
+          owners.some((item) => ownsPath(path, item.ownedPaths)),
+        ) ?? named[0]!;
+      const shown = missing
+        .slice(0, MAX_DIAGNOSTIC_HEADINGS)
+        .map(diagnosticValue);
+      const more = missing.length - shown.length;
+      found(
+        `QA item ${qa.id} validation runs a check that requires ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""} in ${named.join(" or ")}, which the base lacks, and no Work Item ${qa.id} depends on is asked to write ${missing.length > 1 ? "them" : "it"}: a read-only QA item changes nothing, so the check fails on the integrated result. Give ${owners.length ? `the Work Item that owns ${file} (${owners.map((item) => item.id).join(" or ")})` : `a Work Item ${qa.id} depends on, owning ${file},`} an acceptance entry that names ${file} and quotes ${missing.length > 1 ? "each string" : "the string"}, or drop the requirement from the check`,
+        qa.id,
+      );
     }
   }
 }

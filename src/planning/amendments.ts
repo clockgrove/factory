@@ -1696,7 +1696,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       // planner's to fix, like the checks' findings: both go back.
       const findings = [
         ...decoded.findings,
-        ...(await checkPlan(draft, facts, files, plan)),
+        // The accepted plan's items keep their spec: the proof checks
+        // judge only what this amendment adds or changes.
+        ...(await checkPlan(draft, facts, files, plan, plan)),
         ...amendmentFindings(plan, draft, progress, {
           answered: answered.length > 0,
           nativeStack: config.delivery.kind === "native-stack",

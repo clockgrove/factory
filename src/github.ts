@@ -2165,23 +2165,38 @@ export class GitHub {
   }
 
   /**
-   * Whether GitHub shows `branch` as protected (`GET branches/{b}`, which
-   * needs only read access): by a ruleset or a classic branch protection
-   * rule, which it doesn't tell apart. Undefined when GitHub doesn't say.
+   * Whether the branch read (`GET branches/{b}`, which needs only read
+   * access) shows a classic branch protection rule on `branch` without
+   * showing that it requires no status checks. Its `protected` flag is set
+   * by a ruleset alone too, so it can't say; `protection.enabled` is true
+   * only for a classic rule (false on a branch only rulesets protect), and
+   * the rule's `required_status_checks` enforcement level "off" says it
+   * requires none, hence no up-to-date branch either. Undefined when
+   * GitHub doesn't say.
    */
-  async branchProtected(
+  async classicRuleHidden(
     branch: string,
     signal?: AbortSignal,
   ): Promise<boolean | undefined> {
     const read = await this.optional(() =>
-      this.rest<{ protected?: unknown }>(
+      this.rest<{
+        protection?: {
+          enabled?: unknown;
+          required_status_checks?: { enforcement_level?: unknown } | null;
+        };
+      }>(
         "GET",
         this.repo(`branches/${encodeURIComponent(branch)}`),
         undefined,
         signal,
       ),
     );
-    return typeof read?.protected === "boolean" ? read.protected : undefined;
+    const enabled = read?.protection?.enabled;
+    if (typeof enabled !== "boolean") return undefined;
+    return (
+      enabled &&
+      read?.protection?.required_status_checks?.enforcement_level !== "off"
+    );
   }
 
   /**

@@ -321,14 +321,51 @@ test("a user's login is unchanged: it reads classic protection, with no installa
   assert.ok(!requests.includes(INSTALLATION));
 });
 
-test("branchProtected reads GitHub's protected flag, by a ruleset or a classic rule", async () => {
-  routes = { [BRANCH]: [200, { name: "main", protected: true }] };
+/** The branch read: protected, with `protection` as given. */
+const branchRead = (protection) => [
+  200,
+  { name: "main", protected: true, protection },
+];
+
+test("classicRuleHidden: a classic rule the branch read shows (enabled) without its checks setting; never a ruleset alone", async () => {
   const client = await user();
-  assert.equal(await client.branchProtected("main"), true);
+  for (const [protection, hidden] of [
+    // Rulesets alone: protected, but not enabled (Clockgrove's main,
+    // rust-lang/rust's on 2026-10-28).
+    [CLOCKGROVE[BRANCH][1].protection, false],
+    // A classic rule requiring no checks (golang/go's, facebook/react's).
+    [
+      {
+        enabled: true,
+        required_status_checks: {
+          enforcement_level: "off",
+          contexts: [],
+          checks: [],
+        },
+      },
+      false,
+    ],
+    // A classic rule whose checks setting the read doesn't show.
+    [{ enabled: true }, true],
+    [
+      {
+        enabled: true,
+        required_status_checks: { enforcement_level: "non_admins" },
+      },
+      true,
+    ],
+  ]) {
+    routes = { [BRANCH]: branchRead(protection) };
+    assert.equal(
+      await client.classicRuleHidden("main"),
+      hidden,
+      JSON.stringify(protection),
+    );
+  }
   routes = { [BRANCH]: [200, { name: "main", protected: false }] };
-  assert.equal(await client.branchProtected("main"), false);
+  assert.equal(await client.classicRuleHidden("main"), undefined);
   routes = {};
-  assert.equal(await client.branchProtected("main"), undefined);
+  assert.equal(await client.classicRuleHidden("main"), undefined);
 });
 
 /** A GitHub stand-in for readiness: every read it isn't given fails the test. */
@@ -342,7 +379,8 @@ function fake(answers) {
   });
 }
 
-async function readiness({ isApp, policy, protectedBranch }) {
+/** Readiness with `policy` and `hidden` as given, or as `client` reads them from the fake GitHub. */
+async function readiness({ isApp, policy, hidden, client }) {
   process.env.FACTORY_STATE_DIR = tempDir("factory-unseen-state-");
   return repositoryChecks(
     {
@@ -359,25 +397,27 @@ async function readiness({ isApp, policy, protectedBranch }) {
       canPush: async () => true,
       defaultBranch: async () => "main",
       mergeCommitsAllowed: async () => true,
-      checksPolicy: async () => policy,
-      branchProtected: async () => protectedBranch,
+      checksPolicy: async (branch) =>
+        client ? client.checksPolicy(branch) : policy,
+      classicRuleHidden: async (branch) =>
+        client ? client.classicRuleHidden(branch) : hidden,
       requiredReviews: async () => [],
       threadResolution: async () => [],
     }),
   );
 }
 
-test("readiness: a protected branch whose rule Factory can't see (no ruleset or branch-read checks, up-to-date unknown) is named, with a ruleset as the fix", async () => {
+test("readiness: a classic rule on the branch that Factory can't see (no ruleset or branch-read checks, up-to-date unknown) is named, with a ruleset as the fix", async () => {
   const checks = await readiness({
     isApp: true,
     policy: { names: [], strict: undefined },
-    protectedBranch: true,
+    hidden: true,
   });
   const warned = checks.find((check) => check.name === "branch protection");
   assert.equal(warned.status, "warn");
   assert.match(
     warned.detail,
-    /^GitHub shows main as protected, but neither its rulesets nor the branch read show a required check or the up-to-date rule\. A classic branch protection rule is unreadable to drill-factory\[bot\]: GitHub shows it only with Administration access/,
+    /^GitHub shows a classic branch protection rule on main, but neither its rulesets nor the branch read show a required check or the up-to-date rule\. A classic branch protection rule is unreadable to drill-factory\[bot\]: GitHub shows it only with Administration access/,
   );
   assert.match(warned.fix, /into a ruleset/);
   assert.match(warned.fix, /rather than granting the App Administration/);
@@ -391,19 +431,19 @@ test("readiness: a protected branch whose rule Factory can't see (no ruleset or 
     await readiness({
       isApp: false,
       policy: { names: [], strict: undefined },
-      protectedBranch: true,
+      hidden: true,
     })
   ).find((check) => check.name === "branch protection");
   assert.match(login.detail, /can't read a classic branch protection rule/);
   assert.doesNotMatch(login.fix, /Administration/);
 });
 
-test("readiness: an unprotected branch, or one whose classic protection was read, keeps the plain required-checks warning", async () => {
-  for (const [policy, protectedBranch] of [
+test("readiness: a branch with no classic rule hidden, or whose classic protection was read, keeps the plain required-checks warning", async () => {
+  for (const [policy, hidden] of [
     [{ names: [], strict: undefined }, false],
     [{ names: [], strict: false }, true],
   ]) {
-    const checks = await readiness({ isApp: true, policy, protectedBranch });
+    const checks = await readiness({ isApp: true, policy, hidden });
     const required = checks.find((check) => check.name === "required checks");
     assert.equal(required.status, "warn");
     assert.match(required.detail, /^main requires no status checks/);
@@ -416,7 +456,7 @@ test("readiness: an unprotected branch, or one whose classic protection was read
   const checks = await readiness({
     isApp: true,
     policy: { names: ["quality"], strict: true },
-    protectedBranch: true,
+    hidden: true,
   });
   assert.equal(
     checks.find((check) => check.name === "required checks").status,
@@ -425,5 +465,55 @@ test("readiness: an unprotected branch, or one whose classic protection was read
   assert.equal(
     checks.find((check) => check.name === "branch protection").status,
     "ok",
+  );
+});
+
+test("readiness: a branch only rulesets protect, requiring no checks, keeps the required-checks warning and names no classic rule (the App without Administration)", async () => {
+  // rust-lang/rust's master on 2026-10-28: rulesets with no status-check
+  // rule, no classic protection; the branch read says protected, not
+  // enabled.
+  routes = {
+    ...installed(BASE),
+    [RULES]: [
+      200,
+      [
+        { type: "deletion", ruleset_id: 1 },
+        { type: "non_fast_forward", ruleset_id: 1 },
+        {
+          type: "pull_request",
+          ruleset_id: 1,
+          parameters: { required_approving_review_count: 0 },
+        },
+      ],
+    ],
+    [BRANCH]: CLOCKGROVE[BRANCH],
+    [CHECKS]: REFUSED,
+    [PROTECTION]: REFUSED,
+  };
+  const client = await app();
+  const checks = await readiness({ isApp: true, client });
+  const required = checks.find((check) => check.name === "required checks");
+  assert.equal(required.status, "warn");
+  assert.match(required.detail, /^main requires no status checks/);
+  assert.equal(required.fix, "Require the CI checks on main in a ruleset");
+  assert.equal(
+    checks.find((check) => check.name === "branch protection"),
+    undefined,
+  );
+  assert.deepEqual(protectionReads(), []);
+
+  // The same branch with a classic rule whose checks setting the read
+  // doesn't show: named as one Factory can't see.
+  routes = {
+    ...routes,
+    [BRANCH]: branchRead({ enabled: true }),
+  };
+  const hidden = (await readiness({ isApp: true, client })).find(
+    (check) => check.name === "branch protection",
+  );
+  assert.equal(hidden.status, "warn");
+  assert.match(
+    hidden.detail,
+    /^GitHub shows a classic branch protection rule on main/,
   );
 });

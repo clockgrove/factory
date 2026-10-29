@@ -59,7 +59,7 @@ export class CodexValidate {
     /** Absent: no tool (no declared commands, or a gitlink). */
     private readonly server: McpSocketServer | undefined,
     private readonly ended: AbortController,
-    /** The item's whole validation deadline: one call's limit. */
+    /** The item's whole validation deadline, its formatter's command included: one call's limit. */
     readonly deadlineMs: number,
   ) {}
 
@@ -107,7 +107,12 @@ export class CodexValidate {
       validator,
       server,
       ended,
-      validationDeadlineMs(input.item, options.commandTimeoutMs),
+      // The formatter is one more command, as for Claude and Copilot (#2166).
+      validationDeadlineMs(
+        input.item,
+        options.commandTimeoutMs,
+        options.formatCommand !== undefined,
+      ),
     );
   }
 

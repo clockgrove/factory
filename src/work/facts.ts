@@ -9,6 +9,7 @@ import type { CriterionDecision, ResultReview } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
 import type { RepairContext } from "./prompt.js";
+import type { ValidateResult } from "./steps.js";
 import type { WorkerSpend } from "./worker.js";
 
 /*
@@ -121,6 +122,33 @@ export interface ItemFacts {
    * question instead of a repair that would repeat the last one.
    */
   rereviewed: { commit: string; at: string };
+  /**
+   * The item's latest validation by its validate step (step-validate.ts):
+   * the candidate commit, the digest of what it ran under
+   * (`validationKey`), when, and its result. The same commit under the
+   * same key reuses it instead of running the commands again (#2174); the
+   * operator's `revalidate` drops it, and so does a run that ends without
+   * a result or runs a failed command once more.
+   */
+  validation: KeptValidation;
+}
+
+/** The item's `validation` fact. */
+export interface KeptValidation {
+  commit: string;
+  key: string;
+  at: string;
+  result:
+    | { kind: "passed"; done: ValidateResult }
+    | {
+        kind: "failed";
+        /** The repair's finding: the output as kept (step-validate.ts `keptOutput`). */
+        detail: string;
+        /** The finding as the repair shows it. */
+        shown?: string;
+        /** The failed command, for `validationFailed`. */
+        command?: string;
+      };
 }
 
 /** What the Objective's own steps keep, by name. */

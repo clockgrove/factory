@@ -6,7 +6,14 @@
  * viewer's setting. Every number comes from a scorecard; a null shows as
  * "n/a", never 0.
  */
-import { compare, METRICS, SHOWN, spread, verdict } from "./metrics.mjs";
+import {
+  compare,
+  isPartial,
+  METRICS,
+  SHOWN,
+  spread,
+  verdict,
+} from "./metrics.mjs";
 
 // --- formatting -------------------------------------------------------------
 
@@ -40,6 +47,11 @@ export function value(unit, v) {
 
 const time = (at) => (at ? `${at.slice(0, 16).replace("T", " ")} UTC` : "n/a");
 const clock = (at) => (at ? at.slice(11, 16) : "");
+/** A card's outcome, marked when the card is partial. */
+const outcomeOf = (card) =>
+  isPartial(card) ? `${card.outcome} (partial)` : card.outcome;
+const PARTIAL_NOTE =
+  "This run hadn't ended when it was scored: its totals cover the run so far and are lower only because it is unfinished. It is left out of every comparison.";
 
 // --- page -------------------------------------------------------------------
 
@@ -202,6 +214,10 @@ function timeline(card) {
   const off = [
     ...card.totals.outages.map((o) => ({ ...o, what: "outage" })),
     ...card.totals.pauses.map((p) => ({ ...p, what: "paused" })),
+    ...(card.totals.holdBlocked ?? []).map((b) => ({
+      ...b,
+      what: "waiting on an answer, nothing running",
+    })),
   ]
     .map(
       (s) =>
@@ -233,7 +249,7 @@ function timeline(card) {
         `<line x1="${x(h)}" x2="${x(h)}" y1="${top - 6}" y2="${H - 22}"/><text x="${x(h)}" y="${H - 6}" text-anchor="middle">${clock(h)}</text>`,
     )
     .join("");
-  return `<div class="chart wide"><div class="legend"><span><i class="key" style="background:var(--s1)"></i>Work Item, first step to merge</span><span><i class="key" style="background:var(--off)"></i>Outage or pause (excluded)</span><span>● hold for the operator</span><span>○ hold of a kind the policy answers</span></div>
+  return `<div class="chart wide"><div class="legend"><span><i class="key" style="background:var(--s1)"></i>Work Item, first step to merge</span><span><i class="key" style="background:var(--off)"></i>Outage, pause, or waiting on an answer with nothing running (excluded)</span><span>● hold for the operator</span><span>○ hold of a kind the policy answers</span></div>
 <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Timeline of the Work Items, UTC"><g class="grid">${axis}</g>${off}${marks}</svg></div>`;
 }
 
@@ -266,7 +282,10 @@ function historyChart(metricId, cards, baselineGroup) {
   for (const [g, group] of groups.entries()) {
     if (g) at += 1;
     const x0 = left + at * slot;
-    const s = spread(group.cards.map(metric.get));
+    // A partial card is plotted, hollow, but left out of its group's spread.
+    const s = spread(
+      group.cards.filter((card) => !isPartial(card)).map(metric.get),
+    );
     const x1 = x0 + group.cards.length * slot;
     if (s) {
       parts.push(
@@ -279,7 +298,9 @@ function historyChart(metricId, cards, baselineGroup) {
       const cx = left + (at + 0.5) * slot;
       if (v !== null)
         parts.push(
-          `<circle cx="${cx}" cy="${y(v)}" r="4.5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"><title>${esc(`${card.run.label}: ${value(metric.unit, v)}`)}</title></circle>`,
+          isPartial(card)
+            ? `<circle cx="${cx}" cy="${y(v)}" r="4" fill="var(--surface)" stroke="var(--s1)" stroke-width="2" stroke-dasharray="2 2"><title>${esc(`${card.run.label}: ${value(metric.unit, v)} so far (partial: ${card.outcome}, not ended; left out of the spread)`)}</title></circle>`
+            : `<circle cx="${cx}" cy="${y(v)}" r="4.5" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"><title>${esc(`${card.run.label}: ${value(metric.unit, v)}`)}</title></circle>`,
         );
       at += 1;
     }
@@ -305,10 +326,13 @@ function historyChart(metricId, cards, baselineGroup) {
 
 // --- run report -------------------------------------------------------------
 
-/** The baseline runs a card is compared with: the baseline group, without the card itself. */
+/** The baseline runs a card is compared with: the baseline group's ended runs, without the card itself. */
 export function baselineOf(card, cards, definition) {
   return cards.filter(
-    (c) => c.run.group === definition.baseline && c.run.id !== card.run.id,
+    (c) =>
+      c.run.group === definition.baseline &&
+      c.run.id !== card.run.id &&
+      !isPartial(c),
   );
 }
 
@@ -324,8 +348,8 @@ function itemRows(card) {
     duration(i.modelMs),
     i.repairs,
     `${i.holds.total} (${i.holds.operator})`,
-    `${i.validation.runs} (${i.validation.passed})`,
-    `${i.ci.published} / ${i.ci.rounds} (${i.ci.passedFirstTime})`,
+    `${i.validation.passedFirstTime ?? "n/a"} of ${i.validation.results ?? "n/a"}; ${i.validation.runs} (${i.validation.passed})`,
+    `${i.ci.published} / ${i.ci.rounds} (${i.ci.passedFirstTime}${i.ci.conflicts ? `; ${i.ci.conflicts} conflict` : ""})`,
     `${i.reviews.runs} (${i.reviews.passed})`,
   ]);
 }
@@ -334,9 +358,10 @@ export function runReport(card, cards, definition) {
   const t = card.totals;
   const baseline = baselineOf(card, cards, definition);
   const isBaseline = card.run.group === definition.baseline;
+  const partial = isPartial(card);
   const rows = compare(baseline, [card], SHOWN);
   const decision =
-    !isBaseline && baseline.length
+    !isBaseline && !partial && baseline.length
       ? verdict(definition, baseline, [card])
       : null;
   const objectiveTokens = card.objective?.tokens;
@@ -367,25 +392,28 @@ export function runReport(card, cards, definition) {
     Object.entries(card.factory.commits)
       .map(([v, c]) => `${v} ${c ? c.slice(0, 8) : "commit unknown"}`)
       .join(", "),
-  )}). Models: ${esc(card.models.map((m) => `${m.role} ${m.provider} ${m.model} ${m.effort} (${m.calls} calls)`).join("; "))}. Outcome: <b>${esc(card.outcome)}</b>.</p>
+  )}). Models: ${esc(card.models.map((m) => `${m.role} ${m.provider} ${m.model} ${m.effort} (${m.calls} calls)`).join("; "))}. Outcome: <b>${esc(outcomeOf(card))}</b>.</p>
+${partial ? `<p class="worse"><b>Partial.</b> ${esc(PARTIAL_NOTE)}</p>` : ""}
 </header>
 <section>
 <div class="tiles">
 ${tile(tokens(t.tokens.total), `tokens, own ${tokens(t.tokens.own)} + child threads ${tokens(t.tokens.childThreads)}`)}
-${tile(duration(t.activeWallMs), `active wall time; ${duration(t.wallMs)} span, ${duration(t.excludedMs)} excluded`)}
+${tile(duration(t.activeWallMs), `active wall time; ${duration(t.wallMs)} span, ${duration(t.excludedMs)} excluded (${duration(t.downtimeMs)} down or paused, ${duration(t.holdBlockedMs)} waiting on answers)`)}
 ${tile(duration(t.modelMs), "model time, summed over calls")}
 ${tile(tokens(t.tokensPerCriterion), `tokens per criterion (${t.criteria ?? "n/a"} criteria)`)}
 ${tile(String(t.repairs), "repairs")}
 ${tile(`${t.holds.operator} + ${t.holds.scripted}`, `holds: for the operator + of the policy's kinds; ${duration(t.holds.operatorWaitMs)} operator wait`)}
-${tile(percent(t.validation.firstPassRate), `validation runs passed (${t.validation.passed} of ${t.validation.runs})`)}
-${tile(percent(t.ci.firstPassRate), `CI first-pass (${t.ci.passedFirstTime} of ${t.ci.published} pushes, ${t.ci.rounds} rounds)`)}
+${tile(percent(t.validation.firstPassRate), `results passing their first validation (${t.validation.passedFirstTime} of ${t.validation.results}); ${t.validation.passed} of ${t.validation.runs} runs passed, ${t.validation.holds} held`)}
+${tile(percent(t.ci.firstPassRate), `CI first-pass (${t.ci.passedFirstTime} of ${t.ci.published - t.ci.conflicts} pushes whose checks ran; ${t.ci.conflicts} base conflict(s), ${t.ci.rounds} rounds)`)}
 </div>
 </section>
 <section>
 <h2>Against the baseline</h2>
 ${
-  baseline.length
-    ? `<p class="meta">Baseline: ${esc(definition.baseline)}, ${baseline.length} run(s). Better or worse means beyond the baseline's whole spread.</p>
+  partial
+    ? `<p class="meta">Not compared: the run is partial.</p>`
+    : baseline.length
+      ? `<p class="meta">Baseline: ${esc(definition.baseline)}, ${baseline.length} run(s). Better or worse means beyond the baseline's whole spread.</p>
 ${table(
   ["Metric", "This run", "Baseline median", "Baseline range", "Verdict"],
   rows.map((r) => [
@@ -402,7 +430,7 @@ ${table(
   [1, 2, 3],
 )}
 ${decision ? `<p><b>Hill-climb: ${decision.accept ? "accept" : "reject"}.</b> ${esc([...decision.reasons, ...decision.warnings].join("; ") || "Every primary metric is better and no guard is worse.")}</p>` : ""}`
-    : `<p class="meta">${isBaseline ? `This run is the baseline (${esc(definition.baseline)}) and the only run in it: later runs are compared with it.` : `No baseline runs (${esc(definition.baseline)}) in the results yet.`}</p>`
+      : `<p class="meta">${isBaseline ? `This run is the baseline (${esc(definition.baseline)}) and the only run in it: later runs are compared with it.` : `No baseline runs (${esc(definition.baseline)}) in the results yet.`}</p>`
 }
 </section>
 <section>
@@ -420,14 +448,14 @@ ${table(
     "Model time",
     "Repairs",
     "Holds (operator)",
-    "Validation (passed)",
+    "First validation passed; runs (passed)",
     "CI pushes / rounds (first pass)",
     "Reviews (passed)",
   ],
   itemRows(card),
   [2, 3, 4, 5, 6, 7, 8],
 )}
-<p class="meta">Tokens include child threads (Codex sub-agents), each counted once: a resumed session's cumulative child threads count only what they added. An amendment's planning is charged to the Work Item whose worker proposed it. Validation counts Factory's validate step; each run checks a new result.</p>
+<p class="meta">Tokens include child threads (Codex sub-agents), each counted once: a resumed session's cumulative child threads count only what they added. An amendment's planning is charged to the Work Item whose worker proposed it. Active time leaves out the outages and pauses, and the item's waits for an answer while none of its steps ran. First validation: of the results the item's work produced, how many passed the first validate run that judged them (a retry validates the same result again, and is not counted); runs (passed) counts every validate verdict.</p>
 </section>
 <section>
 <h2>Timeline</h2>
@@ -471,7 +499,7 @@ ${table(
 </details>
 </section>
 <section>
-<h2>Outages and pauses</h2>
+<h2>Excluded from active time</h2>
 ${
   t.outages.length || t.pauses.length
     ? table(
@@ -492,7 +520,22 @@ ${
         ],
         [3],
       )
-    : "<p>None.</p>"
+    : "<p>No outages or pauses.</p>"
+}
+${
+  (t.holdBlocked ?? []).length
+    ? `<details><summary>${t.holdBlocked.length} stretch(es) waiting on an answer with nothing running, ${duration(t.holdBlockedMs)} beyond the outages and pauses</summary>
+${table(
+  ["From", "To", "Length"],
+  t.holdBlocked.map((b) => [
+    esc(time(b.from)),
+    esc(time(b.to)),
+    esc(b.ms < 60_000 ? `${Math.round(b.ms / 1000)} s` : duration(b.ms)),
+  ]),
+  [2],
+)}
+</details>`
+    : ""
 }
 </section>
 <section>
@@ -521,6 +564,10 @@ ${table(
         .join(", "),
     ],
     ["Cache hit rate (cached of input)", percent(t.cacheHitRate)],
+    [
+      "Hold waits without downtime (asked to answered)",
+      `${duration(t.holds.waitMs)} (${duration(t.holds.rawWaitMs)})`,
+    ],
     [
       "Planning rounds, revisions",
       `${t.planning.rounds}, ${t.planning.revisions}`,
@@ -579,21 +626,25 @@ export function runMarkdown(card, cards, definition) {
   const lines = [
     `# ${card.run.label}`,
     "",
-    `Benchmark \`${card.benchmark}\`, run \`${card.run.id}\` (${card.run.source}): ${card.run.repository}#${card.run.issue}, ${time(card.startedAt)} to ${time(card.endedAt)}, Factory ${card.factory.versions.join(" → ")}. Outcome: **${card.outcome}**.`,
+    `Benchmark \`${card.benchmark}\`, run \`${card.run.id}\` (${card.run.source}): ${card.run.repository}#${card.run.issue}, ${time(card.startedAt)} to ${time(card.endedAt)}, Factory ${card.factory.versions.join(" → ")}. Outcome: **${outcomeOf(card)}**.`,
     "",
+    ...(isPartial(card) ? [`**Partial.** ${PARTIAL_NOTE}`, ""] : []),
     "| Metric | This run |",
     "| --- | ---: |",
     `| Tokens (own + child threads) | ${tokens(t.tokens.total)} (${tokens(t.tokens.own)} + ${tokens(t.tokens.childThreads)}) |`,
-    `| Active wall time (span, excluded) | ${duration(t.activeWallMs)} (${duration(t.wallMs)}, ${duration(t.excludedMs)}) |`,
+    `| Active wall time (span; down or paused, waiting on answers) | ${duration(t.activeWallMs)} (${duration(t.wallMs)}; ${duration(t.downtimeMs)}, ${duration(t.holdBlockedMs)}) |`,
     `| Model time | ${duration(t.modelMs)} |`,
     `| Tokens per criterion | ${tokens(t.tokensPerCriterion)} |`,
     `| Repairs | ${t.repairs} |`,
     `| Holds (for the operator, policy's kinds) | ${t.holds.total} (${t.holds.operator}, ${t.holds.scripted}) |`,
-    `| Validation runs passed | ${t.validation.passed} of ${t.validation.runs} |`,
-    `| CI first-pass | ${t.ci.passedFirstTime} of ${t.ci.published} |`,
+    `| Results passing their first validation | ${t.validation.passedFirstTime} of ${t.validation.results} |`,
+    `| Validation runs passed (held) | ${t.validation.passed} of ${t.validation.runs} (${t.validation.holds}) |`,
+    `| CI first-pass (base conflicts) | ${t.ci.passedFirstTime} of ${t.ci.published - t.ci.conflicts} (${t.ci.conflicts}) |`,
     "",
   ];
-  if (baseline.length) {
+  if (isPartial(card))
+    lines.push("Not compared with the baseline: the run is partial.", "");
+  else if (baseline.length) {
     lines.push(
       `Against the baseline (${definition.baseline}, ${baseline.length} run(s)):`,
       "",
@@ -613,11 +664,11 @@ export function runMarkdown(card, cards, definition) {
       "",
     );
   lines.push(
-    "| Work Item | Tokens | Child threads | Active time | Repairs | Holds | Validation (passed) |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Work Item | Tokens | Child threads | Active time | Repairs | Holds | First validation passed | Validation runs (passed) |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ...card.items.map(
       (i) =>
-        `| ${i.id} | ${tokens(i.tokens.total)} | ${tokens(i.tokens.childThreads)} | ${duration(i.activeWallMs)} | ${i.repairs} | ${i.holds.total} | ${i.validation.runs} (${i.validation.passed}) |`,
+        `| ${i.id} | ${tokens(i.tokens.total)} | ${tokens(i.tokens.childThreads)} | ${duration(i.activeWallMs)} | ${i.repairs} | ${i.holds.total} | ${i.validation.passedFirstTime} of ${i.validation.results} | ${i.validation.runs} (${i.validation.passed}) |`,
     ),
     "",
   );
@@ -634,7 +685,7 @@ export function historyPage(cards, definition) {
 <header style="display:grid;gap:8px">
 <span class="eyebrow">Benchmark history</span>
 <h1>${esc(definition.title)}</h1>
-<p class="meta">${sorted.length} run(s) of <code>${esc(definition.id)}</code>, in the order they ran, grouped by Factory build. Each dot is a run; a band is a group's spread (min to max) and its line the median. Baseline: ${esc(definition.baseline)}. A candidate is accepted only when its primary metrics (${esc(definition.hillClimb.primary.join(", "))}) are better than the baseline's whole spread and no guard (${esc(definition.hillClimb.guards.join(", "))}) is worse.</p>
+<p class="meta">${sorted.length} run(s) of <code>${esc(definition.id)}</code>, in the order they ran, grouped by Factory build. Each dot is a run; a band is a group's spread (min to max) and its line the median. Baseline: ${esc(definition.baseline)}. A candidate is accepted only when its primary metrics (${esc(definition.hillClimb.primary.join(", "))}) are better than the baseline's whole spread and no guard (${esc(definition.hillClimb.guards.join(", "))}) is worse.${sorted.some(isPartial) ? " A hollow dot is a run that hadn't ended when it was scored (partial): it is left out of its group's spread and of every comparison." : ""}</p>
 </header>
 <section class="small">
 ${SHOWN.map((id) => historyChart(id, sorted, definition.baseline)).join("\n")}
@@ -655,7 +706,7 @@ ${table(
     esc(c.run.group),
     esc(time(c.startedAt)),
     esc(c.factory.versions.join(" → ")),
-    esc(c.outcome),
+    esc(outcomeOf(c)),
     ...SHOWN.map((id) => esc(value(METRICS[id].unit, METRICS[id].get(c)))),
   ]),
   SHOWN.map((_, i) => i + 5),
@@ -677,7 +728,7 @@ export function historyMarkdown(cards, definition) {
     `| --- | --- | --- | ${SHOWN.map(() => "---:").join(" | ")} |`,
     ...sorted.map(
       (c) =>
-        `| ${c.run.id} | ${c.run.group} | ${c.outcome} | ${SHOWN.map((id) => value(METRICS[id].unit, METRICS[id].get(c))).join(" | ")} |`,
+        `| ${c.run.id} | ${c.run.group} | ${outcomeOf(c)} | ${SHOWN.map((id) => value(METRICS[id].unit, METRICS[id].get(c))).join(" | ")} |`,
     ),
   ].join("\n")}\n`;
 }

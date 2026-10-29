@@ -21,12 +21,13 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { hostValue } from "./definition.mjs";
 
 /** Runs commands, or with `dryRun` prints them; `print` gets each line. */
@@ -66,6 +67,19 @@ export class Runner {
     return this.dryRun ? dry : this.run(argv, { env, cwd, input });
   }
 
+  /** A read that must succeed: its output; a failure throws. A dry run reads nothing: `dry`. */
+  read(title, argv, { env, cwd, dry = "" } = {}) {
+    this.print(`check: ${title}\n    ${Runner.shown(argv)}`);
+    if (this.dryRun) return dry;
+    try {
+      return this.run(argv, { env, cwd });
+    } catch (error) {
+      throw new Error(
+        `Couldn't read ${title} (${Runner.shown(argv)}): ${String(error.stderr || error.message).trim()}`,
+      );
+    }
+  }
+
   /** A read: its output, or null when it fails. A dry run reads nothing: `dry`. */
   look(title, argv, { env, cwd, dry = null } = {}) {
     if (this.dryRun) {
@@ -98,31 +112,106 @@ export function loadHost(file) {
   return host;
 }
 
-/** The Factory to run: a checkout (its dist/cli.js; a candidate) or an installed CLI (a release). */
+/** SHA-256 over a directory's files (relative path and content, in path order): a build's identity. */
+export function treeDigest(dir) {
+  const hash = createHash("sha256");
+  const walk = (at) => {
+    for (const name of readdirSync(at).sort()) {
+      const file = join(at, name);
+      const stat = statSync(file);
+      if (stat.isDirectory()) walk(file);
+      else if (stat.isFile()) {
+        hash.update(`${relative(dir, file)}\0`);
+        hash.update(readFileSync(file));
+        hash.update("\0");
+      }
+    }
+  };
+  walk(dir);
+  return hash.digest("hex");
+}
+
+/**
+ * The Factory to run, from a Factory checkout or a CLI path. The kind comes
+ * from where the build lives: a package root that is a Git work tree's top
+ * (and not under node_modules) is a candidate, with its commit, branch and
+ * whether it has uncommitted changes; anything else (an installed package)
+ * is a release. dist/ is gitignored, so the commit alone doesn't say which
+ * build ran: `distSha256` does, and scoring checks it again.
+ */
 export function resolveFactory(path) {
-  const checkout = existsSync(path) && statSync(path).isDirectory();
-  const cli = checkout ? join(path, "dist", "cli.js") : realpathSync(path);
+  const given = realpathSync(path);
+  const cli = statSync(given).isDirectory()
+    ? join(given, "dist", "cli.js")
+    : given;
   if (!existsSync(cli))
     throw new Error(
       `${cli} doesn't exist: build the candidate first (npm run build)`,
     );
-  let dir = dirname(cli);
-  while (!existsSync(join(dir, "package.json")) && dir !== dirname(dir))
-    dir = dirname(dir);
+  let root = dirname(cli);
+  while (!existsSync(join(root, "package.json")) && root !== dirname(root))
+    root = dirname(root);
   const version = JSON.parse(
-    readFileSync(join(dir, "package.json"), "utf8"),
+    readFileSync(join(root, "package.json"), "utf8"),
   ).version;
+  const build = dirname(cli);
+  const distSha256 = treeDigest(build);
+  const installed = root.split(sep).includes("node_modules");
+  const checkout = !installed && existsSync(join(root, ".git"));
   if (!checkout)
-    return { cli, version, commit: null, dirty: false, kind: "release" };
+    return {
+      cli,
+      root,
+      version,
+      commit: null,
+      branch: null,
+      dirty: false,
+      distSha256,
+      kind: "release",
+    };
+  // A checkout's Git must answer: a candidate is never recorded without its commit.
   const git = (...args) =>
-    execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
   return {
     cli,
+    root,
     version,
     commit: git("rev-parse", "HEAD"),
     branch: git("rev-parse", "--abbrev-ref", "HEAD"),
     dirty: git("status", "--porcelain").length > 0,
+    distSha256,
     kind: "candidate",
+  };
+}
+
+/** A harness run's `run` for scoreRun, with the Factory build checked again now. */
+export function harnessRun(record) {
+  const factory = record.factory ?? {};
+  let distSha256Now = null;
+  try {
+    if (factory.cli) distSha256Now = treeDigest(dirname(factory.cli));
+  } catch {
+    // The build is gone: nothing to compare.
+  }
+  return {
+    id: record.runId,
+    label: record.label,
+    group: record.group,
+    source: "harness",
+    repository: record.repository,
+    factory: {
+      kind: factory.kind ?? null,
+      cli: factory.cli ?? null,
+      version: factory.version ?? null,
+      commit: factory.commit ?? null,
+      branch: factory.branch ?? null,
+      dirty: factory.dirty ?? null,
+      distSha256: factory.distSha256 ?? null,
+      distSha256Now,
+    },
   };
 }
 
@@ -202,6 +291,10 @@ export function setupArgs(
 
 /** Copy `source` (a knowledge store) to `target` without Objective `issue`'s entries or any made at or after `before`. */
 export async function seedMemory(source, target, issue, before) {
+  // `created` is stored as toISOString text and compared as text: compare it with the same form of the cut.
+  const cut = new Date(before);
+  if (Number.isNaN(cut.getTime()))
+    throw new Error(`memory cut ${before} isn't a time`);
   const { DatabaseSync } = await import("node:sqlite");
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
   // VACUUM INTO: a consistent copy of a store a live service may be writing.
@@ -212,10 +305,10 @@ export async function seedMemory(source, target, issue, before) {
   const where = "objective = ? OR created >= ?";
   const removed = db
     .prepare(`SELECT id FROM memory WHERE ${where}`)
-    .all(issue, before);
+    .all(issue, cut.toISOString());
   const drop = db.prepare("DELETE FROM memory_text WHERE id = ?");
   for (const { id } of removed) drop.run(id);
-  db.prepare(`DELETE FROM memory WHERE ${where}`).run(issue, before);
+  db.prepare(`DELETE FROM memory WHERE ${where}`).run(issue, cut.toISOString());
   const kept = db.prepare("SELECT count(*) AS n FROM memory").get().n;
   db.close();
   chmodSync(target, 0o600);
@@ -223,6 +316,106 @@ export async function seedMemory(source, target, issue, before) {
 }
 
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+
+/** `id state path` lines of a repository's workflows, as listWorkflows asks for them. */
+function parseWorkflows(text) {
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [id, state, ...path] = line.split(" ");
+      return { id, state, path: path.join(" ") };
+    });
+}
+
+/**
+ * Turn Actions on with only the kept workflows active. Nothing deploy-capable
+ * may stay enabled: the listing must succeed, must name every workflow file
+ * of the base tree, and is read again after disabling to check that only
+ * kept workflows are active. On any failure Actions is turned off again.
+ */
+export function enableOnlyKeptWorkflows({ def, repository, cache, runner }) {
+  const keep = def.ci.keepWorkflows;
+  const actions = (enabled) => [
+    "gh",
+    "api",
+    "-X",
+    "PUT",
+    `repos/${repository}/actions/permissions`,
+    "-F",
+    `enabled=${enabled}`,
+    ...(enabled ? ["-f", "allowed_actions=all"] : []),
+  ];
+  const list = (title) =>
+    parseWorkflows(
+      runner.read(title, [
+        "gh",
+        "api",
+        `repos/${repository}/actions/workflows`,
+        "--paginate",
+        "--jq",
+        '.workflows[] | "\\(.id) \\(.state) \\(.path)"',
+      ]),
+    );
+  const files = runner
+    .read("the base tree's workflow files", [
+      "git",
+      "-C",
+      cache,
+      "ls-tree",
+      "--name-only",
+      def.source.base,
+      ".github/workflows/",
+    ])
+    .split("\n")
+    .filter((path) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path));
+  const notKept = (workflow) =>
+    workflow.state === "active" &&
+    workflow.path.startsWith(".github/workflows/") &&
+    !keep.includes(workflow.path);
+  runner.act("turn Actions on", actions(true));
+  try {
+    const workflows = list(`${repository}'s workflows`);
+    if (!runner.dryRun) {
+      const listed = new Set(workflows.map((w) => w.path));
+      const missing = files.filter((path) => !listed.has(path));
+      if (missing.length)
+        throw new Error(
+          `${repository}'s workflow listing doesn't name ${missing.join(", ")} of the base tree (${workflows.length} listed); run provisioning again once GitHub lists them`,
+        );
+    }
+    if (runner.dryRun)
+      runner.act(`disable every workflow but ${keep.join(", ")}`, [], {
+        show: `gh api -X PUT repos/${repository}/actions/workflows/<id>/disable   (each active .github/workflows/* not kept)`,
+      });
+    for (const workflow of workflows.filter(notKept))
+      runner.act(`disable ${workflow.path}`, [
+        "gh",
+        "api",
+        "-X",
+        "PUT",
+        `repos/${repository}/actions/workflows/${workflow.id}/disable`,
+      ]);
+    const active = list(
+      `${repository}'s workflows again: only ${keep.join(", ")} active`,
+    ).filter(notKept);
+    if (active.length)
+      throw new Error(
+        `${repository} still has active workflows that aren't kept: ${active.map((w) => w.path).join(", ")}`,
+      );
+  } catch (error) {
+    if (!runner.dryRun)
+      try {
+        runner.act(
+          "turn Actions off again: the workflows aren't safe",
+          actions(false),
+        );
+      } catch (offError) {
+        error.message += `\nTurning Actions off again failed too: ${offError.message}. Turn it off by hand: gh api -X PUT repos/${repository}/actions/permissions -F enabled=false`;
+      }
+    throw error;
+  }
+}
 
 /**
  * Provision run `runId` of `definition` on `host` with `factory`
@@ -508,54 +701,7 @@ export async function provision({
       },
     );
   }
-  runner.act("turn Actions on", [
-    "gh",
-    "api",
-    "-X",
-    "PUT",
-    `repos/${repository}/actions/permissions`,
-    "-F",
-    "enabled=true",
-    "-f",
-    "allowed_actions=all",
-  ]);
-  const workflows =
-    runner.look(
-      `${repository}'s workflows`,
-      [
-        "gh",
-        "api",
-        `repos/${repository}/actions/workflows`,
-        "--paginate",
-        "--jq",
-        '.workflows[] | "\\(.id) \\(.state) \\(.path)"',
-      ],
-      { dry: "" },
-    ) ?? "";
-  if (runner.dryRun)
-    runner.act(
-      `disable every workflow but ${def.ci.keepWorkflows.join(", ")}`,
-      [],
-      {
-        show: `gh api -X PUT repos/${repository}/actions/workflows/<id>/disable   (each active .github/workflows/* not kept)`,
-      },
-    );
-  for (const line of workflows.split("\n").filter(Boolean)) {
-    const [id, state, path] = line.split(" ");
-    if (
-      state !== "active" ||
-      !path.startsWith(".github/workflows/") ||
-      def.ci.keepWorkflows.includes(path)
-    )
-      continue;
-    runner.act(`disable ${path}`, [
-      "gh",
-      "api",
-      "-X",
-      "PUT",
-      `repos/${repository}/actions/workflows/${id}/disable`,
-    ]);
-  }
+  enableOnlyKeptWorkflows({ def, repository, cache, runner });
 
   // The checkout Factory works in.
   if (!existsSync(checkout)) {

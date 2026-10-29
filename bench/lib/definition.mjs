@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLD_KINDS } from "./holds.mjs";
+import { SCRIPTABLE } from "./holds.mjs";
 import { METRICS } from "./metrics.mjs";
 
 export const BENCH_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -27,6 +27,8 @@ export class DefinitionError extends Error {
   }
 }
 
+/** An instant as Factory stores one (toISOString): memory's `created` compares with it as text. */
+const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
 const SHA1 = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
@@ -48,6 +50,58 @@ const MERGE_SETTINGS = [
   "has_projects",
   "has_wiki",
 ];
+
+/**
+ * Every field the schema has. `true` is a leaf, or a map whose keys its own
+ * check covers (mergeSettings, environment, answers); anything else in a
+ * definition is a mistake, such as a misspelled optional field.
+ */
+const SHAPE = {
+  schemaVersion: true,
+  id: true,
+  title: true,
+  source: { repository: true, base: true, lfs: true },
+  objective: { issue: true, title: true, bodySha256: true, labels: true },
+  repository: {
+    owner: true,
+    namePrefix: true,
+    description: true,
+    mergeSettings: true,
+  },
+  ci: { rulesets: true, variables: true, keepWorkflows: true },
+  memory: { seed: true, before: true },
+  factory: {
+    provider: true,
+    planner: true,
+    worker: { kind: true, model: true, effort: true, network: true },
+    models: {
+      planner: { model: true, effort: true },
+      reviewer: { model: true, effort: true },
+    },
+    sandbox: { network: true, readOnlyPaths: true, environment: true },
+    toolchain: { paths: true, executables: true },
+    formatCommand: true,
+    requiredCommands: true,
+    ciOnlyCommands: true,
+    allowances: Object.fromEntries(ALLOWANCES.map((key) => [key, true])),
+    spend: { objectiveTokens: true, dayTokens: true },
+  },
+  operatorPolicy: { as: true, answers: true, otherwise: true },
+  baseline: true,
+  hillClimb: { primary: true, guards: true },
+  budget: { tokens: true, hours: true },
+};
+
+/** The paths of `value`'s fields that `shape` doesn't have. */
+function unknownFields(value, shape, path = "") {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return [];
+  return Object.keys(value).flatMap((key) => {
+    const at = path ? `${path}.${key}` : key;
+    if (!Object.hasOwn(shape, key)) return [at];
+    return shape[key] === true ? [] : unknownFields(value[key], shape[key], at);
+  });
+}
 
 /** Checks `value` against the schema; returns the problems, empty when valid. */
 export function definitionProblems(value) {
@@ -114,8 +168,8 @@ export function definitionProblems(value) {
   if (at("memory.seed") === "before-objective")
     need(
       "memory.before",
-      (v) => string(v) && !Number.isNaN(Date.parse(v)),
-      "the ISO time memory is cut at",
+      (v) => string(v) && UTC.test(v) && !Number.isNaN(Date.parse(v)),
+      "the UTC time memory is cut at, as YYYY-MM-DDTHH:MM:SS[.mmm]Z",
     );
   need(
     "factory.provider",
@@ -179,16 +233,24 @@ export function definitionProblems(value) {
     (v) =>
       object(v) &&
       Object.entries(v).every(
-        ([kind, answer]) => HOLD_KINDS.includes(kind) && string(answer),
+        ([kind, answer]) =>
+          Object.hasOwn(SCRIPTABLE, kind) && SCRIPTABLE[kind] === answer,
       ),
-    `hold kind -> answer, kinds among ${HOLD_KINDS.join(", ")}`,
+    `only ${Object.entries(SCRIPTABLE)
+      .map(([kind, answer]) => `${kind}: ${answer}`)
+      .join(
+        ", ",
+      )}; every other hold pauses for the operator, and no policy accepts or cancels`,
   );
   need("operatorPolicy.otherwise", (v) => v === "pause", "pause");
   need("baseline", string, "the result group that is the baseline");
   for (const list of ["primary", "guards"])
     need(
       `hillClimb.${list}`,
-      (v) => strings(v) && v.length > 0 && v.every((id) => METRICS[id]),
+      (v) =>
+        strings(v) &&
+        v.length > 0 &&
+        v.every((id) => Object.hasOwn(METRICS, id)),
       `metric ids among ${Object.keys(METRICS).join(", ")}`,
     );
   need(
@@ -204,6 +266,8 @@ export function definitionProblems(value) {
       ),
     "tokens and hours as [low, high]",
   );
+  for (const path of unknownFields(value, SHAPE))
+    problems.push(`${path}: not a field of the schema`);
   return problems;
 }
 

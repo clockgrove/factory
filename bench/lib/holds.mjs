@@ -31,16 +31,32 @@ export function holdKind(question) {
 }
 
 /**
+ * The only answers a policy may script: raising a spend limit or an
+ * allowance, and adopting a changed configuration. Every other hold (a
+ * review's criteria, a diagnosis, an amendment, ...) is the operator's, and
+ * no policy may accept or cancel anything.
+ */
+export const SCRIPTABLE = Object.freeze({
+  spend: "more",
+  allowance: "more",
+  config: "adopt",
+});
+
+/**
  * The policy's answer to an open hold (status's `holds[]`: question and
  * options), or null when the operator must answer. A scripted answer is
- * given only when the hold offers it.
+ * given only when it is one SCRIPTABLE allows and the hold offers it.
  */
 export function policyAnswer(hold, policy) {
   const kind = holdKind(hold.question);
-  const answer = policy.answers[kind];
+  const answer = Object.hasOwn(policy.answers, kind)
+    ? policy.answers[kind]
+    : undefined;
+  const allowed =
+    Object.hasOwn(SCRIPTABLE, kind) && SCRIPTABLE[kind] === answer;
   const offered = (hold.options ?? []).some(
     (option) =>
       (typeof option === "string" ? option : option.answer) === answer,
   );
-  return { kind, answer: answer && offered ? answer : null };
+  return { kind, answer: allowed && offered ? answer : null };
 }

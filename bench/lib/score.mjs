@@ -8,11 +8,13 @@
  * `diagnostics --summary` and `--analyze` (the same functions, as JSON)
  * the totals the scorecard is checked against and its telemetry.
  *
- * Time: wall time runs from admission to the end; outages (the gap from a
- * run file's last event to the next run file's first: a restart) and
- * operator pauses (`pause` to `resume`) are excluded from active time and
- * listed. A count the logs can't give is null, with its reason in
- * `unavailable`; never 0.
+ * Time: wall time runs from admission to the end. Excluded from active
+ * time, and listed: outages (the gap from a run file's last event to the
+ * next run file's first: a restart), operator pauses (`pause` to `resume`),
+ * and the stretches where a hold waits for an answer and no step is in
+ * progress (Factory has nothing to do until someone answers). A hold's wait
+ * leaves out the outages and pauses inside it. A count the logs can't give
+ * is null, with its reason in `unavailable`; never 0.
  */
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -23,13 +25,64 @@ import { CAPTURE_OFF, logFiles, rotatedRuns } from "../../dist/log.js";
 import { currentPlan } from "../../dist/planning/plan.js";
 import { findState } from "../../dist/state.js";
 import { holdKind } from "./holds.mjs";
+import { SCORECARD_VERSION } from "./metrics.mjs";
 
-export const SCORECARD_VERSION = 1;
+export { SCORECARD_VERSION };
 
 const num = (value) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
 const ms = (at) => Date.parse(at);
 const rate = (part, whole) => (whole ? part / whole : null);
+
+/** A CI repair that is a merge conflict, found before any check ran (delivery.ts). */
+const BASE_CONFLICT = /conflicts with its base branch/;
+/** Hold kinds that stop a step for a limit or a setting, not for a verdict on its result. */
+const NOT_A_VERDICT = new Set(["spend", "allowance", "config"]);
+/**
+ * Whether an outcome ends a step's turn. A plain `retry` means the step is
+ * still being worked on (a CI poll, a provider backoff). A `retry` with
+ * `progress` handed its work to other steps (an amendment's planning, a
+ * replacement amendment) and may never run again, so it ends the turn too.
+ */
+const ends = (event) => event.outcome !== "retry" || event.progress === true;
+
+/** The spans `blocked` was true over, from its changes in time order. */
+class Spans {
+  constructor() {
+    this.since = null;
+    this.spans = [];
+  }
+
+  set(at, blocked) {
+    if (blocked && this.since === null) this.since = at;
+    else if (!blocked && this.since !== null) {
+      if (ms(at) > ms(this.since))
+        this.spans.push({ from: this.since, to: at });
+      this.since = null;
+    }
+  }
+
+  close(at) {
+    if (at) this.set(at, false);
+    return this.spans;
+  }
+}
+
+/** `spans` cut to [start, end], each with its length; empty ones dropped. */
+function clip(spans, start, end) {
+  return spans
+    .map((span) => {
+      const from = Math.max(ms(span.from), start);
+      const to = Math.min(ms(span.to), end);
+      return {
+        ...span,
+        from: new Date(from).toISOString(),
+        to: new Date(to).toISOString(),
+        ms: to - from,
+      };
+    })
+    .filter((span) => span.ms > 0);
+}
 
 /** Milliseconds of [from, to) that the intervals cover; intervals don't overlap. */
 function covered(from, to, intervals) {
@@ -96,6 +149,32 @@ function addTokens(tally, raw, event) {
   tally.reasoning += num(event.tokens.reasoning) ?? 0;
 }
 
+/**
+ * Factory's validate step. `runs` are its verdicts (done, repair, fail),
+ * `passed` the done ones and `holds` the runs that stopped for a question.
+ * `results` counts each result's first validation (the first after the
+ * work that made it); `passedFirstTime` those that passed it. A hold for a
+ * limit or a setting is not a verdict and leaves the first validation to
+ * the next run; any other hold counts as the result not passing it.
+ */
+function validationTally() {
+  return {
+    runs: 0,
+    passed: 0,
+    holds: 0,
+    passRate: null,
+    results: 0,
+    passedFirstTime: 0,
+    firstPassRate: null,
+  };
+}
+
+function finishValidation(tally) {
+  tally.passRate = rate(tally.passed, tally.runs);
+  tally.firstPassRate = rate(tally.passedFirstTime, tally.results);
+  return tally;
+}
+
 function itemScore(id, kind, criteria) {
   return {
     id,
@@ -112,12 +191,14 @@ function itemScore(id, kind, criteria) {
     tokensPerCriterion: null,
     repairs: 0,
     amendments: 0,
+    holdBlockedMs: null,
     holds: { total: 0, operator: 0, operatorWaitMs: 0, waitMs: 0 },
-    validation: { runs: 0, passed: 0, firstPassRate: null },
+    validation: validationTally(),
     workerValidation: { runs: 0, passed: 0 },
     ci: {
       rounds: 0,
       published: 0,
+      conflicts: 0,
       reruns: 0,
       flaky: 0,
       passedFirstTime: 0,
@@ -228,6 +309,8 @@ export async function scoreRun({
   const files = logFiles(logs, issue);
   const runs = [];
   const events = [];
+  /** Where each run file's events begin: a new service process. */
+  const fileStarts = new Set();
   for (const file of files) {
     const first = events.length;
     let header;
@@ -238,6 +321,7 @@ export async function scoreRun({
       events.push(event);
     });
     if (events.length === first) continue;
+    fileStarts.add(first);
     runs.push({
       run: events[first].run,
       factoryVersion: header?.factoryVersion ?? null,
@@ -286,13 +370,35 @@ export async function scoreRun({
   const generations = new Set();
   const amendmentAnswers = new Map();
   const ciRound = new Map();
-  const validation = { runs: 0, passed: 0 };
+  const validation = validationTally();
+  /** Items whose current result has had its first validation. */
+  const validated = new Set();
+  /** Each step's latest hold kind. */
+  const lastHold = new Map();
   const final = { runs: 0, passed: 0, review: null };
   let modelMs = 0;
   let costUsd = 0;
   let costed = 0;
 
-  for (const raw of events) {
+  // Waiting on an answer: a hold is open and no step is in progress, for the
+  // Objective (nothing at all runs) and for each Work Item (none of its steps runs).
+  const inProgress = new Set();
+  const openHolds = new Map();
+  const blocked = new Spans();
+  const itemBlocked = new Map();
+  const track = (at) => {
+    blocked.set(at, openHolds.size > 0 && inProgress.size === 0);
+    const busy = new Set([...inProgress].map(itemOfStep));
+    const held = new Set([...openHolds.values()].map((hold) => hold.item));
+    for (const id of held)
+      if (id && !itemBlocked.has(id)) itemBlocked.set(id, new Spans());
+    for (const [id, spans] of itemBlocked)
+      spans.set(at, held.has(id) && !busy.has(id));
+  };
+
+  for (const [index, raw] of events.entries()) {
+    // A new run file is a new service process: the old one's steps died with it.
+    if (index > 0 && fileStarts.has(index)) inProgress.clear();
     const event = children.counted(raw);
     const step = event.step;
     // `item` names a Work Item on Factory's own events; a provider event's `item` is something else.
@@ -335,6 +441,12 @@ export async function scoreRun({
       }
       case "start": {
         attempts.set(`${event.run} ${event.attemptId ?? step}`, event.at);
+        if (step) {
+          inProgress.add(step);
+          // A held step that runs again was answered, whether or not the log has the answer.
+          for (const [id, hold] of openHolds)
+            if (hold.step === step) openHolds.delete(id);
+        }
         const round = /^plan:(\d+):(\d+)$/.exec(step ?? "");
         if (round) {
           planRounds.add(step);
@@ -346,12 +458,25 @@ export async function scoreRun({
         const outcome = event.outcome;
         const phase = /^item:[^:]+:(\w+)$/.exec(step ?? "")?.[1];
         const settled = outcome !== "retry";
+        if (ends(event)) inProgress.delete(step);
+        if (phase === "work" && item && outcome === "done")
+          validated.delete(item.id);
         if (phase === "validate" && item && settled) {
-          item.validation.runs += 1;
-          validation.runs += 1;
-          if (outcome === "done") {
-            item.validation.passed += 1;
-            validation.passed += 1;
+          const tallies = [item.validation, validation];
+          for (const tally of tallies)
+            if (outcome === "hold") tally.holds += 1;
+            else {
+              tally.runs += 1;
+              if (outcome === "done") tally.passed += 1;
+            }
+          const verdict =
+            outcome !== "hold" || !NOT_A_VERDICT.has(lastHold.get(step));
+          if (verdict && !validated.has(item.id)) {
+            validated.add(item.id);
+            for (const tally of tallies) {
+              tally.results += 1;
+              if (outcome === "done") tally.passedFirstTime += 1;
+            }
           }
         }
         if (step === "final" && settled) {
@@ -362,6 +487,15 @@ export async function scoreRun({
           const open = ciRound.get(item.id);
           if (open && outcome === "done") {
             if (open.published && !open.failed) item.ci.passedFirstTime += 1;
+            ciRound.delete(item.id);
+          } else if (
+            open &&
+            !open.failed &&
+            outcome === "repair" &&
+            BASE_CONFLICT.test(event.finding ?? "")
+          ) {
+            // No check failed: the push can't merge until it is rebased. Not a CI result.
+            if (open.published) item.ci.conflicts += 1;
             ciRound.delete(item.id);
           } else if (open && ["repair", "hold", "fail"].includes(outcome)) {
             open.failed = true;
@@ -417,30 +551,35 @@ export async function scoreRun({
         break;
       }
       case "hold":
-        if (typeof event.id === "string")
+        if (typeof event.id === "string") {
+          const kind = holdKind(event.question);
           holds.set(event.id, {
             question: event.id,
-            kind: holdKind(event.question),
+            kind,
             step: step ?? null,
             item: itemId ?? null,
             cause: event.cause ?? null,
             askedAt: event.at,
             answeredAt: null,
             waitMs: null,
+            rawWaitMs: null,
             answer: null,
             by: null,
             as: null,
           });
+          openHolds.set(event.id, { step, item: itemId ?? null });
+          if (step) lastHold.set(step, kind);
+        }
         break;
       case "request": {
         const request = event.request ?? {};
         // The service's acknowledgement repeats a request without `by`; a refused answer has a `code`.
         if (!event.by || event.code) break;
         if (request.kind === "answer") {
+          openHolds.delete(request.question);
           const hold = holds.get(request.question);
           if (hold && !hold.answeredAt) {
             hold.answeredAt = event.at;
-            hold.waitMs = ms(event.at) - ms(hold.askedAt);
             hold.answer = request.answer ?? null;
             hold.by = event.by;
             hold.as = event.as ?? null;
@@ -471,6 +610,7 @@ export async function scoreRun({
         break;
       }
     }
+    track(event.at);
   }
   if (pausedAt && endedAt) pauses.push({ from: pausedAt, to: endedAt });
   for (const pause of pauses) {
@@ -478,15 +618,20 @@ export async function scoreRun({
     pause.to = new Date(Math.min(ms(pause.to), end)).toISOString();
     pause.ms = ms(pause.to) - ms(pause.from);
   }
-  const excluded = union(
+  const length = (spans) =>
+    spans.reduce((sum, s) => sum + ms(s.to) - ms(s.from), 0);
+  /** The service down or paused: left out of active time and of hold waits. */
+  const downtime = union(
     [...outages, ...pauses].filter((s) => ms(s.to) > ms(s.from)),
   );
-  const excludedMs = excluded.reduce(
-    (sum, s) => sum + ms(s.to) - ms(s.from),
-    0,
-  );
+  const holdBlocked =
+    start === null ? [] : clip(blocked.close(endedAt), start, end);
+  /** Everything active time leaves out. */
+  const excluded = union([...downtime, ...holdBlocked]);
+  const excludedMs = length(excluded);
+  const downtimeMs = length(downtime);
 
-  // Holds: who answered, how long, and whether the policy scripts their kind.
+  // Holds: who answered, how long (the service down or paused left out), and whether the policy scripts their kind.
   const scripted = new Set(Object.keys(definition.operatorPolicy.answers));
   const holdTotals = {
     total: 0,
@@ -494,15 +639,23 @@ export async function scoreRun({
     operator: 0,
     open: 0,
     waitMs: 0,
+    rawWaitMs: 0,
     operatorWaitMs: 0,
     byKind: {},
   };
   for (const hold of holds.values()) {
     hold.policy = scripted.has(hold.kind);
+    if (hold.answeredAt) {
+      const from = ms(hold.askedAt);
+      const to = ms(hold.answeredAt);
+      hold.rawWaitMs = to - from;
+      hold.waitMs = hold.rawWaitMs - covered(from, to, downtime);
+    }
     holdTotals.total += 1;
     holdTotals[hold.policy ? "scripted" : "operator"] += 1;
     if (!hold.answeredAt) holdTotals.open += 1;
     holdTotals.waitMs += hold.waitMs ?? 0;
+    holdTotals.rawWaitMs += hold.rawWaitMs ?? 0;
     if (!hold.policy) holdTotals.operatorWaitMs += hold.waitMs ?? 0;
     holdTotals.byKind[hold.kind] ??= {
       count: 0,
@@ -574,14 +727,18 @@ export async function scoreRun({
     if (item.startedAt && item.endedAt) {
       const from = ms(item.startedAt);
       const to = ms(item.endedAt);
+      // Also left out: the item's own waits for an answer while none of its steps ran.
+      const own = itemBlocked.get(item.id)?.close(endedAt) ?? [];
+      const off = union([...excluded, ...clip(own, start, end)]);
       item.wallMs = to - from;
-      item.activeWallMs = to - from - covered(from, to, excluded);
+      item.activeWallMs = to - from - covered(from, to, off);
+      item.holdBlockedMs = covered(from, to, off) - covered(from, to, downtime);
     }
-    item.validation.firstPassRate = rate(
-      item.validation.passed,
-      item.validation.runs,
+    finishValidation(item.validation);
+    item.ci.firstPassRate = rate(
+      item.ci.passedFirstTime,
+      item.ci.published - item.ci.conflicts,
     );
-    item.ci.firstPassRate = rate(item.ci.passedFirstTime, item.ci.published);
     item.tokensPerCriterion = item.criteria
       ? item.tokens.total / item.criteria
       : null;
@@ -593,6 +750,7 @@ export async function scoreRun({
   const ci = {
     rounds: 0,
     published: 0,
+    conflicts: 0,
     reruns: 0,
     flaky: 0,
     passedFirstTime: 0,
@@ -631,7 +789,11 @@ export async function scoreRun({
       sum(summary.roles, (r) => r.ms),
     ),
     check("holds", holdTotals.total, summary.holds.length),
-    check("hold waits (ms)", holdTotals.waitMs, summary.holdWaitMs),
+    check(
+      "hold waits, asked to answered (ms)",
+      holdTotals.rawWaitMs,
+      summary.holdWaitMs,
+    ),
     check(
       "repairs (state against the log's repair outcomes)",
       repairs,
@@ -674,6 +836,20 @@ export async function scoreRun({
         : (state.holds ?? []).length
           ? "held"
           : "running";
+  // An unfinished run's totals are lower only because it hasn't finished.
+  const partial = outcome !== "done" && outcome !== "cancelled";
+  if (partial)
+    unavailable.unshift({
+      metric: "every total",
+      reason: `the Objective is ${outcome}, not ended: the totals cover the run so far, so this card is partial and is left out of comparisons`,
+    });
+  const build = run.factory?.distSha256;
+  const buildNow = run.factory?.distSha256Now;
+  if (build && buildNow && build !== buildNow)
+    unavailable.push({
+      metric: "which Factory ran",
+      reason: `the Factory build (${run.factory.cli ?? "dist/"}) changed after provisioning: sha256 ${build.slice(0, 12)} then, ${buildNow.slice(0, 12)} at scoring. The service may have run either`,
+    });
   return {
     schemaVersion: SCORECARD_VERSION,
     benchmark: definition.id,
@@ -685,7 +861,9 @@ export async function scoreRun({
       source: run.source,
       repository: run.repository,
       issue,
+      ...(run.factory ? { factory: run.factory } : {}),
     },
+    partial,
     factory: {
       versions,
       commits: Object.fromEntries(
@@ -709,8 +887,11 @@ export async function scoreRun({
       wallMs,
       activeWallMs: wallMs === null ? null : wallMs - excludedMs,
       excludedMs,
+      downtimeMs,
+      holdBlockedMs: excludedMs - downtimeMs,
       outages,
       pauses,
+      holdBlocked,
       modelMs,
       tokens: { ...totals, spendLedger },
       cacheHitRate: rate(totals.cached, totals.input),
@@ -726,11 +907,11 @@ export async function scoreRun({
       },
       amendments,
       holds: holdTotals,
-      validation: {
-        ...validation,
-        firstPassRate: rate(validation.passed, validation.runs),
+      validation: finishValidation(validation),
+      ci: {
+        ...ci,
+        firstPassRate: rate(ci.passedFirstTime, ci.published - ci.conflicts),
       },
-      ci: { ...ci, firstPassRate: rate(ci.passedFirstTime, ci.published) },
       final,
     },
     items: [...items.values()],

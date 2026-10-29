@@ -31,6 +31,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
 import { policyAnswer } from "./lib/holds.mjs";
+import { harnessRun } from "./lib/provision.mjs";
 import { scoreRun } from "./lib/score.mjs";
 
 const { values, positionals } = parseArgs({
@@ -143,14 +144,7 @@ for (;;) {
       stateDir: record.stateDir,
       issue: record.issue,
       definition,
-      run: {
-        id: record.runId,
-        label: record.label,
-        group: record.group,
-        source: "harness",
-        repository: record.repository,
-        factory: { commit: record.factory.commit },
-      },
+      run: harnessRun(record),
       factoryRepo: dirname(BENCH_DIR),
     });
     const out = join(

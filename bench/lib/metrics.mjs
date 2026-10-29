@@ -5,6 +5,14 @@
  * it is noise. Accept only when every primary metric is better and no
  * guard is worse (bench/README.md#Hill-climb).
  */
+/**
+ * The scorecard's schema. 2: active time leaves out waits for an answer
+ * with nothing running; hold waits leave out downtime; validation counts
+ * each result's first validation; CI leaves out base conflicts; `partial`.
+ * Cards of another version mean other things by the same names.
+ */
+export const SCORECARD_VERSION = 2;
+
 const totals = (path) => (card) =>
   path.split(".").reduce((node, key) => node?.[key], card.totals) ?? null;
 
@@ -64,7 +72,7 @@ export const METRICS = {
     get: totals("holds.operatorWaitMs"),
   },
   "validation.firstPassRate": {
-    label: "Validation pass rate",
+    label: "Results passing their first validation",
     unit: "rate",
     better: "higher",
     get: totals("validation.firstPassRate"),
@@ -135,8 +143,27 @@ export function compare(baseline, candidate, ids) {
   });
 }
 
-/** The hill-climb decision for a candidate group against the baseline group. */
-export function verdict(definition, baseline, candidate) {
+/** Cards of runs that hadn't ended when scored: their totals are partial. */
+export const isPartial = (card) =>
+  card.partial ?? !["done", "cancelled"].includes(card.outcome);
+
+/**
+ * The hill-climb decision for a candidate group against the baseline group.
+ * Partial cards are left out (a warning says so): an unfinished run's
+ * tokens and time are lower only because it is unfinished.
+ */
+export function verdict(definition, baselineCards, candidateCards) {
+  const warnings = [];
+  const ended = (cards, which) => {
+    const left = cards.filter(isPartial);
+    if (left.length)
+      warnings.push(
+        `left out ${left.length} partial ${which} run(s), not ended when scored: ${left.map((c) => c.run.id).join(", ")}`,
+      );
+    return cards.filter((card) => !isPartial(card));
+  };
+  const baseline = ended(baselineCards, "baseline");
+  const candidate = ended(candidateCards, "candidate");
   const primary = compare(baseline, candidate, definition.hillClimb.primary);
   const guards = compare(baseline, candidate, definition.hillClimb.guards);
   const reasons = [
@@ -147,7 +174,6 @@ export function verdict(definition, baseline, candidate) {
       .filter((row) => row.verdict === "worse" || row.verdict === "unknown")
       .map((row) => `guard ${row.id} is ${row.verdict}`),
   ];
-  const warnings = [];
   if (baseline.length < 3 || candidate.length < 3)
     warnings.push(
       `${baseline.length} baseline and ${candidate.length} candidate runs: a spread needs at least 3 of each`,

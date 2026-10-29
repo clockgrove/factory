@@ -11,6 +11,10 @@
  *     The hill-climb decision for a group of runs against the baseline
  *     group (the definition's, by default): prints it and exits 0 when
  *     accepted, 3 when not.
+ *
+ * A partial card (a run that hadn't ended when scored) is reported and
+ * plotted, marked, but never compared. A card of another scorecard version
+ * is left out, with a warning.
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,7 +27,7 @@ import {
   runMarkdown,
   runReport,
 } from "./lib/report.mjs";
-import { verdict } from "./lib/metrics.mjs";
+import { isPartial, SCORECARD_VERSION, verdict } from "./lib/metrics.mjs";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -44,14 +48,35 @@ if (!values.benchmark) {
 }
 const definition = loadDefinition(values.benchmark);
 const resultsDir = values.results ?? join(BENCH_DIR, "results", definition.id);
+const warn = (text) => process.stderr.write(`Warning: ${text}\n`);
 const cards = readdirSync(resultsDir)
   .filter((name) => name.endsWith(".json"))
-  .map((name) => JSON.parse(readFileSync(join(resultsDir, name), "utf8")));
+  .map((name) => [
+    name,
+    JSON.parse(readFileSync(join(resultsDir, name), "utf8")),
+  ])
+  .filter(([name, card]) => {
+    if (card.schemaVersion === SCORECARD_VERSION) return true;
+    warn(
+      `${name} is scorecard version ${card.schemaVersion}, not ${SCORECARD_VERSION}: left out. Score it again with bench/score.mjs.`,
+    );
+    return false;
+  })
+  .map(([, card]) => card);
 
 if (positionals[0] === "compare") {
   const baselineGroup = values.baseline ?? definition.baseline;
-  const baseline = cards.filter((c) => c.run.group === baselineGroup);
-  const candidate = cards.filter((c) => c.run.group === values.candidate);
+  const ended = (group) =>
+    cards.filter((c) => {
+      if (c.run.group !== group) return false;
+      if (!isPartial(c)) return true;
+      warn(
+        `${c.run.id} (${group}) hadn't ended when it was scored (${c.outcome}): left out`,
+      );
+      return false;
+    });
+  const baseline = ended(baselineGroup);
+  const candidate = ended(values.candidate);
   if (!baseline.length || !candidate.length) {
     process.stderr.write(
       `Need runs in both groups: ${baseline.length} in ${baselineGroup}, ${candidate.length} in ${values.candidate}\n`,

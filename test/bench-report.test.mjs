@@ -89,6 +89,68 @@ test("the history graph plots every group with its spread", () => {
   );
 });
 
+test("partial cards are left out of comparisons and marked in the reports", () => {
+  const hours = 3_600_000;
+  const base = [
+    [100, 7.5],
+    [106.17, 8.57],
+    [110, 9],
+  ].map(([m, h], i) => {
+    const card = structuredClone(baseline);
+    card.run = { ...card.run, id: `b${i}` };
+    card.totals.tokens.total = m * 1_000_000;
+    card.totals.activeWallMs = h * hours;
+    return card;
+  });
+  const finished = [
+    candidate("f1", (t) => {
+      t.tokens.total = 98_000_000;
+      t.activeWallMs = 7.2 * hours;
+    }),
+    candidate("f2", (t) => {
+      t.tokens.total = 120_000_000;
+      t.activeWallMs = 10 * hours;
+    }),
+  ];
+  // A live run scored mid-way: low only because it is unfinished.
+  const live = candidate("live", (t) => {
+    t.tokens.total = 42_830_000;
+    t.activeWallMs = 5.19 * hours;
+  });
+  live.outcome = "running";
+  live.partial = true;
+  const decision = verdict(definition, base, [...finished, live]);
+  assert.equal(decision.accept, false);
+  assert.deepEqual(
+    decision.primary.map((row) => [row.id, row.candidate.n, row.verdict]),
+    [
+      ["tokens.total", 2, "within"],
+      ["activeWallMs", 2, "within"],
+    ],
+  );
+  assert.match(
+    decision.warnings[0],
+    /left out 1 partial candidate run\(s\), not ended when scored: live/,
+  );
+  const cards = [...base, ...finished, live];
+  const html = runReport(live, cards, definition);
+  assertSelfContained(html);
+  assert.match(html, /running \(partial\)/);
+  assert.match(html, /Not compared: the run is partial/);
+  assert.doesNotMatch(html, /Hill-climb|▲ better/);
+  assert.match(runMarkdown(live, cards, definition), /\*\*Partial\.\*\*/);
+  const history = historyPage(cards, definition);
+  assert.match(history, /stroke-dasharray="2 2"><title>candidate live: /);
+  assert.match(
+    history,
+    /Factory 0\.6\.0: 2 run\(s\), median 109\.00M, 98\.00M to 120\.00M/,
+  );
+  assert.match(
+    historyMarkdown(cards, definition),
+    /\| live \| Factory 0\.6\.0 \| running \(partial\) \|/,
+  );
+});
+
 test("the hill-climb accepts only better primaries with no worse guard", () => {
   const good = [70, 72, 74].map((m) =>
     candidate(`g${m}`, (t) => {

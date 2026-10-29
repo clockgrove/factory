@@ -529,7 +529,7 @@
 {"at":"2026-10-28T17:13:16.385Z","seq":3792,"event":"published","step":"item:entity-selection:publish","attemptId":"item:entity-selection:publish#1","item":"entity-selection","pr":906,"head":"h-828dfd567ada"}
 {"at":"2026-10-28T17:13:16.405Z","seq":3799,"event":"outcome","step":"item:entity-selection:publish","attemptId":"item:entity-selection:publish#1","outcome":"done"}
 {"at":"2026-10-28T17:13:17.129Z","seq":3800,"event":"start","step":"item:entity-selection:ci","attemptId":"item:entity-selection:ci#1"}
-{"at":"2026-10-28T17:13:18.962Z","seq":3807,"event":"outcome","step":"item:entity-selection:ci","attemptId":"item:entity-selection:ci#1","outcome":"repair","target":"item:entity-selection:work"}
+{"at":"2026-10-28T17:13:18.962Z","seq":3807,"event":"outcome","step":"item:entity-selection:ci","attemptId":"item:entity-selection:ci#1","outcome":"repair","target":"item:entity-selection:work","finding":"PR #906 conflicts with its base branch; rebase the change"}
 {"at":"2026-10-28T17:13:19.153Z","seq":3808,"event":"hold","step":"item:entity-selection:work","id":"item:entity-selection:work@2026-10-28T17:13:19.143Z","cause":"failure","question":"item:entity-selection:work needs another repair, past "}
 {"at":"2026-10-28T17:14:06.430Z","seq":3811,"event":"request","by":"kirk","message":"ok","request":{"kind":"answer","issue":800,"answer":"more","question":"item:entity-selection:work@2026-10-28T17:13:19.143Z"}}
 {"at":"2026-10-28T17:14:06.448Z","seq":3812,"event":"start","step":"item:entity-selection:work","attemptId":"item:entity-selection:work#21","parentAttemptId":"item:entity-selection:ci#1"}

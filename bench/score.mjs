@@ -7,12 +7,15 @@
  *                    [--group NAME] [--repository OWNER/NAME]
  *
  * --out FILE writes elsewhere; --print prints the scorecard instead. Read-only
- * on the state directory, so a live service's Objective can be scored.
+ * on the state directory, so a live service's Objective can be scored. An
+ * Objective that hasn't ended scores a partial card (`partial: true`), which
+ * is never written into results/: give --out or --print for one.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
+import { harnessRun } from "./lib/provision.mjs";
 import { scoreRun } from "./lib/score.mjs";
 
 const { values } = parseArgs({
@@ -48,14 +51,7 @@ if (values["run-dir"]) {
     benchmark: record.benchmark,
     stateDir: record.stateDir,
     issue: record.issue,
-    run: {
-      id: record.runId,
-      label: record.label,
-      group: record.group,
-      source: "harness",
-      repository: record.repository,
-      factory: { commit: record.factory.commit },
-    },
+    run: harnessRun(record),
   };
 } else {
   for (const flag of ["benchmark", "state-dir", "issue", "run-id", "label"])
@@ -88,7 +84,12 @@ const card = await scoreRun({
 });
 const text = `${JSON.stringify(card, null, 2)}\n`;
 if (values.print) process.stdout.write(text);
-else {
+else if (card.partial && !values.out) {
+  process.stderr.write(
+    `#${input.issue} is ${card.outcome}, not ended: its scorecard would be partial, and results/ holds only ended runs. Give --out FILE or --print to see it.\n`,
+  );
+  process.exit(65);
+} else {
   const out =
     values.out ??
     join(BENCH_DIR, "results", definition.id, `${card.run.id}.json`);

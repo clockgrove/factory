@@ -11,7 +11,7 @@
 // What a model is shown needs a model: no fake provider runs here
 // (AGENTS.md), so that is the Codex worker integration cases'.
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   readFileSync,
@@ -20,7 +20,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
@@ -37,7 +36,6 @@ import {
 } from "../dist/providers/codex-worker.js";
 import { workerCapability } from "../dist/planning/rubric.js";
 import { profileWorker } from "../dist/providers/selection.js";
-import { LaunchedGroup } from "../dist/sandbox.js";
 import {
   criterionMap,
   FinishRequests,
@@ -45,6 +43,7 @@ import {
   validateRequest,
 } from "../dist/work/self-validate.js";
 import {
+  codexAppServer,
   configured,
   installation,
   item,
@@ -100,56 +99,6 @@ function changedCheckout() {
   return { worktree, base };
 }
 
-/** Codex's app server, started as the worker starts codex, and a JSON-RPC client for it. */
-function appServer(home, cwd) {
-  const child = spawn(home.launcher, ["app-server"], {
-    cwd,
-    env: home.env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  const group = new LaunchedGroup(home.pidFile, new AbortController().signal);
-  let stderr = "";
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
-  const pending = new Map();
-  createInterface({ input: child.stdout }).on("line", (line) => {
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (message.id === undefined || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
-    pending.delete(message.id);
-    if (message.error) reject(new Error(JSON.stringify(message.error)));
-    else resolve(message.result);
-  });
-  let next = 0;
-  return {
-    request(method, params) {
-      const id = next++;
-      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-      return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        setTimeout(
-          () =>
-            reject(new Error(`${method} timed out: ${stderr.slice(-2000)}`)),
-          120_000,
-        ).unref();
-      });
-    },
-    notify(method) {
-      child.stdin.write(`${JSON.stringify({ method })}\n`);
-    },
-    end() {
-      child.stdin.end();
-      group.end();
-    },
-  };
-}
-
 test("a Codex worker's Codex runs Validate through Factory's MCP server: the item's declared commands on a snapshot of its files, reached by Codex and never by the worker's shell (#2156)", async () => {
   const { worktree, base } = changedCheckout();
   const runs = [];
@@ -203,7 +152,7 @@ test("a Codex worker's Codex runs Validate through Factory's MCP server: the ite
   // Only this user reaches the socket's directory.
   assert.equal(statSync(dirname(socket)).mode & 0o777, 0o700);
   const home = codexWorkerHome(worktree, false, [], sandbox, undefined, config);
-  const codex = appServer(home, worktree);
+  const codex = codexAppServer(home, worktree);
   try {
     await codex.request("initialize", {
       clientInfo: { name: "factory-test", version: "0" },
@@ -335,7 +284,7 @@ test("a running Validate costs a Codex worker no model rounds, and the rounds sp
     undefined,
     validation.config(),
   );
-  const codex = appServer(home, worktree);
+  const codex = codexAppServer(home, worktree);
   let read;
   try {
     await codex.request("initialize", {

@@ -105,7 +105,12 @@ const COPILOT_USAGE_KEYS = [
 const PLANNER_IDLE_MS = 15 * 60 * 1000;
 const CLEANUP_MS = 5_000;
 
-const READ_TOOLS = ["view", "rg", "glob"];
+/**
+ * The built-in tools a planning or review call gets over its tree. `view`
+ * returns an image file to the model as image data (runtime 1.0.13), as
+ * Claude's Read and Codex's view_image do (#2193).
+ */
+export const COPILOT_READ_TOOLS = ["view", "rg", "glob"];
 
 const LOGIN_HOLD =
   "Copilot login is missing or expired: run `copilot` and `/login` (or `gh auth login`) as the service's user, then answer retry";
@@ -269,6 +274,48 @@ async function bounded(operation: Promise<unknown>): Promise<void> {
   clearTimeout(timer);
 }
 
+/**
+ * A turn's answer to each permission request: Factory's own tools (`custom`)
+ * called with no arguments, and file reads, or writes when `writes`, inside
+ * `root` alone. Anything else is refused.
+ */
+export function copilotPermission(
+  root: string,
+  writes: boolean,
+  custom: ReadonlySet<string>,
+) {
+  return (request: PermissionRequest) => {
+    // Factory's own tool takes no arguments: the model names no command.
+    if (request.kind === "custom-tool")
+      return !request.managedApprovalRequired &&
+        custom.has(request.toolName) &&
+        (request.args === undefined ||
+          (isObject(request.args) && !Object.keys(request.args).length))
+        ? { kind: "approve-once" as const }
+        : {
+            kind: "reject" as const,
+            feedback: "Factory did not grant this capability",
+          };
+    if (
+      request.managedApprovalRequired ||
+      (request.kind !== "read" && request.kind !== "write") ||
+      request.requestSandboxBypass ||
+      (request.kind === "write" && !writes)
+    )
+      return {
+        kind: "reject" as const,
+        feedback: "Factory did not grant this capability",
+      };
+    const path = request.kind === "read" ? request.path : request.fileName;
+    return pathInsideRoot(path, root)
+      ? { kind: "approve-once" as const }
+      : {
+          kind: "reject" as const,
+          feedback: "Factory grants file access only inside this directory",
+        };
+  };
+}
+
 async function runTurn(turn: Turn): Promise<TurnResult> {
   turn.signal.throwIfAborted();
   let sdk: typeof import("@github/copilot-sdk");
@@ -355,36 +402,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     idle.catch(() => undefined);
     let sent = false;
     const custom = new Set(turn.custom?.map((tool) => tool.name));
-    const permit = (request: PermissionRequest) => {
-      // Factory's own tool takes no arguments: the model names no command.
-      if (request.kind === "custom-tool")
-        return !request.managedApprovalRequired &&
-          custom.has(request.toolName) &&
-          (request.args === undefined ||
-            (isObject(request.args) && !Object.keys(request.args).length))
-          ? { kind: "approve-once" as const }
-          : {
-              kind: "reject" as const,
-              feedback: "Factory did not grant this capability",
-            };
-      if (
-        request.managedApprovalRequired ||
-        (request.kind !== "read" && request.kind !== "write") ||
-        request.requestSandboxBypass ||
-        (request.kind === "write" && !turn.writes)
-      )
-        return {
-          kind: "reject" as const,
-          feedback: "Factory did not grant this capability",
-        };
-      const path = request.kind === "read" ? request.path : request.fileName;
-      return pathInsideRoot(path, root)
-        ? { kind: "approve-once" as const }
-        : {
-            kind: "reject" as const,
-            feedback: "Factory grants file access only inside this directory",
-          };
-    };
+    const permit = copilotPermission(root, turn.writes, custom);
     const resumed = turn.conversation?.resumed?.id;
     const open = (config: SessionConfigBase) =>
       resumed
@@ -620,7 +638,7 @@ export class CopilotPlanner implements Planner {
         const result = await runTurn({
           choice,
           directory: call.readDir ?? empty!,
-          tools: call.readDir ? READ_TOOLS : [],
+          tools: call.readDir ? COPILOT_READ_TOOLS : [],
           writes: false,
           prompt: `${turn?.prompt ?? call.prompt}\n\nAnswer with only one JSON object that matches this JSON Schema, with no other text:\n${JSON.stringify(call.schema)}`,
           images,

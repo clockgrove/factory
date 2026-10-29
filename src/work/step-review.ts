@@ -1,6 +1,6 @@
 import { ACCEPT } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
-import type { InputRecord } from "../media.js";
+import type { CandidateRecord, InputRecord } from "../media.js";
 import { ancestors } from "../planning/graph.js";
 import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
@@ -63,7 +63,6 @@ export async function reviewStep(
     fact(state, "held", item.id),
     item.id,
   );
-  const chosen = selection(state)(item.id);
   const position: DeliveryPosition = place
     ? {
         kind: "native-stack",
@@ -86,6 +85,14 @@ export async function reviewStep(
     item,
     secondLook(context) ? undefined : fact(state, "reviewSession", item.id),
   );
+  const dependencies = await dependencyResults(
+    state,
+    item,
+    deps.config.checkout,
+    work.base,
+    signal,
+  );
+  const candidates = reviewCandidates(state, plan.items, item, dependencies);
   const review = await reviewResult({
     planner: deps.planner,
     plan,
@@ -98,9 +105,7 @@ export async function reviewStep(
     sources: await pinnedSources(state, deps, signal),
     dir: `${worktree}.review`,
     notes: JSON.stringify(work.notes),
-    ...(chosen
-      ? { candidates: [{ item, sets: work.sets, selection: chosen }] }
-      : {}),
+    ...(candidates.length ? { candidates } : {}),
     inputs: workerInputs(state, [item.id]),
     peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
     ...(memory ? { memory } : {}),
@@ -109,13 +114,7 @@ export async function reviewStep(
     decisions: decided.decisions,
     ...(decided.earlier ? { earlier: decided.earlier } : {}),
     delivery: position,
-    dependencies: await dependencyResults(
-      state,
-      item,
-      deps.config.checkout,
-      work.base,
-      signal,
-    ),
+    dependencies,
     signal,
     log: context.log,
   });
@@ -146,6 +145,45 @@ export function deliveredHead(
     (state.done[stepKey(id, "ci")] as { head: string } | undefined)?.head ??
     (state.done[stepKey(id, "publish")] as PublishResult | undefined)?.head
   );
+}
+
+/**
+ * The candidate media records an item's result review gets: the item's
+ * own selection, then each dependency's whose delivered result the
+ * reviewed base holds. A dependency's selected members are in the
+ * candidate tree as Git LFS pointers, so without its receipt the review
+ * has no digest-checked copy of the bytes the item's validation read: in
+ * run 2026-10-28T190035PDT-aa02 a test item's reviewer held asking the
+ * operator for the hydrated preview its dependency had delivered. A
+ * dependency's record is marked, so its receipt carries the selected set
+ * alone: its unselected alternatives stay out of this review.
+ */
+export function reviewCandidates(
+  state: ObjectiveState,
+  items: readonly WorkItem[],
+  item: WorkItem,
+  dependencies: readonly DependencyResult[],
+): CandidateRecord[] {
+  const held = new Set(
+    dependencies
+      .filter((entry) => entry.inReviewedBase)
+      .map((entry) => entry.id),
+  );
+  const records: CandidateRecord[] = [];
+  for (const entry of [item, ...items.filter((other) => held.has(other.id))]) {
+    const chosen = selection(state)(entry.id);
+    const work = state.done[stepKey(entry.id, "work")] as
+      | WorkResult
+      | undefined;
+    if (chosen && work)
+      records.push({
+        item: entry,
+        sets: work.sets,
+        selection: chosen,
+        ...(entry !== item && { dependency: true as const }),
+      });
+  }
+  return records;
 }
 
 /** The read-only inputs each item's worker last got, for review. */

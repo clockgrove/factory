@@ -7,7 +7,7 @@ import { code, digest, prose } from "./markdown.js";
 import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
 import type { Retirement } from "./planning/types.js";
 import type { CriterionDecision } from "./review/result.js";
-import { answerForm, type ObjectiveState } from "./state.js";
+import { answerForm, closingAnswer, type ObjectiveState } from "./state.js";
 import type { ObjectiveView } from "./status.js";
 
 /**
@@ -455,7 +455,7 @@ function render(
         const who = answeredBy(closed, []);
         const what =
           closed.how === "answered"
-            ? `${code([closed.answer, closed.arg].filter(Boolean).join(" "))} by ${who}`
+            ? `${code(closingAnswer(closed))} by ${who}`
             : closed.how === "cancelled"
               ? `closed: cancelled${closed.by === "deadline" ? " at its deadline" : ` by ${who}`}`
               : `closed without an answer (${closed.how})`;

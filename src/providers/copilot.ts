@@ -728,6 +728,12 @@ function copilotActivity(
 export class CopilotWorker implements Worker {
   constructor(private readonly options: CopilotWorkerOptions) {}
 
+  get validation(): SelfValidateOptions | undefined {
+    return this.options.tools.includes("Validate")
+      ? this.options.validation
+      : undefined;
+  }
+
   async run(input: WorkerInput): Promise<WorkerResult> {
     try {
       return await this.once(input);

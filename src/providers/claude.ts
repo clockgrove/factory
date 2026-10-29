@@ -73,7 +73,7 @@ export const DEFAULT_CLAUDE_MODELS: ClaudePlannerOptions = {
  * event surfaces may omit ongoing reasoning; higher effort gets a finite
  * quiet window.
  */
-function modelResponseTimeoutMs(reasoningEffort?: string): number {
+export function modelResponseTimeoutMs(reasoningEffort?: string): number {
   return (
     (["high", "xhigh", "max", "ultra", "persistent"].includes(
       reasoningEffort ?? "",

@@ -10,6 +10,7 @@ import {
   networkCategory,
   newTransport,
   note,
+  routeOf,
   statusCategory,
   type Transport,
   transport,
@@ -436,6 +437,9 @@ function expecting<T>(
   return expectedStatuses.run(statuses, read);
 }
 
+/** A classic branch protection read GitHub refuses the login (`classicProtection`). */
+const REFUSED: unique symbol = Symbol("refused");
+
 export class GitHub {
   /** Requests outside a step or a sync job: the service run's own (`takeAmbient`). */
   private ambient = newTransport();
@@ -459,6 +463,14 @@ export class GitHub {
    * a rate-limited answer (`limited`); `send` sends nothing it holds.
    */
   private readonly heldUntil = new Map<string, number>();
+  /**
+   * Set once GitHub refused (403) a read of the repository's classic
+   * branch protection: the login may not read it (a GitHub App without
+   * Administration access never may). Never cleared: for the rest of the
+   * service run no protection route is read again, and each read takes
+   * its fallback (`classicProtection`, #2174). A restart reads again.
+   */
+  private protectionRefused = false;
 
   constructor(
     readonly repository: string,
@@ -2090,31 +2102,21 @@ export class GitHub {
       | { contexts?: unknown; checks?: unknown; strict?: unknown }
       | null
       | undefined;
-    let classic: Required;
+    // Undefined (404): unprotected, or no required checks.
+    let classic = await this.classicProtection<Required>(
+      `branches/${name}/protection/required_status_checks`,
+      signal,
+    );
     // The branch read's protection never shows `strict`.
-    let strictKnown = true;
-    try {
-      classic = await expecting([403, 404], () =>
-        this.rest<Required>(
-          "GET",
-          this.repo(`branches/${name}/protection/required_status_checks`),
-          undefined,
-          signal,
-        ),
-      );
-    } catch (error) {
-      if (!(error instanceof GitHubError && [403, 404].includes(error.status)))
-        throw error;
-      // 404: unprotected, or no required checks. 403: the login may not read
-      // protection settings; the branch read shows the same checks.
-      strictKnown = error.status === 404;
-      if (error.status === 403)
-        classic = (
-          await this.rest<{
-            protection?: { required_status_checks?: Required };
-          }>("GET", this.repo(`branches/${name}`), undefined, signal)
-        ).protection?.required_status_checks;
-    }
+    const strictKnown = classic !== REFUSED;
+    // The login may not read protection settings: the branch read shows
+    // the same checks.
+    if (classic === REFUSED)
+      classic = (
+        await this.rest<{
+          protection?: { required_status_checks?: Required };
+        }>("GET", this.repo(`branches/${name}`), undefined, signal)
+      ).protection?.required_status_checks;
     const names = [
       ...new Set(
         [
@@ -2176,15 +2178,16 @@ export class GitHub {
         count,
       });
     }
-    const count = (
-      await this.optional(() =>
-        this.rest<{
-          required_pull_request_reviews?: {
-            required_approving_review_count?: unknown;
-          };
-        }>("GET", this.repo(`branches/${name}/protection`), undefined, signal),
-      )
-    )?.required_pull_request_reviews?.required_approving_review_count;
+    const classic = await this.classicProtection<{
+      required_pull_request_reviews?: {
+        required_approving_review_count?: unknown;
+      };
+    }>(`branches/${name}/protection`, signal);
+    const count =
+      classic === REFUSED
+        ? undefined
+        : classic?.required_pull_request_reviews
+            ?.required_approving_review_count;
     if (typeof count === "number" && count > 0)
       found.push({ rule: "branch protection", count });
     return found;
@@ -2217,15 +2220,13 @@ export class GitHub {
         rule.parameters?.required_review_thread_resolution === true
       )
         found.push(await this.rulesetName(rule.ruleset_id, signal));
-    const classic = await this.optional(() =>
-      this.rest<{ required_conversation_resolution?: { enabled?: unknown } }>(
-        "GET",
-        this.repo(`branches/${name}/protection`),
-        undefined,
-        signal,
-      ),
-    );
-    if (classic?.required_conversation_resolution?.enabled === true)
+    const classic = await this.classicProtection<{
+      required_conversation_resolution?: { enabled?: unknown };
+    }>(`branches/${name}/protection`, signal);
+    if (
+      classic !== REFUSED &&
+      classic?.required_conversation_resolution?.enabled === true
+    )
       found.push("branch protection");
     return [...new Set(found)];
   }
@@ -2276,15 +2277,50 @@ export class GitHub {
       )
     )
       return false;
-    const classic = await this.optional(() =>
-      this.rest<{ required_linear_history?: { enabled?: unknown } }>(
-        "GET",
-        this.repo(`branches/${name}/protection`),
-        undefined,
-        signal,
-      ),
+    const classic = await this.classicProtection<{
+      required_linear_history?: { enabled?: unknown };
+    }>(`branches/${name}/protection`, signal);
+    return (
+      classic === REFUSED || classic?.required_linear_history?.enabled !== true
     );
-    return classic?.required_linear_history?.enabled !== true;
+  }
+
+  /**
+   * A read of the classic branch protection at `path` (under the
+   * repository): undefined on a 404 (unprotected, or not that setting);
+   * REFUSED on a 403, the login may not read it. The first 403 stops every
+   * later protection read for the rest of the service run, which then
+   * takes REFUSED at once, and is noted once as a
+   * `branch-protection-unreadable` event in the scope that met it.
+   */
+  private async classicProtection<T>(
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<T | typeof REFUSED | undefined> {
+    if (this.protectionRefused) return REFUSED;
+    try {
+      return await expecting([403, 404], () =>
+        this.rest<T>("GET", this.repo(path), undefined, signal),
+      );
+    } catch (error) {
+      if (!(error instanceof GitHubError)) throw error;
+      if (error.status === 404) return undefined;
+      if (error.status !== 403) throw error;
+      if (!this.protectionRefused) {
+        this.protectionRefused = true;
+        const counted = transport.getStore() ?? this.ambient;
+        counted.notices = [
+          ...(counted.notices ?? []),
+          {
+            event: "branch-protection-unreadable",
+            route: routeOf(this.repo(path)),
+            status: 403,
+            message: `${this.isApp ? "Factory's GitHub App" : "The GitHub login"} can't read ${this.repository}'s branch protection (GitHub answered 403), so Factory reads it no more until the service restarts: required checks come from rulesets and the branch read, whether a branch must be up to date is unknown, and classic rules on reviews, review threads and linear history aren't seen.`,
+          },
+        ];
+      }
+      return REFUSED;
+    }
   }
 
   /**

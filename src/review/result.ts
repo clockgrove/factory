@@ -31,7 +31,7 @@ import {
   inputReceipts,
 } from "../media.js";
 import { validPath } from "../objective.js";
-import { coverageCriterion, isRecord } from "../planning/graph.js";
+import { isRecord, resultCriteria } from "../planning/graph.js";
 import { operatorAnswers } from "../planning/plan.js";
 import { TREE_READ_GUIDANCE } from "../planning/prompts.js";
 import {
@@ -53,26 +53,7 @@ import {
   reviewArtifactEvidence,
 } from "./artifacts.js";
 
-/**
- * The criteria a result review judges: the item's own acceptance, then each
- * Objective criterion or source exit item the plan says this item's review
- * proves. A single-item plan's review also judges what final review proves.
- * The indices match the worker's notes.
- */
-export function resultCriteria(plan: Plan, item: WorkItem): string[] {
-  const whole = plan.items.length === 1 && plan.items[0]!.id === item.id;
-  const owned = plan.coverage
-    .filter(
-      (entry) =>
-        entry.itemId === item.id &&
-        (entry.proof.kind === "result-semantic" ||
-          entry.proof.kind === "integrated-semantic" ||
-          (whole && entry.proof.kind === "final-review")),
-    )
-    .map(coverageCriterion)
-    .filter((criterion) => !item.acceptance.includes(criterion));
-  return [...item.acceptance, ...new Set(owned)];
-}
+export { resultCriteria };
 
 /** The commands Factory's validation ran, in order, each passing on `tree`. */
 export interface PassedValidation {

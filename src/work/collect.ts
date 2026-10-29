@@ -31,7 +31,7 @@ import {
   type WorkDiscovery,
   workDiscoveryProblem,
 } from "../planning/amendments.js";
-import { isRecord, ownsPath } from "../planning/graph.js";
+import { isRecord, ownsPath, resultCriteria } from "../planning/graph.js";
 import { DESIGN_QUESTIONS, type DesignRisk } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { candidateBounds } from "../sandbox.js";
@@ -249,7 +249,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
   const notes = await readHandoff(
     handoffPath,
     handoffPeers(input.plan, item),
-    item.acceptance.length,
+    resultCriteria(input.plan, item).length,
   );
   if (notes) {
     if (!(await untracked(".factory-handoff.json")))
@@ -450,14 +450,14 @@ export async function snapshot(
  */
 export async function readHandoffNotes(
   worktree: string,
-  plan: Pick<Plan, "items">,
+  plan: Pick<Plan, "items" | "coverage">,
   item: WorkItem,
 ): Promise<HandoffNote[] | { problem: string } | undefined> {
   try {
     return await readHandoff(
       join(worktree, ".factory-handoff.json"),
       handoffPeers(plan, item),
-      item.acceptance.length,
+      resultCriteria(plan, item).length,
     );
   } catch (error) {
     if (error instanceof WorkFinding) return { problem: error.message };

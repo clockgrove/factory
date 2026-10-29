@@ -11,6 +11,7 @@ import type { SandboxConfig } from "../config.js";
 import { hold, objectiveWide } from "../engine.js";
 import { GitRefusal } from "../git.js";
 import { needsSelection } from "../media.js";
+import { resultCriteria } from "../planning/graph.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
@@ -370,7 +371,9 @@ export class SelfValidation {
   async checkHandoff(): Promise<HandoffCheck> {
     const { item, worktree } = this.input;
     const { plan } = this.options;
-    const count = item.acceptance.length;
+    // The criteria its review judges, as its contract numbers them.
+    const criteria = resultCriteria(plan, item);
+    const count = criteria.length;
     const notes = await readHandoffNotes(worktree, plan, item);
     if (notes && "problem" in notes)
       return {
@@ -382,7 +385,7 @@ export class SelfValidation {
         passed: true,
         ...(count && {
           text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${count} acceptance criteria there, using the schema in your instructions.`,
-          criteria: (bound: number) => criterionMap(item.acceptance, [], bound),
+          criteria: (bound: number) => criterionMap(criteria, [], bound),
         }),
       };
     const verified = notes.filter(
@@ -398,8 +401,7 @@ export class SelfValidation {
       passed: true,
       text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.${unanswered.length ? ` No design note yet for ${unanswered.join(", ")}.` : ""}`,
       ...(count && {
-        criteria: (bound: number) =>
-          criterionMap(item.acceptance, notes, bound),
+        criteria: (bound: number) => criterionMap(criteria, notes, bound),
       }),
     };
   }

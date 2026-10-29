@@ -34,9 +34,12 @@ import {
   spendQuestion,
 } from "./spend.js";
 import {
+  ALL,
   type Answer,
   type AnsweredVia,
+  type AnswerPart,
   answerForm,
+  answerList,
   answersOf,
   type Frozen,
   type Hold,
@@ -46,6 +49,7 @@ import {
   keptClosings,
   type ObjectiveState,
   type ObjectiveStatus,
+  leadingArg,
   RESET_KEY,
   type Retry,
   recordClosed,
@@ -1730,20 +1734,47 @@ export class ObjectiveRunner {
     let note = text;
     let option = offered[0]!;
     if (offered.some((one) => one.arg !== undefined)) {
-      const first = text?.trim().split(/\s+/)[0];
+      const word = arg === undefined ? text?.trim().split(/\s+/)[0] : undefined;
+      const first = word?.toLowerCase() === ALL ? ALL : word;
+      const comment = via.channel === "comment";
+      const nameOne = `Name one: ${offered.map((one) => `\`${answerForm(one)}\``).join(", ")}.`;
+      // `all` names every criterion only where the question offers it (a
+      // question about one criterion offers `accept <n>` alone), the same
+      // from a comment as from the CLI.
+      if (
+        (arg ?? (comment ? first : undefined)) === ALL &&
+        !offered.some((one) => one.arg === ALL)
+      )
+        return refused(
+          "invalid_answer",
+          `This question offers no \`${answer} ${ALL}\`. ${nameOne}`,
+        );
+      // The CLI's text is never an `all`: an answer that gives several at
+      // once is named only by its argument, or a comment's first word.
       const named =
         arg !== undefined
           ? offered.find((one) => one.arg === arg)
-          : (offered.find((one) => one.arg === first) ??
-            (offered.length === 1 ? offered[0] : undefined));
-      if (!named)
-        return refused(
-          "invalid_answer",
-          `Name one: ${offered.map((one) => `\`${answerForm(one)}\``).join(", ")}.`,
-        );
+          : (offered.find(
+              (one) => one.arg === first && (comment || !one.covers),
+            ) ?? (offered.length === 1 ? offered[0] : undefined));
+      if (!named) return refused("invalid_answer", nameOne);
       option = named;
-      if (arg === undefined && first !== undefined && named.arg === first)
+      if (arg === undefined && first !== undefined && named.arg === first) {
         note = text?.trim().slice(first.length).trim() || undefined;
+        // `/factory accept 1 and 2 <reason>` decides one criterion: refused,
+        // so the reason doesn't swallow the others it names.
+        const more = leadingArg(
+          note,
+          offered.flatMap((one) =>
+            one.arg !== undefined && one !== named ? [one.arg] : [],
+          ),
+        );
+        if (more !== undefined)
+          return refused(
+            "invalid_answer",
+            `That answer names ${more} in its reason, but \`${answer} ${first}\` decides ${first} alone. ${nameOne}`,
+          );
+      }
     }
     if (text !== undefined && Buffer.byteLength(text) > MAX_ANSWER_TEXT)
       return refused(
@@ -1755,6 +1786,25 @@ export class ObjectiveRunner {
         "invalid_answer",
         `\`${answer}\` needs text after it, for example \`/factory ${answer} <your text>\`.`,
       );
+    // An answer that gives several of the hold's answers at once: all it
+    // covers, with its text, or the list its text is, checked here so a
+    // list that doesn't fit is refused before the question closes.
+    let parts: AnswerPart[] | undefined;
+    if (option.covers)
+      parts = option.covers.map((covered) => ({
+        answer,
+        arg: covered,
+        ...(note ? { text: note } : {}),
+      }));
+    else if (option.list) {
+      const listed = answerList(note ?? "", hold.options);
+      if (typeof listed === "string")
+        return refused(
+          "invalid_answer",
+          `${listed} So that answer wasn't applied.`,
+        );
+      parts = listed;
+    }
     let frozen: Frozen | undefined;
     if (answer === SWITCH) {
       const provider = option.arg!;
@@ -1814,6 +1864,7 @@ export class ObjectiveRunner {
       answer,
       ...(option.arg !== undefined ? { arg: option.arg } : {}),
       ...(note ? { text: note } : {}),
+      ...(parts ? { parts } : {}),
       ...who,
       ...(via.comment ? { comment: via.comment } : {}),
     });
@@ -1865,6 +1916,7 @@ export class ObjectiveRunner {
           answer: given,
           ...(option.arg !== undefined ? { arg: option.arg } : {}),
           ...(note ? { text: note } : {}),
+          ...(parts ? { parts } : {}),
           ...who,
           at: this.now().toISOString(),
         };

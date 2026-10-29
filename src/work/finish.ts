@@ -31,7 +31,12 @@ import { moveStatusOffDone } from "../queue.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
 import { decisionLines, type ResultReview } from "../review/result.js";
-import { type ObjectiveState, runOf, sinceRun } from "../state.js";
+import {
+  closingAnswer,
+  type ObjectiveState,
+  runOf,
+  sinceRun,
+} from "../state.js";
 import { errorMessage } from "../text.js";
 import {
   laterScriptChanges,
@@ -618,10 +623,7 @@ export function answeredLines(
         entry.url && /^https:\/\/[^\s()<>]+$/.test(entry.url)
           ? `[${id}](${entry.url})`
           : id;
-      const answer = [entry.closed.answer, entry.closed.arg]
-        .filter(Boolean)
-        .join(" ");
-      return `- ${linked}: ${code(answer)} by ${answeredBy(entry.closed, secrets)}, at ${code(displayTime(entry.closed.at))}`;
+      return `- ${linked}: ${code(closingAnswer(entry.closed))} by ${answeredBy(entry.closed, secrets)}, at ${code(displayTime(entry.closed.at))}`;
     }),
   ];
 }

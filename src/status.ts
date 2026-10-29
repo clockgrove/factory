@@ -33,6 +33,7 @@ import {
 } from "./spend.js";
 import {
   answerForm,
+  closingAnswer,
   type Frozen,
   findState,
   type Hold,
@@ -226,7 +227,7 @@ export function decisionText(decision: RecentDecision): string {
   const how = closed.channel ? ` via ${closed.channel}` : "";
   const what =
     closed.how === "answered"
-      ? `answered ${[closed.answer, closed.arg].filter(Boolean).join(" ")}${closed.text ? ` (${decisionLine(closed.text)})` : ""}`
+      ? `answered ${closingAnswer(closed)}${closed.text ? ` (${decisionLine(closed.text)})` : ""}`
       : `closed: ${closed.how}${closed.next ? ` by ${closed.next}` : ""}`;
   return `${decision.id}: ${what}${who}${how} at ${displayTime(closed.at)}; it asked: ${decisionLine(decision.summary)}`;
 }

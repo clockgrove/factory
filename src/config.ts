@@ -176,6 +176,24 @@ export interface CoreConfig {
   reviewArtifacts: ReviewArtifactSelector[];
   /** The OS sandbox every worker-caused command runs in (sandbox.ts). */
   sandbox: SandboxConfig;
+  /**
+   * The host's toolchains mise doesn't pin (#2182). Operational: it
+   * operates the host, never decides the work.
+   */
+  toolchain: {
+    /**
+     * Directories `setup --background` puts on the service unit's PATH,
+     * after the checkout's mise pins and before the setup shell's PATH, so
+     * a setup run from a shell without them keeps them.
+     */
+    path: string[];
+    /**
+     * Executables validation needs that no command names first (such as
+     * `pg_ctl`, which a test suite starts): readiness blocks while one
+     * isn't on the PATH the service runs with.
+     */
+    executables: string[];
+  };
   media: {
     /**
      * Host directories a "local" source asset may come from, by real path;
@@ -367,6 +385,37 @@ const sandboxSection = object({
     ) as Record<keyof SandboxLimits, Check<number>>,
   ),
 });
+
+/**
+ * `toolchain.path`: distinct absolute directories, each one PATH entry (no
+ * `:`, which would split it, and no line break, which the unit can't hold).
+ */
+const toolchainDirectories: Check<string[]> = (value, path, problems) => {
+  const entries = directories(value, path, problems);
+  if (
+    entries.some((entry) => /[:\n\r\0]/.test(entry)) ||
+    new Set(entries).size !== entries.length
+  )
+    problems.push(
+      `${path} must be distinct directories, each without a colon or line break`,
+    );
+  return entries;
+};
+
+const EXECUTABLE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._+-]*$/;
+
+/** `toolchain.executables`: distinct executable names, not paths. */
+const executableNames: Check<string[]> = (value, path, problems) => {
+  const names = strings(value, path, problems);
+  if (
+    names.some((name) => !EXECUTABLE_NAME.test(name)) ||
+    new Set(names).size !== names.length
+  )
+    problems.push(
+      `${path} must be distinct executable names (such as "pg_ctl"), not paths`,
+    );
+  return names;
+};
 
 /** `media.localAssetRoots`: directories that show workers nothing sealed. */
 const localAssetRoots: Check<string[]> = (value, path, problems) =>
@@ -660,6 +709,10 @@ export function loadConfig(repository: string): CoreConfig {
       reviewArtifacts: (value, _path, found) =>
         loadReviewArtifacts(value, found),
       sandbox: sandboxSection,
+      toolchain: object({
+        path: toolchainDirectories,
+        executables: executableNames,
+      }),
       media: object({ localAssetRoots }),
       progress: object({
         enabled: flag(true),

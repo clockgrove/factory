@@ -17,7 +17,7 @@ import { type Args, type Command, usage } from "./shared.js";
 export const spec: Command = {
   args: "",
   flags: SETUP_FLAGS,
-  help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; Factory's GitHub App comes first: --github-app-link prints the link that registers it, and --github-app-id ID --github-app-key PATH makes Factory act as it (--github-login keeps the GitHub CLI's login instead); --operator LOGIN names whom holds mention; see docs/reference/setup.md#Setup for every option",
+  help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; Factory's GitHub App comes first: --github-app-link prints the link that registers it, and --github-app-id ID --github-app-key PATH makes Factory act as it (--github-login keeps the GitHub CLI's login instead); --operator LOGIN names whom holds mention; --toolchain-path DIR... keeps a toolchain mise doesn't pin on the background service's PATH; see docs/reference/setup.md#Setup for every option",
   run: ({ repository, args }) => setupCommand(repository, args),
 };
 
@@ -44,10 +44,11 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
   }
   const modes = SERVICE_MODES.filter((mode) => values[mode]);
   if (modes.length > 1) throw usage(`give one of --${modes.join(", --")}`);
-  if (values["credential-file"] && modes[0] !== "background")
-    throw usage(
-      "--credential-file binds the background service: give --background",
-    );
+  for (const flag of ["credential-file", "drop-path"])
+    if (values[flag] && modes[0] !== "background")
+      throw usage(
+        `--${flag} ${flag === "drop-path" ? "lets the background service's PATH lose directories" : "binds the background service"}: give --background`,
+      );
   let report: SetupReport;
   try {
     if (modes[0])
@@ -97,6 +98,13 @@ function printService(report: ServiceReport, args: Args): number {
           ? [
               `  Setup ${report.setup.status}:`,
               ...report.setup.problems.map((problem) => `  - ${problem}`),
+              // Each blocked readiness check, which `--json` has in full.
+              ...(report.setup.readiness?.checks ?? [])
+                .filter((check) => check.status === "blocked")
+                .map(
+                  (check) =>
+                    `  - BLOCKED ${check.name}: ${check.detail}${check.fix ? `\n      ${check.fix}` : ""}`,
+                ),
             ]
           : []),
         ...report.problems.map((problem) => `- ${problem}`),

@@ -17,6 +17,7 @@ import {
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import { observeLocalExecutables } from "../dist/planning/executables.js";
+import { unitName, unitText } from "../dist/systemd.js";
 import {
   miseManages,
   misePinFix,
@@ -28,6 +29,7 @@ import {
   closedPort,
   configured,
   installation,
+  REPO,
   tempDir,
 } from "./helpers.mjs";
 
@@ -64,14 +66,19 @@ esac
 `,
     { mode: 0o755 },
   );
-  // A pinned node: this test's own, under a directory of its own.
-  const nodeBin = join(root, "installs", "node", NODE, "bin");
+  // A pinned node: this test's own, where mise installs it.
+  const nodeBin = join(root, "mise", "installs", "node", NODE, "bin");
   mkdirSync(nodeBin, { recursive: true });
   symlinkSync(process.execPath, join(nodeBin, "node"));
   writeFileSync(join(root, "bins", `node@${NODE}`), `${nodeBin}\n`);
   const pins = (
     checkout,
-    { untrusted = false, pnpm = false, system = false } = {},
+    {
+      untrusted = false,
+      pnpm = false,
+      system = false,
+      node = { version: NODE, installed: true },
+    } = {},
   ) => {
     const source = join(realpathSync(checkout), "mise.toml");
     const entry = (version, installed, path = source) => [
@@ -87,7 +94,7 @@ esac
     writeFileSync(
       join(root, "ls.json"),
       JSON.stringify({
-        node: entry(NODE, true),
+        node: entry(node.version, node.installed),
         // A global pin is the operator's own, not the checkout's.
         jq: entry("1.7.1", true, join(root, "config", "config.toml")),
         ...(pnpm ? { pnpm: entry("12.9.1", false) } : {}),
@@ -255,6 +262,90 @@ test("setup reads the checkout's mise pins: --background puts them first on the 
   assert.equal(
     named(plain, "node version")[0].fix,
     "Put a matching node first on the PATH the service runs with, or change the pin",
+  );
+});
+
+test("--background that would drop the unit's mise install names mise's fix: mise install, mise trust, or mise on the PATH; a moved pin goes through", async () => {
+  const inst = installation();
+  configured(inst, `http://127.0.0.1:${await closedPort()}`);
+  const checkout = join(inst.root, "checkout");
+  writeFileSync(join(checkout, "mise.toml"), '[tools]\nnode = "24.99.0"\n');
+  const mise = fakeMise();
+  inst.env.PATH = `${mise.bin}:${withoutMise(process.env.PATH)}`;
+  const units = tempDir("factory-units-");
+  inst.env.XDG_CONFIG_HOME = units;
+  mkdirSync(join(units, "systemd", "user"), { recursive: true });
+  // The unit an earlier setup wrote, with the node the pin named then.
+  const oldNode = join(
+    tempDir("factory-old-"),
+    "mise",
+    "installs",
+    "node",
+    "24.21.0",
+    "bin",
+  );
+  mkdirSync(oldNode, { recursive: true });
+  const unit = () =>
+    writeFileSync(
+      join(
+        units,
+        "systemd",
+        "user",
+        unitName({ root: realpathSync(inst.root) }),
+      ),
+      unitText(REPO, [], {
+        node: process.execPath,
+        env: { PATH: `${oldNode}:${inst.env.PATH}`, HOME: inst.env.HOME },
+      }),
+    );
+  unit();
+  const background = () =>
+    JSON.parse(cli(inst, "setup", "--background", "--json").out).setup;
+  const refusal = () => {
+    const setup = background();
+    assert.equal(setup.status, "refused", JSON.stringify(setup));
+    assert.equal(setup.problems.length, 1, setup.problems.join("\n"));
+    assert.match(
+      setup.problems[0],
+      new RegExp(
+        `^The service's PATH would lose ${oldNode}, mise's install of node: `,
+      ),
+    );
+    // Never toolchain.path, which would hold the old node past the pin.
+    assert.doesNotMatch(setup.problems[0], /toolchain/);
+    return setup.problems[0];
+  };
+
+  // The pin moved, and the new version isn't installed.
+  const source = mise.pins(checkout, {
+    node: { version: "24.99.0", installed: false },
+  });
+  assert.match(
+    refusal(),
+    new RegExp(
+      `node 24\\.99\\.0, pinned in ${source}, isn't installed: run \`mise install\` in ${checkout}, then repeat`,
+    ),
+  );
+
+  mise.pins(checkout, { untrusted: true });
+  assert.match(
+    refusal(),
+    new RegExp(
+      `run \`mise trust ${join(realpathSync(checkout), "mise.toml")}\``,
+    ),
+  );
+
+  // Installed: the moved pin replaces the old install, so nothing is lost.
+  mise.pins(checkout);
+  const moved = background();
+  assert.notEqual(moved.status, "refused", JSON.stringify(moved.problems));
+
+  // No mise on this shell's PATH: the pins can't come first.
+  inst.env.PATH = withoutMise(process.env.PATH);
+  unit();
+  assert.match(
+    refusal(),
+    /mise isn't on this shell's PATH, so setup can't put .*'s pins first: run setup from a shell that has mise on its PATH/,
   );
 });
 

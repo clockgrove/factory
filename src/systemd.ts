@@ -258,6 +258,15 @@ export function boundCredentials(paths: Paths): Credential[] {
   }
 }
 
+/**
+ * The PATH Factory's unit runs the service with now; undefined without a
+ * unit, or one that doesn't read.
+ */
+export function unitServicePath(paths: Paths): string | undefined {
+  const text = ours(paths);
+  return text ? recorded(text)?.env.PATH : undefined;
+}
+
 /** Factory's unit file text, or undefined when there's none (or it isn't Factory's). */
 function ours(paths: Paths): string | undefined {
   try {

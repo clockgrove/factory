@@ -267,6 +267,8 @@ export const OPERATIONAL: readonly string[] = [
   // The sandbox's resource caps and the package cache's place on the host.
   "sandbox.limits",
   "sandbox.packageStore",
+  // The host's toolchains on the service's PATH, and the executables readiness looks for.
+  "toolchain",
   // Selectors choose review evidence and grant no authority; each capture records what it ran.
   "reviewArtifacts",
   // The live status comment: display only.

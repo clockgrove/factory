@@ -154,7 +154,9 @@ export function deliveredHead(
  * candidate tree as Git LFS pointers, so without its receipt the review
  * has no digest-checked copy of the bytes the item's validation read: in
  * run 2026-10-28T190035PDT-aa02 a test item's reviewer held asking the
- * operator for the hydrated preview its dependency had delivered.
+ * operator for the hydrated preview its dependency had delivered. A
+ * dependency's record is marked, so its receipt carries the selected set
+ * alone: its unselected alternatives stay out of this review.
  */
 export function reviewCandidates(
   state: ObjectiveState,
@@ -174,7 +176,12 @@ export function reviewCandidates(
       | WorkResult
       | undefined;
     if (chosen && work)
-      records.push({ item: entry, sets: work.sets, selection: chosen });
+      records.push({
+        item: entry,
+        sets: work.sets,
+        selection: chosen,
+        ...(entry !== item && { dependency: true as const }),
+      });
   }
   return records;
 }

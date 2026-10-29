@@ -8,9 +8,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { candidateReceipts } from "../dist/media.js";
 import { reviewResult } from "../dist/review/result.js";
 import { reviewCandidates } from "../dist/work/step-review.js";
 import { tempDir } from "./helpers.mjs";
@@ -147,13 +148,20 @@ test("an item's review candidates are its own selection, then each dependency's 
     },
   ]);
   assert.deepEqual(
-    records.map((record) => [record.item.id, record.selection.set.id]),
-    [["cube-assets", "candidate-c"]],
+    records.map((record) => [
+      record.item.id,
+      record.selection.set.id,
+      record.dependency,
+    ]),
+    [["cube-assets", "candidate-c", true]],
   );
-  // The selecting item's own review: its record alone.
+  // The selecting item's own review: its record alone, not a dependency's.
   assert.deepEqual(
-    reviewCandidates(state, items, ASSETS, []).map((record) => record.item.id),
-    ["cube-assets"],
+    reviewCandidates(state, items, ASSETS, []).map((record) => [
+      record.item.id,
+      record.dependency,
+    ]),
+    [["cube-assets", undefined]],
   );
   // An item with no media and no delivered media dependency: none.
   assert.deepEqual(reviewCandidates(state, items, TEST_ITEM, []), []);
@@ -204,6 +212,12 @@ test("a dependent test item's review holds the dependency's selected preview byt
         readFileSync(join(call.readDir, preview), "utf8"),
         "PNG red",
       );
+      // The dependency's unselected alternative stays out of this review.
+      assert.equal(
+        existsSync(join(call.readDir, "media-sets/cube-assets/candidate-d")),
+        false,
+      );
+      assert.ok(!call.prompt.includes("candidate-d"));
       assert.match(
         readFileSync(
           join(call.readDir, "candidate/assets/cubeQazja-preview.png"),
@@ -277,4 +291,77 @@ test("a dependent test item's review holds the dependency's selected preview byt
     events.some((event) => event.event === "result-review-evidence-sendback"),
   );
   assert.equal(outcome.kind, "pass");
+});
+
+test("a dependency's receipt copies only its selected set, and selected members are copied before any alternative spends the bound", async () => {
+  const MIB = 1024 * 1024;
+  const sets = stagedSets();
+  // The reviewed item's own 64 one-MiB alternatives come before its
+  // selected set and would spend the whole 64 MiB bound on their own.
+  const staged = tempDir("factory-dep-media-big-");
+  const big = Buffer.alloc(MIB, 7);
+  writeFileSync(join(staged, "alt.png"), big);
+  const altMember = {
+    role: "preview-image",
+    destination: "assets/own.png",
+    mediaType: "image/png",
+    bytes: MIB,
+    sha256: createHash("sha256").update(big).digest("hex"),
+    file: join(staged, "alt.png"),
+  };
+  const ownSet = (id, member) => ({ ...sets[0], id, members: [member] });
+  const alternatives = Array.from({ length: 64 }, (_, n) =>
+    ownSet(`alt-${String(n).padStart(2, "0")}`, altMember),
+  );
+  const chosenOwn = ownSet("chosen", {
+    ...sets[0].members[1],
+    destination: "assets/own.png",
+  });
+  const own = workItem("own-media", ["Offer sets."], ["assets/own.png"]);
+  const root = tempDir("factory-dep-media-receipts-");
+  const receipts = await candidateReceipts(root, [
+    {
+      item: own,
+      sets: [...alternatives, chosenOwn],
+      selection: { ...selected(sets, "c0", "t0"), set: chosenOwn },
+    },
+    {
+      item: ASSETS,
+      sets,
+      selection: selected(sets, "c1", "t1"),
+      dependency: true,
+    },
+  ]);
+  const [ownReceipt, depReceipt] = receipts.map((r) => JSON.parse(r.content));
+  // The own item's selected member has its copy despite the alternatives.
+  const ownChosen = ownReceipt.sets.find((set) => set.id === "chosen");
+  assert.equal(
+    ownChosen.members[0].reviewCopy,
+    "media-sets/own-media/chosen/cubeQazja-preview.png",
+  );
+  assert.equal(ownReceipt.capturedSets, 65);
+  assert.equal(ownReceipt.deliveredDependency, undefined);
+  // The dependency: its selected set alone, both members copied.
+  assert.equal(depReceipt.capturedSets, 2);
+  assert.match(depReceipt.deliveredDependency, /only its selected set/);
+  assert.deepEqual(
+    depReceipt.sets.map((set) => [set.id, set.selected]),
+    [["candidate-c", true]],
+  );
+  for (const member of depReceipt.sets[0].members) {
+    assert.ok(
+      member.reviewCopy?.startsWith("media-sets/cube-assets/candidate-c/"),
+    );
+    assert.equal(existsSync(join(root, member.reviewCopy)), true);
+  }
+  assert.equal(
+    existsSync(join(root, "media-sets/cube-assets/candidate-d")),
+    false,
+  );
+  // The alternatives share what is left of the bound, in order.
+  const copiedAlternatives = ownReceipt.sets.filter(
+    (set) => set.id !== "chosen" && set.members[0].reviewCopy !== null,
+  );
+  assert.ok(copiedAlternatives.length < 64);
+  assert.equal(ownReceipt.sets.at(-2).members[0].reviewCopy, null);
 });

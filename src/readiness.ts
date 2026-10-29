@@ -52,7 +52,13 @@ import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { COPILOT_SECRETS } from "./providers/config.js";
 import { executable, sandboxStatus } from "./sandbox.js";
 import { errorMessage } from "./text.js";
-import { type MiseTool, type MiseToolchain, misePinFix } from "./toolchain.js";
+import {
+  isDirectory,
+  type MiseTool,
+  type MiseToolchain,
+  misePinFix,
+  onPathOf,
+} from "./toolchain.js";
 import { danglingLauncher } from "./worktree.js";
 
 export interface ReadinessCheck {
@@ -96,11 +102,17 @@ export async function readiness(
    * whether they are on this PATH, the one `--background` gives the service.
    */
   mise?: { toolchain: MiseToolchain; service: boolean },
+  /**
+   * The PATH the service unit runs with (setup.ts): the mise pins, then
+   * toolchain.path, then the setup shell's.
+   */
+  servicePath: string = process.env.PATH ?? "",
 ): Promise<Readiness> {
   const scripts = packageScripts(config.checkout);
   const checks = [
     ...hostChecks(config, scripts),
     ...(mise ? miseChecks(config.checkout, mise.toolchain, mise.service) : []),
+    ...toolchainChecks(config.toolchain, servicePath),
     ...(await nodeVersionCheck(config.checkout, !!mise)),
     ...(await providerChecks(config, bound)),
     ...(await repositoryChecks(config, github)),
@@ -257,7 +269,7 @@ function hostChecks(
           name: "PATH",
           status: "blocked",
           detail: `Not on the PATH: ${missing.map(([name, use]) => `${name} (${use})`).join(", ")}`,
-          fix: "Install them, or add their directory to the PATH the service runs with",
+          fix: "Install them, or add their directory to the PATH the service runs with (factory setup --toolchain-path DIR... keeps it there)",
         }
       : ok("PATH", `Found ${[...programs.keys()].join(", ")} and git lfs`),
   );
@@ -381,6 +393,62 @@ function miseChecks(
       detail: `mise's shims (${shims.join(", ")}) are on the PATH the service runs with: a tool the checkout doesn't pin would resolve from the worktree a command runs in, which a worker writes`,
       fix: "Remove the shims directory from the PATH of the shell that runs factory setup --background (and don't `mise activate` it there); the checkout's pins come first without it",
     });
+  return checks;
+}
+
+/**
+ * The configuration's toolchain (#2182) on the PATH the service runs with:
+ * each toolchain.path entry is a directory (`warn`: a typo or a moved
+ * toolchain adds nothing), and each toolchain.executables name resolves
+ * there (`blocked`: validation that starts it fails). Empty while neither
+ * is set.
+ */
+export function toolchainChecks(
+  toolchain: CoreConfig["toolchain"],
+  servicePath: string,
+): ReadinessCheck[] {
+  const name = "toolchain";
+  const checks: ReadinessCheck[] = [];
+  const absent = toolchain.path.filter((directory) => !isDirectory(directory));
+  if (absent.length)
+    checks.push({
+      name,
+      status: "warn",
+      detail: `toolchain.path names ${absent.join(", ")}, which ${absent.length === 1 ? "isn't a directory" : "aren't directories"}, so the service's PATH gains nothing from ${absent.length === 1 ? "it" : "them"}`,
+      fix: "Install the toolchain there, or give factory setup --toolchain-path DIR... with the directories that hold it (the list given replaces the whole list)",
+    });
+  const found = toolchain.executables.map(
+    (executable) => [executable, onPathOf(executable, servicePath)] as const,
+  );
+  const missing = found.filter(([, file]) => !file).map(([each]) => each);
+  if (missing.length)
+    checks.push({
+      name,
+      status: "blocked",
+      detail: `Not on the PATH the service runs with: ${missing.join(", ")} (toolchain.executables), so validation that starts ${missing.length === 1 ? "it" : "them"} fails`,
+      fix: "Install them, or add their directory to the service's PATH with factory setup --toolchain-path DIR... (kept in toolchain.path, after the mise pins)",
+    });
+  const present = toolchain.path.filter(
+    (directory) => !absent.includes(directory),
+  );
+  if (!missing.length && (present.length || found.length))
+    checks.push(
+      ok(
+        name,
+        [
+          ...(present.length
+            ? [
+                `${present.join(", ")} on the service's PATH after the mise pins`,
+              ]
+            : []),
+          ...(found.length
+            ? [
+                `found ${found.map(([each, file]) => `${each} (${file})`).join(", ")}`,
+              ]
+            : []),
+        ].join("; "),
+      ),
+    );
   return checks;
 }
 

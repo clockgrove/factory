@@ -253,7 +253,7 @@ function lookup(name: string, path: string, targetRoot: string): Lookup {
   }
   return {
     status: "missing",
-    detail: `\`${name}\` is not on the validation PATH. Install it on this host or add its directory to the service's PATH; Factory does not install or substitute tools.`,
+    detail: `\`${name}\` is not on the validation PATH. Install it on this host or add its directory to the service's PATH (\`factory setup --toolchain-path DIR\` keeps it there); Factory does not install or substitute tools.`,
   };
 }
 

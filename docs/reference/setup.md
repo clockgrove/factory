@@ -19,6 +19,7 @@ Part of [the design](../DESIGN.md).
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - with `sandbox.network` `off` and commands sandboxed, a checkout with a bootstrap's lockfile (`pnpm-lock.yaml` or `package-lock.json`) has a `sandbox.packageStore` that isn't empty; otherwise it is `warn`, because validation's dependency install runs offline and the Objective holds on it;
   - git, git lfs, node and each final command's program are on the PATH;
+  - with `toolchain` set (see [Toolchains mise doesn't pin](#toolchains-mise-doesnt-pin)), the `toolchain` check reads the PATH the service runs with (the mise pins, then `toolchain.path`, then the setup shell's), with or without `--background`: a `toolchain.path` entry that isn't a directory is `warn`, and a `toolchain.executables` name that isn't on that PATH is `blocked`, since validation that starts it fails;
   - the setup skill's `factory` launcher, on the PATH or at `~/.local/share/clockgrove-factory/bin` (under `XDG_DATA_HOME` when set), still links to an installed release; one whose release directory was deleted is `warn`, fixed by running the plugin's setup again, with the installer's `--prefix` for a launcher in one (worktree.ts `danglingLauncher`; workers never get it either way);
   - with mise managing the checkout (see [Toolchain from mise](#toolchain-from-mise)), `mise toolchain` says which tools came from mise and from which file. A configuration mise doesn't trust is `warn` with `mise trust FILE` as its fix, and a pinned tool that isn't installed is `warn` with `mise install` in the checkout. mise's shims directory on the PATH is `warn` too;
   - node satisfies the checkout's Node pin, the first exact version or semver range in `.nvmrc`, `.node-version`, `.tool-versions` or `package.json` `engines.node` (an alias such as `lts/*` is passed over); a mismatch is `warn`, because the Objective check holds on it. With mise managing the checkout, its fix (and the Objective check's) is `mise install` in the checkout, then `factory setup --background`;
@@ -52,6 +53,7 @@ Installation options, each setting one key:
 | `--base-rerun-workflow FILE`                                                                   | `delivery.baseRerun.workflow`                              |
 | `--sandbox-network off\|package-install\|host`, `--package-store DIR`                          | `sandbox.network`, `sandbox.packageStore`                  |
 | `--read-only-path DIR`..., `--sandbox-env NAME=VALUE`...                                       | `sandbox.readOnlyPaths`, `sandbox.environment`             |
+| `--toolchain-path DIR`..., `--toolchain-executable NAME`...                                    | `toolchain.path`, `toolchain.executables`                  |
 | `--format-command CMD`                                                                         | `validation.formatCommand`                                 |
 | `--required-command CMD`..., `--ci-only-command CMD`...                                        | `finalValidation.*`                                        |
 | `--allowed-secret NAME`...                                                                     | `policy.allowedSecretNames`                                |
@@ -102,7 +104,8 @@ The opt-out is the GitHub CLI's login (or `FACTORY_GITHUB_TOKEN`): `--github-log
 The service runs as a systemd user unit (systemd.ts), one per installation. Each mode takes `--repo` and `--json`.
 
 - **`--background`:** setup as above, checked as the service will run (setup.ts `setup`): its readiness counts the credentials the unit will load and leaves out the logins the unit doesn't keep from the setup shell (systemd.ts `unkeptLogins`): `CODEX_API_KEY`, `OPENAI_API_KEY`, `FACTORY_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `FACTORY_GITHUB_APP_KEY` and the credential names below. So the service's Codex login is `codex login`'s auth.json and its GitHub login is the one `gh auth login` stored, or its GitHub App's key. Only once its status is `configured` does it write the unit and enable and start it, then wait up to 30 s for the service to take its lock.
-  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations, Copilot endpoint settings (`COPILOT_API_URL`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`) and proxies. With mise managing the checkout, the checkout's pinned tools come first on that PATH (see [Toolchain from mise](#toolchain-from-mise)).
+  - The unit runs this Factory's `node cli.js serve --repo`. It carries the setup shell's PATH, HOME, `FACTORY_CONFIG`, `FACTORY_STATE_DIR`, login locations, Copilot endpoint settings (`COPILOT_API_URL`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`) and proxies. With mise managing the checkout, the checkout's pinned tools come first on that PATH (see [Toolchain from mise](#toolchain-from-mise)), then `toolchain.path`'s directories (see [Toolchains mise doesn't pin](#toolchains-mise-doesnt-pin)), then the shell's.
+  - A PATH that would lose a directory the installed unit's PATH has now is refused, and nothing is saved or restarted: the refusal names each directory and how to keep it (`--toolchain-path DIR`, or a shell that has it), or `--drop-path` (with `--background` only) drops it on purpose. A directory that no longer exists, or a mise install of a tool the new PATH takes from another mise install (a moved pin), isn't counted as lost.
   - It restarts on failure, except on exit 2 (usage) and 78 (a configuration that doesn't load, or names no GitHub identity).
   - `KillMode=mixed`: the service stops at its next tick, and then its children are killed.
   - Repeated with nothing changed, it leaves the running service alone. The service reads its configuration and credentials once, so it restarts when the unit changed (an upgrade, or a changed environment or credential list), when setup changed the configuration or the App's key, or when `--credential-file` is given.
@@ -124,6 +127,16 @@ mise manages the checkout when the checkout has a mise configuration (`mise.toml
 - **Without mise:** no mise on the PATH, or no configuration in the checkout, changes nothing.
 
 Factory never runs `mise install` or `mise trust`, and runs mise only in the configured checkout, with `MISE_YES=0` (see [Security](security.md#security)). mise trusts a path, not its contents, so review a change to the checkout's mise configuration before you bring the checkout up to date: setup runs it. Keep mise's shims directory, and `mise activate`, off the shell that runs `--background`: a shim picks its version from the directory a command runs in, a worktree a worker writes.
+
+### Toolchains mise doesn't pin
+
+A toolchain the operator provisions outside mise (a PostgreSQL or OpenTofu build under `~/.local/opt`, say) reaches the service only on its PATH. Without `toolchain`, that PATH is the shell's that last ran `--background`, so a setup run later from a shell without it, for an unrelated change, would silently drop it, and validation that starts it would fail (#2182: Clockgrove #800's database tests failed on `pg_ctl was not found on PATH` for a whole build). Put it in the configuration instead:
+
+- **`--toolchain-path DIR`...** (`toolchain.path`): absolute directories, each one PATH entry (no `:`), that `--background` puts on the unit's PATH after the mise pins and before the shell's PATH, each directory once. Every later setup keeps them, whatever its shell's PATH.
+- **`--toolchain-executable NAME`...** (`toolchain.executables`): executables validation needs that no command names first, such as `pg_ctl`, which a test suite starts. Readiness blocks while one isn't on the PATH the service runs with. The final commands' own programs are checked already (the `PATH` check); Factory can't see what a test suite starts, so these are the operator's to name.
+- **Re-setup:** `--background` compares the PATH it would write with the installed unit's and refuses one that loses a directory (see [Background service](#background-service)); `--drop-path` lets it.
+
+Both lists repeat, and the values given replace the whole list. `toolchain` is operational ([State](state.md#frozen-configuration)): changing it holds no running Objective, and `--background` restarts the service with the new PATH.
 
 **An unconfigured serve is visible.** Without a configuration file, serve applies requests only:
 

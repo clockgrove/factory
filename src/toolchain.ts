@@ -12,9 +12,20 @@
  * trusted, so Factory asks mise only in the operator's checkout, never in a
  * worktree a worker writes, and with MISE_YES=0, so mise can't trust a
  * configuration on its own.
+ *
+ * Toolchains mise doesn't pin (a PostgreSQL or OpenTofu the operator
+ * provisioned) are the configuration's toolchain.path: setup puts them on
+ * the unit's PATH after the mise pins, so a setup run from a shell without
+ * them keeps them (#2182).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { executable } from "./sandbox.js";
 
@@ -173,17 +184,68 @@ export function miseToolchain(checkout: string): MiseToolchain | undefined {
   return { status: "resolved", tools, missing };
 }
 
-/** The tools' directories first on `path`, each once. */
+/**
+ * The tools' directories first on `path`, then `extra` (the configuration's
+ * toolchain.path), then the rest of `path`: each directory once.
+ */
 export function toolchainPath(
   path: string | undefined,
   tools: readonly MiseTool[],
+  extra: readonly string[] = [],
 ): string {
-  const bins = [...new Set(tools.flatMap((tool) => tool.bins))];
+  const first = [...new Set([...tools.flatMap((tool) => tool.bins), ...extra])];
   const rest =
     path === undefined
       ? []
-      : path.split(":").filter((entry) => !bins.includes(entry));
-  return [...bins, ...rest].join(":");
+      : path.split(":").filter((entry) => !first.includes(entry));
+  return [...first, ...rest].join(":");
+}
+
+/** The mise tool whose install a directory lies in (`…/mise/installs/TOOL/…`), or undefined. */
+const miseInstall = (directory: string) =>
+  /\/mise\/installs\/([^/]+)\//.exec(`${directory}/`)?.[1];
+
+/**
+ * The directories of `before` (the service unit's PATH now) that `after`
+ * (the PATH setup would write) leaves out, in `before`'s order. A directory
+ * that no longer exists, or a mise install of a tool `after` takes from
+ * another mise install (a moved pin), isn't lost.
+ */
+export function droppedDirectories(before: string, after: string): string[] {
+  const kept = after.split(":");
+  const tools = new Set(kept.map(miseInstall).filter(Boolean));
+  return [...new Set(before.split(":"))].filter((directory) => {
+    if (!isAbsolute(directory) || kept.includes(directory)) return false;
+    const tool = miseInstall(directory);
+    return !(tool && tools.has(tool)) && isDirectory(directory);
+  });
+}
+
+/** Whether `path` is a directory. */
+export function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The executable regular file `name` resolves to on `path`, searched as a
+ * shell searches it (absolute entries only), or undefined.
+ */
+export function onPathOf(name: string, path: string): string | undefined {
+  for (const directory of path.split(":")) {
+    if (!isAbsolute(directory)) continue;
+    const file = join(directory, name);
+    try {
+      accessSync(file, constants.X_OK);
+      if (statSync(file).isFile()) return file;
+    } catch {
+      // Not here: the next directory.
+    }
+  }
+  return undefined;
 }
 
 /**

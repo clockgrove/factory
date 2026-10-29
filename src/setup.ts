@@ -45,10 +45,15 @@ import {
   stop,
   uninstall,
   unitHealth,
+  unitServicePath,
   unkeptLogins,
 } from "./systemd.js";
 import { errorMessage } from "./text.js";
-import { miseToolchain, toolchainPath } from "./toolchain.js";
+import {
+  droppedDirectories,
+  miseToolchain,
+  toolchainPath,
+} from "./toolchain.js";
 
 /** How an option's value becomes the key's: loadConfig checks the result. */
 type Read = "text" | "number" | "list" | "names" | "env";
@@ -110,6 +115,8 @@ const CONFIG_OPTIONS: Record<string, Option> = {
   "package-store": { key: "sandbox.packageStore", read: "text" },
   "read-only-path": { key: "sandbox.readOnlyPaths", read: "list" },
   "sandbox-env": { key: "sandbox.environment", read: "env" },
+  "toolchain-path": { key: "toolchain.path", read: "list" },
+  "toolchain-executable": { key: "toolchain.executables", read: "list" },
   "format-command": { key: "validation.formatCommand", read: "text" },
   "required-command": { key: "finalValidation.requiredCommands", read: "list" },
   "ci-only-command": { key: "finalValidation.ciOnlyCommands", read: "list" },
@@ -163,6 +170,7 @@ const MANAGED_FIELDS: Record<string, string> = {
 export const SETUP_FLAGS: Record<string, "switch" | "value" | "list"> = {
   "config-only": "switch",
   background: "switch",
+  "drop-path": "switch",
   check: "switch",
   stop: "switch",
   uninstall: "switch",
@@ -393,23 +401,47 @@ export async function setup(
       "--github-app-key is the private key of the App github.app.id names: give --github-app-id too",
     );
   providerOptions(raw, values, path, set);
+  const save = (body: string) => {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeAtomic(path, body);
+  };
+  const restore = () => {
+    if (created) rmSync(path, { force: true });
+    else if (changed.length) save(original);
+  };
   if (!created && !changed.length) {
     const problems = loads(repository);
     if (problems) return refused(path, false, problems);
   } else {
-    const save = (body: string) => {
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      writeAtomic(path, body);
-    };
     save(`${JSON.stringify(raw, null, 2)}\n`);
     const problems = loads(repository);
     if (problems) {
-      if (created) rmSync(path, { force: true });
-      else save(original);
+      restore();
       return refused(path, created, problems);
     }
   }
   const config = loadConfig(repository);
+  // The PATH the service runs with: the checkout's mise pins, then
+  // toolchain.path, then this shell's. With --background, readiness checks
+  // it and the unit records it (systemd.ts unitText).
+  const toolchain = existsSync(config.checkout)
+    ? miseToolchain(config.checkout)
+    : undefined;
+  const servicePath = toolchainPath(
+    process.env.PATH,
+    toolchain?.status === "resolved" ? toolchain.tools : [],
+    config.toolchain.path,
+  );
+  // One that would lose a directory the unit has now is refused before
+  // anything is kept, so the next setup starts from the same file.
+  const dropped =
+    service &&
+    !values["drop-path"] &&
+    droppedPath(repository, servicePath, config.toolchain.path);
+  if (dropped) {
+    restore();
+    return refused(path, created, dropped);
+  }
   if (key !== undefined && keepAppKey(installationPaths(repository).root, key))
     changed.push(GITHUB_APP_KEY);
   // The login needs no App's key: its copy goes, unread, unless the
@@ -429,15 +461,10 @@ export async function setup(
     const refusal = await originRefusal(config.checkout, repository);
     if (refusal) problems.push(refusal.message);
   }
-  if (service)
+  if (service) {
     for (const name of unkeptLogins(config)) delete process.env[name];
-  // The checkout's mise pins go first on the PATH the service runs with,
-  // which readiness then checks and the unit records (systemd.ts unitText).
-  const toolchain = existsSync(config.checkout)
-    ? miseToolchain(config.checkout)
-    : undefined;
-  if (service && toolchain?.status === "resolved" && toolchain.tools.length)
-    process.env.PATH = toolchainPath(process.env.PATH, toolchain.tools);
+    if (servicePath) process.env.PATH = servicePath;
+  }
   const github = factoryGitHub(config);
   try {
     problems.push(...(await projectProblems(github, config)));
@@ -449,6 +476,7 @@ export async function setup(
     github,
     service,
     toolchain && { toolchain, service: !!service },
+    servicePath,
   );
   return {
     status: problems.length || !ready.ready ? "blocked" : "configured",
@@ -462,6 +490,26 @@ export async function setup(
       hostCapacity(config.execution, config.queue.maxActiveObjectives),
     ),
   };
+}
+
+/**
+ * Why the unit can't take `servicePath`, or undefined: it would drop
+ * directories the installed unit's PATH has now (toolchain.ts
+ * `droppedDirectories`), such as a toolchain only the shell that last ran
+ * setup had (#2182). The fix it names keeps `kept`, toolchain.path now,
+ * since the list given replaces the whole list.
+ */
+function droppedPath(
+  repository: string,
+  servicePath: string,
+  kept: readonly string[],
+): string | undefined {
+  const before = unitServicePath(installationPaths(repository));
+  if (before === undefined) return undefined;
+  const lost = droppedDirectories(before, servicePath);
+  if (!lost.length) return undefined;
+  const them = lost.length === 1 ? "it" : "them";
+  return `The service's PATH would lose ${lost.join(", ")}: the unit has ${them} now, and neither toolchain.path nor this shell's PATH does. Keep ${them} with ${[...kept, ...lost].map((directory) => `--toolchain-path ${directory}`).join(" ")} (saved in toolchain.path, so every later setup keeps ${them}), or run setup from a shell that has ${them} on its PATH; or give --drop-path to drop ${them}`;
 }
 
 /** Whether the installation's background unit loads setup's copy of the App's key. */

@@ -5,7 +5,7 @@
  * the Objective froze (`autonomy.spend`); none is set by default. Every
  * model call's `model-usage` event is charged to its Objective
  * (`state.spend`) and to the installation's day (`spend.json`, a UTC
- * day). Reaching a limit holds the Objective before its next model step,
+ * day), its child threads and sub-agents included. Reaching a limit holds the Objective before its next model step,
  * and `more` grants as much again of each limit reached.
  */
 import { readFileSync } from "node:fs";
@@ -27,10 +27,20 @@ export interface SpendLimits {
   perDay?: Limit;
 }
 
-/** An Objective's spend, with the operator's `more` grants (a day's grant counts on its day only). */
+/**
+ * An Objective's spend, with the operator's `more` grants (a day's grant
+ * counts on its day only), and how many of its tokens child threads spent
+ * (`childTokens`, a call's `model-usage` field).
+ */
 export interface Spend extends Amount {
+  childTokens?: number;
   granted?: Limit;
   dayGranted?: Limit & { day: string };
+}
+
+/** One call's charge: its tokens (child threads' among them) and cost. */
+export interface Charge extends Amount {
+  childTokens: number;
 }
 
 /** The installation's spend on one UTC day. */
@@ -52,13 +62,22 @@ export interface Ceiling {
 const UNITS: readonly Unit[] = ["tokens", "cents"];
 const SCOPES: readonly Scope[] = ["perObjective", "perDay"];
 
-/** A `model-usage` event's tokens and cost. */
-export function amountOf(event: Record<string, unknown>): Amount {
-  const tokens = (event.tokens as { total?: unknown } | null)?.total;
-  const cost = event.costUsd;
+/**
+ * A `model-usage` event's tokens and cost. Its `tokens` hold its child
+ * threads' and sub-agents' (#2168); when the call's own are unknown, its
+ * child threads' (`childTokens`) still count.
+ */
+export function amountOf(event: Record<string, unknown>): Charge {
+  const finite = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  const tokens = finite((event.tokens as { total?: unknown } | null)?.total);
+  const children =
+    finite((event.childTokens as { total?: unknown } | null)?.total) ?? 0;
+  const cost = finite(event.costUsd);
   return {
-    tokens: typeof tokens === "number" && Number.isFinite(tokens) ? tokens : 0,
-    cents: typeof cost === "number" && Number.isFinite(cost) ? cost * 100 : 0,
+    tokens: tokens ?? children,
+    cents: cost === undefined ? 0 : cost * 100,
+    childTokens: children,
   };
 }
 
@@ -71,12 +90,17 @@ export function spendLimits(state: ObjectiveState): SpendLimits {
 }
 
 /** Charge one call to the Objective. */
-export function charge(state: ObjectiveState, amount: Amount): void {
+export function charge(
+  state: ObjectiveState,
+  amount: Amount & { childTokens?: number },
+): void {
   const spend = state.spend ?? { tokens: 0, cents: 0 };
+  const children = (spend.childTokens ?? 0) + (amount.childTokens ?? 0);
   state.spend = {
     ...spend,
     tokens: spend.tokens + amount.tokens,
     cents: spend.cents + amount.cents,
+    ...(children ? { childTokens: children } : {}),
   };
 }
 
@@ -140,14 +164,24 @@ const SCOPE_TEXT: Record<Scope, string> = {
   perDay: "today's (UTC)",
 };
 
+/** `N of them by child threads` when the Objective's tokens hold some, else empty. */
+export function childText(spend: Spend | undefined): string {
+  return spend?.childTokens
+    ? `${Math.round(spend.childTokens).toLocaleString("en-US")} of them by child threads`
+    : "";
+}
+
 /** The question a reached limit asks. */
 export function spendQuestion(state: ObjectiveState, day: Day): string {
   const limits = spendLimits(state);
-  const past = reached(state, day).map(
-    ({ scope, unit, used, allowed }) =>
-      `${SCOPE_TEXT[scope]} ${amountText(unit, used)} of ${amountText(unit, allowed)} (autonomy.spend.${scope}.${unit}; \`more\` allows ${amountText(unit, limits[scope]![unit]!)} more)`,
-  );
-  return `Model spend reached ${past.join(" and ")}. Calls already running finish; no other model step starts until you answer.\n\nAnswer \`more\` to go on, or cancel.`;
+  const past = reached(state, day).map(({ scope, unit, used, allowed }) => {
+    const children =
+      scope === "perObjective" && unit === "tokens"
+        ? childText(state.spend)
+        : "";
+    return `${SCOPE_TEXT[scope]} ${amountText(unit, used)} of ${amountText(unit, allowed)} (${children ? `${children}; ` : ""}autonomy.spend.${scope}.${unit}; \`more\` allows ${amountText(unit, limits[scope]![unit]!)} more)`;
+  });
+  return `Model spend reached ${past.join(" and ")}. Tokens count every call's child threads and sub-agents too (Codex \`spawn_agent\` threads, Claude sub-agents). Calls already running finish; no other model step starts until you answer.\n\nAnswer \`more\` to go on, or cancel.`;
 }
 
 const FILE = "spend.json";

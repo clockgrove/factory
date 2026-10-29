@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { ChildThreads, childTokensOf } from "./child-threads.js";
 import { num, readRun, str } from "./diagnostics.js";
 import { displayTime, duration, redactDeep } from "./display.js";
 import { type LogEvent, logFiles, rotatedRuns, runOfFile } from "./log.js";
@@ -305,8 +306,9 @@ export interface FactoryObjective {
   };
   /**
    * The providers' own usage views (`providerUsage`): calls that reported
-   * one, and Codex child threads' usage (`descendants`), summed; never
-   * added to `tokens`.
+   * one, and Codex child threads' usage (`descendants`: each call's
+   * `childTokens`, an older call's by its increase, child-threads.ts),
+   * summed; part of `tokens`.
    */
   nativeUsage: {
     reportedCalls: number;
@@ -414,7 +416,10 @@ export function factoryObjective(
   const planRounds = new Set<string>();
   let planningSetback = false;
   let deliverySetback = false;
-  for (const event of events) {
+  // Older Codex calls' child threads, counted as today's (child-threads.ts).
+  const children = new ChildThreads();
+  for (const read of events) {
+    const event = children.counted(read);
     const step = str(event.step) ?? "";
     switch (event.event) {
       case "model-usage": {
@@ -445,25 +450,22 @@ export function factoryObjective(
           if (present(id)) sessions.add(id);
         const prompt = str(event.promptDigest);
         if (prompt) prompts.add(prompt);
-        const native = event.providerUsage as
-          | { descendants?: Record<string, unknown> }
-          | undefined;
-        if (native && typeof native === "object") {
+        if (event.providerUsage && typeof event.providerUsage === "object")
           nativeCalls += 1;
-          if (native.descendants && typeof native.descendants === "object") {
-            descendants ??= {
-              threads: 0,
-              input: 0,
-              cached: 0,
-              output: 0,
-              reasoning: 0,
-              total: 0,
-            };
-            for (const key of Object.keys(
-              descendants,
-            ) as (keyof typeof descendants)[])
-              descendants[key] += num(native.descendants[key]) ?? 0;
-          }
+        const child = childTokensOf(event);
+        if (child) {
+          descendants ??= {
+            threads: 0,
+            input: 0,
+            cached: 0,
+            output: 0,
+            reasoning: 0,
+            total: 0,
+          };
+          for (const key of Object.keys(
+            descendants,
+          ) as (keyof typeof descendants)[])
+            descendants[key] += num(child[key]) ?? 0;
         }
         break;
       }

@@ -9,11 +9,13 @@
  * environment's (retry); an install that ran offline for the host's lack of
  * network, or a configuration fault, is the operator's (hold).
  */
+import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
   fstatSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
@@ -26,7 +28,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
-import { GitRefusal } from "./git.js";
+import { GitRefusal, readBlobs } from "./git.js";
 import type { CommitAuthor } from "./github.js";
 import type { RunFile } from "./log.js";
 import {
@@ -138,6 +140,19 @@ export interface ValidateInput {
   checkout: string;
   /** Where the fresh worktree goes, such as `<item worktree>.validation`. Replaced, then removed. */
   directory: string;
+  /**
+   * A Work Item's validation, the validate step's and the worker's own:
+   * where the exact install keeps its package store across this item's
+   * validations, such as `<item worktree>.packages` (#2169). The install
+   * still runs every time, frozen, so each validation proves it works on
+   * the result; it reuses the store only when the last install that wrote
+   * it had the same key (`installKey`: the install command and every
+   * dependency input), else it starts from an empty one. Only sandboxed,
+   * and only without the operator's `sandbox.packageStore`, which every
+   * install shares already. Absent (final validation): each install's
+   * store is its own empty HOME's, as before.
+   */
+  installStore?: string;
   /** The exact candidate commit. */
   commit: string;
   /** One Work Item's commands, or, absent, the plan's final commands. */
@@ -499,11 +514,14 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         network: boolean;
         outputLimit?: number;
         offline?: true;
+        /** The exact install's kept package store (`installStore`). */
+        store?: string;
       },
     ) =>
       runSandboxed(command, {
         cwd: worktree,
         home: grant.install ? await made("factory-install-home-") : home,
+        ...(grant.install && grant.store && { installStore: grant.store }),
         temporary,
         env: {
           ...validationEnvironment(credentials),
@@ -617,8 +635,36 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           : undefined;
       const online =
         install && input.sandbox.network === "package-install" && !refused;
+      // The item's kept package store, for the exact install alone, keyed
+      // by its inputs as this commit has them: the install still runs.
+      let store: KeptStore | undefined;
+      if (
+        install &&
+        input.installStore &&
+        !input.sandbox.packageStore &&
+        sandboxAvailable().available
+      )
+        try {
+          store = await keptStore(
+            input.installStore,
+            await installKey(checkout, commit, command, signal),
+          );
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error instanceof GitRefusal) throw error;
+          return {
+            kind: "retry",
+            reason: `The install's package store could not be made at ${input.installStore}: ${errorMessage(error)}. Free disk space and keep Factory's work directory writable.`,
+          };
+        }
       const started = Date.now();
-      input.log({ event: "validation-command", index, command, preparing });
+      input.log({
+        event: "validation-command",
+        index,
+        command,
+        preparing,
+        ...(store && { installStore: store.reused ? "reused" : "new" }),
+      });
       const limit = capture ? outputLimit(selectors, command) : undefined;
       // The whole output, as it arrives: what the run keeps of a failure.
       const whole = input.runFile(`validation-${index}`);
@@ -628,6 +674,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           install,
           network: online,
           ...(limit ? { outputLimit: limit } : {}),
+          ...(store && { store: store.root }),
         });
       } catch (error) {
         // Cancelled or past its deadline: nothing names its output.
@@ -675,6 +722,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           : undefined);
       const passed = run.exitCode === 0 && !overflow;
       if (passed) whole.remove();
+      // A store over the disk budget is never kept: the next install of the
+      // item starts from an empty one.
+      if (store && run.diskOverflow) await forceRemove(input.installStore!);
       input.log({
         event: "validation-result",
         index,
@@ -1135,15 +1185,99 @@ async function dependencyInputsChanged(
     .toString("utf8")
     .split("\0")
     .filter(Boolean);
-  return changed.some(
-    (path) =>
-      path === "pnpm-lock.yaml" ||
-      path === "package-lock.json" ||
-      path === "pnpm-workspace.yaml" ||
-      path === ".npmrc" ||
-      // pnpm also reads a project's package.json5 or package.yaml.
-      /(?:^|\/)package\.(?:json|json5|yaml)$/.test(path),
+  return changed.some(dependencyInput);
+}
+
+/** Whether `path` is an input of the dependency install: a lockfile, a manifest or package configuration. */
+function dependencyInput(path: string): boolean {
+  return (
+    path === "pnpm-lock.yaml" ||
+    path === "package-lock.json" ||
+    path === "pnpm-workspace.yaml" ||
+    path === ".npmrc" ||
+    // pnpm also reads a project's package.json5 or package.yaml.
+    /(?:^|\/)package\.(?:json|json5|yaml)$/.test(path)
   );
+}
+
+/**
+ * The key of the exact install `command` on `commit` (#2169): a SHA-256 of
+ * the command and of every dependency input's path, mode and blob there,
+ * so a change to any lockfile, manifest or package configuration, or to
+ * the command, makes another.
+ *
+ * A package from the checkout itself (a `file:` tarball or directory) is
+ * fetched from the commit's files, and pnpm and npm then serve it from the
+ * store by the integrity the lockfile records, never reading the file
+ * again: a result that changed only the vendored tarball would install the
+ * old package from a kept store, where an empty one fails the integrity
+ * check. So when any dependency input names `file:`, the key covers every
+ * path, mode and blob of the commit: only the very same tree reuses it.
+ */
+export async function installKey(
+  checkout: string,
+  commit: string,
+  command: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const hash = createHash("sha256").update(`${command.trim()}\0`);
+  const entries = (
+    await hostGit(checkout, ["ls-tree", "-r", "--full-tree", "-z", commit], {
+      signal,
+    })
+  )
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+  // `<mode> <type> <object>\t<path>`, in Git's path order.
+  const inputs = entries.filter((entry) =>
+    dependencyInput(entry.slice(entry.indexOf("\t") + 1)),
+  );
+  const bodies = await readBlobs(
+    (args, input) => hostGit(checkout, args, { input, signal }),
+    inputs
+      .map((entry) => entry.split(/[ \t]/))
+      .filter(([, type]) => type === "blob")
+      .map(([, , object]) => object!),
+  );
+  const local = bodies.some((body) => body.includes("file:"));
+  for (const entry of local ? entries : inputs) hash.update(`${entry}\0`);
+  return hash.digest("hex");
+}
+
+/** An item's kept package store, ready for one install. */
+interface KeptStore {
+  /** The package-manager store and caches' root, the install's to write. */
+  root: string;
+  /** The last install that wrote it had this one's key. */
+  reused: boolean;
+}
+
+/**
+ * The package store kept in `directory` across one item's validations
+ * (`installStore`, #2169): its `cache` reused when the `key` beside it is
+ * this install's, else emptied first and keyed anew. Only the install
+ * writes `cache`, so what a reused one holds is what installs of these very
+ * inputs fetched; the key stays outside, where no command reaches.
+ */
+export async function keptStore(
+  directory: string,
+  key: string,
+): Promise<KeptStore> {
+  const root = join(directory, "cache");
+  const keyFile = join(directory, "key");
+  let kept: string | undefined;
+  try {
+    kept = readFileSync(keyFile, "utf8");
+  } catch {
+    // None yet.
+  }
+  if (kept === key && lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
+    return { root, reused: true };
+  await forceRemove(directory);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  writeFileSync(keyFile, key, { mode: 0o600 });
+  return { root, reused: false };
 }
 
 // ---------------------------------------------------------------------------

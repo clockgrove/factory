@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { gitEnvironment, lfsFiltered } from "../git.js";
@@ -680,6 +680,155 @@ export function namedBase(command: string, base: string): string | undefined {
         ?.find((token) => base.startsWith(token.toLowerCase()));
 }
 
+// ── What a command runs ─────────────────────────────────────────────────
+
+/** A test file, by its name alone. */
+const TEST_FILE =
+  /(?:^|\/)(?:[^/]+[._-](?:test|spec)\.[A-Za-z0-9]+|test_[^/]+\.py|[^/]+_test\.(?:go|py))$/;
+/** A test runner's configuration, by its name: `vitest.browser.config.ts`, `playwright.config.js`, `vitest.workspace.ts`. */
+const RUNNER_CONFIG = /(?:^|[./_-])(?:config|workspace)\.(?:[cm]?[jt]s|json)$/;
+/** The largest runner configuration read for the test files it names. */
+const MAX_RUNNER_CONFIG_BYTES = 65_536;
+/**
+ * A runner configuration's lists of what it doesn't run (`exclude`,
+ * `testIgnore`, `testPathIgnorePatterns`), as a list or one string: the
+ * files they name are never the ones it runs.
+ */
+const EXCLUSIONS =
+  /["'`]?\b\w*(?:exclude|ignore)\w*["'`]?\s*:\s*(?:\[[^\]]*\]|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`)/gi;
+
+/** A command's words that may name files: quotes, a `--flag=` prefix and a leading `./` dropped. */
+function pathWords(command: string): string[] {
+  return command
+    .split(/[\s;&|()]+/)
+    .map((word) =>
+      word
+        .replace(/^['"]+|['"]+$/g, "")
+        .replace(/^--?[\w-]+=/, "")
+        .replace(/^\.\//, ""),
+    )
+    .filter(validPath);
+}
+
+/** A command, then the bodies of the root package scripts it runs, to a fixed depth. */
+function scriptBodies(
+  command: string,
+  scripts: Record<string, unknown>,
+  depth = 0,
+): string[] {
+  const invocation = packageScriptInvocation(command.trim());
+  const body = invocation ? scripts[invocation.name] : undefined;
+  if (typeof body !== "string" || depth > 3) return [command];
+  return [
+    command,
+    ...body
+      .split(/&&|\|\||[;|\n&]/)
+      .flatMap((segment) =>
+        packageScriptInvocation(segment.trim())
+          ? scriptBodies(segment.trim(), scripts, depth + 1)
+          : [segment],
+      ),
+  ];
+}
+
+/** Every quoted string in a source text, quotes dropped; template strings only without substitutions. */
+function quotedStrings(text: string): string[] {
+  return [
+    ...text.matchAll(
+      /"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|`([^`$\\]*)`/g,
+    ),
+  ].map((match) => match[1] ?? match[2] ?? match[3] ?? "");
+}
+
+/**
+ * The test files and runner configurations a command runs, as far as its
+ * words show: each one it names, directly or through the root package
+ * scripts it runs, and each test file a named configuration names by exact
+ * path, from the repository root or from the configuration's directory
+ * (tests/ci/vitest.browser.config.ts naming tests/ci/browser.test.mjs),
+ * outside its exclusion lists (`EXCLUSIONS`).
+ * Globs, directories and a runner's default discovery are never expanded,
+ * so a command that runs a file only through them names nothing here.
+ */
+export async function commandRuns(
+  command: string,
+  files: BaseFiles,
+  scripts: Record<string, unknown>,
+): Promise<string[]> {
+  const runs = new Set<string>();
+  for (const body of scriptBodies(command, scripts)) {
+    // `cd DIR && ...`: the words after it are relative to DIR.
+    let directory = "";
+    const words: string[] = [];
+    for (const segment of body.split(/&&|\|\||[;\n]/)) {
+      const cd = segment.trim().match(/^cd\s+(\S+)$/);
+      if (cd)
+        directory = posix.join(directory, cd[1]!.replace(/^['"]+|['"]+$/g, ""));
+      else
+        words.push(
+          ...pathWords(segment).map((word) => posix.join(directory, word)),
+        );
+    }
+    for (const word of words.filter(validPath)) {
+      if (TEST_FILE.test(word)) runs.add(word);
+      if (!RUNNER_CONFIG.test(word)) continue;
+      runs.add(word);
+      const bytes = await files.blob(word);
+      if (!bytes || bytes.length > MAX_RUNNER_CONFIG_BYTES) continue;
+      // Runners differ in what a configured path is relative to: the one
+      // the base tracks, or both when neither is there yet.
+      const tracked = new Set(await files.paths());
+      const runnable = (utf8(bytes) ?? "").replace(EXCLUSIONS, "");
+      for (const literal of quotedStrings(runnable)) {
+        const paths = [
+          posix.normalize(literal),
+          posix.join(posix.dirname(word), literal),
+        ].filter((path) => validPath(path) && TEST_FILE.test(path));
+        const existing = paths.filter((path) => tracked.has(path));
+        for (const path of existing.length ? existing : paths) runs.add(path);
+      }
+    }
+  }
+  return [...runs];
+}
+
+/**
+ * The planner's note on what the final and CI-only commands run (#2170):
+ * a Work Item that owns one of those files validates with the command, or,
+ * for a CI-only one that validation never runs, is proved by CI. The plan
+ * check (planning/checks.ts `finalProofFindings`) reads the same files.
+ */
+async function finalProofInstructions(
+  facts: PlanningFacts,
+  files: BaseFiles,
+): Promise<string> {
+  const scripts = await files.scripts();
+  const named = async (commands: readonly string[]) =>
+    (
+      await Promise.all(
+        commands.map(async (command) => {
+          const runs = await commandRuns(command, files, scripts);
+          return runs.length ? [`\`${command}\` (${runs.join(", ")})`] : [];
+        }),
+      )
+    ).flat();
+  const final = await named(facts.finalCommands ?? []);
+  const ciOnly = await named(facts.ciOnlyCommands);
+  return `${
+    facts.finalCommands?.length
+      ? `\n\nFinal commands (the installation's required commands; they run on the integrated result after the last merge): ${listCommands(facts.finalCommands)}.`
+      : ""
+  }${
+    final.length
+      ? ` These name test files or runner configurations: ${final.join(", ")}. A Work Item that owns one of those files (by its exact path) runs that final command among its own validation commands, unless another of its commands names the file: otherwise its review sees no proof from it, which first runs after the item merged. The plan check refuses a plan that leaves it out.`
+      : ""
+  }${
+    ciOnly.length
+      ? `\n\nThese CI-only commands name test files or runner configurations: ${ciOnly.join(", ")}. A Work Item that owns one of those files (by its exact path) is proved by CI, a published-ci proof with that item as targetItem or an integrated-ci proof on a QA item after it, unless one of its own commands names the file. The plan check refuses a plan that has neither.`
+      : ""
+  }`;
+}
+
 // ── Package commands ────────────────────────────────────────────────────
 
 /**
@@ -796,7 +945,8 @@ export async function commandInstructions(
   checkout: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const scripts = await new BaseFiles(checkout, facts.base, signal).scripts();
+  const files = new BaseFiles(checkout, facts.base, signal);
+  const scripts = await files.scripts();
   return (
     ciOnlyInstructions(
       facts.ciOnlyCommands,
@@ -807,7 +957,8 @@ export async function commandInstructions(
     packageCommandInstructions(
       facts.packageCommands,
       scopedCommands(facts.packageCommands, scripts),
-    )
+    ) +
+    (await finalProofInstructions(facts, files))
   );
 }
 
@@ -1278,6 +1429,7 @@ export async function buildFacts(
     sources,
     packageCommands: await packageCommands(files, ciOnlyCommands),
     ciOnlyCommands,
+    finalCommands: finalCommands(args.requiredCommands),
     ...(args.hostNetwork ? { hostNetwork: true as const } : {}),
     ...(args.lockfileResolution ? { lockfileResolution: true as const } : {}),
     ...(args.formatCommand ? { formatCommand: args.formatCommand } : {}),

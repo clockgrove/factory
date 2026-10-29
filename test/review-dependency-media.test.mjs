@@ -1,0 +1,280 @@
+// An item's result review gets its delivered dependencies' candidate
+// receipts, so it has digest-checked copies of the media they selected. In
+// 0.5.9 qualification (run 2026-10-28T190035PDT-aa02, Codex) the plan split
+// the cube's assets and their test into two items; the test item's tree held
+// the selected preview only as a Git LFS pointer, its review had no copy of
+// the bytes, and its reviewer held asking the operator "Can you provide the
+// hydrated preview image bytes or a digest-checked review copy".
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { reviewResult } from "../dist/review/result.js";
+import { reviewCandidates } from "../dist/work/step-review.js";
+import { tempDir } from "./helpers.mjs";
+
+function git(directory, ...args) {
+  const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+  assert.equal(run.status, 0, `git ${args.join(" ")}: ${run.stderr}`);
+  return run.stdout.trim();
+}
+
+function commit(directory, message) {
+  git(directory, "add", ".");
+  git(
+    directory,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "--quiet",
+    "-m",
+    message,
+  );
+  return git(directory, "rev-parse", "HEAD");
+}
+
+function workItem(id, acceptance, ownedPaths, dependencies = []) {
+  return {
+    kind: "work",
+    id,
+    title: `Item ${id}`,
+    goal: "Deliver the change.",
+    acceptance,
+    nonGoals: ["Nothing else."],
+    citations: [],
+    dependencies,
+    ownedPaths,
+    validation: [{ command: "npm test" }],
+    brief: "Deliver the change.",
+    priority: 1,
+  };
+}
+
+const ASSETS = workItem(
+  "cube-assets",
+  ["Offer two candidate sets in different colours; deliver the selected one."],
+  ["assets/cubeQazja.glb", "assets/cubeQazja-preview.png"],
+);
+const TEST_ITEM = workItem(
+  "cube-asset-test",
+  [
+    "The new test verifies `assets/cubeQazja-preview.png` is a 64x64 PNG containing non-background cube image content.",
+  ],
+  ["test/cube-assets.test.js"],
+  ["cube-assets"],
+);
+
+/** The two staged candidate sets of `cube-assets`, with their bytes on disk. */
+function stagedSets() {
+  const staged = tempDir("factory-dep-media-staged-");
+  const member = (set, role, destination, mediaType, content) => {
+    const bytes = Buffer.from(content);
+    const directory = join(staged, `${set}-${role}`);
+    mkdirSync(directory);
+    const file = join(directory, destination.split("/").pop());
+    writeFileSync(file, bytes);
+    return {
+      role,
+      destination,
+      mediaType,
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      file,
+    };
+  };
+  const set = (id, colour) => ({
+    id,
+    provenance: {
+      source: "generated",
+      rights: "owned",
+      visibility: "private",
+      lineage: "test",
+    },
+    members: [
+      member(
+        id,
+        "model",
+        "assets/cubeQazja.glb",
+        "model/gltf-binary",
+        `glTF ${colour}`,
+      ),
+      member(
+        id,
+        "preview-image",
+        "assets/cubeQazja-preview.png",
+        "image/png",
+        `PNG ${colour}`,
+      ),
+    ],
+  });
+  return [set("candidate-c", "red"), set("candidate-d", "blue")];
+}
+
+function selected(sets, commitSha, tree) {
+  return {
+    commit: commitSha,
+    tree,
+    set: sets[0],
+    bound: [],
+    by: "kirk",
+    at: "2026-10-29T02:05:40.480Z",
+  };
+}
+
+test("an item's review candidates are its own selection, then each dependency's in the reviewed base", () => {
+  const sets = stagedSets();
+  const other = workItem("other-media", ["Another set."], ["assets/other.png"]);
+  const state = {
+    done: {
+      "item:cube-assets:work": { sets },
+      "item:cube-assets:select": selected(sets, "c1", "t1"),
+      "item:other-media:work": { sets },
+      "item:other-media:select": selected(sets, "c2", "t2"),
+    },
+  };
+  const items = [ASSETS, TEST_ITEM, other];
+  const records = reviewCandidates(state, items, TEST_ITEM, [
+    { id: "cube-assets", title: "", status: "merged", inReviewedBase: true },
+    {
+      id: "other-media",
+      title: "",
+      status: "published-unmerged",
+      inReviewedBase: false,
+    },
+  ]);
+  assert.deepEqual(
+    records.map((record) => [record.item.id, record.selection.set.id]),
+    [["cube-assets", "candidate-c"]],
+  );
+  // The selecting item's own review: its record alone.
+  assert.deepEqual(
+    reviewCandidates(state, items, ASSETS, []).map((record) => record.item.id),
+    ["cube-assets"],
+  );
+  // An item with no media and no delivered media dependency: none.
+  assert.deepEqual(reviewCandidates(state, items, TEST_ITEM, []), []);
+});
+
+test("a dependent test item's review holds the dependency's selected preview bytes, and a question about them goes back to the reviewer", async () => {
+  const checkout = tempDir("factory-dep-media-");
+  git(checkout, "init", "--quiet", "--initial-branch=main");
+  writeFileSync(
+    join(checkout, ".gitattributes"),
+    "*.glb filter=lfs diff=lfs merge=lfs -text\n*.png filter=lfs diff=lfs merge=lfs -text\n",
+  );
+  commit(checkout, "init");
+  // cube-assets merged: the selected set's pointers are on the base.
+  const sets = stagedSets();
+  mkdirSync(join(checkout, "assets"));
+  for (const member of sets[0].members)
+    writeFileSync(
+      join(checkout, member.destination),
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${member.sha256}\nsize ${member.bytes}\n`,
+    );
+  const base = commit(checkout, "cube-assets");
+  const baseTree = git(checkout, "rev-parse", `${base}^{tree}`);
+  mkdirSync(join(checkout, "test"));
+  writeFileSync(
+    join(checkout, "test/cube-assets.test.js"),
+    'import { readFileSync } from "node:fs";\nreadFileSync("assets/cubeQazja-preview.png");\n',
+  );
+  const head = commit(checkout, "cube-asset-test");
+  const tree = git(checkout, "rev-parse", `${head}^{tree}`);
+  const state = {
+    done: {
+      "item:cube-assets:work": { sets },
+      "item:cube-assets:select": selected(sets, base, baseTree),
+    },
+  };
+  const candidates = reviewCandidates(state, [ASSETS, TEST_ITEM], TEST_ITEM, [
+    { id: "cube-assets", title: "", status: "merged", inReviewedBase: true },
+  ]);
+  const preview = "media-sets/cube-assets/candidate-c/cubeQazja-preview.png";
+  const calls = [];
+  const events = [];
+  const planner = {
+    async answer(call) {
+      calls.push(call);
+      // The preview's bytes are in the evidence root beside its pointer.
+      assert.equal(
+        readFileSync(join(call.readDir, preview), "utf8"),
+        "PNG red",
+      );
+      assert.match(
+        readFileSync(
+          join(call.readDir, "candidate/assets/cubeQazja-preview.png"),
+          "utf8",
+        ),
+        /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/,
+      );
+      if (calls.length === 1)
+        return {
+          value: {
+            findings: [
+              {
+                criterionIndex: 0,
+                verdict: "needs-human",
+                evidenceIndices: [1],
+                detail:
+                  "The supplied preview is an LFS pointer (candidate/assets/cubeQazja-preview.png), not the PNG bytes.",
+                question:
+                  "Can you provide the hydrated preview image bytes so the asserted mask can be compared to the actual preview?",
+              },
+            ],
+          },
+        };
+      return {
+        value: {
+          findings: [
+            {
+              criterionIndex: 0,
+              verdict: "pass",
+              evidenceIndices: [1],
+              detail: "The test checks the preview's bytes.",
+              question: "",
+            },
+          ],
+        },
+      };
+    },
+  };
+  const outcome = await reviewResult({
+    planner,
+    plan: {
+      base,
+      items: [ASSETS, TEST_ITEM],
+      coverage: [],
+      finalCommands: [],
+      decisions: [],
+    },
+    item: TEST_ITEM,
+    checkout,
+    base,
+    commit: head,
+    validation: { tree, commands: ["npm test"] },
+    sources: [],
+    dir: tempDir("factory-dep-media-root-"),
+    candidates,
+    signal: AbortSignal.timeout(60_000),
+    log: (event) => events.push(event),
+  });
+  assert.ok(
+    calls[0].prompt.includes("Controller candidate receipt: cube-assets"),
+  );
+  assert.ok(
+    calls[0].prompt.includes(
+      "a receipt whose workItem is another item's belongs to a dependency whose accepted result the reviewed base holds",
+    ),
+  );
+  // The question went back once, naming the review copy, and never held.
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].prompt.slice(calls[0].prompt.length).includes(preview));
+  assert.ok(
+    events.some((event) => event.event === "result-review-evidence-sendback"),
+  );
+  assert.equal(outcome.kind, "pass");
+});

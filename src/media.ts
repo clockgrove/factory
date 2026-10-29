@@ -13,7 +13,8 @@
  *   select    selectionQuestion / readSelection → materializeSelection
  *   validate  validationMembers → hydrateTree (every LFS file of the fresh
  *             checkout) → commands → rewrittenMedia
- *   review    candidateReceipts (result review, and final review of merged items)
+ *   review    candidateReceipts (result review, with its delivered
+ *             dependencies' selections, and final review of merged items)
  *   publish   lfsPushIfPointers, called by delivery's publish before it pushes
  *   final     validationMembers → verifyOriginMedia
  *

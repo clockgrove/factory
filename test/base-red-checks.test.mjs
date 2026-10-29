@@ -759,9 +759,11 @@ test("artifacts reach the repair diagnosis's input, so it needn't ask the operat
   });
   assert.equal(result.kind, "question");
   assert.equal(asked.length, 1);
-  // The request is the prompt's last line, as JSON.
-  const { prompt } = asked[0];
-  const request = JSON.parse(prompt.slice(prompt.lastIndexOf("\n{") + 1));
+  // The failure is its own paragraph: a heading line, then JSON.
+  const failure = asked[0].prompt
+    .split("\n\n")
+    .find((part) => part.startsWith("The failure ("));
+  const request = JSON.parse(failure.slice(failure.indexOf("\n") + 1));
   assert.ok(
     request.failure.includes(
       `--- quality-receipts-checks: vulnerabilities.json ---\n${ADVISORIES}`,

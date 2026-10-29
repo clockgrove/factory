@@ -875,12 +875,16 @@ const mebibytes = (bytes: number) => (bytes / 1024 ** 2).toFixed(1);
  * the run's first command started, and together they add at most `files`
  * entries. Checked after each command, since HOME, TMPDIR and the checkout
  * last the whole run; the answer names what is over, or is undefined.
+ * An install's kept package store (`installStore`, #2169), which takes the
+ * place of its HOME's caches, counts with that HOME: the store an install
+ * writes is held to what the install could have written to HOME.
  */
 async function diskOverflow(
   checkout: string,
   home: string,
   temporary: string,
   config: SandboxConfig,
+  store?: string,
 ): Promise<string | undefined> {
   const limits = config.limits;
   // Dropped only when the run's TMPDIR went missing; measuring from zero or
@@ -899,18 +903,28 @@ async function diskOverflow(
       return undefined;
     });
   const files = limits.files;
-  const [grown, homeUse, scratch] = await Promise.all([
+  const [grown, homeOnly, storeUse, scratch] = await Promise.all([
     measured(checkout, baseline.entries + files, join(checkout, ".git")),
     measured(home, files),
+    store
+      ? measured(store, files)
+      : Promise.resolve<DiskUse>({ bytes: 0, entries: 0 }),
     measured(temporary, files),
   ]);
+  const homeUse =
+    homeOnly && storeUse
+      ? {
+          bytes: homeOnly.bytes + storeUse.bytes,
+          entries: homeOnly.entries + storeUse.entries,
+        }
+      : undefined;
   if (grown && grown.bytes - baseline.bytes > limits.checkoutMiB * 1024 ** 2)
     over.push(
       `the checkout grew by ${mebibytes(grown.bytes - baseline.bytes)} MiB, more than sandbox.limits.checkoutMiB (${limits.checkoutMiB} MiB)`,
     );
   if (homeUse && homeUse.bytes > limits.homeMiB * 1024 ** 2)
     over.push(
-      `HOME holds ${mebibytes(homeUse.bytes)} MiB, more than sandbox.limits.homeMiB (${limits.homeMiB} MiB)`,
+      `${store ? "HOME and the install's package store hold" : "HOME holds"} ${mebibytes(homeUse.bytes)} MiB, more than sandbox.limits.homeMiB (${limits.homeMiB} MiB)`,
     );
   if (scratch && scratch.bytes > limits.tmpMiB * 1024 ** 2)
     over.push(
@@ -924,7 +938,7 @@ async function diskOverflow(
       : 0;
   if (entries > files)
     over.push(
-      `checkout growth, HOME and TMPDIR hold more than sandbox.limits.files (${files}) files`,
+      `checkout growth, HOME${store ? ", the install's package store" : ""} and TMPDIR hold more than sandbox.limits.files (${files}) files`,
     );
   return over.length
     ? `the sandbox disk budget is exceeded: ${over.join("; ")}. Remove what the commands wrote there, or raise sandbox.limits in the Factory configuration.`
@@ -1131,6 +1145,14 @@ export interface SandboxOptions {
    */
   packageInstall?: boolean;
   /**
+   * Only with `packageInstall` and without `sandbox.packageStore`: the
+   * package store and caches' root Factory keeps for this install across
+   * one item's validations (validate.ts `installStore`), writable to it in
+   * place of the private HOME's. No other command mounts it. The disk
+   * budget counts it with HOME (`sandbox.limits.homeMiB`, `files`).
+   */
+  installStore?: string;
+  /**
    * The install may reach the network: in its own network namespace through
    * pasta, or, without pasta, not at all. Only with `packageInstall`.
    */
@@ -1313,6 +1335,24 @@ function launch(
   // in the checkout.
   Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
   const writable = [checkout, temporary, home];
+  // Factory's kept store for the exact install: beside the checkout, never
+  // in it, and its own mount, so pnpm copies packages into node_modules (a
+  // hard link can't cross mounts) and no later command can write the
+  // store's files through them.
+  if (options.packageInstall && options.installStore && !config.packageStore) {
+    const store = realpathSync(options.installStore);
+    if (
+      [checkout, temporary, home].some(
+        (path) => within(store, path) || within(path, store),
+      )
+    )
+      throw new Refusal(
+        `the install's package store ${store} overlaps the checkout or the command's private directories`,
+        "Report it: Factory keeps the store beside the validation checkout",
+      );
+    writable.push(store);
+    Object.assign(env, packageCacheEnvironment(store));
+  }
   let readOnlyStore: string | undefined;
   if (config.packageStore) {
     // Not in a shared temporary directory, nor in any directory others can
@@ -1856,6 +1896,10 @@ export async function runSandboxed(
     home,
     temporary,
     options.config,
+    // The kept store, when launch mounted it in place of HOME's caches.
+    prepared.sandboxed && options.packageInstall && !options.config.packageStore
+      ? options.installStore
+      : undefined,
   );
   return {
     kind: "ran",

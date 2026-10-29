@@ -791,7 +791,7 @@ export class CodexPlanner implements Planner {
       }
       group.end();
       saveModelsCache(home.env.CODEX_HOME!);
-      addCodexTelemetry(record, home.env.CODEX_HOME!, baseline?.size);
+      addCodexTelemetry(record, home.env.CODEX_HOME!, baseline);
       // A retained conversation's home stays for its next turn, unless a
       // later turn has taken it (a hedge's loser, an aborted attempt).
       if (call.conversation) {

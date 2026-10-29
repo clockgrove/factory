@@ -418,6 +418,16 @@ export function worktreePath(
   return join(workDir, String(issue), item);
 }
 
+/**
+ * The install's package store kept beside a Work Item's `worktree` across
+ * its validations (validate.ts `installStore`, #2169): the worker's
+ * Validate, the validate step and a QA item's validate step all keep it
+ * here, so each reuses what the others fetched.
+ */
+export function installStorePath(worktree: string): string {
+  return `${worktree}.packages`;
+}
+
 /** `checkout`'s Git directory and common Git directory, absolute. */
 async function gitDirectories(
   checkout: string,
@@ -645,8 +655,9 @@ async function completeWorktree(
 }
 
 /**
- * Remove a worktree and its private `.shell` and `.validation` directories,
- * then prune the registration. A missing worktree is fine. The files go
+ * Remove a worktree and its private `.shell`, `.validation` and `.packages`
+ * (validation's kept package store) directories, then prune the
+ * registration. A missing worktree is fine. The files go
  * first, so a worktree Git refuses to remove still frees its space.
  */
 export async function removeWorktree(
@@ -674,7 +685,12 @@ export async function removeWorktree(
     // Not registered, or Git refused: the directory goes regardless.
   }
   await Promise.all(
-    [worktree, `${worktree}.shell`, `${worktree}.validation`].map(forceRemove),
+    [
+      worktree,
+      `${worktree}.shell`,
+      `${worktree}.validation`,
+      installStorePath(worktree),
+    ].map(forceRemove),
   );
   await hostGit(checkout, ["worktree", "prune"], { signal });
 }

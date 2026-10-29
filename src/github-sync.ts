@@ -48,6 +48,7 @@ import {
 } from "./requests.js";
 import { resetting, statusRecordOf } from "./reset.js";
 import type {
+  AnswerPart,
   ClosedHold,
   Hold,
   HoldClosing,
@@ -2014,9 +2015,11 @@ export function closingLine(
       const answer = [closing.answer ?? "", closing.arg]
         .filter((part) => part !== undefined && part !== "")
         .join(" ");
-      const text = closing.text
-        ? `\n\n> ${guidance(closing.text, secrets)}`
-        : "";
+      const text = closing.parts?.length
+        ? `\n\n${answerParts(closing.parts, secrets)}`
+        : closing.text
+          ? `\n\n> ${guidance(closing.text, secrets)}`
+          : "";
       return `**Answered** ${code(`/factory ${answer}`)} by ${who}${at}.${text}`;
     }
     case "cancelled":
@@ -2055,6 +2058,34 @@ export function closingLine(
 }
 
 /** An answer's text as one quoted line: redacted, escaped, then cut to GUIDANCE_LIMIT. */
+/**
+ * The answers one answer gave at once (`HoldClosing.parts`), each shown
+ * (#2171): those with the same text on one line, then that text, redacted
+ * and cut as an answer's is.
+ */
+function answerParts(
+  parts: readonly AnswerPart[],
+  secrets: readonly string[],
+): string {
+  const groups: { forms: string[]; text?: string }[] = [];
+  for (const part of parts) {
+    const form = code(`${part.answer} ${part.arg}`);
+    const group = groups.find((entry) => entry.text === part.text);
+    if (group) group.forms.push(form);
+    else
+      groups.push({
+        forms: [form],
+        ...(part.text !== undefined ? { text: part.text } : {}),
+      });
+  }
+  return `It gave:\n${groups
+    .map(
+      (group) =>
+        `- ${group.forms.join(", ")}${group.text ? `: ${guidance(group.text, secrets)}` : ""}`,
+    )
+    .join("\n")}`;
+}
+
 function guidance(text: string, secrets: readonly string[]): string {
   const line = prose(redact(text, secrets).replace(/\s+/g, " ").trim());
   if (line.length <= GUIDANCE_LIMIT) return line;

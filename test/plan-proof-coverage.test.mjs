@@ -50,8 +50,8 @@ function git(directory, ...args) {
   return run.stdout.trim();
 }
 
-/** A base with a browser suite, a web e2e suite, a CI-only suite and the Wave 4 plan; `planDoc` replaces the plan's text. */
-function repository(planDoc = PLAN_DOC) {
+/** A base with a browser suite, a web e2e suite, a CI-only suite and the Wave 4 plan; `planDoc` replaces the plan's text, and `extra` adds or replaces files. */
+function repository(planDoc = PLAN_DOC, extra = {}) {
   const checkout = tempDir("factory-plan-proof-");
   git(checkout, "init", "--quiet", "--initial-branch=main");
   const files = {
@@ -71,6 +71,7 @@ function repository(planDoc = PLAN_DOC) {
     "e2e/flow.spec.ts": "// hosted journey\n",
     "docs/plan.md": planDoc,
     "README.md": "# Target\n",
+    ...extra,
   };
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(checkout, path)), { recursive: true });
@@ -163,6 +164,7 @@ async function findings(target, items, options = {}) {
       new BaseFiles(target.checkout, target.base),
       options.accepted,
       options.accepted,
+      options.started,
     )
   ).filter((finding) => PROOF.test(finding.message));
 }
@@ -393,6 +395,222 @@ test("only strings a check looks for count: never messages, paths, encodings, re
       command,
     );
   }
+});
+
+/** What each QA command is refused as requiring of docs/plan.md, by command, on `target`. */
+async function requirements(target, commands) {
+  const scene = work("living-scene", ["docs/plan.md"], ["npm test"]);
+  const found = [];
+  for (const command of commands)
+    found.push(
+      (
+        await findings(target, [
+          scene,
+          qa("pilot-predeclaration", ["living-scene"], command),
+        ])
+      ).map(
+        (finding) =>
+          finding.message.match(
+            /requires (.*) in [\w/.]+(?: or [\w/.]+)*, which/,
+          )?.[1],
+      ),
+    );
+  return found;
+}
+
+test("a check that ignores case is judged without it", async () => {
+  const target = repository();
+  assert.deepEqual(
+    await requirements(target, [
+      `grep -qi "kirk APPROVED" docs/plan.md`,
+      `python3 -c 'from pathlib import Path; text = Path("docs/plan.md").read_text().lower(); assert "kirk approved" in text'`,
+      `node -e 'const t = require("fs").readFileSync("docs/plan.md", "utf8").toLowerCase(); if (!t.includes("wave 3 hosted")) process.exit(1)'`,
+      // Still a requirement, in any case.
+      `grep -qi "#817 deferred" docs/plan.md`,
+    ]),
+    [[], [], [], ['"#817 deferred"']],
+  );
+});
+
+test("a grep pattern or a regular expression counts only when it spells out text, and then as one", async () => {
+  const target = repository();
+  assert.deepEqual(
+    await requirements(target, [
+      `grep -Eq "#693|#817" docs/plan.md`,
+      `grep -q "### 1\\.1 Objectives" docs/plan.md`,
+      `grep -q "Kirk approved this protocol." docs/plan.md`,
+      `python3 -c 'import re; from pathlib import Path; assert re.search("Status:.. (Unevaluated|Pending)", Path("docs/plan.md").read_text())'`,
+      `node -e 'const t = require("fs").readFileSync("docs/plan.md", "utf8"); if (!new RegExp("#69\\\\d", "m").test(t)) process.exit(1)'`,
+      // Text the base lacks, shown as the text it matches.
+      `grep -q "### 1\\.2 Pilot" docs/plan.md`,
+      // A basic grep pattern's | is text, and -F's \\. is two characters.
+      `grep -q "#693|#817" docs/plan.md`,
+      `grep -qF "### 1\\.1 Objectives" docs/plan.md`,
+    ]),
+    [
+      [],
+      [],
+      [],
+      [],
+      [],
+      ['"### 1.2 Pilot"'],
+      ['"#693|#817"'],
+      ['"### 1\\\\.1 Objectives"'],
+    ],
+  );
+});
+
+test("an assertion's message, and what a check writes, are never required", async () => {
+  const target = repository();
+  assert.deepEqual(
+    await requirements(target, [
+      `node -e 'const assert = require("node:assert"); const t = require("node:fs").readFileSync("docs/plan.md", "utf8"); assert.ok(t.includes("#693"), "plan keeps the qualification reference")'`,
+      `node -e 'const assert = require("node:assert"); const t = require("node:fs").readFileSync("docs/plan.md", "utf8"); assert(t.includes("#693"), "plan keeps the qualification reference")'`,
+      `node -e 'const assert = require("node:assert"); const t = require("node:fs").readFileSync("docs/plan.md", "utf8"); assert.equal(t.includes("#693"), true, "plan keeps the qualification reference")'`,
+      `node -e 'const t = require("node:fs").readFileSync("docs/plan.md", "utf8"); if (!t.includes("#693")) { process.stderr.write("qualification reference missing"); process.exit(1) }'`,
+      `python3 -c 'import sys; from pathlib import Path; text = Path("docs/plan.md").read_text(); "#693" in text or sys.stderr.write("qualification reference missing")'`,
+      // The condition still counts.
+      `node -e 'const assert = require("node:assert"); const t = require("node:fs").readFileSync("docs/plan.md", "utf8"); assert.ok(t.includes("#817"), "plan defers to the pilot")'`,
+    ]),
+    [[], [], [], [], [], ['"#817"']],
+  );
+});
+
+test("a string a check requires absent is never required, however it says so", async () => {
+  const target = repository();
+  assert.deepEqual(
+    await requirements(target, [
+      `grep -q "TODO" docs/plan.md && exit 1 || true`,
+      `grep -q "TODO" docs/plan.md && { echo "plan has a TODO" >&2; exit 1; } || true`,
+      `python3 -c 'from pathlib import Path; text = Path("docs/plan.md").read_text(); assert text.count("TODO") == 0'`,
+      `python3 -c 'from pathlib import Path; text = Path("docs/plan.md").read_text(); assert text.find("TODO") == -1'`,
+      `node -e 'const t = require("fs").readFileSync("docs/plan.md", "utf8"); if (t.indexOf("TODO") !== -1) process.exit(1)'`,
+      // A count whose comparison says nothing either way.
+      `python3 -c 'from pathlib import Path; text = Path("docs/plan.md").read_text(); assert text.count("TODO") < 3'`,
+      // Present, said with a count or an index.
+      `python3 -c 'from pathlib import Path; text = Path("docs/plan.md").read_text(); assert text.count("#817") >= 1'`,
+      `node -e 'const t = require("fs").readFileSync("docs/plan.md", "utf8"); if (t.indexOf("#817") === -1) process.exit(1)'`,
+      `grep -q "#817" docs/plan.md || exit 1`,
+    ]),
+    [[], [], [], [], [], [], ['"#817"'], ['"#817"'], ['"#817"']],
+  );
+});
+
+test("a query tool's filter is never text the file must hold", async () => {
+  const target = repository();
+  const pkg = work("package", ["package.json"], ["npm test"]);
+  for (const command of [
+    `jq -e '.name == "target"' package.json`,
+    `jq -e '.scripts | has("test")' package.json`,
+    `yq -e '.name' package.json`,
+  ])
+    assert.deepEqual(
+      await findings(target, [pkg, qa("package-check", ["package"], command)]),
+      [],
+      command,
+    );
+});
+
+test("a test file a runner configuration excludes is not one it runs", async () => {
+  const target = repository(PLAN_DOC, {
+    "tests/ci/vitest.browser.config.ts": `export default { test: { include: ["tests/ci/browser.test.mjs"], exclude: ["tests/ci/quarantined.test.mjs"] } };\n`,
+    "tests/ci/quarantined.test.mjs": "// quarantined\n",
+  });
+  const files = new BaseFiles(target.checkout, target.base);
+  assert.deepEqual(await commandRuns(BROWSER, files, await files.scripts()), [
+    "tests/ci/vitest.browser.config.ts",
+    "tests/ci/browser.test.mjs",
+  ]);
+  assert.deepEqual(
+    await findings(target, [
+      work(
+        "quarantine-fix",
+        ["src/q.ts", "tests/ci/quarantined.test.mjs"],
+        ["npm test"],
+      ),
+    ]),
+    [],
+  );
+});
+
+test("the #800 amendment: an accepted item given a final-only test is judged, and a started one is sent to a new item", async () => {
+  const target = repository();
+  const scene = work(
+    "living-scene",
+    ["src/scene.ts", "tests/ci/browser.test.mjs"],
+    ["npm test", BROWSER],
+  );
+  const selection = work(
+    "entity-selection",
+    ["src/selection.ts"],
+    ["npm test"],
+    {
+      dependencies: ["living-scene"],
+    },
+  );
+  const why = work("recorded-why", ["src/why.ts"], ["npm test"], {
+    dependencies: ["entity-selection"],
+  });
+  const accepted = {
+    base: target.base,
+    items: [scene, selection, why],
+    coverage: [],
+  };
+  // entity-selection, started, is given the browser test without its command.
+  const grown = {
+    ...selection,
+    ownedPaths: [...selection.ownedPaths, "tests/ci/browser.test.mjs"],
+  };
+  const [finding, ...more] = await findings(target, [scene, grown, why], {
+    accepted,
+    started: new Set(["living-scene", "entity-selection"]),
+  });
+  assert.equal(more.length, 0);
+  assert.equal(finding.itemId, "entity-selection");
+  assert.equal(
+    finding.message,
+    `Work Item entity-selection has started, and this amendment gives it tests/ci/browser.test.mjs, which the final command ${BROWSER} runs and none of its validation commands names: its review would judge the item without that test's proof, and the started-item rule keeps its validation, so it can't add that command. Leave that file out of entity-selection's owned paths, and put the change to that file in a new Work Item that owns that file, depends on entity-selection and runs \`${BROWSER}\` among its validation commands`,
+  );
+  // recorded-why, not started, is given it: it adds the command.
+  const given = {
+    ...why,
+    ownedPaths: [...why.ownedPaths, "tests/ci/browser.test.mjs"],
+  };
+  const unstarted = await findings(target, [scene, selection, given], {
+    accepted,
+    started: new Set(["living-scene", "entity-selection"]),
+  });
+  assert.deepEqual(
+    unstarted.map((found) => found.itemId),
+    ["recorded-why"],
+  );
+  assert.match(
+    unstarted[0].message,
+    /^Work Item recorded-why owns tests\/ci\/browser\.test\.mjs, which the final command .* Add `/,
+  );
+  assert.deepEqual(
+    await findings(
+      target,
+      [
+        scene,
+        selection,
+        { ...given, validation: [...given.validation, { command: BROWSER }] },
+      ],
+      { accepted, started: new Set(["living-scene", "entity-selection"]) },
+    ),
+    [],
+  );
+  // An accepted item that drops the command it ran is judged too.
+  assert.deepEqual(
+    (
+      await findings(
+        target,
+        [{ ...scene, validation: [{ command: "npm test" }] }, selection, why],
+        { accepted },
+      )
+    ).map((found) => found.itemId),
+    ["living-scene"],
+  );
 });
 
 test("an amendment is judged on what it adds or changes: the accepted plan's items keep their spec", async () => {

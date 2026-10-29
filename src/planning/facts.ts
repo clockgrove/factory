@@ -689,6 +689,13 @@ const TEST_FILE =
 const RUNNER_CONFIG = /(?:^|[./_-])(?:config|workspace)\.(?:[cm]?[jt]s|json)$/;
 /** The largest runner configuration read for the test files it names. */
 const MAX_RUNNER_CONFIG_BYTES = 65_536;
+/**
+ * A runner configuration's lists of what it doesn't run (`exclude`,
+ * `testIgnore`, `testPathIgnorePatterns`), as a list or one string: the
+ * files they name are never the ones it runs.
+ */
+const EXCLUSIONS =
+  /["'`]?\b\w*(?:exclude|ignore)\w*["'`]?\s*:\s*(?:\[[^\]]*\]|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`)/gi;
 
 /** A command's words that may name files: quotes, a `--flag=` prefix and a leading `./` dropped. */
 function pathWords(command: string): string[] {
@@ -738,7 +745,8 @@ function quotedStrings(text: string): string[] {
  * words show: each one it names, directly or through the root package
  * scripts it runs, and each test file a named configuration names by exact
  * path, from the repository root or from the configuration's directory
- * (tests/ci/vitest.browser.config.ts naming tests/ci/browser.test.mjs).
+ * (tests/ci/vitest.browser.config.ts naming tests/ci/browser.test.mjs),
+ * outside its exclusion lists (`EXCLUSIONS`).
  * Globs, directories and a runner's default discovery are never expanded,
  * so a command that runs a file only through them names nothing here.
  */
@@ -770,7 +778,8 @@ export async function commandRuns(
       // Runners differ in what a configured path is relative to: the one
       // the base tracks, or both when neither is there yet.
       const tracked = new Set(await files.paths());
-      for (const literal of quotedStrings(utf8(bytes) ?? "")) {
+      const runnable = (utf8(bytes) ?? "").replace(EXCLUSIONS, "");
+      for (const literal of quotedStrings(runnable)) {
         const paths = [
           posix.normalize(literal),
           posix.join(posix.dirname(word), literal),

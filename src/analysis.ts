@@ -9,11 +9,14 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   type ActivityCounts,
+  addHedge,
   addUsage,
   chosenFiles,
   count,
   emptyUsage,
   foldActivity,
+  type HedgeCount,
+  hedgeLines,
   itemOfEvent,
   num,
   originalText,
@@ -390,6 +393,8 @@ export interface AnalysisReport {
   filters: Partial<Record<AnalysisField, string>>;
   calls: CallGroup;
   groups: CallGroup[];
+  /** Hedged planner calls by `role phase`, of the calls the filters select: started, won, lost and their tokens. */
+  hedges: Record<string, HedgeCount>;
   /** Per phase: attempts, outcomes, wall time (overlaps once) and summed attempt time. */
   phases: Record<
     string,
@@ -873,6 +878,7 @@ class Analysis {
   >();
   /** Each model call's groups, by `callId`, for the semantic refusals that name it. */
   private readonly callGroups = new Map<string, CallGroup[]>();
+  private readonly hedges: AnalysisReport["hedges"] = {};
   private readonly githubJobs = new Set<string>();
   private readonly github: AnalysisReport["github"] = {
     jobs: 0,
@@ -1118,6 +1124,7 @@ class Analysis {
     for (const [field, expected] of Object.entries(filters))
       if (callField(event, field as AnalysisField) !== expected) return;
     addCall(this.calls.group, this.calls.rates, event);
+    addHedge(this.hedges, event);
     const key = Object.fromEntries(
       groupBy.map((field) => [field, callField(event, field)]),
     );
@@ -1245,6 +1252,7 @@ class Analysis {
       groups: [...this.groups.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([, { group, rates }]) => settle(group, rates)),
+      hedges: this.hedges,
       phases,
       time: {
         stepsMs: unionMs(stepIntervals),
@@ -1302,6 +1310,7 @@ const LIMITATIONS = [
   "Sequence numbers count per run file: a gap is a line lost to a failed write (log-health counts them too); a run with no run-end is still running, or died and no later start has seen it yet.",
   "A refused answer (stage semantic) is a call that succeeded and that Factory's checks then refused; it counts beside the call's outcome, not instead of it.",
   "Filters on role, provider, model, effort, outcome, tokenSource and hedge select model calls only; run, item and phase also select steps.",
+  "A hedge's win is read from the first call it beat (aborted as hedged), so a hedge=1 filter shows no wins.",
 ];
 
 /** The analysis views over the chosen runs. */
@@ -1441,6 +1450,10 @@ function analysisText(report: AnalysisReport): string {
         .join(", ")}:`,
       ...groupText(group, "    "),
     ]),
+  );
+  section(
+    "Hedges by role and phase (a hedge wins when it answers first):",
+    hedgeLines(report.hedges),
   );
   section(
     "Steps by phase (wall time counts overlaps once):",

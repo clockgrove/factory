@@ -29,8 +29,12 @@ import {
   REVIEW_PHASES,
 } from "./planner.js";
 
-/** The longest `hedgeSeconds`: past the planners' own idle limits, a hedge would never start. */
-export const MAX_HEDGE_SECONDS = 3600;
+/**
+ * The longest `hedgeSeconds`: the longest planner idle limit (Codex and
+ * Copilot planning, 15 minutes). A threshold at or past the call's own
+ * idle limit never hedges, since that limit ends the silent call first.
+ */
+export const MAX_HEDGE_SECONDS = 900;
 
 export const PLANNERS = ["codex", "claude", "copilot"] as const;
 export type PlannerKind = (typeof PLANNERS)[number];

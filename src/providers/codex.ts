@@ -59,6 +59,7 @@ import {
   type PlannerCall,
   PlannerError,
   type PlannerModels,
+  type PlannerPhase,
 } from "./planner.js";
 import { openTurn, overflowed, type Turn, turnFields } from "./session.js";
 import {
@@ -79,6 +80,20 @@ export const DEFAULT_CODEX_MODELS: PlannerModels<CodexEffort> = {
 const PLANNER_IDLE_MS = 15 * 60 * 1000;
 /** Lower-effort reviews get a finite five-minute outlier bound. */
 const LOWER_EFFORT_REVIEW_IDLE_MS = 5 * 60 * 1000;
+
+/**
+ * The silence that ends a Codex planning or review call: five minutes for a
+ * review at low or medium effort, else 15 minutes.
+ */
+export function codexIdleMs(phase: PlannerPhase, effort: string): number {
+  const lowerEffortReview =
+    phase !== "plan" &&
+    phase !== "diagnosis" &&
+    phase !== "dream" &&
+    phase !== "propose" &&
+    ["minimal", "low", "medium"].includes(effort);
+  return lowerEffortReview ? LOWER_EFFORT_REVIEW_IDLE_MS : PLANNER_IDLE_MS;
+}
 
 /** Replaces native coding-agent boilerplate only for isolated read-only roles. */
 const CODEX_READONLY_BASE_INSTRUCTIONS = `You are the read-only semantic assistant for Factory. The current request identifies your planning, diagnosis or independent review task and supplies its evidence and output schema. Complete that task; do not implement changes or perform controller operations.
@@ -519,15 +534,7 @@ export class CodexPlanner implements Planner {
         `Codex planning needs the @openai/codex-sdk package; install it, then answer retry (${detail(String(error))})`,
       );
     }
-    const lowerEffortReview =
-      call.phase !== "plan" &&
-      call.phase !== "diagnosis" &&
-      call.phase !== "dream" &&
-      call.phase !== "propose" &&
-      ["minimal", "low", "medium"].includes(choice.effort);
-    const idleMs = lowerEffortReview
-      ? LOWER_EFFORT_REVIEW_IDLE_MS
-      : PLANNER_IDLE_MS;
+    const idleMs = codexIdleMs(call.phase, choice.effort);
     // A running read-only command gets the same bound: none would hang it.
     const watchdog = new IdleWatchdog(idleMs, call.signal, idleMs);
     let home: ReturnType<typeof codexHome>;

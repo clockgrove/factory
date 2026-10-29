@@ -471,18 +471,33 @@ export class IdleWatchdog {
 export type HedgeSeconds = Partial<Record<PlannerPhase, number>>;
 
 /**
- * The phases hedged by default, and after how much silence. Diagnosis,
- * result review and final review aren't: they think for minutes between
- * events (diagnosis up to 200 s with none), so every hedge of theirs in
- * Clockgrove #800 started a duplicate that lost to the first call (10 of
- * 10, 2.3M tokens).
+ * Each phase's seconds of silence before its call is hedged. In Clockgrove
+ * #800 all 10 hedges lost to the first call. The 8 of diagnosis (hedged
+ * after 124 s of silence), result review and final review (45-48 s) cost
+ * 1.84M reported tokens: their healthy calls go quiet for longer than the
+ * old role thresholds of 120 s and 45 s. The longest silence in a healthy
+ * call across the host's run logs was 151 s for diagnosis, 74 s for result
+ * review and 75 s for final review, so those phases now wait about twice
+ * that. That is still well inside Codex's idle limits (5 minutes for a
+ * medium-effort review, 15 for diagnosis), so a stalled call is hedged
+ * long before it would end. Planning and plan review keep their earlier
+ * thresholds; their hedges also lost (plan 4 of 4 on the host), so those
+ * rest on the stall reports, not on an observed win.
+ *
+ * A threshold at or past the call's own idle limit never fires: that
+ * limit ends the silent call first (codex.ts `codexIdleMs`, claude.ts
+ * `modelResponseTimeoutMs`), except while a Claude or Copilot read tool
+ * runs, which may stay quiet for 45 minutes. On Claude's default models
+ * that holds for every phase but plan review and result review (high
+ * effort, 5 minutes): its other phases run at medium effort and end after
+ * 2 minutes of silence, which is their stall protection there.
  */
 export const DEFAULT_HEDGE_SECONDS: Readonly<Record<PlannerPhase, number>> = {
   plan: 120,
   "graph-review": 45,
-  "result-review": 0,
-  "objective-review": 0,
-  diagnosis: 0,
+  "result-review": 150,
+  "objective-review": 150,
+  diagnosis: 300,
   dream: 120,
   propose: 120,
 };
@@ -515,9 +530,9 @@ export function hedgePolicy(seconds: HedgeSeconds = {}): HedgePolicy {
  * the model has started its final message, the terminal event never comes,
  * and the call would wait out a 5-minute idle limit. When the first call
  * goes silent past the policy, an identical second call starts; the first
- * answer wins and the other is aborted. A phase whose healthy calls go
- * quiet for longer than any threshold worth having isn't hedged
- * (DEFAULT_HEDGE_SECONDS): its call goes straight to the inner planner.
+ * answer wins and the other is aborted. Each phase has its own threshold
+ * (DEFAULT_HEDGE_SECONDS), above its healthy calls' silence; a phase set
+ * to 0 isn't hedged, and its call goes straight to the inner planner.
  */
 export class HedgedPlanner implements Planner {
   constructor(

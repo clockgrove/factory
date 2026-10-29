@@ -437,6 +437,14 @@ const failedChecks = () => ({
   detail: "Checks failed on PR #3: checks (failure)",
 });
 
+/** The validate step's kept result for `commit` (work/facts.ts `validation`). */
+const validated = (commit) => ({
+  commit,
+  key: "digest",
+  at: "2026-10-28T12:01:00.000Z",
+  result: { kind: "passed", done: { tree: "t", commands: ["true"] } },
+});
+
 test("revalidate on a spent repair allowance finishes the work step with the same result, charged once as a rereview", async () => {
   const served = servedWork(failedChecks);
   const { runner, asked, prompts, commit } = served;
@@ -446,6 +454,9 @@ test("revalidate on a spent repair allowance finishes the work step with the sam
     asked1.options.map((option) => option.answer),
     ["more", "revalidate", "replan", "cancel"],
   );
+  // The refused result's last validation, which the operator's own
+  // `revalidate` doesn't reuse: it runs the commands again (#2174).
+  runner.state.kept["item:a:validation"] = validated(commit);
   served.answer(asked1, "revalidate");
   const landed = runner.state.answers["item:a:work"].at;
   await served.run("the work step", () => runner.state.done["item:a:work"]);
@@ -454,6 +465,7 @@ test("revalidate on a spent repair allowance finishes the work step with the sam
     commit,
     at: landed,
   });
+  assert.equal(runner.state.kept["item:a:validation"], undefined);
   assert.equal(runner.state.kept["item:a:refused"], undefined);
   assert.equal(runner.state.kept["allowances:rereviews"], 1);
   assert.equal(runner.state.repairs["item:a:work"].count, 2);
@@ -514,6 +526,10 @@ test("a result kept unchanged on the operator's guidance is checked again as a r
     work: keeps,
   });
   const { runner, asked, prompts, commit } = served;
+  // Factory's own `revalidate` keeps the refused result's last validation,
+  // which the validate step reuses for that same commit (#2174).
+  const kept = validated(commit);
+  runner.state.kept["item:a:validation"] = kept;
   const diagnosis = await served.question();
   served.answer(diagnosis, "answer", KEEP);
   await served.run(
@@ -523,6 +539,7 @@ test("a result kept unchanged on the operator's guidance is checked again as a r
       runner.state.holds.length > 0 ||
       runner.state.repairs["item:a:work"].count > 2,
   );
+  assert.deepEqual(runner.state.kept["item:a:validation"], kept);
   assert.equal(prompts.length, 1, "the worker ran once, with the guidance");
   assert.match(prompts[0], /Keep your change as it is/);
   assert.equal(runner.state.repairs["item:a:work"].count, 2, "no repair");

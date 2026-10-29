@@ -286,7 +286,7 @@ When an agent answers for you (the director skill, or a script), give `--as NAME
 Common answers:
 
 - `retry`: run the step again, after you fixed the cause.
-- `answer` with text: your decision, sent back to the planner or worker. When your guidance is a Work Item repair's only correction and its worker then makes no change (whatever the guidance said: it resubmits its refused result unchanged, or leaves a checkout that never held that result with no change; removing its refused change is a change, and is refused), that isn't charged as a repair: the refused result is checked again as `revalidate` would (a result rereview), or Factory asks you, quoting the worker's final response.
+- `answer` with text: your decision, sent back to the planner or worker. When your guidance is a Work Item repair's only correction and its worker then makes no change (whatever the guidance said: it resubmits its refused result unchanged, or leaves a checkout that never held that result with no change; removing its refused change is a change, and is refused), that isn't charged as a repair: the refused result is checked again as `revalidate` would (a result rereview), or Factory asks you, quoting the worker's final response. Factory doesn't run the validation commands again on that same commit when nothing they run under changed (the plan, the commands, the configuration, Factory's build and the service process): the last validation's result stands. Answer `revalidate` yourself to run them again, after you changed something on the host, say; a service restart counts as a change.
 - `more`: grant more repairs or rounds.
 - `replan`, and `revalidate` (check a refused result again, unchanged).
 - `approve`: plan an issue whose author has no write access, or run the plan as it is when plan review asks you a question.
@@ -359,7 +359,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Credentials stay with the service.** Workers never see them. Only the variables in `policy.allowedSecretNames` reach a worker, and their values are redacted from everything Factory writes.
 - **Checked before every push.** Every blob a result adds is searched for those secret values. A match pushes nothing and holds.
 - **GitHub input.** Factory reads an issue as GitHub renders it, never its raw Markdown. A `/factory` comment counts only from someone with write access. An issue author without write access must be approved once.
-- **Branch protection.** Factory merges only through the API, under your branch rules, with merge commits. Setup recommends requiring branches to be up to date.
+- **Branch protection.** Factory merges only through the API, under your branch rules, with merge commits. Setup recommends requiring branches to be up to date. Factory's GitHub App can't read classic branch protection (it has no Administration access): after GitHub's first refusal the service stops asking for the rest of its run, logs it once, and reads required checks from rulesets and the branch instead.
 
 ## Media and delivery
 

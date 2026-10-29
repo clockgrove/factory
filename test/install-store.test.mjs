@@ -559,6 +559,9 @@ function stepRun(config, state, events) {
       signal: AbortSignal.timeout(120_000),
       log: (event) => events.push(event),
       runFile: (kind) => log.runFile(1, `item:a:validate#1.${kind}`),
+      // The validate step keeps its latest result (#2174); these tests
+      // read only the install's events.
+      keep: () => {},
     },
   };
 }

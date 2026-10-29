@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Outcome, StepContext } from "../engine.js";
+import { runningBuild } from "../log.js";
 import { validationMembers } from "../media.js";
 import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
@@ -8,7 +10,7 @@ import type { ObjectiveState } from "../state.js";
 import { headAndTail } from "../text.js";
 import { formatRef, lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, installStorePath, worktreePath } from "../worktree.js";
-import { fact, facts } from "./facts.js";
+import { fact, facts, type KeptValidation } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaValidateStep } from "./step-qa.js";
 import {
@@ -41,16 +43,40 @@ export async function validateStep(
   const workDir = deps.workDir(state.issue);
   const worktree = worktreePath(workDir, state.issue, item.id);
   await addWorktree(config.checkout, worktree, work.base, signal, context.log);
+  const commit = candidate(state, item.id);
+  const blocks = acceptedInputs(state).shown.blocks;
+  const media = validationMembers(plan, item, selection(state));
+  const key = validationKey({
+    commit,
+    plan: state.kept[ACCEPTED_AT] ?? null,
+    validation: item.validation,
+    blocks,
+    base: work.base,
+    planBase: plan.base,
+    reviewArtifacts: {
+      configured: config.reviewArtifacts,
+      planned: plan.reviewArtifacts ?? null,
+    },
+    media,
+    formatCommand: config.validation.formatCommand ?? null,
+    sandbox: config.sandbox,
+    commandTimeoutMs: commandTimeoutMs(deps),
+  });
+  const kept = fact(state, "validation", item.id);
+  if (kept?.commit === commit && kept.key === key)
+    return reusedValidation(item, context, place, kept);
+  // A run that ends without a result leaves no kept one behind it.
+  context.keep(facts({ validation: null }, item.id));
   const result = await validateTree({
     checkout: config.checkout,
     repository: config.repository,
     directory: `${worktree}.validation`,
     // The worker's Validate keeps the same store (self-validate.ts).
     installStore: installStorePath(worktree),
-    commit: candidate(state, item.id),
+    commit,
     item,
     plan,
-    blocks: acceptedInputs(state).shown.blocks,
+    blocks,
     base: work.base,
     ...(work.base !== plan.base ? { predecessor: work.base } : {}),
     reviewArtifacts: {
@@ -58,7 +84,7 @@ export async function validateStep(
       planned: plan.reviewArtifacts,
       dir: join(workDir, "artifacts", item.id),
     },
-    media: validationMembers(plan, item, selection(state)),
+    media,
     // A dependency change's lockfile, which Factory resolves when the
     // worker couldn't, is committed on the candidate (validate.ts).
     lockfile: {
@@ -91,7 +117,11 @@ export async function validateStep(
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
         ...(result.formatted ? { formatted: result.formatted } : {}),
       };
-      return { kind: "done", result: done };
+      return {
+        kind: "done",
+        result: done,
+        keep: keptValidation(item.id, commit, key, { kind: "passed", done }),
+      };
     }
     case "failed": {
       // The worker's own Validate passed this exact tree with these
@@ -120,21 +150,114 @@ export async function validateStep(
         await writeFile(outputFile, result.output, { mode: 0o600 });
         keptOutput = `${headAndTail(result.output, KEPT_OUTPUT_HEAD, KEPT_OUTPUT_TAIL)}\n[The complete output is kept for the operator at ${outputFile}; it is not readable from the worker's checkout.]`;
       }
-      return repairOutcome(
+      const failed: Extract<KeptValidation["result"], { kind: "failed" }> = {
+        kind: "failed",
+        detail: keptOutput,
+        shown: result.detail,
+        ...(result.failed ? { command: result.failed.command } : {}),
+      };
+      return failedOutcome(
         item,
-        "validate",
-        { kind: "failure", detail: keptOutput },
         context.state,
         place,
-        {
-          shown: result.detail,
-          keep: failedCommandKept(state, item.id, result.failed?.command),
-        },
+        failed,
+        keptValidation(item.id, commit, key, failed),
       );
     }
     default:
       return result;
   }
+}
+
+/**
+ * The digest of what a validation of the item's candidate runs under
+ * (#2174): the candidate commit (so its tree and its base), the accepted
+ * plan and the item's commands, everything else `validateTree` is given,
+ * and the environment: Factory's build and this service process, so a
+ * restart (after a change on the host, say) never reuses a result.
+ */
+export function validationKey(
+  inputs: Record<string, unknown>,
+  environment: Record<string, unknown> = serviceEnvironment(),
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ ...inputs, environment }))
+    .digest("hex");
+}
+
+/** This service process, for `validationKey`: its pid and when it started. */
+const SERVICE_PROCESS = `${process.pid}@${new Date(Date.now() - process.uptime() * 1000).toISOString()}`;
+
+/** The environment `validationKey` takes by default: Factory's build and this process. */
+function serviceEnvironment(): Record<string, unknown> {
+  const { factoryVersion, sourceDigest } = runningBuild();
+  return { factoryVersion, sourceDigest, process: SERVICE_PROCESS };
+}
+
+/** The item's `validation` fact: the latest validation's result, under `key`. */
+function keptValidation(
+  id: string,
+  commit: string,
+  key: string,
+  result: KeptValidation["result"],
+): Record<string, unknown> {
+  return facts(
+    {
+      validation: { commit, key, at: new Date().toISOString(), result },
+    },
+    id,
+  );
+}
+
+/** A validation failure as the work step's repair. */
+function failedOutcome(
+  item: WorkItem,
+  state: ObjectiveState,
+  place: StackPlace | undefined,
+  failed: Extract<KeptValidation["result"], { kind: "failed" }>,
+  keep: Record<string, unknown> = {},
+): Outcome {
+  return repairOutcome(
+    item,
+    "validate",
+    { kind: "failure", detail: failed.detail },
+    state,
+    place,
+    {
+      ...(failed.shown !== undefined ? { shown: failed.shown } : {}),
+      keep: {
+        ...failedCommandKept(state, item.id, failed.command),
+        ...keep,
+      },
+    },
+  );
+}
+
+/**
+ * The item's candidate is the commit its latest validation ran on, under
+ * the same plan, commands, configuration and environment (`validationKey`):
+ * a question answered with no new commit, such as Factory's own
+ * `revalidate` after the worker resubmitted its refused result unchanged.
+ * That validation's result stands again, with nothing run (#2174). The
+ * operator's own `revalidate` drops the kept result (step-work.ts), so it
+ * always runs the commands again.
+ */
+function reusedValidation(
+  item: WorkItem,
+  context: StepContext,
+  place: StackPlace | undefined,
+  kept: KeptValidation,
+): Outcome {
+  context.log({
+    event: "validation-reused",
+    item: item.id,
+    commit: kept.commit,
+    validatedAt: kept.at,
+    passed: kept.result.kind === "passed",
+  });
+  return kept.result.kind === "passed"
+    ? { kind: "done", result: kept.result.done }
+    : failedOutcome(item, context.state, place, kept.result);
 }
 
 /**

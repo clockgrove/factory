@@ -291,7 +291,7 @@ Common answers:
 - `replan`, and `revalidate` (check a refused result again, unchanged).
 - `approve`: plan an issue whose author has no write access, or run the plan as it is when plan review asks you a question.
 - `replace` with a correction, `continue` and `refuse` (an amendment; see [Amend a plan](#amend-a-plan)).
-- `accept N` and `refuse N` with a reason: decide one review criterion on this exact result.
+- `accept N` and `refuse N` with a reason: decide one review criterion on this exact result. A review that needs your judgment on several criteria asks once, listing them all: `accept all` or `refuse all` with a reason decides every one, and `decide` with one entry per line (or after `;`), such as `accept 1,2 <reason>` and `refuse 3 <reason>`, decides each with its own reason. Each criterion's decision is recorded and shown on its own.
 - `wait` and `switch NAME` (provider limits).
 - `adopt` (a configuration change).
 - `recheck` (an edited issue).

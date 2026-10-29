@@ -203,6 +203,14 @@ export async function workStep(
               commit: refused.commit,
               at: context.answer.at,
             },
+            // The operator's own `revalidate` runs the commands again;
+            // Factory's, after the worker resubmitted the refused result
+            // unchanged (engine.ts `rereview`), reuses the validation of
+            // that same commit when nothing it ran under changed
+            // (step-validate.ts `reusedValidation`, #2174).
+            ...(context.answer.channel === "factory"
+              ? {}
+              : { validation: null }),
           },
           item.id,
         ),

@@ -63,6 +63,8 @@ export type AnswerFamily =
   | "adopt"
   | "accept"
   | "refuse"
+  /** Several of a hold's answers in one, each with its text (`HoldOption.list`). */
+  | "decide"
   | "select"
   | "answer"
   | "repair"
@@ -82,6 +84,28 @@ export interface HoldOption {
   needsText?: boolean;
   /** Exactly one option per hold. */
   recommended?: boolean;
+  /**
+   * The arguments of this hold's options of the same answer that this one
+   * gives at once, each with its text (`accept all`: `accept <n>` for every
+   * criterion the question lists). The answer records them as its `parts`.
+   */
+  covers?: string[];
+  /**
+   * Its text lists this hold's parameterized answers to give at once
+   * (`decide`), checked when it is answered (`answerList`). The answer
+   * records them as its `parts`.
+   */
+  list?: true;
+}
+
+/**
+ * One of the hold's parameterized answers that an answer gave beside
+ * others (`HoldOption.covers`, `HoldOption.list`): `accept 2` and its text.
+ */
+export interface AnswerPart {
+  answer: string;
+  arg: string;
+  text?: string;
 }
 
 /** A question only a person can answer. Every answer it lists works. */
@@ -134,6 +158,117 @@ export function answersOf(hold: Pick<Hold, "options">): string[] {
   return [...new Set(hold.options.map((option) => option.answer))];
 }
 
+/** RegExp source matching `text` literally. */
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The argument of the answers that give every criterion a question lists
+ * at once (`accept all`, `HoldOption.covers`). Only a question that offers
+ * it takes it: one about a single criterion offers `accept <n>` alone.
+ */
+export const ALL = "all";
+
+/**
+ * The argument a reason starts with, when it is one of `args`: after
+ * `and`, `&` or a comma, or alone when it is a number (`accept 1 and 2
+ * <reason>`, `accept 1 2 <reason>`; a provider's name may start a reason).
+ * An answer that names one argument and then such a reason would read as
+ * deciding several while it decides one, so it is refused.
+ */
+export function leadingArg(
+  reason: string | undefined,
+  args: readonly string[],
+): string | undefined {
+  const lead = reason
+    ? /^(and\s+|&\s*|,\s*)?([^\s,.;:&]+)(?=[\s,.;:]|$)/i.exec(reason)
+    : null;
+  return lead &&
+    args.includes(lead[2]!) &&
+    (lead[1] !== undefined || /^\d+$/.test(lead[2]!))
+    ? lead[2]
+    : undefined;
+}
+
+/**
+ * The parts a `list` option's text gives (`HoldOption.list`), or why it
+ * gives none. Each entry reads `<answer> <arg>[,<arg>...] <text>`, one per
+ * line, or after a `;` that the next entry follows (`accept 1,2 It ran;
+ * refuse 3 It didn't`); a leading `-` or `*` is a list bullet, and a comma
+ * may have spaces around it (`accept 1, 2 It ran`). Each names options of
+ * `options` with an argument (not another covering or list one), each
+ * argument once, with text where its option needs it. An entry whose
+ * text starts with another argument (`accept 1 and 2 It ran`) is refused,
+ * never read as deciding only the first (`leadingArg`).
+ */
+export function answerList(
+  text: string,
+  options: readonly HoldOption[],
+): AnswerPart[] | string {
+  const single = options.filter(
+    (option) => option.arg !== undefined && !option.covers && !option.list,
+  );
+  const forms = single.map((option) => `\`${answerForm(option)}\``).join(", ");
+  if (!single.length) return "This question offers no answers to list.";
+  const answers = [...new Set(single.map((option) => option.answer))];
+  const args = [...new Set(single.map((option) => option.arg!))];
+  // A `;` splits only where an entry follows it, so a reason can hold one.
+  const next = new RegExp(
+    `;\\s*(?=(?:${answers.map(literal).join("|")})\\s+(?:${args.map(literal).join("|")})(?:[,\\s]|$))`,
+    "i",
+  );
+  const entries = text
+    .split(/\r?\n/)
+    .flatMap((line) => line.split(next))
+    .map((entry) => entry.trim().replace(/^[-*]\s+/, ""))
+    .filter(Boolean);
+  const parts: AnswerPart[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const match =
+      /^(\S+)\s+([^\s,]+(?:\s*,\s*[^\s,]+)*)(?:\s+([\s\S]*))?$/.exec(entry);
+    const answer = match ? match[1]!.toLowerCase() : undefined;
+    if (!match || answer === undefined || !answers.includes(answer))
+      return `"${entry.slice(0, 80)}" isn't an entry of the list: each reads \`<answer> <n>[,<n>...] <text>\`, one per line or after \`;\`, naming answers this question offers: ${forms}.`;
+    const reason = match[3]?.trim();
+    const listed = match[2]!.split(/\s*,\s*/);
+    const more = leadingArg(reason, args);
+    if (more !== undefined)
+      return `"${entry.slice(0, 80)}" names ${more} in its reason: list the criteria an entry decides comma-separated before its reason, \`${answer} ${[...listed, more].join(",")} <text>\`.`;
+    for (const arg of listed) {
+      const option = single.find(
+        (one) => one.answer === answer && one.arg === arg,
+      );
+      if (!option)
+        return `\`${answer} ${arg}\` isn't an answer to this question; it offers ${forms}.`;
+      if (seen.has(arg))
+        return `The list names ${arg} more than once; name each once.`;
+      if (option.needsText && !reason)
+        return `\`${answer} ${arg}\` needs text after it in the list, for example \`${answer} ${arg} <your text>\`.`;
+      seen.add(arg);
+      parts.push({ answer, arg, ...(reason ? { text: reason } : {}) });
+    }
+  }
+  return parts.length
+    ? parts
+    : `The list names no answer: give one entry per line, each \`<answer> <n>[,<n>...] <text>\`, from ${forms}.`;
+}
+
+/**
+ * A closing's answer as its question's history shows it: the answer with
+ * its argument, then the answers it gave at once (`parts`), as in
+ * `decide (accept 1, refuse 2)`.
+ */
+export function closingAnswer(
+  closing: Pick<HoldClosing, "answer" | "arg" | "parts">,
+): string {
+  const answer = [closing.answer, closing.arg]
+    .filter((part) => part !== undefined && part !== "")
+    .join(" ");
+  return closing.parts?.length
+    ? `${answer} (${closing.parts.map((part) => `${part.answer} ${part.arg}`).join(", ")})`
+    : answer;
+}
+
 /**
  * How an answer reached Factory: `factory answer` (or `factory retry
  * --question`, `factory cancel`), a `/factory` comment, or Factory itself
@@ -161,6 +296,8 @@ export interface Answer {
   /** The option's argument, for a parameterized answer (`accept 2`). */
   arg?: string;
   text?: string;
+  /** The answers it gave at once (`accept all`, `decide`): `HoldOption.covers`, `HoldOption.list`. */
+  parts?: AnswerPart[];
   /** A comment's author's GitHub login, the CLI's host user, or `factory`. */
   by: string;
   /** Who gave it on `by`'s behalf (`AnsweredVia`). */
@@ -201,6 +338,8 @@ export interface HoldClosing {
   arg?: string;
   /** Its text, whole (at most MAX_ANSWER_TEXT): cut only where it is shown, after redaction. */
   text?: string;
+  /** The answers it gave at once (`Answer.parts`), each with its text. */
+  parts?: AnswerPart[];
   /** Who answered or cancelled (as `Answer.by`); `deadline` when the deadline cancelled. */
   by?: string;
   as?: string;

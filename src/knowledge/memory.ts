@@ -403,9 +403,11 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
   for (const [step, answer] of Object.entries(state.answers)) {
     // A bare retry says nothing a later plan can use.
     if (!answer.text && answer.answer === "retry") continue;
-    // A review's accept or refuse is recorded above, with its criterion.
+    // A review's accept, refuse or decide is recorded above, per criterion.
     if (
-      (answer.answer === "accept" || answer.answer === "refuse") &&
+      (answer.answer === "accept" ||
+        answer.answer === "refuse" ||
+        answer.answer === "decide") &&
       (step === "final-review" || step.endsWith(":review"))
     )
       continue;

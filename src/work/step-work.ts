@@ -39,12 +39,15 @@ import {
   worktreePath,
 } from "../worktree.js";
 import { blameAmendment, discoveryOutcome } from "./amend.js";
-import { collect, type HandoffNote } from "./collect.js";
+import { collect, type HandoffNote, VALIDATE_LOGS } from "./collect.js";
 import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
-import type { WorkerValidateFailure } from "./self-validate.js";
+import {
+  stageValidateLog,
+  type WorkerValidateFailure,
+} from "./self-validate.js";
 import { itemMemory } from "./shared.js";
 import { correctsMedia, repairOutcome } from "./step-deliver.js";
 import { refusalDecisions } from "./step-review.js";
@@ -385,6 +388,7 @@ export async function workStep(
     );
     const pin = packageManagerUpdate(shown.blocks);
     const memory = await itemMemory("work", item, context, deps, base);
+    const validateLog = await stageValidateLog(worktree, finding);
     const profile = item.executionProfile?.id;
     const instructions =
       profile === undefined
@@ -407,6 +411,7 @@ export async function workStep(
         ? { formatCommand: config.validation.formatCommand }
         : {}),
       ...(repair ? { repair: repair.context } : {}),
+      ...(validateLog ? { validateLog } : {}),
       mediaInputs: [
         ...inputs.value,
         ...(await sentBackInputs(item.id, sentBack ?? [])),
@@ -463,7 +468,7 @@ export async function workStep(
       deps.config.secrets,
       {
         transcript: context.runFile("transcript"),
-        changes: () => changedFiles(worktree, signal),
+        changes: () => workerChanges(worktree, signal),
       },
     );
     const { spend, session, ...result } = await worker
@@ -609,7 +614,8 @@ export async function workStep(
     playbook: config.planning.playbook,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
-    // New candidates are a new result, even on the refused tree.
+    // New candidates are a new result, even on the refused tree, and so is
+    // that tree after an accepted amendment, until a result is refused again.
     refusedTree: refusedTreeFor(state, item.id, {
       sets,
       selectionStands: own !== undefined,
@@ -771,7 +777,17 @@ async function holdsNoChange(
   const head = (await hostGit(worktree, ["rev-parse", "HEAD"], { signal }))
     .toString("utf8")
     .trim();
-  return head === base && (await changedFiles(worktree, signal)).length === 0;
+  return head === base && (await workerChanges(worktree, signal)).length === 0;
+}
+
+/** The worker's changed files (`changedFiles`); Factory's validation logs are none. */
+async function workerChanges(
+  worktree: string,
+  signal: AbortSignal,
+): Promise<string[]> {
+  return (await changedFiles(worktree, signal)).filter(
+    (path) => !path.startsWith(`${VALIDATE_LOGS}/`),
+  );
 }
 
 /** The longest worker final response a question quotes. */

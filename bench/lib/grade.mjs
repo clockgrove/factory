@@ -10,10 +10,11 @@
  * checkout, with BENCH_TREE (the checkout), BENCH_COMMIT (the commit),
  * BENCH_DEFINITION (the definition file) and BENCH_OUT (where to write) in
  * its environment. It writes `{ graderVersion, criteria: [{ id, text,
- * verdict, method, evidence }] }` to BENCH_OUT, each verdict `pass`, `fail`
- * or `unknown`. The harness never interprets criteria itself: a grader
- * that fails, times out or writes anything else is recorded as
- * `grade.error`, never as a pass rate.
+ * verdict, method, evidence }], metrics }` to BENCH_OUT, each verdict
+ * `pass`, `fail` or `unknown`; `metrics`, optional, maps a name to a number,
+ * such as the delivered tests' mutation score (#2224). The harness never
+ * interprets criteria itself: a grader that fails, times out or writes
+ * anything else is recorded as `grade.error`, never as a pass rate.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -141,6 +142,17 @@ export function commitTime(repo, sha) {
 export function freshCheckout(repo, commit) {
   const root = mkdtempSync(join(tmpdir(), "bench-grade-"));
   const tree = join(root, "tree");
+  try {
+    checkoutInto(repo, commit, tree);
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+  return { root, tree };
+}
+
+/** `commit` of repository `repo` checked out into the new directory `tree`, as freshCheckout does. */
+export function checkoutInto(repo, commit, tree) {
   const env = { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" };
   const run = (args) =>
     execFileSync("git", args, { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -148,16 +160,14 @@ export function freshCheckout(repo, commit) {
     run(["clone", "--quiet", "--shared", "--no-checkout", repo, tree]);
     run(["-C", tree, "checkout", "--quiet", "--detach", commit]);
   } catch (error) {
-    rmSync(root, { recursive: true, force: true });
     throw new Error(
       `can't check out ${commit} from ${repo}: ${String(error.stderr ?? error.message).trim()}`,
     );
   }
-  return { root, tree };
 }
 
 /** The command run in a shell of its own process group, killed whole at `timeoutMs`. */
-function runCommand(command, { cwd, env, timeoutMs }) {
+export function runCommand(command, { cwd, env, timeoutMs }) {
   return new Promise((resolve) => {
     const child = spawn(command, {
       shell: true,
@@ -204,8 +214,18 @@ function graderOutput(text) {
     throw new Error("BENCH_OUT has no graderVersion");
   if (!Array.isArray(value.criteria) || !value.criteria.length)
     throw new Error("BENCH_OUT has no criteria");
+  const metrics = value.metrics ?? {};
+  if (
+    typeof metrics !== "object" ||
+    Array.isArray(metrics) ||
+    !Object.values(metrics).every(
+      (n) => typeof n === "number" && Number.isFinite(n),
+    )
+  )
+    throw new Error("BENCH_OUT's metrics must map each name to a number");
   return {
     graderVersion: value.graderVersion,
+    metrics: { ...metrics },
     criteria: value.criteria.map((criterion, index) => {
       if (
         typeof criterion?.id !== "string" ||
@@ -234,14 +254,16 @@ const failed = (commit, error, graderVersion = null) => ({
   unknown: null,
   passRate: null,
   criteria: [],
+  metrics: {},
   error,
 });
 
 /**
  * Run the definition's grader on `commit` of repository `repo` (a fresh
  * checkout, removed after). The grade: per-criterion verdicts as the
- * grader gave them, and `passRate`, the share of criteria it passed (an
- * unknown verdict is not a pass). A failure is `error`, never a rate.
+ * grader gave them, `passRate`, the share of criteria it passed (an
+ * unknown verdict is not a pass), and the grader's own `metrics`. A
+ * failure is `error`, never a rate.
  */
 export async function runGrader(definition, { repo, commit }) {
   const { command, timeoutMinutes } = definition.grader;
@@ -296,6 +318,7 @@ export async function runGrader(definition, { repo, commit }) {
       unknown: count("unknown"),
       passRate: count("pass") / graded.criteria.length,
       criteria: graded.criteria,
+      metrics: graded.metrics,
     };
   } finally {
     rmSync(checkout.root, { recursive: true, force: true });

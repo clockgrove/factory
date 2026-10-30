@@ -421,6 +421,11 @@ export class RunFile {
     this.grew();
   }
 
+  /** The file's text as `readRunFile` joins it, or undefined when no segment is on disk. */
+  read(): { text: string; cut: boolean } | undefined {
+    return readRunFile(this.logs, this.file, this.secrets);
+  }
+
   /** Remove every segment: the run's budget dropped this file. */
   remove(): void {
     this.closed = true;

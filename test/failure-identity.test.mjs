@@ -151,6 +151,37 @@ test("the same failed command, ending the same way, is a repeat whatever its out
   );
 });
 
+test("a long failure kept whole in a file named by its content is unchanged whatever that file's name", () => {
+  // work/step-validate.ts names the kept output's file by its content, so the
+  // same failure with other timings is kept under another name (#2201).
+  const kept = (text, name) =>
+    `${text}\n[The complete output is kept for the operator at /home/op/.local/state/factory/work/outputs/a/${name}.txt. The repair diagnosis can ask for it as .factory-validate/validate.log, and the next worker attempt reads it there in its checkout.]`;
+  const keptFirst = kept(first, "0123456789abcdef");
+  const keptSecond = kept(second, "fedcba9876543210");
+  assert.equal(
+    unchangedFailure(
+      keptSecond,
+      [{ ...tried, failure: keptFirst }],
+      2,
+      npmTest,
+    ),
+    true,
+  );
+  // Another test failing is still another output, whatever the file's name.
+  assert.equal(
+    unchangedFailure(
+      kept(
+        first.replace("sum is 3", "sum of nothing is 0"),
+        "fedcba9876543210",
+      ),
+      [{ ...tried, failure: keptFirst }],
+      2,
+      npmTest,
+    ),
+    false,
+  );
+});
+
 test("the same command failing on another test moved: it is the same failure for a repeated correction, never unchanged", async () => {
   // Repair 1 fixed "sum is 3"; now "sum of nothing is 0" fails, exit 1.
   const moved = `Validation command failed (1): npm test: \n2026-10-29T19:02:11.004Z sum.test.js\n  not ok 2 - sum of nothing is 0\n  at /tmp/factory-d4e5f6/src/a.js:4\n# duration 1093ms`;

@@ -51,6 +51,7 @@ import { validPath } from "../objective.js";
 import { ContainedError, copyContained, pathInsideRoot } from "../paths.js";
 import { writeAtomic } from "../state.js";
 import { errorMessage } from "../text.js";
+import { VALIDATE_LOGS } from "../work/collect.js";
 import {
   targetOf,
   type Worker,
@@ -267,6 +268,7 @@ async function pack(
   };
   walk(PRIVATE_STAGING);
   walk(".factory-handoff.json");
+  walk(VALIDATE_LOGS);
   const paths = [...new Set([...listed, ...staging])].filter(
     // A tracked file the worker deleted is listed but absent.
     (path) => lstatSync(join(worktree, path), { throwIfNoEntry: false }),
@@ -370,7 +372,9 @@ async function apply(
     preserveOwner: false,
   });
   const own = (path: string) =>
-    path !== PRIVATE_STAGING && !path.startsWith(`${PRIVATE_STAGING}/`);
+    [PRIVATE_STAGING, VALIDATE_LOGS].every(
+      (staging) => path !== staging && !path.startsWith(`${staging}/`),
+    );
   const target = (path: string) => {
     const absolute = join(worktree, path);
     if (!pathInsideRoot(absolute, worktree))

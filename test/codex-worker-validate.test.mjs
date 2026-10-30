@@ -231,6 +231,97 @@ test("a Codex worker's Codex runs Validate through Factory's MCP server: the ite
   }
 });
 
+// Live (#2201), a Codex worker's Validate result kept an excerpt of a
+// check's output without its errors, and the worker could not see them.
+// The complete output is a log in its checkout, which its own shell reads.
+test("a Codex worker's shell reads the complete output of a command its Validate failed, from the log the result names (#2201)", async () => {
+  const worktree = join(tempDir("factory-codex-validate-log-"), "w");
+  mkdirSync(join(worktree, "src"), { recursive: true });
+  git(worktree, "init", "--quiet");
+  writeFileSync(
+    join(worktree, "check.sh"),
+    'seq 1 20000\necho "src/feature.js:1:1 error: the feature is missing"\nseq 20001 40000\nexit 1\n',
+  );
+  git(worktree, "add", ".");
+  git(worktree, "commit", "--quiet", "-m", "base");
+  const base = git(worktree, "rev-parse", "HEAD");
+  writeFileSync(join(worktree, "src", "feature.js"), "exports.feature = 1;\n");
+  const failing = item("failing", {
+    ownedPaths: ["src/feature.js"],
+    validation: [{ command: "sh check.sh" }],
+  });
+  const log = new RunLog(logs, "2026-01-01T00-00-00-000Z-3", CAPTURE_OFF, []);
+  const validation = await CodexValidate.start(
+    {
+      worktree,
+      prompt: "",
+      item: failing,
+      commands: ["sh check.sh"],
+      base,
+      signal: AbortSignal.timeout(300_000),
+      log: () => {},
+      activity: () => {},
+      output: () => {},
+      runFile: (kind) => log.runFile(1, `item:failing:work#1.${kind}`),
+    },
+    {
+      sandbox,
+      plan: plan([failing], { base }),
+      blocks: [],
+      repository: REPO,
+      commandTimeoutMs: 60_000,
+    },
+  );
+  assert.ok(validation instanceof CodexValidate, JSON.stringify(validation));
+  const home = codexWorkerHome(
+    worktree,
+    false,
+    [],
+    sandbox,
+    undefined,
+    validation.config(),
+  );
+  const codex = codexAppServer(home, worktree);
+  try {
+    await codex.request("initialize", {
+      clientInfo: { name: "factory-test", version: "0" },
+    });
+    codex.notify("initialized");
+    const { thread } = await codex.request("thread/start", {
+      cwd: worktree,
+      approvalPolicy: "never",
+    });
+    const called = await codex.request("mcpServer/tool/call", {
+      threadId: thread.id,
+      server: "factory-validation",
+      tool: "run_validation",
+      arguments: {},
+    });
+    const text = called.content.map((part) => part.text).join("");
+    const logged = ".factory-validate/run-1-sh-check.sh.log";
+    assert.ok(text.includes(`is in ${logged} in your checkout`), text);
+    // The excerpt leaves the middle out; the log has every line.
+    assert.ok(!text.includes("\n12345\n"));
+    const shell = await codex.request("command/exec", {
+      command: [
+        "sh",
+        "-c",
+        `grep -x 12345 ${logged} && grep -A1 "error: the feature is missing" ${logged} && wc -l < ${logged}`,
+      ],
+      cwd: worktree,
+    });
+    assert.equal(shell.exitCode, 0, JSON.stringify(shell));
+    assert.equal(
+      shell.stdout,
+      "12345\nsrc/feature.js:1:1 error: the feature is missing\n20001\n40002\n",
+    );
+  } finally {
+    codex.end();
+    await validation.close();
+    rmSync(home.root, { recursive: true, force: true });
+  }
+});
+
 // Live (Clockgrove #800), one Codex worker call made 65 `wait` rounds
 // during 27 minutes of Validate, an estimated 6M tokens: Codex code mode's
 // exec yielded after about 30 s and the model polled the running call. The

@@ -307,6 +307,8 @@ test("grade: the stand-in grader's mixed verdicts on a fresh checkout at the end
       unknown: 1,
       passRate: 3 / 5,
       criteria: ["pass", "pass", "pass", "fail", "unknown"],
+      // The grader's own metrics are carried into the card (#2224).
+      metrics: { mutationScore: 0.75 },
     },
   );
   assert.deepEqual(card.grade.criteria[2], {
@@ -407,16 +409,22 @@ test("grade: a grader that fails, times out or writes nonsense is an error, neve
       `node -e "require('fs').writeFileSync(process.env.BENCH_OUT, JSON.stringify({graderVersion: '1', criteria: [{id: 'a', verdict: 'mostly'}]}))"`,
       /criterion 1 needs an id and a verdict of pass, fail, unknown/,
     ],
+    [
+      "words a metric",
+      `node -e "require('fs').writeFileSync(process.env.BENCH_OUT, JSON.stringify({graderVersion: '1', criteria: [{id: 'a', verdict: 'pass'}], metrics: {mutationScore: 'high'}}))"`,
+      /^BENCH_OUT's metrics must map each name to a number/,
+    ],
     ["writes nothing", "true", /^the grader wrote nothing to BENCH_OUT/],
   ];
   for (const [name, command, error, timeoutMinutes = 1] of cases) {
     const card = await harness();
-    const definition = definitionWith(name.replace(" ", "-"), (d) => {
+    const definition = definitionWith(name.replaceAll(" ", "-"), (d) => {
       d.grader = { command, timeoutMinutes };
     });
     await gradeCard(card, definition, { repo: repo.checkout });
     assert.match(card.grade.error, error, name);
     assert.equal(card.grade.passRate, null, name);
+    assert.deepEqual(card.grade.metrics, {}, name);
     assert.equal(card.grade.passed, null, name);
     assert.equal(card.escapes.graderFailedPassed, null, name);
     assert.equal(card.escapes.total, 2, name);

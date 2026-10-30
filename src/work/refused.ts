@@ -43,7 +43,12 @@ export function refusedOf(
  * stands). The refused tree is the work commit's, before the select step
  * wrote the chosen set on it, so new candidates (a refusal about the media
  * drops the selection) are a new result even on that same tree: for an
- * item that owns only its destinations, the base's.
+ * item that owns only its destinations, the base's. A refused result an
+ * accepted amendment changed the plan for since (its `amended`, amend.ts
+ * `amendedAttempt`) has none either: the plan its tree was judged under is
+ * gone, so that tree left as it is is a result, validated and reviewed
+ * under the amended plan, until a repair refuses a result again (a new
+ * refused fact). A result with media keeps the rule above.
  */
 export function refusedTreeFor(
   state: ObjectiveState,
@@ -51,7 +56,10 @@ export function refusedTreeFor(
   result: { sets: readonly CandidateSet[]; selectionStands: boolean },
 ): string | undefined {
   if (result.sets.length > 0 && !result.selectionStands) return undefined;
-  return refusedOf(state, id)?.tree;
+  const refused = refusedOf(state, id);
+  if (result.sets.length === 0 && refused?.amended !== undefined)
+    return undefined;
+  return refused?.tree;
 }
 
 /**

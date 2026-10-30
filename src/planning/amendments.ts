@@ -12,7 +12,12 @@ import { readBlobs } from "../git.js";
 import { code, prose } from "../markdown.js";
 import { validPath } from "../objective.js";
 import { logRefused } from "../providers/usage.js";
-import { EVIDENCE_NAMED_BYTES, namesPath, treeFiles } from "../repair.js";
+import {
+  EVIDENCE_NAMED_BYTES,
+  type FailureIdentity,
+  namesPath,
+  treeFiles,
+} from "../repair.js";
 import {
   type Answer,
   type AnsweredVia,
@@ -20,7 +25,9 @@ import {
   type ObjectiveState,
   recordClosed,
 } from "../state.js";
+import { failureExcerpt } from "../text.js";
 import { fact, facts } from "../work/facts.js";
+import { mergeOf } from "../work/merged.js";
 import type { WorkerValidateFailure } from "../work/self-validate.js";
 import { hostGit, hostGitExit } from "../worktree.js";
 import { checkPlan } from "./checks.js";
@@ -154,6 +161,16 @@ import {
  * - A rejected amendment is replaced only by a proposal that repeats its
  *   discovery and worker, with the rejection as diagnosis and a new
  *   correction (`rejectionStep` builds it).
+ * - An item that provides a prerequisite current items need (a toolchain,
+ *   CI provisioning, a shared fixture) names them in the answer's
+ *   `enables`, and Factory makes each depend on it (`enabling`), a started
+ *   or published one too: it waits for that item's merge instead of failing
+ *   the same way on every repair (#2233). The planner and the review are
+ *   told which current items are failing CI or validation
+ *   (`failingItems`), never left to read it from prose. A proposal for an
+ *   item's missing prerequisite (`AmendmentProposal.prerequisite`, a repair
+ *   diagnosis's `depend`) is refused by the fence until its item depends
+ *   on the provider.
  *
  * Proposals are kept one per key (`amend:<id>:proposal`, plan.ts
  * `proposalKey`), in the order they were taken in, each stamped with the
@@ -163,8 +180,9 @@ import {
  * `factory propose-amendment` (`proposeAmendment`, applied by the
  * service), a worker's discovery or a merged predecessor's blame answered
  * `amend` (work/steps.ts), a repair diagnosis's or a read-only QA item's
- * question answered `replace-validation` (work/amend.ts), and a rejection
- * answered `replace` or `replace-validation`.
+ * question answered `replace-validation`, a repair diagnosis's missing
+ * prerequisite answered `depend` (work/amend.ts), and a rejection answered
+ * `replace` or `replace-validation`.
  */
 
 /** A worker's or operator's proposal of further work, as `.factory-discovery.json` holds it. */
@@ -183,7 +201,8 @@ export interface AmendmentProposal {
    * discovery, `blame-<item>-<repair>` for a merged predecessor's blame,
    * `validation-<item>-<repair>` for a repair diagnosis's
    * `replace-validation` (`validation-<item>-<n>` for a QA item's, its
-   * n-th proposal), or `<rejected>-r<n>` for a replacement.
+   * n-th proposal), `prerequisite-<item>-<repair>` for a repair
+   * diagnosis's `depend`, or `<rejected>-r<n>` for a replacement.
    */
   id: string;
   actor: string;
@@ -203,6 +222,17 @@ export interface AmendmentProposal {
   commit?: string;
   /** A replacement of a rejected amendment, with the operator's diagnosis. */
   replacement?: { amendmentId: string; diagnosis: string; correction: string };
+  /**
+   * The missing prerequisite it is for (a repair diagnosis's `depend`): the
+   * fence refuses a round that doesn't make its item depend on its provider.
+   */
+  prerequisite?: Prerequisite;
+}
+
+/** Work Item `itemId`'s failure is a missing prerequisite that Work Item `provider` provides (#2233). */
+export interface Prerequisite {
+  itemId: string;
+  provider: string;
 }
 
 /** The saved outcome of one amendment (`amend:<id>`). */
@@ -233,6 +263,13 @@ interface AmendRound {
   round?: number;
   /** The started items' fields Factory set back in its answer and draft (`restoreStarted`). */
   restored?: RestoredFields[];
+  /**
+   * The `enables` of this round and the amendment's earlier ones whose
+   * edges it holds (`enabling`): the fence lets a started item grow
+   * by them, and acceptance has each started item they name brought up to
+   * date once its new dependencies merged (work/facts.ts `enabled`).
+   */
+  enables?: Enables[];
   /**
    * The planner answered cannotPlan: the round has no draft, and its
    * review judges the refusal. Its answer is the current plan with the
@@ -286,6 +323,12 @@ interface AmendRevision {
   findings: Finding[];
   /** The started items' fields Factory set back in it (`restoreStarted`): the next round is told. */
   restored?: RestoredFields[];
+  /**
+   * The `enables` entries Factory made edges of in it and the rounds before
+   * (`enabling`): its answer holds those edges, so they stand in the next
+   * round whether or not its answer names them again.
+   */
+  enables?: Enables[];
   /** Sent back by acceptance, after its review: the next round is reviewed again. */
   atAcceptance?: true;
   /** The round was the planner's cannotPlan, which its review found a plan allows: the next round is told. */
@@ -481,6 +524,16 @@ export function proposalProblems(
     (typeof proposal.commit !== "string" || !COMMIT.test(proposal.commit))
   )
     problems.push("An amendment's commit is a full commit id");
+  if (proposal.prerequisite !== undefined) {
+    const { itemId, provider }: Partial<Prerequisite> =
+      proposal.prerequisite ?? {};
+    const planned = (id: unknown) =>
+      plan?.items.some((item) => item.id === id) ?? false;
+    if (itemId === provider || !planned(itemId) || !planned(provider))
+      problems.push(
+        "A prerequisite names two different items of the current plan: the one whose failure lacks it, and the one that provides it",
+      );
+  }
   if (!proposal.replacement) {
     if (ledger.rejected)
       problems.push(
@@ -926,6 +979,289 @@ export function askedAgain(
     `${question}\n\nYour \`replace-validation\` answer wasn't taken: ${problem}.`,
     offers,
   );
+}
+
+// ── Prerequisites an item provides ──────────────────────────────────────
+
+/**
+ * The amendment answer's field that names, for an item that provides a
+ * prerequisite (a toolchain, CI provisioning, a shared fixture), the
+ * current items that need it (#2233). Live, an amendment added the item
+ * that provisions a failing item's browser for CI, but left the failing
+ * item not depending on it, so its CI ran before the provisioning was on
+ * the default branch and failed the same way on every repair.
+ */
+const ENABLES_FIELD = "enables";
+
+/** One `enables` entry: Work Item `itemId` provides a prerequisite that each of `enables`, current items yet to merge, needs. */
+export interface Enables {
+  itemId: string;
+  enables: string[];
+}
+
+/** `schema` with the `enables` field added, which every amendment answer gives. */
+function withEnables(schema: Record<string, unknown>): Record<string, unknown> {
+  const { properties, required } = schema as {
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+  return {
+    ...schema,
+    properties: {
+      ...properties,
+      [ENABLES_FIELD]: {
+        type: "array",
+        description:
+          "For each item that provides a prerequisite current items need (a toolchain, CI provisioning, a shared fixture, a service), the ids of those items: Factory makes each depend on it, a started item too, so it waits for that item's merge. [] when no item provides one.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            itemId: { type: "string", minLength: 1 },
+            enables: { type: "array", minItems: 1, items: { type: "string" } },
+          },
+          required: ["itemId", "enables"],
+        },
+      },
+    },
+    required: [...(required ?? []), ENABLES_FIELD],
+  };
+}
+
+/**
+ * The answer without its `enables`, and the entries; or why they are a
+ * broken answer. An answer without the field enables nothing.
+ */
+function takeEnables(
+  value: unknown,
+): { value: unknown; enables: Enables[] } | { problem: string } {
+  if (!isObject(value) || !(ENABLES_FIELD in value))
+    return { value, enables: [] };
+  const { [ENABLES_FIELD]: given, ...rest } = value;
+  if (
+    !Array.isArray(given) ||
+    !given.every(
+      (entry) =>
+        isObject(entry) &&
+        typeof entry.itemId === "string" &&
+        Array.isArray(entry.enables) &&
+        entry.enables.every((id) => typeof id === "string"),
+    )
+  )
+    return {
+      problem:
+        "Planner enables must be a list of { itemId, enables } entries: the id of an item that provides a prerequisite, and the ids of the current items that need it",
+    };
+  return {
+    value: rest,
+    enables: (given as Enables[]).map(({ itemId, enables }) => ({
+      itemId,
+      enables: [...new Set(enables)],
+    })),
+  };
+}
+
+/**
+ * The full `answer` with each `enables` entry made dependency edges: every
+ * item it names depends on its item. An entry for an item the answer
+ * lacks, or naming one that isn't another of `current`'s items yet to
+ * merge, or a layer of a started native stack (`stacked`, which a new
+ * dependency would take out of its stack), makes no edge and a finding
+ * that says what passes. `made`: the entries as far as they made edges.
+ */
+function enabling(
+  answer: unknown,
+  enables: readonly Enables[],
+  current: Plan,
+  state: ObjectiveState,
+  stacked: ReadonlyMap<string, string>,
+): { answer: unknown; findings: Finding[]; made: Enables[] } {
+  if (!enables.length || !isObject(answer) || !Array.isArray(answer.items))
+    return { answer, findings: [], made: [] };
+  const items = structuredClone(answer.items as unknown[]);
+  const byId = new Map(items.filter(isObject).map((item) => [item.id, item]));
+  const findings: Finding[] = [];
+  const made: Enables[] = [];
+  for (const { itemId, enables: ids } of enables) {
+    if (!byId.has(itemId)) {
+      findings.push({
+        source: "check",
+        message: `enables names ${JSON.stringify(itemId)}, which is not an item of this plan; give each entry the id of the item that provides the prerequisite`,
+      });
+      continue;
+    }
+    const edges: string[] = [];
+    for (const id of ids) {
+      const dependent = byId.get(id);
+      const dependencies = dependent?.dependencies;
+      const stack = stacked.get(id);
+      if (stack !== undefined) {
+        findings.push({
+          source: "check",
+          message: `${itemId}'s enables names ${id}, a layer of the started native stack ${stack}: a new dependency would take it out of that stack, whose layers an amendment keeps, so leave it out of enables`,
+          itemId,
+        });
+        continue;
+      }
+      if (
+        id === itemId ||
+        !current.items.some((item) => item.id === id) ||
+        mergeOf(state, id) ||
+        !dependent ||
+        !Array.isArray(dependencies)
+      ) {
+        findings.push({
+          source: "check",
+          message: `${itemId}'s enables names ${JSON.stringify(id)}, which is not another item of the plan being amended that has yet to merge; name only the current items that need what ${itemId} provides (a new item depends on it through its own dependencies)`,
+          itemId,
+        });
+        continue;
+      }
+      if (!dependencies.includes(itemId))
+        dependent.dependencies = [...dependencies, itemId];
+      edges.push(id);
+    }
+    if (edges.length) made.push({ itemId, enables: edges });
+  }
+  return { answer: { ...answer, items }, findings, made };
+}
+
+/** `enables` entries as one, by item, each item's ids in the order given. */
+function joinEnables(...lists: (readonly Enables[] | undefined)[]): Enables[] {
+  const byItem = new Map<string, Set<string>>();
+  for (const { itemId, enables } of lists.flatMap((list) => list ?? []))
+    for (const id of enables)
+      byItem.set(itemId, (byItem.get(itemId) ?? new Set()).add(id));
+  return [...byItem].map(([itemId, ids]) => ({ itemId, enables: [...ids] }));
+}
+
+/** The `enables` entries as far as `draft` holds their edges. */
+function heldEnables(enables: readonly Enables[], draft: Draft): Enables[] {
+  return enables.flatMap(({ itemId, enables: ids }) => {
+    const held = ids.filter((id) =>
+      draft.items.find((item) => item.id === id)?.dependencies.includes(itemId),
+    );
+    return held.length ? [{ itemId, enables: held }] : [];
+  });
+}
+
+/**
+ * Under native-stack delivery, each layer of a started stack of more than
+ * one item, with the stack (`x > a`). A layer takes no new dependency: one
+ * with two leaves its chain (planning/units.ts), which changes the stack's
+ * layers, and the fence keeps those.
+ */
+export function startedStacks(
+  plan: Pick<Plan, "items" | "coverage">,
+  started: ReadonlySet<string>,
+  nativeStack: boolean,
+): Map<string, string> {
+  const stacks = new Map<string, string>();
+  const split = nativeStack ? units(plan) : undefined;
+  if (!split || !("units" in split)) return stacks;
+  for (const unit of split.units) {
+    const ids = unit.items.map((item) => item.id);
+    if (ids.length > 1 && ids.some((id) => started.has(id)))
+      for (const id of ids) stacks.set(id, ids.join(" > "));
+  }
+  return stacks;
+}
+
+/** The started native stacks of `current` whose layers `next` changes, each as `x > a`. */
+function changedStacks(
+  current: Pick<Plan, "items" | "coverage">,
+  next: Pick<Plan, "items" | "coverage">,
+  started: ReadonlySet<string>,
+): string[][] {
+  const before = units(current);
+  const after = units(next);
+  if (!("units" in before) || !("units" in after)) return [];
+  return before.units
+    .map((unit) => unit.items.map((item) => item.id))
+    .filter(
+      (ids) =>
+        ids.some((id) => started.has(id)) &&
+        !after.units.some((candidate) =>
+          isDeepStrictEqual(
+            candidate.items.map((item) => item.id),
+            ids,
+          ),
+        ),
+    );
+}
+
+/**
+ * Under native-stack delivery, the started stack (`x > a`) that Work Item
+ * `itemId` depending on `provider` would change, which no amendment may:
+ * a repair diagnosis's `depend` isn't offered then (work/repair-context.ts
+ * `missingPrerequisite`). Undefined when it changes none.
+ */
+export function dependencyChangesStack(
+  plan: Plan,
+  started: ReadonlySet<string>,
+  itemId: string,
+  provider: string,
+): string | undefined {
+  const next = {
+    coverage: plan.coverage,
+    items: plan.items.map((item) =>
+      item.id === itemId
+        ? { ...item, dependencies: [...item.dependencies, provider] }
+        : item,
+    ),
+  };
+  return changedStacks(plan, next, started)[0]?.join(" > ");
+}
+
+/** The excerpt of each failing item's failure the planner and the review get, at most. */
+const FAILING_CHARS = 2000;
+
+/** A current item whose latest result failed CI or validation, as the amendment's planner and review get it. */
+export interface FailingItem {
+  itemId: string;
+  /** What failed: the checks, or the command (repair.ts `FailureIdentity`). */
+  failed: FailureIdentity;
+  /** How, bounded. */
+  failure: string;
+  /**
+   * The started native stack it is a layer of (`startedStacks`), which a
+   * new dependency would change: no `enables` entry may name it.
+   */
+  stack?: string;
+}
+
+/**
+ * The current items yet to merge whose latest result failed CI or
+ * validation and is being repaired (their `finding`), with what failed:
+ * the amendment's planner names those an added item provides for in its
+ * `enables`, and its review refuses one that leaves them out (#2233),
+ * except a layer of a started native stack (`stacked`), which can't wait
+ * for another item.
+ */
+export function failingItems(
+  state: ObjectiveState,
+  plan: Plan,
+  stacked: ReadonlyMap<string, string>,
+): FailingItem[] {
+  return plan.items.flatMap((item) => {
+    const finding = fact(state, "finding", item.id);
+    if (
+      finding?.kind !== "failure" ||
+      !finding.identity ||
+      !["ci", "validation", "format"].includes(finding.identity.kind) ||
+      mergeOf(state, item.id)
+    )
+      return [];
+    const stack = stacked.get(item.id);
+    return [
+      {
+        itemId: item.id,
+        failed: finding.identity,
+        failure: failureExcerpt(finding.detail, FAILING_CHARS),
+        ...(stack === undefined ? {} : { stack }),
+      },
+    ];
+  });
 }
 
 // ── The plan as amended ─────────────────────────────────────────────────
@@ -1449,13 +1785,21 @@ const obligationKey = (entry: {
  * A plan round's draft reaches it with its started items set back
  * (`restoreStarted`), so it finds what that can't settle; at acceptance it
  * also finds an item that started since. `answered` is true when the
- * operator answered a planner question about this amendment.
+ * operator answered a planner question about this amendment. `enables`:
+ * the round's entries (`enabling`), by which any started item's
+ * dependencies may grow. `prerequisite`: the proposal's, whose item must
+ * depend on its provider.
  */
 export function amendmentFindings(
   current: Plan,
   next: Draft,
   progress: AmendmentProgress,
-  options: { answered: boolean; nativeStack: boolean },
+  options: {
+    answered: boolean;
+    nativeStack: boolean;
+    enables?: readonly Enables[] | undefined;
+    prerequisite?: Prerequisite | undefined;
+  },
 ): Finding[] {
   const findings: Finding[] = [];
   const found = (message: string, itemId?: string) =>
@@ -1464,19 +1808,36 @@ export function amendmentFindings(
       message,
       ...(itemId ? { itemId } : {}),
     });
+  // By item, the items whose enables names it: it may depend on them.
+  const providers = new Map<string, Set<string>>();
+  for (const { itemId, enables } of options.enables ?? [])
+    for (const id of enables)
+      providers.set(id, (providers.get(id) ?? new Set()).add(itemId));
   for (const old of current.items) {
-    const item = next.items.find((entry) => entry.id === old.id);
-    if (!item) {
+    const given = next.items.find((entry) => entry.id === old.id);
+    if (!given) {
       found(
         `The amendment removes Work Item ${old.id}; keep every item (an unneeded pending item can change, not disappear)`,
         old.id,
       );
       continue;
     }
-    if (isDeepStrictEqual(normalized(item), normalized(old))) continue;
-    if (!progress.started.has(old.id)) continue;
     const replaceable = replaceableOf(progress, old.id);
     const reattempt = progress.reattempt.has(old.id);
+    // A dependency on an item that enables it is Factory's edge, which any
+    // started item takes; a reattempt item's grows as the rule says.
+    const enabled = providers.get(old.id);
+    const item =
+      enabled && !reattempt
+        ? {
+            ...given,
+            dependencies: given.dependencies.filter(
+              (id) => old.dependencies.includes(id) || !enabled.has(id),
+            ),
+          }
+        : given;
+    if (isDeepStrictEqual(normalized(item), normalized(old))) continue;
+    if (!progress.started.has(old.id)) continue;
     if (
       reattempt
         ? !reworks(old, item, replaceable)
@@ -1492,12 +1853,23 @@ export function amendmentFindings(
       const replacing = replaceable.length
         ? `, or a validation command Factory's validation or its worker's Validate failed it on, or the operator authorized replacing (${commands}), may be replaced, keeping every other command in its order`
         : "";
+      // Only dependencies added: the edge an enables entry makes, unnamed.
+      const added = item.dependencies.filter(
+        (id) => !old.dependencies.includes(id),
+      );
+      const waits =
+        !reattempt &&
+        added.length > 0 &&
+        isDeepStrictEqual(fields, ["dependencies"]) &&
+        old.dependencies.every((id) => item.dependencies.includes(id));
       found(
         reattempt
           ? `Work Item ${old.id} has started, so it keeps its spec, except that its owned paths or dependencies may grow, keeping every entry${replacing}, and only then may its acceptance, brief and non-goals be restated${changes}. Restore the rest, and put further work in a new item or grow its owned paths or dependencies to take it`
-          : replaceable.length
-            ? `Work Item ${old.id} has started, so it keeps its spec, except that a validation command the operator authorized replacing (${commands}) may be replaced, keeping every other command in its order${changes}. Restore the rest, and put further work in a new item`
-            : `Work Item ${old.id} has started, so it keeps its spec${changes}. Leave it as it is, and put further work in a new item`,
+          : waits
+            ? `Work Item ${old.id} has started, so it keeps its spec; this answer adds ${added.join(", ")} to its dependencies, and a started item depends on another only through that item's enables entry. Name ${old.id} in the enables entry of each of ${added.join(", ")} when ${old.id} needs what it provides, else leave ${old.id}'s dependencies as they are`
+            : replaceable.length
+              ? `Work Item ${old.id} has started, so it keeps its spec, except that a validation command the operator authorized replacing (${commands}) may be replaced, keeping every other command in its order${changes}. Restore the rest, and put further work in a new item`
+              : `Work Item ${old.id} has started, so it keeps its spec${changes}. Leave it as it is, and put further work in a new item`,
         old.id,
       );
       continue;
@@ -1517,6 +1889,17 @@ export function amendmentFindings(
         old.id,
       );
   }
+  const wanted = options.prerequisite;
+  if (
+    wanted &&
+    !next.items
+      .find((item) => item.id === wanted.itemId)
+      ?.dependencies.includes(wanted.provider)
+  )
+    found(
+      `This amendment is for Work Item ${wanted.itemId}'s failure, a missing prerequisite that Work Item ${wanted.provider} provides, and ${wanted.itemId} doesn't depend on ${wanted.provider}: name ${wanted.itemId} in ${wanted.provider}'s enables entry, so ${wanted.itemId} waits for ${wanted.provider}'s merge`,
+      wanted.itemId,
+    );
   const covered = new Set(next.coverage.map(obligationKey));
   for (const entry of current.coverage)
     if (!covered.has(obligationKey(entry)))
@@ -1540,26 +1923,21 @@ export function amendmentFindings(
       found(
         `The amendment drops the excluded source item at ${exclusion.source.path} lines ${exclusion.source.lines.join("-")}; list it again under sourceObligations as out-of-scope, or cover it`,
       );
-  if (options.nativeStack) {
-    const before = units(current);
-    const after = units(next);
-    if ("units" in before && "units" in after)
-      for (const unit of before.units) {
-        if (!unit.items.some((item) => progress.started.has(item.id))) continue;
-        const ids = unit.items.map((item) => item.id);
-        if (
-          !after.units.some((candidate) =>
-            isDeepStrictEqual(
-              candidate.items.map((item) => item.id),
-              ids,
-            ),
-          )
-        )
-          found(
-            `The amendment changes the started native stack ${ids.join(" > ")}; keep its layers as they are`,
-          );
-      }
-  }
+  if (options.nativeStack)
+    for (const ids of changedStacks(current, next, progress.started)) {
+      // A new dependency of a lone item or a stack's bottom on an item it
+      // alone depends on joins it to that item's stack (planning/units.ts).
+      const enabled = ids.filter(
+        (id) => providers.has(id) || id === wanted?.itemId,
+      );
+      found(
+        `The amendment changes the started native stack ${ids.join(" > ")}; keep its layers as they are${
+          enabled.length
+            ? `. ${enabled.join(", ")} took a new dependency (an enables entry, or the prerequisite), and an item whose only dependency is an item nothing else depends on joins that item's stack: make another item (such as the QA item) depend on the item that provides the prerequisite too`
+            : ""
+        }`,
+      );
+    }
   return findings;
 }
 
@@ -1571,13 +1949,15 @@ export function amendmentFindings(
  * answers with the complete plan instead of changes; `revising` when
  * currentPlan is the planner's own earlier answer that the checks or the
  * review refused. `refused`: the previous round's cannotPlan, which its
- * review found a plan allows.
+ * review found a plan allows. `prerequisite`: the proposal's
+ * (`AmendmentProposal.prerequisite`).
  */
 function amendmentRules(
   whole: boolean,
   revising: boolean,
   progress: AmendmentProgress,
   refused?: CannotPlan,
+  prerequisite?: Prerequisite,
 ): string {
   return [
     whole
@@ -1599,6 +1979,12 @@ function amendmentRules(
       : "Answer with only the changes that serve it. Keep every current item and every coverage entry and source exclusion.",
     startedItemRule(progress),
     "Add new items for further work, with ordinary source grounding.",
+    "When an item you add or change provides a prerequisite that current items need (a toolchain, CI provisioning, a shared fixture, a service), name those items in its enables entry: Factory makes each depend on it, a started or published item too, so it waits for that item's merge and is checked again on the default branch with it. Without that dependency it keeps failing the same way. failingItems, when present, lists the current items whose latest result failed CI or validation, with what failed: name such an item in the enables entry of the item that provides what its failure lacks, unless failingItems gives it a stack: it is a layer of a started native stack, which a new dependency would change, so no enables entry names it. Entries an earlier round of this amendment gave (earlierEnables, when present) stand: their dependencies are in currentPlan already, so an answer need not repeat them. Answer enables [] when no item provides one.",
+    ...(prerequisite
+      ? [
+          `This amendment is for Work Item ${prerequisite.itemId}'s failure, which its repair diagnosis traced to a missing prerequisite that Work Item ${prerequisite.provider} provides (prerequisite): name ${prerequisite.itemId} in ${prerequisite.provider}'s enables entry.`,
+        ]
+      : []),
     "An independent review judges a cannotPlan answer before Factory asks the operator, and sends it back to you when a rule or the evidence allows a plan.",
   ].join(" ");
 }
@@ -1617,7 +2003,7 @@ export function startedItemRule(progress: AmendmentProgress): string {
   const authorized = progress.authorized?.size
     ? ` The operator also authorized replacing validation commands (authorizedValidation, by item: ${JSON.stringify(Object.fromEntries([...progress.authorized].map(([id, entries]) => [id, entries.map((entry) => entry.command)])))}, each with the operator's reason; replaceableValidation lists them too): such a command of any started item, reattempt item or not, may be replaced, keeping every other command in its order, by commands that prove what it was there to prove, as the operator's reason says, keeping every assertion it makes. Only a reattempt item may restate its acceptance, brief and non-goals to match; any other started item changes nothing else.`
     : "";
-  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation, or the item's worker's Validate (which runs the declared commands as Factory's validation does), failed its result on (replaceableValidation, by item: ${replaceable}; workerValidateFailures, when present, holds each such worker's Validate failure with how the command ended and its output) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays.${authorized} Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation, or the item's worker's Validate (which runs the declared commands as Factory's validation does), failed its result on (replaceableValidation, by item: ${replaceable}; workerValidateFailures, when present, holds each such worker's Validate failure with how the command ended and its output) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays.${authorized} Any started item, reattempt item or not, published or not, also depends on each item whose enables entry names it: Factory adds that dependency itself, and nothing else of the item changes with it. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
 }
 
 /** An operator's authorization as the planner and the review get it. */
@@ -1872,7 +2258,15 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       // No planner answer to revise (factory reset rebuilt the plan): the
       // planner answers in full, with the plan as it stands to amend.
       const whole = base === undefined;
-      const schema = (whole ? planSchema : revisionSchema)(facts, wire);
+      const schema = withEnables(
+        (whole ? planSchema : revisionSchema)(facts, wire),
+      );
+      const nativeStack = config.delivery.kind === "native-stack";
+      const stacked = startedStacks(plan, progress.started, nativeStack);
+      const failing = failingItems(state, plan, stacked);
+      // The edges earlier rounds made are in the answer this one revises
+      // (each round sent back keeps them all); a whole answer has none.
+      const earlier = whole ? [] : (last?.enables ?? []);
       const lookups = plannerLookups(state, key, inputs, config);
       // Supplied files render once as literal blocks; a note stays inline.
       const cited = await citedFiles(
@@ -1889,7 +2283,13 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ? { planInForce: answeredPlan(currentPlan(state)) }
           : { currentPlan: base }),
         amendment: {
-          rules: amendmentRules(whole, Boolean(last), progress, last?.refused),
+          rules: amendmentRules(
+            whole,
+            Boolean(last),
+            progress,
+            last?.refused,
+            proposal.prerequisite,
+          ),
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
@@ -1902,6 +2302,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
           ...replaceableData(progress),
+          ...(failing.length ? { failingItems: failing } : {}),
+          ...(earlier.length ? { earlierEnables: earlier } : {}),
+          ...(proposal.prerequisite
+            ? { prerequisite: proposal.prerequisite }
+            : {}),
         },
         contextLookups: lookups.data,
       };
@@ -1964,14 +2369,27 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if ("outcome" in taken) return taken.outcome;
       // An answer clears the mark; an invalid one sets it again (invalidAnswer).
       context.keep({ [invalidKey(key)]: null });
-      const revised = whole
-        ? { answer: taken.value, findings: [] }
-        : applyRevision(base, taken.value, facts, wire);
+      const given = takeEnables(taken.value);
+      const enables = "enables" in given ? given.enables : [];
+      const revised: ReturnType<typeof applyRevision> =
+        "problem" in given
+          ? {
+              findings: [{ source: "check", message: given.problem }],
+              invalidShape: true,
+            }
+          : whole
+            ? { answer: given.value, findings: [] }
+            : applyRevision(base, given.value, facts, wire);
+      // Each enables entry made dependency edges first, so a started item
+      // keeps them as the rule lets it (`amendmentFindings`), with the
+      // earlier rounds' edges, which stand whether named again or not.
+      const enabled = enabling(revised.answer, enables, plan, state, stacked);
+      const made = joinEnables(earlier, enabled.made);
       // The answer with its started items set back as far as the
       // started-item rule allows, against the accepted plan's own answer;
       // a plan with none is set back in its decoded draft only.
       const restoredAnswer = restoreAnswer(
-        revised.answer,
+        enabled.answer,
         currentAnswer(state),
         progress,
       );
@@ -2003,7 +2421,10 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         findings: Finding[],
         restored?: RestoredFields[],
       ): Outcome =>
-        sendBack(state, proposal, answer, findings, reject, { restored });
+        sendBack(state, proposal, answer, findings, reject, {
+          restored,
+          enables: made,
+        });
       if (revised.invalidShape) return invalid(revised.findings);
       if (!full) return revise(base, revised.findings);
       const decoded = decodePlan(full, facts, wire);
@@ -2021,6 +2442,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ...(whole ? {} : { answer: full }),
           cannot: decoded.cannot,
           round,
+          // The edges its answer holds stand in the round after it.
+          ...(!whole && made.length ? { enables: made } : {}),
         } satisfies AmendRound);
       }
       if (decoded.question) {
@@ -2031,7 +2454,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         return asking(asked, { [ASKED_KEY(proposal.id)]: asked });
       }
       if (!decoded.plan)
-        return revise(full, decoded.findings, restoredAnswer.restored);
+        return revise(
+          full,
+          [...decoded.findings, ...enabled.findings],
+          restoredAnswer.restored,
+        );
       // The draft set back too: a plan with no answer of its own, or a
       // field the answer's form decodes differently.
       const kept = restoreStarted(
@@ -2060,20 +2487,25 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       // planner's to fix, like the checks' findings: both go back.
       const findings = [
         ...decoded.findings,
+        ...enabled.findings,
         // The proof checks judge only what this amendment adds or
         // changes, and what a started item can't take is a new item's.
         ...(await checkPlan(draft, facts, files, plan, plan, progress.started)),
         ...amendmentFindings(plan, draft, progress, {
           answered: answered.length > 0,
-          nativeStack: config.delivery.kind === "native-stack",
+          nativeStack,
+          enables: made,
+          prerequisite: proposal.prerequisite,
         }),
       ];
       if (findings.length) return revise(saved, findings, restored);
+      const held = heldEnables(made, draft);
       return done({
         ...(saved === undefined ? {} : { answer: saved }),
         draft,
         round,
         ...(restored.length ? { restored } : {}),
+        ...(held.length ? { enables: held } : {}),
       } satisfies AmendRound);
     },
   };
@@ -2089,8 +2521,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
  * `atAcceptance`: acceptance sends a reviewed round back, so the next
  * round is reviewed again (`reviewOf`). `restored`: the started items'
  * fields Factory set back in the round, kept with it for the next round.
- * `refused`: the round was the planner's cannotPlan, which the next round
- * is told its review overturned.
+ * `enables`: the entries whose edges its answer holds, which stand in the
+ * next round. `refused`: the round was the planner's cannotPlan, which the
+ * next round is told its review overturned.
  */
 function sendBack(
   state: ObjectiveState,
@@ -2101,10 +2534,12 @@ function sendBack(
   {
     atAcceptance = false,
     restored,
+    enables,
     refused,
   }: {
     atAcceptance?: boolean;
     restored?: RestoredFields[] | undefined;
+    enables?: Enables[] | undefined;
     refused?: CannotPlan | undefined;
   } = {},
 ): Outcome {
@@ -2132,6 +2567,7 @@ function sendBack(
           answer,
           findings,
           ...(restored?.length ? { restored } : {}),
+          ...(enables?.length ? { enables } : {}),
           ...(atAcceptance ? { atAcceptance: true as const } : {}),
           ...(refused ? { refused } : {}),
         } satisfies AmendRevision,
@@ -2253,6 +2689,15 @@ function amendReviewStep(
       const local = await localExecutables(inputs, config, signal);
       const previousPlan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, previousPlan, proposal);
+      const failing = failingItems(
+        state,
+        previousPlan,
+        startedStacks(
+          previousPlan,
+          progress.started,
+          config.delivery.kind === "native-stack",
+        ),
+      );
       const evidence = planningReviewEvidence({
         sources: facts.sources,
         decisions: all,
@@ -2269,6 +2714,14 @@ function amendReviewStep(
           reattemptItemIds: [...progress.reattempt],
           ...replaceableData(progress),
           startedItemRule: startedItemRule(progress),
+          // What the review refuses an added prerequisite without (#2233):
+          // the failing items, the edges the round made, and the
+          // prerequisite the proposal is for.
+          ...(failing.length ? { failingItems: failing } : {}),
+          ...(round.enables?.length ? { enables: round.enables } : {}),
+          ...(proposal.prerequisite
+            ? { prerequisite: proposal.prerequisite }
+            : {}),
           // What Factory set back of the planner's answer: the draft holds
           // those fields as previousPlan has them.
           ...(round.restored?.length ? { restoredFields: round.restored } : {}),
@@ -2366,7 +2819,7 @@ function amendReviewStep(
             round: round.round,
             rejected: `${said}Independent amendment review: ${findings.map((f) => f.message).join("; ")}`,
           } satisfies AmendReview),
-        { restored: round.restored, refused: cannot },
+        { restored: round.restored, enables: round.enables, refused: cannot },
       );
     },
   };
@@ -2410,18 +2863,16 @@ function amendAcceptStep(
       // while the amendment was planned may have started an item since.
       // The planner can leave it as it is, so the round goes back to it,
       // and the revised round is reviewed again.
-      const fence = amendmentFindings(
-        saved,
-        round.draft!,
-        amendmentProgress(state, saved, proposal),
-        {
-          answered: Boolean(
-            (state.kept[ANSWERS_KEY(proposal.id)] as unknown[] | undefined)
-              ?.length,
-          ),
-          nativeStack: deps.config.delivery.kind === "native-stack",
-        },
-      );
+      const progress = amendmentProgress(state, saved, proposal);
+      const fence = amendmentFindings(saved, round.draft!, progress, {
+        answered: Boolean(
+          (state.kept[ANSWERS_KEY(proposal.id)] as unknown[] | undefined)
+            ?.length,
+        ),
+        nativeStack: deps.config.delivery.kind === "native-stack",
+        enables: round.enables,
+        prerequisite: proposal.prerequisite,
+      });
       if (fence.length)
         return sendBack(
           state,
@@ -2432,7 +2883,11 @@ function amendAcceptStep(
             done({
               rejected: `The build moved on while the amendment was planned: ${findings.map((f) => f.message).join("; ")}`,
             } satisfies AmendmentResult),
-          { atAcceptance: true, restored: round.restored },
+          {
+            atAcceptance: true,
+            restored: round.restored,
+            enables: round.enables,
+          },
         );
       const inputs = amendmentInputs(state);
       // The paths it adds are owned from now: they rank after every plan
@@ -2456,10 +2911,34 @@ function amendAcceptStep(
         point: "amend",
         note: `Amended by ${code(proposal.id)} (${prose(proposal.actor)}): ${prose(proposal.discovery.reason)}`,
       });
-      return done({
-        plan,
-        answer: round.answer,
-      } satisfies AmendmentResult);
+      // Each started item an enables entry made wait for another is brought
+      // up to date and checked again once those merged, as its proposer
+      // would be (work/amend.ts `enabledAttempt`): its kept result and base
+      // predate what it now depends on.
+      const providers = new Map<string, string[]>();
+      for (const { itemId, enables } of round.enables ?? [])
+        for (const id of enables)
+          if (
+            progress.started.has(id) &&
+            !mergeOf(state, id) &&
+            !saved.items
+              .find((item) => item.id === id)
+              ?.dependencies.includes(itemId)
+          )
+            providers.set(id, [...(providers.get(id) ?? []), itemId]);
+      return {
+        kind: "done",
+        result: { plan, answer: round.answer } satisfies AmendmentResult,
+        keep: Object.assign(
+          {},
+          ...[...providers].map(([id, enabledBy]) =>
+            facts(
+              { enabled: { amendment: proposal.id, providers: enabledBy } },
+              id,
+            ),
+          ),
+        ),
+      };
     },
   };
 }
@@ -2508,6 +2987,9 @@ function rejectionStep(
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
           ...(proposal.commit ? { commit: proposal.commit } : {}),
+          ...(proposal.prerequisite
+            ? { prerequisite: proposal.prerequisite }
+            : {}),
           replacement: {
             amendmentId: proposal.id,
             diagnosis: error,

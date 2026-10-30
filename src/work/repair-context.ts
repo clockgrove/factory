@@ -3,6 +3,7 @@ import { hold, type Outcome, type StepContext } from "../engine.js";
 import {
   amendmentStatus,
   asking,
+  dependencyChangesStack,
   REPLACE_VALIDATION_NOTE,
   type ReplacementQuestion,
   replacementOffered,
@@ -23,7 +24,13 @@ import {
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt, headAndTail } from "../text.js";
 import { hasGitlink } from "../worktree.js";
-import { AMEND, REPLACE_FOR_REPAIR, validationAmendmentId } from "./amend.js";
+import {
+  AMEND,
+  DEPEND,
+  prerequisiteAmendmentId,
+  REPLACE_FOR_REPAIR,
+  validationAmendmentId,
+} from "./amend.js";
 import { fact, facts, type ItemFacts, itemsWith } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
@@ -36,6 +43,7 @@ import {
   type BuildDeps,
   multiLayer,
   stackOf,
+  startedItems,
   stepKey,
   type WorkResult,
 } from "./steps.js";
@@ -173,6 +181,38 @@ export async function repairContext(
     return {
       outcome: blameOutcome(state, deps, item, result, history.count, saved),
     };
+  // Not this item's own work either: its repair is free, and it asks to
+  // depend on the provider.
+  if (result.kind === "prerequisite") {
+    // A native stack's layers stay as they are, so a dependency that
+    // changes a started one can't be amended in.
+    const stack =
+      deps.config.delivery.kind === "native-stack"
+        ? dependencyChangesStack(
+            plan,
+            startedItems(state),
+            item.id,
+            result.provider,
+          )
+        : undefined;
+    const found = {
+      repair: history.count,
+      provider: result.provider,
+      diagnosis: result.diagnosis,
+      failure: result.failure,
+      ...(stack === undefined ? {} : { stack }),
+    };
+    return {
+      outcome: withKeep(
+        freed(
+          missingPrerequisite(state, item, found),
+          stepKey(item.id, "work"),
+          history.count,
+        ),
+        facts({ prerequisite: found }, item.id),
+      ),
+    };
+  }
   if (result.kind === "question") {
     const asked = diagnosisQuestion(
       state,
@@ -515,6 +555,50 @@ export function mergedBlame(
         family: "retry",
         consequence: "Diagnoses the failure again.",
       },
+      "cancel",
+    ],
+  );
+}
+
+/**
+ * The diagnosis found the item's failure is a missing prerequisite that
+ * Work Item `found.provider`, which it doesn't depend on, provides
+ * (#2233): no repair of the item can fix it, and guidance to its worker
+ * can't either, so it asks. `depend` (once per repair; past the allowance
+ * its planning asks for `more`) proposes an amendment that makes the item
+ * depend on the provider (amend.ts `prerequisiteAmendment`): the item then
+ * waits for the provider's merge and runs again on the default branch with
+ * it. `note` says why `depend` isn't offered. Nor is it under native-stack
+ * delivery when the dependency would change a started stack's layers
+ * (`found.stack`), which no amendment may: the question says so.
+ */
+export function missingPrerequisite(
+  state: ObjectiveState,
+  item: WorkItem,
+  found: NonNullable<ItemFacts["prerequisite"]>,
+  note?: string,
+): Outcome {
+  const { provider, stack } = found;
+  const why =
+    note ??
+    (stack === undefined
+      ? undefined
+      : `\`depend\` isn't offered: under native-stack delivery, ${item.id} depending on ${provider} would change the layers of the started native stack ${stack}, which an amendment keeps as they are.`);
+  const dependable =
+    why === undefined &&
+    !amendmentStatus(state, prerequisiteAmendmentId(item.id, found.repair));
+  const left = revisionsLeft(state);
+  return hold(
+    `Work Item ${item.id}'s failure is a missing prerequisite that Work Item ${provider} provides, and ${item.id} doesn't depend on ${provider}, so it is checked without it and no repair of ${item.id} can fix it.\n\nEvidence: ${found.diagnosis}${why ? `\n\n${why}` : ""}\n\nAnswer ${dependable ? `\`depend\` to have an amendment make ${item.id} depend on ${provider} (reviewed independently; it uses a planning revision${left > 0 ? "" : ", and none is left, so its planning asks for `more` first"}): ${item.id} then waits for ${provider}'s merge and runs again on the default branch with it, with no repair charged; ` : ""}\`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, \`replan\` to plan the remaining work again, or cancel.`,
+    [
+      ...(dependable ? [DEPEND] : []),
+      "answer",
+      {
+        answer: "retry",
+        family: "retry",
+        consequence: "Diagnoses the failure again.",
+      },
+      "replan",
       "cancel",
     ],
   );

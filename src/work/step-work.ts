@@ -41,6 +41,8 @@ import {
 import {
   blameAmendment,
   discoveryOutcome,
+  enabledAttempt,
+  prerequisiteAmendment,
   validationAmendment,
 } from "./amend.js";
 import { collect, type HandoffNote, VALIDATE_LOGS } from "./collect.js";
@@ -298,7 +300,12 @@ export async function workStep(
       blameAmendment(item, context, place, keepBase) ??
       // A diagnosis question answered `replace-validation`, or its
       // amendment settled: likewise.
-      validationAmendment(item, context, place, keepBase);
+      validationAmendment(item, context, place, keepBase) ??
+      // A missing prerequisite answered `depend`, or its amendment
+      // settled: likewise.
+      prerequisiteAmendment(item, context, place, keepBase) ??
+      // Another's amendment made it wait for items that merged since.
+      enabledAttempt(item, context, place, keepBase);
     if (amended) return amended;
     const repair = await repairContext(
       item,

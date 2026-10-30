@@ -27,7 +27,11 @@ import { failureExcerpt } from "../text.js";
 import type { Collection } from "./collect.js";
 import { fact, facts, written } from "./facts.js";
 import { refusedOf } from "./refused.js";
-import { diagnosisQuestion, mergedBlame } from "./repair-context.js";
+import {
+  diagnosisQuestion,
+  mergedBlame,
+  missingPrerequisite,
+} from "./repair-context.js";
 import { repairOutcome } from "./step-deliver.js";
 import { withKeep } from "./step-work.js";
 import { MINUTE, type StackPlace, stepKey } from "./steps.js";
@@ -70,7 +74,8 @@ export function propose(
 }
 
 /**
- * The item's new attempt once the amendment it proposed was accepted: a
+ * The item's new attempt once the amendment it proposed, or one that made
+ * it wait for another item (`enabledAttempt`), was accepted: a
  * repair that counts against no allowance (`free`), its correction saved
  * so no diagnosis runs, moved onto the current start with the change so
  * far replayed. It runs with the amended plan's owned paths, acceptance
@@ -102,6 +107,8 @@ export function amendedAttempt(
           },
           discovered: null,
           blamed: null,
+          prerequisite: null,
+          enabled: null,
         },
         item.id,
       ),
@@ -328,6 +335,145 @@ export function blameAmendment(
         `The amendment can't be proposed: ${problems}`,
       ),
   );
+}
+
+// ---------------------------------------------------------------------------
+// `depend`: a missing prerequisite another Work Item provides (#2233)
+
+export const DEPEND: HoldOption = {
+  answer: "depend",
+  family: "repair",
+  consequence:
+    "Asks the planner to amend the plan so this Work Item depends on the one that provides its missing prerequisite, reviewed independently; uses a planning revision, and the Work Item waits for that one's merge, then runs again on the default branch with no repair charged.",
+};
+
+/** The amendment `depend` proposes from repair `repair`'s missing prerequisite. */
+export const prerequisiteAmendmentId = (itemId: string, repair: number) =>
+  `prerequisite-${itemId}-${repair}`;
+
+/**
+ * A repair diagnosis's missing prerequisite answered `depend`
+ * (repair-context.ts `missingPrerequisite`): propose amendment
+ * `prerequisite-<item>-<repair>`, which makes the item depend on the
+ * provider (`AmendmentProposal.prerequisite`; its fence refuses a round
+ * that doesn't) with its own review. The item waits for its outcome, as
+ * for a discovery. Accepted, the item depends on the provider, so it
+ * runs only once the provider merged: then a new attempt on the amended
+ * plan (`amendedAttempt`) moves its change onto the default branch with
+ * the provider's result and checks it again, its refused change replayed,
+ * which may end on the same tree. Rejected and continued past, or settled
+ * with the plan unchanged, it asks again without `depend`. Undefined: the
+ * repair goes on as usual.
+ */
+export function prerequisiteAmendment(
+  item: WorkItem,
+  context: StepContext,
+  place: StackPlace | undefined,
+  keep: Record<string, unknown>,
+): Outcome | undefined {
+  const { state, answer } = context;
+  const repair = state.repairs?.[stepKey(item.id, "work")]?.count ?? 0;
+  const found = fact(state, "prerequisite", item.id);
+  if (!found || found.repair !== repair) return undefined;
+  const id = prerequisiteAmendmentId(item.id, repair);
+  const amendment = amendmentStatus(state, id);
+  if (amendment?.status === "accepted") {
+    const refused = fact(state, "refused", item.id);
+    return amendedAttempt(item, state, place, amendment.id, {
+      ...keep,
+      ...(refused
+        ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
+        : {}),
+    });
+  }
+  if (amendment?.status === "continued")
+    return answer?.answer === DEPEND.answer
+      ? withKeep(
+          missingPrerequisite(
+            state,
+            item,
+            found,
+            `Amendment ${amendment.id} didn't change the plan, which continues as it is.`,
+          ),
+          keep,
+        )
+      : undefined;
+  if (amendment)
+    return {
+      kind: "retry",
+      reason: `Waits for amendment ${amendment.id}`,
+      afterMs: MINUTE,
+      keep,
+    };
+  // A started native stack's layers keep it from being offered.
+  if (answer?.answer !== DEPEND.answer || found.stack !== undefined)
+    return undefined;
+  // The files it cites are read from the failed result, or the item's start.
+  const commit =
+    refusedOf(state, item.id)?.commit ?? fact(state, "base", item.id);
+  const { provider } = found;
+  return propose(
+    state,
+    {
+      id,
+      actor: answer.by,
+      at: new Date().toISOString(),
+      plan: String(state.kept[ACCEPTED_AT]),
+      discovery: {
+        scope: "in-scope",
+        reason: `Work Item ${item.id}'s failure is a missing prerequisite that Work Item ${provider} provides, and ${item.id} doesn't depend on ${provider}: ${found.diagnosis} Make ${item.id} depend on ${provider} by naming ${item.id} in ${provider}'s enables entry, so it waits for ${provider}'s merge and is checked again with it; every other item and field stays as it is.`,
+        evidence: [
+          failureExcerpt(found.failure, EVIDENCE_CHARS),
+          found.diagnosis,
+        ].filter((text) => text.trim()),
+        ownership: item.ownedPaths,
+        acceptance: [
+          `${item.id} depends on ${provider}, so it is checked again only once ${provider}'s result is on the default branch.`,
+        ],
+        dependencies: [provider],
+      },
+      worker: { itemId: item.id, attempt: itemAttempt(state, item.id) },
+      prerequisite: { itemId: item.id, provider },
+      ...(commit ? { commit } : {}),
+    },
+    keep,
+    (problems) =>
+      missingPrerequisite(
+        state,
+        item,
+        found,
+        `The amendment can't be proposed: ${problems}`,
+      ),
+  );
+}
+
+/**
+ * An accepted amendment made this started item depend on the items whose
+ * `enables` named it (its `enabled` fact), and those merged, or the item
+ * wouldn't run: its result was refused, or kept, on a base without them.
+ * Unless its own amendment's route took it first, its next work step is
+ * a new attempt on the amended plan (`amendedAttempt`), as its proposer's
+ * would be: moved onto the default branch with what it now depends on, its
+ * change replayed and free to end on the same tree, then checked again,
+ * with no diagnosis of the failure that predates them. Undefined: no such
+ * fact.
+ */
+export function enabledAttempt(
+  item: WorkItem,
+  context: StepContext,
+  place: StackPlace | undefined,
+  keep: Record<string, unknown>,
+): Outcome | undefined {
+  const { state } = context;
+  const enabled = fact(state, "enabled", item.id);
+  if (!enabled) return undefined;
+  const refused = fact(state, "refused", item.id);
+  return amendedAttempt(item, state, place, enabled.amendment, {
+    ...keep,
+    ...(refused
+      ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
+      : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -13,9 +13,11 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { loadConfig } from "../dist/config.js";
 import { correction } from "../dist/repair.js";
 import { resultCriteria } from "../dist/review/result.js";
 import {
+  collect,
   handoffPeers,
   maxHandoffSources,
   readHandoffNotes,
@@ -23,7 +25,14 @@ import {
 } from "../dist/work/collect.js";
 import { prepareWorkPrompt, workItemContract } from "../dist/work/prompt.js";
 import { SelfValidation } from "../dist/work/self-validate.js";
-import { item, plan, tempDir } from "./helpers.mjs";
+import {
+  configured,
+  installation,
+  item,
+  plan,
+  REPO,
+  tempDir,
+} from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
   const result = spawnSync(
@@ -34,6 +43,21 @@ const git = (cwd, ...args) => {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 };
+
+/** The sandbox and playbook collection runs with. */
+function loaded() {
+  const inst = installation();
+  configured(inst, "http://127.0.0.1:1");
+  const saved = process.env.FACTORY_CONFIG;
+  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+  try {
+    const { sandbox, planning } = loadConfig(REPO);
+    return { sandbox, playbook: planning.playbook };
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_CONFIG;
+    else process.env.FACTORY_CONFIG = saved;
+  }
+}
 
 function repository() {
   const worktree = join(tempDir("factory-criteria-"), "w");
@@ -182,6 +206,52 @@ test("a verification note for a covered Objective criterion decodes at its revie
   const refused = await readHandoffNotes(worktree, accepted, work);
   assert.match(
     refused.problem,
+    /criterionIndex 3 names no acceptance criterion of this Work Item \(it has 3\)/,
+  );
+});
+
+test("collection keeps a verification note for a covered Objective criterion at its review's index, and refuses one past it (#2197)", async () => {
+  const { sandbox, playbook } = loaded();
+  const { work, accepted } = covered();
+  const collectIn = async (indices) => {
+    const { worktree, base } = repository();
+    mkdirSync(join(worktree, "src"), { recursive: true });
+    mkdirSync(join(worktree, "test"), { recursive: true });
+    writeFileSync(
+      join(worktree, "src", "tallyChar.js"),
+      "exports.tallyChar = (s, ch) => s.split(ch).length - 1;\n",
+    );
+    writeFileSync(
+      join(worktree, "test", "tallyChar.test.js"),
+      'const { tallyChar } = require("../src/tallyChar.js");\n',
+    );
+    writeFileSync(
+      join(worktree, ".factory-handoff.json"),
+      JSON.stringify({ notes: indices.map(note) }),
+    );
+    return collect({
+      worktree,
+      base,
+      plan: accepted,
+      item: work,
+      mayChange: [],
+      playbook,
+      sandbox,
+      finalResponse: "",
+      signal: AbortSignal.timeout(60_000),
+    });
+  };
+  const collected = await collectIn([0, 1, 2]);
+  assert.equal(collected.kind, "collected", JSON.stringify(collected));
+  assert.deepEqual(
+    collected.notes.map((kept) => kept.criterionIndex),
+    [0, 1, 2],
+  );
+  const refused = await collectIn([0, 1, 2, 3]);
+  assert.equal(refused.kind, "repair", JSON.stringify(refused));
+  assert.equal(refused.staging, "handoff");
+  assert.match(
+    refused.finding,
     /criterionIndex 3 names no acceptance criterion of this Work Item \(it has 3\)/,
   );
 });

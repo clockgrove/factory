@@ -2,8 +2,9 @@
 // written by fixtures/bench/generate.mjs). Three run files: two restarts,
 // the second inside an operator pause; Codex calls whose resumed sessions
 // repeat their child threads' cumulative usage; holds of every kind, each
-// waiting with nothing running; repairs, amendments, CI reruns and a merge
-// conflict with the base branch.
+// waiting with nothing running; repairs, amendments, CI reruns, a merge
+// conflict with the base branch, and final review's refusal. The outcome
+// metrics are bench-outcomes.test.mjs's.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -50,16 +51,16 @@ test("tokens: each resumed session's child threads counted once", async () => {
   assert.equal(card.outcome, "done");
   assert.deepEqual(card.factory.versions, ["0.5.7", "0.5.8"]);
   // What the 0.5.7/0.5.8 spend limit counted: the calls' own tokens.
-  assert.equal(tokens.counted, 17_844_000);
-  assert.equal(tokens.own, 17_844_000);
+  assert.equal(tokens.counted, 18_144_000);
+  assert.equal(tokens.own, 18_144_000);
   // Resumed sessions repeat 400,000, 300,000 and 520,000 cumulative child
   // tokens, and two report 650,000 and 210,000 after 400,000 and 150,000:
   // 3,540,000 summed naively, 1,770,000 counted once.
   assert.equal(tokens.childThreads, 1_770_000);
   assert.equal(tokens.childThreadCount, 9);
-  assert.equal(tokens.total, 19_614_000);
+  assert.equal(tokens.total, 19_914_000);
   // The spend ledger never charged the call the first restart replaced.
-  assert.equal(tokens.spendLedger, 17_844_000 - 55_000);
+  assert.equal(tokens.spendLedger, 18_144_000 - 55_000);
   assert.equal(tokens.unknownCalls, 2);
   assert.ok(
     card.checks.every((check) => check.ok),
@@ -71,8 +72,8 @@ test("active time leaves out the outages, the pause and waits for an answer", as
   const card = await fixtureCard();
   const { totals } = card;
   assert.equal(card.partial, false);
-  // Admitted 09:00:04, ended 12:01:47.790.
-  assert.equal(totals.wallMs, 10_903_790);
+  // Admitted 09:00:04, ended 12:21:08.990.
+  assert.equal(totals.wallMs, 12_064_990);
   assert.deepEqual(
     totals.outages.map((outage) => [outage.ms, outage.runEnd]),
     [
@@ -87,8 +88,13 @@ test("active time leaves out the outages, the pause and waits for an answer", as
   // The second outage falls inside the pause: excluded once.
   assert.equal(totals.downtimeMs, 2_480_000 + 6_500);
   // A hold open and no step in progress: Factory waits on whoever answers.
-  // Every hold here waits so; the read-only QA hold is the longest.
-  assert.equal(totals.holdBlocked.length, 12);
+  // Every hold here waits so; final review's refusal is the longest.
+  assert.equal(totals.holdBlocked.length, 13);
+  assert.deepEqual(totals.holdBlocked.at(-1), {
+    from: "2031-03-04T12:01:41.790Z",
+    to: "2031-03-04T12:11:41.790Z",
+    ms: 600_000,
+  });
   assert.deepEqual(
     totals.holdBlocked.find((span) => span.from.startsWith("2031-03-04T11:39")),
     {
@@ -97,11 +103,11 @@ test("active time leaves out the outages, the pause and waits for an answer", as
       ms: 690_000,
     },
   );
-  assert.equal(totals.holdBlockedMs, 2_807_000);
+  assert.equal(totals.holdBlockedMs, 2_807_000 + 600_000);
   assert.equal(totals.excludedMs, totals.downtimeMs + totals.holdBlockedMs);
-  assert.equal(totals.activeWallMs, 10_903_790 - 2_486_500 - 2_807_000);
-  // The operator's waits stay a guard of their own.
-  assert.equal(totals.holds.operatorWaitMs, 2_340_000);
+  assert.equal(totals.activeWallMs, 12_064_990 - 2_486_500 - 3_407_000);
+  // The operator's waits stay a diagnostic of their own.
+  assert.equal(totals.holds.operatorWaitMs, 2_340_000 + 600_000);
   const smoke = card.items.find((item) => item.id === "release-smoke");
   assert.equal(smoke.holdBlockedMs, 690_000);
   assert.equal(smoke.activeWallMs, 18_820);
@@ -146,8 +152,8 @@ test("a hold's wait leaves out the downtime inside it; the raw wait is kept for 
   assert.equal(qa.rawWaitMs, 690_000);
   assert.equal(qa.waitMs, 690_000 - 300_000);
   assert.equal(card.totals.holds.byKind.qa.waitMs, 390_000);
-  assert.equal(card.totals.holds.operatorWaitMs, 2_340_000 - 300_000);
-  assert.equal(card.totals.holds.rawWaitMs, 2_807_000);
+  assert.equal(card.totals.holds.operatorWaitMs, 2_940_000 - 300_000);
+  assert.equal(card.totals.holds.rawWaitMs, 3_407_000);
   assert.ok(
     card.checks.every((check) => check.ok),
     JSON.stringify(card.checks),
@@ -269,7 +275,7 @@ test("scorecards go only where they are told: outside the Factory repository", (
       "utf8",
     ),
   );
-  assert.equal(card.totals.tokens.total, 19_614_000);
+  assert.equal(card.totals.tokens.total, 19_914_000);
 });
 
 test("a harness run is scored where its record says, unless a flag says otherwise", () => {
@@ -318,11 +324,12 @@ test("repairs, holds by kind, validation, CI and per Work Item", async () => {
   const card = await fixtureCard();
   const { totals } = card;
   // tokenizer's worker validation, validation and review sent it back;
-  // query-api's push conflicted with its base; export-csv's validation.
-  assert.equal(totals.repairs, 5);
-  assert.equal(totals.holds.total, 12);
+  // query-api's push conflicted with its base; export-csv's validation;
+  // final review, after the operator's fix, sent final validation back.
+  assert.equal(totals.repairs, 6);
+  assert.equal(totals.holds.total, 13);
   assert.equal(totals.holds.scripted, 6);
-  assert.equal(totals.holds.operator, 6);
+  assert.equal(totals.holds.operator, 7);
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(totals.holds.byKind).map(([kind, k]) => [kind, k.count]),
@@ -335,8 +342,17 @@ test("repairs, holds by kind, validation, CI and per Work Item", async () => {
       config: 1,
       ci: 1,
       qa: 1,
+      "final-review": 1,
     },
   );
+  // Final validation ran twice, before and after the operator's fix; final
+  // review refused, then passed.
+  assert.deepEqual(totals.final, {
+    runs: 2,
+    passed: 2,
+    review: { outcome: "pass", criteria: 19 },
+    reviewPassed: true,
+  });
   // The plan as amended: tokenizer's amendment added a criterion.
   assert.equal(totals.criteria, 19);
   assert.deepEqual(totals.planning, {
@@ -401,9 +417,9 @@ test("repairs, holds by kind, validation, CI and per Work Item", async () => {
       ["release-smoke", "settled", 90_000, 0, 0, 1, 1, 0],
     ],
   );
-  // Planning and the final review are the Objective's own.
-  assert.equal(card.objective.tokens.total, 3_390_000);
-  assert.equal(card.operator.decisions.length, 12);
+  // Planning and the final reviews are the Objective's own.
+  assert.equal(card.objective.tokens.total, 3_690_000);
+  assert.equal(card.operator.decisions.length, 13);
   assert.deepEqual(
     card.operator.actions.map((action) => action.kind),
     ["decline-discovery", "pause", "resume"],
@@ -419,6 +435,6 @@ test("repairs, holds by kind, validation, CI and per Work Item", async () => {
   });
   assert.deepEqual(
     card.unavailable.map((gap) => gap.metric),
-    ["costUsd", "tokens of some calls"],
+    ["costUsd", "tokens of some calls", "hand fixes", "grade"],
   );
 });

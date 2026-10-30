@@ -4,8 +4,9 @@
  * patterns follow Factory's own question templates: spend limits
  * (spend.ts), repair, rereview and planning allowances (allowances.ts,
  * planning/amendments.ts), a changed configuration, a diagnosis's
- * question, the result reviewer's judgment, CI, a QA refusal and an
- * amendment's decision. The operator policy scripts answers by kind; the
+ * question, the result reviewer's judgment, CI, a QA refusal, an
+ * amendment's decision and final review's refusal (work/finish.ts
+ * `finalRefusal`). The operator policy scripts answers by kind; the
  * scorecard groups holds and their waits by it.
  */
 const PATTERNS = [
@@ -20,6 +21,7 @@ const PATTERNS = [
   ["amendment", /^(Planning amendment |Amendment `)/],
   ["ci", /^Check "[^"]+" has no run/],
   ["qa", /^Read-only QA item /],
+  ["final-review", /^Final review refused the integrated result/],
 ];
 
 /** Every kind, `other` last. */

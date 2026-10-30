@@ -2,7 +2,9 @@ import { overrun } from "../allowances.js";
 import { hold, type Outcome, type StepContext } from "../engine.js";
 import {
   amendmentStatus,
+  asking,
   REPLACE_VALIDATION_NOTE,
+  type ReplacementQuestion,
   replacementOffered,
   revisionsLeft,
   validationList,
@@ -172,34 +174,20 @@ export async function repairContext(
       outcome: blameOutcome(state, deps, item, result, history.count, saved),
     };
   if (result.kind === "question") {
-    // The engine offers `revalidate` itself, with its text, exactly when
-    // it takes it (refused.ts `revalidatable`, engine.ts `hold`): a
-    // sentence of the step's own once offered it where the answer was
-    // refused (#2120).
-    const offer = refusalOffers(finding);
-    // A broken validation command is the operator's to authorize
-    // replacing, once per repair (amend.ts `validationAmendment`).
-    const replacing =
-      replacementOffered(state) &&
-      !amendmentStatus(state, validationAmendmentId(item.id, history.count));
-    const commands = item.validation.length
-      ? ` (${item.id}'s commands are ${validationList(item)})`
-      : "";
+    const asked = diagnosisQuestion(
+      state,
+      item,
+      finding,
+      result.question,
+      history.count,
+    );
+    // Kept while it offers `replace-validation`, so an answer it can't take
+    // asks it again as it was (amend.ts `validationAmendment`).
+    const replacing = asked.offers.includes(REPLACE_FOR_REPAIR);
     return {
-      outcome: hold(
-        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, \`retry\` to diagnose the failure again, or \`replan\` to plan again.${replacing ? ` ${REPLACE_VALIDATION_NOTE}${commands}; ${item.id} then runs again on the amended plan.` : ""}${offer.note}`,
-        [
-          "answer",
-          ...(replacing ? [REPLACE_FOR_REPAIR] : []),
-          {
-            answer: "retry",
-            family: "retry",
-            consequence: "Diagnoses the failure again.",
-          },
-          ...offer.options,
-          "replan",
-          "cancel",
-        ],
+      outcome: asking(
+        asked,
+        facts({ asked: replacing ? asked : null }, item.id),
       ),
     };
   }
@@ -250,6 +238,46 @@ export async function repairContext(
     context: repairContextValue,
     keep,
     ...(result.correction.path ? { path: result.correction.path } : {}),
+  };
+}
+
+/**
+ * Repair `repair`'s diagnosis question to the operator, its `question`
+ * with what the step offers. The engine offers `revalidate` itself, with
+ * its text, exactly when it takes it (refused.ts `revalidatable`,
+ * engine.ts `hold`): a sentence of the step's own once offered it where
+ * the answer was refused (#2120).
+ */
+export function diagnosisQuestion(
+  state: ObjectiveState,
+  item: WorkItem,
+  finding: RepairFinding | undefined,
+  question: string,
+  repair: number,
+): ReplacementQuestion {
+  const offer = refusalOffers(finding);
+  // A broken validation command is the operator's to authorize
+  // replacing, once per repair (amend.ts `validationAmendment`).
+  const replacing =
+    replacementOffered(state) &&
+    !amendmentStatus(state, validationAmendmentId(item.id, repair));
+  const commands = item.validation.length
+    ? ` (${item.id}'s commands are ${validationList(item)})`
+    : "";
+  return {
+    question: `Work Item ${item.id} needs your decision before it is repaired${question ? `:\n\n${question}` : "."}\n\nAnswer \`answer <text>\` to send the worker your guidance, \`retry\` to diagnose the failure again, or \`replan\` to plan again.${replacing ? ` ${REPLACE_VALIDATION_NOTE}${commands}; ${item.id} then runs again on the amended plan.` : ""}${offer.note}`,
+    offers: [
+      "answer",
+      ...(replacing ? [REPLACE_FOR_REPAIR] : []),
+      {
+        answer: "retry",
+        family: "retry",
+        consequence: "Diagnoses the failure again.",
+      },
+      ...offer.options,
+      "replan",
+      "cancel",
+    ],
   };
 }
 

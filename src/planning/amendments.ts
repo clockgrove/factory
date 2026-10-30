@@ -335,6 +335,8 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MINUTE = 60_000;
 const ANSWERS_KEY = (id: string) => `amend:${id}:answers`;
+/** The amendment planner's latest question, as asked (`asking`). */
+const ASKED_KEY = (id: string) => `amend:${id}:asked`;
 
 // ── Intake ──────────────────────────────────────────────────────────────
 
@@ -889,21 +891,41 @@ export function authorizationText(
   return `${authorized[0]?.by ?? "The operator"} authorized replacing ${commands}: ${authorized[0]?.reason ?? ""}`;
 }
 
-/** What a question that a `replace-validation` answer couldn't be taken for adds. */
-const NOT_TAKEN = "\n\nYour `replace-validation` answer wasn't taken: ";
+/**
+ * A question that offers `replace-validation`, as its step asked it: its
+ * own text, without what the engine adds when it asks (the `revalidate`
+ * sentence, the deadline), and its own offers. Its step keeps it with the
+ * question, so an answer it can't take asks it again as it was.
+ */
+export interface ReplacementQuestion {
+  question: string;
+  offers: Offer[];
+}
+
+/** The hold that asks `asked`, with `keep`: where its step keeps it (`askedAgain`). */
+export function asking(
+  asked: ReplacementQuestion,
+  keep: Record<string, unknown>,
+): Outcome {
+  return { ...hold(asked.question, asked.offers), keep };
+}
 
 /**
- * The question `answer` answered (else `fallback`), asked again with
- * `offers` and why its `replace-validation` wasn't taken.
+ * The question its step kept (`asking`; else `fallback`), asked again with
+ * its own text and offers, so it still names exactly the answers it takes
+ * (#2120), and why its `replace-validation` answer wasn't taken. The kept
+ * question stays as it was, so asking again adds no second why.
  */
 export function askedAgain(
-  answer: Answer,
+  asked: ReplacementQuestion | undefined,
   problem: string,
-  offers: readonly Offer[],
-  fallback: string,
+  fallback: ReplacementQuestion,
 ): Outcome {
-  const asked = answer.question?.split(NOT_TAKEN)[0] ?? fallback;
-  return hold(`${asked}${NOT_TAKEN}${problem}.`, offers);
+  const { question, offers } = asked ?? fallback;
+  return hold(
+    `${question}\n\nYour \`replace-validation\` answer wasn't taken: ${problem}.`,
+    offers,
+  );
 }
 
 // ── The plan as amended ─────────────────────────────────────────────────
@@ -1754,10 +1776,14 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         const authorized = authorizeReplacement(state, reply);
         if ("problem" in authorized)
           return askedAgain(
-            reply,
+            state.kept[ASKED_KEY(proposal.id)] as
+              | ReplacementQuestion
+              | undefined,
             authorized.problem,
-            QUESTION_OFFERS,
-            `Planning amendment ${proposal.id} needs a decision.`,
+            {
+              question: `Planning amendment ${proposal.id} needs a decision.`,
+              offers: [...QUESTION_OFFERS],
+            },
           );
         return {
           kind: "retry",
@@ -1997,11 +2023,13 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           round,
         } satisfies AmendRound);
       }
-      if (decoded.question)
-        return hold(
-          `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; ${REPLACE_VALIDATION_NOTE}, and plans it again; \`refuse\` rejects the amendment.`,
-          QUESTION_OFFERS,
-        );
+      if (decoded.question) {
+        const asked: ReplacementQuestion = {
+          question: `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; ${REPLACE_VALIDATION_NOTE}, and plans it again; \`refuse\` rejects the amendment.`,
+          offers: [...QUESTION_OFFERS],
+        };
+        return asking(asked, { [ASKED_KEY(proposal.id)]: asked });
+      }
       if (!decoded.plan)
         return revise(full, decoded.findings, restoredAnswer.restored);
       // The draft set back too: a plan with no answer of its own, or a

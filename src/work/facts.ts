@@ -1,6 +1,9 @@
 import type { BaseRerun, CiRerun } from "../delivery.js";
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
-import type { WorkDiscovery } from "../planning/amendments.js";
+import type {
+  ReplacementQuestion,
+  WorkDiscovery,
+} from "../planning/amendments.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
 import type { Retirement, ValidationAuthorization } from "../planning/types.js";
 import type { Session } from "../providers/session.js";
@@ -93,6 +96,12 @@ export interface ItemFacts {
   secret: string;
   /** A read-only QA review refused the integrated result: its `retry` checks again from validation. */
   qaRefused: true;
+  /**
+   * The item's latest question that offers `replace-validation` (a repair
+   * diagnosis's, a QA refusal's), as its step asked it: an answer it can't
+   * take asks it again as it was (planning/amendments.ts `askedAgain`).
+   */
+  asked: ReplacementQuestion;
   /**
    * Work attempt `attempt`'s in-scope `.factory-discovery.json`, kept
    * while its question is open: collection deletes the file.

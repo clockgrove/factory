@@ -10,7 +10,9 @@ import {
 import { defaultHead } from "../git.js";
 import { validationMembers } from "../media.js";
 import {
+  asking,
   REPLACE_VALIDATION_NOTE,
+  type ReplacementQuestion,
   validationList,
 } from "../planning/amendments.js";
 import { acceptedInputs, currentPlan } from "../planning/plan.js";
@@ -222,12 +224,9 @@ export async function qaReviewStep(
   });
   const held = (asked: ResultReview | null) => facts({ held: asked }, item.id);
   return withKeep(
-    reviewOutcome(
-      review,
-      held,
-      "and the QA item holds as refused",
-      (refusal) => ({
-        ...qaRefusal(
+    reviewOutcome(review, held, "and the QA item holds as refused", (refusal) =>
+      withKeep(
+        qaRefusal(
           item,
           checked.commit,
           "its review refused",
@@ -235,8 +234,8 @@ export async function qaReviewStep(
             .map((r) => `- ${r.criterion}: ${r.detail}`)
             .join("\n"),
         ),
-        keep: { ...facts({ qaRefused: true }, item.id), ...held(null) },
-      }),
+        { ...facts({ qaRefused: true }, item.id), ...held(null) },
+      ),
     ),
     decided.keep,
   );
@@ -245,7 +244,8 @@ export async function qaReviewStep(
 /**
  * A QA refusal: no worker repairs it, so it holds with the evidence.
  * `replace-validation` authorizes an amendment to replace a broken command
- * of its own (amend.ts `qaReplacement`).
+ * of its own (amend.ts `qaReplacement`); the question is kept while it
+ * offers that, so an answer it can't take asks it again as it was.
  */
 export function qaRefusal(
   item: WorkItem,
@@ -254,10 +254,11 @@ export function qaRefusal(
   evidence: string,
 ): Outcome {
   const replacing = item.validation.length > 0;
-  return hold(
-    `Read-only QA item ${item.id} refused the integrated result at ${commit.slice(0, 12)}: ${what}.\n\n${evidence}\n\nAnswer \`replan\` to plan the fix, \`retry\` to check again once the default branch is fixed, or cancel.${replacing ? ` If a command of its own can't pass on a correct result, ${REPLACE_VALIDATION_NOTE} (${item.id}'s commands are ${validationList(item)}); ${item.id} then checks again on the plan as it stands.` : ""}`,
-    qaRefusalOffers(item),
-  );
+  const asked: ReplacementQuestion = {
+    question: `Read-only QA item ${item.id} refused the integrated result at ${commit.slice(0, 12)}: ${what}.\n\n${evidence}\n\nAnswer \`replan\` to plan the fix, \`retry\` to check again once the default branch is fixed, or cancel.${replacing ? ` If a command of its own can't pass on a correct result, ${REPLACE_VALIDATION_NOTE} (${item.id}'s commands are ${validationList(item)}); ${item.id} then checks again on the plan as it stands.` : ""}`,
+    offers: qaRefusalOffers(item),
+  };
+  return asking(asked, facts({ asked: replacing ? asked : null }, item.id));
 }
 
 /** What a QA refusal offers. */

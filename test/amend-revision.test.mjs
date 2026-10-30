@@ -1204,6 +1204,37 @@ test("a work item's validation command the operator authorized replacing is repl
   assert.equal(posted.length, 1);
 });
 
+test("the amendment planner's question answered replace-validation it can't take is asked again as the step asked it, with why (#2199)", async () => {
+  const { checkout, state } = await discovered({ answer: withCut });
+  const { planner } = scripted({
+    ...revision(),
+    decisionRequired: {
+      obligationIndex: 0,
+      question: "Which delimiter does the guide use?",
+    },
+  });
+  const deps = depsOf(checkout, planner);
+  const question = await step(state, deps);
+  assert.equal(question.outcome.kind, "hold", JSON.stringify(question.outcome));
+  const kept = state.kept["amend:op-1:asked"];
+  assert.equal(kept.question, question.outcome.question);
+  // The engine stored it with its own notes after the step's text.
+  const again = await step(state, deps, {
+    ...replaceValidation(`a 9 ${REASON}`),
+    question: `${question.outcome.question}\n\nThis Objective's deadline is soon.`,
+  });
+  assert.equal(again.outcome.kind, "hold");
+  assert.ok(
+    again.outcome.question.startsWith(
+      `${kept.question}\n\nYour \`replace-validation\` answer wasn't taken: Work Item a has no validation command 9;`,
+    ),
+    again.outcome.question,
+  );
+  assert.doesNotMatch(again.outcome.question, /deadline/);
+  assert.deepEqual(again.outcome.options, question.outcome.options);
+  assert.equal(state.kept["validation:authorized"], undefined);
+});
+
 /** a and the integrated QA item, whose own command splits at the first `---` too. */
 const withQaCut = {
   ...accepted,

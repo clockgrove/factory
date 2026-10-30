@@ -11,7 +11,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { replacementOffered } from "../dist/planning/amendments.js";
 import { qaReplacement, validationAmendment } from "../dist/work/amend.js";
-import { qaRefusal } from "../dist/work/step-qa.js";
+import {
+  qaRefusal,
+  qaReviewStep,
+  qaValidateStep,
+} from "../dist/work/step-qa.js";
 import { item, plan } from "./helpers.mjs";
 
 const ACCEPTED_AT = "2026-01-01T00:00:00.000Z";
@@ -76,12 +80,19 @@ function apply(state, outcome) {
 const context = (state, answer) => ({
   state,
   ...(answer ? { answer } : {}),
+  signal: new AbortController().signal,
   log: () => {},
   keep: () => {},
 });
 
 test("replace-validation to a repair diagnosis proposes an amendment of the authorized command, the item waits for it and runs again once it is accepted", () => {
   const state = held();
+  // The diagnosis question as the work step kept it (repair-context.ts).
+  state.kept["item:a:asked"] = {
+    question:
+      "Work Item a needs your decision before it is repaired:\n\nWhich delimiter does the guide use?",
+    offers: ["answer", "replace-validation", "retry", "replan", "cancel"],
+  };
   // An index the item hasn't: asked again with its commands, nothing kept.
   const wrong = validationAmendment(
     a,
@@ -112,6 +123,7 @@ test("replace-validation to a repair diagnosis proposes an amendment of the auth
   );
   assert.equal(proposed.kind, "retry", JSON.stringify(proposed));
   apply(state, proposed);
+  assert.equal(state.kept["item:a:asked"], undefined, "taken: no longer kept");
   assert.deepEqual(state.kept["validation:authorized"], [
     {
       itemId: "a",
@@ -187,6 +199,88 @@ test("replace-validation to a QA item's refusal proposes an operator's amendment
   assert.equal(asked.kind, "hold");
   assert.match(asked.question, /depends on no Work Item that owns paths/);
   assert.equal(bare.kept["validation:authorized"], undefined);
+});
+
+/**
+ * A QA step's dependencies, which a step that checks reaches first through
+ * the checkout: reaching it is where QA checks the default branch again.
+ */
+const unreached = {
+  config: {
+    get checkout() {
+      throw new Error("checks the default branch");
+    },
+  },
+};
+
+/** A QA item's refusal as its step asked it, kept (step-qa.ts `qaRefusal`). */
+function refusedQa(state) {
+  const refusal = qaRefusal(
+    qa,
+    "4".repeat(40),
+    "its review refused",
+    "- It holds: gap.",
+  );
+  apply(state, refusal);
+  return refusal;
+}
+
+test("a QA item's review refusal answered replace-validation proposes the amendment, then checks again from validation (#2199)", async () => {
+  const state = held();
+  delete state.repairs["item:a:work"];
+  state.kept["item:qa:qaRefused"] = true;
+  const refusal = refusedQa(state);
+  const at = (text) => ({
+    ...replaceValidation(text, "item:qa:review@1"),
+    // As the engine stored it, with its own note after the step's text.
+    question: `${refusal.question}\n\nThis Objective's deadline is soon.`,
+  });
+  // A command it hasn't: the refusal again as it was asked, with why.
+  const wrong = await qaReviewStep(
+    qa,
+    context(state, at(`qa 5 ${REASON}`)),
+    unreached,
+  );
+  assert.equal(wrong.kind, "hold");
+  assert.equal(
+    wrong.question,
+    `${refusal.question}\n\nYour \`replace-validation\` answer wasn't taken: Work Item qa has no validation command 5; its commands are 0 \`npm test\`, 1 \`${CUT}\`.`,
+  );
+  assert.deepEqual(wrong.options, refusal.options);
+  assert.equal(state.kept["validation:authorized"], undefined);
+
+  const answer = at(`qa 1 ${REASON}`);
+  const proposed = await qaReviewStep(qa, context(state, answer), unreached);
+  assert.equal(proposed.kind, "retry", JSON.stringify(proposed));
+  apply(state, proposed);
+  const proposal = state.kept["amend:validation-qa-1:proposal"];
+  // Its evidence is the refusal as the step asked it, not the engine's notes.
+  assert.ok(
+    proposal.discovery.evidence.every((entry) => !/deadline/.test(entry)),
+  );
+  assert.equal(state.kept["item:qa:asked"], undefined);
+  // Taken in: validation and review again, on the plan as it then stands.
+  const again = await qaReviewStep(qa, context(state, answer), unreached);
+  assert.equal(again.kind, "repair", JSON.stringify(again));
+  assert.equal(again.target, "item:qa:validate");
+  assert.deepEqual(again.clear, ["item:qa:validate", "item:qa:review"]);
+  assert.match(again.finding, /authorized replacing validation commands/);
+  assert.deepEqual(again.keep, { "item:qa:qaRefused": null });
+});
+
+test("a QA item's validation refusal answered replace-validation proposes the amendment, then validates again (#2199)", async () => {
+  const state = held();
+  delete state.repairs["item:a:work"];
+  refusedQa(state);
+  const answer = replaceValidation(`qa 1 ${REASON}`, "item:qa:validate@1");
+  const proposed = await qaValidateStep(qa, context(state, answer), unreached);
+  assert.equal(proposed.kind, "retry", JSON.stringify(proposed));
+  apply(state, proposed);
+  assert.ok(state.kept["amend:validation-qa-1:proposal"]);
+  await assert.rejects(
+    qaValidateStep(qa, context(state, answer), unreached),
+    /checks the default branch/,
+  );
 });
 
 test("replace-validation is offered while an unpublished item has a validation command, and a QA refusal names its commands", () => {

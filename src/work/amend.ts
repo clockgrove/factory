@@ -27,7 +27,7 @@ import { failureExcerpt } from "../text.js";
 import type { Collection } from "./collect.js";
 import { fact, facts, written } from "./facts.js";
 import { refusedOf } from "./refused.js";
-import { mergedBlame } from "./repair-context.js";
+import { diagnosisQuestion, mergedBlame } from "./repair-context.js";
 import { repairOutcome } from "./step-deliver.js";
 import { withKeep } from "./step-work.js";
 import { MINUTE, type StackPlace, stepKey } from "./steps.js";
@@ -325,19 +325,6 @@ export const REPLACE_FOR_QA: HoldOption = replaceValidationOption(
   "Authorizes replacing those validation commands in an amendment, which its review judges on your reason; uses a planning revision, and the QA item checks again on the plan as it then stands.",
 );
 
-/** What a repair diagnosis's question offers when it is asked again. */
-const DIAGNOSIS_OFFERS: readonly Offer[] = [
-  "answer",
-  REPLACE_FOR_REPAIR,
-  {
-    answer: "retry",
-    family: "retry",
-    consequence: "Diagnoses the failure again.",
-  },
-  "replan",
-  "cancel",
-];
-
 /** The amendment `replace-validation` proposes from repair `repair`'s diagnosis question. */
 export const validationAmendmentId = (itemId: string, repair: number) =>
   `validation-${itemId}-${repair}`;
@@ -452,13 +439,19 @@ export function validationAmendment(
       keep,
     };
   if (answer?.answer !== REPLACE_VALIDATION) return undefined;
+  // Asked again as the diagnosis asked it (repair-context.ts keeps it).
   const ask = (problem: string) =>
     withKeep(
       askedAgain(
-        answer,
+        fact(state, "asked", item.id),
         problem,
-        DIAGNOSIS_OFFERS,
-        `Work Item ${item.id} needs your decision before it is repaired.`,
+        diagnosisQuestion(
+          state,
+          item,
+          fact(state, "finding", item.id),
+          "",
+          repair,
+        ),
       ),
       keep,
     );
@@ -483,7 +476,7 @@ export function validationAmendment(
       ...(commit ? { commit } : {}),
     },
     keep,
-    authorized.keep,
+    { ...authorized.keep, ...facts({ asked: null }, item.id) },
     ask,
   );
 }
@@ -495,8 +488,9 @@ export function validationAmendment(
  * judges the replacement on the reason. It runs before every other step,
  * and the QA item's step runs again on the plan as it then stands. A QA
  * item owns nothing, so its discovery's ownership is what it checks: its
- * dependencies' owned paths. An answer that can't be taken asks again with
- * why, `offers` the refusal's. Undefined: no such answer, or one taken in
+ * dependencies' owned paths. An answer that can't be taken asks the
+ * refusal again as it was asked (step-qa.ts `qaRefusal` keeps it; else
+ * with `offers`), with why. Undefined: no such answer, or one taken in
  * already.
  */
 export function qaReplacement(
@@ -507,13 +501,12 @@ export function qaReplacement(
   const { state, answer } = context;
   if (answer?.answer !== REPLACE_VALIDATION || replacementTaken(state, answer))
     return undefined;
+  const asked = fact(state, "asked", item.id);
   const ask = (problem: string) =>
-    askedAgain(
-      answer,
-      problem,
-      offers,
-      `Read-only QA item ${item.id} refused the integrated result.`,
-    );
+    askedAgain(asked, problem, {
+      question: `Read-only QA item ${item.id} refused the integrated result.`,
+      offers: [...offers],
+    });
   const authorized = authorizeReplacement(state, answer);
   if ("problem" in authorized) return ask(authorized.problem);
   const plan = currentPlan(state)!;
@@ -537,12 +530,12 @@ export function qaReplacement(
       plan: String(state.kept[ACCEPTED_AT]),
       discovery: replacementDiscovery(
         authorized.authorized,
-        answer.question ?? "",
+        asked?.question ?? answer.question ?? "",
         ownership,
       ),
     },
     {},
-    authorized.keep,
+    { ...authorized.keep, ...facts({ asked: null }, item.id) },
     ask,
   );
 }

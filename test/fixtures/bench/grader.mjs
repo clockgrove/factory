@@ -4,8 +4,9 @@
  * benchmark's frozen grader does, on the run repository fixtureRepository
  * builds (generate.mjs). It keeps the grader contract (bench/lib/grade.mjs):
  * it runs in the checkout, reads BENCH_TREE, BENCH_COMMIT and
- * BENCH_DEFINITION, and writes its verdicts to BENCH_OUT. Its verdicts are
- * mixed: three criteria pass, one fails and one it can't judge. It refuses
+ * BENCH_DEFINITION, and writes its verdicts and a metric to BENCH_OUT. Its
+ * verdicts are mixed: three criteria pass, one fails and one it can't
+ * judge. It refuses
  * (exit 3) a checkout that isn't BENCH_COMMIT or that goes past the
  * Objective's end.
  */
@@ -79,5 +80,8 @@ writeFileSync(
         evidence: "no display to start it on",
       },
     ],
+    // What a grader measures besides its verdicts (#2224): here, a fixed
+    // share of the export's mutants the delivered tests kill.
+    metrics: { mutationScore: 0.75 },
   }),
 );

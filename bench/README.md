@@ -6,12 +6,14 @@ A benchmark replays a real Objective from its base commit in a fresh private tes
 
 What Factory is for: you file an Objective, walk away, and come back to correct, merged work, at a reasonable cost. So the scorecard scores outcomes first (#2223): whether the merged result is correct, judged by the benchmark's own grader; how much the operator had to do; how long delivery took; how much work was wasted; and which defects got past the stage meant to catch them, with cost as a guard. Tokens, time, repairs and first-pass rates stay as diagnostics. They can point the wrong way: a stricter review that catches a defect early adds a repair, yet saves a refusal and a hand fix.
 
+A result can meet every criterion literally and still miss the Objective's intent, or be code nobody wants to maintain. So `compare` can also ask the benchmark's own judge, blind, which of two runs' results it would rather have, on intent and on code quality, and checks that judge against a person's choices (#2224).
+
 ```
 bench/
   provision.mjs               set up one run: repository, Project, Factory, memory, Objective
   run.mjs                     follow the run to its end, applying the operator policy
   score.mjs                   score a run, or any Objective, into the results
-  report.mjs                  run reports, the history page, the hill-climb decision
+  report.mjs                  run reports, the history page, the hill-climb decision, the judge's calibration
   examples/acme-widgets-42.json  an invented definition (schema below)
   lib/                        what the commands share
 ```
@@ -26,8 +28,9 @@ Not in this repository. A benchmark replays a real Objective of some repository,
 <bench home>/
   benchmarks/<id>.json        a benchmark definition (schema below)
   results/<id>/<run id>.json  scorecards
+  results/<id>/judgments/     the pairwise judge's judgments, one file per pair of runs
   reports/<id>/               generated HTML and Markdown
-  graders/                    optional: each benchmark's grader and its private checks
+  graders/                    optional: each benchmark's grader and judge, and their private checks
   private-words.txt           optional: words this repository must never contain
 ```
 
@@ -125,11 +128,15 @@ node bench/score.mjs --benchmark acme-widgets-42 --state-dir ... --issue 42 --ru
 ```sh
 node bench/report.mjs --benchmark acme-widgets-42            # every run's report and the history page
 node bench/report.mjs compare --benchmark acme-widgets-42 --candidate "Factory 0.6.0"
+node bench/report.mjs calibrate --benchmark acme-widgets-42 \
+  --pair widgets-0.5.8-1 widgets-0.6.0-1 --intent B --quality tie --by "a widgets maintainer"
 ```
 
-A run report is one self-contained HTML file (inline CSS and SVG, no network assets, light and dark) plus a Markdown summary, written to the bench home's `reports/<id>/` (or `--out DIR`). The outcomes come first: grade, human effort, time to delivery, waste, stage escapes and cost, then the diagnostics. It has the comparison with the baseline's spread (outcomes, then diagnostics), the grader's verdict per criterion, every operator touch with its weight, waste by cause and by Work Item, cost per model, tokens per Work Item, a timeline with the excluded time and holds, holds by kind, every operator decision, telemetry, and the checks against Factory's diagnostics. The history page plots each metric per run, outcomes first, grouped by Factory build, with each group's median and min-to-max band.
+A run report is one self-contained HTML file (inline CSS and SVG, no network assets, light and dark) plus a Markdown summary, written to the bench home's `reports/<id>/` (or `--out DIR`). The outcomes come first: grade, human effort, time to delivery, waste, stage escapes and cost, then the diagnostics. It has the comparison with the baseline's spread (outcomes, then diagnostics), the grader's verdict per criterion and its own metrics, every operator touch with its weight, waste by cause and by Work Item, cost per model, tokens per Work Item, a timeline with the excluded time and holds, holds by kind, every operator decision, telemetry, and the checks against Factory's diagnostics. The history page plots each metric per run, outcomes first, grouped by Factory build, with each group's median and min-to-max band, and each metric the grader reported, such as `mutationScore`, after the outcomes.
 
-A partial card in the results is reported and plotted, marked "partial" and drawn as a hollow dot. It is left out of its group's spread and out of every comparison, and `compare` warns about it. A version 2 card is reported with a warning to score it again: it has no outcome metrics, and it is left out of every comparison. A card of any other version is left out with a warning. `report.mjs` exits 0 when it wrote the reports, and `compare` exits 0 on accept and 3 on reject; both exit 64 on a usage error.
+With a judge in the definition, `compare` also runs the blind pairwise review ([Pairwise judge](#pairwise-judge)) and prints it after the metrics: each pair's choices, unblinded, the candidate's win rates, and the judge's agreement with the person's calibration choices. A run's tree is found through its run directory, which a harness run's card names; for a card scored before cards named it, give `--bench-root DIR`, the host profile's `benchRoot`. `calibrate` records a person's choice between two runs' trees into the definition's `judgeCalibration` ([Calibration](#calibration)).
+
+A partial card in the results is reported and plotted, marked "partial" and drawn as a hollow dot. It is left out of its group's spread and out of every comparison, and `compare` warns about it. A version 2 card is reported with a warning to score it again: it has no outcome metrics, and it is left out of every comparison. A card of any other version is left out with a warning. `report.mjs` exits 0 when it wrote the reports, `compare` exits 0 on accept and 3 on reject, and `calibrate` exits 0 when it recorded the choice; each exits 64 on a usage error.
 
 ## Hill-climb
 
@@ -140,13 +147,14 @@ A partial card in the results is reported and plotted, marked "partial" and draw
    - `grade` is not worse;
    - `human` or `deliveryMs` is better;
    - `escapes` is not worse;
-   - `cost` is not worse beyond the baseline's range.
+   - `cost` is not worse beyond the baseline's range;
+   - with a judge, the candidate's blind pairwise intent win rate is not below 50%.
 
-   An unknown outcome (no run graded, no prices) never passes a rule. Waste is shown with the outcomes but doesn't decide, and the diagnostics (the definition's `hillClimb` metrics, or tokens, active time, repairs, holds and first-pass rates) never do. `compare` exits 0 on accept and 3 otherwise. It warns when either group has fewer than 3 runs: a single run's planner variance is larger than most effects.
+   An unknown outcome (no run graded, no pair judged) never passes a rule. Cost is a guard, not a goal: when it is unknown on both sides, as for a provider without per-token prices, or for the baseline alone, the cost guard is skipped with a warning. A candidate whose cost is unknown against a baseline whose cost is known is rejected. Waste and the grader's own metrics are shown with the outcomes but don't decide, and the diagnostics (the definition's `hillClimb` metrics, or tokens, active time, repairs, holds and first-pass rates) never do. `compare` exits 0 on accept and 3 otherwise. It warns when either group has fewer than 3 runs: a single run's planner variance is larger than most effects.
 
 5. An accepted candidate is released. Its runs become the next baseline: set `baseline` to their group.
 
-**Cost.** A definition's `budget` gives one run's expected tokens and hours. Set its spend cap well above that, so a run never stops on a limit the original Objective had to raise. A baseline and a candidate of 3 runs each cost six runs' budget. Runs can overlap, since each has its own repository, service and state, but they share the host's capacity and the provider's rate limits, which then show in their times.
+**Cost.** A definition's `budget` gives one run's expected tokens and hours. Set its spend cap well above that, so a run never stops on a limit the original Objective had to raise. A baseline and a candidate of 3 runs each cost six runs' budget, and with a judge, nine judgments (every pair), each made once and kept. Runs can overlap, since each has its own repository, service and state, but they share the host's capacity and the provider's rate limits, which then show in their times.
 
 ## Host profile
 
@@ -186,7 +194,10 @@ A definition is checked when it is loaded: `bench/lib/definition.mjs` names ever
 | `hillClimb.primary`, `hillClimb.guards`                             | Optional: the diagnostics `compare` shows, as metric ids (`bench/lib/metrics.mjs`). They don't decide                                                                                                                                                                                         |
 | `budget.tokens`, `budget.hours`                                     | The expected cost per run, `[low, high]`                                                                                                                                                                                                                                                      |
 | `grader.command`, `grader.timeoutMinutes`                           | Optional: the benchmark's own grader of the merged result ([Grader](#grader)), and how long it may run                                                                                                                                                                                        |
+| `judge.command`, `judge.timeoutMinutes`                             | Optional: the benchmark's own blind pairwise judge ([Pairwise judge](#pairwise-judge)), and how long it may run per pair                                                                                                                                                                      |
+| `judgeCalibration[]`                                                | Optional: a person's pairwise choices the judge is checked against, each `{ runA, runB, intent, quality, by, at }` ([Calibration](#calibration))                                                                                                                                              |
 | `scoring.questionChargeMinutes`                                     | Optional: what time to delivery charges per question for the operator; 15 by default                                                                                                                                                                                                          |
+| `scoring.minJudgeAgreement`                                         | Optional: the share of the person's choices the judge must agree with, below which `compare` warns; 0.8 by default                                                                                                                                                                            |
 | `prices.<model>.uncachedInput`, `.cachedInput`, `.output`           | Optional: each model's price, US dollars per million tokens, for `cost`                                                                                                                                                                                                                       |
 
 A definition written before scorecard v3, without the optional fields, still loads: its runs have no grade or cost, so `compare` can't accept a candidate on them until they are added.
@@ -199,7 +210,7 @@ A definition written before scorecard v3, without the optional fields, still loa
 
 In priority order. Each is read from the run log's events, the state and the run repository's history, never from the text of a finding or a question (`bench/lib/outcomes.mjs`, `bench/lib/grade.mjs`).
 
-1. **`grade`: correct delivery, judged independently.** The grader's verdict on each of the Objective's criteria, on a fresh checkout of the run repository's default branch at the Objective's end commit (`endCommit`: the last first-parent commit made by `endedAt`): `{ graderVersion, commit, passed, failed, unknown, passRate, criteria[] }`, each criterion `{ id, text, verdict, method, evidence }` as the grader wrote it. `passRate` is `passed` over all criteria: an unknown verdict is not a pass. A grader that fails, times out or writes anything else records `grade.error`, with every number null: never a made-up rate. No grader, or nothing to grade: `grade` is null and `unavailable` says why.
+1. **`grade`: correct delivery, judged independently.** The grader's verdict on each of the Objective's criteria, on a fresh checkout of the run repository's default branch at the Objective's end commit (`endCommit`: the last first-parent commit made by `endedAt`): `{ graderVersion, commit, passed, failed, unknown, passRate, criteria[], metrics }`, each criterion `{ id, text, verdict, method, evidence }` as the grader wrote it, and `metrics` the grader's own numbers by name, such as `mutationScore` (#2224), `{}` when it reports none. `passRate` is `passed` over all criteria: an unknown verdict is not a pass. A grader that fails, times out or writes anything else records `grade.error`, with every number null: never a made-up rate. No grader, or nothing to grade: `grade` is null and `unavailable` says why.
 2. **`human`: human effort.** Every operator touch, weighted:
 
    | Touch      | Weight | What                                                                                                                                                  |
@@ -223,7 +234,7 @@ In priority order. Each is read from the run log's events, the state and the run
 
 The rest of the card, unchanged from version 2: shown after the outcomes, never deciding.
 
-- **`run`, `factory`, `models`, `startedAt`, `endedAt`, `outcome`, `partial`.** The run's id, label, group and source, and for a harness run the Factory build (kind, commit, `distSha256` at provisioning and at scoring). Factory's versions from the run headers, with the commit each release was tagged at (or a candidate's commit), and each run file and how it ended. Model calls by role, provider, model and effort. Admission to end, and `done`, `held`, `running` or `cancelled`. `partial` is true unless the Objective is done or cancelled.
+- **`run`, `factory`, `models`, `startedAt`, `endedAt`, `outcome`, `partial`.** The run's id, label, group and source, and for a harness run its run directory (`run.dir`, where the pairwise review finds its tree and Objective) and the Factory build (kind, commit, `distSha256` at provisioning and at scoring). Factory's versions from the run headers, with the commit each release was tagged at (or a candidate's commit), and each run file and how it ended. Model calls by role, provider, model and effort. Admission to end, and `done`, `held`, `running` or `cancelled`. `partial` is true unless the Objective is done or cancelled.
 - **`totals.wallMs`, `activeWallMs`, `outages`, `pauses`, `holdBlocked`.** Wall time runs from admission to the end. Active time leaves out three kinds of time, each once where they overlap:
   - an outage, the gap from one run file's last event to the next run file's first (a service restart);
   - a pause, from the operator's `pause` to `resume`;
@@ -264,18 +275,34 @@ The benchmark's own judgment of the merged result, frozen with the benchmark, ne
 
 - The command runs in a shell, with its working directory in a fresh checkout of the run repository's default branch at the Objective's end commit (a clone sharing the repository's objects, so nothing is fetched; LFS files are pointers, and a grader that needs them runs `git lfs pull`).
 - Its environment has `BENCH_TREE` (the checkout), `BENCH_COMMIT` (the commit), `BENCH_DEFINITION` (the definition file, so `$(dirname "$BENCH_DEFINITION")/../graders/...` finds the grader in the bench home) and `BENCH_OUT`.
-- It writes `{ graderVersion, criteria: [{ id, text, verdict, method, evidence }] }` to `BENCH_OUT`, each `verdict` `pass`, `fail` or `unknown`.
-- It is killed at `timeoutMinutes`, with everything it started. A non-zero exit, a timeout, or output without a `graderVersion`, criteria, or a valid verdict for each is `grade.error`.
+- It writes `{ graderVersion, criteria: [{ id, text, verdict, method, evidence }], metrics }` to `BENCH_OUT`, each `verdict` `pass`, `fail` or `unknown`.
+- `metrics` is optional: a name → number map of whatever else the grader measures, recorded in the card as `grade.metrics`, shown with the grade in the run report and graphed in the history. For example `mutationScore`: the share of bounded, deterministic mutants of the files the Objective changed that the delivered tests kill. Metrics are shown, never deciding; which way is better is the grader's to say.
+- It is killed at `timeoutMinutes`, with everything it started. A non-zero exit, a timeout, or output without a `graderVersion`, criteria, or a valid verdict for each, or with a metric that isn't a number, is `grade.error`.
 
 The harness never interprets criteria itself. The checkout is removed after grading.
 
+## Pairwise judge
+
+A grade says the criteria are met; it doesn't say whether the result is what the Objective meant, or code anyone wants to keep. The benchmark's own judge, frozen with the benchmark like the grader and living in the bench home beside it, compares two runs' final trees and says which it would rather have. `definition.judge = { command, timeoutMinutes }`. `report.mjs compare` pairs every candidate run with every baseline run (all of them, no sample: 3 × 3 runs are 9 pairs) and judges each pair once:
+
+- **Blind.** Which run is tree A is decided by a hash of the two run ids, never by which is the candidate, and the same pair is always in the same order. The command runs in a shell, with its working directory a temporary directory holding the pair, and `BENCH_TREE_A` and `BENCH_TREE_B` (each run's tree as the grader gets it, a fresh checkout at the commit the run was graded at or its end commit, with its `.git` removed, since its history names the run's repository, its dates and Factory's commits), `BENCH_OBJECTIVE` (a copy of the Objective as the run filed it, its `objective.md`), `BENCH_DEFINITION` (a copy of the definition without `baseline` and `judgeCalibration`, which name groups and runs; a link to the bench home's `graders/` sits beside it, so `$(dirname "$BENCH_DEFINITION")/../graders/...` finds the judge as it finds a grader) and `BENCH_OUT`. Nothing it is given names a run, a Factory version, a group or a date.
+- **Output.** It writes `{ judgeVersion, intent, quality, reasons }` to `BENCH_OUT`, `intent` and `quality` each `A`, `B` or `tie`. It is killed at `timeoutMinutes`. A non-zero exit, a timeout or any other output leaves the pair unjudged, with a warning.
+- **Unblinded and kept.** Each judgment is stored with the run and commit of A and B in `results/<id>/judgments/`, one file per pair, and reused: a pair is judged again only when the judge's command or either tree's commit changes. A failed judgment isn't kept.
+- **Win rates.** The candidate's share of the pairs it wins, on intent and on quality, a tie counting half. **Acceptance** adds: the intent win rate is not below 50%. No pair judged is unknown, which never passes. Quality is shown, not deciding.
+
+`compare` finds each run's tree through its run directory: its run record names the run repository's checkout, and its `objective.md` the Objective. A backfill has no run directory, so its pairs aren't judged.
+
+### Calibration
+
+A judge that disagrees with the person who owns the intent isn't to be trusted. `definition.judgeCalibration` lists that person's own choices between pairs of runs, each `{ runA, runB, intent, quality, by, at }`, `intent` and `quality` `A` (the run `runA`), `B` or `tie`. Record one with `report.mjs calibrate --benchmark ID --pair RUN_A RUN_B --intent A|B|tie --quality A|B|tie --by NAME`: it checks that both runs have scorecards, replaces the person's earlier choice of the same pair and stamps the time. `compare` judges every calibration pair the same way (blind, and kept), compares the answers as run ids, and reports how many of the person's choices the judge made too, overall, on intent and on quality. Below `scoring.minJudgeAgreement` (0.8 by default) it warns that the judge's verdict isn't to be trusted; with no calibration pair it can judge, it warns that the judge is uncalibrated. A warning doesn't change the decision: whoever reads it decides whether to trust the judge.
+
 ## The example
 
-`bench/examples/acme-widgets-42.json` is an invented benchmark: an Objective, acme/widgets#42, that adds a query tokenizer, a query API, a CSV export and a read-only smoke check of the release. Nothing in it is real. The tests score an invented run of it, written by `test/fixtures/bench/generate.mjs` into `test/fixtures/bench/acme__widgets/`: three run files, Factory 0.5.7 and then 0.5.8, operator-assisted. `fixtureRepository` in the same file builds its run repository with Git, and `test/fixtures/bench/grader.mjs` is a stand-in grader. Its scorecard shows what each part of the scorecard counts:
+`bench/examples/acme-widgets-42.json` is an invented benchmark: an Objective, acme/widgets#42, that adds a query tokenizer, a query API, a CSV export and a read-only smoke check of the release. Nothing in it is real. The tests score an invented run of it, written by `test/fixtures/bench/generate.mjs` into `test/fixtures/bench/acme__widgets/`: three run files, Factory 0.5.7 and then 0.5.8, operator-assisted. `fixtureRepository` in the same file builds its run repository with Git, `test/fixtures/bench/grader.mjs` is a stand-in grader, and `test/fixtures/bench/judge.mjs` a stand-in judge with fixed preferences (quoted CSV values on intent, the shorter export on quality). Its scorecard shows what each part of the scorecard counts:
 
 |                                                    | Scorecard                                                                                                                                      |
 | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Grade                                              | 60%: 3 of 5 criteria pass, 1 fails (the CSV row limit), 1 unknown (the release build needs a display)                                          |
+| Grade                                              | 60%: 3 of 5 criteria pass, 1 fails (the CSV row limit), 1 unknown (the release build needs a display); the grader's `mutationScore` 0.75       |
 | Human effort                                       | 61: 11 stamps, 5 judgments (two diagnosis answers, two review accepts, a declined discovery) and the hand fix during final review's refusal    |
 | Time to delivery                                   | 3 h 28 m: 1 h 43 m active and 7 questions for the operator at 15 min                                                                           |
 | Waste                                              | 1,495,000 tokens (7.5%): a lost hedge 600,000, a rejected and an unchanged amendment 440,000, two superseded results 400,000, an outage 55,000 |

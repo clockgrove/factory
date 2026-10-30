@@ -176,7 +176,9 @@ export interface KeptValidation {
         shown?: string;
         /** The failed command, for `validationFailed`. */
         command?: string;
-        /** How the failed command ended (validate.ts `failed.exit`): with `command`, the failure's identity. */
+        /** The repository's formatter's command, when it failed by itself (validate.ts `formatter`). */
+        formatter?: string;
+        /** How the failed command or formatter ended (validate.ts `failed.exit`): with it, the failure's identity. */
         exit?: string;
       };
 }

@@ -4,8 +4,10 @@
 // never compared equal, so Factory repaired it the same way again instead
 // of escalating. Whether a failure repeated is now decided by what failed:
 // the command and its exit, the checks and their conclusions, the refused
-// criteria (#2215). A correction saved with only its text compares by its
-// text, as before.
+// criteria (#2215). Whether it is unchanged, which refuses another repair,
+// also needs its output to read the same once that noise is set aside, so
+// the same command failing on another test still moved. A correction saved
+// with only its text compares by its text, as before.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -18,6 +20,7 @@ import {
   sameFailure,
   unchangedFailure,
 } from "../dist/repair.js";
+import { validationIdentity } from "../dist/work/step-validate.js";
 import { item, plan, tempDir } from "./helpers.mjs";
 
 const a = item("a", {
@@ -139,12 +142,87 @@ test("the same failed command, ending the same way, is a repeat whatever its out
   assert.match(model.asked[0].prompt, /"failureRepeatedUnchanged":true/);
   assert.ok(
     model.asked[0].prompt.includes(
-      "the last entry of prior left the same failure as it was (the same failed command, check or refused criteria, however its output reads)",
+      "the last entry of prior left the same failure as it was (the same failed command, check or refused criteria, with the same output once timings, timestamps, temporary paths and hashes are set aside)",
     ),
   );
   assert.match(
     model.asked[1].prompt,
     /the failure repeated unchanged after the last correction/,
+  );
+});
+
+test("the same command failing on another test moved: it is the same failure for a repeated correction, never unchanged", async () => {
+  // Repair 1 fixed "sum is 3"; now "sum of nothing is 0" fails, exit 1.
+  const moved = `Validation command failed (1): npm test: \n2026-10-29T19:02:11.004Z sum.test.js\n  not ok 2 - sum of nothing is 0\n  at /tmp/factory-d4e5f6/src/a.js:4\n# duration 1093ms`;
+  assert.equal(unchangedFailure(moved, [tried], 2, npmTest), false);
+  // The same correction again is still refused: its failure is the same.
+  assert.equal(
+    repeated({ ...tried, failure: moved, repair: undefined }, [tried]),
+    true,
+  );
+
+  const model = planner(repair("Return 0 for no inputs in src/a.js."));
+  const result = await diagnose(
+    model,
+    { kind: "failure", detail: moved, identity: npmTest },
+    { prior: [tried], repair: 2 },
+  );
+  assert.equal(result.kind, "correction", JSON.stringify(result));
+  assert.equal(
+    result.correction.correction,
+    "Return 0 for no inputs in src/a.js.",
+  );
+  assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
+});
+
+test("a formatter that fails the same way twice, its timings aside, is unchanged; its identity comes from the kept validation", () => {
+  const biome = (ms) =>
+    `The repository's formatter failed (1): biome check --write .: \nsrc/a.js format ━━━━━━━━━━\n  × File content differs from formatting output\nChecked 12 files in ${ms}ms. No fixes applied.\nFound 1 error.`;
+  const kept = (ms) => ({
+    kind: "failed",
+    detail: biome(ms),
+    formatter: "biome check --write .",
+    exit: "1",
+  });
+  const identity = validationIdentity(kept(34));
+  assert.deepEqual(identity, {
+    kind: "format",
+    command: "biome check --write .",
+    exit: "1",
+  });
+  const formatted = {
+    source: "diagnosis",
+    failure: biome(34),
+    identity,
+    diagnosis: "src/a.js is not formatted.",
+    path: "src/a.js",
+    correction: "Format src/a.js.",
+    repair: 1,
+  };
+  assert.equal(
+    unchangedFailure(biome(41), [formatted], 2, validationIdentity(kept(41))),
+    true,
+  );
+  // Another formatter ending, or another command, is another failure.
+  assert.equal(
+    unchangedFailure(biome(41), [formatted], 2, { ...identity, exit: "2" }),
+    false,
+  );
+  assert.deepEqual(
+    validationIdentity({
+      ...kept(34),
+      command: "npm test",
+      formatter: undefined,
+    }),
+    { kind: "validation", command: "npm test", exit: "1" },
+  );
+  // A pin, a refused formatter change, or a result kept before 0.5.10.
+  assert.equal(
+    validationIdentity({
+      kind: "failed",
+      detail: "the formatter changed b.js",
+    }),
+    undefined,
   );
 });
 
@@ -231,6 +309,54 @@ test("a review refusal is identified by its refused criteria's indices, never by
   assert.equal(failureIdentity(refusal("something else", "no")), undefined);
 });
 
+test("a criterion refused again over another gap after its review-findings correction is diagnosed and may be repaired; refused again over the same gap, it is unchanged", async () => {
+  const refused = (detail) => ({
+    kind: "review",
+    tree: "t",
+    refused: [
+      {
+        criterion: "sum rounds half up",
+        source: "model",
+        detail,
+        evidence: [],
+      },
+    ],
+  });
+  // Round 1: the findings are the correction, with no diagnosis call.
+  const direct = await diagnose(planner(), refused("2.5 gives 2, not 3."), {
+    repair: 1,
+  });
+  assert.equal(direct.kind, "correction", JSON.stringify(direct));
+  assert.equal(direct.correction.source, "review-findings");
+  assert.deepEqual(direct.correction.identity, {
+    kind: "review",
+    criteria: [1],
+  });
+  const first = { ...direct.correction, repair: 1 };
+
+  // Round 2: the same criterion, another gap. The diagnosis may repair it.
+  const model = planner(repair("Round -2.5 toward +infinity in src/a.js."));
+  const moved = await diagnose(
+    model,
+    refused("-2.5 gives -3; half up means -2."),
+    {
+      prior: [first],
+      repair: 2,
+    },
+  );
+  assert.equal(moved.kind, "correction", JSON.stringify(moved));
+  assert.equal(moved.correction.source, "diagnosis");
+  assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
+
+  // Round 3: the reviewer refuses it again with the same finding.
+  const again = planner(answer({ question: "Should -2.5 round to -2 or -3?" }));
+  await diagnose(again, refused("-2.5 gives -3; half up means -2."), {
+    prior: [first, { ...moved.correction, repair: 2 }],
+    repair: 3,
+  });
+  assert.match(again.asked[0].prompt, /"failureRepeatedUnchanged":true/);
+});
+
 test("failed checks are identified by name and conclusion, not by the head or the logs; staging refusals by their file", () => {
   const checks = (name, conclusion) => ({
     kind: "ci",
@@ -255,6 +381,24 @@ test("failed checks are identified by name and conclusion, not by the head or th
       { failure: "x", identity: checks("tests", "timed_out") },
     ),
     false,
+  );
+  // The head is noise: the same checks failing the same way are unchanged.
+  const ci = {
+    source: "diagnosis",
+    failure: `Checks failed on PR #7 at ${"a".repeat(40)}: tests (failure)\n\ntests:\n2026-10-29T18:30:52.557Z not ok 1 - sum is 3`,
+    identity: checks("tests", "failure"),
+    diagnosis: "d",
+    correction: "c",
+    repair: 1,
+  };
+  assert.equal(
+    unchangedFailure(
+      `Checks failed on PR #7 at ${"b".repeat(40)}: tests (failure)\n\ntests:\n2026-10-29T19:41:07.210Z not ok 1 - sum is 3`,
+      [ci],
+      2,
+      checks("tests", "failure"),
+    ),
+    true,
   );
   // As the state file returns it, its keys in another order.
   const read = JSON.parse(

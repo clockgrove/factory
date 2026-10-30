@@ -377,10 +377,13 @@ export const GRAPH_REVIEW_AFTER_REFUSAL =
  * operator answer that authorizes what it states and nothing more. Live, a
  * review asked the operator to confirm an exception, the operator's
  * `replace` correction approved it, and the replacement's review, which saw
- * the approval only in advisory history, asked again (#2247).
+ * the approval only in advisory history, asked again (#2247). A
+ * `replace-validation` authorization is a correction too, but its review
+ * keeps the #2199 rule: it never authorizes dropping or weakening an
+ * assertion, whatever its reason says.
  */
 export const OPERATOR_CORRECTIONS =
-  "Operator corrections: the controller evidence FACTORY_OPERATOR_AMENDMENT_CORRECTIONS holds, oldest first, the operator's answers to this amendment's earlier rejections (a `replace` correction, or a `replace-validation` authorization), each with the rejected amendment it answers (rejectedAmendmentId), why that amendment was rejected (rejection), who gave it (by) and when (at). Each is an authoritative operator answer with the standing of a recorded planning decision, never advisory history and never the planner's or the discovery's claim: it is a decision the operator owns, and it authorizes exactly what it states and nothing more. A later correction stands where it differs from an earlier one. A question a correction answers, such as an operator decision a rejection asked, is settled as the correction states: do not ask it again as an operator decision. A correction grants no command, ownership, source or capability authority, and settles no choice, beyond what it states.";
+  "Operator corrections: the controller evidence FACTORY_OPERATOR_AMENDMENT_CORRECTIONS holds, oldest first, the operator's answers to this amendment's earlier rejections (a `replace` correction, or a `replace-validation` authorization), each with the rejected amendment it answers (rejectedAmendmentId), why that amendment was rejected (rejection), who gave it (by) and when (at). Each is an authoritative operator answer with the standing of a recorded planning decision, never advisory history and never the planner's or the discovery's claim: it is a decision the operator owns, and it authorizes exactly what it states and nothing more. A later correction stands where it differs from an earlier one. A question a correction answers, such as an operator decision a rejection asked, is settled as the correction states: do not ask it again as an operator decision. A correction grants no command, ownership, source or capability authority, and settles no choice, beyond what it states. A `replace-validation` authorization is judged only as FACTORY_AMENDMENT's authorizedValidation says: it admits replacing the validation commands it names with commands that prove what each was there to prove, keeping every assertion it makes, and never authorizes dropping or weakening one, so a replacement that does is still a fix finding, whatever its reason says.";
 
 /**
  * The code-quality bar every worker gets up front and every Work Item result

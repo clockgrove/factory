@@ -1492,7 +1492,7 @@ test("an unauthorized replacement, or one authorized under an earlier plan or fo
   }
 });
 
-test("replace-validation to a rejected amendment records the authorization and takes in its replacement; one that names no command is asked again (#2199)", async () => {
+test("replace-validation to a rejected amendment records the authorization and takes in its replacement, reviewed by the #2199 rule; one that names no command is asked again (#2199, #2247)", async () => {
   const rejectedOn = async (kept = {}) => {
     const built = await discovered({ answer: withQaCut, kept });
     const why = "FACTORY_AMENDMENT lists no replaceable validation commands";
@@ -1504,7 +1504,8 @@ test("replace-validation to a rejected amendment records the authorization and t
     // An earlier plan's authorization, which recording drops.
     authorized(authorization("a", 0, "npm test", "2025-12-31T00:00:00.000Z")),
   );
-  const deps = depsOf(checkout, scripted().planner);
+  const { planner, asked } = scripted(replacesQaCut, { findings: [] });
+  const deps = depsOf(checkout, planner);
   const asks = await step(state, deps);
   assert.equal(asks.key, "amend:op-1:continue");
   assert.match(asks.outcome.question, /`replace-validation <item> <index>/);
@@ -1548,6 +1549,30 @@ test("replace-validation to a rejected amendment records the authorization and t
     `octo authorized replacing qa's validation command 1 (${JSON.stringify(CUT_AT_TABLE)}): ${REASON}`,
   );
   assert.deepEqual(replacement.worker, { itemId: "a", attempt: 1 });
+
+  // Its review gets the authorization as an operator correction (#2247),
+  // judged only as authorizedValidation says: one that drops or weakens an
+  // assertion is still a fix finding, whatever its reason says.
+  assert.equal((await step(state, deps)).key, "amend:op-1-r2:plan");
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1-r2:review");
+  const prompt = asked[1].prompt;
+  assert.ok(prompt.includes(`"authorizedValidation":{"qa":`));
+  assert.ok(
+    prompt.includes(
+      "one it drops or weakens is a fix finding, whatever the reason says.",
+    ),
+  );
+  assert.ok(prompt.includes(CORRECTIONS_ROW));
+  assert.ok(
+    prompt.includes(JSON.stringify(replacement.replacement.correction)),
+  );
+  assert.ok(prompt.includes(OPERATOR_CORRECTIONS));
+  assert.match(
+    OPERATOR_CORRECTIONS,
+    /A `replace-validation` authorization is judged only as FACTORY_AMENDMENT's authorizedValidation says: .*never authorizes dropping or weakening one, so a replacement that does is still a fix finding, whatever its reason says\.$/,
+  );
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
 });
 
 test("the validate step keeps every command it failed an item's results on, under the plan accepted then (#2107)", () => {

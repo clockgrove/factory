@@ -200,7 +200,10 @@ export async function repairContext(
             correction: result.correction.correction,
           },
         }),
-    ...(finding.kind === "review" ? { fromReview: true } : {}),
+    // Final review's refusal says so in its own failure line.
+    ...(finding.kind === "review" && !finding.final
+      ? { fromReview: true }
+      : {}),
   };
   const keep = facts(
     {

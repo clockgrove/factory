@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { deleteFactoryBranch } from "../delivery.js";
 import {
   CANCEL_CLEANUP,
+  type Held,
   hold,
   type Outcome,
   type Step,
@@ -25,14 +26,21 @@ import {
   retiredLines,
 } from "../planning/plan.js";
 import { objectiveNotes } from "../planning/schedule.js";
+import { coverageCriterion } from "../planning/graph.js";
 import { REOPENED } from "../planning/steps.js";
-import type { Plan } from "../planning/types.js";
+import type { Plan, WorkItem } from "../planning/types.js";
 import { moveStatusOffDone } from "../queue.js";
+import type { RepairFinding } from "../repair.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
-import { decisionLines, type ResultReview } from "../review/result.js";
+import {
+  decisionLines,
+  type RefusedCriterion,
+  type ResultReview,
+} from "../review/result.js";
 import {
   closingAnswer,
+  type HoldOption,
   type ObjectiveState,
   runOf,
   sinceRun,
@@ -54,7 +62,7 @@ import {
   worktreePath,
 } from "../worktree.js";
 import { fact, facts } from "./facts.js";
-import { mergeOf } from "./merged.js";
+import { type MergeResult, mergeOf } from "./merged.js";
 import {
   finalRetirable,
   keepFirst,
@@ -69,7 +77,7 @@ import {
   objectiveMerges,
   pinnedSources,
 } from "./shared.js";
-import { RERUN, RERUN_CLEANUP } from "./step-deliver.js";
+import { RERUN, RERUN_CLEANUP, repairOutcome } from "./step-deliver.js";
 import type { QaResult } from "./step-qa.js";
 import {
   criterionDecisions,
@@ -84,8 +92,10 @@ import {
   type BuildDeps,
   commandTimeoutMs,
   MINUTE,
+  multiLayer,
   type PublishResult,
   selection,
+  stackOf,
   stepKey,
   type ValidateResult,
   type WorkResult,
@@ -335,6 +345,21 @@ export function finalReviewStep(deps: BuildDeps): Step {
     deadlineMs: 45 * MINUTE,
     run: async (context): Promise<Outcome> => {
       const { state, signal } = context;
+      // The operator's `repair` to the refusal: the Work Item that owns the
+      // refused criteria is repaired against the default branch, and final
+      // validation and final review run again once it merges.
+      if (
+        context.answer?.answer === REPAIR_OWNER &&
+        fact(state, "final-review:refused")
+      ) {
+        const held = fact(state, "final-review:held");
+        const route =
+          held?.kind === "refused"
+            ? finalRepairRoute(currentPlan(state)!, held.refused, deps)
+            : undefined;
+        if (held?.kind === "refused" && route)
+          return finalRepair(state, held.tree, route);
+      }
       // A `retry` to the refusal (never to an error or a wait question):
       // the operator fixed the default branch, so validate the new head
       // before reviewing again.
@@ -360,10 +385,11 @@ export function finalReviewStep(deps: BuildDeps): Step {
         fact(state, "final-review:held"),
         undefined,
       );
-      // Every merged item in merge order; a native stack's layers share its merge.
-      const mergedIds = merges.flatMap(
-        (entry) => entry.merged.items ?? [entry.id],
-      );
+      // Every merged item in merge order; a native stack's layers share its
+      // merge, and an item final review sent back has merged more than once.
+      const mergedIds = [
+        ...new Set(merges.flatMap((entry) => entry.merged.items ?? [entry.id])),
+      ];
       const sources = await pinnedSources(state, deps, signal);
       const acceptance = checkObjective(
         acceptedInputs(state).shown.blocks,
@@ -464,29 +490,190 @@ export function finalReviewStep(deps: BuildDeps): Step {
           review,
           held,
           "and final review refuses the integrated result",
-          (refusal) => {
-            const lines = refusal.refused.map(
-              (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
-            );
-            const open = refusal.questions.map(
-              (q) =>
-                `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
-            );
-            const offers = criterionOffers(refusal, "and the refusal stands");
-            return {
-              ...hold(
-                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${standingRefusals(refusal.refused, "this integrated result", "a fix with `retry`, `replan`, or cancel")}`,
-                ["retry", "replan", ...offers, "cancel"],
-              ),
-              keep: {
-                ...facts({ "final-review:refused": true }),
-                ...held(refusal),
-              },
-            };
-          },
+          (refusal) => ({
+            ...finalRefusal(plan, refusal, deps),
+            keep: {
+              ...facts({ "final-review:refused": true }),
+              ...held(refusal),
+            },
+          }),
         ),
         decided.keep,
       );
+    },
+  };
+}
+
+/**
+ * Final review's refusal as a question: the refused criteria, then
+ * `repair` where the refusal can go back to the Work Item that owns it
+ * (`finalRepairRoute`), `retry` after the operator's own fix, `replan`,
+ * an `accept <n>` for each criterion the reviewer refused, and cancel.
+ */
+export function finalRefusal(
+  plan: Plan,
+  refusal: Extract<ResultReview, { kind: "refused" }>,
+  deps: BuildDeps,
+): Held {
+  const lines = refusal.refused.map(
+    (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
+  );
+  const open = refusal.questions.map(
+    (q) => `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
+  );
+  const offers = criterionOffers(refusal, "and the refusal stands");
+  const route = finalRepairRoute(plan, refusal.refused, deps);
+  return hold(
+    `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\n${finalAnswers(route)}${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}${standingRefusals(refusal.refused, "this integrated result", route ? "`repair`, a fix with `retry`, `replan`, or cancel" : "a fix with `retry`, `replan`, or cancel")}`,
+    [
+      ...(route ? [repairOffer(route)] : []),
+      "retry",
+      "replan",
+      ...offers,
+      "cancel",
+    ],
+  );
+}
+
+/** The answer that sends final review's refusal back to the Work Item that owns it (#2204). */
+export const REPAIR_OWNER = "repair";
+
+/** Where final review's refusal goes back to: a Work Item and the refused criteria it owns. */
+export interface FinalRepairRoute {
+  item: WorkItem;
+  refused: RefusedCriterion[];
+  /** The refused criteria other Work Items own: judged again once `item` merges. */
+  later: RefusedCriterion[];
+}
+
+/**
+ * The Work Item final review's refusal can go back to (#2204): each refused
+ * criterion's owner in the plan's coverage, the one coding Work Item among
+ * the owners of its coverage entries. A refused criterion without one (an
+ * integration question, one only QA proves, one two coding items share)
+ * leaves only the operator's fix, and so does an owner in a native stack of
+ * more than one item, which merges as one. With several owners, the first
+ * refused criterion's goes first with the criteria it owns, and final
+ * review judges the rest again once it merges.
+ */
+export function finalRepairRoute(
+  plan: Plan,
+  refused: readonly RefusedCriterion[],
+  deps: BuildDeps,
+): FinalRepairRoute | undefined {
+  const stacked = stackOf(plan, deps);
+  const ownerOf = (criterion: string): WorkItem | undefined => {
+    const owners = plan.items.filter(
+      (item) =>
+        (item.kind ?? "work") === "work" &&
+        plan.coverage.some(
+          (entry) =>
+            entry.itemId === item.id && coverageCriterion(entry) === criterion,
+        ),
+    );
+    const [owner] = owners;
+    return owners.length === 1 && !multiLayer(stacked, owner!.id)
+      ? owner
+      : undefined;
+  };
+  const owners = refused.map((entry) => ownerOf(entry.criterion));
+  const [item] = owners;
+  if (!item || owners.some((owner) => !owner)) return undefined;
+  return {
+    item,
+    refused: refused.filter((_, at) => owners[at] === item),
+    later: refused.filter((_, at) => owners[at] !== item),
+  };
+}
+
+/** Criteria by their numbers in final review's question: "criterion 2", "criteria 1 and 3". */
+function numbered(entries: readonly RefusedCriterion[]): string {
+  const numbers = entries.map((entry) => String(entry.criterionIndex + 1));
+  return numbers.length === 1
+    ? `criterion ${numbers[0]}`
+    : `criteria ${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)}`;
+}
+
+/** "it" for one criterion, else "them". */
+const them = (entries: readonly unknown[]) =>
+  entries.length === 1 ? "it" : "them";
+
+/** What final review's refusal says of its answers: `repair` where `route` allows it, `retry` and `replan`. */
+function finalAnswers(route: FinalRepairRoute | undefined): string {
+  const others = `Answer \`retry\` once you have fixed it on the default branch yourself: final validation runs again on the new head, then final review. Answer \`replan\` to plan the remaining work again from the default branch, which keeps what merged, dropping this plan and its build. Or cancel.`;
+  if (!route)
+    return `${others} There is no \`repair\`: final review's refusal goes back to a Work Item only when the plan's coverage gives each refused criterion to one coding Work Item outside a native stack.`;
+  const { id } = route.item;
+  const { refused, later } = route;
+  return `Answer \`repair\` to send ${numbered(refused)} back to Work Item ${id}, which owns ${them(refused)} in the plan's coverage: ${id} is repaired against the current default branch with ${refused.length === 1 ? "that criterion" : "those criteria"}, verbatim, and the findings above, goes through its validation, result review, CI and merge again on a new PR, and then final validation and final review run again. It is a repair of ${id}, counted against the repair allowances.${later.length ? ` Other Work Items own ${numbered(later)}: final review judges ${them(later)} again once ${id} merges, and offers \`repair\` for ${them(later)} then.` : ""} ${others}`;
+}
+
+/** The `repair` answer to final review's refusal. */
+function repairOffer(route: FinalRepairRoute): HoldOption {
+  return {
+    answer: REPAIR_OWNER,
+    family: "repair",
+    consequence: `Repairs Work Item ${route.item.id} against the current default branch with the refused criteria it owns; final validation and final review run again once it merges. Counts as a repair.`,
+  };
+}
+
+/**
+ * The operator's `repair` to final review's refusal of `tree`: route's Work
+ * Item is repaired with the refused criteria it owns, verbatim, and final
+ * review's findings (a review finding marked `final`), and final validation
+ * and final review are cleared to run again after it merges. It is a repair
+ * of the item's work like any other (step-deliver.ts `repairOutcome`),
+ * counted against its path's and the Objective's repair allowances. Its
+ * merged result is on the default branch, so the item starts again there
+ * with nothing to replay or check again (no base, no refused result), and
+ * its PR merged already, so it publishes on a new one (`republish`). The
+ * cleared merge stays on the default branch as part of the item's change,
+ * so it is kept (`earlierMerges`): final validation and final review judge
+ * it with the repair's merge.
+ */
+function finalRepair(
+  state: ObjectiveState,
+  tree: string,
+  route: FinalRepairRoute,
+): Outcome {
+  const { item } = route;
+  const merged = state.done[stepKey(item.id, "merge")] as
+    | MergeResult
+    | undefined;
+  const published = state.done[stepKey(item.id, "publish")] as
+    | PublishResult
+    | undefined;
+  const earlier = [
+    ...(fact(state, "earlierMerges", item.id) ?? []),
+    ...(merged ? [{ merged, ...(published ? { pr: published.pr } : {}) }] : []),
+  ];
+  const finding: RepairFinding = {
+    kind: "review",
+    tree,
+    refused: route.refused,
+    final: true,
+  };
+  const outcome = repairOutcome(item, "merge", finding, state, undefined, {
+    shown: `Final review refused, on the integrated default branch:\n${route.refused.map((entry) => `${entry.criterion}: ${entry.detail}`).join("\n")}`,
+  });
+  if (outcome.kind !== "repair") return outcome;
+  return {
+    ...outcome,
+    clear: [...outcome.clear, "final", "final-review"],
+    keep: {
+      ...outcome.keep,
+      ...facts(
+        {
+          base: null,
+          rebase: null,
+          onto: null,
+          refused: null,
+          republish: true,
+          ...(earlier.length ? { earlierMerges: earlier } : {}),
+        },
+        item.id,
+      ),
+      ...facts({ "final-review:refused": null, "final-review:held": null }),
     },
   };
 }
@@ -560,7 +747,12 @@ export function reportComment(
       item.kind === "qa"
         ? (state.done[stepKey(item.id, "validate")] as QaResult | undefined)
         : undefined;
-    return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
+    // The merges final review sent back, each repaired on a new PR.
+    const earlier = (fact(state, "earlierMerges", item.id) ?? []).map(
+      (entry) =>
+        `${entry.pr ? `#${entry.pr} ` : ""}merged as \`${entry.merged.mergeSha.slice(0, 12)}\``,
+    );
+    return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}${earlier.length ? `; final review sent back ${earlier.join(", then ")}` : ""}`;
   });
   const repairs = Object.values(state.repairs ?? {}).reduce(
     (sum, r) => sum + r.count,

@@ -8,6 +8,7 @@ import type { Correction, RepairFinding } from "../repair.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
+import type { MergeResult } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
 import type { WorkerValidateFailure } from "./self-validate.js";
 import type { ValidateResult } from "./steps.js";
@@ -144,6 +145,20 @@ export interface ItemFacts {
    * a result or runs a failed command once more.
    */
   validation: KeptValidation;
+  /**
+   * The item's merges that final review's `repair` cleared, oldest first,
+   * with their PRs (finish.ts `finalRepair`): they stay on the default
+   * branch, so they are still this Objective's merges, and final review
+   * judges the item's whole change (shared.ts `objectiveMerges`).
+   */
+  earlierMerges: EarlierMerge[];
+}
+
+/** One of the item's `earlierMerges`. */
+export interface EarlierMerge {
+  merged: MergeResult;
+  /** The PR it merged; absent when none was recorded. */
+  pr?: number;
 }
 
 /** The item's `validation` fact. */

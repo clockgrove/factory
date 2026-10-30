@@ -2,7 +2,9 @@
  * Repair diagnosis: turn a refused or failed Work Item result into a
  * correction for the worker, or a question for the operator. The first
  * model review refusal of an item becomes the correction directly: the
- * reviewer already stated each gap against the exact candidate. Every other
+ * reviewer already stated each gap against the exact candidate; so does the
+ * first final review refusal the operator sends back to the item that owns
+ * its criteria (`repair`, work/finish.ts, #2204). Every other
  * failure (a failed command, failed CI, an operator refusal, a later review
  * refusal) goes to a diagnosis call. A correction must name a file the item
  * owns, and a correction that already failed for the same failure is
@@ -49,7 +51,13 @@ import { createHash } from "node:crypto";
 import { readBlobs } from "./git.js";
 import { needsSelection } from "./media.js";
 import { validPath } from "./objective.js";
-import { ancestors, isRecord, ownsPath, strings } from "./planning/graph.js";
+import {
+  ancestors,
+  coverageCriterion,
+  isRecord,
+  ownsPath,
+  strings,
+} from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
 import type { Planner } from "./providers/planner.js";
 import {
@@ -65,8 +73,18 @@ import { hostGit } from "./worktree.js";
 
 /** What went wrong with the result. */
 export type RepairFinding =
-  /** The result review refused these criteria on `tree`. */
-  | { kind: "review"; tree: string; refused: RefusedCriterion[] }
+  /**
+   * The result review refused these criteria on `tree`; with `final`, final
+   * review refused them on the integrated tree, and the operator's `repair`
+   * sent them back to the Work Item whose coverage owns them (work/finish.ts
+   * `finalRepairRoute`, #2204).
+   */
+  | {
+      kind: "review";
+      tree: string;
+      refused: RefusedCriterion[];
+      final?: true;
+    }
   /**
    * A failed command (with its complete output), failed CI (with the check
    * names, URLs and excerpts GitHub supplied), a conflict, or a collection
@@ -90,6 +108,7 @@ export type RepairFinding =
 export interface Correction {
   source:
     | "review-findings"
+    | "final-review"
     | "staging-refusal"
     | "selection"
     | "diagnosis"
@@ -221,6 +240,9 @@ export function workerShellRule(validate: boolean): string {
 /** The failure line of a review findings correction; it is taken once per item. */
 const REVIEW_FINDINGS_FAILURE =
   "the result review refused the findings in the required correction below.";
+/** The same for final review's findings, also taken once per item. */
+const FINAL_FINDINGS_FAILURE =
+  "final review refused the integrated result on the findings in the required correction below.";
 /** The failure text a correction carries: a long failure's excerpt (`bounded`). */
 const FAILURE_CHARS = 8000;
 /** Diagnosis calls in one correction: the first, then re-asks with files or the error. */
@@ -323,7 +345,7 @@ function failureDetail(finding: RepairFinding): string {
   return finding.refused
     .map(
       (refused) =>
-        `Acceptance criterion ${refused.source === "operator" ? "refused" : "disproved"}: ${refused.criterion}: ${refused.detail}`,
+        `${finding.final ? "Final review on the integrated default branch: " : ""}Acceptance criterion ${refused.source === "operator" ? "refused" : "disproved"}: ${refused.criterion}: ${refused.detail}`,
     )
     .join("\n\n");
 }
@@ -339,18 +361,27 @@ const bounded = (text: string) => failureExcerpt(text, FAILURE_CHARS);
  * A model review refusal as the correction, with no diagnosis call: each
  * refused finding with its criterion, detail and cited evidence. Taken once
  * per item; a finding with a question, an operator refusal, a criterion this
- * item doesn't review, or a repeat goes to the diagnosis instead.
+ * item doesn't review, or a repeat goes to the diagnosis instead. Final
+ * review's refusal (`final`) is taken once per item too, apart from the
+ * result review's: its criteria are the ones the plan's coverage gives this
+ * item, whatever proves them. Either way a finding's criterionIndex is its
+ * criterion's number in the worker's Acceptance list (`resultCriteria`,
+ * #2197); a criterion only final review proves has none.
  */
 function reviewFindingsCorrection(
   input: CorrectionInput,
 ): CorrectionResult | undefined {
   const { finding, item, prior } = input;
-  if (
-    finding.kind !== "review" ||
-    prior.some((tried) => tried.source === "review-findings")
-  )
-    return undefined;
-  const reviewed = resultCriteria(input.plan, item);
+  if (finding.kind !== "review") return undefined;
+  const source = finding.final ? "final-review" : "review-findings";
+  if (prior.some((tried) => tried.source === source)) return undefined;
+  // Numbered as the worker's Acceptance list numbers them (resultCriteria).
+  const numbered = resultCriteria(input.plan, item);
+  const reviewed = finding.final
+    ? input.plan.coverage
+        .filter((entry) => entry.itemId === item.id)
+        .map(coverageCriterion)
+    : numbered;
   if (
     !finding.refused.length ||
     finding.refused.some(
@@ -362,13 +393,20 @@ function reviewFindingsCorrection(
   )
     return undefined;
   const count = finding.refused.length;
+  const criteria = count === 1 ? "criterion" : "criteria";
   const result = accepted(input, {
-    source: "review-findings",
-    failure: REVIEW_FINDINGS_FAILURE,
-    diagnosis: `The independent result review refused ${count} acceptance ${count === 1 ? "criterion" : "criteria"} of candidate tree ${finding.tree} after its validation commands passed. Each finding states the gap the candidate must close.`,
-    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's bracketed number [n] in the Work Item's Acceptance list, which quotes each Objective criterion this Work Item proves verbatim after its own. evidence is what the reviewer cited.\n${JSON.stringify(
+    source,
+    failure: finding.final ? FINAL_FINDINGS_FAILURE : REVIEW_FINDINGS_FAILURE,
+    diagnosis: finding.final
+      ? `Final review refused ${count} Objective ${criteria} this Work Item owns on the integrated default branch (tree ${finding.tree}) after final validation passed. This repair starts from the current default branch, which holds this Work Item's merged result. Each finding states the gap to close.`
+      : `The independent result review refused ${count} acceptance ${criteria} of candidate tree ${finding.tree} after its validation commands passed. Each finding states the gap the candidate must close.`,
+    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's bracketed number [n] in the Work Item's Acceptance list, which quotes each Objective criterion this Work Item proves verbatim after its own.${finding.final ? " A finding without one refuses an Objective criterion only final review judges, on the integrated result, quoted verbatim." : ""} evidence is what the reviewer cited.\n${JSON.stringify(
       finding.refused.map(({ criterion, detail, evidence }) => ({
-        criterionIndex: reviewed.indexOf(criterion),
+        // The worker's Acceptance numbering (#2197); a criterion only final
+        // review proves is not in that list, so it has no number.
+        ...(numbered.includes(criterion) && {
+          criterionIndex: numbered.indexOf(criterion),
+        }),
         criterion,
         finding: detail,
         evidence: evidence.map(({ path, origin, complete }) => ({

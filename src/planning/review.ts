@@ -3,11 +3,11 @@ import type { Finding, PinnedSource, PlannerDecision } from "./types.js";
 
 /**
  * The plan review's evidence and answer. The reviewer cites evidence rows by
- * index: the operator's recorded answers, an amendment's operator
- * corrections, the pinned sources, then the controller's execution bounds,
- * native prerequisites and local executable observations when supplied, and
- * an amendment's discovery with the files it cites. A finding is `fix` (the
- * planner corrects the
+ * index: the operator's recorded answers, an amendment's operator answers
+ * to its planners and its operator corrections, the pinned sources, then
+ * the controller's execution bounds, native prerequisites and local
+ * executable observations when supplied, and an amendment's discovery with
+ * the files it cites. A finding is `fix` (the planner corrects the
  * plan within the Objective as written) or `operator-decision` (the
  * correction needs a decision only the operator owns). An answer whose shape
  * is invalid is flagged `invalid` with the reason; the step retries with it
@@ -43,6 +43,23 @@ export interface OperatorCorrection {
 }
 
 /**
+ * An operator's answer to a question an amendment's planner asked
+ * (amendments.ts `amendPlanStep`): an `answer`'s text, or a
+ * `replace-validation` authorization as its text. The review reads it as an
+ * operator answer, as it does a correction (#2247).
+ */
+export interface OperatorAmendmentAnswer {
+  /** The amendment in the replacement chain whose planner asked. */
+  amendmentId: string;
+  holdId: string;
+  question: string;
+  answer: string;
+  /** Who gave it and when; an answer an earlier Factory kept has neither. */
+  by?: string;
+  at?: string;
+}
+
+/**
  * fix: the planner can correct the plan within the Objective as written.
  * operator-decision: the correction needs a decision only the operator owns.
  */
@@ -74,6 +91,8 @@ export interface ReviewFinding extends Finding {
 export function planningReviewEvidence(input: {
   sources: readonly PinnedSource[];
   decisions?: readonly PlannerDecision[];
+  /** An amendment's operator answers to its planners' questions in its replacement chain, oldest first. */
+  plannerAnswers?: readonly OperatorAmendmentAnswer[];
   /** An amendment's operator corrections in its replacement chain, oldest first. */
   corrections?: readonly OperatorCorrection[];
   /** The planning execution bounds (configured concurrency and limits). */
@@ -108,6 +127,9 @@ export function planningReviewEvidence(input: {
             complete: true,
           },
         ]
+      : []),
+    ...(input.plannerAnswers?.length
+      ? controller("FACTORY_OPERATOR_AMENDMENT_ANSWERS", input.plannerAnswers)
       : []),
     ...(input.corrections?.length
       ? controller("FACTORY_OPERATOR_AMENDMENT_CORRECTIONS", input.corrections)

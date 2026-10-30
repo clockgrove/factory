@@ -23,7 +23,7 @@ import { ciStep, mergeStep, publishStep } from "./step-deliver.js";
 import { settleStep } from "./step-qa.js";
 import { reviewStep } from "./step-review.js";
 import { selectStep } from "./step-select.js";
-import { validateStep } from "./step-validate.js";
+import { unvalidatedMerges, validateStep } from "./step-validate.js";
 import { withKeep, workStep } from "./step-work.js";
 import type { Worker } from "./worker.js";
 
@@ -213,7 +213,13 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
     // Aggregates and QA deliver nothing: their merge step settles them.
     if (phase === "merge" && (item.kind ?? "work") !== "work")
       return settleStep(item);
-    return itemStep(item, phase, deps, place);
+    return itemStep(
+      item,
+      phase,
+      deps,
+      place,
+      phase === "merge" && !place && unvalidatedMerges(state, plan, item.id),
+    );
   };
   const steps: Step[] = [];
   const runnable = plan.items.filter(
@@ -370,11 +376,18 @@ export function candidate(state: ObjectiveState, id: string): string {
   );
 }
 
+/**
+ * Item step `phase`. `revalidates`: its merge step validates the candidate
+ * again on Objective merges its validation didn't count
+ * (step-validate.ts `validateBeforeMerge`), so it takes a CPU slot and
+ * the commands' time, as the validate step does.
+ */
 export function itemStep(
   item: WorkItem,
   phase: Phase,
   deps: BuildDeps,
   place: StackPlace | undefined,
+  revalidates = false,
 ): Step {
   const key = stepKey(item.id, phase);
   const run = {
@@ -390,7 +403,7 @@ export function itemStep(
     key,
     ...(phase === "work"
       ? { resource: "worker" as const }
-      : phase === "validate"
+      : phase === "validate" || revalidates
         ? { resource: "cpu" as const }
         : phase === "review"
           ? { resource: "planner" as const }
@@ -411,7 +424,10 @@ export function itemStep(
               (item.kind === "qa" || place
                 ? 0
                 : item.validation.length * commandTimeoutMs(deps))
-            : 45 * MINUTE,
+            : 45 * MINUTE +
+              (revalidates
+                ? validationDeadlineMs(item, commandTimeoutMs(deps))
+                : 0),
     run: async (context) => {
       const outcome = await run(item, context, deps, place);
       return phase === "work"

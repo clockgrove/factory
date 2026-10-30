@@ -4,8 +4,12 @@ import { dirname, join } from "node:path";
 import type { Outcome, StepContext } from "../engine.js";
 import { runningBuild } from "../log.js";
 import { type SelectedMember, validationMembers } from "../media.js";
-import { namedBase } from "../planning/facts.js";
-import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
+import {
+  ACCEPTED_AT,
+  acceptedInputs,
+  checkedAtFinal,
+  currentPlan,
+} from "../planning/plan.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
 import type { ObjectiveBlock } from "../shown.js";
@@ -39,6 +43,7 @@ import {
   candidate,
   commandTimeoutMs,
   KEPT_OUTPUT_CHARS,
+  type PublishResult,
   type StackPlace,
   selection,
   stepKey,
@@ -91,7 +96,7 @@ export async function validateStep(
   });
   const kept = fact(state, "validation", item.id);
   if (kept?.commit === commit && kept.key === key)
-    return reusedValidation(item, context, place, kept);
+    return reusedValidation(item, context, place, kept, plan);
   // A run that ends without a result leaves no kept one behind it.
   context.keep(facts({ validation: null }, item.id));
   const result = await validateTree({
@@ -151,8 +156,7 @@ export async function validateStep(
             deps,
             plan,
             work,
-            commit:
-              result.formatted?.commit ?? result.regenerated?.commit ?? commit,
+            commit: validatedCommit(done, commit),
             earlier,
             directory: `${worktree}.validation`,
             installStore: installStorePath(worktree),
@@ -181,7 +185,12 @@ export async function validateStep(
       return {
         kind: "done",
         result: done,
-        keep: keptValidation(item.id, commit, key, { kind: "passed", done }),
+        keep: {
+          ...keptValidation(item.id, commit, key, { kind: "passed", done }),
+          ...(place
+            ? {}
+            : validatedOn(state, plan, item.id, validatedCommit(done, commit))),
+        },
       };
     }
     case "failed": {
@@ -310,11 +319,14 @@ type Integrated =
  * validation passed, Factory merges the validated commit into the
  * Objective's integrated head (shared.ts `integrated`: the latest merge,
  * which holds every earlier one) as a commit of its own, pinned at
- * `integratedRef` until cleanup and never published, and runs the item's
- * commands there as final validation will, the plan's base as
- * FACTORY_BASE_SHA. It leaves out the commands final validation skips: one
- * that names its base (it checks only this item's change), and one whose
- * package script an earlier merge changed. A command that fails by itself
+ * `integratedRef` until cleanup and never published, and runs there the
+ * item's commands final validation will run itself (planning/plan.ts
+ * `checkedAtFinal`), as it will, the plan's base as FACTORY_BASE_SHA. It
+ * leaves out the others: one that names its base (it checks only this
+ * item's change), any but a final command when the plan has those (final
+ * validation never runs it, and with the plan's base it would count other
+ * Objectives' merges), and one whose package script an earlier merge
+ * changed. A command that fails by itself
  * there is the item's to repair, before it merges: the work step moves it
  * onto the current default branch (`rebase`), so the worker sees the
  * Objective's change so far. A merge that conflicts is left to the merge
@@ -384,9 +396,8 @@ async function integratedValidation(input: {
     ["update-ref", integratedRef(state.issue, item.id), merged],
     { signal },
   );
-  const own = item.validation.filter(
-    (check) => !namedBase(check.command, plan.base),
-  );
+  const atFinal = checkedAtFinal(plan);
+  const own = item.validation.filter((check) => atFinal(check.command));
   const changed = await laterScriptChanges({
     checkout,
     base: plan.base,
@@ -556,6 +567,7 @@ function reusedValidation(
   context: StepContext,
   place: StackPlace | undefined,
   kept: KeptValidation,
+  plan: Plan,
 ): Outcome {
   context.log({
     event: "validation-reused",
@@ -564,9 +576,136 @@ function reusedValidation(
     validatedAt: kept.at,
     passed: kept.result.kind === "passed",
   });
-  return kept.result.kind === "passed"
-    ? { kind: "done", result: kept.result.done }
-    : failedOutcome(item, context.state, place, kept.result);
+  if (kept.result.kind !== "passed")
+    return failedOutcome(item, context.state, place, kept.result);
+  const { done } = kept.result;
+  // The key names the merges the candidate lacked, so the same ones counted.
+  return {
+    kind: "done",
+    result: done,
+    ...(place
+      ? {}
+      : {
+          keep: validatedOn(
+            context.state,
+            plan,
+            item.id,
+            validatedCommit(done, kept.commit),
+          ),
+        }),
+  };
+}
+
+/** The commit a passed validation ran on: Factory's last commit on the candidate, if any. */
+function validatedCommit(done: ValidateResult, candidate: string): string {
+  return done.formatted?.commit ?? done.regenerated?.commit ?? candidate;
+}
+
+/**
+ * The item's `validatedOn` fact: the Objective's merges of other Work
+ * Items so far, which its validation of `commit` counted (#2240).
+ */
+function validatedOn(
+  state: ObjectiveState,
+  plan: Plan,
+  id: string,
+  commit: string,
+): Record<string, unknown> {
+  return facts(
+    { validatedOn: { commit, merges: otherMerges(state, plan, id) } },
+    id,
+  );
+}
+
+/** The merge commits of the Objective's Work Items other than `id`, in merge order. */
+function otherMerges(state: ObjectiveState, plan: Plan, id: string): string[] {
+  return objectiveMerges(state, plan)
+    .filter((entry) => entry.id !== id)
+    .map((entry) => entry.merged.mergeSha);
+}
+
+/**
+ * Whether Work Item `id`'s merge step validates its candidate again first
+ * (`validateBeforeMerge`): another Work Item of the Objective merged that
+ * its validation didn't count (`validatedOn`). That step then takes a CPU
+ * slot and the time of the item's commands (steps.ts `itemStep`).
+ */
+export function unvalidatedMerges(
+  state: ObjectiveState,
+  plan: Plan,
+  id: string,
+): boolean {
+  const kept = fact(state, "validatedOn", id);
+  const counted =
+    kept?.commit === candidate(state, id)
+      ? new Set(kept.merges)
+      : new Set<string>();
+  return otherMerges(state, plan, id).some((sha) => !counted.has(sha));
+}
+
+/**
+ * Before a Work Item outside a native stack merges (step-deliver.ts
+ * `mergeStep`), its candidate is validated again on the Objective's merges
+ * its validation didn't count (#2240). Items run side by side: each is
+ * often validated before the other merges, so the one that merges second
+ * was validated without the first's merge, and nothing else runs its
+ * commands on it before final validation. So the merge step runs them
+ * there first, as the validate step does (`integratedValidation`), and a
+ * command that fails is the item's repair onto the current default branch,
+ * before it merges. A PR already merged (the merge step resumed after
+ * GitHub merged it) is past this. Undefined when the merge goes ahead: the
+ * merges counted are kept (`validatedOn`), so the step's retries don't run
+ * the commands again.
+ */
+export async function validateBeforeMerge(
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+): Promise<Outcome | undefined> {
+  const { state, signal } = context;
+  const plan = currentPlan(state)!;
+  if (!unvalidatedMerges(state, plan, item.id)) return undefined;
+  const published = state.done[stepKey(item.id, "publish")] as PublishResult;
+  if ((await deps.github.pull(published.pr, signal)).merged) return undefined;
+  const commit = candidate(state, item.id);
+  const work = state.done[stepKey(item.id, "work")] as WorkResult;
+  const workDir = deps.workDir(state.issue);
+  const worktree = worktreePath(workDir, state.issue, item.id);
+  const earlier = await mergesMissing(
+    state,
+    plan,
+    item.id,
+    commit,
+    deps,
+    signal,
+  );
+  const integrated = earlier.length
+    ? await integratedValidation({
+        item,
+        context,
+        deps,
+        plan,
+        work,
+        commit,
+        earlier,
+        directory: `${worktree}.validation`,
+        installStore: installStorePath(worktree),
+        blocks: acceptedInputs(state).shown.blocks,
+        media: validationMembers(plan, item, selection(state)),
+      })
+    : undefined;
+  if (integrated?.kind === "failed")
+    return failedOutcome(item, state, undefined, {
+      ...(await keptFailure(
+        integrated.result,
+        join(workDir, "outputs", item.id),
+        integrated.lead,
+      )),
+      integrated: true,
+    });
+  if (integrated) return integrated;
+  context.keep(validatedOn(state, plan, item.id, commit));
+  return undefined;
 }
 
 /**

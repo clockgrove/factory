@@ -155,6 +155,16 @@ export interface ItemFacts {
    */
   validation: KeptValidation;
   /**
+   * The other Work Items' merges of this Objective (their merge commits)
+   * that the validation of `commit`, the item's validated candidate,
+   * counted: the candidate held them, or its commands ran on them
+   * (step-validate.ts `integratedValidation`, #2240). Outside a native
+   * stack, the merge step validates the candidate again on any merge since
+   * (step-validate.ts `validateBeforeMerge`) and adds it. Absent from state
+   * 0.5.11 saved: every merge counts as since.
+   */
+  validatedOn: { commit: string; merges: string[] };
+  /**
    * The item's merges that final review's `repair` cleared, oldest first,
    * with their PRs (finish.ts `finalRepair`): they stay on the default
    * branch, so they are still this Objective's merges, and final review

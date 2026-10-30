@@ -59,7 +59,6 @@ import {
 import { forceRemove, openParent, within } from "./paths.js";
 import {
   LOCKFILE_RESOLUTION,
-  namedBase,
   PINNED_NPM_BOOTSTRAP,
   PINNED_PNPM_BOOTSTRAP,
   packageBootstrap,
@@ -68,7 +67,12 @@ import {
   unpinnablePackageCommand,
 } from "./planning/facts.js";
 import { ownsPath } from "./planning/graph.js";
-import { dependencyOrder, fallbackRuns, finalChecks } from "./planning/plan.js";
+import {
+  checkedAtFinal,
+  dependencyOrder,
+  fallbackRuns,
+  finalChecks,
+} from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import {
@@ -165,12 +169,15 @@ export interface ValidateInput {
   predecessor?: string;
   /**
    * Item validation: the commit the candidate was built on, the
-   * FACTORY_BASE_SHA of each command that names its base
-   * (planning/facts.ts `namedBase`), so the item's own base-relative check
-   * sees only this item's change. Every other command gets the plan's
-   * base, as final validation runs it: a check that reads the base itself
-   * (a budget, a size limit, a coverage delta) counts the Objective's
-   * change so far here as it will there (#2240). Absent (QA and final
+   * FACTORY_BASE_SHA of each command final validation never runs itself
+   * (one that names its base, planning/facts.ts `namedBase`; with final
+   * commands, any that isn't one), so its base-relative check sees only
+   * this item's change, never other Objectives' merges since the plan's
+   * base. A command final validation runs itself (planning/plan.ts
+   * `checkedAtFinal`) gets the plan's base, as it will there: a check that
+   * reads the base itself (a budget, a size limit, a coverage delta)
+   * counts the Objective's change so far here as it will there (#2240).
+   * Setup commands (an install, the formatter) keep the item's base. Absent (QA and final
    * validation, on the shared default branch): the plan's base for every
    * command, which no single commit can replace there; the plan check
    * refuses integrated commands that name it.
@@ -383,6 +390,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
+  const atFinal = checkedAtFinal(plan);
   const { signal } = input;
   let tree = await revParse(checkout, `${commit}^{tree}`, signal);
   // Sandboxed commands can write any directory of the checkout. Behind a
@@ -550,10 +558,10 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           ...validationEnvironment(credentials),
           // Factory fetches by SHA and never moves the checkout's
           // remote-tracking branches, so base-relative checks use this
-          // (#1664): the item's own base for a command that names it, else
-          // the plan's, as final validation gives it (#2240).
+          // (#1664): the plan's base for a command final validation runs
+          // itself, as it gives it there, else the item's own (#2240).
           FACTORY_BASE_SHA:
-            input.base !== undefined && namedBase(command, plan.base)
+            input.base !== undefined && !atFinal(command)
               ? input.base
               : plan.base,
         },

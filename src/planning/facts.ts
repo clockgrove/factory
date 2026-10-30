@@ -435,7 +435,7 @@ const VALIDATION_ENVIRONMENT = {
   // sandbox.network package-install; host and off replace it below.
   network:
     "none except the exact script-disabled package install, which runs first",
-  refs: "remote-tracking branches may be stale; a Work Item command that names $FACTORY_BASE_SHA compares with the commit its change was built on; every other command gets the plan's base as FACTORY_BASE_SHA, as final validation does, so a script's own base-relative check counts the Objective's whole change; integrated, QA and final commands run on the shared default branch, which holds other Objectives' merges, so they prove behaviour, never a diff: Factory enforces each item's owned paths",
+  refs: "remote-tracking branches may be stale; a Work Item command that final validation also runs on the default branch (a final command, or with none, each Work Item command that doesn't name $FACTORY_BASE_SHA) gets the plan's base as FACTORY_BASE_SHA, as final validation does, so a script's own base-relative check counts the Objective's whole change; every other Work Item command compares with the commit its change was built on; integrated, QA and final commands run on the shared default branch, which holds other Objectives' merges, so they prove behaviour, never a diff: Factory enforces each item's owned paths",
   commit:
     "the uncommitted result: commands check working-tree files, never HEAD, the index or a commit of the result; a base-relative check compares the working tree with $FACTORY_BASE_SHA",
   ci: "no hosted CI jobs, logs or secrets",

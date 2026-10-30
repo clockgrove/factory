@@ -82,6 +82,7 @@ CASE_TABLE_prd=(
   "shared|P|30|a person's change to the same file lands on main while Factory's PR is open: repaired, merged, the person's commit kept (delivery.shared-main)"
   "hostnet|P|25|sandbox.network host: final validation reaches a service on the host's loopback (worker.host-network)"
   "toolchain|P|25|its own repository T pins Node (.nvmrc) and pnpm (packageManager), and installation T requires 'pnpm run toolchain': a host node outside the pin holds the plan check, naming the fix; after a person pins the host's node, 'recheck' plans, and final validation runs the command under that pin and manager (toolchain.pin)"
+  "seam|P|40|the production planner's plan of 19 criteria, several pinning exact messages and output lines, one a real consumer proven by a test: every covered criterion reaches its worker word for word (seam.criteria-verbatim); result review judges each criterion an item's command proves (seam.command-judged); a stub consumer is refused at result review, never first at final review (seam.stub-refused-early); a final-review refusal closes by 'repair' alone (seam.final-repair)"
   "nocheck|P|35|its own repository N (protected main, no required check, no workflow) and installation N: a Work Item PR with no checks merges 15-20 min after its push, with no hold (delivery.no-check-merge)"
   "prod|Q|45|repository C at production settings: 'factory setup' with no model call and '--background'; a /factory queue pause comment admits nothing until resume; planning in Project order and at most 3 at once; two items at once; no hold; status comment, Work Item issues and card; log, diagnostics, export; memory shown for a file an earlier Objective pinned; dream applies only on approval; stop and uninstall (setup.*, queue.*, exec.parallel-items, prod.no-holds, visibility.*, knowledge.*)"
 )
@@ -213,6 +214,7 @@ required_checks() {
     hostnet) echo worker.host-network ;;
     toolchain) echo toolchain.pin ;;
     nocheck) echo delivery.no-check-merge ;;
+    seam) echo 'seam.criteria-verbatim seam.command-judged seam.stub-refused-early seam.final-repair' ;;
     prod) echo 'setup.config setup.background queue.pause-github queue.order queue.concurrency-3 exec.parallel-items prod.no-holds visibility.github visibility.cli knowledge.memory knowledge.dream' ;;
   esac
 }

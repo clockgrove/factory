@@ -1,7 +1,8 @@
 # The PRD suite (run-suite.sh --suite prd): requirements no main or edge case
 # shows live. Two lanes on the run's own repositories, every case at once:
 #   P  repository M, installation P behind the fault proxy, the suite's fast
-#      models, sandbox.network host and one CI-only command;
+#      models, sandbox.network host, one CI-only command and content capture
+#      (the seam case reads its workers' prompts and reviews' verdicts there);
 #   Q  repository C, installation Q written by `factory setup` with
 #      production defaults and run by `setup --background` as a user
 #      service: one lane case, `prod`, at production models and concurrency.
@@ -26,7 +27,8 @@ setup_prd() {
     git -C "$co" -c user.name="Factory integration" -c user.email=factory-integration@users.noreply.github.com \
       commit -q -m "Drill: the prd suite's fixtures" && git -C "$co" push -q origin HEAD:main || return 1
   write_config "$STATE_BASE/config-p.json" $M_REPO "$co" 12 \
-    'c["sandbox"]={"network":"host"}' 'c["finalValidation"]={"ciOnlyCommands":["npm run ci-only"]}'
+    'c["sandbox"]={"network":"host"}' 'c["finalValidation"]={"ciOnlyCommands":["npm run ci-only"]}' \
+    'c["capture"]={"enabled":True}'
   inst_define P $M_REPO "$STATE_BASE/config-p.json" || return 1
   [ -z "$NEEDS_C" ] || inst_define Q $C_REPO "$STATE_BASE/config-q.json" || return 1
   inst P
@@ -641,6 +643,196 @@ nocheck_github() {
   done
   echo "$out"; return $ok
 }
+
+# #2222: the seams between planner, worker, result review and final review,
+# which each role's own tests miss. A production plan of an Objective with
+# 19 criteria, several pinning exact messages and output lines the planner
+# can paraphrase away, one requiring a real consumer proven by a test, one
+# that only the integrated result shows. Every covered criterion must reach
+# its worker word for word (#2197), result review must judge the criteria an
+# item's command proves (#2203), a stub consumer must be refused there, not
+# first at final review, and a final-review refusal must close by `repair`
+# alone (#2204). No mechanism makes a worker write a stub, so the stub check
+# is the reviews' verdicts on whatever the workers wrote. Lane P captures
+# model calls (setup_prd): the checks read the worker's prompt and each
+# review's criteria and verdicts from those captures.
+SEAM_CONSUMER="is a real consumer of the parser, not a stub"   # the Objective's consumer criterion (objectives/seam.md)
+case_seam() {
+  local t0 id n p hj key; t0=$(now); id=$(uid)
+  local HOLD_POLICY="d2 review decide more"
+  n=$(new_objective seam "seams: many exact criteria" PROVIDER="$PLAN_PROVIDER" ID="$id") || return
+  key=$(issue_key "$n"); : >"$RUN_DIR/seam-final-hold.$key"
+  p=$(wait_phase "$n" 'done|cancelled|failed' "$(left)")
+  # A final-review refusal is answered as an operator would, with `repair`
+  # and no change of the operator's own; a refusal of the repaired result
+  # once more, so the case stays in its budget.
+  local tries=0
+  while [ "$p" = held:final-review ] && [ $tries -lt 2 ]; do
+    hj=$(st hold "$n" final-review); printf '%s\n' "$hj" >>"$RUN_DIR/seam-final-hold.$key"
+    [[ ,$(hold_field "$hj" answers), == *,repair,* ]] || break
+    answer_t 60 "$n" repair --question "$(hold_field "$hj" id)" >/dev/null 2>&1
+    tries=$(( tries + 1 ))
+    p=$(wait_phase "$n" 'done|cancelled|failed' "$(left)")
+  done
+  log "#$n ended the wait $p after $tries final-review repair(s)"
+  seam_checks "$n" "$t0"
+  settled "$n" || cancel_wait "$n" 300
+}
+# seam_checks N T0: the four seam checks from N's state, run log and captures,
+# and the case's record of each final-review refusal it met
+# (seam-final-hold.KEY, issue_key N) alone (also run-suite.sh --replay).
+seam_checks() {
+  local n=$1 out check rc evid
+  out=$(python3 -B - "$SUITE/lib" "$ROOT" "$n" "${KEPT:-$RUN_DIR}/seam-final-hold.$(issue_key "$n")" "$SEAM_CONSUMER" <<'PY'
+import fnmatch, glob, json, os, re, sys
+sys.path.insert(0, sys.argv[1])
+import st
+root, n, holds_file, consumer = sys.argv[2:6]
+d = st.load(root, n)
+d = d if isinstance(d, dict) else {}
+done, kept = d.get("done") or {}, d.get("kept") or {}
+# The current plan: the last accepted amendment's, else the plan (planning/plan.ts acceptedPlan).
+proposals = sorted((p for k, p in kept.items() if fnmatch.fnmatchcase(k, "amend:*:proposal") and isinstance(p, dict)),
+                   key=lambda p: str(p.get("at", "")))
+plan = next((done[f"amend:{p.get('id')}"]["plan"] for p in reversed(proposals)
+             if isinstance(done.get(f"amend:{p.get('id')}"), dict) and done[f"amend:{p.get('id')}"].get("plan")), None) \
+    or done.get("plan") or {}
+items = {i["id"]: i for i in plan.get("items") or [] if isinstance(i, dict) and "id" in i}
+text = lambda e: e.get("statement") or (e.get("source") or {}).get("text") or ""
+objective = [e for e in plan.get("coverage") or [] if (e.get("source") or {}).get("path") == "OBJECTIVE"]
+short = lambda t: (t[:60] + "...") if len(t) > 63 else t
+evs = [e for e in st.events(root, n) if "at" in e]
+
+def capture(e):
+    files = glob.glob(os.path.join(glob.escape(os.path.join(root, "logs", str(n))), "*.captures", f"{e['capture']}.json"))
+    try:
+        return json.load(open(files[0]))
+    except (IndexError, OSError, ValueError):
+        return {}
+
+def answer(body):
+    """A review's answer: its findings, from the captured response."""
+    raw = body.get("response")
+    if not isinstance(raw, str):
+        return []
+    for cand in (raw, raw[raw.find("{"):raw.rfind("}") + 1]):
+        try:
+            v = json.loads(cand)
+            return [f for f in v.get("findings") or [] if isinstance(f, dict)]
+        except (ValueError, AttributeError):
+            continue
+    return []
+
+# Each worker's first whole prompt (a repair's resumed turn sends only a delta).
+prompts = {}
+# Each review's verdicts, by the criterion's text as the review's packet numbered it.
+verdicts, packets = {}, {}
+for e in evs:
+    if e.get("event") != "model-usage" or not e.get("capture"):
+        continue
+    step = str(e.get("step"))
+    if e.get("role") == "worker" and fnmatch.fnmatchcase(step, "item:*:work") and "deltaBytes" not in e:
+        item = step[len("item:"):-len(":work")]
+        if item not in prompts:
+            prompts[item] = capture(e).get("request") or ""
+    elif e.get("phase") in ("result-review", "objective-review"):
+        body = capture(e)
+        m = re.search(r'^\{"criteria":.*$', body.get("request") or "", re.M)
+        if m:
+            try:
+                packets[step] = [c.get("criterion") for c in json.loads(m.group(0))["criteria"]]
+            except (ValueError, KeyError, AttributeError):
+                pass
+        criteria = packets.get(step) or []
+        for f in answer(body):
+            i = f.get("criterionIndex")
+            if isinstance(i, int) and 0 <= i < len(criteria):
+                verdicts.setdefault(criteria[i], []).append(
+                    {"at": str(e["at"]), "step": step, "phase": e["phase"], "verdict": f.get("verdict")})
+
+out = []
+def check(name, ok, evidence):
+    out.append(f"{name}\t{0 if ok else 1}\t{evidence}")
+
+# seam.criteria-verbatim: every Objective criterion an item's result review
+# judges (review/result.ts resultCriteria) is in that item's worker prompt word
+# for word, however the item's own acceptance restates it.
+whole = len(items) == 1
+judged = ("result-semantic", "result-command", "integrated-semantic") + (("final-review",) if whole else ())
+owed = {}
+for e in objective:
+    item = items.get(e.get("itemId"))
+    if item and (item.get("kind") or "work") not in ("qa", "aggregate") and (e.get("proof") or {}).get("kind") in judged:
+        owed.setdefault(item["id"], []).append(text(e))
+rows, ok = [], bool(owed)
+for item, texts in owed.items():
+    req = prompts.get(item)
+    if req is None:
+        ok = False; rows.append(f"{item}: no worker prompt captured"); continue
+    miss = [t for t in texts if t not in req]
+    para = sum(1 for t in texts if t not in (items[item].get("acceptance") or []))
+    ok = ok and not miss
+    rows.append(f"{item}: {len(texts) - len(miss)}/{len(texts)} verbatim, {para} not verbatim in its acceptance"
+                + (f", missing {[short(t) for t in miss]}" if miss else ""))
+check("seam.criteria-verbatim", ok, f"#{n}: {len(objective)} Objective criteria in the plan's coverage, {len(items)} items; "
+      + ("; ".join(rows) or "no coding item's review judges an Objective criterion"))
+
+# seam.command-judged: each Objective criterion an item's command proves
+# (result-command) has a verdict from that item's result review.
+cmd = [(e.get("itemId"), text(e)) for e in objective if (e.get("proof") or {}).get("kind") == "result-command"]
+rows, ok = [], bool(cmd)
+for item, t in cmd:
+    v = [x["verdict"] for x in verdicts.get(t, []) if x["step"] == f"item:{item}:review"]
+    ok = ok and bool(v)
+    rows.append(f"{item} '{short(t)}': {', '.join(v) or 'never judged'}")
+kinds = {}
+for e in objective:
+    k = (e.get("proof") or {}).get("kind"); kinds[k] = kinds.get(k, 0) + 1
+check("seam.command-judged", ok, f"#{n}: proofs {json.dumps(kinds)}; " + ("; ".join(rows) or "no Objective criterion has a result-command proof"))
+
+# seam.stub-refused-early: the consumer criterion is judged at result review,
+# and its first refusal, if any, is result review's, never final review's.
+cons = next((text(e) for e in objective if consumer in text(e)), "")
+seen = sorted(verdicts.get(cons, []), key=lambda x: x["at"]) if cons else []
+rr = [x for x in seen if x["phase"] == "result-review"]
+fr = [x for x in seen if x["phase"] == "objective-review"]
+first = next((x for x in seen if x["verdict"] == "refuse"), None)
+ok = bool(rr) and (first is None or first["phase"] == "result-review") and bool(fr or first)
+show = lambda xs: ", ".join(f"{x['verdict']} ({x['step']})" for x in xs) or "none"
+check("seam.stub-refused-early", ok, f"#{n}: consumer criterion {'in the plan' if cons else 'not in the plan'}; "
+      f"result review verdicts: {show(rr)}; final review verdicts: {show(fr)}; first refusal: "
+      + (f"{first['phase']} at {first['at']}" if first else "none (no stub reached a review)"))
+
+# seam.final-repair: each final-review refusal offered `repair`, and after it
+# the Objective finished with no other answer: an item's work ran again,
+# then the report.
+try:
+    refusals = [json.loads(l) for l in open(holds_file) if l.strip() and l.strip() != "null"]
+except (OSError, ValueError):
+    refusals = []
+status = d.get("status")
+ended = max((str(e["at"]) for e in evs if e.get("event") == "outcome" and e.get("outcome") == "done" and e.get("step") == "report"), default="")
+rows, ok = [], status == "done"
+for h in refusals:
+    answers = h.get("answers") or [o.get("answer") for o in h.get("options") or [] if isinstance(o, dict)]
+    asked = str(h.get("askedAt", ""))
+    redo = sum(1 for e in evs if e.get("event") == "start" and fnmatch.fnmatchcase(str(e.get("step")), "item:*:work") and str(e["at"]) >= asked)
+    ok = ok and "repair" in answers and redo >= 1 and ended >= asked
+    rows.append(f"refusal asked {asked} [{','.join(a for a in answers if a)}]: work starts after it {redo}")
+holds = sum(1 for e in evs if e.get("event") == "hold")
+check("seam.final-repair", ok, f"#{n} {status}, report done {ended or 'never'}, holds {holds}; "
+      + ("; ".join(rows) if refusals else "final review refused nothing, so no repair was needed"))
+print("\n".join(out))
+PY
+)
+  while IFS=$'\t' read -r check rc evid; do
+    [ -n "$check" ] && rec_if "$check" "$rc" "$evid" "$2"
+  done <<<"$out"
+  for check in seam.criteria-verbatim seam.command-judged seam.stub-refused-early seam.final-repair; do
+    grep -q "^$check"$'\t' <<<"$out" || record "$check" FAIL "#$n: the check's reader failed" "$2"
+  done
+}
+replay_seam() { local n; n=$(case_issues | head -1); [ -z "$n" ] || seam_checks "$n" "$(now)"; }
 
 # ---------- lane Q: production settings ----------
 q_order() { # N VALUE: set the card's "Factory order" number

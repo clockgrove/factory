@@ -45,8 +45,8 @@ case_reset() {
   [ $up = 0 ] || return
   prule_clear
   local reset_at; reset_at=$(iso_ms)
-  cli_t 120 reset "$d" >"$RUN_DIR/reset.$d.out" 2>&1; local rd=$?
-  cli_t 120 reset "$b" >"$RUN_DIR/reset.$b.out" 2>&1; local rb=$?
+  cli_t 120 reset "$d" >"$RUN_DIR/reset.$(issue_key "$d").out" 2>&1; local rd=$?
+  cli_t 120 reset "$b" >"$RUN_DIR/reset.$(issue_key "$b").out" 2>&1; local rb=$?
   wait_phase "$d" 'done|cancelled|failed' 600 >/dev/null
   wait_phase "$b" 'done|cancelled|failed' 1500 >/dev/null; sleep 20
   end_done "$d"; local okd=$?
@@ -69,7 +69,7 @@ case_archived() {
   n=$(new_issue withdraw "archived card" ID="$(uid)") || { record queue.archived-card FAIL "setup: couldn't file the issue (gh's error is in the suite log)" "$t0"; touch "$RUN_DIR/archived.done"; return; }
   item=$(gh_retry "$err" "adding #$n's card" gh_item_add "$n") && [ -n "$item" ] || { record queue.archived-card FAIL "setup: couldn't add #$n's card: $(head -c 300 "$err")" "$t0"; touch "$RUN_DIR/archived.done"; return; }
   gh_retry "$err" "archiving #$n's card" gh_item_archive "$item" || { record queue.archived-card FAIL "setup: couldn't archive #$n's card: $(head -c 300 "$err")" "$t0"; touch "$RUN_DIR/archived.done"; return; }
-  cli_t 40 run "$n" >>"$RUN_DIR/run.$n.out" 2>&1
+  cli_t 40 run "$n" >>"$RUN_DIR/run.$(issue_key "$n").out" 2>&1
   wait_for 300 bash -c "[ \"\$(python3 '$SUITE/lib/st.py' '$ROOT' status $n)\" != none ]"
   local s; s=$(st status "$n"); local adm; adm=$(st events "$n" event=admitted)
   cancel_wait "$n" 300; touch "$RUN_DIR/archived.done"
@@ -206,7 +206,7 @@ case_threads() {
   r_comment "$n" "$pr" || { record holds.review-threads FAIL "not proved: couldn't open a review thread on PR #$pr while it was open: $(tail -c 300 "$RUN_DIR/r.comment.err" 2>/dev/null)" "$t0"; e_end R "$n"; return 1; }
   # Only the suite answers the thread's hold, once it has resolved the thread.
   p=$(HOLD_POLICY="" wait_phase "$n" '^hold:|done|cancelled|failed' "$THREADS_BOUND")
-  local hj; hj=$(st hold "$n" 'item:*'); printf '%s\n' "$hj" >"$RUN_DIR/threads-hold.$n"
+  local hj; hj=$(st hold "$n" 'item:*'); printf '%s\n' "$hj" >"$RUN_DIR/threads-hold.$(issue_key "$n")"
   if [ "$hj" != null ] && [[ ,$(hold_field "$hj" answers), == *,retry,* ]] && r_resolve "$n" "$pr"; then
     sleep 5; answer_t 60 "$n" retry --question "$(hold_field "$hj" id)" >/dev/null 2>&1
     wait_phase "$n" 'done|cancelled|failed' "$(( $(left) - 60 ))" >/dev/null; sleep 10
@@ -229,7 +229,7 @@ JSON
 }
 # r_comment N PR: a review comment on the first line PR adds (else on its first
 # file), as the suite's gh login: an open review thread. Refused once the PR
-# is no longer open. Keeps {id, url, path, at} in threads-comment.N.
+# is no longer open. Keeps {id, url, path, at} in threads-comment.KEY (issue_key N).
 r_comment() {
   local state="" head="" files="" path="" line="" c=""
   state=$(gh api "repos/$REPO/pulls/$2" --jq '"\(.state) \(.head.sha)"' 2>>"$RUN_DIR/r.comment.err") || return 1
@@ -251,25 +251,25 @@ print(files[0]["filename"] if files else "")' "$files")"
   local where=(-f path="$path"); if [ -n "$line" ]; then where+=(-F line="$line" -f side=RIGHT); else where+=(-f subject_type=file); fi
   c=$(gh api -X POST "repos/$REPO/pulls/$2/comments" -f body="Drill: an open review thread. The integration suite resolves it once Factory holds on it." \
     -f commit_id="$head" "${where[@]}" --jq '{id, url: .html_url, path, at: .created_at}' 2>>"$RUN_DIR/r.comment.err") || return 1
-  printf '%s\n' "$c" >"$RUN_DIR/threads-comment.$1"
+  printf '%s\n' "$c" >"$RUN_DIR/threads-comment.$(issue_key "$1")"
   log "#$1: review thread opened on PR #$2 at $path${line:+:$line}"
 }
-# r_resolve N PR: resolve the suite's thread on PR (GraphQL resolveReviewThread); keeps its id in threads-thread.N.
+# r_resolve N PR: resolve the suite's thread on PR (GraphQL resolveReviewThread); keeps its id in threads-thread.KEY.
 r_resolve() {
   local cid="" tid="" r=""
-  cid=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$RUN_DIR/threads-comment.$1") || return 1
+  cid=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$RUN_DIR/threads-comment.$(issue_key "$1")") || return 1
   tid=$(gh api graphql -F p="$2" -f o="$OWNER" -f r="$NAME" \
     -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){nodes{id comments(first:1){nodes{databaseId}}}}}}}' \
     --jq ".data.repository.pullRequest.reviewThreads.nodes[]|select(.comments.nodes[0].databaseId==$cid)|.id") && [ -n "$tid" ] || { log "#$1: the suite's review thread on PR #$2 wasn't found"; return 1; }
   r=$(gh api graphql -f t="$tid" -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' \
     --jq .data.resolveReviewThread.thread.isResolved) && [ "$r" = true ] || { log "#$1: resolving review thread $tid failed"; return 1; }
-  echo "$tid" >"$RUN_DIR/threads-thread.$1"; log "#$1: review thread $tid resolved"
+  echo "$tid" >"$RUN_DIR/threads-thread.$(issue_key "$1")"; log "#$1: review thread $tid resolved"
 }
 # r_github N: 0 when the suite's thread shows resolved and R's main still
 # has a rule requiring thread resolution. Prints the evidence.
 r_github() {
   local tid="" res="" rules="" ok=0
-  tid=$(cat "$RUN_DIR/threads-thread.$1" 2>/dev/null)
+  tid=$(cat "$RUN_DIR/threads-thread.$(issue_key "$1")" 2>/dev/null)
   if [ -n "$tid" ]; then
     res=$(gh api graphql -f t="$tid" -f query='query($t:ID!){node(id:$t){... on PullRequestReviewThread{isResolved}}}' --jq .data.node.isResolved) || res="unreadable"
   else res="no, the suite never resolved it"; fi
@@ -279,14 +279,14 @@ r_github() {
   return $ok
 }
 # threads_check N T0 [LIVE LIVE_EVIDENCE]: from R's state, the case's records
-# of its review comment and of the hold it met (threads-comment.N,
-# threads-hold.N) alone (also run-suite.sh --replay). The hold is a Work
+# of its review comment and of the hold it met (threads-comment.KEY,
+# threads-hold.KEY: issue_key N) alone (also run-suite.sh --replay). The hold is a Work
 # Item's ci or merge step, asked within THREADS_BOUND of the comment, naming
 # unresolved review threads with a link to the suite's, offering retry; then
 # N done. LIVE is the GitHub part's exit (r_github, end_done), empty in a replay.
 threads_check() {
   local n=$1 d=${KEPT:-$RUN_DIR} ev="" rk=0
-  ev=$(python3 - "$d/threads-comment.$n" "$d/threads-hold.$n" "$(st status "$n")" "$THREADS_BOUND" <<'PY'
+  ev=$(python3 - "$d/threads-comment.$(issue_key "$n")" "$d/threads-hold.$(issue_key "$n")" "$(st status "$n")" "$THREADS_BOUND" <<'PY'
 import datetime, json, re, sys
 def read(path):
     try:

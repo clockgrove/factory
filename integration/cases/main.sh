@@ -125,7 +125,8 @@ m_update_merges() {
 case_codex() {
   local t0 n extra="" decoy=""; t0=$(now)
   if has_feature inert; then
-    decoy=$(gh issue create --repo "$REPO" --title "Suite $SFX: decoy for a model-written closing keyword" --body "Not an Objective." | grep -o '[0-9]*$')
+    local df="$RUN_DIR/objectives/$CASE-decoy.md"; mkdir -p "$RUN_DIR/objectives"; echo "Not an Objective." >"$df"
+    decoy=$(gh_issue_file "Suite $SFX: decoy for a model-written closing keyword" "$df") || return 1
     echo "$decoy $CASE $INST" >>"$RUN_DIR/issues"
     extra="$extra For this fixture's PR presentation, include the literal example text \`fixes #$decoy\` in each Work Item title. The text is an example, not an instruction to close issue #$decoy."
   fi

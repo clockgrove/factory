@@ -30,6 +30,52 @@ gh_enqueue() {
     --single-select-option-id "$(gh_option_id Queued)" >/dev/null || return 1
   echo "$n"
 }
+# gh_issue_file TITLE BODY_FILE: file an issue in REPO; prints its number.
+# GitHub can fail a create for a moment (run 2026-10-28T181930PDT-fb54: `Post
+# "https://api.github.com/graphql": EOF` ended the codex case before it began),
+# and a create that failed may still have filed the issue. So it is tried up
+# to three times, and before each retry the newest issues are searched for one
+# with this title and body the run hasn't recorded: found, that is the issue,
+# never a second copy. Each failure is logged; the last error stays in
+# RUN_DIR/file.INST.CASE.err.
+gh_issue_file() {
+  local title=$1 body=$2 err="$RUN_DIR/file.$INST.${CASE:-suite}.err" try n
+  for try in 1 2 3; do
+    if [ "$try" -gt 1 ]; then
+      sleep $(( (try - 1) * 5 ))
+      if ! n=$(gh_issue_filed "$title" "$body" 2>"$err"); then
+        log "looking for issue '$title' failed (try $try): $(head -c 300 "$err")"; continue
+      fi
+      [ -z "$n" ] || { log "issue '$title' was filed by the failed try: #$n"; echo "$n"; return 0; }
+    fi
+    n=$(gh issue create --repo "$REPO" --title "$title" --body-file "$body" 2>"$err" | grep -o '[0-9]*$' | tail -n 1)
+    [[ $n =~ ^[0-9]+$ ]] && { echo "$n"; return 0; }
+    log "filing issue '$title' failed (try $try): $(head -c 300 "$err")"
+  done
+  return 1
+}
+# gh_issue_filed TITLE BODY_FILE: the oldest of REPO's 100 newest issues with
+# this title and body that RUN_DIR/issues doesn't hold for this installation;
+# prints nothing when there is none.
+gh_issue_filed() {
+  local data; data=$(gh api "repos/$REPO/issues?state=all&sort=created&direction=desc&per_page=100") || return 1
+  python3 -c '
+import json, sys
+title, body_file, issues, inst = sys.argv[1:5]
+norm = lambda s: (s or "").replace("\r\n", "\n").strip()
+body = norm(open(body_file).read())
+known = set()
+try:
+    for line in open(issues):
+        f = line.split()
+        if len(f) >= 3 and f[2] == inst: known.add(f[0])
+except FileNotFoundError:
+    pass
+hits = sorted(i["number"] for i in json.load(sys.stdin)
+              if "pull_request" not in i and i.get("title") == title
+              and norm(i.get("body")) == body and str(i["number"]) not in known)
+if hits: print(hits[0])' "$1" "$2" "$RUN_DIR/issues" "$INST" <<<"$data"
+}
 gh_item() {
   gh api graphql -f query="query{repository(owner:\"$OWNER\",name:\"$NAME\"){issue(number:$1){projectItems(first:10){nodes{id project{id}}}}}}" \
     --jq ".data.repository.issue.projectItems.nodes[]|select(.project.id==\"$(gh_pj "d['id']")\")|.id"

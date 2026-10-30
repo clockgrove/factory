@@ -58,6 +58,36 @@ const ERRORS = [
   "src/feature.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.",
   "src/feature.ts(9,1): error TS2304: Cannot find name 'missingThing'.",
 ];
+/**
+ * A linter's warnings with code frames whose source mentions an error, in
+ * box-drawing characters that take three bytes each in UTF-8.
+ */
+const codeFrames = (from, count) =>
+  Array.from({ length: count }, (_, index) =>
+    [
+      `src/module${from + index}.ts:10:23 lint/suspicious/noExplicitAny ${"━".repeat(80)}`,
+      "",
+      "  ! Unexpected any. Specify a different type.",
+      "",
+      "     9 │ try { run(); }",
+      "  > 10 │ } catch (error: any) {",
+      "       │                 ^^^",
+      "    11 │   log(error.message);",
+      "",
+      "  i any disables many type checking rules. Its use should be avoided.",
+      "",
+    ].join("\n"),
+  ).join("\n");
+/** A test run's passing tests, which name errors, around one failure. */
+const passing = Array.from(
+  { length: 600 },
+  (_, n) => `  ✓ returns an error when input ${n} is invalid (2ms)`,
+).join("\n");
+const FAILED_TEST = [
+  "  ✗ parses the config",
+  "    AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
+];
+const testRun = `> test\n${passing}\n${FAILED_TEST.join("\n")}\n    at TestContext.<anonymous> (test/config.test.js:12:5)\n${passing}\n# fail 1\n`;
 /** A linter's warnings, then a compiler's errors, then more warnings. */
 const flooded = `> check\n${warnings(0, 400)}\n${ERRORS[0]}\n  3 const total: number = "none";\n${ERRORS[1]}\nFound 2 errors in 1 file.\n${warnings(400, 400)}\n`;
 
@@ -131,6 +161,35 @@ test("failureExcerpt leaves short output as it is, keeps the start and the end o
   assert.ok(failureExcerpt(cases[3], 30_000).includes("npm ERR! code 1"));
 });
 
+test("failureExcerpt keeps the errors before lines that only mention one: code frames of error-handling code and passing tests named for errors (#2201)", () => {
+  for (const before of [20, 40, 100, 300]) {
+    const text = `> check\n${codeFrames(0, before)}\n${ERRORS[0]}\n${ERRORS[1]}\nFound 2 errors in 1 file.\n${codeFrames(before, 300)}\n`;
+    for (const chars of [8_000, 10_000, 30_000]) {
+      const excerpt = failureExcerpt(text, chars);
+      assert.ok(excerpt.length <= chars, `${excerpt.length} > ${chars}`);
+      for (const error of ERRORS)
+        assert.ok(excerpt.includes(error), `${before}, ${chars}: ${excerpt}`);
+      // Only the errors, and their summary, are taken for failures.
+      assert.match(excerpt, /and [1-3] lines? that looks? like errors/);
+    }
+  }
+  for (const chars of [8_000, 30_000]) {
+    const excerpt = failureExcerpt(testRun, chars);
+    assert.ok(excerpt.length <= chars, `${excerpt.length} > ${chars}`);
+    assert.ok(
+      excerpt.includes(`${FAILED_TEST.join("\n")}\n    at TestContext`),
+      excerpt,
+    );
+  }
+  // A line that only mentions a failure is kept with the room left.
+  const mention = `${warnings(0, 400)}\nwarning: 3 tests were skipped after a failing setup\n${warnings(400, 400)}`;
+  assert.ok(
+    failureExcerpt(mention, 8_000).includes(
+      "warning: 3 tests were skipped after a failing setup",
+    ),
+  );
+});
+
 test("a repair's correction carries the errors of a failed command's output between pages of warnings (#2201)", async () => {
   const result = await correction({
     finding: {
@@ -148,12 +207,13 @@ test("a repair's correction carries the errors of a failed command's output betw
   }
 });
 
-test("a worker's Validate shows a failed command's errors that sit in the middle of more than 30,000 characters of warnings, within VALIDATE_RESULT_CHARS (#2201)", async () => {
+/** A worker's Validate of a check that prints `output` and fails. */
+async function validated(output) {
   const { sandbox, logs } = loaded();
   const worktree = join(tempDir("factory-validate-errors-"), "w");
   mkdirSync(join(worktree, "src"), { recursive: true });
   git(worktree, "init", "--quiet");
-  writeFileSync(join(worktree, "flooded.txt"), flooded);
+  writeFileSync(join(worktree, "flooded.txt"), output);
   writeFileSync(join(worktree, "check.sh"), "cat flooded.txt\nexit 1\n");
   git(worktree, "add", ".");
   git(worktree, "commit", "--quiet", "-m", "base");
@@ -185,6 +245,11 @@ test("a worker's Validate shows a failed command's errors that sit in the middle
   );
   const run = await validator.call();
   assert.equal(run.isError, false, run.text);
+  return run;
+}
+
+test("a worker's Validate shows a failed command's errors that sit in the middle of more than 30,000 characters of warnings, within VALIDATE_RESULT_CHARS (#2201)", async () => {
+  const run = await validated(flooded);
   assert.ok(
     run.text.startsWith(
       "Validation failed. Fix this before you finish.\nsh check.sh failed:\n",
@@ -201,4 +266,20 @@ test("a worker's Validate shows a failed command's errors that sit in the middle
   // More of the output than the old 8,000-character tail: what the result
   // leaves.
   assert.ok(run.text.length > 20_000, String(run.text.length));
+  assert.ok(
+    Buffer.byteLength(run.text) <= VALIDATE_RESULT_CHARS,
+    String(Buffer.byteLength(run.text)),
+  );
+});
+
+test("a worker's Validate of output that takes several bytes a character stays within VALIDATE_RESULT_CHARS bytes, which Codex counts, and keeps the errors (#2201)", async () => {
+  const output = `> check\n${codeFrames(0, 120)}\n${ERRORS[0]}\n${ERRORS[1]}\nFound 2 errors in 1 file.\n${codeFrames(120, 120)}\n`;
+  assert.ok(Buffer.byteLength(output) > 1.3 * output.length);
+  const run = await validated(output);
+  assert.ok(
+    Buffer.byteLength(run.text) <= VALIDATE_RESULT_CHARS,
+    String(Buffer.byteLength(run.text)),
+  );
+  for (const error of ERRORS) assert.ok(run.text.includes(error), run.text);
+  assert.ok(run.text.includes("src/module239.ts:10:23"), run.text);
 });

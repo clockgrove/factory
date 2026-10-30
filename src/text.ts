@@ -17,12 +17,25 @@ export function headAndTail(
 }
 
 /**
- * A line that carries a command's failure: a compiler's or linter's error,
- * a failed test or assertion, a thrown exception or panic, a package
- * manager's error code, a non-zero exit.
+ * A line that says why a command failed: a compiler's or linter's error
+ * (`error TS2322`, `error[E0308]`, `file:3:7: error`, `  3:7  error`), a
+ * thrown error or exception, a package manager's error code, a failed test
+ * (`FAIL`, `✗`, `not ok`, `●`), a traceback, a panic, a non-zero exit.
  */
 const FAILURE_LINE =
-  /\berrors?\b|\w(?:error|exception)\b|\bERR!|\bERR_[A-Z\d_]+|\bfail(?:ed|ures?|ing|s)?\b|\bassert(?:ion)?\b|\bpanic(?:ked)?\b|^Traceback \(most recent call last\)|^\s*not ok\b|^\s*[✖✗✘×]|\bexit(?:ed)?(?: with)? (?:code|status):? *[1-9]/i;
+  /^\s*error\b|\berror(?:\[\w+\]| TS\d+)|:\s*error\b|^\s*\d+:\d+\s+error\b|\b(?:[A-Z]\w*)?(?:Error|Exception)(?::|\s\[|\s*$)|^Exception in\b|\bERR!|\bERR_[A-Z\d_]+|\bELIFECYCLE\b|\bFAIL(?:ED|URES?)?\b|^\s*(?:[✖✗✘×●]|not ok\b)|^Traceback \(most recent call last\)|\bpanic(?:ked)?\b|\b[Ee]xit(?:ed)?(?: with)? (?:code|status):? *[1-9]/;
+/**
+ * A line that only mentions an error or a failure, such as a summary
+ * (`Found 2 errors`) or a warning about error handling: kept with the room
+ * FAILURE_LINE's lines leave.
+ */
+const MENTIONS_FAILURE =
+  /\berrors?\b|\w(?:error|exception)\b|\bfail(?:ed|ures?|ing|s)?\b|\bassert(?:ion)?\b/i;
+/**
+ * A line that is never a failure line, whatever it says: a code frame's
+ * source line (`> 10 │ } catch (error: any) {`) or a passing test.
+ */
+const NOT_FAILURE = /^\s*>?\s*\d*\s*[│|]|^\s*(?:[✓✔√]|ok\b|PASS\b)/;
 /** A stack frame: kept after a failure line, never a failure by itself. */
 const STACK_FRAME = /^\s+at\s|^\s*File ".*", line \d+/;
 /** The lines kept around each failure line, and the stack frames past them. */
@@ -38,11 +51,13 @@ const excerptNote = (omitted: number, length: number, failures: number) =>
  * A failed command's output within `chars` characters, keeping what says
  * why it failed (#2201). Head and tail alone lose it when the errors sit in
  * the middle: a check that runs linters and then a compiler can bury its
- * first error under pages of warnings either side. So the lines that look
- * like failures (FAILURE_LINE), each with the lines around it and the
- * stack frames after it, come first, in the order they appear, within half
- * the budget; the start and the end take the rest. Every gap says how many
- * characters it left out, and a last line what was kept.
+ * first error under pages of warnings either side, and those warnings can
+ * mention errors themselves. So the lines that say why it failed
+ * (FAILURE_LINE), each with the lines around it and the stack frames after
+ * it, come first, in the order they appear, then the lines that only
+ * mention a failure (MENTIONS_FAILURE), within half the budget; the start
+ * and the end take the rest. Every gap says how many characters it left
+ * out, and a last line what was kept.
  */
 export function failureExcerpt(text: string, chars: number): string {
   if (text.length <= chars) return text;
@@ -66,26 +81,35 @@ export function failureExcerpt(text: string, chars: number): string {
   const lineCap = Math.max(200, Math.floor(chars / 10));
   const line = (index: number) =>
     text.slice(lines[index]!.start, lines[index]!.end);
-  const kept: [number, number][] = [];
+  const keep = new Uint8Array(lines.length);
   let spent = 0;
   let failures = 0;
-  let last = -1;
+  // The lines `from` to `to` not kept yet, and what they cost: their
+  // characters, a gap's marker before them, and a marker for each cut line.
   const window = (from: number, to: number) => {
-    const ranges: [number, number][] = [];
-    let cost = marker;
+    const added: number[] = [];
+    let cost = 0;
     for (let index = from; index <= to; index++) {
+      if (keep[index]) continue;
       const { start, end } = lines[index]!;
       const cut = Math.min(end, start + lineCap);
-      ranges.push([start, cut]);
+      added.push(index);
       cost += cut - start + 1 + (cut < end ? marker : 0);
     }
-    return { ranges, cost };
+    return { added, cost: added.length ? cost + marker : 0 };
   };
+  const failing: number[] = [];
+  const mentioning: number[] = [];
   for (let index = 0; index < lines.length; index++) {
     const { start, end } = lines[index]!;
     // Failures the head or the tail keep anyway need no excerpt.
-    if (index <= last || end <= head || start >= text.length - tail) continue;
-    if (!FAILURE_LINE.test(line(index))) continue;
+    if (end < head || start > text.length - tail) continue;
+    const content = line(index);
+    if (NOT_FAILURE.test(content)) continue;
+    if (FAILURE_LINE.test(content)) failing.push(index);
+    else if (MENTIONS_FAILURE.test(content)) mentioning.push(index);
+  }
+  for (const index of [...failing, ...mentioning]) {
     let to = Math.min(lines.length - 1, index + FAILURE_CONTEXT.after);
     while (
       to + 1 < lines.length &&
@@ -93,18 +117,21 @@ export function failureExcerpt(text: string, chars: number): string {
       STACK_FRAME.test(line(to + 1))
     )
       to++;
-    const from = Math.max(last + 1, index - FAILURE_CONTEXT.before);
+    const from = Math.max(0, index - FAILURE_CONTEXT.before);
     // The failure line alone when its context doesn't fit.
-    const taken = [
-      { ...window(from, to), to },
-      { ...window(index, index), to: index },
-    ].find((candidate) => spent + candidate.cost <= budget);
-    if (!taken) break;
-    kept.push(...taken.ranges);
+    const taken = [window(from, to), window(index, index)].find(
+      (candidate) => spent + candidate.cost <= budget,
+    );
+    if (!taken) continue;
+    for (const added of taken.added) keep[added] = 1;
     spent += taken.cost;
     failures++;
-    last = taken.to;
   }
+  const kept = lines.flatMap(({ start, end }, index) =>
+    keep[index]
+      ? [[start, Math.min(end, start + lineCap)] as [number, number]]
+      : [],
+  );
   // What the excerpts left goes to the start and the end, cut at a line
   // break where one is near.
   const left = budget - spent;

@@ -145,8 +145,9 @@ export class FinishRequests {
 }
 
 /**
- * The least of a failed command's output a Validate result keeps, whatever
- * else it holds; it gets what the result has left when that is more.
+ * The least of a failed command's output a Validate result keeps, in bytes,
+ * whatever else it holds; it gets what the result has left when that is
+ * more.
  */
 const VALIDATION_OUTPUT_CHARS = 8_000;
 /**
@@ -162,19 +163,27 @@ const NOTE_EXCERPTS = [600, 200, 0] as const;
  * as 4 bytes a token, and cuts the middle of anything longer, which would
  * drop part of the criterion map; the Claude Agent SDK's MCP cap is larger.
  * So the whole result stays under Codex's limit, with room for the exec
- * wrapper, and the same for all three workers.
+ * wrapper, and the same for all three workers. A failed run's result is
+ * bounded in UTF-8 bytes, since a command's output can be far from ASCII.
  */
 export const VALIDATE_RESULT_CHARS = 30_000;
 
 /**
- * Plain text within `chars`: the start, which names the failed command, the
- * end, and the lines that say why it failed wherever they are (#2201).
+ * Plain text within `bytes` of UTF-8: the start, which names the failed
+ * command, the end, and the lines that say why it failed wherever they are
+ * (#2201). Codex counts a result's bytes, and output such as a linter's
+ * code frames takes more than one a character, so the excerpt shrinks until
+ * its bytes fit.
  */
-function bounded(output: string, chars: number): string {
-  return failureExcerpt(
-    stripVTControlCharacters(output),
-    Math.max(VALIDATION_OUTPUT_CHARS, chars),
-  );
+function bounded(output: string, bytes: number): string {
+  const plain = stripVTControlCharacters(output);
+  const room = Math.max(VALIDATION_OUTPUT_CHARS, bytes);
+  for (let chars = room; ; ) {
+    const excerpt = failureExcerpt(plain, chars);
+    const size = Buffer.byteLength(excerpt);
+    if (size <= room) return excerpt;
+    chars = Math.max(0, Math.floor((chars * room) / size) - 1);
+  }
 }
 
 /**
@@ -349,8 +358,8 @@ export class SelfValidation {
         composed.unshift("Validation failed. Fix this before you finish.");
       return composed;
     };
-    // A failed command's output gets what the rest of the result leaves
-    // (VALIDATE_RESULT_CHARS), cut to keep its failure lines (#2201).
+    // A failed command's output gets the bytes the rest of the result
+    // leaves (VALIDATE_RESULT_CHARS), cut to keep its failure lines (#2201).
     const parts =
       result.kind === "passed"
         ? compose("")
@@ -359,7 +368,8 @@ export class SelfValidation {
               result.failed
                 ? `${result.failed.command} failed:\n${result.output}`
                 : result.output || result.detail,
-              VALIDATE_RESULT_CHARS - compose("").join("\n\n").length,
+              VALIDATE_RESULT_CHARS -
+                Buffer.byteLength(compose("").join("\n\n")),
             ),
           );
     // Self-review follows a passing run, last and within what the result has

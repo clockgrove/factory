@@ -150,9 +150,15 @@ const CLAIM_ONCE =
 const SHARED_HARNESS =
   "Where several items' tests need the same harness or fixture setup (a runtime, browser or service harness), the first item that needs it owns it as a shared module, and the items after it that need it depend on that item and reuse it: flag a plan that leaves each of them to build its own.";
 
-/** Check 3: ownership that lets independent items run concurrently. */
+/**
+ * Check 3: ownership that lets independent items run concurrently. A later
+ * item may own a shared file too when it depends on its owner, as the plan
+ * check allows (checks.ts): live (#2265), "exactly one owner" left an
+ * amendment no arrangement for new work on a started item's file, and its
+ * review contradicted itself round after round.
+ */
 const OWNERSHIP =
-  "Owned paths are as narrow as the change needs: files, or a directory only when the item creates or changes most of it, never a whole source tree or a shared folder for one file. A shared file (index, contracts barrel, router, registry, manifest, docs map) has exactly one owner, and every other item that needs its change depends on that owner. Where a shared layer (contracts, schema) must land first, one item owns it and the items consuming it depend on it and run in parallel with each other. Factory refuses two items that own the same or overlapping paths unless one depends on the other.";
+  "Owned paths are as narrow as the change needs: files, or a directory only when the item creates or changes most of it, never a whole source tree or a shared folder for one file. A shared file (index, contracts barrel, router, registry, manifest, docs map) has one first owner, and every other item that needs its change depends on that owner; a later item that must change the file too may also own it when it depends on that owner, so their changes are serial. In an amendment, a started item keeps its owned paths, so new work on a file it owns goes to a new or reattempt item that depends on it: never flag that overlap. Where a shared layer (contracts, schema) must land first, one item owns it and the items consuming it depend on it and run in parallel with each other. Factory refuses two items that own the same or overlapping paths unless one depends on the other.";
 
 /** Check 3: one outcome per item. */
 const ONE_OUTCOME =

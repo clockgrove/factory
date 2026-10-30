@@ -1,8 +1,9 @@
 // bench/run.mjs against a stand-in Factory CLI (fixtures/bench/factory-cli.mjs).
 // `factory run` queues the Objective and then follows it for as long as it
-// runs, so run.mjs stops that follower at its Queued line and follows with
-// `factory status`; a non-zero exit of any Factory command is a result it
-// records, never a crash.
+// runs, so run.mjs stops that follower once status shows the Objective
+// admitted (its Queued line comes before the service answers) and follows
+// with `factory status`; a non-zero exit of any Factory command is a
+// result it records, never a crash.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -108,9 +109,14 @@ const events = (at) =>
 const calls = (at) => lines(join(at, "calls.jsonl"));
 const recorded = (at) => JSON.parse(readFileSync(join(at, "run.json"), "utf8"));
 
-test("factory run is stopped at its Queued line, and the run is followed by status through a restart to its end", () => {
+test("factory run is stopped once status shows the Objective admitted, and the run is followed by status through a restart to its end", () => {
   const at = runDir("follow", {
     status: [
+      // While queuing: not yet admitted, a restart, then admitted.
+      view("running"),
+      { exit: 1, error: "Error: ENOENT: no such file or directory" },
+      view("running", objective("building")),
+      // Following.
       { exit: 1, error: "Error: ENOENT: no such file or directory" },
       view("stopped", objective("building")),
       view("running", objective("building", [SPEND])),
@@ -120,8 +126,13 @@ test("factory run is stopped at its Queued line, and the run is followed by stat
   const run = benchRun(at);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /#42 done; scored into /);
-  // The follower printed Queued and was stopped as Ctrl-C stops it.
+  // The follower printed Queued and was stopped as Ctrl-C stops it, only
+  // after the third status showed the Objective admitted.
   const made = calls(at);
+  assert.deepEqual(
+    made.slice(0, 5).map((call) => call.signal ?? call.command),
+    ["run", "status", "status", "status", "SIGINT"],
+  );
   assert.deepEqual(
     made.filter((call) => call.command === "run"),
     [
@@ -181,7 +192,12 @@ test("no service running is reported, not queued, and the next run queues it", (
   assert.deepEqual(events(at), ["service-down"]);
   assert.ok(!calls(at).some((call) => call.command === "status"));
   // Started: queued, and the service seen up again.
-  standIn(at, { status: [view("running", objective("done"))] });
+  standIn(at, {
+    status: [
+      view("running", objective("building")),
+      view("running", objective("done")),
+    ],
+  });
   const started = benchRun(at);
   assert.equal(started.status, 0, started.stderr);
   assert.ok(recorded(at).queuedAt);
@@ -193,20 +209,25 @@ test("no service running is reported, not queued, and the next run queues it", (
   ]);
 });
 
-test("a refused queue request is reported without a stack and not queued", () => {
+test("a request the service refuses after the Queued line is reported without a stack and not queued", () => {
   const at = runDir("refused", {
     run: "refused",
-    status: [view("running", objective("done"))],
+    // Never admitted: status doesn't show it.
+    status: [view("running")],
   });
   const run = benchRun(at);
   assert.equal(run.status, 1, run.stderr);
   assert.match(
     run.stderr,
-    /^factory run 42 didn't queue it \(exit 1\): factory: #42 is closed/,
+    /^factory run 42 didn't queue it \(exit 1\): factory: The queue is paused, so #42 isn't admitted/,
   );
   assert.doesNotMatch(run.stderr, /\n\s+at /);
   assert.equal(recorded(at).queuedAt, undefined);
   assert.deepEqual(events(at), []);
+  // Looked for the admission while waiting, and never stopped the follower.
+  const made = calls(at);
+  assert.ok(made.some((call) => call.command === "status"));
+  assert.ok(!made.some((call) => call.signal));
 });
 
 test("a refused policy answer is recorded, and a hold still open after it pauses for the operator", () => {

@@ -3,14 +3,17 @@
  * Runs a provisioned benchmark run to its end, applying the operator policy.
  *
  *   node bench/run.mjs --run-dir DIR [--interval SECONDS]
- *     Queues the Objective (once), then follows it. `factory run` queues
- *     it and then follows it itself until it ends or needs a person, so
- *     this stops that follower at its "Queued #N" line, as Ctrl-C would
- *     (the Objective keeps running), and follows with `factory status`.
- *     A follower that ends on an open hold before it is stopped queued it
- *     too. While the service isn't running nothing is queued: that is
- *     recorded and printed, and this exits 75; start the service and run
- *     it again. A refused queue request exits 1. Holds of a kind the
+ *     Queues the Objective (once), then follows it. `factory run` asks
+ *     the service to run it and then follows it itself until it ends or
+ *     needs a person, so this stops that follower, as Ctrl-C would (the
+ *     Objective keeps running), once `factory status` shows the Objective
+ *     admitted, and follows with `factory status`. Its "Queued #N" line
+ *     comes before the service answers, so it is no admission. A follower
+ *     that ends on an open hold or the Objective's end before it is
+ *     stopped queued it too. While the service isn't running nothing is
+ *     queued: that is recorded and printed, and this exits 75; start the
+ *     service and run it again. A refused request, or one not admitted in
+ *     10 min, exits 1 and isn't recorded as queued. Holds of a kind the
  *     policy scripts (spend and allowance raises: `more`; a changed
  *     configuration: `adopt`) are answered with `factory answer --as
  *     <policy>`. Any other hold pauses for the operator: it is recorded and
@@ -33,7 +36,7 @@
  * service was seen down goes to DIR/decisions.jsonl; the scorecard takes
  * the same decisions and the outages from Factory's run log.
  */
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   mkdirSync,
@@ -173,58 +176,102 @@ if (positionals[0] === "answer") {
 }
 
 // What `factory run` prints (followRun, src/host.ts): its Queued line once
-// Ctrl-C only stops following, the service-isn't-running line (exit 2; the
-// request waits for a service), and a refusal's JSON line on stderr.
+// Ctrl-C only stops following, which is before the service answers the
+// request, the service-isn't-running line (exit 2; the request waits for a
+// service), and a refusal's JSON line and "factory: " line on stderr.
 const QUEUED = new RegExp(`^Queued #${issue};`, "m");
 const NO_SERVICE = /^The service isn't running; the request applies/m;
-const REFUSED = /"kind":"lifecycle-refusal"/;
-/** How long `factory run` may take to print its Queued line. */
-const QUEUE_MS = 120_000;
+const FAILED = /^factory: /m;
+/** How long the service may take to admit the Objective. */
+const QUEUE_MS = 600_000;
+/** How often to look for the admission meanwhile. */
+const ADMIT_MS = Math.min(Number(values.interval) * 1000, 5000);
 
 /**
- * `factory run ISSUE` queues the Objective, then follows it until it ends
- * or needs a person, which can take hours. Queue only: at its Queued line
- * stop it with SIGINT, which it takes as Ctrl-C (it stops following, 130).
- * Resolves its exit code and output, and whether it was stopped for
- * printing no Queued line in QUEUE_MS.
+ * Whether `factory status` shows the Objective admitted: running, or
+ * holding. A failed status (a restart) is no answer yet; an ended
+ * Objective is an earlier run's, which the request admits again.
  */
-function queue() {
+function admitted() {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [record.factory.cli, "run", issue], {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
+    execFile(
+      process.execPath,
+      [record.factory.cli, "status", issue, "--json"],
+      { encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 },
+      (error, stdout) => {
+        let view;
+        try {
+          view = error
+            ? undefined
+            : JSON.parse(stdout).objectives?.find(
+                (o) => o.issue === record.issue,
+              );
+        } catch {
+          view = undefined;
+        }
+        resolve(Boolean(view && !["done", "cancelled"].includes(view.status)));
+      },
+    );
+  });
+}
+
+/**
+ * `factory run ISSUE` asks the service to run the Objective, then follows
+ * it until it ends or needs a person, which can take hours. Its Queued
+ * line comes before the service admits or refuses it, so queue only: once
+ * status shows it admitted, stop it with SIGINT, which it takes as Ctrl-C
+ * (it stops following, 130). Resolves its exit code and output, whether
+ * it was stopped for being admitted, and whether it was stopped for no
+ * admission in QUEUE_MS.
+ */
+async function queue() {
+  const child = spawn(process.execPath, [record.factory.cli, "run", issue], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (text) => {
+    stdout += text;
+  });
+  child.stderr.setEncoding("utf8").on("data", (text) => {
+    stderr += text;
+  });
+  let exited = false;
+  const closed = new Promise((resolve) => {
+    child.on("error", (error) => {
+      stderr += `factory: ${error.message}\n`;
+      resolve(1);
     });
-    let stdout = "";
-    let stderr = "";
-    let stopping = false;
-    let late = false;
-    const stop = () => {
-      if (stopping) return;
-      stopping = true;
-      child.kill("SIGINT");
-      // A follower that doesn't stop is ended.
-      setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
-    };
-    const timer = setTimeout(() => {
+    child.on("close", (code) => resolve(code ?? 1));
+  }).finally(() => {
+    exited = true;
+  });
+  const stop = () => {
+    child.kill("SIGINT");
+    // A follower that doesn't stop is ended.
+    setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+  };
+  const until = Date.now() + QUEUE_MS;
+  let late = false;
+  let admission = false;
+  // Until the follower ends by itself (a refusal, no service, an open
+  // hold, the Objective's end) or status shows the Objective admitted.
+  while (!exited) {
+    await Promise.race([closed, sleep(ADMIT_MS)]);
+    if (exited) break;
+    if (Date.now() >= until) {
       late = true;
       stop();
-    }, QUEUE_MS);
-    child.stdout.setEncoding("utf8").on("data", (text) => {
-      stdout += text;
-      if (QUEUED.test(stdout)) stop();
-    });
-    child.stderr.setEncoding("utf8").on("data", (text) => {
-      stderr += text;
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ code: 1, stdout, stderr: `factory: ${error.message}`, late });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr, late });
-    });
-  });
+      break;
+    }
+    if (QUEUED.test(stdout) && (await admitted())) {
+      admission = true;
+      stop();
+      break;
+    }
+  }
+  return { code: await closed, stdout, stderr, late, admitted: admission };
 }
 
 if (!record.queuedAt) {
@@ -237,14 +284,23 @@ if (!record.queuedAt) {
     );
     process.exit(75);
   }
-  if (REFUSED.test(run.stderr) || !QUEUED.test(run.stdout)) {
+  // Queued: admitted, so following stopped (130), or the follower ended
+  // first on an open hold (2) or the Objective's end (0, 1), which the
+  // follow loop reads from status. A refusal or failure says "factory: ".
+  const queued =
+    run.admitted ||
+    (!run.late &&
+      QUEUED.test(run.stdout) &&
+      [0, 1, 2].includes(run.code) &&
+      !FAILED.test(run.stderr));
+  if (!queued) {
+    // A request still waiting is harmless: run again, it answers at once
+    // for a running Objective, and a later one supersedes it.
     process.stderr.write(
-      `factory run ${issue} didn't queue it (exit ${run.code}): ${run.late ? `no Queued line in ${QUEUE_MS / 1000} s` : failure(run)}\n`,
+      `factory run ${issue} didn't queue it (exit ${run.code}): ${run.late ? `not admitted in ${QUEUE_MS / 1000} s; factory status ${issue} shows it, and running this again carries on` : failure(run)}\n`,
     );
     process.exit(1);
   }
-  // Queued: following stopped (130), or ended first on an open hold (2) or
-  // the Objective's end (0, 1), which the follow loop reads from status.
   record.queuedAt = now();
   writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`);
   note({ event: "queued", issue: record.issue });

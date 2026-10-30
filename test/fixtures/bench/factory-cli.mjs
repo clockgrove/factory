@@ -2,8 +2,8 @@
 // and `answer` of acme/widgets#42, printing and exiting as Factory does
 // (followRun in src/host.ts, src/commands/). BENCH_FACTORY_RUN is how `run`
 // goes: "follow" prints the Queued line and follows until SIGINT, "hold"
-// ends on an open hold, "no-service" finds no service, "refused" is
-// refused. BENCH_FACTORY_STATUS is a JSON list of what each `status` gives
+// ends on an open hold, "no-service" finds no service, "refused" prints
+// the Queued line and then the service's refusal. BENCH_FACTORY_STATUS is a JSON list of what each `status` gives
 // in turn, the last one repeated: a status view, or { exit, error }.
 // BENCH_FACTORY_ANSWER "refused" refuses every answer. Each call is a line
 // of BENCH_FACTORY_CALLS.
@@ -33,12 +33,6 @@ if (command === "run") {
     );
     process.exit(2);
   }
-  if (mode === "refused") {
-    process.stderr.write(
-      `${JSON.stringify({ kind: "lifecycle-refusal", code: "issue_closed" })}\nfactory: #42 is closed and Factory never ran it: reopen it first.\n`,
-    );
-    process.exit(1);
-  }
   // Following: Ctrl-C stops it.
   process.once("SIGINT", () => {
     called({ signal: "SIGINT" });
@@ -47,9 +41,19 @@ if (command === "run") {
     );
     process.exit(130);
   });
+  // Printed before the service answers the request.
   process.stdout.write(
     "Queued #42; following it (Ctrl-C stops following, and it keeps running).\n",
   );
+  if (mode === "refused") {
+    // A later look reads the service's refusal.
+    setTimeout(() => {
+      process.stderr.write(
+        `${JSON.stringify({ kind: "lifecycle-refusal", code: "queue_not_running" })}\nfactory: The queue is paused, so #42 isn't admitted; run factory queue resume, then factory run 42 again.\n`,
+      );
+      process.exit(1);
+    }, 200);
+  }
   if (mode === "hold") {
     // The first look after admission finds a question open.
     process.stdout.write("#42 building: 1 open question\n");

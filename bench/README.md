@@ -67,7 +67,7 @@ Each step looks before it acts, so running provisioning again with the same `--r
 node bench/run.mjs --run-dir <benchRoot>/acme-widgets-42/<run id>
 ```
 
-This queues the Objective and follows it. `factory run` follows the Objective itself once it queues it, so `run.mjs` stops it at its "Queued #N" line, as Ctrl-C would, and follows with `factory status`. While the service isn't running nothing is queued: `run.mjs` says so and exits 75; start the service and run it again. A refused queue request exits 1. A status that fails while following, such as during a restart, counts as the service seen down and is tried again. The operator policy answers by hold kind, always through `factory answer --as "<policy as>"`:
+This queues the Objective and follows it. `factory run` follows the Objective itself once it asks the service to run it, so `run.mjs` stops it, as Ctrl-C would, once `factory status` shows the Objective admitted, and follows with `factory status`. Its "Queued #N" line comes before the service admits or refuses the request, so it isn't taken as queued. While the service isn't running nothing is queued: `run.mjs` says so and exits 75; start the service and run it again. A request the service refuses, or doesn't admit in 10 minutes, exits 1 without recording the run as queued; run it again once the cause is fixed. A status that fails while following, such as during a restart, counts as the service seen down and is tried again. The operator policy answers by hold kind, always through `factory answer --as "<policy as>"`:
 
 | Hold kind   | Asked when                                       | Policy                 |
 | ----------- | ------------------------------------------------ | ---------------------- |

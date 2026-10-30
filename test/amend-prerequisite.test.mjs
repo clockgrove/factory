@@ -7,8 +7,9 @@
 // that need it in the amendment answer's `enables`, and Factory makes each
 // depend on it, a published one too; the planner and the review are told
 // which items are failing CI or validation. A repair diagnosis that finds
-// a missing prerequisite another item provides offers `depend`, whose
-// amendment the fence refuses until the item depends on the provider; the
+// a missing prerequisite another item provides proposes an amendment at
+// once (#2243; where it can't, its question offers `depend`), which the
+// fence refuses until the item depends on the provider; the
 // item then waits for the provider's merge and runs again on the default
 // branch with it.
 import assert from "node:assert/strict";
@@ -28,7 +29,11 @@ import { buildFacts } from "../dist/planning/facts.js";
 import { decodePlan } from "../dist/planning/wire.js";
 import { correction } from "../dist/repair.js";
 import { readShown } from "../dist/shown.js";
-import { enabledAttempt, prerequisiteAmendment } from "../dist/work/amend.js";
+import {
+  diagnosedPrerequisite,
+  enabledAttempt,
+  prerequisiteAmendment,
+} from "../dist/work/amend.js";
 import { missingPrerequisite } from "../dist/work/repair-context.js";
 import { buildSteps } from "../dist/work/steps.js";
 import {
@@ -641,7 +646,10 @@ test("under native-stack delivery a layer of a started stack takes no enables ed
     failure: LAUNCH,
     stack: "x > a",
   };
-  const asked = missingPrerequisite(state, a, found);
+  // The diagnosis proposes nothing: it asks, its repair free.
+  const asked = diagnosedPrerequisite(state, a, found);
+  assert.equal(asked.kind, "hold", JSON.stringify(asked));
+  assert.deepEqual(asked.free, { target: "item:a:work", repair: 2 });
   assert.ok(!asked.options.some((option) => option.answer === "depend"));
   assert.match(
     asked.question,
@@ -868,7 +876,7 @@ test("a CI failure that repeated unchanged after the last correction may still b
   );
 });
 
-test("a missing prerequisite answered depend amends the plan so the item depends on the provider: a round without the dependency goes back, and the item waits for the provider's merge, then runs again brought up to date (#2233)", async () => {
+test("a repair diagnosis's missing prerequisite is proposed at once, with no question, as an amendment that makes the item depend on the provider: a round without the dependency goes back, and the item waits for the provider's merge, then runs again brought up to date (#2233, #2243)", async () => {
   const found = {
     repair: 2,
     provider: "browser",
@@ -896,39 +904,19 @@ test("a missing prerequisite answered depend amends the plan so the item depends
     keep: () => {},
   });
 
-  // The diagnosis's question offers depend, with no guidance text needed.
-  const asked = missingPrerequisite(state, a, found);
-  assert.equal(asked.kind, "hold");
-  assert.deepEqual(
-    asked.options.map((option) => [option.answer, option.needsText ?? false]),
-    [
-      ["depend", false],
-      ["answer", true],
-      ["retry", false],
-      ["replan", false],
-      ["cancel", false],
-    ],
-  );
-  assert.match(asked.question, /a then waits for browser's merge/);
-
-  // Another answer: the repair goes on as usual.
-  assert.equal(prerequisiteAmendment(a, context(), undefined, {}), undefined);
-  const depend = {
-    holdId: "item:a:work@3",
-    question: asked.question,
-    answer: "depend",
-    by: "octo",
-    at: "2026-01-01T02:00:00.000Z",
-  };
-  const proposed = prerequisiteAmendment(a, context(depend), undefined, {});
+  // The diagnosis proposes the amendment as its own, asking nothing; its
+  // repair is free.
+  const proposed = diagnosedPrerequisite(state, a, found);
   assert.equal(proposed.kind, "retry", JSON.stringify(proposed));
+  assert.deepEqual(proposed.free, { target: "item:a:work", repair: 2 });
   apply(state, proposed);
   const proposal = state.kept["amend:prerequisite-a-2:proposal"];
+  assert.equal(proposal.actor, "Work Item a's repair diagnosis");
   assert.deepEqual(proposal.prerequisite, { itemId: "a", provider: "browser" });
   assert.deepEqual(proposal.worker, { itemId: "a", attempt: 3 });
   assert.deepEqual(proposal.discovery.dependencies, ["browser"]);
   assert.match(
-    prerequisiteAmendment(a, context(depend), undefined, {}).reason,
+    prerequisiteAmendment(a, context(), undefined, {}).reason,
     /Waits for amendment prerequisite-a-2/,
   );
 
@@ -993,5 +981,94 @@ test("a missing prerequisite answered depend amends the plan so the item depends
     !missingPrerequisite(state, a, found).options.some(
       (option) => option.answer === "depend",
     ),
+  );
+});
+
+test("a missing prerequisite whose provider has a question open asks, offering depend, which proposes the amendment as the operator's; continued past, it asks once more without depend (#2243)", async () => {
+  const found = {
+    repair: 2,
+    provider: "browser",
+    diagnosis:
+      "The database job never installs the browser, which browser provisions.",
+    failure: `Required checks failed: database\n${LAUNCH}`,
+  };
+  const { state } = await building(
+    accepted([work("a"), browser, qa(["a", "browser"])]),
+    { "item:a:prerequisite": found },
+  );
+  state.holds.push({
+    id: "item:browser:work@1",
+    step: "item:browser:work",
+    item: "browser",
+    question: "Work Item browser needs your decision.",
+    options: [],
+    cause: "question",
+    askedAt: "2026-01-01T01:30:00.000Z",
+  });
+  const a = state.done.plan.items.find((entry) => entry.id === "a");
+
+  // The diagnosis asks, its repair free, offering depend with no text.
+  const asked = diagnosedPrerequisite(state, a, found);
+  assert.equal(asked.kind, "hold", JSON.stringify(asked));
+  assert.deepEqual(asked.free, { target: "item:a:work", repair: 2 });
+  assert.equal(asked.keep, undefined);
+  assert.deepEqual(
+    asked.options.map((option) => [option.answer, option.needsText ?? false]),
+    [
+      ["depend", false],
+      ["answer", true],
+      ["retry", false],
+      ["replan", false],
+      ["cancel", false],
+    ],
+  );
+  assert.match(asked.question, /a then waits for browser's merge/);
+
+  // Another answer: the repair goes on as usual.
+  assert.equal(
+    prerequisiteAmendment(
+      a,
+      contextOf(state, { holdId: "h", answer: "retry", by: "octo" }),
+      undefined,
+      {},
+    ),
+    undefined,
+  );
+  const depend = {
+    holdId: "item:a:work@3",
+    question: asked.question,
+    answer: "depend",
+    by: "octo",
+    at: "2026-01-01T02:00:00.000Z",
+  };
+  const proposed = prerequisiteAmendment(
+    a,
+    contextOf(state, depend),
+    undefined,
+    {},
+  );
+  assert.equal(proposed.kind, "retry", JSON.stringify(proposed));
+  apply(state, proposed);
+  const proposal = state.kept["amend:prerequisite-a-2:proposal"];
+  assert.equal(proposal.actor, "octo");
+  assert.deepEqual(proposal.prerequisite, { itemId: "a", provider: "browser" });
+
+  // Settled with the plan unchanged: it asks once more, without depend,
+  // and the answer to that goes on as usual.
+  state.done["amend:prerequisite-a-2"] = { unchanged: true };
+  const again = prerequisiteAmendment(a, contextOf(state), undefined, {});
+  assert.equal(again.kind, "hold", JSON.stringify(again));
+  assert.match(again.question, /didn't change the plan/);
+  assert.ok(!again.options.some((option) => option.answer === "depend"));
+  apply(state, again);
+  assert.equal(state.kept["item:a:prerequisite"], undefined);
+  assert.equal(
+    prerequisiteAmendment(
+      a,
+      contextOf(state, { holdId: "h2", answer: "retry", by: "octo" }),
+      undefined,
+      {},
+    ),
+    undefined,
   );
 });

@@ -87,6 +87,8 @@ export type Outcome =
       /** A wait that becomes a question after a while (see `HoldAfter`). */
       holdAfter?: HoldAfter;
       keep?: Record<string, unknown>;
+      /** A repair the retry's cause blames on another Work Item: it counts against no allowance (as a repair's `free`). */
+      free?: { target: string; repair: number };
     }
   | {
       kind: "hold";
@@ -1191,6 +1193,7 @@ export class ObjectiveRunner {
       case "retry":
         if (outcome.progress) delete state.retries[key];
         else this.retry(key, outcome);
+        markFree(state, outcome.free);
         break;
       case "hold":
         if (!(outcome.rereview && this.rereview(key, outcome.question)))

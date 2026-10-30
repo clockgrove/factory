@@ -870,7 +870,7 @@ function collector() {
     collect({
       worktree: target.directory,
       base,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: [],
       playbook: planning.playbook,
@@ -998,7 +998,7 @@ test("a media item that owns only its destinations collects an empty change, and
     collect({
       worktree: target.directory,
       base: target.commit,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: [],
       playbook: planning.playbook,
@@ -1079,7 +1079,7 @@ test("new candidates after a refusal about the media are a new result on the ref
     collect({
       worktree: target.directory,
       base: target.commit,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: [],
       playbook: planning.playbook,

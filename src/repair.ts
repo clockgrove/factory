@@ -66,7 +66,7 @@ import {
   receiptPath,
   resultCriteria,
 } from "./review/result.js";
-import { headAndTail } from "./text.js";
+import { failureExcerpt } from "./text.js";
 import { type CollectedStaging, privateStagingPath } from "./work/collect.js";
 import { VALIDATION_TOOL_NAME } from "./work/validate-tool.js";
 import { hostGit } from "./worktree.js";
@@ -243,9 +243,8 @@ const REVIEW_FINDINGS_FAILURE =
 /** The same for final review's findings, also taken once per item. */
 const FINAL_FINDINGS_FAILURE =
   "final review refused the integrated result on the findings in the required correction below.";
-/** The failure text a correction carries: the head and tail of a long failure. */
-const FAILURE_HEAD = 1000;
-const FAILURE_TAIL = 7000;
+/** The failure text a correction carries: a long failure's excerpt (`bounded`). */
+const FAILURE_CHARS = 8000;
 /** Diagnosis calls in one correction: the first, then re-asks with files or the error. */
 const MAX_DIAGNOSIS_CALLS = 3;
 /**
@@ -351,8 +350,12 @@ function failureDetail(finding: RepairFinding): string {
     .join("\n\n");
 }
 
-/** A long failure keeps its first lines and its end, where tools report. */
-const bounded = (text: string) => headAndTail(text, FAILURE_HEAD, FAILURE_TAIL);
+/**
+ * A long failure keeps its first lines, its end, and the lines that say why
+ * it failed wherever they are: the worker's repair reads this, and a
+ * command's errors can sit between pages of warnings (#2201).
+ */
+const bounded = (text: string) => failureExcerpt(text, FAILURE_CHARS);
 
 /**
  * A model review refusal as the correction, with no diagnosis call: each
@@ -361,7 +364,9 @@ const bounded = (text: string) => headAndTail(text, FAILURE_HEAD, FAILURE_TAIL);
  * item doesn't review, or a repeat goes to the diagnosis instead. Final
  * review's refusal (`final`) is taken once per item too, apart from the
  * result review's: its criteria are the ones the plan's coverage gives this
- * item, whatever proves them.
+ * item, whatever proves them. Either way a finding's criterionIndex is its
+ * criterion's number in the worker's Acceptance list (`resultCriteria`,
+ * #2197); a criterion only final review proves has none.
  */
 function reviewFindingsCorrection(
   input: CorrectionInput,
@@ -370,11 +375,13 @@ function reviewFindingsCorrection(
   if (finding.kind !== "review") return undefined;
   const source = finding.final ? "final-review" : "review-findings";
   if (prior.some((tried) => tried.source === source)) return undefined;
+  // Numbered as the worker's Acceptance list numbers them (resultCriteria).
+  const numbered = resultCriteria(input.plan, item);
   const reviewed = finding.final
     ? input.plan.coverage
         .filter((entry) => entry.itemId === item.id)
         .map(coverageCriterion)
-    : resultCriteria(input.plan, item);
+    : numbered;
   if (
     !finding.refused.length ||
     finding.refused.some(
@@ -393,10 +400,12 @@ function reviewFindingsCorrection(
     diagnosis: finding.final
       ? `Final review refused ${count} Objective ${criteria} this Work Item owns on the integrated default branch (tree ${finding.tree}) after final validation passed. This repair starts from the current default branch, which holds this Work Item's merged result. Each finding states the gap to close.`
       : `The independent result review refused ${count} acceptance ${criteria} of candidate tree ${finding.tree} after its validation commands passed. Each finding states the gap the candidate must close.`,
-    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's position in the Work Item's acceptance; a finding without one refuses an Objective criterion this Work Item proves, quoted verbatim. evidence is what the reviewer cited.\n${JSON.stringify(
+    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's bracketed number [n] in the Work Item's Acceptance list, which quotes each Objective criterion this Work Item proves verbatim after its own.${finding.final ? " A finding without one refuses an Objective criterion only final review judges, on the integrated result, quoted verbatim." : ""} evidence is what the reviewer cited.\n${JSON.stringify(
       finding.refused.map(({ criterion, detail, evidence }) => ({
-        ...(item.acceptance.includes(criterion) && {
-          criterionIndex: item.acceptance.indexOf(criterion),
+        // The worker's Acceptance numbering (#2197); a criterion only final
+        // review proves is not in that list, so it has no number.
+        ...(numbered.includes(criterion) && {
+          criterionIndex: numbered.indexOf(criterion),
         }),
         criterion,
         finding: detail,

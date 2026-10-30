@@ -71,6 +71,12 @@ PY
 }
 # A replay (KEPT: the kept run's directory) reads the kept run's installations.
 inst() { source "${KEPT:-$RUN_DIR}/inst/$1/env"; }
+# issue_key N: issue N of this installation's repository, as run files name it
+# (`run.<key>.out`, `notes.<key>`): <owner>_<repo>.N. Issue numbers restart in
+# every repository, so the number alone was one name for lanes on different
+# repositories (#2190); installations on one repository (C, H and X) share an
+# issue's files, as they share the issue.
+issue_key() { echo "${REPO//\//_}.$1"; }
 # The installation's live serve directory (the supervisor or the lane writes it).
 serve_dir_of() { cat "$RUN_DIR/inst/$1/serve_dir" 2>/dev/null; }
 
@@ -242,8 +248,8 @@ HOLD_POLICY=${HOLD_POLICY-d2 review}
 # 2 when a hold is open, HOLD_POLICY (and AUTO_REVIEW_DECISIONS) has no answer
 # left for any, and no answer of the case's own is waiting to be applied; else 1.
 auto_answer() {
-  local n=$1 choices choice id step pick arg text marker at seconds count rc=1 offered=""
-  local fields=() args=()
+  local n=$1 choices choice id step pick arg text marker at seconds count rc=1 offered="" key
+  local fields=() args=(); key=$(issue_key "$n")
   choices=$(st auto-answers "$n" "$HOLD_POLICY" "${AUTO_REVIEW_DECISIONS:-[]}") || return 1
   while IFS= read -r choice; do
     [ -n "$choice" ] || continue
@@ -252,11 +258,11 @@ c=json.loads(sys.argv[1])
 for k in ("id","step","answer","arg","text"): print(c.get(k,""),end="\0")
 print(hashlib.sha256(c["id"].encode()).hexdigest(),end="\0")' "$choice")
     id=${fields[0]}; step=${fields[1]}; pick=${fields[2]}; arg=${fields[3]}; text=${fields[4]}
-    marker="$RUN_DIR/answered/$n.${fields[5]}"
+    marker="$RUN_DIR/answered/$key.${fields[5]}"
     # Answered and accepted: the hold is still on its way out.
     [ -f "$marker" ] && { offered=1; continue; }
     if [[ $step == decide:* ]]; then
-      count=$(python3 - "$RUN_DIR/answered" "$n" <<'PY'
+      count=$(python3 - "$RUN_DIR/answered" "$key" <<'PY'
 import glob,json,os,sys
 print(sum(1 for p in glob.glob(os.path.join(sys.argv[1],sys.argv[2]+".*"))
           if json.load(open(p)).get("step", "").startswith("decide:")))
@@ -274,7 +280,7 @@ PY
     args=(); [ -z "$arg" ] || args+=("$arg")
     args+=(--question "$id"); [ -z "$text" ] || args+=(--text "$text")
     at=$(iso_ms)
-    if ! answer_t "$seconds" "$n" "$pick" "${args[@]}" >"$RUN_DIR/answer.$n.out" 2>&1; then
+    if ! answer_t "$seconds" "$n" "$pick" "${args[@]}" >"$RUN_DIR/answer.$key.out" 2>&1; then
       log "#$n answer $pick${arg:+ $arg} was refused or interrupted ($id at $step)"
       continue
     fi
@@ -283,7 +289,7 @@ PY
       rc=0; continue
     fi
     printf '%s\n' "$choice" >"$marker"
-    echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$n"
+    echo "#$n auto-answered $pick at $step" >>"$RUN_DIR/notes.$key"
     log "#$n auto-answered $pick${arg:+ $arg} (question $id at $step)"; rc=0
   done <<<"$choices"
   [ -n "$offered" ] && return $rc
@@ -385,7 +391,7 @@ new_issue() {
   local f="$RUN_DIR/objectives/$CASE-$tpl-$(date +%H%M%S%N).md"
   mkdir -p "$RUN_DIR/objectives"
   render "$tpl" "$f" "$@" || return 1
-  local n; n=$(gh issue create --repo "$REPO" --title "Suite $SFX: $title" --body-file "$f" | grep -o '[0-9]*$') || return 1
+  local n; n=$(gh_issue_file "Suite $SFX: $title" "$f") || return 1
   echo "$n $CASE $INST" >>"$RUN_DIR/issues"
   log "filed #$n ($tpl)"
   echo "$n"
@@ -394,13 +400,18 @@ new_issue() {
 # `factory run N --provider P` (the follower is stopped; the run goes on).
 # Adding the card and setting it Queued both repeat safely, so a GitHub
 # failure is tried again; one that lasts fails here, never as a silent wait.
+# A Project conflict is waited out under the Project's lock (gh.sh project_write).
+# `factory run` only writes a request: the service sets the card itself, later
+# and in its own process, and tries a failed write again after a backoff, so
+# the suite's lock can't cover it. Factory's own Project writes taking turns
+# is Factory's to fix, not the suite's (#2191).
 queue_issue() {
-  if [ -n "${2:-}" ]; then cli_t 30 run "$1" --provider "$2" >>"$RUN_DIR/run.$1.out" 2>&1; log "factory run #$1 --provider $2 (follower stopped: rc $?)"; return 0; fi
-  gh_retry "$RUN_DIR/enqueue.$1.err" "queueing #$1" gh_enqueue "$1" >/dev/null || return 1
+  if [ -n "${2:-}" ]; then cli_t 30 run "$1" --provider "$2" >>"$RUN_DIR/run.$(issue_key "$1").out" 2>&1; log "factory run #$1 --provider $2 (follower stopped: rc $?)"; return 0; fi
+  gh_retry "$RUN_DIR/enqueue.$(issue_key "$1").err" "queueing #$1" gh_enqueue "$1" >/dev/null || return 1
   log "queued #$1"
 }
 # gh_retry ERRFILE WHAT CMD...: run CMD, GitHub calls that repeat safely, up to
-# three times (a Project "temporary conflict" passes in seconds). Its stdout
+# three times (a dropped connection, a GitHub error). Its stdout
 # passes through; its stderr goes to ERRFILE and each failure is logged. One
 # that lasts returns 1 with gh's last error left in ERRFILE for the evidence.
 gh_retry() {

@@ -10,6 +10,7 @@ import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
 import type { MergeResult } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
+import type { WorkerValidateFailure } from "./self-validate.js";
 import type { ValidateResult } from "./steps.js";
 import type { WorkerSpend } from "./worker.js";
 
@@ -66,10 +67,20 @@ export interface ItemFacts {
   /**
    * The validation commands the validate step failed this item's results
    * on, under the plan accepted at `plan` (planning/plan.ts ACCEPTED_AT):
-   * an amendment may replace these of a reattempt item, and only these
-   * (planning/amendments.ts `replaceableValidation`).
+   * an amendment may replace these of a reattempt item, and with
+   * `workerValidateFailed`'s only these (planning/amendments.ts
+   * `replaceableValidation`).
    */
   validationFailed: { plan: string; commands: string[] };
+  /**
+   * The commands the item's latest finished worker run failed in its own
+   * Validate, with no later run of it passing them, under the plan
+   * accepted at `plan`, each with how it ended and its output: an
+   * amendment may replace these of a reattempt item too, and its review
+   * judges the replacement on that output (#2199). The next finished
+   * worker run replaces it.
+   */
+  workerValidateFailed: { plan: string; failures: WorkerValidateFailure[] };
   /** The result review that asked the operator, while its questions are answered. */
   held: ResultReview;
   /** The operator's `accept <n>` and `refuse <n>` at this item's reviews and refusals (planning/plan.ts `decisionsOf`). */

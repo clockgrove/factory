@@ -1,8 +1,10 @@
 // A dry run of bench/provision.mjs prints every GitHub, Git and setup action
 // of a benchmark run, in order, and does none: with no gh or git on PATH it
-// still succeeds and leaves no run directory behind.
+// still succeeds and leaves no run directory behind. Base patches are
+// applied with Git for real, on an invented source repository, with GitHub
+// and Factory stood in for.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -13,18 +15,26 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { loadDefinition } from "../bench/lib/definition.mjs";
+import { handFixCommits } from "../bench/lib/grade.mjs";
 import { HOME_ENV } from "../bench/lib/home.mjs";
 import {
+  cherryPick,
+  defaultRunId,
   enableOnlyKeptWorkflows,
   harnessRun,
+  provision,
   Runner,
   resolveFactory,
+  runCapacity,
   seedMemory,
+  setupArgs,
+  shareCapacity,
+  withFileLock,
 } from "../bench/lib/provision.mjs";
 import { EXAMPLE } from "./bench-fixture.mjs";
 
@@ -32,54 +42,60 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), "bench-provision-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-test("a dry run prints the whole provisioning and touches nothing", () => {
-  const host = join(dir, "host.json");
-  writeFileSync(
-    host,
-    JSON.stringify({
-      benchRoot: join(dir, "bench"),
-      workDir: join(dir, "work"),
-      cacheDir: join(dir, "cache"),
-      sourceState: join(dir, "state"),
-      toolchain: "/opt/toolchain",
-      githubApp: { id: "1", keyPath: join(dir, "app.pem") },
-      operator: "operator-login",
-    }),
-  );
-  // Git only, to read the candidate checkout's commit: no gh.
-  const bin = join(dir, "bin");
-  mkdirSync(bin);
-  const git = process.env.PATH.split(":")
+const host = join(dir, "host.json");
+writeFileSync(
+  host,
+  JSON.stringify({
+    benchRoot: join(dir, "bench"),
+    workDir: join(dir, "work"),
+    cacheDir: join(dir, "cache"),
+    sourceState: join(dir, "state"),
+    toolchain: "/opt/toolchain",
+    githubApp: { id: "1", keyPath: join(dir, "app.pem") },
+    operator: "operator-login",
+  }),
+);
+// Git only, to read the candidate checkout's commit: no gh.
+const bin = join(dir, "bin");
+mkdirSync(bin);
+symlinkSync(
+  process.env.PATH.split(":")
     .map((p) => join(p, "git"))
-    .find((p) => existsSync(p));
-  symlinkSync(git, join(bin, "git"));
-  // Definitions and results live in a bench home outside the repository.
-  const home = join(dir, "bench-home");
-  mkdirSync(join(home, "benchmarks"), { recursive: true });
-  writeFileSync(
-    join(home, "benchmarks", "acme-widgets-42.json"),
-    readFileSync(EXAMPLE),
-  );
-  const env = { ...process.env, PATH: bin };
-  delete env[HOME_ENV];
-  const run = spawnSync(
-    process.execPath,
-    [
-      join(root, "bench", "provision.mjs"),
-      "--bench-home",
-      home,
-      "--benchmark",
-      "acme-widgets-42",
-      "--host",
-      host,
-      "--factory",
-      join(root, "dist", "cli.js"),
-      "--run-id",
-      "t1",
-      "--dry-run",
-    ],
-    { encoding: "utf8", env },
-  );
+    .find((p) => existsSync(p)),
+  join(bin, "git"),
+);
+// Definitions and results live in a bench home outside the repository.
+const home = join(dir, "bench-home");
+mkdirSync(join(home, "benchmarks"), { recursive: true });
+writeFileSync(
+  join(home, "benchmarks", "acme-widgets-42.json"),
+  readFileSync(EXAMPLE),
+);
+const dryEnv = { ...process.env, PATH: bin };
+delete dryEnv[HOME_ENV];
+/** bench/provision.mjs's argv for a dry run of the example, with `extra`. */
+const dryArgv = (...extra) => [
+  join(root, "bench", "provision.mjs"),
+  "--bench-home",
+  home,
+  "--benchmark",
+  "acme-widgets-42",
+  "--host",
+  host,
+  "--factory",
+  join(root, "dist", "cli.js"),
+  "--dry-run",
+  ...extra,
+];
+/** The run record a dry run's output ends with. */
+const dryRecord = (out) =>
+  JSON.parse(out.slice(out.indexOf("The run record would be:\n") + 25));
+
+test("a dry run prints the whole provisioning and touches nothing", () => {
+  const run = spawnSync(process.execPath, dryArgv("--run-id", "t1"), {
+    encoding: "utf8",
+    env: dryEnv,
+  });
   assert.equal(run.status, 0, run.stderr);
   const out = run.stdout;
   const repo = "acme/bench-widgets-42-t1";
@@ -98,14 +114,33 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
     out.includes(`"resultsDir": ${JSON.stringify(join(home, "results"))}`),
     out,
   );
+  // And the capacity setup is given, and the base patch it applies.
+  const record = dryRecord(out);
+  assert.deepEqual(record.capacity, {
+    workers: 4,
+    validations: 2,
+    memoryMib: 16384,
+    share: null,
+  });
+  assert.deepEqual(record.basePatches, [
+    {
+      ...loadDefinition(EXAMPLE).basePatches[0],
+      applied: "<the base with 89abcde>",
+    },
+  ]);
   const steps = [
     "check: read acme/widgets#42",
     "would: check its title and body digest (d0f6c906d9b1)",
+    `would: hold ${join(dir, "cache", "acme__widgets.lock")} while cloning and fetching`,
     "git clone --no-checkout https://github.com/acme/widgets.git",
+    "would: fetch the base 0123456",
+    "would: fetch the base patch 89abcde",
+    "would: apply the base patch 89abcde (the source's fix of a flaky export test",
     `gh repo create ${repo} --private`,
     `gh api -X PUT repos/${repo}/actions/permissions -F enabled=false`,
     "-F allow_merge_commit=true -F allow_squash_merge=true -F allow_rebase_merge=false -F allow_auto_merge=false -F delete_branch_on_merge=true",
-    `push --no-verify https://github.com/${repo}.git 0123456789abcdef0123456789abcdef01234567:refs/heads/main`,
+    "would: push the base with its 1 patch(es) as main",
+    `push --no-verify https://github.com/${repo}.git '<the base with 89abcde>:refs/heads/main'`,
     "lfs push --object-id",
     "would: mirror the ruleset protect-main",
     `gh variable set TEST_RUNNER --repo ${repo} --body <acme/widgets's value>`,
@@ -119,7 +154,8 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
     "would: configure Factory (setup)",
     "--codex-network host --sandbox-network package-install --read-only-path /opt/toolchain/browsers",
     "--toolchain-path /opt/toolchain/node-24/bin",
-    "--objective-tokens 40000000 --day-tokens 80000000 --json",
+    // The definition's capacity.
+    "--objective-tokens 40000000 --day-tokens 80000000 --workers 4 --validations 2 --memory-mib 16384 --json",
     "would: seed memory from",
     "without #42's entries or any from 2031-03-04T09:00:00Z on",
     "would: start the background service (setup --background)",
@@ -139,7 +175,169 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
     /FACTORY_CONFIG=\S+\/bench\/acme-widgets-42\/t1\/factory\.json FACTORY_STATE_DIR=\S+\/bench\/acme-widgets-42\/t1\/state factory setup/,
   );
   assert.ok(!existsSync(join(dir, "bench")), "a dry run creates nothing");
+  assert.ok(!existsSync(join(dir, "cache")), "a dry run creates nothing");
   assert.ok(!existsSync(join(home, "results")), "a dry run creates nothing");
+});
+
+// --- several runs at once -----------------------------------------------------
+
+/** `node bench/provision.mjs ARGV` without waiting, so runs overlap. */
+const provisionAsync = (argv) =>
+  new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      argv,
+      { encoding: "utf8", env: dryEnv },
+      (error, stdout, stderr) =>
+        resolve({ status: error ? (error.code ?? 1) : 0, stdout, stderr }),
+    );
+  });
+
+test("runs provisioned at once with the default run id get their own ids", async () => {
+  const runs = await Promise.all(
+    [1, 2, 3].map(() => provisionAsync(dryArgv())),
+  );
+  const ids = runs.map((run) => {
+    assert.equal(run.status, 0, run.stderr);
+    return /^Dry run: nothing is created\. acme-widgets-42 run (\S+) on /.exec(
+      run.stdout,
+    )?.[1];
+  });
+  for (const id of ids) assert.match(id, /^\d{8}-\d{4}-[0-9a-f]{6}$/);
+  assert.equal(new Set(ids).size, 3, ids.join(", "));
+  // Each its own repository.
+  assert.equal(
+    new Set(runs.map((run) => dryRecord(run.stdout).repository)).size,
+    3,
+  );
+  // The same minute, told apart.
+  const at = new Date("2031-03-04T09:00:00Z");
+  assert.notEqual(defaultRunId(at), defaultRunId(at));
+  assert.match(defaultRunId(at), /^20310304-0900-[0-9a-f]{6}$/);
+});
+
+test("a run's capacity: the definition's, then --share, then each flag", async () => {
+  const definition = loadDefinition(EXAMPLE);
+  const resources = { cpus: 24, memoryMiB: 47104 };
+  // About a third of the host each: Factory's formulas over 8 CPUs and a third of the memory.
+  assert.deepEqual(shareCapacity(3, resources), {
+    workers: 4,
+    validations: 2,
+    memoryMib: 14336,
+  });
+  // Never below Factory's own floors.
+  assert.deepEqual(shareCapacity(24, resources), {
+    workers: 2,
+    validations: 2,
+    memoryMib: 1792,
+  });
+  assert.deepEqual(runCapacity(definition), {
+    workers: 4,
+    validations: 2,
+    memoryMib: 16384,
+    share: null,
+  });
+  assert.deepEqual(
+    runCapacity(definition, { share: 2, workers: 3 }, resources),
+    { workers: 3, validations: 3, memoryMib: 21504, share: 2 },
+  );
+  // A definition without capacity leaves the rest to Factory.
+  const bare = { factory: { ...definition.factory, capacity: undefined } };
+  assert.deepEqual(runCapacity(bare, { validations: 1 }), {
+    validations: 1,
+    share: null,
+  });
+  const args = setupArgs(
+    definition,
+    { toolchain: "/t" },
+    {
+      repository: "acme/bench-widgets-42-c",
+      checkout: "/work/c",
+      projectId: "PVT_c",
+      capacity: { validations: 1, share: null },
+    },
+  );
+  assert.deepEqual(args.slice(args.indexOf("--day-tokens")), [
+    "--day-tokens",
+    "80000000",
+    "--validations",
+    "1",
+  ]);
+  // A share of the whole host is Factory's own default for it.
+  const { hostDefaults } = await import(join(root, "dist", "capacity.js"));
+  const host = hostDefaults();
+  assert.deepEqual(shareCapacity(1), {
+    workers: host.workers,
+    validations: host.validations,
+    memoryMib: host.budgetMiB,
+  });
+  // The flags reach setup through provisioning.
+  const run = spawnSync(
+    process.execPath,
+    dryArgv("--run-id", "c1", "--share", "2", "--workers", "3"),
+    { encoding: "utf8", env: dryEnv },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const expected = { ...shareCapacity(2), workers: 3 };
+  assert.ok(
+    run.stdout.includes(
+      `--day-tokens 80000000 --workers 3 --validations ${expected.validations} --memory-mib ${expected.memoryMib} --json`,
+    ),
+    run.stdout,
+  );
+  assert.deepEqual(dryRecord(run.stdout).capacity, { ...expected, share: 2 });
+  for (const bad of [
+    ["--share", "0"],
+    ["--memory-mib", "100"],
+    ["--workers", "two"],
+  ]) {
+    const refused = spawnSync(
+      process.execPath,
+      dryArgv("--run-id", "c2", ...bad),
+      { encoding: "utf8", env: dryEnv },
+    );
+    assert.equal(refused.status, 64, refused.stderr);
+    assert.match(
+      refused.stderr,
+      new RegExp(`^${bad[0]} ${bad[1]}: a whole number`),
+    );
+  }
+});
+
+test("the cache lock lets one holder in at a time and takes over a dead holder's", async () => {
+  const lock = join(dir, "cache.lock");
+  const held = [];
+  let inside = 0;
+  await Promise.all(
+    [1, 2, 3].map((n) =>
+      withFileLock(
+        lock,
+        async () => {
+          inside += 1;
+          held.push(inside);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inside -= 1;
+          return n;
+        },
+        { pollMs: 5 },
+      ),
+    ),
+  );
+  assert.deepEqual(held, [1, 1, 1]);
+  assert.ok(!existsSync(lock), "released");
+  // A holder that is gone: taken over.
+  const gone = spawnSync(process.execPath, ["-e", "process.pid"]).pid;
+  writeFileSync(lock, `${gone}\n`);
+  assert.equal(await withFileLock(lock, () => "taken"), "taken");
+  // A live holder past the wait: named.
+  writeFileSync(lock, `${process.pid}\n`);
+  await assert.rejects(
+    withFileLock(lock, () => "never", { waitMs: 30, pollMs: 5 }),
+    new RegExp(
+      `cache\\.lock is still held by process ${process.pid} after 0 s`,
+    ),
+  );
+  rmSync(lock);
 });
 
 /** `node bench/<script> ...args` without the environment's bench home. */
@@ -373,6 +571,8 @@ test("a build is classed by where it lives, and its dist/ digest is recorded", (
   });
   assert.equal(run.factory.distSha256, byFile.distSha256);
   assert.equal(run.factory.distSha256Now, rebuilt.distSha256);
+  // A record from before base patches has none.
+  assert.deepEqual(run.basePatches, []);
 
   // An installed package is a release.
   const installed = join(dir, "lib", "node_modules", "@clockgrove", "factory");
@@ -383,4 +583,304 @@ test("a build is classed by where it lives, and its dist/ digest is recorded", (
   assert.equal(release.kind, "release");
   assert.equal(release.commit, null);
   assert.equal(release.version, "0.5.9");
+});
+
+// --- base patches: on the base before the Objective is queued ----------------
+
+/** `git ARGS` in `cwd`, as the invented source's developer at `at`. */
+function gitAt(cwd, at, ...args) {
+  const date = `${Math.floor(Date.parse(at) / 1000)} +0000`;
+  return execFileSync(
+    "git",
+    [
+      "-C",
+      cwd,
+      "-c",
+      "user.name=Widgets Dev",
+      "-c",
+      "user.email=dev@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      ...args,
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  ).trim();
+}
+
+/**
+ * The invented source, acme/widgets, in `at`: the base, then on main the
+ * Objective's change to the README, the fix of a flaky test (a patch that
+ * applies on the base) and a README edit over the Objective's (one that
+ * doesn't).
+ */
+function sourceRepository(at) {
+  mkdirSync(at, { recursive: true });
+  gitAt(at, "2031-03-04T08:00:00Z", "init", "--quiet", "--initial-branch=main");
+  const commit = (when, files, message) => {
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(at, path)), { recursive: true });
+      writeFileSync(join(at, path), text);
+    }
+    gitAt(at, when, "add", "--all");
+    gitAt(at, when, "commit", "--quiet", "--message", message);
+    return gitAt(at, when, "rev-parse", "HEAD");
+  };
+  const base = commit(
+    "2031-03-04T08:00:00Z",
+    {
+      "README.md": "# widgets\n",
+      ".github/workflows/test.yml": "on: push\n",
+      "test/export.test.js": "retries(0);\n",
+    },
+    "Widgets",
+  );
+  commit(
+    "2031-03-04T12:00:00Z",
+    { "README.md": "# widgets\n\nQueries and CSV export.\n" },
+    "Query widgets and export them as CSV",
+  );
+  const fix = commit(
+    "2031-03-05T09:00:00Z",
+    { "test/export.test.js": "retries(2);\n" },
+    "Retry the flaky export test",
+  );
+  const clash = commit(
+    "2031-03-05T10:00:00Z",
+    { "README.md": "# widgets\n\nQueries, CSV and JSON export.\n" },
+    "Mention the JSON export",
+  );
+  return { at, base, fix, clash };
+}
+
+const show = (repo, ...args) =>
+  execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+
+test("a base patch is cherry-picked onto the base the same way every time, or refused", () => {
+  const source = sourceRepository(join(dir, "pick"));
+  const applied = cherryPick(source.at, source.base, source.fix);
+  // The same commit on every provisioning: a rerun pushes the same main.
+  assert.equal(cherryPick(source.at, source.base, source.fix), applied);
+  assert.equal(show(source.at, "rev-parse", `${applied}^`), source.base);
+  assert.equal(
+    show(source.at, "show", `${applied}:test/export.test.js`),
+    "retries(2);",
+  );
+  // Only the patch: the Objective's README isn't carried with it.
+  assert.equal(show(source.at, "show", `${applied}:README.md`), "# widgets");
+  assert.equal(
+    show(source.at, "show", "-s", "--format=%an %aI|%B", applied),
+    `Widgets Dev 2031-03-05T09:00:00Z|Retry the flaky export test\n\n(cherry picked from commit ${source.fix})`,
+  );
+  assert.throws(
+    () => cherryPick(source.at, source.base, source.clash),
+    new RegExp(
+      `^Error: The base patch ${source.clash} doesn't apply cleanly onto ${source.base}: it conflicts in README\\.md$`,
+    ),
+  );
+  assert.throws(
+    () => cherryPick(source.at, applied, source.fix),
+    /changes nothing on [0-9a-f]+: the base has it already$/,
+  );
+  assert.throws(
+    () => cherryPick(source.at, applied, source.base),
+    /is a root commit: only a commit with one parent applies$/,
+  );
+});
+
+/**
+ * A Runner that runs Git for real, with GitHub's URLs in `urls` going to
+ * local repositories, and stands in for gh and Factory: the test
+ * repository and Project exist, the Objective is filed, setup configures.
+ */
+class StandIn extends Runner {
+  constructor(urls, definition) {
+    super({ dryRun: false, print: () => {} });
+    this.calls = [];
+    this.definition = definition;
+    const entries = Object.entries(urls);
+    this.gitEnv = Object.fromEntries([
+      ["GIT_CONFIG_COUNT", String(entries.length)],
+      ...entries.flatMap(([url, local], i) => [
+        [`GIT_CONFIG_KEY_${i}`, `url.${local}.insteadOf`],
+        [`GIT_CONFIG_VALUE_${i}`, url],
+      ]),
+    ]);
+  }
+
+  run(argv, options = {}) {
+    const shown = Runner.shown(argv);
+    this.calls.push(shown);
+    if (argv[0] === "git")
+      return super.run(argv, {
+        ...options,
+        env: { ...options.env, ...this.gitEnv },
+      });
+    if (argv[0] === process.execPath) return '{"status":"configured"}';
+    if (shown.startsWith("gh repo view"))
+      return this.definition.repository.description;
+    if (shown.includes("/rulesets")) return "protect-main";
+    if (shown.includes("/actions/variables/")) return "runner";
+    if (shown.includes("/actions/workflows"))
+      return "1 active .github/workflows/test.yml";
+    if (shown.startsWith("gh project list")) return "7";
+    if (shown.startsWith("gh project view")) return "PVT_bench";
+    if (shown.startsWith("gh issue list")) return "42";
+    return "";
+  }
+}
+
+const real = join(dir, "real");
+const source = sourceRepository(join(real, "source"));
+const realHost = {
+  benchRoot: join(real, "bench"),
+  workDir: join(real, "work"),
+  cacheDir: join(real, "cache"),
+  sourceState: join(real, "state"),
+  toolchain: "/opt/toolchain",
+};
+
+/** The example on the invented source, with `patches` on its base, loaded. */
+function patchedDefinition(name, patches) {
+  const value = JSON.parse(readFileSync(EXAMPLE, "utf8"));
+  value.source = { repository: "acme/widgets", base: source.base, lfs: false };
+  value.memory = { seed: "none" };
+  value.basePatches = patches;
+  const file = join(real, `${name}.json`);
+  mkdirSync(real, { recursive: true });
+  writeFileSync(file, JSON.stringify(value));
+  return loadDefinition(file);
+}
+
+/** Provision run `runId` of `definition` against local repositories; the stand-in runner too. */
+async function provisionLocally(definition, runId, capacity) {
+  const name = `bench-widgets-42-${runId}`;
+  const origin = join(real, "github", `${name}.git`);
+  if (!existsSync(origin))
+    execFileSync("git", [
+      "init",
+      "--quiet",
+      "--bare",
+      "--initial-branch=main",
+      origin,
+    ]);
+  const runDir = join(realHost.benchRoot, definition.id, runId);
+  mkdirSync(runDir, { recursive: true });
+  // Fetched and checked before: the digest check isn't what this tests.
+  writeFileSync(join(runDir, "objective.md"), "The Objective\n");
+  const runner = new StandIn(
+    {
+      "https://github.com/acme/widgets.git": source.at,
+      [`https://github.com/acme/${name}.git`]: origin,
+    },
+    definition,
+  );
+  const provisioned = provision({
+    definition,
+    host: realHost,
+    factory: { kind: "release", cli: "/opt/factory/dist/cli.js" },
+    runId,
+    label: runId,
+    group: "patched",
+    capacity,
+    runner,
+  });
+  return { provisioned, runner, origin, runDir };
+}
+
+test("provisioning applies the base patches before anything is queued, records them, and they are never hand fixes", async () => {
+  const reason = "the source's later fix of the flaky export test";
+  const definition = patchedDefinition("patched", [
+    { commit: source.fix, reason },
+  ]);
+  const capacity = runCapacity(definition, { workers: 3 });
+  const { provisioned, runner, origin, runDir } = await provisionLocally(
+    definition,
+    "p1",
+    capacity,
+  );
+  const record = await provisioned;
+  // main is the base with the patch, as the record says.
+  const main = show(origin, "rev-parse", "main");
+  assert.deepEqual(record.basePatches, [
+    { commit: source.fix, reason, applied: main },
+  ]);
+  assert.equal(show(origin, "rev-parse", "main^"), source.base);
+  assert.equal(show(origin, "show", "main:test/export.test.js"), "retries(2);");
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")),
+    record,
+  );
+  // The patch is pushed before setup runs and the Objective is looked up.
+  const at = (text) => runner.calls.findIndex((call) => call.includes(text));
+  assert.ok(at("push --no-verify") < at("setup --repo"));
+  assert.ok(at("setup --repo") < at("gh issue list"));
+  // The capacity reaches setup and the record.
+  assert.deepEqual(record.capacity, {
+    workers: 3,
+    validations: 2,
+    memoryMib: 16384,
+    share: null,
+  });
+  assert.ok(
+    runner.calls.some((call) =>
+      call.endsWith(
+        "--day-tokens 80000000 --workers 3 --validations 2 --memory-mib 16384 --json",
+      ),
+    ),
+    runner.calls.join("\n"),
+  );
+  // Scoring gets the patches, and hand-fix detection leaves them out even
+  // inside the run's window.
+  assert.deepEqual(harnessRun(record).basePatches, record.basePatches);
+  const window = {
+    end: main,
+    base: source.base,
+    startedAt: "2031-03-05T00:00:00Z",
+    endedAt: "2031-03-06T00:00:00Z",
+    merges: new Set(),
+    heads: new Set(),
+  };
+  assert.deepEqual(
+    handFixCommits(record.checkout, window).map((fix) => fix.sha),
+    [main],
+  );
+  assert.deepEqual(
+    handFixCommits(record.checkout, { ...window, patches: new Set([main]) }),
+    [],
+  );
+  // Provisioned again, it carries on with the same main.
+  const again = await (await provisionLocally(definition, "p1", capacity))
+    .provisioned;
+  assert.deepEqual(again.basePatches, record.basePatches);
+  assert.equal(show(origin, "rev-parse", "main"), main);
+  assert.ok(!existsSync(join(realHost.cacheDir, "acme__widgets.lock")));
+});
+
+test("a base patch that doesn't apply stops provisioning before anything is pushed", async () => {
+  const definition = patchedDefinition("clash", [
+    { commit: source.fix, reason: "the flaky export test" },
+    { commit: source.clash, reason: "a README edit over the Objective's" },
+  ]);
+  const { provisioned, runner, origin } = await provisionLocally(
+    definition,
+    "p2",
+    runCapacity(definition),
+  );
+  await assert.rejects(
+    provisioned,
+    new RegExp(
+      `The base patch ${source.clash} doesn't apply cleanly onto [0-9a-f]{40}: it conflicts in README\\.md$`,
+    ),
+  );
+  assert.ok(!runner.calls.some((call) => call.includes(" push ")));
+  assert.ok(!runner.calls.some((call) => call.startsWith("gh ")));
+  assert.throws(() => show(origin, "rev-parse", "--verify", "--quiet", "main"));
+  // The lock is released for the next provisioning.
+  assert.ok(!existsSync(join(realHost.cacheDir, "acme__widgets.lock")));
 });

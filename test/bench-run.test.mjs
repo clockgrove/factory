@@ -66,7 +66,10 @@ function runDir(name, stand) {
 }
 
 /** Point a run's stand-in at `stand`, keeping what the run recorded. */
-function standIn(at, { run = "follow", status, answer = "ok" }) {
+function standIn(
+  at,
+  { run = "follow", status, answer = "ok", setup = "stopped" },
+) {
   const file = join(at, "run.json");
   const record = JSON.parse(readFileSync(file, "utf8"));
   // The stand-in sees these only through the record's environment.
@@ -74,6 +77,7 @@ function standIn(at, { run = "follow", status, answer = "ok" }) {
     BENCH_FACTORY_RUN: run,
     BENCH_FACTORY_STATUS: JSON.stringify(status),
     BENCH_FACTORY_ANSWER: answer,
+    BENCH_FACTORY_SETUP: setup,
     BENCH_FACTORY_CALLS: join(at, "calls.jsonl"),
   };
   writeFileSync(file, JSON.stringify(record));
@@ -250,4 +254,77 @@ test("a refused policy answer is recorded, and a hold still open after it pauses
   assert.equal(answered.status, 1);
   assert.match(answered.stderr, /no open question q-spend/);
   assert.deepEqual(events(at), ["queued", "answer-refused", "paused"]);
+});
+
+// --- stop: an ended run's service stops polling; a held run keeps it ---------
+
+const setups = (at) => calls(at).filter((call) => call.command === "setup");
+const STOP = ["--repo", "acme/widgets", "--stop", "--json"];
+
+test("stop stops and disables an ended run's service", () => {
+  const at = runDir("stop-ended", {
+    status: [view("running", objective("done"))],
+  });
+  const stopped = benchRun(at, "stop");
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.stdout, /^Stopped acme\/widgets's service/);
+  assert.deepEqual(
+    setups(at).map((call) => call.args),
+    [STOP],
+  );
+  assert.deepEqual(events(at), ["service-stopped"]);
+});
+
+test("stop refuses while the Objective holds or runs, unless --force", () => {
+  const at = runDir("stop-held", {
+    status: [view("running", objective("building", [REVIEW]))],
+  });
+  const refused = benchRun(at, "stop");
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.match(
+    refused.stderr,
+    /^Not stopping acme\/widgets's service: #42 has 1 open hold\(s\): q-review\. --force stops it anyway\./,
+  );
+  assert.deepEqual(setups(at), []);
+  assert.deepEqual(events(at), []);
+  // Running, or its status unreadable: refused too.
+  for (const status of [
+    [view("running", objective("building"))],
+    [{ exit: 1, error: "Error: EACCES" }],
+  ]) {
+    standIn(at, { status });
+    const again = benchRun(at, "stop");
+    assert.equal(again.status, 2, again.stderr);
+    assert.match(
+      again.stderr,
+      /: (#42 is building, not ended|#42's status can't be read: factory: Error: EACCES)\./,
+    );
+  }
+  assert.deepEqual(setups(at), []);
+  // Forced: stopped, and the decisions say why it was held.
+  standIn(at, { status: [view("running", objective("building", [REVIEW]))] });
+  const forced = benchRun(at, "stop", "--force");
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.deepEqual(
+    setups(at).map((call) => call.args),
+    [STOP],
+  );
+  assert.deepEqual(
+    lines(join(at, "decisions.jsonl")).at(-1).forced,
+    "#42 has 1 open hold(s): q-review",
+  );
+});
+
+test("a service setup doesn't stop is reported and exits 1", () => {
+  const at = runDir("stop-blocked", {
+    status: [view("running", objective("cancelled"))],
+    setup: "blocked",
+  });
+  const failed = benchRun(at, "stop");
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.match(
+    failed.stderr,
+    /didn't stop acme\/widgets's service: blocked: systemctl --user isn't available/,
+  );
+  assert.deepEqual(events(at), []);
 });

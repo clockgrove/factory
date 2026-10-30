@@ -544,6 +544,16 @@ function itemRows(card) {
   ]);
 }
 
+/** The source commits provisioning put on the base, so a reader sees it wasn't pristine. */
+function basePatchesNote(card) {
+  return `Base patches, on the base before the Objective was queued and never counted as hand fixes: ${card.run.basePatches
+    .map(
+      (patch) =>
+        `${patch.commit.slice(0, 8)} as ${patch.applied.slice(0, 8)} (${patch.reason})`,
+    )
+    .join("; ")}.`;
+}
+
 export function runReport(card, cards, definition) {
   const t = card.totals;
   const baseline = baselineOf(card, cards, definition);
@@ -604,6 +614,7 @@ export function runReport(card, cards, definition) {
       .map(([v, c]) => `${v} ${c ? c.slice(0, 8) : "commit unknown"}`)
       .join(", "),
   )}). Models: ${esc(card.models.map((m) => `${m.role} ${m.provider} ${m.model} ${m.effort} (${m.calls} calls)`).join("; "))}. Outcome: <b>${esc(outcomeOf(card))}</b>.</p>
+${card.run.basePatches ? `<p class="meta">${esc(basePatchesNote(card))}</p>` : ""}
 ${partial ? `<p class="worse"><b>Partial.</b> ${esc(PARTIAL_NOTE)}</p>` : ""}
 ${current ? "" : `<p class="worse"><b>Scorecard version ${esc(card.schemaVersion)}.</b> ${esc(RESCORE_NOTE)}</p>`}
 </header>
@@ -843,6 +854,7 @@ export function runMarkdown(card, cards, definition) {
     "",
     `Benchmark \`${card.benchmark}\`, run \`${card.run.id}\` (${card.run.source}): ${card.run.repository}#${card.run.issue}, ${time(card.startedAt)} to ${time(card.endedAt)}, Factory ${card.factory.versions.join(" → ")}. Outcome: **${outcomeOf(card)}**.`,
     "",
+    ...(card.run.basePatches ? [basePatchesNote(card), ""] : []),
     ...(isPartial(card) ? [`**Partial.** ${PARTIAL_NOTE}`, ""] : []),
     ...(isCurrent(card)
       ? [

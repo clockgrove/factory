@@ -1,22 +1,25 @@
 /**
  * One benchmark run's world, from a definition and a host profile
  * (bench/README.md#Provisioning): a private test repository at the base
- * commit with its LFS objects, mirrored merge settings, rulesets and
- * variables and only the kept workflows enabled; a checkout; a Project
- * with Factory's fields; an isolated Factory configuration and state
- * directory (FACTORY_CONFIG, FACTORY_STATE_DIR) running the given Factory;
+ * commit, with the definition's base patches on it, and its LFS objects,
+ * mirrored merge settings, rulesets and variables and only the kept
+ * workflows enabled; a checkout; a Project with Factory's fields; an
+ * isolated Factory configuration and state directory (FACTORY_CONFIG,
+ * FACTORY_STATE_DIR) running the given Factory with the run's capacity;
  * repository memory as it stood before the Objective; the background
  * service; and the Objective filed verbatim, its body checked against the
  * definition's digest. The run record (run.json) is what bench/run.mjs and
  * bench/score.mjs read.
  *
  * Every step looks before it acts, so running it again carries on where
- * it stopped. With a dry run, `Runner` prints each GitHub, Git and setup
- * action instead of doing it and answers each look with "not there yet",
- * so the whole sequence prints and nothing outside the process is touched.
+ * it stopped. Runs provisioned at the same time share the host's cache
+ * clone of the source, so one at a time fetches into it. With a dry run,
+ * `Runner` prints each GitHub, Git and setup action instead of doing it
+ * and answers each look with "not there yet", so the whole sequence
+ * prints and nothing outside the process is touched.
  */
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -24,11 +27,14 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
-import { hostValue } from "./definition.mjs";
+import { setTimeout as sleep } from "node:timers/promises";
+import { CAPACITY, hostValue } from "./definition.mjs";
 
 /** Runs commands, or with `dryRun` prints them; `print` gets each line. */
 export class Runner {
@@ -110,6 +116,199 @@ export function loadHost(file) {
   if (host.githubApp && !(host.githubApp.id && host.githubApp.keyPath))
     throw new Error(`${file}: githubApp needs id and keyPath`);
   return host;
+}
+
+/**
+ * A new run id: the start minute and a random suffix, so runs provisioned
+ * in the same minute differ. A run id is part of a repository name:
+ * lowercase, digits and -.
+ */
+export function defaultRunId(now = new Date()) {
+  const minute = now
+    .toISOString()
+    .slice(0, 16)
+    .replace(/[-:]/g, "")
+    .replace("T", "-");
+  return `${minute}-${randomBytes(3).toString("hex")}`;
+}
+
+/** MiB src/capacity.ts keeps for the system and the service itself. */
+const SYSTEM_MIB = 4096;
+
+/** The host's CPUs and memory, read as src/capacity.ts hostDefaults reads them. */
+export function hostResources() {
+  return {
+    cpus: availableParallelism(),
+    memoryMiB: Math.floor(totalmem() / 2 ** 20),
+  };
+}
+
+/**
+ * About 1/`share` of the host, for `share` runs side by side:
+ * src/capacity.ts hostDefaults' formulas over a share of the CPUs and of
+ * the memory the system leaves. A share of 1 is Factory's own default.
+ */
+export function shareCapacity(share, { cpus, memoryMiB } = hostResources()) {
+  const shareCpus = cpus / share;
+  return {
+    workers: Math.max(2, Math.floor(shareCpus / 2)),
+    validations: Math.max(2, Math.floor(shareCpus / 4)),
+    memoryMib: Math.max(1024, Math.floor((memoryMiB - SYSTEM_MIB) / share)),
+  };
+}
+
+/**
+ * The run's service capacity, as run.json records it: the definition's
+ * `factory.capacity`, then `share` (shareCapacity), then each value given,
+ * each overriding the one before. A value none of them sets is left to
+ * Factory, which sizes it for the whole host.
+ */
+export function runCapacity(
+  definition,
+  { share = null, ...given } = {},
+  resources = undefined,
+) {
+  return {
+    ...definition.factory.capacity,
+    ...(share ? shareCapacity(share, resources) : {}),
+    ...Object.fromEntries(
+      Object.entries(given).filter(
+        ([key, value]) => Object.hasOwn(CAPACITY, key) && value !== undefined,
+      ),
+    ),
+    share,
+  };
+}
+
+/** Whether process `pid` is alive; one this user may not signal is. */
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+/**
+ * `fn`'s result, run while holding the lock `file`: created only when no
+ * other holds it, with this process's id, and removed after. A lock whose
+ * process is gone (it crashed) is taken over; one still held after
+ * `waitMs` throws, naming its holder.
+ */
+export async function withFileLock(
+  file,
+  fn,
+  { waitMs = 30 * 60_000, pollMs = 250 } = {},
+) {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    try {
+      writeFileSync(file, `${process.pid}\n`, { flag: "wx" });
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    let holder;
+    try {
+      holder = readFileSync(file, "utf8");
+    } catch {
+      continue; // Released meanwhile.
+    }
+    // An empty lock is being written by its holder.
+    const pid = Number(holder);
+    if (holder && pid > 0 && !alive(pid)) {
+      try {
+        if (readFileSync(file, "utf8") === holder)
+          rmSync(file, { force: true });
+      } catch {
+        // Released meanwhile.
+      }
+      continue;
+    }
+    if (Date.now() >= until)
+      throw new Error(
+        `${file} is still held by process ${holder.trim() || "unknown"} after ${Math.round(waitMs / 1000)} s; remove it if that process is gone`,
+      );
+    await sleep(pollMs);
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
+
+/**
+ * Source commit `commit` applied onto `onto` in repository `repo`, as `git
+ * cherry-pick -x` would, without a work tree: the new commit's SHA. The
+ * commit keeps the patch's author, committer and dates, so the same patches
+ * on the same base make the same commits on every provisioning, and a run
+ * provisioned again pushes the same main. A merge or root commit, or one
+ * that doesn't apply cleanly, throws.
+ */
+export function cherryPick(repo, onto, commit) {
+  const git = (args, { input, env } = {}) =>
+    execFileSync("git", ["-C", repo, ...args], {
+      encoding: "utf8",
+      input,
+      env: env ? { ...process.env, ...env } : process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  const parents = git(["rev-list", "--parents", "-n", "1", commit])
+    .split(" ")
+    .slice(1);
+  if (parents.length !== 1)
+    throw new Error(
+      `The base patch ${commit} is ${parents.length ? "a merge" : "a root commit"}: only a commit with one parent applies`,
+    );
+  let tree;
+  try {
+    tree = git([
+      "merge-tree",
+      "--write-tree",
+      "--name-only",
+      "--no-messages",
+      `--merge-base=${parents[0]}`,
+      onto,
+      commit,
+    ]);
+  } catch (error) {
+    // Exit 1 is a conflict: the tree, then each conflicted path.
+    const conflicted =
+      error.status === 1
+        ? String(error.stdout).trim().split("\n").slice(1).filter(Boolean)
+        : [];
+    throw new Error(
+      conflicted.length
+        ? `The base patch ${commit} doesn't apply cleanly onto ${onto}: it conflicts in ${[...new Set(conflicted)].join(", ")}`
+        : `The base patch ${commit} can't be applied onto ${onto}: ${String(error.stderr || error.message).trim()}`,
+    );
+  }
+  if (tree === git(["rev-parse", `${onto}^{tree}`]))
+    throw new Error(
+      `The base patch ${commit} changes nothing on ${onto}: the base has it already`,
+    );
+  const [authorName, authorEmail, authorDate, name, email, date] = git([
+    "show",
+    "-s",
+    "--date=raw",
+    "--format=%an%n%ae%n%ad%n%cn%n%ce%n%cd",
+    commit,
+  ]).split("\n");
+  const message = git(["show", "-s", "--format=%B", commit]);
+  // Unsigned: a signature would make each provisioning's commit differ.
+  return git(["commit-tree", "--no-gpg-sign", tree, "-p", onto], {
+    input: `${message}\n\n(cherry picked from commit ${commit})\n`,
+    env: {
+      GIT_AUTHOR_NAME: authorName,
+      GIT_AUTHOR_EMAIL: authorEmail,
+      GIT_AUTHOR_DATE: authorDate,
+      GIT_COMMITTER_NAME: name,
+      GIT_COMMITTER_EMAIL: email,
+      GIT_COMMITTER_DATE: date,
+    },
+  });
 }
 
 /** SHA-256 over a directory's files (relative path and content, in path order): a build's identity. */
@@ -203,6 +402,7 @@ export function harnessRun(record) {
     source: "harness",
     repository: record.repository,
     dir: record.runDir ?? null,
+    basePatches: record.basePatches ?? [],
     factory: {
       kind: factory.kind ?? null,
       cli: factory.cli ?? null,
@@ -216,11 +416,11 @@ export function harnessRun(record) {
   };
 }
 
-/** `factory setup`'s options for this definition, host, repository, checkout and Project. */
+/** `factory setup`'s options for this definition, host, repository, checkout, Project and capacity (runCapacity). */
 export function setupArgs(
   definition,
   host,
-  { repository, checkout, projectId },
+  { repository, checkout, projectId, capacity = {} },
 ) {
   const f = definition.factory;
   const value = (text) => hostValue(text, host);
@@ -287,6 +487,9 @@ export function setupArgs(
     String(f.spend.objectiveTokens),
     "--day-tokens",
     String(f.spend.dayTokens),
+    ...Object.entries(CAPACITY).flatMap(([key, { flag }]) =>
+      capacity[key] === undefined ? [] : [flag, String(capacity[key])],
+    ),
   ];
 }
 
@@ -332,10 +535,17 @@ function parseWorkflows(text) {
 /**
  * Turn Actions on with only the kept workflows active. Nothing deploy-capable
  * may stay enabled: the listing must succeed, must name every workflow file
- * of the base tree, and is read again after disabling to check that only
- * kept workflows are active. On any failure Actions is turned off again.
+ * of the base tree (`tree`: the base with its patches), and is read again
+ * after disabling to check that only kept workflows are active. On any
+ * failure Actions is turned off again.
  */
-export function enableOnlyKeptWorkflows({ def, repository, cache, runner }) {
+export function enableOnlyKeptWorkflows({
+  def,
+  repository,
+  cache,
+  runner,
+  tree = def.source.base,
+}) {
   const keep = def.ci.keepWorkflows;
   const actions = (enabled) => [
     "gh",
@@ -365,7 +575,7 @@ export function enableOnlyKeptWorkflows({ def, repository, cache, runner }) {
       cache,
       "ls-tree",
       "--name-only",
-      def.source.base,
+      tree,
       ".github/workflows/",
     ])
     .split("\n")
@@ -420,8 +630,8 @@ export function enableOnlyKeptWorkflows({ def, repository, cache, runner }) {
 
 /**
  * Provision run `runId` of `definition` on `host` with `factory`
- * (resolveFactory). Returns the run record; also writes it to
- * <benchRoot>/<benchmark>/<run id>/run.json unless dry.
+ * (resolveFactory) and `capacity` (runCapacity). Returns the run record;
+ * also writes it to <benchRoot>/<benchmark>/<run id>/run.json unless dry.
  */
 export async function provision({
   definition: def,
@@ -431,6 +641,7 @@ export async function provision({
   label,
   group,
   resultsDir = null,
+  capacity = runCapacity(def),
   runner,
 }) {
   const owner = def.repository.owner;
@@ -470,6 +681,10 @@ export async function provision({
     stateDir,
     env,
     factory,
+    // The service's capacity, as given to setup; a value missing is Factory's own for the host.
+    capacity,
+    // The source commits put on the base, each with the commit it made on main.
+    basePatches: [],
     policyAs: def.operatorPolicy.as,
     provisionedAt: null,
   };
@@ -509,39 +724,68 @@ export async function provision({
     );
   }
 
-  // The source at its base, with the base tree's LFS objects.
-  if (!existsSync(cache))
-    runner.act(
-      `clone ${source} (no LFS smudge) into the cache`,
-      [
+  // The source at its base, with the base tree's LFS objects, and the base
+  // patches on it. Runs provisioned at once share the cache clone: one at a
+  // time clones and fetches into it.
+  const patches = def.basePatches ?? [];
+  let head = def.source.base;
+  const fromSource = () => {
+    if (!existsSync(cache))
+      runner.act(
+        `clone ${source} (no LFS smudge) into the cache`,
+        [
+          "git",
+          "clone",
+          "--no-checkout",
+          `https://github.com/${source}.git`,
+          cache,
+        ],
+        {
+          env: { GIT_LFS_SKIP_SMUDGE: "1" },
+        },
+      );
+    for (const [what, commit] of [
+      ["the base", def.source.base],
+      ...patches.map((patch) => ["the base patch", patch.commit]),
+    ]) {
+      runner.act(`fetch ${what} ${commit.slice(0, 7)}`, [
         "git",
-        "clone",
-        "--no-checkout",
-        `https://github.com/${source}.git`,
+        "-C",
         cache,
-      ],
-      {
-        env: { GIT_LFS_SKIP_SMUDGE: "1" },
-      },
-    );
-  runner.act(`fetch the base ${def.source.base.slice(0, 7)}`, [
-    "git",
-    "-C",
-    cache,
-    "fetch",
-    "origin",
-    def.source.base,
-  ]);
-  if (def.source.lfs)
-    runner.act("fetch the base tree's LFS objects", [
-      "git",
-      "-C",
-      cache,
-      "lfs",
-      "fetch",
-      "origin",
-      def.source.base,
-    ]);
+        "fetch",
+        "origin",
+        commit,
+      ]);
+      if (def.source.lfs)
+        runner.act(`fetch ${what}'s LFS objects`, [
+          "git",
+          "-C",
+          cache,
+          "lfs",
+          "fetch",
+          "origin",
+          commit,
+        ]);
+    }
+    // A patch that doesn't apply cleanly stops provisioning before anything is pushed.
+    for (const patch of patches) {
+      head = runner.local(
+        `apply the base patch ${patch.commit.slice(0, 7)} (${patch.reason})`,
+        () => cherryPick(cache, head, patch.commit),
+        `<the base with ${patch.commit.slice(0, 7)}>`,
+      );
+      record.basePatches.push({ ...patch, applied: head });
+    }
+  };
+  const lock = `${cache}.lock`;
+  runner.print(
+    `${runner.dryRun ? "would" : "do"}: hold ${lock} while cloning and fetching`,
+  );
+  if (runner.dryRun) fromSource();
+  else {
+    mkdirSync(host.cacheDir, { recursive: true });
+    await withFileLock(lock, fromSource);
+  }
 
   // The test repository: nothing may run until the deploy-capable workflows are off.
   const description = runner.look(`does ${repository} exist`, [
@@ -589,19 +833,22 @@ export async function provision({
       `${key}=${on}`,
     ]),
   ]);
-  runner.act(`push the base as main, without the LFS pre-push hook`, [
-    "git",
-    "-C",
-    cache,
-    "push",
-    "--no-verify",
-    remote,
-    `${def.source.base}:refs/heads/main`,
-  ]);
+  runner.act(
+    `push the base${patches.length ? ` with its ${patches.length} patch(es)` : ""} as main, without the LFS pre-push hook`,
+    [
+      "git",
+      "-C",
+      cache,
+      "push",
+      "--no-verify",
+      remote,
+      `${head}:refs/heads/main`,
+    ],
+  );
   if (def.source.lfs) {
     const listed = runner.look(
       "the base tree's LFS objects",
-      ["git", "-C", cache, "lfs", "ls-files", "-l", def.source.base],
+      ["git", "-C", cache, "lfs", "ls-files", "-l", head],
       { dry: "" },
     );
     const oids = (listed ?? "")
@@ -614,7 +861,7 @@ export async function provision({
         ["git", "-C", cache, "lfs", "push", "--object-id", remote, ...oids],
         {
           show: runner.dryRun
-            ? `git -C ${cache} lfs push --object-id ${remote} <each oid of git lfs ls-files -l ${def.source.base}>`
+            ? `git -C ${cache} lfs push --object-id ${remote} <each oid of git lfs ls-files -l ${head}>`
             : undefined,
         },
       );
@@ -706,7 +953,7 @@ export async function provision({
       },
     );
   }
-  enableOnlyKeptWorkflows({ def, repository, cache, runner });
+  enableOnlyKeptWorkflows({ def, repository, cache, runner, tree: head });
 
   // The checkout Factory works in.
   if (!existsSync(checkout)) {
@@ -827,7 +1074,12 @@ export async function provision({
 
   // Factory: an isolated configuration and state directory.
   const factoryArgv = (...args) => [process.execPath, factory.cli, ...args];
-  const args = setupArgs(def, host, { repository, checkout, projectId });
+  const args = setupArgs(def, host, {
+    repository,
+    checkout,
+    projectId,
+    capacity,
+  });
   // A setup that refused or is blocked stops here: it names what to fix, and running again carries on.
   const setup = (title, extra, ok) => {
     const out = runner.act(title, factoryArgv(...args, ...extra, "--json"), {

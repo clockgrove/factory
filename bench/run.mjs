@@ -35,6 +35,13 @@
  *     The operator's answer, through `factory answer --as`, recorded once
  *     Factory takes it; a refusal exits with Factory's code.
  *
+ *   node bench/run.mjs stop --run-dir DIR [--force]
+ *     Stops the run's background service and keeps it from starting again
+ *     (`factory setup --stop`), so a run that has ended stops polling. A
+ *     held run keeps its service: while the Objective has an open hold, or
+ *     hasn't ended, or its status can't be read, this refuses and exits 2,
+ *     unless --force. Exits 0 once stopped, 1 when setup doesn't stop it.
+ *
  * Every decision (asked, answered, answer, by whom) and every time the
  * service was seen down goes to DIR/decisions.jsonl; the scorecard takes
  * the same decisions and the outages from Factory's run log.
@@ -71,6 +78,7 @@ const { values, positionals } = parseArgs({
     question: { type: "string" },
     "text-file": { type: "string" },
     as: { type: "string" },
+    force: { type: "boolean" },
   },
 });
 if (!values["run-dir"]) {
@@ -84,7 +92,9 @@ const recordFile = join(runDir, "run.json");
 const record = JSON.parse(readFileSync(recordFile, "utf8"));
 const dirs = benchDirs(values);
 const resultsDir = runResultsDir(values, record.resultsDir ?? null);
-if (positionals[0] !== "answer" && !resultsDir) {
+// Answering and stopping score nothing.
+const following = !["answer", "stop"].includes(positionals[0]);
+if (following && !resultsDir) {
   process.stderr.write(
     `Where to score the run into: ${missingDir("results", "results")}\n`,
   );
@@ -92,15 +102,16 @@ if (positionals[0] !== "answer" && !resultsDir) {
 }
 let definition;
 try {
-  definition = loadDefinition(
-    record.definitionFile ?? record.benchmark,
-    dirs.benchmarks,
-  );
+  if (positionals[0] !== "stop")
+    definition = loadDefinition(
+      record.definitionFile ?? record.benchmark,
+      dirs.benchmarks,
+    );
 } catch (error) {
   process.stderr.write(`${error.message}\n`);
   process.exit(64);
 }
-const policy = definition.operatorPolicy;
+const policy = definition?.operatorPolicy;
 const log = join(runDir, "decisions.jsonl");
 const now = () => new Date().toISOString();
 const note = (entry) =>
@@ -176,6 +187,54 @@ if (positionals[0] === "answer") {
   });
   process.stdout.write(
     `Answered ${values.question} with ${answer}. Follow on: node bench/run.mjs --run-dir ${runDir}\n`,
+  );
+  process.exit(0);
+}
+
+if (positionals[0] === "stop") {
+  // A held run keeps its service, so the answer can be acted on.
+  const shown = factory("status", issue, "--json");
+  let held = null;
+  try {
+    if (shown.code !== 0) throw new Error(failure(shown));
+    const view = JSON.parse(shown.stdout).objectives?.find(
+      (o) => o.issue === record.issue,
+    );
+    if (view?.holds?.length)
+      held = `#${issue} has ${view.holds.length} open hold(s): ${view.holds.map((hold) => hold.id).join(", ")}`;
+    else if (view && !["done", "cancelled"].includes(view.status))
+      held = `#${issue} is ${view.status}, not ended`;
+  } catch (error) {
+    held = `#${issue}'s status can't be read: ${error.message.split("\n")[0]}`;
+  }
+  if (held && !values.force) {
+    process.stderr.write(
+      `Not stopping ${record.repository}'s service: ${held}. --force stops it anyway.\n`,
+    );
+    process.exit(2);
+  }
+  const stopped = factory(
+    "setup",
+    "--repo",
+    record.repository,
+    "--stop",
+    "--json",
+  );
+  let report = null;
+  try {
+    report = JSON.parse(stopped.stdout);
+  } catch {
+    // No report: the failure says why.
+  }
+  if (stopped.code !== 0 || report?.status !== "stopped") {
+    process.stderr.write(
+      `factory setup --stop didn't stop ${record.repository}'s service: ${report ? `${report.status}${report.problems?.length ? `: ${report.problems.join("; ")}` : ""}` : failure(stopped)}\n`,
+    );
+    process.exit(1);
+  }
+  note({ event: "service-stopped", ...(held ? { forced: held } : {}) });
+  process.stdout.write(
+    `Stopped ${record.repository}'s service; it won't start again by itself. Provisioning again with run id ${record.runId} starts it.\n`,
   );
   process.exit(0);
 }

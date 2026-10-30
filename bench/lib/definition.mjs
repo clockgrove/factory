@@ -4,7 +4,8 @@
  * trusts what `loadDefinition` returns. Definitions live outside the
  * Factory repository (bench/lib/home.mjs); bench/examples/ has an invented
  * one. A definition names
- * the work (source repository, base commit, Objective), how the test
+ * the work (source repository, base commit and any patches put on it,
+ * Objective), how the test
  * repository mirrors the source (merge settings, rulesets, variables,
  * workflows kept), how memory is seeded, the Factory settings, the
  * operator policy, and how runs are scored: the grader, the pairwise judge
@@ -67,6 +68,7 @@ const SHAPE = {
   id: true,
   title: true,
   source: { repository: true, base: true, lfs: true },
+  basePatches: true,
   objective: { issue: true, title: true, bodySha256: true, labels: true },
   repository: {
     owner: true,
@@ -91,6 +93,7 @@ const SHAPE = {
     ciOnlyCommands: true,
     allowances: Object.fromEntries(ALLOWANCES.map((key) => [key, true])),
     spend: { objectiveTokens: true, dayTokens: true },
+    capacity: { workers: true, validations: true, memoryMib: true },
   },
   operatorPolicy: { as: true, answers: true, otherwise: true },
   baseline: true,
@@ -107,6 +110,15 @@ const SHAPE = {
 export const CHOICES = ["A", "B", "tie"];
 /** A person's pairwise choice in `judgeCalibration`: every field. */
 const CALIBRATION = ["runA", "runB", "intent", "quality", "by", "at"];
+
+/** A base patch: every field. */
+const PATCH = ["commit", "reason"];
+/** `factory.capacity`: each a `factory setup` option, and the least its configuration takes (src/config.ts). */
+export const CAPACITY = {
+  workers: { flag: "--workers", least: 1 },
+  validations: { flag: "--validations", least: 1 },
+  memoryMib: { flag: "--memory-mib", least: 256 },
+};
 
 /** A price's rates, US dollars per million tokens. */
 const RATES = ["uncachedInput", "cachedInput", "output"];
@@ -143,6 +155,24 @@ export function definitionProblems(value) {
   need("source.repository", (v) => string(v) && REPO.test(v), "OWNER/NAME");
   need("source.base", (v) => string(v) && SHA1.test(v), "a full commit SHA");
   need("source.lfs", (v) => typeof v === "boolean", "true or false");
+  // Optional: source commits provisioning puts on the base before the Objective is queued.
+  if (at("basePatches") !== undefined)
+    need(
+      "basePatches",
+      (v) =>
+        Array.isArray(v) &&
+        v.every(
+          (patch) =>
+            object(patch) &&
+            Object.keys(patch).every((key) => PATCH.includes(key)) &&
+            string(patch.commit) &&
+            SHA1.test(patch.commit) &&
+            patch.commit !== at("source.base") &&
+            string(patch.reason),
+        ) &&
+        new Set(v.map((patch) => patch.commit)).size === v.length,
+      "source commits to apply on the base, in order, each { commit (a full SHA, once, not the base), reason }",
+    );
   need("objective.issue", whole, "the source issue number");
   need("objective.title", string, "the Objective's title");
   need(
@@ -246,6 +276,20 @@ export function definitionProblems(value) {
   );
   need("factory.spend.objectiveTokens", whole, "the per-Objective token cap");
   need("factory.spend.dayTokens", whole, "the per-day token cap");
+  // Optional: the run's service capacity; without it Factory sizes for the whole host.
+  if (at("factory.capacity") !== undefined)
+    need(
+      "factory.capacity",
+      object,
+      `${Object.keys(CAPACITY).join(", ")}, each optional`,
+    );
+  for (const [key, { least }] of Object.entries(CAPACITY))
+    if (at(`factory.capacity.${key}`) !== undefined)
+      need(
+        `factory.capacity.${key}`,
+        (v) => Number.isSafeInteger(v) && v >= least,
+        `a whole number, ${least} or more`,
+      );
   need("operatorPolicy.as", string, "the name scripted answers are given as");
   need(
     "operatorPolicy.answers",

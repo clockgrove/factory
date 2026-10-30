@@ -23,7 +23,11 @@ const INVENTED = {
   owners: new Set(["acme", "OWNER"]),
   issues: new Set([42]),
   year: "2031",
-  commits: new Set(["0123456789abcdef0123456789abcdef01234567"]),
+  // The base, and the base patch on it.
+  commits: new Set([
+    "0123456789abcdef0123456789abcdef01234567",
+    "89abcdef0123456789abcdef0123456789abcdef",
+  ]),
 };
 
 /** Factory's own repository and the issues of it that the harness cites. */

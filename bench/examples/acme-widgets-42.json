@@ -7,6 +7,12 @@
     "base": "0123456789abcdef0123456789abcdef01234567",
     "lfs": true
   },
+  "basePatches": [
+    {
+      "commit": "89abcdef0123456789abcdef0123456789abcdef",
+      "reason": "the source's fix of a flaky export test, merged the day after the base"
+    }
+  ],
   "objective": {
     "issue": 42,
     "title": "Query widgets and export the results as CSV",
@@ -73,6 +79,11 @@
     "spend": {
       "objectiveTokens": 40000000,
       "dayTokens": 80000000
+    },
+    "capacity": {
+      "workers": 4,
+      "validations": 2,
+      "memoryMib": 16384
     }
   },
   "operatorPolicy": {

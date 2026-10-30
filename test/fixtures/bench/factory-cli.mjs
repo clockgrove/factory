@@ -5,8 +5,9 @@
 // ends on an open hold, "no-service" finds no service, "refused" prints
 // the Queued line and then the service's refusal. BENCH_FACTORY_STATUS is a JSON list of what each `status` gives
 // in turn, the last one repeated: a status view, or { exit, error }.
-// BENCH_FACTORY_ANSWER "refused" refuses every answer. Each call is a line
-// of BENCH_FACTORY_CALLS.
+// BENCH_FACTORY_ANSWER "refused" refuses every answer. `setup --stop`
+// reports BENCH_FACTORY_SETUP's status ("stopped" unless set), exiting 1
+// unless stopped. Each call is a line of BENCH_FACTORY_CALLS.
 import { appendFileSync, readFileSync } from "node:fs";
 
 const [command, ...args] = process.argv.slice(2);
@@ -79,6 +80,21 @@ if (command === "run") {
     process.exit(1);
   }
   process.stdout.write("Done.\n");
+} else if (command === "setup" && args.includes("--stop")) {
+  called();
+  const status = process.env.BENCH_FACTORY_SETUP || "stopped";
+  process.stdout.write(
+    `${JSON.stringify({
+      mode: "stop",
+      status,
+      problems:
+        status === "stopped"
+          ? []
+          : ["systemctl --user isn't available: no user session"],
+      warnings: [],
+    })}\n`,
+  );
+  process.exit(status === "stopped" ? 0 : 1);
 } else {
   process.stderr.write(`factory: the stand-in has no ${command}\n`);
   process.exit(2);

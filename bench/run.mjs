@@ -20,7 +20,10 @@
  *     printed, and this exits 2, as does a scripted answer Factory refused
  *     on a hold still open at the next look. Run it again after answering;
  *     it carries on. At the end it scores the run into
- *     <results>/<benchmark>/ and exits 0 (done) or 1 (cancelled). The
+ *     <results>/<benchmark>/, grades it with the definition's grader on
+ *     the run checkout's default branch at the end (a grader that fails is
+ *     recorded in the card and printed, the exit code unchanged), and
+ *     exits 0 (done) or 1 (cancelled). The
  *     results directory is --results DIR or results/ in --bench-home DIR
  *     when given, otherwise the one provisioning recorded;
  *     FACTORY_BENCH_HOME's results/ only when the record names none
@@ -39,6 +42,7 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
@@ -47,6 +51,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
+import { gradeCard } from "./lib/grade.mjs";
 import { policyAnswer } from "./lib/holds.mjs";
 import {
   benchDirs,
@@ -337,17 +342,26 @@ for (;;) {
   const view = (status.objectives ?? []).find((o) => o.issue === record.issue);
   if (view && ["done", "cancelled"].includes(view.status)) {
     note({ event: "ended", status: view.status });
+    const checkout =
+      record.checkout && existsSync(record.checkout) ? record.checkout : null;
     const card = await scoreRun({
       stateDir: record.stateDir,
       issue: record.issue,
       definition,
       run: harnessRun(record),
       factoryRepo: dirname(BENCH_DIR),
+      checkout,
     });
+    await gradeCard(card, definition, { repo: checkout });
     const out = join(resultsDir, definition.id, `${record.runId}.json`);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, `${JSON.stringify(card, null, 2)}\n`);
     process.stdout.write(`#${issue} ${view.status}; scored into ${out}\n`);
+    // A failed grader is in the card; the exit code stays the Objective's.
+    if (card.grade?.error)
+      process.stderr.write(
+        `The grader failed: ${card.grade.error}. Grade it again with node bench/score.mjs --run-dir ${runDir} --grade-only\n`,
+      );
     process.exit(view.status === "done" ? 0 : 1);
   }
   const seen = noted();

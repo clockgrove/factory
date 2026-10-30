@@ -35,6 +35,19 @@
  *     The operator's answer, through `factory answer --as`, recorded once
  *     Factory takes it; a refusal exits with Factory's code.
  *
+ *   node bench/run.mjs stop --run-dir DIR [--force]
+ *     Stops the run's background service and keeps it from starting again
+ *     (`factory setup --stop`), so a run that has ended stops polling. A
+ *     held run keeps its service: while the Objective has an open hold, or
+ *     hasn't ended, or its status can't be read, this refuses and exits 2,
+ *     unless --force. Exits 0 once stopped, 1 when setup doesn't stop it.
+ *
+ *   node bench/run.mjs start --run-dir DIR
+ *     Starts the run's background service again with its own configuration
+ *     (`factory setup --background`, given nothing else to change), after
+ *     a stop. Exits 0 once it runs or is starting, 1 when setup doesn't
+ *     start it.
+ *
  * Every decision (asked, answered, answer, by whom) and every time the
  * service was seen down goes to DIR/decisions.jsonl; the scorecard takes
  * the same decisions and the outages from Factory's run log.
@@ -71,6 +84,7 @@ const { values, positionals } = parseArgs({
     question: { type: "string" },
     "text-file": { type: "string" },
     as: { type: "string" },
+    force: { type: "boolean" },
   },
 });
 if (!values["run-dir"]) {
@@ -84,7 +98,9 @@ const recordFile = join(runDir, "run.json");
 const record = JSON.parse(readFileSync(recordFile, "utf8"));
 const dirs = benchDirs(values);
 const resultsDir = runResultsDir(values, record.resultsDir ?? null);
-if (positionals[0] !== "answer" && !resultsDir) {
+// Answering, stopping and starting score nothing.
+const following = !["answer", "stop", "start"].includes(positionals[0]);
+if (following && !resultsDir) {
   process.stderr.write(
     `Where to score the run into: ${missingDir("results", "results")}\n`,
   );
@@ -92,15 +108,16 @@ if (positionals[0] !== "answer" && !resultsDir) {
 }
 let definition;
 try {
-  definition = loadDefinition(
-    record.definitionFile ?? record.benchmark,
-    dirs.benchmarks,
-  );
+  if (!["stop", "start"].includes(positionals[0]))
+    definition = loadDefinition(
+      record.definitionFile ?? record.benchmark,
+      dirs.benchmarks,
+    );
 } catch (error) {
   process.stderr.write(`${error.message}\n`);
   process.exit(64);
 }
-const policy = definition.operatorPolicy;
+const policy = definition?.operatorPolicy;
 const log = join(runDir, "decisions.jsonl");
 const now = () => new Date().toISOString();
 const note = (entry) =>
@@ -145,6 +162,31 @@ const failure = ({ code, stdout, stderr }) =>
   stderr.split("\n").find((line) => line.startsWith("factory: ")) ??
   (`${stderr}${stdout}`.trim().split("\n").at(-1) || `exit ${code}`);
 const issue = String(record.issue);
+/**
+ * `factory setup --repo REPOSITORY --MODE --json` for the run's service:
+ * the report when setup's status is one of `ok`, else the reason it isn't.
+ */
+const service = (mode, ok) => {
+  const run = factory(
+    "setup",
+    "--repo",
+    record.repository,
+    `--${mode}`,
+    "--json",
+  );
+  let report = null;
+  try {
+    report = JSON.parse(run.stdout);
+  } catch {
+    // No report: the failure says why.
+  }
+  if (run.code === 0 && ok.includes(report?.status)) return { report };
+  return {
+    problem: report
+      ? `${report.status}${report.problems?.length ? `: ${report.problems.join("; ")}` : ""}`
+      : failure(run),
+  };
+};
 
 if (positionals[0] === "answer") {
   const [, answer, arg] = positionals;
@@ -176,6 +218,60 @@ if (positionals[0] === "answer") {
   });
   process.stdout.write(
     `Answered ${values.question} with ${answer}. Follow on: node bench/run.mjs --run-dir ${runDir}\n`,
+  );
+  process.exit(0);
+}
+
+if (positionals[0] === "stop") {
+  // A held run keeps its service, so the answer can be acted on.
+  const shown = factory("status", issue, "--json");
+  let held = null;
+  try {
+    if (shown.code !== 0) throw new Error(failure(shown));
+    const view = JSON.parse(shown.stdout).objectives?.find(
+      (o) => o.issue === record.issue,
+    );
+    if (view?.holds?.length)
+      held = `#${issue} has ${view.holds.length} open hold(s): ${view.holds.map((hold) => hold.id).join(", ")}`;
+    else if (view && !["done", "cancelled"].includes(view.status))
+      held = `#${issue} is ${view.status}, not ended`;
+  } catch (error) {
+    held = `#${issue}'s status can't be read: ${error.message.split("\n")[0]}`;
+  }
+  if (held && !values.force) {
+    process.stderr.write(
+      `Not stopping ${record.repository}'s service: ${held}. --force stops it anyway.\n`,
+    );
+    process.exit(2);
+  }
+  const { problem } = service("stop", ["stopped"]);
+  if (problem) {
+    process.stderr.write(
+      `factory setup --stop didn't stop ${record.repository}'s service: ${problem}\n`,
+    );
+    process.exit(1);
+  }
+  note({ event: "service-stopped", ...(held ? { forced: held } : {}) });
+  process.stdout.write(
+    `Stopped ${record.repository}'s service; it won't start again by itself. node bench/run.mjs start --run-dir ${runDir} starts it.\n`,
+  );
+  process.exit(0);
+}
+
+if (positionals[0] === "start") {
+  // The run's configuration as it stands: setup enables and starts its unit.
+  const { report, problem } = service("background", ["running", "starting"]);
+  if (problem) {
+    process.stderr.write(
+      `factory setup --background didn't start ${record.repository}'s service: ${problem}\n`,
+    );
+    process.exit(1);
+  }
+  for (const warning of report.warnings ?? [])
+    process.stderr.write(`${warning}\n`);
+  note({ event: "service-started" });
+  process.stdout.write(
+    `Started ${record.repository}'s service (${report.status}). Follow on: node bench/run.mjs --run-dir ${runDir}\n`,
   );
   process.exit(0);
 }

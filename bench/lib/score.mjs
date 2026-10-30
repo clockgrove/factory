@@ -295,7 +295,8 @@ function releaseCommit(repo, version) {
  * installation's: `<root>/<owner>__<repo>`). `run` names the result: id,
  * label, group, source (`harness` or `backfill`), repository, for a
  * candidate build its `factory: { commit }`, and for a harness run its run
- * directory, `dir`. `factoryRepo`: the Factory
+ * directory, `dir`, and the base patches provisioning applied,
+ * `basePatches` (each `{ commit, reason, applied }`). `factoryRepo`: the Factory
  * checkout releases' tags are resolved in. `checkout`: a checkout of the
  * run repository, where the end commit is read, and for a harness run (a
  * test repository no one else commits to) its hand fixes. `handFixes`:
@@ -963,6 +964,7 @@ export async function scoreRun({
   // history has other people's commits too.
   const activeWallMs = wallMs === null ? null : wallMs - excludedMs;
   const atEnd = checkout ? endCommit(checkout, endedAt) : null;
+  const basePatches = run.basePatches ?? [];
   const fixes = [];
   if (checkout && run.source === "harness") {
     try {
@@ -975,6 +977,7 @@ export async function scoreRun({
           endedAt,
           merges: recordedMerges(state),
           heads,
+          patches: new Set(basePatches.map((patch) => patch.applied)),
         }).map((fix) => ({ ...fix, from: "history" })),
       );
     } catch (error) {
@@ -1054,6 +1057,8 @@ export async function scoreRun({
       // A harness run's directory: its run record and Objective, which the
       // blind pairwise review reads (bench/lib/judge.mjs).
       ...(run.dir ? { dir: run.dir } : {}),
+      // The source commits provisioning put on the base: it wasn't pristine.
+      ...(basePatches.length ? { basePatches } : {}),
     },
     partial,
     factory: {

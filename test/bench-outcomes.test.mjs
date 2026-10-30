@@ -22,6 +22,7 @@ import { BENCH_DIR, loadDefinition } from "../bench/lib/definition.mjs";
 import { gradeCard, handFixCommits } from "../bench/lib/grade.mjs";
 import { HOME_ENV } from "../bench/lib/home.mjs";
 import { supersededAttempts, wasteOf } from "../bench/lib/outcomes.mjs";
+import { runMarkdown, runReport } from "../bench/lib/report.mjs";
 import { EXAMPLE, fixtureCard, fixtureCopy } from "./bench-fixture.mjs";
 import { fixtureRepository } from "./fixtures/bench/generate.mjs";
 
@@ -171,6 +172,37 @@ test("hand fixes: a merge Factory didn't record is one; a merge of a head Factor
     blind.unavailable.find((g) => g.metric === "hand fixes after final review")
       .reason,
     /its time is unknown/,
+  );
+});
+
+test("a base patch is never a hand fix, and the scorecard and its report list it", async () => {
+  // As if provisioning had put the operator's fix on the base: a commit made
+  // by no Factory merge, inside the run's window.
+  const basePatches = [
+    {
+      commit: repo.after,
+      reason: "the source's later quoting fix",
+      applied: repo.handFix,
+    },
+  ];
+  const card = await fixtureCard({ source: "harness", basePatches }, merged, {
+    checkout: repo.checkout,
+  });
+  assert.deepEqual(card.human.fixes, []);
+  assert.equal(card.human.score, 11 + 25);
+  assert.equal(card.escapes.handFixesAfterFinalReview, 0);
+  assert.deepEqual(card.run.basePatches, basePatches);
+  const definition = loadDefinition(EXAMPLE);
+  const note = `Base patches, on the base before the Objective was queued and never counted as hand fixes: ${repo.after.slice(0, 8)} as ${repo.handFix.slice(0, 8)} (the source's later quoting fix).`;
+  assert.ok(runMarkdown(card, [card], definition).includes(note));
+  assert.ok(
+    runReport(card, [card], definition).includes(note.replaceAll("'", "&#39;")),
+  );
+  // A run with none lists none.
+  const pristine = await harness();
+  assert.equal(pristine.run.basePatches, undefined);
+  assert.ok(
+    !runMarkdown(pristine, [pristine], definition).includes("Base patches"),
   );
 });
 

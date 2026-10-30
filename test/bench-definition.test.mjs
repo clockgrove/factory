@@ -251,6 +251,56 @@ test("the judge, its calibration and the agreement it needs are optional, and ch
   }
 });
 
+test("base patches and capacity are optional, and checked when given", () => {
+  const before = example();
+  delete before.basePatches;
+  delete before.factory.capacity;
+  assert.deepEqual(definitionProblems(before), []);
+  const patch = example().basePatches[0];
+  assert.match(patch.reason, /flaky/);
+  for (const bad of [
+    [{ commit: patch.commit.slice(0, 7), reason: patch.reason }],
+    [{ commit: patch.commit }],
+    [{ ...patch, note: "x" }],
+    [patch, patch],
+    [{ ...patch, commit: example().source.base }],
+    patch,
+  ]) {
+    const value = example();
+    value.basePatches = bad;
+    assert.deepEqual(
+      definitionProblems(value).map((p) => p.split(":")[0]),
+      ["basePatches"],
+      JSON.stringify(bad),
+    );
+  }
+  const capacity = example();
+  assert.deepEqual(capacity.factory.capacity, {
+    workers: 4,
+    validations: 2,
+    memoryMib: 16384,
+  });
+  capacity.factory.capacity = { workers: 0, validations: 1.5, memoryMib: 128 };
+  assert.deepEqual(
+    definitionProblems(capacity).map((p) => p.split(":")[0]),
+    [
+      "factory.capacity.workers",
+      "factory.capacity.validations",
+      "factory.capacity.memoryMib",
+    ],
+  );
+  // Each value is optional; an unknown one is refused.
+  capacity.factory.capacity = { memoryMib: 8192, cpus: 4 };
+  assert.deepEqual(definitionProblems(capacity), [
+    "factory.capacity.cpus: not a field of the schema",
+  ]);
+  capacity.factory.capacity = 4;
+  assert.deepEqual(
+    definitionProblems(capacity).map((p) => p.split(":")[0]),
+    ["factory.capacity"],
+  );
+});
+
 test("a field the schema doesn't have is refused, at every level", () => {
   const definition = example();
   definition.factory.worker.netwrok = definition.factory.worker.network;

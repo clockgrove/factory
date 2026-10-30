@@ -85,12 +85,14 @@ export function endCommit(checkout, endedAt) {
  * `startedAt` to `endedAt` that no Factory merge made, oldest first: each
  * `{ sha, at }`. Factory's merges are the merge commits its merge steps
  * recorded (`merges`) and any merge commit whose other parent is a head
- * Factory published (`heads`). `base`, when the checkout has it, bounds
- * the history read.
+ * Factory published (`heads`). The definition's base patches, which
+ * provisioning put on the branch before admission (`patches`, the commits
+ * they made), are never hand fixes, whatever their time. `base`, when the
+ * checkout has it, bounds the history read.
  */
 export function handFixCommits(
   checkout,
-  { end, base, startedAt, endedAt, merges, heads },
+  { end, base, startedAt, endedAt, merges, heads, patches = new Set() },
 ) {
   let hasBase = false;
   try {
@@ -115,7 +117,7 @@ export function handFixCommits(
   for (const line of lines) {
     const [sha, time, , ...others] = line.split(" ");
     const at = Number(time);
-    if (at < from || at > to) continue;
+    if (at < from || at > to || patches.has(sha)) continue;
     if (merges.has(sha) || others.some((parent) => heads.has(parent))) continue;
     fixes.push({ sha, at: new Date(at * 1000).toISOString() });
   }

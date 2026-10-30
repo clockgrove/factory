@@ -150,6 +150,14 @@ test("a failed validation of a commit stands again for that same commit, with no
   assert.equal(kept.commit, served.commit);
   assert.equal(kept.result.kind, "failed");
   assert.equal(kept.result.command, "grep -qx 3 src/a.js");
+  // What failed, for the repair's repeat detection (#2215); the reused
+  // result below repairs with the same finding.
+  assert.equal(kept.result.exit, "1");
+  assert.deepEqual(first.outcome.keep["item:a:finding"].identity, {
+    kind: "validation",
+    command: "grep -qx 3 src/a.js",
+    exit: "1",
+  });
 
   // Factory's own `revalidate` after the worker resubmitted it unchanged.
   again(served.state);

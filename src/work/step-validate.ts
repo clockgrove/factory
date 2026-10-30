@@ -6,7 +6,7 @@ import { runningBuild } from "../log.js";
 import { validationMembers } from "../media.js";
 import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
-import { FAILURE_CHARS } from "../repair.js";
+import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt } from "../text.js";
 import { formatRef, lockfileRef, validateTree } from "../validate.js";
@@ -160,11 +160,14 @@ export async function validateStep(
         await writeFile(outputFile, log, { mode: 0o600 });
         keptOutput = `${result.output.length > KEPT_OUTPUT_CHARS ? failureExcerpt(result.output, KEPT_OUTPUT_CHARS) : result.output}\n[The complete output is kept for the operator at ${outputFile}. The repair diagnosis can ask for it as ${VALIDATE_STEP_LOG}, and the next worker attempt reads it there in its checkout.]`;
       }
+      const exit = result.failed?.exit ?? result.formatter?.exit;
       const failed: Extract<KeptValidation["result"], { kind: "failed" }> = {
         kind: "failed",
         detail: keptOutput,
         shown: result.detail,
         ...(result.failed ? { command: result.failed.command } : {}),
+        ...(result.formatter ? { formatter: result.formatter.command } : {}),
+        ...(exit !== undefined ? { exit } : {}),
         ...(outputFile ? { output: outputFile } : {}),
       };
       return failedOutcome(
@@ -220,7 +223,27 @@ function keptValidation(
   );
 }
 
-/** A validation failure as the work step's repair. */
+/**
+ * A failed validation's identity (repair.ts `FailureIdentity`): the failed
+ * command, or the repository's formatter that failed by itself, with how it
+ * ended. A pin, the formatter's refused change or the mutation check has
+ * none, and neither has a result kept before 0.5.10.
+ */
+export function validationIdentity(
+  failed: Extract<KeptValidation["result"], { kind: "failed" }>,
+): FailureIdentity | undefined {
+  if (failed.command !== undefined)
+    return {
+      kind: "validation",
+      command: failed.command,
+      ...(failed.exit !== undefined && { exit: failed.exit }),
+    };
+  if (failed.formatter !== undefined && failed.exit !== undefined)
+    return { kind: "format", command: failed.formatter, exit: failed.exit };
+  return undefined;
+}
+
+/** A validation failure as the work step's repair, with its identity (`validationIdentity`). */
 function failedOutcome(
   item: WorkItem,
   state: ObjectiveState,
@@ -228,6 +251,7 @@ function failedOutcome(
   failed: Extract<KeptValidation["result"], { kind: "failed" }>,
   keep: Record<string, unknown> = {},
 ): Outcome {
+  const identity = validationIdentity(failed);
   return repairOutcome(
     item,
     "validate",
@@ -235,6 +259,7 @@ function failedOutcome(
       kind: "failure",
       detail: failed.detail,
       ...(failed.output ? { output: failed.output } : {}),
+      ...(identity && { identity }),
     },
     state,
     place,

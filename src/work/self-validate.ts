@@ -15,7 +15,7 @@ import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
-import { errorMessage, headAndTail } from "../text.js";
+import { errorMessage, failureExcerpt } from "../text.js";
 import { validateTree } from "../validate.js";
 import { hasGitlink, installStorePath } from "../worktree.js";
 import {
@@ -145,7 +145,11 @@ export class FinishRequests {
   }
 }
 
-/** Validate keeps the tail: failures report last. */
+/**
+ * The least of a failed command's output a Validate result keeps, in bytes,
+ * whatever else it holds; it gets what the result has left when that is
+ * more.
+ */
 const VALIDATION_OUTPUT_CHARS = 8_000;
 /**
  * Note excerpts in the criterion map, longest first: enough of a note to see
@@ -160,15 +164,27 @@ const NOTE_EXCERPTS = [600, 200, 0] as const;
  * as 4 bytes a token, and cuts the middle of anything longer, which would
  * drop part of the criterion map; the Claude Agent SDK's MCP cap is larger.
  * So the whole result stays under Codex's limit, with room for the exec
- * wrapper, and the same for all three workers.
+ * wrapper, and the same for all three workers. A failed run's result is
+ * bounded in UTF-8 bytes, since a command's output can be far from ASCII.
  */
 export const VALIDATE_RESULT_CHARS = 30_000;
 
-/** Plain text: the first line names the failed command; the tail holds the failures. */
-function bounded(output: string): string {
+/**
+ * Plain text within `bytes` of UTF-8: the start, which names the failed
+ * command, the end, and the lines that say why it failed wherever they are
+ * (#2201). Codex counts a result's bytes, and output such as a linter's
+ * code frames takes more than one a character, so the excerpt shrinks until
+ * its bytes fit.
+ */
+function bounded(output: string, bytes: number): string {
   const plain = stripVTControlCharacters(output);
-  const head = (plain.split("\n", 1)[0] ?? "").slice(0, 300);
-  return headAndTail(plain, head.length, VALIDATION_OUTPUT_CHARS);
+  const room = Math.max(VALIDATION_OUTPUT_CHARS, bytes);
+  for (let chars = room; ; ) {
+    const excerpt = failureExcerpt(plain, chars);
+    const size = Buffer.byteLength(excerpt);
+    if (size <= room) return excerpt;
+    chars = Math.max(0, Math.floor((chars * room) / size) - 1);
+  }
 }
 
 /**
@@ -345,23 +361,40 @@ export class SelfValidation {
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);
     const passed = result.kind === "passed";
-    const declared =
+    const compose = (output: string) => {
+      const declared =
+        result.kind === "passed"
+          ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
+          : `Validation failed. Fix this before you finish.\n${output}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
+      const composed = [
+        result.produced ? `${declared}\n\n${result.produced}` : declared,
+      ];
+      if (result.regenerated)
+        composed.push(
+          `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
+        );
+      if (result.formatted) composed.push(formattedNote(result.formatted));
+      if (handoff.text)
+        if (handoff.passed) composed.push(handoff.text);
+        else composed.unshift(handoff.text);
+      if (passed && !handoff.passed)
+        composed.unshift("Validation failed. Fix this before you finish.");
+      return composed;
+    };
+    // A failed command's output gets the bytes the rest of the result
+    // leaves (VALIDATE_RESULT_CHARS), cut to keep its failure lines (#2201).
+    const parts =
       result.kind === "passed"
-        ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
-    const parts = [
-      result.produced ? `${declared}\n\n${result.produced}` : declared,
-    ];
-    if (result.regenerated)
-      parts.push(
-        `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
-      );
-    if (result.formatted) parts.push(formattedNote(result.formatted));
-    if (handoff.text)
-      if (handoff.passed) parts.push(handoff.text);
-      else parts.unshift(handoff.text);
-    if (passed && !handoff.passed)
-      parts.unshift("Validation failed. Fix this before you finish.");
+        ? compose("")
+        : compose(
+            bounded(
+              result.failed
+                ? `${result.failed.command} failed:\n${result.output}`
+                : result.output || result.detail,
+              VALIDATE_RESULT_CHARS -
+                Buffer.byteLength(compose("").join("\n\n")),
+            ),
+          );
     // Self-review follows a passing run, last and within what the result has
     // left (VALIDATE_RESULT_CHARS), so no worker's harness cuts it.
     if (passed && handoff.criteria)
@@ -385,7 +418,10 @@ export class SelfValidation {
           ...(result.failed.exit !== undefined
             ? { exit: result.failed.exit }
             : {}),
-          output: bounded(result.output || result.detail),
+          output: bounded(
+            result.output || result.detail,
+            VALIDATION_OUTPUT_CHARS,
+          ),
         });
     }
     input.log({

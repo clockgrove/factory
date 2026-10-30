@@ -80,7 +80,7 @@ import {
 } from "./review/artifacts.js";
 import { runSandboxed, sandboxAvailable } from "./sandbox.js";
 import type { ObjectiveBlock } from "./shown.js";
-import { errorMessage, headAndTail } from "./text.js";
+import { errorMessage, failureExcerpt, headAndTail } from "./text.js";
 import { factoryCommit, privateStagingPath } from "./work/collect.js";
 import {
   addWorktree,
@@ -1008,11 +1008,11 @@ const sourceDeclared = (items: readonly WorkItem[]) =>
 
 /**
  * A failed command's output as people read it: the start and the end, where
- * test runners report failures (#1596). Diagnosis gets the complete output.
- * The tail is at least the 8,000 characters worker Validate shows.
+ * test runners report failures (#1596), and the lines that look like errors
+ * or failures between them (#2201). Diagnosis gets the kept output
+ * (step-validate.ts), cut the same way.
  */
-const FAILED_OUTPUT_HEAD = 2_000;
-const FAILED_OUTPUT_TAIL = 8_000;
+const FAILED_OUTPUT_CHARS = 10_000;
 /** What a passing command keeps of its output. */
 const PASSED_OUTPUT_TAIL = 2_000;
 /** pnpm's and npm's errors for a package an offline install cannot fetch. */
@@ -1023,7 +1023,7 @@ const OUTDATED_LOCKFILE =
   /\bERR_PNPM_(?:OUTDATED_LOCKFILE|LOCKFILE_CONFIG_MISMATCH)\b|`npm ci` can only install packages when your package\.json and package-lock\.json/;
 
 const failedOutput = (output: string) =>
-  headAndTail(output, FAILED_OUTPUT_HEAD, FAILED_OUTPUT_TAIL);
+  failureExcerpt(output, FAILED_OUTPUT_CHARS);
 
 /** The checkout's complete status records. */
 async function status(worktree: string, signal: AbortSignal): Promise<Buffer> {

@@ -41,9 +41,8 @@ export * from "./step-validate.js";
 export * from "./step-work.js";
 
 export const MINUTE = 60_000;
-/** What a kept validation finding holds of a failed run's output. */
-export const KEPT_OUTPUT_HEAD = 32_000;
-export const KEPT_OUTPUT_TAIL = 96_000;
+/** What a kept validation finding holds of a failed run's output (`failureExcerpt`). */
+export const KEPT_OUTPUT_CHARS = 128_000;
 
 /** What execution needs from the installation, beyond planning. */
 export interface BuildDeps extends PlanningDeps {

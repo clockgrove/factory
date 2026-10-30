@@ -50,6 +50,7 @@ import {
   type ObjectiveState,
   type ObjectiveStatus,
   leadingArg,
+  newHoldId,
   RESET_KEY,
   type Retry,
   recordClosed,
@@ -1259,7 +1260,7 @@ export class ObjectiveRunner {
     if (!chargeRereview(state)) return false;
     const at = this.now().toISOString();
     state.answers[key] = {
-      holdId: `${key}@${at}`,
+      holdId: newHoldId(state, key, at),
       question,
       answer: REVALIDATE,
       by: "factory",
@@ -1597,7 +1598,7 @@ export class ObjectiveRunner {
     const named = switching.map(
       (option) => `\`${answerForm(option)}\`: ${option.consequence}`,
     );
-    const id = `${key}@${now}`;
+    const id = newHoldId(state, key, now);
     // The step's earlier question, asked again: its comment says so.
     if (open)
       recordClosed(state, open, { how: "superseded", at: now, next: id });

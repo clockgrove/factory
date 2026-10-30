@@ -3,7 +3,9 @@
 // `gh issue create` failed once with `Post "https://api.github.com/graphql":
 // EOF`, the suite didn't retry, and the case returned 1 before it queued
 // anything. A retry must not file a second copy when the failed create did
-// file the issue.
+// file the issue. The prd suite's p_bot_issue files its non-writer Objective
+// by dispatching drill-issue.yml, and retries a failed dispatch the same way
+// (#2207).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -21,10 +23,12 @@ import { test } from "node:test";
 const LIB = join(import.meta.dirname, "../integration/lib");
 const REPO = "clockgrove/fd-test-m";
 
-// A stand-in for gh: `issue create` and `api repos/R/issues`, over a JSON
-// list of issues. The file "fail" holds how the next creates fail, one word
-// each: "filed" (files the issue, then EOF), "lost" (EOF, nothing filed), "ok".
-// While the file "api-down" exists, every lookup fails with EOF.
+// A stand-in for gh: `issue create`, `workflow run drill-issue.yml` (which
+// files its issue as github-actions[bot]) and `api repos/R/issues`, over a
+// JSON list of issues. The file "fail" holds how the next creates fail, one
+// word each: "filed" (files the issue, then EOF), "lost" (EOF, nothing filed),
+// "ok"; the file "dispatch" holds the same for the next dispatches. While the
+// file "api-down" exists, every lookup fails with EOF.
 const FAKE_GH = `#!/usr/bin/env node
 const fs = require("node:fs");
 const dir = process.env.FAKE_GH_DIR;
@@ -32,7 +36,33 @@ const file = dir + "/issues.json";
 const issues = JSON.parse(fs.readFileSync(file, "utf8"));
 const args = process.argv.slice(2);
 const flag = (name) => args[args.indexOf(name) + 1];
-if (args[0] === "issue" && args[1] === "create") {
+const BOT = "github-actions[bot]";
+if (args[0] === "workflow" && args[1] === "run" && args[2] === "drill-issue.yml") {
+  fs.appendFileSync(dir + "/dispatches", "x");
+  const plan = fs.readFileSync(dir + "/dispatch", "utf8").split(" ").filter(Boolean);
+  const how = plan.shift() ?? "ok";
+  fs.writeFileSync(dir + "/dispatch", plan.join(" "));
+  const input = (name) =>
+    args.filter((a, i) => args[i - 1] === "-f" && a.startsWith(name + "=")).map((a) => a.slice(name.length + 1))[0];
+  if (how !== "lost") {
+    issues.push({ number: issues.length + 1, title: input("title"), body: input("body"), user: { login: BOT }, state: "open" });
+    fs.writeFileSync(file, JSON.stringify(issues));
+  }
+  if (how !== "ok") {
+    process.stderr.write("could not create workflow dispatch event: HTTP 502: Server Error\\n");
+    process.exit(1);
+  }
+} else if (args[0] === "api" && args[1].startsWith("repos/${REPO}/issues?creator=github-actions%5Bbot%5D&")) {
+  if (fs.existsSync(dir + "/api-down")) {
+    process.stderr.write('Get "https://api.github.com/repos": EOF\\n');
+    process.exit(1);
+  }
+  // p_bot_found's --jq: .[]|select(.title=="T")|.number
+  const title = /select\\(\\.title=="(.*)"\\)\\|\\.number$/.exec(flag("--jq"))[1];
+  for (const i of [...issues].reverse()) {
+    if (i.user?.login === BOT && i.state === "open" && i.title === title) process.stdout.write(i.number + "\\n");
+  }
+} else if (args[0] === "issue" && args[1] === "create") {
   fs.appendFileSync(dir + "/creates", "x");
   const plan = fs.readFileSync(dir + "/fail", "utf8").split(" ").filter(Boolean);
   const how = plan.shift() ?? "ok";
@@ -60,13 +90,15 @@ if (args[0] === "issue" && args[1] === "create") {
 `;
 
 // Runs CALL (gh_issue_file by default) against the stand-in gh, whose creates
-// go as FAIL says.
+// go as FAIL says and dispatches as DISPATCH says.
 function file(
   fail,
   {
     issues = [],
     recorded = "",
     apiDown = false,
+    dispatch = "",
+    env = {},
     call = 'gh_issue_file "Suite 10281819: codex stack happy path" "$RUN_DIR/body.md"',
   } = {},
 ) {
@@ -76,7 +108,10 @@ function file(
     chmodSync(join(dir, "gh"), 0o755);
     writeFileSync(join(dir, "issues.json"), JSON.stringify(issues));
     writeFileSync(join(dir, "fail"), fail);
+    writeFileSync(join(dir, "dispatch"), dispatch);
     writeFileSync(join(dir, "creates"), "");
+    writeFileSync(join(dir, "dispatches"), "");
+    writeFileSync(join(dir, "clock"), "");
     writeFileSync(join(dir, "issues"), recorded);
     writeFileSync(join(dir, "body.md"), "Add `padEndQabcd`.\n");
     if (apiDown) writeFileSync(join(dir, "api-down"), "");
@@ -84,8 +119,11 @@ function file(
       "bash",
       [
         "-c",
-        // No waiting between tries here.
-        `source "$1/common.sh"; source "$1/gh.sh"; sleep() { :; }; ${call}`,
+        // No waiting between tries here: sleep only moves a clock that now
+        // reads (a byte of the file "clock" a second).
+        `source "$1/common.sh"; source "$1/gh.sh"; source "$1/../cases/prd.sh"
+        sleep() { printf "%$1s" >>"$RUN_DIR/clock"; }; now() { stat -c %s "$RUN_DIR/clock"; }
+        ${call}`,
         "_",
         LIB,
       ],
@@ -102,6 +140,8 @@ function file(
           REPO,
           INST: "M",
           CASE: "codex",
+          STOP_AT: "1000000",
+          ...env,
         },
       },
     );
@@ -109,6 +149,8 @@ function file(
       status: r.status,
       stdout: r.stdout,
       creates: readFileSync(join(dir, "creates"), "utf8").length,
+      dispatches: readFileSync(join(dir, "dispatches"), "utf8").length,
+      elapsed: readFileSync(join(dir, "clock"), "utf8").length,
       issues: JSON.parse(readFileSync(join(dir, "issues.json"), "utf8")),
       recorded: readFileSync(join(dir, "issues"), "utf8"),
       journal: existsSync(join(dir, "journal"))
@@ -197,4 +239,81 @@ test("new_issue records the issue a failed create filed, once", () => {
   );
   assert.equal(r.recorded, "1 codex M\n");
   assert.match(r.journal, /filed #1 \(withdraw\)/);
+});
+
+// p_bot_issue against the stand-in gh, as the outsider case calls it.
+function botIssue(dispatch, options = {}) {
+  return file("", {
+    dispatch,
+    env: { CASE: "outsider", INST: "P" },
+    call: 'p_bot_issue "Suite 10281819: non-writer Objective Qabcd" "$RUN_DIR/body.md"',
+    ...options,
+  });
+}
+
+test("a dispatch that works the first time files one bot issue, with no retry", () => {
+  const r = botIssue("ok");
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "1\n");
+  assert.equal(r.dispatches, 1);
+  assert.equal(r.issues.length, 1);
+  assert.equal(r.issues[0].user.login, "github-actions[bot]");
+  assert.equal(r.recorded, "1 outsider P\n");
+  assert.doesNotMatch(r.journal, /failed/);
+});
+
+test("a failed dispatch that did file the issue finds it, with no second dispatch", () => {
+  const r = botIssue("filed");
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "1\n");
+  assert.equal(r.dispatches, 1);
+  assert.equal(r.issues.length, 1);
+  assert.equal(r.recorded, "1 outsider P\n");
+  assert.match(
+    r.journal,
+    /\[outsider\] dispatching drill-issue\.yml for .* failed \(try 1\): could not create workflow dispatch event: HTTP 502/,
+  );
+  assert.match(r.journal, /was filed by the failed dispatch: #1/);
+});
+
+test("a failed dispatch that filed nothing is dispatched again once the wait shows no issue", () => {
+  const r = botIssue("lost");
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "1\n");
+  assert.equal(r.dispatches, 2);
+  assert.equal(r.issues.length, 1);
+  assert.equal(r.recorded, "1 outsider P\n");
+  assert.match(r.journal, /failed \(try 1\)/);
+  // The retry waited as long as a dispatch that worked is given.
+  assert.ok(r.elapsed >= 240, `waited ${r.elapsed} s before the retry`);
+  assert.doesNotMatch(r.journal, /filed by the failed dispatch/);
+});
+
+test("a dispatch failure that lasts fails after three tries, each logged", () => {
+  const r = botIssue("lost lost lost");
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.equal(r.dispatches, 3);
+  assert.equal(r.issues.length, 0);
+  assert.equal(r.recorded, "");
+  assert.equal(r.journal.match(/failed \(try [123]\)/g).length, 3);
+});
+
+test("a dispatch that failed late in a lasting failure still finds its issue", () => {
+  const r = botIssue("lost lost filed");
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "1\n");
+  assert.equal(r.dispatches, 3);
+  assert.equal(r.issues.length, 1);
+  assert.match(r.journal, /was filed by the failed dispatch: #1/);
+});
+
+test("a failed dispatch whose issue can't be looked for is never dispatched again", () => {
+  // The failed dispatch may have filed it: dispatching again without looking
+  // could leave two bot issues, so the suite gives up instead.
+  const r = botIssue("filed", { apiDown: true });
+  assert.equal(r.status, 1);
+  assert.equal(r.dispatches, 1);
+  assert.equal(r.issues.length, 1);
+  assert.match(r.journal, /looking for bot issue .* failed: Get .*: EOF/);
 });

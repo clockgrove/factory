@@ -7,8 +7,9 @@
  * the work (source repository, base commit, Objective), how the test
  * repository mirrors the source (merge settings, rulesets, variables,
  * workflows kept), how memory is seeded, the Factory settings, the
- * operator policy and the hill-climb metrics. `${name}` in a Factory
- * setting is a host value (bench/README.md#Host profile).
+ * operator policy, and how runs are scored: the grader, the charge per
+ * question, model prices and the diagnostics compare shows. `${name}` in a
+ * Factory setting is a host value (bench/README.md#Host profile).
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -94,7 +95,13 @@ const SHAPE = {
   baseline: true,
   hillClimb: { primary: true, guards: true },
   budget: { tokens: true, hours: true },
+  grader: { command: true, timeoutMinutes: true },
+  scoring: { questionChargeMinutes: true },
+  prices: true,
 };
+
+/** A price's rates, US dollars per million tokens. */
+const RATES = ["uncachedInput", "cachedInput", "output"];
 
 /** The paths of `value`'s fields that `shape` doesn't have. */
 function unknownFields(value, shape, path = "") {
@@ -248,14 +255,49 @@ export function definitionProblems(value) {
   );
   need("operatorPolicy.otherwise", (v) => v === "pause", "pause");
   need("baseline", string, "the result group that is the baseline");
-  for (const list of ["primary", "guards"])
+  // Optional: the diagnostics `compare` shows. The outcomes decide (metrics.mjs).
+  if (at("hillClimb") !== undefined)
+    for (const list of ["primary", "guards"])
+      need(
+        `hillClimb.${list}`,
+        (v) =>
+          strings(v) &&
+          v.length > 0 &&
+          v.every((id) => Object.hasOwn(METRICS, id)),
+        `metric ids among ${Object.keys(METRICS).join(", ")}`,
+      );
+  // Optional: the benchmark's own grader of the merged result (bench/lib/grade.mjs).
+  if (at("grader") !== undefined) {
+    need("grader.command", string, "the grader's shell command");
     need(
-      `hillClimb.${list}`,
+      "grader.timeoutMinutes",
+      (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
+      "minutes the grader may run, more than 0",
+    );
+  }
+  if (at("scoring") !== undefined)
+    need(
+      "scoring.questionChargeMinutes",
+      (v) => typeof v === "number" && Number.isFinite(v) && v >= 0,
+      "minutes time to delivery charges per question for the operator, 0 or more",
+    );
+  if (at("prices") !== undefined)
+    need(
+      "prices",
       (v) =>
-        strings(v) &&
-        v.length > 0 &&
-        v.every((id) => Object.hasOwn(METRICS, id)),
-      `metric ids among ${Object.keys(METRICS).join(", ")}`,
+        object(v) &&
+        Object.values(v).every(
+          (price) =>
+            object(price) &&
+            Object.keys(price).length === RATES.length &&
+            RATES.every(
+              (rate) =>
+                typeof price[rate] === "number" &&
+                Number.isFinite(price[rate]) &&
+                price[rate] >= 0,
+            ),
+        ),
+      `per model: ${RATES.join(", ")}, US dollars per million tokens`,
     );
   need(
     "budget",

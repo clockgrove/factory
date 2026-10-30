@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { correction } from "../dist/repair.js";
 import {
   commandProofs,
+  REVIEW_GUIDANCE,
   resultCriteria,
   reviewResult,
 } from "../dist/review/result.js";
@@ -193,6 +194,19 @@ test("the review is told a passing command is required, not sufficient, and its 
       `Command-proven criteria: the plan proves criterion 2 by validation command 1 (${JSON.stringify(COMMAND)}) of this Work Item; the Validation command passes row lists each command at that index, and it passed on this tree. When a criterion states only what that command's own exit decides`,
     ),
     prompt,
+  );
+  // Proof asked for once (#2241) keeps its strength: a stub is still refused,
+  // and the review is told a duplicate test or copied harness is a finding.
+  assert.ok(
+    prompt.includes(
+      "a fixture that only stores and echoes its input where the criterion requires a real consumer or producer), or a test the command does not run, leaves the criterion unproven",
+    ),
+  );
+  assert.ok(prompt.includes(REVIEW_GUIDANCE.findings));
+  assert.ok(
+    prompt.includes(
+      "A test this result adds that proves again a claim another test in the tree already proves, or a harness or fixture setup it copies instead of importing, is a test-economy violation: refuse it, citing both locations.",
+    ),
   );
   assert.equal(review.kind, "refused", JSON.stringify(review));
   assert.deepEqual(

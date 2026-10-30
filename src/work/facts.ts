@@ -179,6 +179,16 @@ export interface ItemFacts {
    */
   validation: KeptValidation;
   /**
+   * The other Work Items' merges of this Objective (their merge commits)
+   * that the validation of `commit`, the item's validated candidate,
+   * counted: the candidate held them, or its commands ran on them
+   * (step-validate.ts `integratedValidation`, #2240). Outside a native
+   * stack, the merge step validates the candidate again on any merge since
+   * (step-validate.ts `validateBeforeMerge`) and adds it. Absent from state
+   * 0.5.11 saved: every merge counts as since.
+   */
+  validatedOn: { commit: string; merges: string[] };
+  /**
    * The item's merges that final review's `repair` cleared, oldest first,
    * with their PRs (finish.ts `finalRepair`): they stay on the default
    * branch, so they are still this Objective's merges, and final review
@@ -215,6 +225,12 @@ export interface KeptValidation {
         exit?: string;
         /** The complete output's file, when `detail` holds less (the finding's `output`). */
         output?: string;
+        /**
+         * It failed on the Objective's merges the candidate was built
+         * without (step-validate.ts `integratedValidation`, #2240): the
+         * repair moves the item onto the current default branch.
+         */
+        integrated?: true;
       };
 }
 
@@ -234,6 +250,8 @@ export interface ObjectiveFacts {
   "final:flaky": { tree: string; command: string };
   /** The command final validation failed on, for `retire-command <n>`. */
   "final:failed": { index: number; command: string };
+  /** Final validation's failure while its question is open, for `repair` (work/finish.ts, #2240). */
+  "final:held": FinalFailure;
   /** The commands the operator retired from final validation (planning/plan.ts reads them). */
   "final:retired": Retirement[];
   /**
@@ -254,6 +272,16 @@ export interface ObjectiveFacts {
   "session:graph-review": Session;
   /** The final reviewer's retained conversation across re-reviews. */
   "session:final-review": Session;
+}
+
+/** Final validation's failure (`final:held`): what its `repair` sends back to a Work Item. */
+export interface FinalFailure {
+  /** The default branch head it failed on. */
+  head: string;
+  /** The Work Item whose own commands failed (planning/plan.ts `fallbackRuns`); absent for the final commands. */
+  item?: string;
+  /** The failure as a repair keeps it, its complete output in a file when long (step-validate.ts `keptFailure`). */
+  failed: Extract<KeptValidation["result"], { kind: "failed" }>;
 }
 
 /** A finished worker run, kept until its result is collected, so a collection question doesn't run the worker again. */

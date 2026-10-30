@@ -26,7 +26,7 @@ import {
   retiredLines,
 } from "../planning/plan.js";
 import { objectiveNotes } from "../planning/schedule.js";
-import { coverageCriterion } from "../planning/graph.js";
+import { coverageCriterion, ownsPath } from "../planning/graph.js";
 import { REOPENED } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { moveStatusOffDone } from "../queue.js";
@@ -61,7 +61,7 @@ import {
   removeWorktree,
   worktreePath,
 } from "../worktree.js";
-import { fact, facts } from "./facts.js";
+import { type FinalFailure, fact, facts } from "./facts.js";
 import { type MergeResult, mergeOf } from "./merged.js";
 import {
   finalRetirable,
@@ -86,7 +86,7 @@ import {
   standingRefusals,
   workerInputs,
 } from "./step-review.js";
-import { rerunOnce } from "./step-validate.js";
+import { keptFailure, rerunOnce, validationIdentity } from "./step-validate.js";
 import { acceptedNotes, retained, secondLook, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
@@ -126,6 +126,19 @@ export function finalStep(plan: Plan, deps: BuildDeps): Step {
     run: async (context): Promise<Outcome> => {
       const { state } = context;
       const { config } = deps;
+      // The operator's `repair` to final validation's failure: a Work Item
+      // the failure is attributed to is repaired against the default
+      // branch, and final validation runs again once it merges (#2240).
+      const held = fact(state, "final:held");
+      if (context.answer?.answer === REPAIR_OWNER && held) {
+        const route = finalValidationRoute(
+          currentPlan(state)!,
+          state,
+          held,
+          deps,
+        );
+        if (route) return finalValidationRepair(state, held, route);
+      }
       // `retire-command <n>` to final validation's failure: recorded, and
       // final validation runs again without it.
       const failed = fact(state, "final:failed");
@@ -145,7 +158,10 @@ export function finalStep(plan: Plan, deps: BuildDeps): Step {
           `${recorded} Fix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.`,
           ["retry", "replan", "cancel"],
         );
-      const retired = { ...recorded, ...facts({ "final:failed": null }) };
+      const retired = {
+        ...recorded,
+        ...facts({ "final:failed": null, "final:held": null }),
+      };
       return keepFirst(
         retired,
         await finalValidation(context, deps, planWith(state, retired)),
@@ -183,14 +199,29 @@ export async function finalValidation(
         config.finalValidation.requiredCommands,
       ),
     );
+    // Kept while the question is open, with the complete output, for
+    // `repair` (#2201, #2240).
+    const failure: FinalFailure = {
+      head,
+      ...(item ? { item } : {}),
+      failed: await keptFailure(result, join(workDir, "outputs", "final")),
+    };
+    const route = finalValidationRoute(plan, state, failure, deps);
     return {
       ...hold(
-        `Final validation failed on the default branch (${head.slice(0, 12)})${item ? `, running Work Item ${item}'s own commands` : ""}:\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, \`replan\` to plan the remaining work, or cancel.${offer.note}`,
-        ["retry", ...offer.options, "replan", "cancel"],
+        `Final validation failed on the default branch (${head.slice(0, 12)})${item ? `, running Work Item ${item}'s own commands` : ""}:\n\n${result.detail}\n\n${finalValidationAnswers(route)}${offer.note}`,
+        [
+          ...(route ? [validationRepairOffer(route)] : []),
+          "retry",
+          ...offer.options,
+          "replan",
+          "cancel",
+        ],
       ),
-      ...(result.failed
-        ? { keep: facts({ "final:failed": result.failed }) }
-        : {}),
+      keep: facts({
+        "final:held": failure,
+        ...(result.failed ? { "final:failed": result.failed } : {}),
+      }),
     };
   }
   if (result.kind !== "passed") return result;
@@ -636,7 +667,41 @@ function finalRepair(
   tree: string,
   route: FinalRepairRoute,
 ): Outcome {
-  const { item } = route;
+  const finding: RepairFinding = {
+    kind: "review",
+    tree,
+    refused: route.refused,
+    final: true,
+  };
+  return sentBack(
+    state,
+    route.item,
+    finding,
+    `Final review refused, on the integrated default branch:\n${route.refused.map((entry) => `${entry.criterion}: ${entry.detail}`).join("\n")}`,
+    facts({ "final-review:refused": null, "final-review:held": null }),
+  );
+}
+
+/**
+ * Merged Work Item `item` sent back from the end of the Objective with
+ * `finding`: a repair of its work like any other (step-deliver.ts
+ * `repairOutcome`), counted against its path's and the Objective's repair
+ * allowances, and final validation and final review are cleared to run
+ * again after it merges. Its merged result is on the default branch, so it
+ * starts again there with nothing to replay or check again (no base, no
+ * refused result), and its PR merged already, so it publishes on a new one
+ * (`republish`). The cleared merge stays on the default branch as part of
+ * the item's change, so it is kept (`earlierMerges`): final validation and
+ * final review judge it with the repair's merge. `keep`: the question's own
+ * facts to drop.
+ */
+function sentBack(
+  state: ObjectiveState,
+  item: WorkItem,
+  finding: RepairFinding,
+  shown: string,
+  keep: Record<string, unknown>,
+): Outcome {
   const merged = state.done[stepKey(item.id, "merge")] as
     | MergeResult
     | undefined;
@@ -647,14 +712,8 @@ function finalRepair(
     ...(fact(state, "earlierMerges", item.id) ?? []),
     ...(merged ? [{ merged, ...(published ? { pr: published.pr } : {}) }] : []),
   ];
-  const finding: RepairFinding = {
-    kind: "review",
-    tree,
-    refused: route.refused,
-    final: true,
-  };
   const outcome = repairOutcome(item, "merge", finding, state, undefined, {
-    shown: `Final review refused, on the integrated default branch:\n${route.refused.map((entry) => `${entry.criterion}: ${entry.detail}`).join("\n")}`,
+    shown,
   });
   if (outcome.kind !== "repair") return outcome;
   return {
@@ -673,9 +732,146 @@ function finalRepair(
         },
         item.id,
       ),
-      ...facts({ "final-review:refused": null, "final-review:held": null }),
+      ...keep,
     },
   };
+}
+
+/** Where final validation's failure goes back to (#2240): a merged Work Item, and why it is that one. */
+export interface FinalValidationRoute {
+  item: WorkItem;
+  /** Why the failure is this item's, as the question says it after its id. */
+  why: string;
+}
+
+/**
+ * The Work Item final validation's failure can go back to (#2240), from
+ * what the state attributes it to: the Work Item whose own commands failed
+ * (`fallbackRuns`); else the one Work Item that owns files the failure
+ * names; else, of the Work Items whose validation runs the failed command,
+ * the one that merged last; else the one that merged last. Only a coding
+ * Work Item of this Objective that merged, outside a native stack of more
+ * than one item (which merges as one), can be repaired; with none, there is
+ * no route.
+ */
+export function finalValidationRoute(
+  plan: Plan,
+  state: ObjectiveState,
+  failure: FinalFailure,
+  deps: BuildDeps,
+): FinalValidationRoute | undefined {
+  const stacked = stackOf(plan, deps);
+  // Merge order, oldest first: an item sent back before counts at its last.
+  const order = objectiveMerges(state, plan).flatMap(
+    (entry) => entry.merged.items ?? [entry.id],
+  );
+  const merged = plan.items
+    .filter(
+      (item) =>
+        (item.kind ?? "work") === "work" &&
+        order.includes(item.id) &&
+        !multiLayer(stacked, item.id),
+    )
+    .sort((a, b) => order.lastIndexOf(a.id) - order.lastIndexOf(b.id));
+  const last = (items: readonly WorkItem[]) => items[items.length - 1];
+  const ran = merged.find((item) => item.id === failure.item);
+  if (ran) return { item: ran, why: "whose own commands failed there" };
+  const named = namedPaths(failure.failed.detail);
+  const owners = merged.filter((item) =>
+    named.some((path) => ownsPath(path, item.ownedPaths)),
+  );
+  if (owners.length === 1)
+    return { item: owners[0]!, why: "which owns files the failure names" };
+  const { command } = failure.failed;
+  const running =
+    command === undefined
+      ? []
+      : merged.filter((item) =>
+          item.validation.some(
+            (check) => check.command.trim() === command.trim(),
+          ),
+        );
+  if (running.length)
+    return {
+      item: last(running)!,
+      why:
+        running.length === 1
+          ? `whose own validation runs \`${command}\``
+          : `the last to merge of the Work Items whose own validation runs \`${command}\``,
+    };
+  const latest = last(merged);
+  return (
+    latest && {
+      item: latest,
+      why: "the last of this Objective's Work Items to merge",
+    }
+  );
+}
+
+/**
+ * The repository paths `text` may name: each file-like token (a name with
+ * an extension, with or without directories), and each of its endings
+ * after a `/`, since tools print paths from their own checkout (absolute,
+ * or `./`-relative).
+ */
+function namedPaths(text: string): string[] {
+  const paths = new Set<string>();
+  for (const [token] of text.matchAll(/[\w@+./-]*[\w@+-]\.[A-Za-z0-9]+/g)) {
+    const parts = token
+      .split("/")
+      .filter((part) => part !== "" && part !== "." && part !== "..");
+    for (let at = 0; at < parts.length; at++)
+      paths.add(parts.slice(at).join("/"));
+  }
+  return [...paths];
+}
+
+/** What final validation's failure says of its answers: `repair` where `route` allows it, `retry` and `replan`. */
+function finalValidationAnswers(
+  route: FinalValidationRoute | undefined,
+): string {
+  const others = `Answer \`retry\` once you have fixed it on the default branch yourself: final validation runs again on the new head. Answer \`replan\` to plan the remaining work again from the default branch, which keeps what merged, dropping this plan and its build. Or cancel.`;
+  if (!route)
+    return `${others} There is no \`repair\`: no coding Work Item of this Objective outside a native stack has merged.`;
+  const { id } = route.item;
+  return `Answer \`repair\` to send this failure back to Work Item ${id}, ${route.why}: ${id} is repaired against the current default branch, which holds the Objective's merges, with this failure and its complete output, goes through its validation, result review, CI and merge again on a new PR, and then final validation and final review run again. Its validation gives each command that doesn't name its base the plan's base as FACTORY_BASE_SHA, as final validation does, so a check that compares with the base counts the Objective's whole change. It is a repair of ${id}, counted against the repair allowances. ${others}`;
+}
+
+/** The `repair` answer to final validation's failure. */
+function validationRepairOffer(route: FinalValidationRoute): HoldOption {
+  return {
+    answer: REPAIR_OWNER,
+    family: "repair",
+    consequence: `Repairs Work Item ${route.item.id} against the current default branch with final validation's failure; final validation and final review run again once it merges. Counts as a repair.`,
+  };
+}
+
+/**
+ * The operator's `repair` to final validation's `failure`: route's Work
+ * Item is sent back (`sentBack`) with the failure, its complete output in
+ * the file final validation kept (#2201) and its identity, as a validation
+ * failure of its own.
+ */
+function finalValidationRepair(
+  state: ObjectiveState,
+  failure: FinalFailure,
+  route: FinalValidationRoute,
+): Outcome {
+  const identity = validationIdentity(failure.failed);
+  const where = `Final validation failed on the default branch (${failure.head.slice(0, 12)}), which holds this Work Item's merged result and the Objective's other merges${failure.item ? `, running Work Item ${failure.item}'s own commands` : ""}. This repair starts from the current default branch.\n\n`;
+  const finding: RepairFinding = {
+    kind: "failure",
+    detail: `${where}${failure.failed.detail}`,
+    ...(failure.failed.output ? { output: failure.failed.output } : {}),
+    ...(identity && { identity }),
+  };
+  return sentBack(
+    state,
+    route.item,
+    finding,
+    `${where}${failure.failed.shown ?? failure.failed.detail}`,
+    facts({ "final:held": null, "final:failed": null }),
+  );
 }
 
 // ---------------------------------------------------------------------------

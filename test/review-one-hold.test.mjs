@@ -33,6 +33,7 @@ const BASE = "b".repeat(40);
 const COMMIT = "c".repeat(40);
 const TREE = "a".repeat(40);
 const ACCEPTED = "2026-10-28T00:00:00.000Z";
+const NOW = "2026-10-28T01:00:00.000Z";
 const CRITERIA = [
   "Pointer and accessible selection pick one entity.",
   "Selection shows the entity's details.",
@@ -117,10 +118,12 @@ function reviewStep(reviews, asked) {
 
 /**
  * An engine running that step, which `runStep` runs once with the step's
- * answer; its first review asks about `asked` (criterion indices).
+ * answer; its first review asks about `asked` (criterion indices). Its
+ * clock stands still at NOW, so every question is asked in one
+ * millisecond (#2211).
  */
 function harness(asked) {
-  const state = newObjective(800, new Date());
+  const state = newObjective(800, new Date(NOW));
   state.status = "building";
   state.done.plan = PLAN;
   state.kept[ACCEPTED_AT] = ACCEPTED;
@@ -132,6 +135,8 @@ function harness(asked) {
     tempDir("factory-one-hold-"),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
+    undefined,
+    () => new Date(NOW),
   );
   const runStep = async () =>
     runner.apply(
@@ -373,7 +378,10 @@ test("a list that decides some criteria asks once more, about the rest only", as
   await runStep();
   assert.equal(runner.state.holds.length, 1);
   const [second] = runner.state.holds;
-  assert.notEqual(second.id, first.id);
+  // Asked in the first one's millisecond, it takes the next (#2211).
+  assert.equal(first.id, `${KEY}@${NOW}`);
+  assert.equal(second.id, `${KEY}@2026-10-28T01:00:00.001Z`);
+  assert.equal(second.askedAt, NOW);
   assert.ok(second.question.includes(`2. ${CRITERIA[1]}`));
   assert.ok(second.question.includes(`4. ${CRITERIA[3]}`));
   assert.ok(!second.question.includes(`1. ${CRITERIA[0]}`));

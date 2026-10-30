@@ -178,6 +178,35 @@ test("metric ids are METRICS' own: no prototype names", () => {
   );
 });
 
+test("grader, scoring and prices are optional, and checked when given", () => {
+  // A definition from before scorecard v3 loads as it is.
+  const before = example();
+  for (const key of ["grader", "scoring", "prices", "hillClimb"])
+    delete before[key];
+  assert.deepEqual(definitionProblems(before), []);
+  const definition = example();
+  assert.deepEqual(definition.grader.timeoutMinutes, 10);
+  definition.grader = { command: " ", timeoutMinutes: 0, extra: 1 };
+  definition.scoring.questionChargeMinutes = -1;
+  definition.prices["gpt-test"] = { uncachedInput: 1, cachedInput: "0.1" };
+  assert.deepEqual(
+    definitionProblems(definition).map((p) => p.split(":")[0]),
+    [
+      "grader.command",
+      "grader.timeoutMinutes",
+      "scoring.questionChargeMinutes",
+      "prices",
+      "grader.extra",
+    ],
+  );
+  const extraRate = example();
+  extraRate.prices["gpt-test"].reasoning = 1;
+  assert.deepEqual(
+    definitionProblems(extraRate).map((p) => p.split(":")[0]),
+    ["prices"],
+  );
+});
+
 test("a field the schema doesn't have is refused, at every level", () => {
   const definition = example();
   definition.factory.worker.netwrok = definition.factory.worker.network;

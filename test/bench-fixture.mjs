@@ -26,11 +26,16 @@ export function fixtureCopy(change) {
   return stateDir;
 }
 
-export function fixtureCard(run = {}, stateDir = FIXTURE_STATE) {
+/**
+ * The fixture's scorecard. `options`: scoreRun's `checkout` and
+ * `handFixes`, and `definition` for the example's.
+ */
+export function fixtureCard(run = {}, stateDir = FIXTURE_STATE, options = {}) {
+  const { definition = loadDefinition(EXAMPLE), ...rest } = options;
   return scoreRun({
     stateDir,
     issue: 42,
-    definition: loadDefinition(EXAMPLE),
+    definition,
     run: {
       id: "fixture",
       label: "acme/widgets#42 (fixture)",
@@ -40,5 +45,6 @@ export function fixtureCard(run = {}, stateDir = FIXTURE_STATE) {
       ...run,
     },
     factoryRepo: fileURLToPath(new URL("..", import.meta.url)),
+    ...rest,
   });
 }

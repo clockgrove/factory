@@ -8,12 +8,16 @@
  */
 import {
   compare,
+  DIAGNOSTICS,
+  isCurrent,
   isPartial,
   METRICS,
+  OUTCOMES,
   SHOWN,
   spread,
   verdict,
 } from "./metrics.mjs";
+import { WASTE_CAUSES, WEIGHTS } from "./outcomes.mjs";
 
 // --- formatting -------------------------------------------------------------
 
@@ -37,21 +41,76 @@ export function duration(ms) {
 const percent = (r) =>
   r === null || r === undefined ? "n/a" : `${Math.round(r * 100)}%`;
 
+export const usd = (v) =>
+  v === null || v === undefined ? "n/a" : `$${v.toFixed(2)}`;
+
 export function value(unit, v) {
   if (v === null || v === undefined) return "n/a";
   if (unit === "tokens") return tokens(v);
   if (unit === "ms") return duration(v);
   if (unit === "rate") return percent(v);
+  if (unit === "usd") return usd(v);
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
 }
 
 const time = (at) => (at ? `${at.slice(0, 16).replace("T", " ")} UTC` : "n/a");
 const clock = (at) => (at ? at.slice(11, 16) : "");
-/** A card's outcome, marked when the card is partial. */
+/** A card's outcome, marked when the card is partial or of an older version. */
 const outcomeOf = (card) =>
-  isPartial(card) ? `${card.outcome} (partial)` : card.outcome;
+  `${card.outcome}${isPartial(card) ? " (partial)" : ""}${isCurrent(card) ? "" : ` (scorecard v${card.schemaVersion}: rescore)`}`;
 const PARTIAL_NOTE =
   "This run hadn't ended when it was scored: its totals cover the run so far and are lower only because it is unfinished. It is left out of every comparison.";
+const RESCORE_NOTE =
+  "This card is of an older scorecard version: it has no outcome metrics (grade, human effort, time to delivery, waste, escapes, cost), and it is left out of every comparison. Score it again with bench/score.mjs.";
+const ACCEPT_RULE =
+  "A candidate is accepted when its grade is not worse, its human effort or its time to delivery is better, its stage escapes are not worse, and its cost is not worse; better or worse means beyond the baseline's whole spread. Waste is shown, and the effort metrics after it are diagnostics: they don't decide.";
+
+/** One line per outcome of `card`, label then value then detail (null: an older card). */
+export function outcomeLines(card) {
+  if (!isCurrent(card)) return null;
+  const { grade, human, delivery, waste, escapes, cost } = card;
+  const gradeGap = card.unavailable.find((g) => g.metric === "grade");
+  return [
+    [
+      "Grade",
+      grade?.error ? "error" : percent(grade?.passRate),
+      grade
+        ? grade.error
+          ? `the grader failed: ${grade.error}`
+          : `${grade.passed} passed, ${grade.failed} failed, ${grade.unknown} unknown of ${grade.criteria.length} criteria at ${grade.commit.slice(0, 12)} (${grade.graderVersion})`
+        : `not graded: ${gradeGap?.reason ?? "no grade"}`,
+    ],
+    [
+      "Human effort",
+      String(human.score),
+      `${human.stamps} stamp(s) × ${WEIGHTS.stamp}, ${human.judgments} judgment(s) × ${WEIGHTS.judgment}, ${human.handFixes} hand fix(es) × ${WEIGHTS.handFix}; ${human.unattended ? "unattended" : "attended"}`,
+    ],
+    [
+      "Time to delivery",
+      duration(card.deliveryMs),
+      `active ${duration(delivery.activeWallMs)} + ${delivery.questions} question(s) for the operator × ${duration(delivery.questionChargeMs)}`,
+    ],
+    [
+      "Waste",
+      percent(waste.tokensShare),
+      `${tokens(waste.tokens)} tokens and ${duration(waste.modelMs)} of model time (${percent(waste.modelMsShare)}) on work that didn't reach the result`,
+    ],
+    [
+      "Stage escapes",
+      String(escapes.total),
+      `${escapes.finalReviewRefusals} final-review refusal(s), ${escapes.handFixesAfterFinalReview} hand fix(es) after final review, ${escapes.graderFailedPassed ?? "n/a"} criteria the grader failed that final review passed`,
+    ],
+    [
+      "Cost",
+      usd(cost?.usd),
+      cost
+        ? cost.usd === null
+          ? `the definition prices no ${cost.unpriced.join(", ")}`
+          : "at the definition's prices"
+        : "the definition has no prices",
+    ],
+  ];
+}
 
 // --- page -------------------------------------------------------------------
 
@@ -326,14 +385,124 @@ function historyChart(metricId, cards, baselineGroup) {
 
 // --- run report -------------------------------------------------------------
 
-/** The baseline runs a card is compared with: the baseline group's ended runs, without the card itself. */
+/** The baseline runs a card is compared with: the baseline group's ended runs of this scorecard version, without the card itself. */
 export function baselineOf(card, cards, definition) {
   return cards.filter(
     (c) =>
       c.run.group === definition.baseline &&
       c.run.id !== card.run.id &&
-      !isPartial(c),
+      !isPartial(c) &&
+      isCurrent(c),
   );
+}
+
+/** A short text of a grader's evidence, whatever its shape. */
+const evidence = (value) => {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > 240 ? `${text.slice(0, 239)}…` : text;
+};
+
+/** The outcome sections of a run report: the grade, human effort, waste and cost (current cards only). */
+function outcomeSections(card) {
+  if (!isCurrent(card)) return "";
+  const { grade, human, waste, cost } = card;
+  const touches = [
+    ...card.operator.decisions
+      .filter((d) => d.touch)
+      .map((d) => [
+        d.answeredAt,
+        d.touch,
+        `${d.answer} to a ${d.kind} hold${d.step ? ` (${d.step})` : ""}`,
+        [d.by, d.as].filter(Boolean).join(" as "),
+      ]),
+    ...card.operator.actions.map((a) => [
+      a.at,
+      a.touch ?? "",
+      `${a.kind}${a.answer ? ` ${a.answer}` : ""}${a.item ? ` (${a.item})` : ""}`,
+      [a.by, a.as].filter(Boolean).join(" as "),
+    ]),
+    ...human.fixes.map((f) => [
+      f.at,
+      "hand fix",
+      `commit ${f.sha.slice(0, 12)} on the default branch${f.afterFinalReview ? ", after final review" : ""}`,
+      f.from === "given"
+        ? "given with --hand-fix"
+        : "the run repository's history",
+    ]),
+  ].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  const wasteRows = (rows) =>
+    rows.map(([name, row]) => [
+      esc(name),
+      esc(tokens(row.tokens)),
+      esc(duration(row.modelMs)),
+      String(row.calls),
+    ]);
+  return `
+<section>
+<h2>Grade</h2>
+${
+  grade?.criteria?.length
+    ? table(
+        ["Criterion", "Verdict", "Method", "Evidence"],
+        grade.criteria.map((c) => [
+          `<b>${esc(c.id)}</b>${c.text ? ` ${esc(c.text)}` : ""}`,
+          `<span class="${c.verdict === "pass" ? "better" : c.verdict === "fail" ? "worse" : "unknown"}">${esc(c.verdict)}</span>`,
+          esc(c.method ?? ""),
+          esc(evidence(c.evidence)),
+        ]),
+      )
+    : `<p class="meta">${esc(outcomeLines(card)[0][2])}</p>`
+}
+</section>
+<section>
+<h2>Human effort</h2>
+<p class="meta">Every operator touch, weighted: a stamp (more, a plain retry, adopt, continue, pause, resume) ${WEIGHTS.stamp}, a judgment (an answer with text, accept, refuse, replan, repair, cancel, ...) ${WEIGHTS.judgment}, a hand fix (a commit on the default branch no Factory merge made) ${WEIGHTS.handFix}. ${human.policyStamps} of the stamps are on holds of the kinds the policy answers.</p>
+${
+  touches.length
+    ? table(
+        ["When", "Touch", "What", "By"],
+        touches.map(([at, touch, what, by]) => [
+          esc(time(at)),
+          esc(touch),
+          esc(what),
+          esc(by),
+        ]),
+      )
+    : "<p>No operator touch: unattended.</p>"
+}
+</section>
+<section>
+<h2>Waste</h2>
+<p class="meta">Calls whose work didn't reach the result: cut by an outage, a hedge that lost, an amendment rejected or left unchanged, or a result a later attempt of the same step made again (bench/README.md#Scorecard). ${tokens(waste.tokens)} tokens (${percent(waste.tokensShare)}) and ${duration(waste.modelMs)} of model time (${percent(waste.modelMsShare)}).</p>
+<div class="small">
+${table(
+  ["Cause", "Tokens", "Model time", "Calls"],
+  wasteRows(WASTE_CAUSES.map((cause) => [cause, waste.byCause[cause]])),
+  [1, 2, 3],
+)}
+${table(["Work Item", "Tokens", "Model time", "Calls"], wasteRows(Object.entries(waste.byItem)), [1, 2, 3])}
+</div>
+</section>
+${
+  cost
+    ? `<section>
+<h2>Cost</h2>
+${table(
+  ["Model", "Calls", "Uncached input", "Cached input", "Output", "Cost"],
+  Object.entries(cost.byModel).map(([model, row]) => [
+    esc(model),
+    String(row.calls),
+    esc(tokens(row.uncachedInput)),
+    esc(tokens(row.cachedInput)),
+    esc(tokens(row.output)),
+    esc(usd(row.usd)),
+  ]),
+  [1, 2, 3, 4, 5],
+)}
+</section>`
+    : ""
+}`;
 }
 
 function itemRows(card) {
@@ -359,11 +528,32 @@ export function runReport(card, cards, definition) {
   const baseline = baselineOf(card, cards, definition);
   const isBaseline = card.run.group === definition.baseline;
   const partial = isPartial(card);
+  const current = isCurrent(card);
+  const compared = !partial && current;
   const rows = compare(baseline, [card], SHOWN);
   const decision =
-    !isBaseline && !partial && baseline.length
+    !isBaseline && compared && baseline.length
       ? verdict(definition, baseline, [card])
       : null;
+  const comparison = (ids) =>
+    table(
+      ["Metric", "This run", "Baseline median", "Baseline range", "Verdict"],
+      rows
+        .filter((r) => ids.includes(r.id))
+        .map((r) => [
+          esc(r.label),
+          esc(value(r.unit, r.candidate?.median)),
+          esc(value(r.unit, r.baseline?.median)),
+          r.baseline
+            ? esc(
+                `${value(r.unit, r.baseline.min)} – ${value(r.unit, r.baseline.max)}`,
+              )
+            : "n/a",
+          pill(r.verdict),
+        ]),
+      [1, 2, 3],
+    );
+  const outcomes = outcomeLines(card);
   const objectiveTokens = card.objective?.tokens;
   const bars = [
     ...card.items.map((i) => ({
@@ -394,8 +584,20 @@ export function runReport(card, cards, definition) {
       .join(", "),
   )}). Models: ${esc(card.models.map((m) => `${m.role} ${m.provider} ${m.model} ${m.effort} (${m.calls} calls)`).join("; "))}. Outcome: <b>${esc(outcomeOf(card))}</b>.</p>
 ${partial ? `<p class="worse"><b>Partial.</b> ${esc(PARTIAL_NOTE)}</p>` : ""}
+${current ? "" : `<p class="worse"><b>Scorecard version ${esc(card.schemaVersion)}.</b> ${esc(RESCORE_NOTE)}</p>`}
 </header>
+${
+  outcomes
+    ? `<section>
+<h2>Outcomes</h2>
+<div class="tiles">
+${outcomes.map(([label, big, small]) => tile(big, `${label}: ${small}`)).join("\n")}
+</div>
+</section>`
+    : ""
+}
 <section>
+<h2>Diagnostics</h2>
 <div class="tiles">
 ${tile(tokens(t.tokens.total), `tokens, own ${tokens(t.tokens.own)} + child threads ${tokens(t.tokens.childThreads)}`)}
 ${tile(duration(t.activeWallMs), `active wall time; ${duration(t.wallMs)} span, ${duration(t.excludedMs)} excluded (${duration(t.downtimeMs)} down or paused, ${duration(t.holdBlockedMs)} waiting on answers)`)}
@@ -412,27 +614,19 @@ ${tile(percent(t.ci.firstPassRate), `CI first-pass (${t.ci.passedFirstTime} of $
 ${
   partial
     ? `<p class="meta">Not compared: the run is partial.</p>`
-    : baseline.length
-      ? `<p class="meta">Baseline: ${esc(definition.baseline)}, ${baseline.length} run(s). Better or worse means beyond the baseline's whole spread.</p>
-${table(
-  ["Metric", "This run", "Baseline median", "Baseline range", "Verdict"],
-  rows.map((r) => [
-    esc(r.label),
-    esc(value(r.unit, r.candidate?.median)),
-    esc(value(r.unit, r.baseline?.median)),
-    r.baseline
-      ? esc(
-          `${value(r.unit, r.baseline.min)} – ${value(r.unit, r.baseline.max)}`,
-        )
-      : "n/a",
-    pill(r.verdict),
-  ]),
-  [1, 2, 3],
-)}
-${decision ? `<p><b>Hill-climb: ${decision.accept ? "accept" : "reject"}.</b> ${esc([...decision.reasons, ...decision.warnings].join("; ") || "Every primary metric is better and no guard is worse.")}</p>` : ""}`
-      : `<p class="meta">${isBaseline ? `This run is the baseline (${esc(definition.baseline)}) and the only run in it: later runs are compared with it.` : `No baseline runs (${esc(definition.baseline)}) in the results yet.`}</p>`
+    : !current
+      ? `<p class="meta">Not compared: the card is of an older scorecard version. Score it again.</p>`
+      : baseline.length
+        ? `<p class="meta">Baseline: ${esc(definition.baseline)}, ${baseline.length} run(s). ${esc(ACCEPT_RULE)}</p>
+<h3>Outcomes</h3>
+${comparison(OUTCOMES)}
+<h3>Diagnostics</h3>
+${comparison(DIAGNOSTICS)}
+${decision ? `<p><b>Hill-climb: ${decision.accept ? "accept" : "reject"}.</b> ${esc([...decision.reasons, ...decision.warnings].join("; ") || "Grade and escapes not worse, human effort or time to delivery better, cost not worse.")}</p>` : ""}`
+        : `<p class="meta">${isBaseline ? `This run is the baseline (${esc(definition.baseline)}) and the only run in it: later runs are compared with it.` : `No baseline runs (${esc(definition.baseline)}) of this scorecard version in the results yet.`}</p>`
 }
 </section>
+${outcomeSections(card)}
 <section>
 <h2>Tokens per Work Item</h2>
 ${tokenBars(bars)}
@@ -578,7 +772,7 @@ ${table(
     ],
     [
       "Final validation, final review",
-      `${t.final.passed} of ${t.final.runs} passed; ${t.final.review ? `${t.final.review.outcome}, ${t.final.review.criteria} criteria` : "n/a"}`,
+      `${t.final.passed} of ${t.final.runs} passed; ${t.final.review ? `${t.final.review.outcome}, ${t.final.review.criteria} criteria` : "n/a"}${t.final.reviewPassed && t.final.review?.outcome !== "pass" ? "; passed on the operator's answers" : ""}`,
     ],
     [
       "Hedged calls (lost, tokens)",
@@ -599,7 +793,7 @@ ${table(
       "GitHub requests (failed, rate-limited)",
       `${card.telemetry.github.calls} (${card.telemetry.github.failed}, ${card.telemetry.github.rateLimited})`,
     ],
-    ["Cost", t.costUsd === null ? "n/a" : `$${t.costUsd.toFixed(2)}`],
+    ["Cost the provider reported", usd(t.costUsd)],
   ].map(([a, b]) => [esc(a), esc(b)]),
 )}
 </section>
@@ -629,7 +823,17 @@ export function runMarkdown(card, cards, definition) {
     `Benchmark \`${card.benchmark}\`, run \`${card.run.id}\` (${card.run.source}): ${card.run.repository}#${card.run.issue}, ${time(card.startedAt)} to ${time(card.endedAt)}, Factory ${card.factory.versions.join(" → ")}. Outcome: **${outcomeOf(card)}**.`,
     "",
     ...(isPartial(card) ? [`**Partial.** ${PARTIAL_NOTE}`, ""] : []),
-    "| Metric | This run |",
+    ...(isCurrent(card)
+      ? [
+          "| Outcome | This run | |",
+          "| --- | ---: | --- |",
+          ...outcomeLines(card).map(
+            ([label, big, small]) => `| ${label} | ${big} | ${small} |`,
+          ),
+          "",
+        ]
+      : [`**Scorecard version ${card.schemaVersion}.** ${RESCORE_NOTE}`, ""]),
+    "| Diagnostic | This run |",
     "| --- | ---: |",
     `| Tokens (own + child threads) | ${tokens(t.tokens.total)} (${tokens(t.tokens.own)} + ${tokens(t.tokens.childThreads)}) |`,
     `| Active wall time (span; down or paused, waiting on answers) | ${duration(t.activeWallMs)} (${duration(t.wallMs)}; ${duration(t.downtimeMs)}, ${duration(t.holdBlockedMs)}) |`,
@@ -644,6 +848,11 @@ export function runMarkdown(card, cards, definition) {
   ];
   if (isPartial(card))
     lines.push("Not compared with the baseline: the run is partial.", "");
+  else if (!isCurrent(card))
+    lines.push(
+      "Not compared with the baseline: the card is of an older scorecard version.",
+      "",
+    );
   else if (baseline.length) {
     lines.push(
       `Against the baseline (${definition.baseline}, ${baseline.length} run(s)):`,
@@ -656,6 +865,13 @@ export function runMarkdown(card, cards, definition) {
       ),
       "",
     );
+    if (card.run.group !== definition.baseline) {
+      const decision = verdict(definition, baseline, [card]);
+      lines.push(
+        `Hill-climb: **${decision.accept ? "accept" : "reject"}**${decision.reasons.length ? `: ${decision.reasons.join("; ")}` : ""}.`,
+        "",
+      );
+    }
   } else
     lines.push(
       card.run.group === definition.baseline
@@ -685,10 +901,19 @@ export function historyPage(cards, definition) {
 <header style="display:grid;gap:8px">
 <span class="eyebrow">Benchmark history</span>
 <h1>${esc(definition.title)}</h1>
-<p class="meta">${sorted.length} run(s) of <code>${esc(definition.id)}</code>, in the order they ran, grouped by Factory build. Each dot is a run; a band is a group's spread (min to max) and its line the median. Baseline: ${esc(definition.baseline)}. A candidate is accepted only when its primary metrics (${esc(definition.hillClimb.primary.join(", "))}) are better than the baseline's whole spread and no guard (${esc(definition.hillClimb.guards.join(", "))}) is worse.${sorted.some(isPartial) ? " A hollow dot is a run that hadn't ended when it was scored (partial): it is left out of its group's spread and of every comparison." : ""}</p>
+<p class="meta">${sorted.length} run(s) of <code>${esc(definition.id)}</code>, in the order they ran, grouped by Factory build. Each dot is a run; a band is a group's spread (min to max) and its line the median. Baseline: ${esc(definition.baseline)}. ${esc(ACCEPT_RULE)}${sorted.some(isPartial) ? " A hollow dot is a run that hadn't ended when it was scored (partial): it is left out of its group's spread and of every comparison." : ""}${sorted.some((c) => !isCurrent(c)) ? ` ${sorted.filter((c) => !isCurrent(c)).length} run(s) have cards of an older scorecard version, with no outcome metrics: score them again.` : ""}</p>
 </header>
-<section class="small">
-${SHOWN.map((id) => historyChart(id, sorted, definition.baseline)).join("\n")}
+<section>
+<h2>Outcomes</h2>
+<div class="small">
+${OUTCOMES.map((id) => historyChart(id, sorted, definition.baseline)).join("\n")}
+</div>
+</section>
+<section>
+<h2>Diagnostics</h2>
+<div class="small">
+${DIAGNOSTICS.map((id) => historyChart(id, sorted, definition.baseline)).join("\n")}
+</div>
 </section>
 <section>
 <h2>Runs</h2>
@@ -722,7 +947,7 @@ export function historyMarkdown(cards, definition) {
   return `${[
     `# ${definition.title}: history`,
     "",
-    `${sorted.length} run(s); baseline: ${definition.baseline}.`,
+    `${sorted.length} run(s); baseline: ${definition.baseline}. ${ACCEPT_RULE}`,
     "",
     `| Run | Group | Outcome | ${SHOWN.map((id) => METRICS[id].label).join(" | ")} |`,
     `| --- | --- | --- | ${SHOWN.map(() => "---:").join(" | ")} |`,

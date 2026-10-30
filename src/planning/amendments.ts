@@ -59,6 +59,8 @@ import {
 import {
   decodeGraphReview,
   graphReviewSchema,
+  type OperatorAmendmentAnswer,
+  type OperatorCorrection,
   planningReviewEvidence,
 } from "./review.js";
 import { NO_GAP_ANSWER, SELECTED_MEDIA_ABSENT } from "./rubric.js";
@@ -372,6 +374,85 @@ function earlierReview(
     ...(last.refused ? { refusal: last.refused } : {}),
     findings,
   };
+}
+
+/**
+ * `proposal`'s replacement chain, oldest first: the rejected amendments
+ * each replacement answers, back to the first, then `proposal`.
+ */
+function replacementChain(
+  state: ObjectiveState,
+  proposal: AmendmentProposal,
+): AmendmentProposal[] {
+  const proposals = new Map(proposalsOf(state).map((p) => [p.id, p]));
+  const chain: AmendmentProposal[] = [];
+  const seen = new Set<string>();
+  for (
+    let at: AmendmentProposal | undefined = proposal;
+    at && !seen.has(at.id);
+    at = at.replacement && proposals.get(at.replacement.amendmentId)
+  ) {
+    seen.add(at.id);
+    chain.unshift(at);
+  }
+  return chain;
+}
+
+/**
+ * The operator's corrections in `proposal`'s replacement chain, oldest
+ * first: each rejection's answer that took in a replacement, with who gave
+ * it, when, and the rejection it answers. Its review reads them as operator
+ * answers (#2247); its planner is given the latest (`amendPlanStep`).
+ */
+function operatorCorrections(
+  state: ObjectiveState,
+  proposal: AmendmentProposal,
+): OperatorCorrection[] {
+  return replacementChain(state, proposal).flatMap((at) =>
+    at.replacement
+      ? [
+          {
+            rejectedAmendmentId: at.replacement.amendmentId,
+            rejection: at.replacement.diagnosis,
+            correction: at.replacement.correction,
+            by: at.actor,
+            at: at.at,
+          },
+        ]
+      : [],
+  );
+}
+
+/**
+ * The operator's answers to the questions the planners in `proposal`'s
+ * replacement chain asked, oldest first, each with the amendment whose
+ * planner asked. Its review reads them as operator answers, as it does the
+ * corrections (#2247); its planner is given its own (`amendPlanStep`).
+ */
+function operatorPlannerAnswers(
+  state: ObjectiveState,
+  proposal: AmendmentProposal,
+): OperatorAmendmentAnswer[] {
+  return replacementChain(state, proposal).flatMap((at) =>
+    keptAnswers(state, at.id).map((entry) => ({
+      amendmentId: at.id,
+      ...entry,
+    })),
+  );
+}
+
+/** An operator's answer to the amendment planner's question, as kept (`ANSWERS_KEY`). */
+interface KeptAnswer {
+  holdId: string;
+  question: string;
+  answer: string;
+  /** Absent from an answer an earlier Factory kept. */
+  by?: string;
+  at?: string;
+}
+
+function keptAnswers(state: ObjectiveState, id: string): KeptAnswer[] {
+  return (state.kept[ANSWERS_KEY(id)] ?? []) as KeptAnswer[];
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -2147,11 +2228,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       // Each answer is kept, once per question, before the planner sees
       // it: a later error hold's answer can't overwrite it, and a rerun
       // doesn't add it again.
-      const answered = (state.kept[ANSWERS_KEY(proposal.id)] ?? []) as {
-        holdId: string;
-        question: string;
-        answer: string;
-      }[];
+      const answered = keptAnswers(state, proposal.id);
       const reply = context.answer;
       // `replace-validation` is recorded as the operator's authorization
       // (`authorizeReplacement`), and the planner gets it as their answer.
@@ -2184,7 +2261,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
                 holdId: reply.holdId,
                 question: reply.question ?? "",
                 answer: authorizationText(authorized.authorized),
-              },
+                by: reply.by,
+                at: reply.at,
+              } satisfies KeptAnswer,
             ],
           },
         };
@@ -2205,7 +2284,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
                 question: reply.question ?? "",
                 // Text is required (`needsText`): the engine refuses an answer without it.
                 answer: (reply.text ?? "").trim(),
-              },
+                by: reply.by,
+                at: reply.at,
+              } satisfies KeptAnswer,
             ],
           },
         };
@@ -2686,6 +2767,12 @@ function amendReviewStep(
         } satisfies AmendReview);
       const { facts } = built;
       const all = operatorAnswers(decisions(state));
+      // A replacement's corrections are the operator's answers to its
+      // rejections, and the chain's answers to its planners' questions are
+      // the operator's too: each as authoritative as a planning decision
+      // (#2247).
+      const answered = operatorPlannerAnswers(state, proposal);
+      const corrections = operatorCorrections(state, proposal);
       const local = await localExecutables(inputs, config, signal);
       const previousPlan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, previousPlan, proposal);
@@ -2701,6 +2788,8 @@ function amendReviewStep(
       const evidence = planningReviewEvidence({
         sources: facts.sources,
         decisions: all,
+        plannerAnswers: answered,
+        corrections,
         localExecutables: local.observations,
         prerequisites: inputs.predecessors,
         amendment: {
@@ -2741,6 +2830,8 @@ function amendReviewStep(
         facts,
         evidence,
         decisions: all,
+        plannerAnswers: answered,
+        corrections,
         finalCommands: finalCommands(config.finalValidation.requiredCommands),
         controllerCapabilities: controllerGuarantees(
           inputs.reviewArtifacts.length > 0,
@@ -2865,10 +2956,7 @@ function amendAcceptStep(
       // and the revised round is reviewed again.
       const progress = amendmentProgress(state, saved, proposal);
       const fence = amendmentFindings(saved, round.draft!, progress, {
-        answered: Boolean(
-          (state.kept[ANSWERS_KEY(proposal.id)] as unknown[] | undefined)
-            ?.length,
-        ),
+        answered: keptAnswers(state, proposal.id).length > 0,
         nativeStack: deps.config.delivery.kind === "native-stack",
         enables: round.enables,
         prerequisite: proposal.prerequisite,

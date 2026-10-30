@@ -372,6 +372,17 @@ export const GRAPH_REVIEW_AFTER_REFUSAL =
   "The planner answered cannotPlan in an earlier round (earlierRefusal below), and this review overturned it with the findings below, which the planner was given and planned this plan from. Review the plan as the scope above says, and also: (a) report one of these findings again, with its kind, when the plan does not do what it asks; (b) where one withdrew or restated an earlier objection, do not raise that objection again, or ask to undo what the finding asked for, without a new reason it did not weigh. A finding's earlierItemIds name items of a plan you are not shown.";
 
 /**
+ * What an amendment's reviews (of a plan round and of a cannotPlan) are told
+ * of the operator's corrections in its replacement chain: each is an
+ * operator answer that authorizes what it states and nothing more. Live, a
+ * review asked the operator to confirm an exception, the operator's
+ * `replace` correction approved it, and the replacement's review, which saw
+ * the approval only in advisory history, asked again (#2247).
+ */
+export const OPERATOR_CORRECTIONS =
+  "Operator corrections: the controller evidence FACTORY_OPERATOR_AMENDMENT_CORRECTIONS holds, oldest first, the operator's answers to this amendment's earlier rejections (a `replace` correction, or a `replace-validation` authorization), each with the rejected amendment it answers (rejectedAmendmentId), why that amendment was rejected (rejection), who gave it (by) and when (at). Each is an authoritative operator answer with the standing of a recorded planning decision, never advisory history and never the planner's or the discovery's claim: it is a decision the operator owns, and it authorizes exactly what it states and nothing more. A later correction stands where it differs from an earlier one. A question a correction answers, such as an operator decision a rejection asked, is settled as the correction states: do not ask it again as an operator decision. A correction grants no command, ownership, source or capability authority, and settles no choice, beyond what it states.";
+
+/**
  * The code-quality bar every worker gets up front and every Work Item result
  * review enforces on changed code. Generic for any repository; the target's
  * own conventions win where they differ.

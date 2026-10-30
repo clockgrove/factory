@@ -3,10 +3,11 @@ import type { Finding, PinnedSource, PlannerDecision } from "./types.js";
 
 /**
  * The plan review's evidence and answer. The reviewer cites evidence rows by
- * index: the operator's recorded answers, the pinned sources, then the
- * controller's execution bounds, native prerequisites and local executable
- * observations when supplied, and an amendment's discovery with the files it
- * cites. A finding is `fix` (the planner corrects the
+ * index: the operator's recorded answers, an amendment's operator
+ * corrections, the pinned sources, then the controller's execution bounds,
+ * native prerequisites and local executable observations when supplied, and
+ * an amendment's discovery with the files it cites. A finding is `fix` (the
+ * planner corrects the
  * plan within the Objective as written) or `operator-decision` (the
  * correction needs a decision only the operator owns). An answer whose shape
  * is invalid is flagged `invalid` with the reason; the step retries with it
@@ -22,6 +23,23 @@ export interface ReviewEvidence {
   heading?: string;
   content: string;
   complete: boolean;
+}
+
+/**
+ * An operator's answer to an amendment's rejection that took in its
+ * replacement (amendments.ts `rejectionStep`): a `replace` correction, or a
+ * `replace-validation` authorization as its text. The review reads it as an
+ * operator answer, as it does a recorded planning decision (#2247).
+ */
+export interface OperatorCorrection {
+  /** The rejected amendment it answers. */
+  rejectedAmendmentId: string;
+  /** Why that amendment was rejected. */
+  rejection: string;
+  correction: string;
+  by: string;
+  /** When its replacement was taken in. */
+  at: string;
 }
 
 /**
@@ -56,6 +74,8 @@ export interface ReviewFinding extends Finding {
 export function planningReviewEvidence(input: {
   sources: readonly PinnedSource[];
   decisions?: readonly PlannerDecision[];
+  /** An amendment's operator corrections in its replacement chain, oldest first. */
+  corrections?: readonly OperatorCorrection[];
   /** The planning execution bounds (configured concurrency and limits). */
   executionBounds?: unknown;
   /** The Objective's native prerequisites. */
@@ -88,6 +108,9 @@ export function planningReviewEvidence(input: {
             complete: true,
           },
         ]
+      : []),
+    ...(input.corrections?.length
+      ? controller("FACTORY_OPERATOR_AMENDMENT_CORRECTIONS", input.corrections)
       : []),
     ...input.sources.map((source) => ({
       origin: "source" as const,

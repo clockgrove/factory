@@ -59,6 +59,7 @@ import {
 import {
   decodeGraphReview,
   graphReviewSchema,
+  type OperatorCorrection,
   planningReviewEvidence,
 } from "./review.js";
 import { NO_GAP_ANSWER, SELECTED_MEDIA_ABSENT } from "./rubric.js";
@@ -372,6 +373,36 @@ function earlierReview(
     ...(last.refused ? { refusal: last.refused } : {}),
     findings,
   };
+}
+
+/**
+ * The operator's corrections in `proposal`'s replacement chain, oldest
+ * first: each rejection's answer that took in a replacement, with who gave
+ * it, when, and the rejection it answers. Its review reads them as operator
+ * answers (#2247); its planner is given the latest (`amendPlanStep`).
+ */
+function operatorCorrections(
+  state: ObjectiveState,
+  proposal: AmendmentProposal,
+): OperatorCorrection[] {
+  const proposals = new Map(proposalsOf(state).map((p) => [p.id, p]));
+  const corrections: OperatorCorrection[] = [];
+  const seen = new Set<string>();
+  for (
+    let at: AmendmentProposal | undefined = proposal;
+    at?.replacement && !seen.has(at.id);
+    at = proposals.get(at.replacement.amendmentId)
+  ) {
+    seen.add(at.id);
+    corrections.unshift({
+      rejectedAmendmentId: at.replacement.amendmentId,
+      rejection: at.replacement.diagnosis,
+      correction: at.replacement.correction,
+      by: at.actor,
+      at: at.at,
+    });
+  }
+  return corrections;
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -2686,6 +2717,9 @@ function amendReviewStep(
         } satisfies AmendReview);
       const { facts } = built;
       const all = operatorAnswers(decisions(state));
+      // A replacement's corrections are the operator's answers to its
+      // rejections, as authoritative as a planning decision (#2247).
+      const corrections = operatorCorrections(state, proposal);
       const local = await localExecutables(inputs, config, signal);
       const previousPlan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, previousPlan, proposal);
@@ -2701,6 +2735,7 @@ function amendReviewStep(
       const evidence = planningReviewEvidence({
         sources: facts.sources,
         decisions: all,
+        corrections,
         localExecutables: local.observations,
         prerequisites: inputs.predecessors,
         amendment: {
@@ -2741,6 +2776,7 @@ function amendReviewStep(
         facts,
         evidence,
         decisions: all,
+        corrections,
         finalCommands: finalCommands(config.finalValidation.requiredCommands),
         controllerCapabilities: controllerGuarantees(
           inputs.reviewArtifacts.length > 0,

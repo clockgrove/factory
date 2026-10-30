@@ -35,6 +35,7 @@ import { buildFacts } from "../dist/planning/facts.js";
 import {
   NO_GAP_ANSWER,
   NO_GAP_REFUSAL,
+  OPERATOR_CORRECTIONS,
   REFUSAL_REVIEW_LATER_ROUND,
   SELECTED_MEDIA_ABSENT,
 } from "../dist/planning/rubric.js";
@@ -548,6 +549,160 @@ test("an amendment's review still rejects it on an operator decision, or on the 
       state.done["amend:op-1:review"].rejected,
     );
   }
+});
+
+// #2247: a review asked the operator to confirm an exception, and the
+// operator's `replace` correction approved it. The replacement's review
+// never got the correction as an operator answer, so it asked the same
+// question again, and every round charged a planning revision.
+const EXCEPTION =
+  "b reads the shared fixture directory, which the Objective leaves unowned";
+const CONFIRM =
+  "Confirm that b may read the shared fixture directory before treating its acceptance as authorized.";
+const FIRST_CORRECTION = "Approve b reading the shared fixture directory.";
+const SECOND_CORRECTION =
+  "Approve b reading the shared fixture directory; it writes nothing there.";
+/** The review's operator decision on b, citing evidence rows `evidenceIndices`. */
+const asksOperator = (evidenceIndices = []) => ({
+  findings: [
+    {
+      kind: "operator-decision",
+      itemIds: ["b"],
+      evidenceIndices,
+      detail: EXCEPTION,
+      question: CONFIRM,
+    },
+  ],
+});
+/** The operator's answer `replace <text>` to a rejection's question. */
+const replaceWith = (text) => ({
+  holdId: "h",
+  answer: "replace",
+  text,
+  by: "octo",
+  at: "2026-01-01T03:00:00.000Z",
+});
+const CORRECTIONS_ROW = `"origin":"controller","path":"FACTORY_OPERATOR_AMENDMENT_CORRECTIONS"`;
+
+/**
+ * Settle amendment `id`'s rejection with the operator's `replace <text>`,
+ * and the correction its replacement's review is to get.
+ */
+async function replaced(state, deps, id, text) {
+  assert.equal((await step(state, deps)).key, `amend:${id}`);
+  const rejection = state.done[`amend:${id}`].rejected;
+  assert.ok(rejection);
+  const asks = await step(state, deps);
+  assert.equal(asks.key, `amend:${id}:continue`);
+  assert.equal(asks.outcome.kind, "hold");
+  const taken = await step(state, deps, replaceWith(text));
+  assert.equal(taken.outcome.kind, "retry", JSON.stringify(taken.outcome));
+  const [, replacement] = /^Took in replacement amendment (.+)$/.exec(
+    taken.outcome.reason,
+  );
+  const proposal = state.kept[`amend:${replacement}:proposal`];
+  assert.equal(proposal.actor, "octo");
+  return {
+    replacement,
+    correction: {
+      rejectedAmendmentId: id,
+      rejection,
+      correction: text,
+      by: "octo",
+      at: proposal.at,
+    },
+  };
+}
+
+test("a replacement's review gets each operator correction in its chain, in order, as an operator answer (#2247)", async () => {
+  const { checkout, state } = await building();
+  const { planner, asked } = scripted(
+    withB,
+    asksOperator(),
+    withB,
+    asksOperator([0]),
+    withB,
+    { findings: [] },
+  );
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+
+  // The review asks the operator, and the amendment is rejected.
+  assert.equal((await step(state, deps)).key, "amend:op-1:plan");
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.ok(review.outcome.result.rejected.includes(CONFIRM));
+  assert.ok(
+    !asked[1].prompt.includes("FACTORY_OPERATOR_AMENDMENT_CORRECTIONS"),
+  );
+  assert.ok(!asked[1].prompt.includes(OPERATOR_CORRECTIONS));
+
+  // `replace` approves the exception; the replacement's review gets the
+  // correction, with who gave it, when and the rejection it answers, as an
+  // operator answer.
+  const first = await replaced(state, deps, "op-1", FIRST_CORRECTION);
+  assert.equal(first.replacement, "op-1-r2");
+  assert.equal((await step(state, deps)).key, "amend:op-1-r2:plan");
+  assert.ok(asked[2].prompt.includes(FIRST_CORRECTION));
+  const again = await step(state, deps);
+  assert.equal(again.key, "amend:op-1-r2:review");
+  const reviewing = asked[3].prompt;
+  assert.equal(asked[3].phase, "graph-review");
+  assert.ok(reviewing.includes(CORRECTIONS_ROW));
+  assert.ok(reviewing.includes(JSON.stringify([first.correction])));
+  assert.ok(
+    reviewing.includes(
+      `${OPERATOR_CORRECTIONS} Check that the graph follows each correction.`,
+    ),
+  );
+  // Its finding may cite the correction, by its evidence row.
+  assert.ok(
+    again.outcome.result.rejected.includes(
+      "Evidence: FACTORY_OPERATOR_AMENDMENT_CORRECTIONS",
+    ),
+    again.outcome.result.rejected,
+  );
+
+  // A second `replace`: the next review gets both corrections, oldest first.
+  const second = await replaced(state, deps, "op-1-r2", SECOND_CORRECTION);
+  assert.equal(second.replacement, "op-1-r3");
+  assert.equal((await step(state, deps)).key, "amend:op-1-r3:plan");
+  const last = await step(state, deps);
+  assert.equal(last.key, "amend:op-1-r3:review");
+  assert.ok(
+    asked[5].prompt.includes(
+      JSON.stringify([first.correction, second.correction]),
+    ),
+  );
+  assert.deepEqual(last.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1-r3");
+  assert.equal(state.done["amend:op-1-r3"].rejected, undefined);
+  assert.equal(posted.length, 1);
+  assert.equal(asked.length, 6);
+});
+
+test("a replacement planner's refusal is reviewed with the operator's corrections as operator answers (#2247)", async () => {
+  const { checkout, state } = await building();
+  const { planner, asked } = scripted(withB, asksOperator(), refuses, {
+    findings: [],
+  });
+  const deps = depsOf(checkout, planner);
+  await step(state, deps);
+  await step(state, deps);
+  const { correction } = await replaced(state, deps, "op-1", FIRST_CORRECTION);
+  assert.equal((await step(state, deps)).key, "amend:op-1-r2:plan");
+  assert.deepEqual(state.done["amend:op-1-r2:plan"].cannot, CANNOT);
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1-r2:review");
+  const prompt = asked[3].prompt;
+  assert.ok(prompt.includes("Independently review a planner's refusal"));
+  assert.ok(prompt.includes(CORRECTIONS_ROW));
+  assert.ok(prompt.includes(JSON.stringify([correction])));
+  assert.ok(
+    prompt.includes(
+      `${OPERATOR_CORRECTIONS} A refusal that rests on a choice a correction settled is wrong.`,
+    ),
+  );
 });
 
 // The run's slip: a's own worker proposed b, and the planner relaxed a's

@@ -14,6 +14,7 @@ import { addWorktree, installStorePath, worktreePath } from "../worktree.js";
 import { VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
+import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { qaValidateStep } from "./step-qa.js";
 import {
   type BuildDeps,
@@ -138,22 +139,25 @@ export async function validateStep(
       if (rerun) return rerun;
       // State is saved on every step: it keeps a bounded finding, whose
       // excerpt keeps the failure lines wherever they are (#2201). Output
-      // longer than a repair's brief keeps (repair.ts FAILURE_CHARS, up to
-      // the raised review-artifact stream bounds) is kept whole in a file:
-      // the operator's, the diagnosis can ask for it, and the next worker
-      // attempt reads a copy in its checkout (step-work.ts). Named by its
+      // longer than a repair's brief keeps (repair.ts FAILURE_CHARS) is kept
+      // in a file: the operator's, the diagnosis can ask for it, and the
+      // next worker attempt reads a copy in its checkout (step-work.ts).
+      // `result.output` bounds each stream and puts stderr after stdout, so
+      // the file holds the command's attempt file, as the worker's Validate
+      // log does (self-validate.ts `failedCommandLog`). Named by its
       // content, so the same failure again reads as the same finding.
       let keptOutput = result.output;
       let outputFile: string | undefined;
       if (result.output.length > FAILURE_CHARS) {
+        const log = boundedValidateLog(failedCommandLog(result, result.failed));
         outputFile = join(
           workDir,
           "outputs",
           item.id,
-          `${createHash("sha256").update(result.output).digest("hex").slice(0, 16)}.txt`,
+          `${createHash("sha256").update(log).digest("hex").slice(0, 16)}.txt`,
         );
         await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
-        await writeFile(outputFile, result.output, { mode: 0o600 });
+        await writeFile(outputFile, log, { mode: 0o600 });
         keptOutput = `${result.output.length > KEPT_OUTPUT_CHARS ? failureExcerpt(result.output, KEPT_OUTPUT_CHARS) : result.output}\n[The complete output is kept for the operator at ${outputFile}. The repair diagnosis can ask for it as ${VALIDATE_STEP_LOG}, and the next worker attempt reads it there in its checkout.]`;
       }
       const failed: Extract<KeptValidation["result"], { kind: "failed" }> = {

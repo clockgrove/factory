@@ -201,6 +201,45 @@ function bounded(output: string, bytes: number): string {
 export const VALIDATE_LOG_BYTES = 8 * 1024 ** 2;
 
 /**
+ * A failed command's complete output, as a log of it holds it (#2201): the
+ * command's attempt file, its streams in the order they arrived, under a
+ * line naming the command; without one, the output the run kept, which
+ * bounds each stream and puts stderr after stdout. Plain text.
+ */
+export function failedCommandLog(
+  result: Pick<
+    Extract<Validation, { kind: "failed" }>,
+    "output" | "outputFile"
+  >,
+  failed: { command: string; exit?: string } | undefined,
+): string {
+  const whole = failed ? result.outputFile?.read() : undefined;
+  return stripVTControlCharacters(
+    whole && failed
+      ? `Validation command failed (${failed.exit ?? "failed"}): ${failed.command}\n${whole.text}`
+      : result.output,
+  );
+}
+
+/**
+ * `text` as a log under VALIDATE_LOG_BYTES keeps it: whole, or past the
+ * bound its first and last halves, with the cut stated.
+ */
+export function boundedValidateLog(text: string): Buffer {
+  const bytes = Buffer.from(text, "utf8");
+  const half = VALIDATE_LOG_BYTES / 2;
+  return bytes.length <= VALIDATE_LOG_BYTES
+    ? bytes
+    : Buffer.concat([
+        bytes.subarray(0, half),
+        Buffer.from(
+          `\n[${bytes.length - 2 * half} bytes omitted: this log keeps the first and last ${half} bytes of ${bytes.length}]\n`,
+        ),
+        bytes.subarray(-half),
+      ]);
+}
+
+/**
  * What a worker hears about the excerpt of a failed command's output, and
  * where to see everything (#2201). A tool may leave diagnostics out of its
  * own report as well; Factory passes no flag of any tool's.
@@ -221,18 +260,7 @@ export async function writeValidateLog(
   path: string,
   text: string,
 ): Promise<void> {
-  const bytes = Buffer.from(text, "utf8");
-  const half = VALIDATE_LOG_BYTES / 2;
-  const content =
-    bytes.length <= VALIDATE_LOG_BYTES
-      ? bytes
-      : Buffer.concat([
-          bytes.subarray(0, half),
-          Buffer.from(
-            `\n[${bytes.length - 2 * half} bytes omitted: this log keeps the first and last ${half} bytes of ${bytes.length}]\n`,
-          ),
-          bytes.subarray(-half),
-        ]);
+  const content = boundedValidateLog(text);
   const parent = openParent(worktree, path, true);
   try {
     await writeFile(`${parent.anchor}/${parent.name}`, content, {
@@ -532,25 +560,19 @@ export class SelfValidation {
   /**
    * The failed command's complete output, written to a log in the worker's
    * checkout (`writeValidateLog`), so no excerpt decides what the worker
-   * can see (#2201): what the result says about it. The command's attempt
-   * file has the output as it arrived, its streams in order; without it,
-   * the output the run kept.
+   * can see (#2201): what the result says about it (`failedCommandLog`).
    */
   private async logFailure(
     run: number,
     result: Extract<Validation, { kind: "failed" }>,
     failed: { command: string; exit?: string },
   ): Promise<string> {
-    const whole = result.outputFile?.read();
-    const text = whole
-      ? `Validation command failed (${failed.exit ?? "failed"}): ${failed.command}\n${whole.text}`
-      : result.output;
     const path = logPath(run, failed.command);
     try {
       await writeValidateLog(
         this.input.worktree,
         path,
-        stripVTControlCharacters(text),
+        failedCommandLog(result, failed),
       );
       return validateLogNote(failed.command, path);
     } catch (error) {

@@ -182,7 +182,11 @@ test("a worker's Validate writes a failed command's complete output to a log its
   assert.equal(existsSync(join(worktree, ".factory-validate")), false);
 });
 
-test("the validate step keeps a failed command's complete output, and the next worker attempt reads it in its checkout (#2201)", async () => {
+/**
+ * The validate step of item `a`, whose `sh check.sh` fails, on a checkout
+ * holding `files` at its base: `run(n)` runs the step's attempt `n`.
+ */
+function failingStep(files) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   const saved = process.env.FACTORY_CONFIG;
@@ -198,8 +202,8 @@ test("the validate step keeps a failed command's complete output, and the next w
   const checkout = config.checkout;
   mkdirSync(join(checkout, "src"), { recursive: true });
   writeFileSync(join(checkout, "src", "a.js"), "1\n");
-  writeFileSync(join(checkout, "flooded.txt"), FLOODED);
-  writeFileSync(join(checkout, "check.sh"), "cat flooded.txt\nexit 1\n");
+  for (const [name, text] of Object.entries(files))
+    writeFileSync(join(checkout, name), text);
   git(checkout, "add", ".");
   git(checkout, "commit", "--quiet", "-m", "base");
   const base = git(checkout, "rev-parse", "HEAD");
@@ -237,22 +241,34 @@ test("the validate step keeps a failed command's complete output, and the next w
     CAPTURE_OFF,
     [],
   );
-  const outcome = await validateStep(
-    a,
-    {
-      state,
-      signal: AbortSignal.timeout(120_000),
-      log: () => {},
-      runFile: (kind) => log.runFile(9, `item:a:validate#1.${kind}`),
-      keep: () => {},
-    },
-    {
-      config,
-      github: { commitAuthor: async () => undefined, made() {} },
-      workDir: (issue) => join(dir, "work", String(issue)),
-    },
-    undefined,
-  );
+  return {
+    run: (attempt) =>
+      validateStep(
+        a,
+        {
+          state,
+          signal: AbortSignal.timeout(120_000),
+          log: () => {},
+          runFile: (kind) =>
+            log.runFile(9, `item:a:validate#${attempt}.${kind}`),
+          keep: () => {},
+        },
+        {
+          config,
+          github: { commitAuthor: async () => undefined, made() {} },
+          workDir: (issue) => join(dir, "work", String(issue)),
+        },
+        undefined,
+      ),
+  };
+}
+
+test("the validate step keeps a failed command's complete output, and the next worker attempt reads it in its checkout (#2201)", async () => {
+  const step = failingStep({
+    "flooded.txt": FLOODED,
+    "check.sh": "cat flooded.txt\nexit 1\n",
+  });
+  const outcome = await step.run(1);
   assert.equal(outcome.kind, "repair", JSON.stringify(outcome));
   const finding = outcome.keep["item:a:finding"];
   assert.equal(finding.kind, "failure");
@@ -263,7 +279,12 @@ test("the validate step keeps a failed command's complete output, and the next w
     ),
     finding.detail.slice(-400),
   );
-  assert.ok(readFileSync(finding.output, "utf8").includes(FLOODED));
+  const kept = readFileSync(finding.output, "utf8");
+  assert.ok(
+    kept.startsWith("Validation command failed (1): sh check.sh\n"),
+    kept.slice(0, 200),
+  );
+  assert.ok(kept.includes(FLOODED));
   assert.equal(outcome.keep["item:a:validation"].result.output, finding.output);
 
   // The next attempt's checkout: an earlier run's log goes, and the
@@ -289,4 +310,57 @@ test("the validate step keeps a failed command's complete output, and the next w
     undefined,
   );
   assert.equal(existsSync(join(worktree, ".factory-validate")), false);
+});
+
+/** Numbered stdout lines, 64 bytes each with their newlines. */
+const outLines = (from, count) =>
+  Array.from(
+    { length: count },
+    (_, index) =>
+      `stdout line ${String(from + index).padStart(6, "0")} ${"x".repeat(44)}`,
+  ).join("\n");
+
+test("the validate step's kept output is the command's own, past the run's stream bounds and with its streams in the order they arrived (#2201)", async () => {
+  // Over 1 MiB of stdout, so the run's in-memory output (sandbox.ts,
+  // about 512 KiB of each stream's head and tail) loses its middle, with
+  // stderr written between its halves and after it.
+  const first = outLines(0, 12_000);
+  const second = outLines(12_000, 12_000);
+  const step = failingStep({
+    "first.txt": `${first}\n`,
+    "second.txt": `${second}\n`,
+    "check.sh": [
+      "cat first.txt",
+      "sleep 0.5",
+      "echo 'stderr: between the halves' >&2",
+      "sleep 0.5",
+      "cat second.txt",
+      "sleep 0.5",
+      "echo 'stderr: after stdout' >&2",
+      "exit 1",
+      "",
+    ].join("\n"),
+  });
+  const outcome = await step.run(1);
+  assert.equal(outcome.kind, "repair", JSON.stringify(outcome));
+  const finding = outcome.keep["item:a:finding"];
+  const kept = readFileSync(finding.output, "utf8");
+  assert.ok(
+    kept.startsWith("Validation command failed (1): sh check.sh\n"),
+    kept.slice(0, 200),
+  );
+  // Every stdout line, the middle ones too, and each stderr line where it
+  // arrived.
+  assert.ok(
+    kept.endsWith(
+      `\n${first}\nstderr: between the halves\n${second}\nstderr: after stdout\n`,
+    ),
+    kept.slice(-400),
+  );
+  assert.ok(!kept.includes("omitted"), "within the log's bound, nothing cut");
+
+  // The same failure again is kept in the same file: the finding is unchanged.
+  const again = await step.run(2);
+  assert.equal(again.kind, "repair", JSON.stringify(again));
+  assert.equal(again.keep["item:a:finding"].output, finding.output);
 });

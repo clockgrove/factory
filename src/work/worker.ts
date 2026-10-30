@@ -11,7 +11,10 @@ import type { WorkItem } from "../planning/types.js";
 import type { Conversation, Session } from "../providers/session.js";
 import type { PromptFacts } from "../providers/usage.js";
 import type { Answer, HoldOption, Wait } from "../state.js";
-import type { SelfValidateOptions } from "./self-validate.js";
+import type {
+  SelfValidateOptions,
+  WorkerValidateFailure,
+} from "./self-validate.js";
 
 /**
  * What a paid worker has spent on one Work Item across attempts and
@@ -72,6 +75,8 @@ export type WorkerResult = (
       finalResponse: string;
       /** The tree the worker's own Validate last passed, with its commands. */
       validated?: { tree: string; commands: string[] };
+      /** The commands the worker's own Validate failed and no later run passed (self-validate.ts `validateFailed`). */
+      validateFailed?: WorkerValidateFailure[];
     }
   /** Usage or rate limit (`wait`), lost turn; an idle timeout is an error (`wait.kind` "error"). */
   | { kind: "retry"; reason: string; afterMs?: number; wait?: Wait }

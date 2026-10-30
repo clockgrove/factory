@@ -313,8 +313,13 @@ export type Validation =
       commands: string[];
       /** The commands that passed before the failure. */
       results: CommandResult[];
-      /** The failed command, when one ran or its review artifact capture failed; absent for a pin, the formatter or the mutation check. */
-      failed?: { index: number; command: string };
+      /**
+       * The failed command, when one ran or its review artifact capture
+       * failed; absent for a pin, the formatter or the mutation check.
+       * `exit`: how a command that failed by itself ended (its exit code,
+       * `time limit` or `disk budget`).
+       */
+      failed?: { index: number; command: string; exit?: string };
       /** What people read: the start and end of the output. */
       detail: string;
       /** The complete output, for diagnosis and the next attempt. */
@@ -808,7 +813,12 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       }
       // Past the sandbox's disk budget or the time limit the command
       // failed, whatever it exited.
-      const failed = `Validation command failed (${run.diskOverflow ? "disk budget" : run.timedOut ? "time limit" : run.exitCode}): ${command}: `;
+      const exit = run.diskOverflow
+        ? "disk budget"
+        : run.timedOut
+          ? "time limit"
+          : String(run.exitCode);
+      const failed = `Validation command failed (${exit}): ${command}: `;
       // An install that would have had the network, ran offline and found
       // packages missing from the store (the package managers' offline
       // error codes).
@@ -915,7 +925,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         tree,
         commands: sequence,
         results,
-        failed: { index, command },
+        failed: { index, command, exit },
         detail,
         output: `${failed}${offlineBecause}${overflow ? `${overflow}\n` : ""}${output}`,
         ...(produced && { produced }),

@@ -391,7 +391,7 @@ new_issue() {
   local f="$RUN_DIR/objectives/$CASE-$tpl-$(date +%H%M%S%N).md"
   mkdir -p "$RUN_DIR/objectives"
   render "$tpl" "$f" "$@" || return 1
-  local n; n=$(gh issue create --repo "$REPO" --title "Suite $SFX: $title" --body-file "$f" | grep -o '[0-9]*$') || return 1
+  local n; n=$(gh_issue_file "Suite $SFX: $title" "$f") || return 1
   echo "$n $CASE $INST" >>"$RUN_DIR/issues"
   log "filed #$n ($tpl)"
   echo "$n"

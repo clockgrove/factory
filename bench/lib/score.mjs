@@ -15,6 +15,11 @@
  * progress (Factory has nothing to do until someone answers). A hold's wait
  * leaves out the outages and pauses inside it. A count the logs can't give
  * is null, with its reason in `unavailable`; never 0.
+ *
+ * Outcomes (#2223, bench/lib/outcomes.mjs): human effort from the operator's
+ * answers and actions and the hand fixes in the run repository's history,
+ * time to delivery, waste from the run log's attempts and calls, stage
+ * escapes and cost. The grade is added after scoring (bench/lib/grade.mjs).
  */
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -24,8 +29,18 @@ import { diagnostics, readRun } from "../../dist/diagnostics.js";
 import { CAPTURE_OFF, logFiles, rotatedRuns } from "../../dist/log.js";
 import { currentPlan } from "../../dist/planning/plan.js";
 import { findState } from "../../dist/state.js";
+import { commitTime, endCommit, handFixCommits } from "./grade.mjs";
 import { holdKind } from "./holds.mjs";
 import { SCORECARD_VERSION } from "./metrics.mjs";
+import {
+  answerTouch,
+  costOf,
+  delivery,
+  escapesOf,
+  humanEffort,
+  requestTouch,
+  wasteOf,
+} from "./outcomes.mjs";
 
 export { SCORECARD_VERSION };
 
@@ -246,6 +261,22 @@ async function factoryDiagnostics(logs, issue) {
   };
 }
 
+/** Every merge commit the state records (`mergeSha`: each merge step's, and an item's earlier merges). */
+function recordedMerges(state) {
+  const found = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (typeof node.mergeSha === "string") found.add(node.mergeSha);
+    for (const value of Object.values(node)) walk(value);
+  };
+  walk(state.done);
+  walk(state.kept);
+  return found;
+}
+
+/** The time question charge when the definition sets none (bench/README.md#Scorecard). */
+const QUESTION_CHARGE_MINUTES = 15;
+
 /** The commit a Factory release was tagged at, in the Factory checkout `repo`. */
 function releaseCommit(repo, version) {
   try {
@@ -264,7 +295,10 @@ function releaseCommit(repo, version) {
  * installation's: `<root>/<owner>__<repo>`). `run` names the result: id,
  * label, group, source (`harness` or `backfill`), repository, and for a
  * candidate build its `factory: { commit }`. `factoryRepo`: the Factory
- * checkout releases' tags are resolved in.
+ * checkout releases' tags are resolved in. `checkout`: a checkout of the
+ * run repository, where the end commit is read, and for a harness run (a
+ * test repository no one else commits to) its hand fixes. `handFixes`:
+ * hand-fix commits given by SHA (a backfill's), counted too.
  */
 export async function scoreRun({
   stateDir,
@@ -272,6 +306,8 @@ export async function scoreRun({
   definition,
   run,
   factoryRepo,
+  checkout = null,
+  handFixes = [],
 }) {
   const logs = join(stateDir, "logs");
   const loaded = findState(join(stateDir, "objectives"), issue);
@@ -365,7 +401,6 @@ export async function scoreRun({
   const actions = [];
   const pauses = [];
   let pausedAt = null;
-  const attempts = new Map();
   const planRounds = new Set();
   const generations = new Set();
   const amendmentAnswers = new Map();
@@ -379,6 +414,19 @@ export async function scoreRun({
   let modelMs = 0;
   let costUsd = 0;
   let costed = 0;
+  // For waste and cost: every call, and every step attempt with its outcome.
+  const calls = [];
+  const attempts = new Map();
+  /** Each step's latest attempt: a step runs one attempt at a time. */
+  const latest = new Map();
+  /** `repair` outcomes: where in the log, and the step they sent work to. */
+  const repairOutcomes = [];
+  let file = -1;
+  // For escapes and hand fixes.
+  let finalReviewFrom = null;
+  let refusals = 0;
+  /** Heads Factory published: a merge commit with one as a parent is Factory's. */
+  const heads = new Set();
 
   // Waiting on an answer: a hold is open and no step is in progress, for the
   // Objective (nothing at all runs) and for each Work Item (none of its steps runs).
@@ -398,7 +446,10 @@ export async function scoreRun({
 
   for (const [index, raw] of events.entries()) {
     // A new run file is a new service process: the old one's steps died with it.
-    if (index > 0 && fileStarts.has(index)) inProgress.clear();
+    if (fileStarts.has(index)) {
+      if (index > 0) inProgress.clear();
+      file += 1;
+    }
     const event = children.counted(raw);
     const step = event.step;
     // `item` names a Work Item on Factory's own events; a provider event's `item` is something else.
@@ -437,10 +488,34 @@ export async function scoreRun({
         };
         model.calls += 1;
         models.set(key, model);
+        const total = num(event.tokens?.total);
+        calls.push({
+          attempt: step ? latest.get(step) : undefined,
+          item: itemId ?? null,
+          tokens: total,
+          ms: callMs,
+          error: typeof event.error === "string" ? event.error : null,
+          model: event.model ?? null,
+          input: num(event.tokens?.input) ?? 0,
+          cached: num(event.tokens?.cached) ?? 0,
+          output: num(event.tokens?.output) ?? 0,
+        });
         break;
       }
       case "start": {
-        attempts.set(`${event.run} ${event.attemptId ?? step}`, event.at);
+        if (step) {
+          const key = `${index} ${step}`;
+          attempts.set(key, {
+            key,
+            step,
+            file,
+            outcome: null,
+            outcomeAt: null,
+            aborted: false,
+          });
+          latest.set(step, key);
+        }
+        if (step === "final-review") finalReviewFrom ??= event.at;
         if (step) {
           inProgress.add(step);
           // A held step that runs again was answered, whether or not the log has the answer.
@@ -459,6 +534,13 @@ export async function scoreRun({
         const phase = /^item:[^:]+:(\w+)$/.exec(step ?? "")?.[1];
         const settled = outcome !== "retry";
         if (ends(event)) inProgress.delete(step);
+        const attempt = attempts.get(latest.get(step));
+        if (attempt && attempt.outcome === null) {
+          attempt.outcome = outcome;
+          attempt.outcomeAt = index;
+        }
+        if (outcome === "repair")
+          repairOutcomes.push({ at: index, target: event.target ?? null });
         if (phase === "work" && item && outcome === "done")
           validated.delete(item.id);
         if (phase === "validate" && item && settled) {
@@ -506,7 +588,15 @@ export async function scoreRun({
           item.mergedAt = event.at;
         break;
       }
+      case "aborted":
+        // The engine stopped these steps (cancel, cleared work): no outage cut them.
+        for (const stopped of Array.isArray(event.steps) ? event.steps : []) {
+          const attempt = attempts.get(latest.get(stopped));
+          if (attempt) attempt.aborted = true;
+        }
+        break;
       case "published":
+        if (typeof event.head === "string") heads.add(event.head);
         if (item) {
           item.pr = event.pr ?? item.pr;
           item.ci.published += 1;
@@ -538,6 +628,8 @@ export async function scoreRun({
           outcome: event.outcome ?? null,
           criteria: num(event.criteria),
         };
+        // ResultReview's kind (review/result.ts): final review refused the integrated result.
+        if (event.outcome === "refused") refusals += 1;
         break;
       case "worker-validate":
         if (item) {
@@ -566,6 +658,7 @@ export async function scoreRun({
             answer: null,
             by: null,
             as: null,
+            touch: null,
           });
           openHolds.set(event.id, { step, item: itemId ?? null });
           if (step) lastHold.set(step, kind);
@@ -578,11 +671,13 @@ export async function scoreRun({
         if (request.kind === "answer") {
           openHolds.delete(request.question);
           const hold = holds.get(request.question);
+          const touch = answerTouch(request.answer, request);
           if (hold && !hold.answeredAt) {
             hold.answeredAt = event.at;
             hold.answer = request.answer ?? null;
             hold.by = event.by;
             hold.as = event.as ?? null;
+            hold.touch = touch;
           } else
             actions.push({
               kind: "answer",
@@ -591,6 +686,7 @@ export async function scoreRun({
               question: request.question ?? null,
               by: event.by,
               as: event.as ?? null,
+              touch,
             });
           break;
         }
@@ -601,6 +697,7 @@ export async function scoreRun({
           ...(request.item ? { item: request.item } : {}),
           by: event.by,
           as: event.as ?? null,
+          touch: requestTouch(request.kind),
         });
         if (request.kind === "pause") pausedAt ??= event.at;
         if (request.kind === "resume" && pausedAt) {
@@ -850,6 +947,88 @@ export async function scoreRun({
       metric: "which Factory ran",
       reason: `the Factory build (${run.factory.cli ?? "dist/"}) changed after provisioning: sha256 ${build.slice(0, 12)} then, ${buildNow.slice(0, 12)} at scoring. The service may have run either`,
     });
+
+  // Outcomes (#2223). Hand fixes: a harness run's from its repository's
+  // history; a backfill's only those given, since a real repository's
+  // history has other people's commits too.
+  const activeWallMs = wallMs === null ? null : wallMs - excludedMs;
+  const atEnd = checkout ? endCommit(checkout, endedAt) : null;
+  const fixes = [];
+  if (checkout && run.source === "harness") {
+    try {
+      if (!atEnd) throw new Error("its default branch can't be read");
+      fixes.push(
+        ...handFixCommits(checkout, {
+          end: atEnd.commit,
+          base: plan?.base ?? definition.source.base,
+          startedAt,
+          endedAt,
+          merges: recordedMerges(state),
+          heads,
+        }).map((fix) => ({ ...fix, from: "history" })),
+      );
+    } catch (error) {
+      unavailable.push({
+        metric: "hand fixes",
+        reason: `the run repository's checkout ${checkout}: ${String(error.message).split("\n")[0]}; only --hand-fix commits count`,
+      });
+    }
+  } else if (!handFixes.length)
+    unavailable.push({
+      metric: "hand fixes",
+      reason:
+        run.source === "harness"
+          ? "no checkout of the run repository to read: none counted"
+          : "a backfill counts only the hand fixes given with --hand-fix SHA: none given",
+    });
+  for (const sha of handFixes)
+    if (!fixes.some((fix) => fix.sha === sha))
+      fixes.push({
+        sha,
+        at: checkout ? commitTime(checkout, sha) : null,
+        from: "given",
+      });
+  for (const fix of fixes) {
+    fix.afterFinalReview =
+      fix.at && finalReviewFrom ? ms(fix.at) >= ms(finalReviewFrom) : null;
+    if (fix.at === null)
+      unavailable.push({
+        metric: "hand fixes after final review",
+        reason: `hand fix ${fix.sha}: its time is unknown (no checkout has it), so it isn't counted as after final review`,
+      });
+  }
+  const amendmentFate = (step) => {
+    const id = /^amend:([^:]+)/.exec(step ?? "")?.[1];
+    const done = id ? state.done?.[`amend:${id}`] : undefined;
+    if (!done || done.plan) return undefined;
+    return done.unchanged
+      ? "unchanged"
+      : done.rejected
+        ? "rejected"
+        : undefined;
+  };
+  const delivered = delivery(
+    activeWallMs,
+    holdTotals.operator,
+    definition.scoring?.questionChargeMinutes ?? QUESTION_CHARGE_MINUTES,
+  );
+  const cost = costOf(calls, definition.prices);
+  if (!cost)
+    unavailable.push({
+      metric: "cost",
+      reason: "the definition has no prices",
+    });
+  else if (cost.unpriced.length)
+    unavailable.push({
+      metric: "cost",
+      reason: `the definition prices no ${cost.unpriced.join(", ")}`,
+    });
+  unavailable.push({
+    metric: "grade",
+    reason: definition.grader
+      ? "not graded: bench/score.mjs and bench/run.mjs grade an ended run"
+      : "the definition has no grader",
+  });
   return {
     schemaVersion: SCORECARD_VERSION,
     benchmark: definition.id,
@@ -883,9 +1062,30 @@ export async function scoreRun({
     startedAt,
     endedAt,
     outcome,
+    endCommit: atEnd?.commit ?? null,
+    defaultBranch: atEnd?.branch ?? null,
+    grade: null,
+    human: humanEffort({ decisions, actions, handFixes: fixes, outcome }),
+    deliveryMs: delivered.ms,
+    delivery: delivered,
+    waste: wasteOf({
+      calls,
+      attempts: [...attempts.values()],
+      files: runs.length,
+      repairs: repairOutcomes,
+      amendmentFate,
+      totals: { tokens: totals.total, modelMs },
+    }),
+    escapes: escapesOf({
+      refusals,
+      handFixesAfter: fixes.filter((fix) => fix.afterFinalReview).length,
+      grade: null,
+      finalPassed: final.review?.outcome === "pass",
+    }),
+    cost,
     totals: {
       wallMs,
-      activeWallMs: wallMs === null ? null : wallMs - excludedMs,
+      activeWallMs,
       excludedMs,
       downtimeMs,
       holdBlockedMs: excludedMs - downtimeMs,

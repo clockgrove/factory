@@ -9,14 +9,19 @@
  *
  *   node bench/report.mjs compare --benchmark ID|FILE --candidate GROUP [--baseline GROUP]
  *     The hill-climb decision for a group of runs against the baseline
- *     group (the definition's, by default): prints it and exits 0 when
- *     accepted, 3 when not.
+ *     group (the definition's, by default), on outcomes (#2223): grade not
+ *     worse, human effort or time to delivery better, escapes not worse,
+ *     cost not worse. Prints it, the outcome rows first and the
+ *     diagnostics after, and exits 0 when accepted, 3 when not.
  *
  * The results are --results DIR, or results/ in --bench-home DIR or
  * FACTORY_BENCH_HOME; a definition given by ID is looked up in --benchmarks
  * DIR the same way (bench/lib/home.mjs). A partial card (a run that hadn't
- * ended when scored) is reported and plotted, marked, but never compared. A
- * card of another scorecard version is left out, with a warning.
+ * ended when scored) is reported and plotted, marked, but never compared.
+ * A version 2 card is reported with a warning to score it again (it has no
+ * outcome metrics) and is never compared; a card of any other version is
+ * left out, with a warning. Exit codes: 0 written or accepted; 3 rejected;
+ * 64 usage.
  */
 import {
   existsSync,
@@ -36,7 +41,12 @@ import {
   runMarkdown,
   runReport,
 } from "./lib/report.mjs";
-import { isPartial, SCORECARD_VERSION, verdict } from "./lib/metrics.mjs";
+import {
+  isCurrent,
+  isPartial,
+  SCORECARD_VERSION,
+  verdict,
+} from "./lib/metrics.mjs";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -82,6 +92,12 @@ const cards = readdirSync(resultsDir)
   ])
   .filter(([name, card]) => {
     if (card.schemaVersion === SCORECARD_VERSION) return true;
+    if (card.schemaVersion === SCORECARD_VERSION - 1) {
+      warn(
+        `${name} is scorecard version ${card.schemaVersion}: reported without the outcome metrics (grade, human effort, delivery, waste, escapes, cost) and never compared. Score it again with bench/score.mjs.`,
+      );
+      return true;
+    }
     warn(
       `${name} is scorecard version ${card.schemaVersion}, not ${SCORECARD_VERSION}: left out. Score it again with bench/score.mjs.`,
     );
@@ -94,11 +110,19 @@ if (comparing) {
   const ended = (group) =>
     cards.filter((c) => {
       if (c.run.group !== group) return false;
-      if (!isPartial(c)) return true;
-      warn(
-        `${c.run.id} (${group}) hadn't ended when it was scored (${c.outcome}): left out`,
-      );
-      return false;
+      if (isPartial(c)) {
+        warn(
+          `${c.run.id} (${group}) hadn't ended when it was scored (${c.outcome}): left out`,
+        );
+        return false;
+      }
+      if (!isCurrent(c)) {
+        warn(
+          `${c.run.id} (${group}) is scorecard version ${c.schemaVersion}: left out of the comparison. Score it again with bench/score.mjs`,
+        );
+        return false;
+      }
+      return true;
     });
   const baseline = ended(baselineGroup);
   const candidate = ended(values.candidate);
@@ -119,8 +143,8 @@ if (comparing) {
       "",
       "| | Metric | Candidate median | Baseline median (range) | Verdict |",
       "| --- | --- | ---: | ---: | --- |",
-      ...decision.primary.map((r) => row(r, "primary")),
-      ...decision.guards.map((r) => row(r, "guard")),
+      ...decision.outcomes.map((r) => row(r, "outcome")),
+      ...decision.diagnostics.map((r) => row(r, "diagnostic")),
       "",
       ...decision.reasons.map((r) => `- ${r}`),
       ...decision.warnings.map((w) => `- Warning: ${w}`),

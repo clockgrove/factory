@@ -98,5 +98,19 @@
   "budget": {
     "tokens": [10000000, 20000000],
     "hours": [2, 4]
+  },
+  "grader": {
+    "command": "node \"$(dirname \"$BENCH_DEFINITION\")/../graders/acme-widgets-42.mjs\"",
+    "timeoutMinutes": 10
+  },
+  "scoring": {
+    "questionChargeMinutes": 15
+  },
+  "prices": {
+    "gpt-test": {
+      "uncachedInput": 1.25,
+      "cachedInput": 0.125,
+      "output": 10
+    }
   }
 }

@@ -18,13 +18,25 @@
  * - repairs from validation, review, worker validation and a CI merge
  *   conflict with the base branch; CI reruns, a flaky check and a CI hold.
  * - amendments accepted (after a sendback), rejected and unchanged.
+ * - waste: a result review a later review of the same step replaced (after
+ *   a base conflict), an amendment plan its review sent back, a hedge that
+ *   lost and a call the first restart cut.
+ * - final review refuses the integrated result; the operator fixes the
+ *   default branch by hand and answers retry; final validation and final
+ *   review run again and pass.
  *
  *   node test/fixtures/bench/generate.mjs
  *
  * writes it to test/fixtures/bench/acme__widgets/ (then run `npx biome
  * format --write test/fixtures/bench`). bench-score.test.mjs checks that the
  * committed files are what this writes.
+ *
+ * `fixtureRepository(dir)` builds the run repository the same timeline
+ * made, with Git, for the tests that read one: the base, Factory's three
+ * merges, the operator's hand fix, and a commit after the Objective ended.
+ * grader.mjs is the stand-in grader of its result.
  */
+import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,6 +145,11 @@ function plan(tokenizerCriteria) {
 
 /** The fixture's files: path (under acme__widgets/) to content. */
 export function fixtureFiles() {
+  return fixture().files;
+}
+
+/** The fixture's files, and the times its run repository's commits were made. */
+function fixture() {
   let now = Date.parse("2031-03-04T09:00:00.000Z");
   const iso = () => new Date(now).toISOString();
   const wait = (seconds) => {
@@ -818,7 +835,9 @@ export function fixtureFiles() {
   wait(0.8);
   quick(r.merge, "done", 0.02);
 
-  // Final validation, the final review (with a hedge that lost), the report.
+  // Final validation; the final review (with a hedge that lost) refuses the
+  // integrated result. The operator fixes the default branch by hand and
+  // answers retry: final validation and final review run again, and pass.
   wait(1);
   quick("final", "done", 480);
   wait(0.6);
@@ -829,6 +848,27 @@ export function fixtureFiles() {
     hedge: 1,
     error: "aborted: hedged",
   });
+  on("final-review", "objective-review", { outcome: "refused", criteria: 19 });
+  const refusal = hold(
+    "final-review",
+    "Final review refused the integrated result:\n\n12. Values with commas are quoted: a value with a comma is written as it is",
+  );
+  wait(400);
+  const handFixAt = iso();
+  wait(200);
+  answer(refusal, "retry");
+  wait(0.1);
+  start("final-review");
+  wait(0.2);
+  outcome("final-review", "repair", {
+    target: "final",
+    finding: "Final review runs again after the operator's fix.",
+  });
+  wait(0.3);
+  quick("final", "done", 470);
+  wait(0.6);
+  start("final-review");
+  call("final-review", "reviewer", "objective-review", 300_000, 90);
   on("final-review", "objective-review", { outcome: "pass", criteria: 19 });
   outcome("final-review", "done");
   wait(1);
@@ -898,10 +938,12 @@ export function fixtureFiles() {
       "amend:worker-tokenizer-1": { plan: amended },
       "amend:worker-export-csv-1": { rejected: "rejected" },
       "amend:worker-export-csv-2": { unchanged: true },
+      // The merge commits are the run repository's (fixtureRepository): a
+      // test that reads one puts its SHAs here.
       ...Object.fromEntries(
         Object.entries(merged).map(([id, at]) => [
           `item:${id}:merge`,
-          { mergeSha: "m", integratedSha: "m", at },
+          { mergeSha: `merge-${id}`, integratedSha: `merge-${id}`, at },
         ]),
       ),
       "item:release-smoke:merge": { settled: "qa" },
@@ -932,7 +974,113 @@ export function fixtureFiles() {
     `objectives/finished/${ISSUE}.json`,
     `${JSON.stringify(state, null, 2)}\n`,
   );
-  return files;
+  return { files, timeline: { startedAt, endedAt, merged, handFixAt } };
+}
+
+/** What each Work Item's merge adds to the run repository, and the operator's hand fix. */
+const CHANGES = {
+  tokenizer: {
+    "src/query/tokenizer.ts":
+      "export function tokenize(query: string): string[] {\n  return query.split(/\\s+/).filter(Boolean);\n}\n",
+  },
+  "query-api": {
+    "src/api/widgets.ts":
+      "export function widgets(q: string) {\n  return { q, page: 50 };\n}\n",
+  },
+  "export-csv": {
+    "src/api/export.ts":
+      'export function exportCsv(rows: string[][]): string {\n  return rows.map((row) => row.join(",")).join("\\n");\n}\n',
+  },
+};
+const HAND_FIX = {
+  "src/api/export.ts":
+    'const quote = (value: string) =>\n  value.includes(",") ? `"${value}"` : value;\n\nexport function exportCsv(rows: string[][]): string {\n  return rows.map((row) => row.map(quote).join(",")).join("\\n");\n}\n',
+};
+
+/**
+ * The run repository as the fixture's timeline made it, in `dir`: `origin`
+ * (the test repository) and `checkout`, Factory's clone of it. On `main`,
+ * first parent: the base; each Work Item's merge commit, at its merge
+ * step's time; the operator's hand fix during final review's refusal; and a
+ * commit an hour after the Objective ended. Returns the commits' SHAs.
+ */
+export function fixtureRepository(dir) {
+  const { timeline } = fixture();
+  const origin = join(dir, "origin");
+  const checkout = join(dir, "checkout");
+  mkdirSync(origin, { recursive: true });
+  const git = (cwd, at, ...args) => {
+    const date = `${Math.floor(Date.parse(at) / 1000)} +0000`;
+    return execFileSync(
+      "git",
+      [
+        "-C",
+        cwd,
+        "-c",
+        "user.name=Bench Fixture",
+        "-c",
+        "user.email=bench@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        ...args,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: date,
+          GIT_COMMITTER_DATE: date,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ).trim();
+  };
+  const commit = (at, files, message) => {
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(origin, path)), { recursive: true });
+      writeFileSync(join(origin, path), text);
+    }
+    git(origin, at, "add", "--all");
+    git(origin, at, "commit", "--quiet", "--message", message);
+    return git(origin, at, "rev-parse", "HEAD");
+  };
+  const minuteBefore = (at) => new Date(Date.parse(at) - 60_000).toISOString();
+  git(origin, timeline.startedAt, "init", "--quiet", "--initial-branch=main");
+  const base = commit(
+    "2031-03-04T08:00:00.000Z",
+    { "README.md": "# widgets\n" },
+    "Widgets",
+  );
+  const merges = {};
+  for (const [id, files] of Object.entries(CHANGES)) {
+    const at = timeline.merged[id];
+    git(origin, at, "checkout", "--quiet", "-b", `factory/${id}`, "main");
+    commit(minuteBefore(at), files, id);
+    git(origin, at, "checkout", "--quiet", "main");
+    git(
+      origin,
+      at,
+      "merge",
+      "--quiet",
+      "--no-ff",
+      "--message",
+      `Merge ${id}`,
+      `factory/${id}`,
+    );
+    merges[id] = git(origin, at, "rev-parse", "HEAD");
+  }
+  const handFix = commit(timeline.handFixAt, HAND_FIX, "Quote values");
+  const after = commit(
+    new Date(Date.parse(timeline.endedAt) + 3_600_000).toISOString(),
+    { "CHANGELOG.md": "# Changes\n" },
+    "Changelog",
+  );
+  execFileSync("git", ["clone", "--quiet", origin, checkout], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return { origin, checkout, base, merges, handFix, after, timeline };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

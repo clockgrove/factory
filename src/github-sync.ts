@@ -13,6 +13,7 @@ import {
   GitHubError,
   issueGone,
   TransientError,
+  TryAgain,
 } from "./github.js";
 import {
   callCounts,
@@ -1391,7 +1392,11 @@ export class GitHubSync {
    * 5xx, rate limits, which wait for their reset) retry on and never count
    * here; a lasting refusal (a 4xx that isn't a rate limit), or anything
    * else three times in a row (a render that keeps throwing), gives it up
-   * for this run, so it never holds back settling. Tracking handles a
+   * for this run, so it never holds back settling. A `TryAgain` (a
+   * Project's conflict, or "Something went wrong", which GitHub also
+   * answers for its timeouts and its own bugs) counts like anything else
+   * once its own tries are spent (queue.ts `projectWrite`): one that
+   * keeps coming never holds settling back either. Tracking handles a
    * refusal on one item's issue itself, so one reaching here is the
    * repository's (issues off, no access, gone).
    */
@@ -1400,7 +1405,7 @@ export class GitHubSync {
     job: "status" | "track" | "cancel",
     error: unknown,
   ): void {
-    if (error instanceof TransientError) return;
+    if (error instanceof TransientError && !(error instanceof TryAgain)) return;
     const issue = runner.state.issue;
     const key = `${job}:${issue}`;
     const failures = (this.failures.get(key) ?? 0) + 1;

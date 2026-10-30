@@ -263,6 +263,179 @@ test("a refused policy answer is recorded, and a hold still open after it pauses
   assert.deepEqual(events(at), ["queued", "answer-refused", "paused"]);
 });
 
+// --- the scripted operator (#2266): judgment holds by fixed rules ------------
+
+const DECIDE = {
+  id: "decide:1:2@2031-03-04T09:20:00.000Z",
+  question:
+    "The planner needs a decision:\n\nShould the export default to CSV or TSV? CSV is recommended.\n\nAnswer with `answer <your choice>`.",
+  options: [
+    { answer: "answer", family: "answer", needsText: true, recommended: true },
+    { answer: "replan", family: "replan" },
+    { answer: "cancel", family: "cancel" },
+  ],
+  askedAt: "2031-03-04T09:20:00.000Z",
+};
+const REJECTED = {
+  id: "amend:worker-export-csv-2:continue@2031-03-04T11:20:00.000Z",
+  question:
+    "Amendment `worker-export-csv-2` (Work Item export-csv's worker) was rejected: Another amendment was in flight when it was taken in; replace it once that one is settled\n\nReason: the export needs a row limit\n\n`replace <correction>` plans it again with your correction (3 planning revisions left); `continue` runs the plan without it.",
+  options: [
+    { answer: "replace", needsText: true, recommended: true },
+    { answer: "continue" },
+    { answer: "cancel" },
+  ],
+  askedAt: "2031-03-04T11:20:00.000Z",
+};
+const FINAL = {
+  id: "final@2031-03-04T12:00:00.000Z",
+  question: "Final validation failed on `npm test` (exit 1).",
+  options: [
+    { answer: "repair", recommended: true },
+    { answer: "retry" },
+    { answer: "cancel" },
+  ],
+  askedAt: "2031-03-04T12:00:00.000Z",
+};
+const SCRIPTED_AS = `${POLICY_AS} (scripted)`;
+const decisions = (at) => lines(join(at, "decisions.jsonl"));
+
+/** A run directory whose definition is the example's with operatorPolicy.policy `policy`. */
+function definedRunDir(name, policy, stand) {
+  const at = runDir(name, stand);
+  const value = JSON.parse(readFileSync(EXAMPLE, "utf8"));
+  value.operatorPolicy.policy = policy;
+  mkdirSync(join(at, "benchmarks"));
+  const file = join(at, "benchmarks", "acme-widgets-42.json");
+  writeFileSync(file, JSON.stringify(value));
+  const record = recorded(at);
+  record.definitionFile = file;
+  writeFileSync(join(at, "run.json"), JSON.stringify(record));
+  return at;
+}
+
+test("--policy scripted answers the judgment holds its rules match, as the policy (scripted), and records each rule", () => {
+  const held = view("running", objective("building", [DECIDE, REJECTED]));
+  const at = runDir("scripted", {
+    status: [held, held, view("running", objective("done"))],
+  });
+  const run = benchRun(at, "--policy", "scripted");
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(
+    calls(at)
+      .filter((call) => call.command === "answer")
+      .map((call) => call.args),
+    [
+      [
+        "42",
+        "answer",
+        "--text",
+        "Take the recommended option.",
+        "--question",
+        DECIDE.id,
+        "--as",
+        SCRIPTED_AS,
+      ],
+      ["42", "continue", "--question", REJECTED.id, "--as", SCRIPTED_AS],
+    ],
+  );
+  const answered = decisions(at).filter((e) => e.event === "answered");
+  assert.deepEqual(
+    answered.map(({ question, answer, by, as, rule, text }) => ({
+      question,
+      answer,
+      by,
+      as,
+      rule,
+      text,
+    })),
+    [
+      {
+        question: DECIDE.id,
+        answer: "answer",
+        by: "policy",
+        as: SCRIPTED_AS,
+        rule: "planner-recommended",
+        text: "Take the recommended option.",
+      },
+      {
+        question: REJECTED.id,
+        answer: "continue",
+        by: "policy",
+        as: SCRIPTED_AS,
+        rule: "amendment-continue",
+        text: undefined,
+      },
+    ],
+  );
+});
+
+test("under the scripted policy, a judgment hold no rule matches still pauses, and final validation's never is answered", () => {
+  const unmatched = runDir("scripted-unmatched", {
+    run: "hold",
+    status: [view("running", objective("building", [REVIEW]))],
+  });
+  const paused = benchRun(unmatched, "--policy", "scripted");
+  assert.equal(paused.status, 2, paused.stderr);
+  assert.match(paused.stdout, /PAUSED for the operator: review hold q-review/);
+  assert.doesNotMatch(paused.stdout, /scripted rule/);
+  assert.ok(!calls(unmatched).some((call) => call.command === "answer"));
+  assert.deepEqual(decisions(unmatched).at(-1).rule, undefined);
+
+  const final = runDir("scripted-final", {
+    run: "hold",
+    status: [view("running", objective("building", [FINAL]))],
+  });
+  const held = benchRun(final, "--policy", "scripted");
+  assert.equal(held.status, 2, held.stderr);
+  assert.match(held.stdout, /The scripted rule final-pauses never answers it/);
+  assert.ok(!calls(final).some((call) => call.command === "answer"));
+  assert.deepEqual(
+    decisions(final)
+      .filter((e) => e.event === "paused")
+      .map((e) => [e.question, e.rule]),
+    [[FINAL.id, "final-pauses"]],
+  );
+});
+
+test("a scripted answer Factory refuses is recorded with its rule, and the hold then pauses", () => {
+  const at = runDir("scripted-refused", {
+    answer: "refused",
+    status: [view("running", objective("building", [DECIDE]))],
+  });
+  const run = benchRun(at, "--policy", "scripted");
+  assert.equal(run.status, 2, run.stderr);
+  const refused = decisions(at).find((e) => e.event === "answer-refused");
+  assert.equal(refused.rule, "planner-recommended");
+  assert.equal(refused.as, SCRIPTED_AS);
+  assert.deepEqual(events(at), ["queued", "answer-refused", "paused"]);
+});
+
+test("the definition's policy scripts answers, and --policy wins over it", () => {
+  const held = view("running", objective("building", [DECIDE]));
+  const defined = definedRunDir("scripted-defined", "scripted", {
+    status: [held, held, view("running", objective("done"))],
+  });
+  const run = benchRun(defined);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(
+    decisions(defined).find((e) => e.event === "answered").rule,
+    "planner-recommended",
+  );
+  // --policy stamps answers by kind only: the decision pauses.
+  const overridden = definedRunDir("scripted-overridden", "scripted", {
+    run: "hold",
+    status: [held],
+  });
+  const paused = benchRun(overridden, "--policy", "stamps");
+  assert.equal(paused.status, 2, paused.stderr);
+  assert.ok(!calls(overridden).some((call) => call.command === "answer"));
+  // An unknown policy is a usage error.
+  const unknown = benchRun(overridden, "--policy", "operator");
+  assert.equal(unknown.status, 64);
+  assert.match(unknown.stderr, /--policy is one of stamps, scripted/);
+});
+
 // --- stop: an ended run's service stops polling; a held run keeps it ---------
 
 const setups = (at) => calls(at).filter((call) => call.command === "setup");

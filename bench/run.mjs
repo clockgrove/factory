@@ -3,6 +3,7 @@
  * Runs a provisioned benchmark run to its end, applying the operator policy.
  *
  *   node bench/run.mjs --run-dir DIR [--interval SECONDS]
+ *     [--policy stamps|scripted]
  *     Queues the Objective (once), then follows it. `factory run` asks
  *     the service to run it and then follows it itself until it ends or
  *     needs a person, so this stops that follower, as Ctrl-C would (the
@@ -13,12 +14,17 @@
  *     stopped queued it too. While the service isn't running nothing is
  *     queued: that is recorded and printed, and this exits 75; start the
  *     service and run it again. A refused request, or one not admitted in
- *     10 min, exits 1 and isn't recorded as queued. Holds of a kind the
+ *     10 min, exits 1 and isn't recorded as queued. An unknown --policy
+ *     exits 64. Holds of a kind the
  *     policy scripts (spend and allowance raises: `more`; a changed
  *     configuration: `adopt`) are answered with `factory answer --as
- *     <policy>`. Any other hold pauses for the operator: it is recorded and
- *     printed, and this exits 2, as does a scripted answer Factory refused
- *     on a hold still open at the next look. Run it again after answering;
+ *     <policy>`. With the scripted policy (--policy scripted, else the
+ *     definition's operatorPolicy.policy), a judgment hold one of
+ *     bench/lib/scripted.mjs's rules matches is answered too, with `--as
+ *     "<policy> (scripted)"`, and the rule is recorded. Any other hold
+ *     pauses for the operator: it is recorded and printed, and this exits
+ *     2, as does a scripted answer Factory refused on a hold still open at
+ *     the next look. Run it again after answering;
  *     it carries on. At the end it scores the run into
  *     <results>/<benchmark>/, grades it with the definition's grader on
  *     the run checkout's default branch at the end (a grader that fails is
@@ -48,7 +54,8 @@
  *     a stop. Exits 0 once it runs or is starting, 1 when setup doesn't
  *     start it.
  *
- * Every decision (asked, answered, answer, by whom) and every time the
+ * Every decision (asked, answered, answer, by whom, a scripted answer's
+ * rule and text) and every time the
  * service was seen down goes to DIR/decisions.jsonl; the scorecard takes
  * the same decisions and the outages from Factory's run log.
  */
@@ -74,6 +81,7 @@ import {
 } from "./lib/home.mjs";
 import { harnessRun } from "./lib/provision.mjs";
 import { scoreRun } from "./lib/score.mjs";
+import { POLICIES, scriptedAnswer, scriptedAs } from "./lib/scripted.mjs";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -85,12 +93,17 @@ const { values, positionals } = parseArgs({
     "text-file": { type: "string" },
     as: { type: "string" },
     force: { type: "boolean" },
+    policy: { type: "string" },
   },
 });
 if (!values["run-dir"]) {
   process.stderr.write(
     "--run-dir is required; see the header of bench/run.mjs\n",
   );
+  process.exit(64);
+}
+if (values.policy !== undefined && !POLICIES.includes(values.policy)) {
+  process.stderr.write(`--policy is one of ${POLICIES.join(", ")}\n`);
   process.exit(64);
 }
 const runDir = values["run-dir"];
@@ -118,6 +131,8 @@ try {
   process.exit(64);
 }
 const policy = definition?.operatorPolicy;
+// The flag wins over the definition; answers by kind only by default.
+const scripting = (values.policy ?? policy?.policy ?? "stamps") === "scripted";
 const log = join(runDir, "decisions.jsonl");
 const now = () => new Date().toISOString();
 const note = (entry) =>
@@ -464,7 +479,18 @@ for (;;) {
   for (const hold of view?.holds ?? []) {
     if (seen.some((e) => e.question === hold.id && e.event === "answered"))
       continue;
-    const { kind, answer } = policyAnswer(hold, policy);
+    const { kind, answer: byKind } = policyAnswer(hold, policy);
+    // The scripted operator's rules come after the answers by kind; a rule
+    // that matches without an answer pauses, and its id is recorded.
+    const scripted = !byKind && scripting ? scriptedAnswer(hold) : null;
+    const answer = byKind ?? scripted?.answer ?? null;
+    const as = scripted ? scriptedAs(policy.as) : policy.as;
+    const ruled = scripted
+      ? {
+          rule: scripted.rule,
+          ...(scripted.text ? { text: scripted.text } : {}),
+        }
+      : {};
     const refused = seen.find(
       (e) => e.question === hold.id && e.event === "answer-refused",
     );
@@ -473,10 +499,11 @@ for (;;) {
         "answer",
         issue,
         answer,
+        ...(scripted?.text ? ["--text", scripted.text] : []),
         "--question",
         hold.id,
         "--as",
-        policy.as,
+        as,
       );
       if (given.code !== 0) {
         // The question may have closed since status read it; one still
@@ -488,6 +515,8 @@ for (;;) {
           kind,
           answer,
           by: "policy",
+          as,
+          ...ruled,
           reason,
         });
         process.stderr.write(
@@ -502,15 +531,22 @@ for (;;) {
         askedAt: hold.askedAt,
         answer,
         by: "policy",
-        as: policy.as,
+        as,
+        ...ruled,
       });
       continue;
     }
     if (!seen.some((e) => e.question === hold.id && e.event === "paused"))
-      note({ event: "paused", question: hold.id, kind, askedAt: hold.askedAt });
+      note({
+        event: "paused",
+        question: hold.id,
+        kind,
+        askedAt: hold.askedAt,
+        ...(scripted ? { rule: scripted.rule } : {}),
+      });
     const options = (hold.options ?? []).map((o) => o.answer ?? o).join(", ");
     process.stdout.write(
-      `PAUSED for the operator: ${kind} hold ${hold.id} (asked ${hold.askedAt})\n${hold.question}\n${refused ? `The policy's ${refused.answer} was refused: ${refused.reason}\n` : ""}Answers: ${options}\nAnswer with: node bench/run.mjs answer --run-dir ${runDir} --question ${hold.id} ANSWER [--text-file F]\n`,
+      `PAUSED for the operator: ${kind} hold ${hold.id} (asked ${hold.askedAt})\n${hold.question}\n${scripted && !scripted.answer ? `The scripted rule ${scripted.rule} never answers it.\n` : ""}${refused ? `The policy's ${refused.answer} was refused: ${refused.reason}\n` : ""}Answers: ${options}\nAnswer with: node bench/run.mjs answer --run-dir ${runDir} --question ${hold.id} ANSWER [--text-file F]\n`,
     );
     process.exit(2);
   }

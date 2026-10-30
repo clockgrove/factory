@@ -35,7 +35,11 @@ export function requestTouch(kind) {
  * touch, and every hand fix. `policyStamps`: the stamps on holds of the
  * policy's kinds (a spend or allowance raise, adopting a config), which a
  * harness run's policy gives: they count, as an operator would have had
- * to give them. `unattended`: the Objective is done with no touch at all.
+ * to give them. `scriptedJudgments`: the answers the scripted operator
+ * gave (bench/lib/scripted.mjs), each weighed as a judgment, since a real
+ * operator would have had to make it, and counted apart, so runs under
+ * different policies aren't compared as equals. `unattended`: the
+ * Objective is done with no touch at all.
  */
 export function humanEffort({ decisions, actions, handFixes, outcome }) {
   const touches = [...decisions, ...actions].map((entry) => entry.touch);
@@ -53,6 +57,8 @@ export function humanEffort({ decisions, actions, handFixes, outcome }) {
     judgments,
     handFixes: handFixes.length,
     policyStamps: decisions.filter((d) => d.policy && d.touch === "stamp")
+      .length,
+    scriptedJudgments: [...decisions, ...actions].filter((e) => e.scripted)
       .length,
     fixes: handFixes,
   };

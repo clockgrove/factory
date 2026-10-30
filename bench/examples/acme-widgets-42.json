@@ -93,7 +93,8 @@
       "allowance": "more",
       "config": "adopt"
     },
-    "otherwise": "pause"
+    "otherwise": "pause",
+    "policy": "stamps"
   },
   "baseline": "acme/widgets#42, Factory 0.5.7→0.5.8, operator-assisted",
   "hillClimb": {

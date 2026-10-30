@@ -147,6 +147,21 @@ test("a policy scripts only limit raises and adopting a config: never accept or 
   );
 });
 
+test("operatorPolicy.policy is optional: stamps or scripted", () => {
+  for (const policy of ["stamps", "scripted", undefined]) {
+    const definition = example();
+    definition.operatorPolicy.policy = policy;
+    assert.deepEqual(definitionProblems(definition), [], String(policy));
+  }
+  for (const policy of ["accept", "Scripted", ""]) {
+    const definition = example();
+    definition.operatorPolicy.policy = policy;
+    assert.deepEqual(definitionProblems(definition), [
+      "operatorPolicy.policy: stamps | scripted",
+    ]);
+  }
+});
+
 test("memory.before must be UTC in Factory's form", () => {
   for (const before of [
     "2031-03-04T04:00:00-05:00",

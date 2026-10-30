@@ -320,6 +320,30 @@ test("the hill-climb accepts on outcomes: grade and escapes not worse, human or 
   );
 });
 
+test("compare warns when some runs had scripted judgments and others none", () => {
+  const three = (scripted) =>
+    [1, 2, 3].map((n) =>
+      candidate(`r${n}`, (_, card) => {
+        card.human.score = 10;
+        card.human.scriptedJudgments = scripted;
+      }),
+    );
+  const warning = (decision) =>
+    decision.warnings.filter((w) => w.includes("scripted judgments"));
+  assert.deepEqual(warning(verdict(definition, [baseline], three(2))), [
+    "0 of 1 baseline and 3 of 3 candidate runs had scripted judgments (human.scriptedJudgments): their human effort counts answers a script gave alongside a person's",
+  ]);
+  // The same on both sides, or none at all: no warning.
+  const scriptedBaseline = candidate("b", (_, card) => {
+    card.human.scriptedJudgments = 1;
+  });
+  assert.deepEqual(
+    warning(verdict(definition, [scriptedBaseline], three(2))),
+    [],
+  );
+  assert.deepEqual(warning(verdict(definition, [baseline], three(0))), []);
+});
+
 test("cost is a guard: unknown on both sides it is skipped with a warning; the candidate's alone, rejected", () => {
   const three = (change) =>
     [1, 2, 3].map((n) =>

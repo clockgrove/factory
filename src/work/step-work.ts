@@ -38,7 +38,11 @@ import {
   hostGitExit,
   worktreePath,
 } from "../worktree.js";
-import { blameAmendment, discoveryOutcome } from "./amend.js";
+import {
+  blameAmendment,
+  discoveryOutcome,
+  validationAmendment,
+} from "./amend.js";
 import { collect, type HandoffNote, VALIDATE_LOGS } from "./collect.js";
 import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
@@ -290,7 +294,11 @@ export async function workStep(
       (await holdsNoChange(worktree, base, signal));
     // A merged predecessor's blame answered `amend`, or its amendment
     // settled: no diagnosis runs again.
-    const amended = blameAmendment(item, context, place, keepBase);
+    const amended =
+      blameAmendment(item, context, place, keepBase) ??
+      // A diagnosis question answered `replace-validation`, or its
+      // amendment settled: likewise.
+      validationAmendment(item, context, place, keepBase);
     if (amended) return amended;
     const repair = await repairContext(
       item,

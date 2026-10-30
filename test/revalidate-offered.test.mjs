@@ -211,12 +211,12 @@ test("a kept result's question is answered revalidate by the engine only where i
  * is where a repair starts. The item worktree is added at the kept base
  * when the step runs, unless `holding`: then it is kept from the refused
  * attempt and holds the refused change (uncommitted on the base, as a
- * resubmitted result leaves it).
+ * resubmitted result leaves it). `validation`: the item's commands.
  */
 function servedWork(
   finding,
   answers = [],
-  { perPath = 1, work, holding = false } = {},
+  { perPath = 1, work, holding = false, validation = [] } = {},
 ) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
@@ -315,6 +315,7 @@ function servedWork(
   const a = item("a", {
     ownedPaths: ["src/a.js"],
     acceptance: ["A one holds", "A two holds"],
+    validation,
   });
   const state = newObjective(9, new Date(), {
     provider: "codex",
@@ -332,6 +333,10 @@ function servedWork(
   };
   state.done.plan = plan([a], { base });
   Object.assign(state.kept, {
+    // An operator's `replace-validation` is recorded against it.
+    ...(validation.length
+      ? { "plan:acceptedAt": "2026-10-27T00:00:00.000Z" }
+      : {}),
     "item:a:base": base,
     "item:a:refused": { commit, tree, notes: [] },
     "item:a:finding": finding(tree),
@@ -777,3 +782,92 @@ for (const [what, work] of [
     assert.equal(runner.state.kept["allowances:rereviews"], undefined);
     assert.equal(prompts.length, 1);
   });
+
+// #2199: a diagnosis question answered `replace-validation` it can't take
+// was asked again from the question text the engine stored, with a fixed
+// list of offers: it lost a review refusal's `accept <n>`, which its text
+// still offered, and repeated the engine's own notes.
+const COMMANDS = [
+  { command: "npm test" },
+  { command: "grep -q 'Rollout steps' docs/guide.md" },
+];
+const REASON = "It greps a heading the guide never had; check the list.";
+const whichHeading = [
+  { decision: "operator", question: "Which heading does the guide use?" },
+];
+const offered = (hold) =>
+  hold.options.map((option) => option.answer + (option.arg ?? ""));
+
+test("a review refusal's diagnosis question asked again after a replace-validation it can't take offers what it offered, and its text once (#2199)", async () => {
+  const served = servedWork(reviewRefusal, whichHeading, {
+    perPath: 5,
+    validation: COMMANDS,
+  });
+  const { runner, asked, prompts } = served;
+  const first = await served.question();
+  assert.ok(offered(first).includes("replace-validation"), offered(first));
+  assert.ok(offered(first).includes("accept2"), offered(first));
+  served.answer(first, "replace-validation", `a 9 ${REASON}`);
+  const second = await served.question();
+  assert.notEqual(second.id, first.id);
+  assert.deepEqual(offered(second), offered(first));
+  assert.match(
+    second.question,
+    /^Work Item a needs your decision before it is repaired:\n\nWhich heading does the guide use\?/,
+  );
+  assert.match(
+    second.question,
+    /wasn't taken: Work Item a has no validation command 9; its commands are 0 `npm test`, 1 `grep/,
+  );
+  // Each sentence once: the step's, and the engine's where it offers.
+  for (const once of [
+    "answer `revalidate`",
+    "answer `accept <n> <reason>`",
+    "wasn't taken",
+  ])
+    assert.equal(second.question.split(once).length, 2, once);
+  assert.equal(runner.state.kept["validation:authorized"], undefined);
+  // What its text offers, it takes.
+  served.answer(second, "accept", "The reviewer misread it.", "2");
+  assert.equal(asked.length, 1);
+  assert.equal(prompts.length, 0);
+});
+
+test("a diagnosis question answered replace-validation proposes the item's amendment, and the item runs again on the amended plan once it is accepted, charged to no allowance (#2199)", async () => {
+  const served = servedWork(failedChecks, whichHeading, {
+    perPath: 5,
+    validation: COMMANDS,
+  });
+  const { runner, asked, prompts } = served;
+  const diagnosis = await served.question();
+  served.answer(diagnosis, "replace-validation", `a 1 ${REASON}`);
+  const PROPOSAL = "amend:validation-a-2:proposal";
+  await served.run("the proposal", () => runner.state.kept[PROPOSAL]);
+  const proposal = runner.state.kept[PROPOSAL];
+  assert.deepEqual(proposal.worker, { itemId: "a", attempt: 3 });
+  assert.equal(proposal.plan, "2026-10-27T00:00:00.000Z");
+  assert.deepEqual(
+    runner.state.kept["validation:authorized"].map((entry) => entry.command),
+    [COMMANDS[1].command],
+  );
+  assert.equal(runner.state.kept["item:a:asked"], undefined);
+  assert.equal(runner.state.done["item:a:work"], undefined);
+  assert.equal(asked.length, 1, "no diagnosis runs again");
+  assert.equal(prompts.length, 0);
+  // Its review accepted it (planning/amendments.ts): the work step's next
+  // run starts a new attempt on the amended plan, its own repair `free`.
+  runner.state.done["amend:validation-a-2"] = { plan: runner.state.done.plan };
+  await served.run(
+    "the amended attempt",
+    () => runner.state.repairs["item:a:work"].count > 2,
+  );
+  const repairs = runner.state.repairs["item:a:work"];
+  assert.equal(repairs.count, 3);
+  assert.deepEqual(repairs.free, [3]);
+  assert.match(
+    repairs.findings.at(-1),
+    /^Amendment validation-a-2 was accepted/,
+  );
+  assert.equal(runner.state.kept["item:a:rebase"], true);
+  assert.equal(asked.length, 1, "no diagnosis");
+});

@@ -15,11 +15,12 @@
  * one value over both. --dry-run prints every
  * GitHub, Git and setup action and does none of them. Without --run-id the
  * run gets a new id (the minute and a random suffix); running it again
- * with the same --run-id carries on.
+ * with the same --run-id carries on, with the capacity it was given (each
+ * flag given again changes that value).
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { parseArgs } from "node:util";
+import { isDeepStrictEqual, parseArgs } from "node:util";
 import { loadDefinition } from "./lib/definition.mjs";
 import { benchDirs, DIR_OPTIONS, missingDir } from "./lib/home.mjs";
 import {
@@ -27,6 +28,7 @@ import {
   loadHost,
   provision,
   Runner,
+  recordedRun,
   resolveFactory,
   runCapacity,
 } from "./lib/provision.mjs";
@@ -101,6 +103,15 @@ const runner = new Runner({
 runner.print(
   `${runner.dryRun ? "Dry run: nothing is created. " : ""}${definition.id} run ${runId} on Factory ${build} (${factory.cli})`,
 );
+// Carried on, the run keeps the capacity its service was set up with.
+const recorded = recordedRun(
+  join(host.benchRoot, definition.id, runId),
+)?.capacity;
+const capacity = runCapacity(definition, given, undefined, recorded);
+if (recorded && !isDeepStrictEqual(capacity, recorded))
+  runner.print(
+    `The capacity changes from ${JSON.stringify(recorded)} to ${JSON.stringify(capacity)}`,
+  );
 let record;
 try {
   record = await provision({
@@ -111,7 +122,7 @@ try {
     label: values.label ?? `${definition.id} ${runId}, Factory ${build}`,
     group: values.group ?? `Factory ${build}`,
     resultsDir: dirs.results,
-    capacity: runCapacity(definition, given),
+    capacity,
     runner,
   });
 } catch (error) {

@@ -68,7 +68,13 @@ function runDir(name, stand) {
 /** Point a run's stand-in at `stand`, keeping what the run recorded. */
 function standIn(
   at,
-  { run = "follow", status, answer = "ok", setup = "stopped" },
+  {
+    run = "follow",
+    status,
+    answer = "ok",
+    setup = "stopped",
+    start = "running",
+  },
 ) {
   const file = join(at, "run.json");
   const record = JSON.parse(readFileSync(file, "utf8"));
@@ -78,6 +84,7 @@ function standIn(
     BENCH_FACTORY_STATUS: JSON.stringify(status),
     BENCH_FACTORY_ANSWER: answer,
     BENCH_FACTORY_SETUP: setup,
+    BENCH_FACTORY_START: start,
     BENCH_FACTORY_CALLS: join(at, "calls.jsonl"),
   };
   writeFileSync(file, JSON.stringify(record));
@@ -268,6 +275,13 @@ test("stop stops and disables an ended run's service", () => {
   const stopped = benchRun(at, "stop");
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.match(stopped.stdout, /^Stopped acme\/widgets's service/);
+  // Restarting is run.mjs start's, never provisioning's.
+  assert.ok(
+    stopped.stdout.includes(
+      `node bench/run.mjs start --run-dir ${at} starts it`,
+    ),
+    stopped.stdout,
+  );
   assert.deepEqual(
     setups(at).map((call) => call.args),
     [STOP],
@@ -325,6 +339,44 @@ test("a service setup doesn't stop is reported and exits 1", () => {
   assert.match(
     failed.stderr,
     /didn't stop acme\/widgets's service: blocked: systemctl --user isn't available/,
+  );
+  assert.deepEqual(events(at), []);
+});
+
+// --- start: a stopped run's service starts again with its own configuration -
+
+test("start starts a stopped run's service again with its configuration as it stands", () => {
+  const at = runDir("start-stopped", {
+    status: [view("stopped", objective("building", [REVIEW]))],
+  });
+  const forced = benchRun(at, "stop", "--force");
+  assert.equal(forced.status, 0, forced.stderr);
+  standIn(at, { status: [], start: "starting" });
+  const before = recorded(at);
+  const started = benchRun(at, "start");
+  assert.equal(started.status, 0, started.stderr);
+  assert.match(
+    started.stdout,
+    /^Started acme\/widgets's service \(starting\)\. Follow on: node bench\/run\.mjs --run-dir /,
+  );
+  assert.match(started.stderr, /hasn't started serving yet/);
+  // setup --background given nothing to change, in the run's environment;
+  // the run record is untouched.
+  assert.deepEqual(
+    setups(at).map((call) => call.args),
+    [STOP, ["--repo", "acme/widgets", "--background", "--json"]],
+  );
+  assert.deepEqual(recorded(at), before);
+  assert.deepEqual(events(at), ["service-stopped", "service-started"]);
+});
+
+test("a service setup doesn't start is reported and exits 1", () => {
+  const at = runDir("start-blocked", { status: [], start: "blocked" });
+  const failed = benchRun(at, "start");
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.match(
+    failed.stderr,
+    /didn't start acme\/widgets's service: blocked: The service wasn't started: setup is not configured/,
   );
   assert.deepEqual(events(at), []);
 });

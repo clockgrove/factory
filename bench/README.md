@@ -11,7 +11,7 @@ A result can meet every criterion literally and still miss the Objective's inten
 ```
 bench/
   provision.mjs               set up one run: repository, Project, Factory, memory, Objective
-  run.mjs                     follow the run to its end, applying the operator policy; stop its service
+  run.mjs                     follow the run to its end, applying the operator policy; stop or start its service
   score.mjs                   score a run, or any Objective, into the results
   report.mjs                  run reports, the history page, the hill-climb decision, the judge's calibration
   examples/acme-widgets-42.json  an invented definition (schema below)
@@ -65,7 +65,7 @@ node bench/provision.mjs --benchmark acme-widgets-42 --host ~/bench-host.json \
 8. Seeds repository memory as it stood before the Objective: a copy of the source's knowledge store without the Objective's entries or any made at or after the instant `memory.before`.
 9. Starts the background service (`setup --background`), files the Objective verbatim and checks the filed body against the digest.
 
-Each step looks before it acts, so running provisioning again with the same `--run-id` carries on where it stopped. Without `--run-id`, a run gets a new id: the minute it started and a random suffix, such as `20310304-0900-3fa2c1`, so runs provisioned in the same minute differ, and a run directory already there is refused. The run record, `<benchRoot>/<benchmark>/<run id>/run.json`, holds the repository, issue, Project, Factory (CLI, version, commit), environment, capacity (`{ workers, validations, memoryMib, share }`, as given to setup; a value missing is Factory's own for the host), the base patches (each `{ commit, reason, applied }`, `applied` the commit it made on `main`), the definition file it ran and the results directory the run is scored into. Provisioning refuses before creating anything when no results directory is given. A step that fails stops provisioning with its reason and exits 1.
+Each step looks before it acts, so running provisioning again with the same `--run-id` carries on where it stopped. It keeps the capacity the run recorded, since setup changes only the values it is given: a capacity flag given again changes that value, and provisioning says so. The record keeps its issue and when the run was first provisioned and queued. Without `--run-id`, a run gets a new id: the minute it started and a random suffix, such as `20310304-0900-3fa2c1`, so runs provisioned in the same minute differ, and a run directory already there is refused. The run record, `<benchRoot>/<benchmark>/<run id>/run.json`, holds the repository, issue, Project, Factory (CLI, version, commit), environment, capacity (`{ workers, validations, memoryMib, share }`, as given to setup; a value missing is Factory's own for the host), the base patches (each `{ commit, reason, applied }`, `applied` the commit it made on `main`), the definition file it ran and the results directory the run is scored into. Provisioning refuses before creating anything when no results directory is given. A step that fails stops provisioning with its reason and exits 1.
 
 | `provision.mjs` flag                               | What                                                                                    |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------- |
@@ -109,7 +109,13 @@ A run's service keeps polling after its Objective ends. Once the run is scored, 
 node bench/run.mjs stop --run-dir <benchRoot>/acme-widgets-42/<run id>
 ```
 
-This runs `factory setup --stop`, which stops the service and keeps it from starting again at the next login, and records `service-stopped` in `decisions.jsonl`. A held run keeps its service, so the answer can be acted on: while the Objective has an open hold, hasn't ended, or its status can't be read, `stop` refuses and exits 2. `--force` stops it anyway, and the record says why it was held. It exits 0 once stopped and 1 when setup doesn't stop it. Provisioning again with the run's `--run-id` starts the service again.
+This runs `factory setup --stop`, which stops the service and keeps it from starting again at the next login, and records `service-stopped` in `decisions.jsonl`. A held run keeps its service, so the answer can be acted on: while the Objective has an open hold, hasn't ended, or its status can't be read, `stop` refuses and exits 2. `--force` stops it anyway, and the record says why it was held. It exits 0 once stopped and 1 when setup doesn't stop it. To start it again, such as after stopping a held run:
+
+```sh
+node bench/run.mjs start --run-dir <benchRoot>/acme-widgets-42/<run id>
+```
+
+This runs `factory setup --background` in the run's environment, given nothing else, so the service starts on the configuration and capacity it has, and records `service-started`. It exits 0 once the service runs or is starting and 1 when setup doesn't start it. Don't provision the run again for this: once Factory has merged work, `main` is ahead of the base and provisioning's push of the base is refused.
 
 ### 3. Score
 

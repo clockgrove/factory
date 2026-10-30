@@ -161,23 +161,32 @@ export function shareCapacity(share, { cpus, memoryMiB } = hostResources()) {
  * The run's service capacity, as run.json records it: the definition's
  * `factory.capacity`, then `share` (shareCapacity), then each value given,
  * each overriding the one before. A value none of them sets is left to
- * Factory, which sizes it for the whole host.
+ * Factory, which sizes it for the whole host. A run provisioned again
+ * starts from its `recorded` capacity instead of the definition's: setup
+ * changes only the values it is given, so its service keeps the rest.
  */
 export function runCapacity(
   definition,
   { share = null, ...given } = {},
   resources = undefined,
+  recorded = null,
 ) {
   return {
-    ...definition.factory.capacity,
+    ...(recorded ?? definition.factory.capacity),
     ...(share ? shareCapacity(share, resources) : {}),
     ...Object.fromEntries(
       Object.entries(given).filter(
         ([key, value]) => Object.hasOwn(CAPACITY, key) && value !== undefined,
       ),
     ),
-    share,
+    share: share ?? recorded?.share ?? null,
   };
+}
+
+/** Run directory `runDir`'s record (run.json), or null before it is first provisioned. */
+export function recordedRun(runDir) {
+  const file = join(runDir, "run.json");
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
 }
 
 /** Whether process `pid` is alive; one this user may not signal is. */
@@ -632,6 +641,8 @@ export function enableOnlyKeptWorkflows({
  * Provision run `runId` of `definition` on `host` with `factory`
  * (resolveFactory) and `capacity` (runCapacity). Returns the run record;
  * also writes it to <benchRoot>/<benchmark>/<run id>/run.json unless dry.
+ * Provisioned again, the record keeps its issue, the time it was first
+ * provisioned and queued, and its capacity until setup applies the new one.
  */
 export async function provision({
   definition: def,
@@ -664,6 +675,8 @@ export async function provision({
   };
   const checkout = join(host.workDir, name);
   const cache = join(host.cacheDir, source.replace("/", "__"));
+  // What run.mjs and scoring read stays while this provisioning carries on.
+  const previous = recordedRun(runDir);
   const record = {
     benchmark: def.id,
     definitionFile: def.file ?? null,
@@ -674,7 +687,7 @@ export async function provision({
     label,
     group,
     repository,
-    issue: null,
+    issue: previous?.issue ?? null,
     project: null,
     checkout,
     runDir,
@@ -682,11 +695,12 @@ export async function provision({
     env,
     factory,
     // The service's capacity, as given to setup; a value missing is Factory's own for the host.
-    capacity,
+    capacity: previous?.capacity ?? capacity,
     // The source commits put on the base, each with the commit it made on main.
     basePatches: [],
     policyAs: def.operatorPolicy.as,
-    provisionedAt: null,
+    provisionedAt: previous?.provisionedAt ?? null,
+    ...(previous?.queuedAt ? { queuedAt: previous.queuedAt } : {}),
   };
   const save = () =>
     runner.dryRun ||
@@ -1094,6 +1108,8 @@ export async function provision({
       );
   };
   setup("configure Factory (setup)", [], (status) => status === "configured");
+  record.capacity = capacity;
+  save();
   if (def.memory.seed === "before-objective") {
     const from = join(
       host.sourceState,
@@ -1169,7 +1185,7 @@ export async function provision({
     });
   }
   record.issue = number;
-  record.provisionedAt = new Date().toISOString();
+  record.provisionedAt ??= new Date().toISOString();
   runner.local(`write the run record ${join(runDir, "run.json")}`, save);
   return record;
 }

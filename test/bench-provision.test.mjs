@@ -304,6 +304,68 @@ test("a run's capacity: the definition's, then --share, then each flag", async (
   }
 });
 
+test("a run provisioned again keeps the capacity its service was set up with", () => {
+  const definition = loadDefinition(EXAMPLE);
+  const recorded = { workers: 2, validations: 2, memoryMib: 6144, share: 6 };
+  // Setup changes only the values it is given, so without flags the run
+  // keeps what it recorded, never the definition's; a flag given again
+  // changes its value and the share stays.
+  assert.deepEqual(runCapacity(definition, {}, undefined, recorded), recorded);
+  assert.deepEqual(
+    runCapacity(definition, { workers: 3 }, undefined, recorded),
+    { ...recorded, workers: 3 },
+  );
+  // Through provisioning, carried on with only --run-id.
+  const runDir = join(dir, "bench", "acme-widgets-42", "r1");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "run.json"),
+    JSON.stringify({
+      runId: "r1",
+      issue: 42,
+      capacity: recorded,
+      provisionedAt: "2031-03-04T09:05:00.000Z",
+      queuedAt: "2031-03-04T09:06:00.000Z",
+    }),
+  );
+  try {
+    const again = spawnSync(process.execPath, dryArgv("--run-id", "r1"), {
+      encoding: "utf8",
+      env: dryEnv,
+    });
+    assert.equal(again.status, 0, again.stderr);
+    assert.ok(
+      again.stdout.includes(
+        "--day-tokens 80000000 --workers 2 --validations 2 --memory-mib 6144 --json",
+      ),
+      again.stdout,
+    );
+    assert.doesNotMatch(again.stdout, /The capacity changes/);
+    const record = dryRecord(again.stdout);
+    assert.deepEqual(record.capacity, recorded);
+    // When it was first provisioned and queued stays.
+    assert.equal(record.provisionedAt, "2031-03-04T09:05:00.000Z");
+    assert.equal(record.queuedAt, "2031-03-04T09:06:00.000Z");
+    // A flag given again changes that value, and says so.
+    const changed = spawnSync(
+      process.execPath,
+      dryArgv("--run-id", "r1", "--workers", "3"),
+      { encoding: "utf8", env: dryEnv },
+    );
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.match(
+      changed.stdout,
+      /^The capacity changes from \{"workers":2,.*\} to \{"workers":3,"validations":2,"memoryMib":6144,"share":6\}$/m,
+    );
+    assert.deepEqual(dryRecord(changed.stdout).capacity, {
+      ...recorded,
+      workers: 3,
+    });
+  } finally {
+    rmSync(join(dir, "bench"), { recursive: true, force: true });
+  }
+});
+
 test("the cache lock lets one holder in at a time and takes over a dead holder's", async () => {
   const lock = join(dir, "cache.lock");
   const held = [];
@@ -867,6 +929,17 @@ test("a base patch that doesn't apply stops provisioning before anything is push
     { commit: source.fix, reason: "the flaky export test" },
     { commit: source.clash, reason: "a README edit over the Objective's" },
   ]);
+  // Provisioned before: a rerun that stops keeps what run.mjs and scoring
+  // read, and the capacity its service was set up with.
+  const runDir = join(realHost.benchRoot, definition.id, "p2");
+  mkdirSync(runDir, { recursive: true });
+  const before = {
+    issue: 42,
+    capacity: { workers: 2, share: 6 },
+    provisionedAt: "2031-03-04T09:05:00.000Z",
+    queuedAt: "2031-03-04T09:06:00.000Z",
+  };
+  writeFileSync(join(runDir, "run.json"), JSON.stringify(before));
   const { provisioned, runner, origin } = await provisionLocally(
     definition,
     "p2",
@@ -881,6 +954,11 @@ test("a base patch that doesn't apply stops provisioning before anything is push
   assert.ok(!runner.calls.some((call) => call.includes(" push ")));
   assert.ok(!runner.calls.some((call) => call.startsWith("gh ")));
   assert.throws(() => show(origin, "rev-parse", "--verify", "--quiet", "main"));
+  const kept = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(before).map((key) => [key, kept[key]])),
+    before,
+  );
   // The lock is released for the next provisioning.
   assert.ok(!existsSync(join(realHost.cacheDir, "acme__widgets.lock")));
 });

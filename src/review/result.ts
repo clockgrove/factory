@@ -52,6 +52,7 @@ import {
   type ReviewArtifactGroup,
   reviewArtifactEvidence,
 } from "./artifacts.js";
+import { unreachableModules } from "./orphans.js";
 
 /**
  * The criteria a result review judges: the item's own acceptance, then each
@@ -351,6 +352,7 @@ export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
     itemId: input.item.id,
     phase: "result-review",
     criteria,
+    unreachableScope: item.ownedPaths,
     instructions: resultInstructions(
       item,
       criteria,
@@ -529,6 +531,8 @@ export async function runReview(
     artifacts: readonly ReviewArtifactGroup[];
     /** See materialize. */
     merges?: readonly string[];
+    /** Owned-path scopes whose files the change left unreachable are evidence (orphans.ts). */
+    unreachableScope?: readonly string[];
   },
 ): Promise<ResultReview> {
   const { criteria, phase } = run;
@@ -552,11 +556,13 @@ export async function runReview(
     const receipts = await candidateRows(root, run.candidates);
     const given = await inputRows(root, run.inputs);
     const knowledge = await knowledgeRows(run, root);
+    const unreachable = await unreachableRows(run, changes);
     const evidence: ResultEvidence[] = [
       ...sourceRows(run.sources),
       ...run.design,
       ...decisionRows(run.plan, run.decisions),
       changeIndexRow(run.base, run.commit, tree, changes, run.merges),
+      ...unreachable,
       validationRow(run.validation),
       ...(run.notes
         ? [
@@ -588,6 +594,7 @@ export async function runReview(
     ];
     const instructions = [
       ...run.instructions,
+      ...(unreachable.length ? [UNREACHABLE_GUIDANCE] : []),
       ...(captured.rows.length ? [REVIEW_ARTIFACT_GUIDANCE] : []),
       ...(receipts.length ? [CANDIDATE_GUIDANCE] : []),
       ...(given.length ? [INPUT_GUIDANCE] : []),
@@ -1421,6 +1428,44 @@ function changeIndexRow(
   };
 }
 
+/**
+ * The files the change left unreachable within the review's scope
+ * (orphans.ts), as a controller row; none, or past the scan bound, no row.
+ */
+async function unreachableRows(
+  run: Pick<
+    ResultReviewInput,
+    "checkout" | "base" | "commit" | "signal" | "log"
+  > & {
+    phase: string;
+    unreachableScope?: readonly string[];
+  },
+  changes: readonly ChangeEntry[],
+): Promise<ResultEvidence[]> {
+  if (!run.unreachableScope?.length) return [];
+  const paths = await unreachableModules({
+    ...run,
+    changed: changes.map((entry) => entry.path),
+    scope: run.unreachableScope,
+  });
+  if (paths === undefined)
+    run.log({ event: `${run.phase}-unreachable-unscanned` });
+  return paths?.length
+    ? [
+        {
+          origin: "controller",
+          path: "Files this change left unreachable",
+          content: JSON.stringify({
+            scope:
+              "A file the change edits or removes imported each of these at the base; the result still holds it, and no tracked source file in the result imports it by a static import Factory resolves. A form Factory can't resolve, such as an alias or a computed import, keeps a file off this list, and a file may still be reached in a way imports don't show (an entry point a page or config names, a script).",
+            paths,
+          }),
+          complete: true,
+        },
+      ]
+    : [];
+}
+
 /** The commands that passed on the reviewed tree, and Factory's own changes they ran on. */
 export function validationRow(validation: PassedValidation): ResultEvidence {
   return {
@@ -1603,6 +1648,13 @@ export const REVIEW_GUIDANCE = {
  */
 const CANDIDATE_GUIDANCE =
   "Candidate media sets: alternatives exist so the operator can choose one. Factory delivers, validates, reviews, publishes and merges only the selected set; unselected sets stay in Factory's private staging and are never committed or validated, by design. Judge a criterion about the alternatives (how many were offered, that each was complete, how they differ) from the Controller candidate receipt: it lists every captured set with each member's role, destination, media type, size and sha256, the capture checks every set passed, which roles' bytes differ across sets, and the operator's selection; where a member has a reviewCopy, media-sets/ holds Factory's digest-checked copy of its bytes for read-only comparison. The operator viewed every set before choosing, so the selection is the human judgment of the alternatives' appearance; never ask the operator to confirm it again. Judge the delivered bytes (format, content, tests) from the selected set: candidate/ holds its members as Git LFS pointers whose oid and size are the receipt's sha256 and size, a member's reviewCopy, where it has one, holds its bytes, and the validation that passed on this tree read those bytes. A criterion worded about each candidate or every alternative is judged for the delivered selection plus the receipt's facts about the alternatives: never ask for, and never refuse or hold for missing, validation, tests or review of an unselected set. In a Work Item's result review, a receipt whose workItem is another item's belongs to a dependency whose accepted result the reviewed base holds (its deliveredDependency field says so): it lists only that item's selected set, whose members are in candidate/ as those pointers and its reviewCopy files hold their bytes, so judge this result's criteria about those files from them; that item's own review judged its alternatives and selection.";
+
+/**
+ * How review judges files the change left unreachable, when it left any
+ * (#2253): dead code merged past both reviews.
+ */
+export const UNREACHABLE_GUIDANCE =
+  "Files this change left unreachable: each file that row lists lost its last importer in this change. Each must be removed by the change, or kept with a reason a handoff note records (a public entry point, a script, a later Work Item the plan names); otherwise it is dead code under the engineering standard: refuse the criterion whose implementation orphaned it, citing the row and the file. Check the result first: a file still reached another way is no finding.";
 
 /** How review reads Objective knowledge, when peer notes are supplied. */
 const KNOWLEDGE_GUIDANCE =

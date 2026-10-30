@@ -110,7 +110,7 @@ const collectIn = (worktree, base, finalResponse = "", refusedTree) =>
   collect({
     worktree,
     base,
-    plan: { items: [work] },
+    plan: { items: [work], coverage: [] },
     item: work,
     mayChange: [],
     playbook: planning.playbook,

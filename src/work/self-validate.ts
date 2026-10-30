@@ -13,8 +13,9 @@ import { GitRefusal } from "../git.js";
 import { needsSelection } from "../media.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
+import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
-import { errorMessage, headAndTail } from "../text.js";
+import { errorMessage, failureExcerpt } from "../text.js";
 import { validateTree } from "../validate.js";
 import { hasGitlink, installStorePath } from "../worktree.js";
 import {
@@ -144,7 +145,11 @@ export class FinishRequests {
   }
 }
 
-/** Validate keeps the tail: failures report last. */
+/**
+ * The least of a failed command's output a Validate result keeps, in bytes,
+ * whatever else it holds; it gets what the result has left when that is
+ * more.
+ */
 const VALIDATION_OUTPUT_CHARS = 8_000;
 /**
  * Note excerpts in the criterion map, longest first: enough of a note to see
@@ -159,15 +164,27 @@ const NOTE_EXCERPTS = [600, 200, 0] as const;
  * as 4 bytes a token, and cuts the middle of anything longer, which would
  * drop part of the criterion map; the Claude Agent SDK's MCP cap is larger.
  * So the whole result stays under Codex's limit, with room for the exec
- * wrapper, and the same for all three workers.
+ * wrapper, and the same for all three workers. A failed run's result is
+ * bounded in UTF-8 bytes, since a command's output can be far from ASCII.
  */
 export const VALIDATE_RESULT_CHARS = 30_000;
 
-/** Plain text: the first line names the failed command; the tail holds the failures. */
-function bounded(output: string): string {
+/**
+ * Plain text within `bytes` of UTF-8: the start, which names the failed
+ * command, the end, and the lines that say why it failed wherever they are
+ * (#2201). Codex counts a result's bytes, and output such as a linter's
+ * code frames takes more than one a character, so the excerpt shrinks until
+ * its bytes fit.
+ */
+function bounded(output: string, bytes: number): string {
   const plain = stripVTControlCharacters(output);
-  const head = (plain.split("\n", 1)[0] ?? "").slice(0, 300);
-  return headAndTail(plain, head.length, VALIDATION_OUTPUT_CHARS);
+  const room = Math.max(VALIDATION_OUTPUT_CHARS, bytes);
+  for (let chars = room; ; ) {
+    const excerpt = failureExcerpt(plain, chars);
+    const size = Buffer.byteLength(excerpt);
+    if (size <= room) return excerpt;
+    chars = Math.max(0, Math.floor((chars * room) / size) - 1);
+  }
 }
 
 /**
@@ -222,6 +239,26 @@ export function criterionMap(
   return [head, ...shown.slice(0, fits), rest(fits)].join("\n");
 }
 
+/**
+ * A declared command the worker's Validate failed, and no later run of the
+ * attempt passed: the command, how it ended (`exit`, when it failed by
+ * itself) and its output as Validate returned it. An amendment may replace
+ * such a planned command, through its review (#2199).
+ */
+export interface WorkerValidateFailure {
+  command: string;
+  exit?: string;
+  output: string;
+}
+
+/** A finished result's `validateFailed`: what `validator`'s runs failed, or nothing. */
+export function validateFailed(validator: SelfValidation | undefined): {
+  validateFailed?: WorkerValidateFailure[];
+} {
+  const failures = validator?.failures() ?? [];
+  return failures.length ? { validateFailed: failures } : {};
+}
+
 export interface HandoffCheck {
   passed: boolean;
   text?: string;
@@ -252,6 +289,8 @@ export class SelfValidation {
   private readonly passedTrees = new Set<string>();
   /** Trees whose last run failed. */
   private readonly failedTrees = new Set<string>();
+  /** The commands a run failed and no later run passed, by command. */
+  private readonly failing = new Map<string, WorkerValidateFailure>();
 
   /** `signal` stops a running validation: cancel, or the attempt ending. */
   constructor(
@@ -322,23 +361,40 @@ export class SelfValidation {
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);
     const passed = result.kind === "passed";
-    const declared =
+    const compose = (output: string) => {
+      const declared =
+        result.kind === "passed"
+          ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
+          : `Validation failed. Fix this before you finish.\n${output}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
+      const composed = [
+        result.produced ? `${declared}\n\n${result.produced}` : declared,
+      ];
+      if (result.regenerated)
+        composed.push(
+          `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
+        );
+      if (result.formatted) composed.push(formattedNote(result.formatted));
+      if (handoff.text)
+        if (handoff.passed) composed.push(handoff.text);
+        else composed.unshift(handoff.text);
+      if (passed && !handoff.passed)
+        composed.unshift("Validation failed. Fix this before you finish.");
+      return composed;
+    };
+    // A failed command's output gets the bytes the rest of the result
+    // leaves (VALIDATE_RESULT_CHARS), cut to keep its failure lines (#2201).
+    const parts =
       result.kind === "passed"
-        ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
-    const parts = [
-      result.produced ? `${declared}\n\n${result.produced}` : declared,
-    ];
-    if (result.regenerated)
-      parts.push(
-        `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
-      );
-    if (result.formatted) parts.push(formattedNote(result.formatted));
-    if (handoff.text)
-      if (handoff.passed) parts.push(handoff.text);
-      else parts.unshift(handoff.text);
-    if (passed && !handoff.passed)
-      parts.unshift("Validation failed. Fix this before you finish.");
+        ? compose("")
+        : compose(
+            bounded(
+              result.failed
+                ? `${result.failed.command} failed:\n${result.output}`
+                : result.output || result.detail,
+              VALIDATE_RESULT_CHARS -
+                Buffer.byteLength(compose("").join("\n\n")),
+            ),
+          );
     // Self-review follows a passing run, last and within what the result has
     // left (VALIDATE_RESULT_CHARS), so no worker's harness cuts it.
     if (passed && handoff.criteria)
@@ -352,6 +408,22 @@ export class SelfValidation {
       this.passedTrees.add(tree);
       this.failedTrees.delete(tree);
     } else this.failedTrees.add(tree);
+    // A command a later run passed can pass: it is no longer evidence.
+    if (result.kind === "passed") this.failing.clear();
+    else {
+      for (const ran of result.results) this.failing.delete(ran.command);
+      if (result.failed)
+        this.failing.set(result.failed.command, {
+          command: result.failed.command,
+          ...(result.failed.exit !== undefined
+            ? { exit: result.failed.exit }
+            : {}),
+          output: bounded(
+            result.output || result.detail,
+            VALIDATION_OUTPUT_CHARS,
+          ),
+        });
+    }
     input.log({
       event: "worker-validate",
       run,
@@ -370,7 +442,9 @@ export class SelfValidation {
   async checkHandoff(): Promise<HandoffCheck> {
     const { item, worktree } = this.input;
     const { plan } = this.options;
-    const count = item.acceptance.length;
+    // The criteria its review judges, as its contract numbers them.
+    const criteria = resultCriteria(plan, item);
+    const count = criteria.length;
     const notes = await readHandoffNotes(worktree, plan, item);
     if (notes && "problem" in notes)
       return {
@@ -382,7 +456,7 @@ export class SelfValidation {
         passed: true,
         ...(count && {
           text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${count} acceptance criteria there, using the schema in your instructions.`,
-          criteria: (bound: number) => criterionMap(item.acceptance, [], bound),
+          criteria: (bound: number) => criterionMap(criteria, [], bound),
         }),
       };
     const verified = notes.filter(
@@ -398,8 +472,7 @@ export class SelfValidation {
       passed: true,
       text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.${unanswered.length ? ` No design note yet for ${unanswered.join(", ")}.` : ""}`,
       ...(count && {
-        criteria: (bound: number) =>
-          criterionMap(item.acceptance, notes, bound),
+        criteria: (bound: number) => criterionMap(criteria, notes, bound),
       }),
     };
   }
@@ -425,6 +498,11 @@ export class SelfValidation {
     } catch {
       return undefined;
     }
+  }
+
+  /** The commands this attempt's runs failed that no later run passed (`WorkerValidateFailure`). */
+  failures(): WorkerValidateFailure[] {
+    return [...this.failing.values()];
   }
 
   /** Whether the last run on the files the worker has now failed. */

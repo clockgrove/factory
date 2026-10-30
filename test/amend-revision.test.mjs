@@ -962,6 +962,150 @@ test("a reattempt item keeps every validation command the validate step didn't f
   );
 });
 
+// #2199 (Codex, a replay): the plan gave a Work Item a command that splits
+// a document at its first `---`, which is a Markdown table's separator row,
+// so the text it checks is cut off on any result. The worker's own
+// Validate found it before the validate step ran, and its amendment, which
+// changed only the delimiter, was rejected for naming no replaceable
+// command, with the operator's approval too. A command the worker's
+// Validate failed under the plan is now replaceable through the review,
+// which gets how it ended and its output.
+const CUT_AT_TABLE =
+  "awk 'BEGIN { RS = \"---\" } NR == 2' docs/guide.md | grep -q 'Rollout steps'";
+const AT_RULE =
+  "awk 'BEGIN { RS = \"\\n---\\n\" } NR == 2' docs/guide.md | grep -q 'Rollout steps'";
+const withCut = {
+  ...accepted,
+  items: [work("a", { validation: ["npm test", CUT_AT_TABLE] }), qa(["a"])],
+};
+const CUT_FAILURE = {
+  command: CUT_AT_TABLE,
+  exit: "1",
+  output: `Validation command failed (1): ${CUT_AT_TABLE}: \n`,
+};
+/** a's worker's Validate failed `failures` under the plan accepted at `plan`. */
+const workerFailed = (failures, plan = ACCEPTED_AT) => ({
+  "item:a:workerValidateFailed": { plan, failures },
+});
+const replacesCut = revision([
+  work("a", {
+    validation: ["npm test", AT_RULE],
+    brief:
+      "Export a from src/a.js; check the guide's rollout section, split at its horizontal rule.",
+  }),
+]);
+
+test("a reattempt item's validation command its worker's own Validate failed is replaced through the amendment's review, which gets how it ended and its output (#2199)", async () => {
+  const { checkout, state } = await discovered({
+    answer: withCut,
+    kept: workerFailed([CUT_FAILURE]),
+  });
+  const { planner, asked } = scripted(replacesCut, { findings: [] });
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.rejected, undefined);
+  // Nothing set back: the replacement and the restated brief stay.
+  assert.equal(round.restored, undefined);
+  const a = round.draft.items.find((item) => item.id === "a");
+  assert.deepEqual(a.validation, [
+    { command: "npm test" },
+    { command: AT_RULE },
+  ]);
+  assert.equal(a.brief, replacesCut.items[0].brief);
+
+  // The planner and the review are told the command is replaceable, and
+  // given the worker's failure; the review also the old command beside the
+  // new one, and how to judge them.
+  const progress = {
+    started: new Set(["a"]),
+    reattempt: new Set(["a"]),
+    replaceable: new Map([["a", [CUT_AT_TABLE]]]),
+    workerFailures: new Map([["a", [CUT_FAILURE]]]),
+  };
+  const rule = inJson(startedItemRule(progress));
+  assert.ok(rule.includes(inJson("or the item's worker's Validate")));
+  const replaceable = `"replaceableValidation":${JSON.stringify({ a: [CUT_AT_TABLE] })}`;
+  const failures = `"workerValidateFailures":${JSON.stringify({ a: [CUT_FAILURE] })}`;
+  const [planning] = asked;
+  assert.ok(planning.prompt.includes(rule));
+  assert.ok(planning.prompt.includes(replaceable));
+  assert.ok(planning.prompt.includes(failures));
+
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  const reviewing = asked[1];
+  assert.ok(reviewing.prompt.includes(rule));
+  assert.ok(reviewing.prompt.includes(replaceable));
+  assert.ok(reviewing.prompt.includes(failures));
+  for (const command of [CUT_AT_TABLE, AT_RULE])
+    assert.ok(reviewing.prompt.includes(JSON.stringify(command)));
+  assert.ok(
+    reviewing.prompt.includes(
+      "which Factory's validation or the item's worker's Validate failed its result on (FACTORY_AMENDMENT's workerValidateFailures holds each worker's Validate failure with how the command ended and its output",
+    ),
+  );
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.deepEqual(
+    result.plan.items.find((item) => item.id === "a").validation,
+    a.validation,
+  );
+  assert.equal(posted.length, 1);
+});
+
+test("a worker's Validate failure admits only a command the item still runs, under the plan accepted now, beside the validate step's (#2199)", async () => {
+  const cases = [
+    // Under an earlier plan.
+    workerFailed([CUT_FAILURE], "2025-12-31T00:00:00.000Z"),
+    // Of a command the item doesn't run.
+    workerFailed([{ ...CUT_FAILURE, command: "npm run lint" }]),
+    // None.
+    {},
+  ];
+  for (const kept of cases) {
+    const { checkout, state } = await discovered({ answer: withCut, kept });
+    const { planner, asked } = scripted(replacesCut);
+    const first = await step(state, depsOf(checkout, planner));
+    assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+    const round = state.done["amend:op-1:plan"];
+    assert.deepEqual(round.restored, [
+      { itemId: "a", fields: ["brief", "validation"] },
+    ]);
+    assert.deepEqual(
+      round.draft.items.find((item) => item.id === "a").validation,
+      [{ command: "npm test" }, { command: CUT_AT_TABLE }],
+    );
+    assert.ok(!asked[0].prompt.includes('"replaceableValidation"'));
+    assert.ok(!asked[0].prompt.includes('"workerValidateFailures"'));
+  }
+  // With the validate step's, each command is listed once, the validate
+  // step's first.
+  const { checkout, state } = await discovered({
+    answer: withCut,
+    kept: {
+      ...failedOn(["npm test", CUT_AT_TABLE]),
+      ...workerFailed([CUT_FAILURE]),
+    },
+  });
+  const { planner, asked } = scripted(replacesCut);
+  assert.equal(
+    (await step(state, depsOf(checkout, planner))).outcome.kind,
+    "done",
+  );
+  assert.equal(state.done["amend:op-1:plan"].restored, undefined);
+  assert.ok(
+    asked[0].prompt.includes(
+      `"replaceableValidation":${JSON.stringify({ a: ["npm test", CUT_AT_TABLE] })}`,
+    ),
+  );
+});
+
 test("the validate step keeps every command it failed an item's results on, under the plan accepted then (#2107)", () => {
   const state = { kept: { "plan:acceptedAt": ACCEPTED_AT } };
   assert.deepEqual(failedCommandKept(state, "a", undefined), {});

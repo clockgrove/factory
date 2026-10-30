@@ -75,7 +75,7 @@ test("a conflict repair whose resolution is the result's own tree on the moved b
     return collect({
       worktree,
       base,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: [],
       playbook: planning.playbook,

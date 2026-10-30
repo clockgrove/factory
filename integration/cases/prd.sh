@@ -224,7 +224,7 @@ json.dump({"scope": "in-scope", "reason": f"Callers also need a case-insensitive
            "acceptance": [f"countCharFold{id}(\"Banana\", \"b\") is 1."], "dependencies": []}, open(f, "w"))
 PY
   local at; at=$(iso_ms)
-  cli_t 60 propose-amendment "$n" --file "$f" >"$RUN_DIR/amend.$n.out" 2>&1; local rc=$?
+  cli_t 60 propose-amendment "$n" --file "$f" >"$RUN_DIR/amend.$(issue_key "$n").out" 2>&1; local rc=$?
   # The Objective names none of the amendment's files, so its planner may ask
   # whether to plan them: the operator who proposed it answers once, with
   # that authority. A second question, or a refused answer, is the outcome.
@@ -234,7 +234,7 @@ PY
     local qid text choice qa; qid=$(hold_field "$hj" id); qa=$(iso_ms)
     text="In scope: I proposed this amendment and authorise its new files. Plan countCharFold$id in its own files src/countCharFold$id.js and test/countCharFold$id.test.js, owned by a new Work Item; the files the Objective names stay as they are."
     choice=$(python3 -c 'import json,sys;print(json.dumps({"id": sys.argv[1], "answer": "answer", "text": sys.argv[2]}))' "$qid" "$text")
-    if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$n.out" 2>&1; then asked="answer refused"
+    if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$(issue_key "$n").out" 2>&1; then asked="answer refused"
     else
       wait_for 600 p_amend_ready "$n" 'amend:*' "$qid" "$choice" "$qa"
       local next; next=$(st hold "$n" 'amend:*:plan')
@@ -301,7 +301,7 @@ case_discovery() {
   n=$(new_objective discovery "worker discovery" ID="$id") || return
   # A drain needs Factory's state for N: it has it from admission, before planning starts.
   wait_for 300 p_known "$n"
-  p_control "$n" drain draining || { record plan.discovery FAIL "#$n never drained ($(st phase "$n")): $(tail -c 300 "$RUN_DIR/control.$n.out" 2>/dev/null)" "$t0"; cancel_wait "$n"; return; }
+  p_control "$n" drain draining || { record plan.discovery FAIL "#$n never drained ($(st phase "$n")): $(tail -c 300 "$RUN_DIR/control.$(issue_key "$n").out" 2>/dev/null)" "$t0"; cancel_wait "$n"; return; }
   log "#$n drained ($(st phase "$n"))"
   wait_for 1500 p_plan_ready "$n"
   if [ "$(st has "$n" done.plan)" != 1 ]; then record plan.discovery FAIL "#$n: no plan accepted while drained ($(st phase "$n"))" "$t0"; cancel_wait "$n"; return; fi
@@ -310,9 +310,9 @@ case_discovery() {
   sed "s/{{ID}}/$id/g" "$SUITE/fixtures/repo/disc-companion.test.js" >"$test" || return
   person=$(gh api -X PUT "repos/$REPO/contents/test/discCompanion$id.test.js" -f message="Person: a test of discMore$id beside discBase$id" \
     -f content="$(base64 -w0 <"$test")" --jq .commit.sha) && [ -n "$person" ] || { record plan.discovery FAIL "#$n: couldn't land the person's test" "$t0"; cancel_wait "$n"; return; }
-  echo "$person" >"$RUN_DIR/discovery-person.$n"
+  echo "$person" >"$RUN_DIR/discovery-person.$(issue_key "$n")"
   log "#$n: a person's test/discCompanion$id.test.js landed on main as ${person:0:12}; plan accepted, no Work Item started"
-  p_control "$n" resume null || { record plan.discovery FAIL "#$n never resumed ($(st phase "$n")): $(tail -c 300 "$RUN_DIR/control.$n.out" 2>/dev/null)" "$t0"; cancel_wait "$n"; return; }
+  p_control "$n" resume null || { record plan.discovery FAIL "#$n never resumed ($(st phase "$n")): $(tail -c 300 "$RUN_DIR/control.$(issue_key "$n").out" 2>/dev/null)" "$t0"; cancel_wait "$n"; return; }
   wait_for 1800 p_amend_ready "$n" 'amend:worker-*'
   # The Objective's Constraints put that file in scope, in a Work Item of its
   # own: its planner may still ask whether to plan it, answered once with that
@@ -322,7 +322,7 @@ case_discovery() {
     local qid text choice qa; qid=$(hold_field "$hj" id); qa=$(iso_ms)
     text="In scope: the Objective's Constraints put a file that a test in the repository requires for discBase$id in scope, in a Work Item of its own. Plan the paths the worker's discovery names in a new Work Item; the files the Objective names stay as they are."
     choice=$(python3 -c 'import json,sys;print(json.dumps({"id": sys.argv[1], "answer": "answer", "text": sys.argv[2]}))' "$qid" "$text")
-    if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$n.out" 2>&1; then asked="answer refused"
+    if ! answer_t 60 "$n" answer --question "$qid" --text "$text" >"$RUN_DIR/answer.$(issue_key "$n").out" 2>&1; then asked="answer refused"
     else
       wait_for 600 p_amend_ready "$n" 'amend:worker-*' "$qid" "$choice" "$qa"
       local next; next=$(st hold "$n" 'amend:worker-*:plan')
@@ -345,7 +345,7 @@ p_control() {
   local try
   for try in 1 2 3; do
     p_mode_is "$1" "$3" && return 0
-    cli_t 60 "$2" "$1" >>"$RUN_DIR/control.$1.out" 2>&1
+    cli_t 60 "$2" "$1" >>"$RUN_DIR/control.$(issue_key "$1").out" 2>&1
     wait_for 60 p_mode_is "$1" "$3" && return 0
     stopping && break
   done
@@ -360,7 +360,7 @@ p_plan_ready() {
   auto_answer "$1" >/dev/null; [ $? = 2 ]
 }
 # discovery_check N T0 [EVIDENCE]: from N's state and logs, the case's record of
-# the person's commit (discovery-person.N) and the kept checkout alone (also
+# the person's commit (discovery-person.KEY, issue_key N) and the kept checkout alone (also
 # run-suite.sh --replay). The trigger is proved when the discovering item's kept
 # base (else the first item that worked) holds the person's commit; with no
 # worker amendment, each work attempt shows how the worker met its rule.
@@ -368,7 +368,7 @@ discovery_check() {
   local n=$1 pl rv; pl=$(st events "$n" event=start 'step=amend:worker-*:plan'); rv=$(st events "$n" event=outcome outcome=done 'step=amend:worker-*:review')
   local tries; tries=$(st work-attempts "$n")
   local person item base co why trig=1
-  person=$(cat "${KEPT:-$RUN_DIR}/discovery-person.$n" 2>/dev/null)
+  person=$(cat "${KEPT:-$RUN_DIR}/discovery-person.$(issue_key "$n")" 2>/dev/null)
   item=$(st worker-proposals "$n" | awk 'NR==1{print $2}')
   [ -n "$item" ] || item=$(python3 -c 'import json,sys
 l = [json.loads(x) for x in sys.argv[1].splitlines() if x.strip()]
@@ -619,7 +619,7 @@ nocheck_github() {
 q_order() { # N VALUE: set the card's "Factory order" number
   local item fid; item=$(gh_item "$1") || return 1
   fid=$(gh api graphql -f id="$(gh_pj "d['id']")" -f query='query($id:ID!){node(id:$id){... on ProjectV2{field(name:"Factory order"){... on ProjectV2Field{id}}}}}' --jq .data.node.field.id) || return 1
-  gh project item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$fid" --number "$2" >/dev/null && log "order #$1 -> $2"
+  project_write item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$fid" --number "$2" >/dev/null && log "order #$1 -> $2"
 }
 q_mode() { python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get("mode","running"))
@@ -683,7 +683,7 @@ print(d.get("status"), (node[0].get("status") if node else "absent"))' "$RUN_DIR
   wait_for 180 bash -c "[ \"\$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(\"mode\"))' '$ROOT/queue.json' 2>/dev/null)\" = paused ]"
   local paused; paused=$(q_mode)
   local a b c; a=$(new_issue readme "production: order 3" ID="${id}b") && b=$(new_issue happy "production: order 2" ID="${id}c") && c=$(new_issue pair "production: order 1, two items" ID="${id}d") || { q_uninstall; return; }
-  local x; for x in "$a" "$b" "$c"; do queue_issue "$x" || { record queue.pause-github FAIL "setup: couldn't queue #$x: $(head -c 300 "$RUN_DIR/enqueue.$x.err")" "$t0"; q_uninstall; return; }; done
+  local x; for x in "$a" "$b" "$c"; do queue_issue "$x" || { record queue.pause-github FAIL "setup: couldn't queue #$x: $(head -c 300 "$RUN_DIR/enqueue.$(issue_key "$x").err")" "$t0"; q_uninstall; return; }; done
   q_order "$a" 3; q_order "$b" 2; q_order "$c" 1
   sleep 90
   local admitted_paused=0; for x in "$a" "$b" "$c"; do [ "$(st events "$x" event=admitted)" = 0 ] || admitted_paused=1; done
@@ -846,9 +846,9 @@ case_toolchain() {
   t_setup "$pnpm_v" "$bad" || { record toolchain.pin FAIL "couldn't make repository T and installation T: $(tail -3 "$RUN_DIR/journal" 2>/dev/null | paste -sd' ' | tail -c 300)" "$t0"; t_end; return 1; }
   local HOLD_POLICY="d2 review decide more" n
   n=$(new_objective toolchain "toolchain pin" FN="upper$id") || { record toolchain.pin FAIL "couldn't file or queue the Objective on $REPO" "$t0"; t_end; return 1; }
-  echo "$node_v $pnpm_v $bad" >"$RUN_DIR/toolchain-host.$n"
+  echo "$node_v $pnpm_v $bad" >"$RUN_DIR/toolchain-host.$(issue_key "$n")"
   HOLD_POLICY="" wait_phase "$n" '^hold:' 600 >/dev/null
-  local hj; hj=$(st hold "$n" check); printf '%s\n' "$hj" >"$RUN_DIR/toolchain-hold.$n"
+  local hj; hj=$(st hold "$n" check); printf '%s\n' "$hj" >"$RUN_DIR/toolchain-hold.$(issue_key "$n")"
   if [ "$hj" != null ] && [[ ,$(hold_field "$hj" answers), == *,recheck,* ]]; then
     local sha person
     sha=$(gh api "repos/$REPO/contents/.nvmrc?ref=main" --jq .sha) &&
@@ -862,12 +862,13 @@ case_toolchain() {
   t_end "$n"
 }
 # toolchain_check N T0: from T's state, the case's records of the host's
-# versions and the plan check's hold (toolchain-host.N, toolchain-hold.N) and
+# versions and the plan check's hold (toolchain-host.KEY, toolchain-hold.KEY:
+# issue_key N) and
 # T's checkout alone (also run-suite.sh --replay).
 toolchain_check() {
-  local n=$1 d=${KEPT:-$RUN_DIR} node_v pnpm_v bad
-  read -r node_v pnpm_v bad <"$d/toolchain-host.$n" 2>/dev/null
-  local hj; hj=$(cat "$d/toolchain-hold.$n" 2>/dev/null); [ -n "$hj" ] || hj=null
+  local n=$1 d=${KEPT:-$RUN_DIR} node_v pnpm_v bad key; key=$(issue_key "$1")
+  read -r node_v pnpm_v bad <"$d/toolchain-host.$key" 2>/dev/null
+  local hj; hj=$(cat "$d/toolchain-hold.$key" 2>/dev/null); [ -n "$hj" ] || hj=null
   local planned; planned=$(st at "$n" first event=start 'step=plan*')
   # The plan check: a hold of the check step, before any planning, offering
   # recheck, whose problem names the pin, the host's node and the fix.

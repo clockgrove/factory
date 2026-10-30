@@ -7,7 +7,7 @@ import { validationMembers } from "../media.js";
 import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
-import { headAndTail } from "../text.js";
+import { failureExcerpt } from "../text.js";
 import { formatRef, lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, installStorePath, worktreePath } from "../worktree.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
@@ -17,8 +17,7 @@ import {
   type BuildDeps,
   candidate,
   commandTimeoutMs,
-  KEPT_OUTPUT_HEAD,
-  KEPT_OUTPUT_TAIL,
+  KEPT_OUTPUT_CHARS,
   type StackPlace,
   selection,
   stepKey,
@@ -139,7 +138,7 @@ export async function validateStep(
       // longer than that (up to the raised review-artifact stream bounds)
       // is kept whole in a file for the operator; no model can read it.
       let keptOutput = result.output;
-      if (result.output.length > KEPT_OUTPUT_HEAD + KEPT_OUTPUT_TAIL) {
+      if (result.output.length > KEPT_OUTPUT_CHARS) {
         const outputFile = join(
           workDir,
           "outputs",
@@ -148,7 +147,9 @@ export async function validateStep(
         );
         await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
         await writeFile(outputFile, result.output, { mode: 0o600 });
-        keptOutput = `${headAndTail(result.output, KEPT_OUTPUT_HEAD, KEPT_OUTPUT_TAIL)}\n[The complete output is kept for the operator at ${outputFile}; it is not readable from the worker's checkout.]`;
+        // The excerpt keeps the failure lines wherever they are: the
+        // diagnosis and the worker's repair read it (#2201).
+        keptOutput = `${failureExcerpt(result.output, KEPT_OUTPUT_CHARS)}\n[The complete output is kept for the operator at ${outputFile}; it is not readable from the worker's checkout.]`;
       }
       const failed: Extract<KeptValidation["result"], { kind: "failed" }> = {
         kind: "failed",

@@ -26,6 +26,7 @@ import {
   type SelfValidateOptions,
   SelfValidation,
   selectedMediaNote,
+  validateFailed,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -863,6 +864,7 @@ export class CopilotWorker implements Worker {
         kind: "finished",
         finalResponse: result.text,
         ...(tree && { validated: { tree, commands: [...input.commands] } }),
+        ...validateFailed(validator),
         ...withSession(turn?.end(result.session)),
       };
     } catch (error) {

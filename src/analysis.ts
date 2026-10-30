@@ -492,6 +492,8 @@ export interface AnalysisReport {
     requestMs: number;
     /** Requests traced one by one (`github-request`), by status (or `network`) and failure category. */
     traced: Record<string, number>;
+    /** Traced requests that failed with error codes (no answer, or a body cut short), by failure category and codes: an outage's, told from a bug's. */
+    causes: Record<string, number>;
   };
   limitations: string[];
 }
@@ -923,6 +925,7 @@ class Analysis {
     ms: 0,
     requestMs: 0,
     traced: {},
+    causes: {},
   };
   private from?: string;
   private to?: string;
@@ -1100,6 +1103,11 @@ class Analysis {
             : `${String(event.status ?? "network")}${event.category ? ` ${String(event.category)}` : ""}`,
           num(event.unnoted) ?? 1,
         );
+        if (Array.isArray(event.codes) && event.codes.length)
+          bump(
+            this.github.causes,
+            `${String(event.category ?? "failed")} ${event.codes.map(String).join(" ")}`,
+          );
         break;
       case "github-call": {
         this.githubJobs.add(String(event.job));
@@ -1540,6 +1548,9 @@ function analysisText(report: AnalysisReport): string {
     `  ${count(g.calls)} requests in ${g.runs} runs (${g.jobs} jobs and steps) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.requestMs)} in requests`,
     ...(Object.keys(g.traced).length
       ? [`  traced requests by status and failure: ${tally(g.traced)}`]
+      : []),
+    ...(Object.keys(g.causes).length
+      ? [`  failed requests by error code: ${tally(g.causes)}`]
       : []),
   ]);
   lines.push("", ...report.limitations.map((line) => `Note: ${line}`));

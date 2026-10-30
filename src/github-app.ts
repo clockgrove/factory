@@ -12,6 +12,7 @@ import type { CoreConfig } from "./config.js";
 import { serviceCredential } from "./credentials.js";
 import { remoteToken } from "./git.js";
 import { GitHub } from "./github.js";
+import { failureText } from "./github-trace.js";
 import { installationPaths } from "./paths.js";
 import { writeAtomic } from "./state.js";
 
@@ -138,14 +139,21 @@ export async function organizationOwner(
   api = "https://api.github.com",
 ): Promise<boolean> {
   const path = `/users/${encodeURIComponent(owner)}`;
-  const response = await fetch(`${api}${path}`, {
-    headers: {
-      accept: "application/vnd.github+json",
-      "x-github-api-version": "2022-11-28",
-    },
-    redirect: "error",
-    signal: AbortSignal.timeout(30_000),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${api}${path}`, {
+      headers: {
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+      },
+      redirect: "error",
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    throw new Error(`GitHub GET ${path}: ${failureText(error)}`, {
+      cause: error,
+    });
+  }
   if (!response.ok) throw new Error(`GitHub GET ${path}: ${response.status}`);
   const { type } = (await response.json()) as { type?: unknown };
   return type === "Organization";

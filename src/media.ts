@@ -71,6 +71,7 @@ import {
   sha256,
 } from "./git.js";
 import { type CommitAuthor, rateLimitOf } from "./github.js";
+import { failureText } from "./github-trace.js";
 import { namesPath, validPath } from "./objective.js";
 import {
   ContainedError,
@@ -523,7 +524,7 @@ async function attachmentSource(
       request.signal.throwIfAborted();
       return {
         kind: "retry",
-        reason: `Downloading ${path}: ${errorMessage(error)}`,
+        reason: `Downloading ${path}: ${failureText(error)}`,
       };
     }
     if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -573,7 +574,7 @@ async function attachmentSource(
       request.signal.throwIfAborted();
       return {
         kind: "retry",
-        reason: `Downloading ${path}: ${errorMessage(error)}`,
+        reason: `Downloading ${path}: ${failureText(error)}`,
       };
     }
     return { kind: "done", value: await digestFile(file) };

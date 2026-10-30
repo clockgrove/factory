@@ -109,7 +109,7 @@ test("a worker's change to CI configuration, .github or CODEOWNERS is refused un
     collect({
       worktree,
       base,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: paths,
       playbook: planning.playbook,
@@ -168,7 +168,7 @@ test("a worker's change outside its Work Item's owned paths is refused at collec
     collect({
       worktree,
       base,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: [],
       sandbox,
@@ -209,7 +209,7 @@ test("a worker's change to the configured playbook is refused unless the Objecti
     collect({
       worktree,
       base,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: paths,
       playbook: planning.playbook,
@@ -249,7 +249,7 @@ test("one secret scan of every changed file names the file with a secret and pas
     collect({
       worktree,
       base,
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       mayChange: [],
       playbook: planning.playbook,
@@ -642,7 +642,7 @@ for (const path of [
       checkout: tmpdir(),
       repository: REPO,
       directory: tempDir("factory-media-"),
-      plan: { items: [work] },
+      plan: { items: [work], coverage: [] },
       item: work,
       base: "HEAD",
       body: path,

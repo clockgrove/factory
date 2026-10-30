@@ -330,6 +330,8 @@ export class GitHubSync {
   /** Known issues GitHub no longer has: left out of later reads. */
   private readonly gone = new Set<number>();
   private lastPoll = 0;
+  /** The reset of the low budget last logged (`github-budget-low`): one event per reset. */
+  private lowLogged = 0;
   /**
    * `factory run` cards queued and not yet admitted, with how to answer
    * their request when the operator dequeues them first: read by number
@@ -465,7 +467,23 @@ export class GitHubSync {
         await this.github.checkIdentity(signal);
         this.identified = true;
       });
+    // The installation's budget below its reserve (github.reserve, the
+    // client's lowBudget): what can wait waits for the reset, the queue
+    // poll, comment reads, live status comments and Work Item issues.
+    // Steps, cards, questions and replies go on. One event per reset.
+    const low = this.github.lowBudget();
+    if (low && low.resetAt !== this.lowLogged) {
+      this.lowLogged = low.resetAt;
+      this.log.write(0, {
+        event: "github-budget-low",
+        resource: low.resource,
+        remaining: low.remaining,
+        reserve: low.reserve,
+        reset: new Date(low.resetAt).toISOString(),
+      });
+    }
     const due =
+      !low &&
       this.now() - this.lastPoll >= this.config.queue.pollSeconds * 1000;
     if (due) {
       this.lastPoll = this.now();
@@ -562,8 +580,10 @@ export class GitHubSync {
         this.show(runner, module, sync);
         this.ask(runner);
         this.closings(runner);
-        this.status(runner, sync);
-        this.track(runner);
+        if (!low) {
+          this.status(runner, sync);
+          this.track(runner);
+        }
         this.reply(runner, module, sync);
         this.cancelled(runner, module);
         if (finished) return;

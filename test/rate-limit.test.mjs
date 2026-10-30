@@ -2,8 +2,10 @@
 // secondary, holds every request it covers until its reset (github.ts
 // `send`), and a rate-limited sync job runs again after the reset, never
 // sooner and never given up; any sync job that failed runs again once its
-// wait is over, with nothing else changed (jobs.ts `held`). GitHub is a
-// local fake that answers with GitHub's own headers.
+// wait is over, with nothing else changed (jobs.ts `held`). A budget an
+// answer reports below github.reserve defers the queue poll until its reset
+// (#2194, github-sync.ts `tick`). GitHub is a local fake that answers with
+// GitHub's own headers.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, test } from "node:test";
@@ -54,10 +56,10 @@ async function fakeGitHub(answer) {
   return { api: `http://127.0.0.1:${server.address().port}`, requests };
 }
 
-/** A client of the fake as a token's login (no GitHub CLI). */
-function client(api) {
+/** A client of the fake as a token's login (no GitHub CLI), keeping `reserve` (github.reserve). */
+function client(api, reserve) {
   process.env.FACTORY_GITHUB_TOKEN = "ghs_test";
-  return new GitHub(REPO, api);
+  return new GitHub(REPO, api, undefined, reserve);
 }
 
 /** The routes a live status comment takes: the login, the comment list, the post. */
@@ -466,6 +468,7 @@ test("a cancelled factory run's card move that failed runs again from the tick o
     owner: "drill",
     name: "target",
     takeAmbient: () => undefined,
+    lowBudget: () => undefined,
     sameRepository: () => {},
     // The card read: rate-limited once, then an issue with no card.
     graphqlPartial: async () => {
@@ -508,6 +511,7 @@ test("a cancelled factory run's card move stops once its issue is gone", async (
   const github = {
     repository: REPO,
     takeAmbient: () => undefined,
+    lowBudget: () => undefined,
     graphqlPartial: async () => {
       tries += 1;
       throw new TransientError("GitHub POST /graphql: 502 Bad Gateway");
@@ -528,6 +532,66 @@ test("a cancelled factory run's card move stops once its issue is gone", async (
   tick();
   await sleep(50);
   assert.equal(tries, 1);
+});
+
+test("an answer that reports the budget below github.reserve defers the queue poll until its reset, logged once; above it the poll goes on", async () => {
+  // Whole seconds, as GitHub sends them, 2 to 3 s away.
+  const resetAt = (Math.floor(Date.now() / 1000) + 3) * 1000;
+  const fake = await fakeGitHub((route) =>
+    route === `GET /repos/${REPO}/issues/${ISSUE}`
+      ? [
+          200,
+          { number: ISSUE, state: "open" },
+          {
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": "1500",
+            "x-ratelimit-reset": String(resetAt / 1000),
+            "x-ratelimit-resource": "core",
+          },
+        ]
+      : [200, { data: {} }],
+  );
+  const polls = () =>
+    fake.requests.filter((r) => r.route === "POST /graphql").length;
+  const tick = (sync) =>
+    sync.tick({ runners: new Map(), unreadable: new Map(), guard: () => {} });
+  const lows = (events) =>
+    events.filter((e) => e.event === "github-budget-low");
+
+  // Above the reserve (1000): nothing changes, the poll is sent.
+  const above = client(fake.api, 1000);
+  await above.issue(ISSUE);
+  const plain = harness(above, () => Date.now());
+  plain.sync.identified = true;
+  tick(plain.sync);
+  await until(() => polls() === 1, "the poll above the reserve");
+  assert.deepEqual(lows(plain.events), []);
+
+  // Below it (2000): the poll waits for the reset, and one event says why.
+  const below = client(fake.api, 2000);
+  await below.issue(ISSUE);
+  const { sync, events } = harness(below, () => Date.now());
+  sync.identified = true;
+  tick(sync);
+  await sleep(100);
+  tick(sync);
+  await sleep(100);
+  assert.equal(polls(), 1);
+  assert.deepEqual(lows(events), [
+    {
+      issue: 0,
+      event: "github-budget-low",
+      resource: "core",
+      remaining: 1500,
+      reserve: 2000,
+      reset: iso(resetAt),
+    },
+  ]);
+  // After the reset, the next tick polls; no run failed meanwhile.
+  while (Date.now() < resetAt + 50) await sleep(50);
+  tick(sync);
+  await until(() => polls() === 2, "the poll after the reset");
+  assert.equal(lows(events).length, 1);
 });
 
 test("a job that names its earliest retry waits for it with jitter, even one that otherwise retries at once", async () => {

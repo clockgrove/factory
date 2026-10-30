@@ -244,9 +244,16 @@ export interface CoreConfig {
    * operator's recorded opt-out: Factory acts as the GitHub CLI's login
    * (or FACTORY_GITHUB_TOKEN). One of the two, never both; with neither,
    * readiness blocks and the service refuses to start until the
-   * configuration names one (github-app.ts identityUnchosen). Operational.
+   * configuration names one (github-app.ts identityUnchosen). `reserve`
+   * is the requests of the installation's hourly budget kept for work
+   * that can't wait: below it, work that can waits for the reset
+   * (github-sync.ts `tick`). Operational.
    */
-  github: { app?: { id: number; installationId?: number }; login: boolean };
+  github: {
+    app?: { id: number; installationId?: number };
+    login: boolean;
+    reserve: number;
+  };
   /**
    * The GitHub logins a hold, an Objective's report and a cancel mention,
    * so GitHub notifies them. Operational.
@@ -743,6 +750,7 @@ export function loadConfig(repository: string): CoreConfig {
           object({ id: whole(1), installationId: optional(whole(1)) }),
         ),
         login: flag(false),
+        reserve: whole(0, 100),
       }),
       operators: logins,
     },

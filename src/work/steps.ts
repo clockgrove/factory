@@ -405,7 +405,12 @@ export function itemStep(
                 item,
                 commandTimeoutMs(deps),
                 deps.config.validation.formatCommand !== undefined,
-              )
+              ) +
+              // A Work Item's commands may run again on the Objective's
+              // merges it was built without (step-validate.ts, #2240).
+              (item.kind === "qa" || place
+                ? 0
+                : item.validation.length * commandTimeoutMs(deps))
             : 45 * MINUTE,
     run: async (context) => {
       const outcome = await run(item, context, deps, place);

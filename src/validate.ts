@@ -59,6 +59,7 @@ import {
 import { forceRemove, openParent, within } from "./paths.js";
 import {
   LOCKFILE_RESOLUTION,
+  namedBase,
   PINNED_NPM_BOOTSTRAP,
   PINNED_PNPM_BOOTSTRAP,
   packageBootstrap,
@@ -163,11 +164,16 @@ export interface ValidateInput {
   /** The commit a later item started from, when not the base: its new scripts stay fixed too. */
   predecessor?: string;
   /**
-   * Item validation: the commit the candidate was built on, the commands'
-   * FACTORY_BASE_SHA, so a base-relative check sees only this item's
-   * change. Absent (QA and final validation, on the shared default
-   * branch): the plan's base, which no single commit can replace there;
-   * the plan check refuses integrated commands that use it.
+   * Item validation: the commit the candidate was built on, the
+   * FACTORY_BASE_SHA of each command that names its base
+   * (planning/facts.ts `namedBase`), so the item's own base-relative check
+   * sees only this item's change. Every other command gets the plan's
+   * base, as final validation runs it: a check that reads the base itself
+   * (a budget, a size limit, a coverage delta) counts the Objective's
+   * change so far here as it will there (#2240). Absent (QA and final
+   * validation, on the shared default branch): the plan's base for every
+   * command, which no single commit can replace there; the plan check
+   * refuses integrated commands that name it.
    */
   base?: string;
   /** Final validation of one Work Item's commands: the declared Package manager update must have landed. */
@@ -543,8 +549,13 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         env: {
           ...validationEnvironment(credentials),
           // Factory fetches by SHA and never moves the checkout's
-          // remote-tracking branches, so base-relative checks use this (#1664).
-          FACTORY_BASE_SHA: input.base ?? plan.base,
+          // remote-tracking branches, so base-relative checks use this
+          // (#1664): the item's own base for a command that names it, else
+          // the plan's, as final validation gives it (#2240).
+          FACTORY_BASE_SHA:
+            input.base !== undefined && namedBase(command, plan.base)
+              ? input.base
+              : plan.base,
         },
         config: grant.offline
           ? { ...input.sandbox, network: "off" }

@@ -308,10 +308,15 @@ test("an Objective with no final command still gets QA on the default branch: fi
   );
   assert.match(failed.question, /node check\.mjs/);
   assert.equal(stateOf(inst, 61).kept["final:flaky"].command, "node check.mjs");
-  // Other checks are left, so it can be retired too.
+  // Other checks are left, so it can be retired too; `repair` sends it
+  // back to a, whose own commands failed (#2240).
   assert.deepEqual(
     failed.options.map((option) => option.answer),
-    ["retry", "retire-command", "replan", "cancel"],
+    ["repair", "retry", "retire-command", "replan", "cancel"],
+  );
+  assert.match(
+    failed.question,
+    /Answer `repair` to send this failure back to Work Item a, whose own commands failed there:/,
   );
   const fixed = commit("parser.txt", "fixed\n", "fixed on main");
   assert.equal(

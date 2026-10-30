@@ -23,8 +23,8 @@
  *   touched the same paths in the same period (Factory's are the merge
  *   records of every Objective here; everything else counts as human).
  *
- * Read-only. Every scan is bounded (MAX_*), and the report says which
- * bound it hit.
+ * Read-only. `git blame` is what costs: its calls are bounded (MAX_BLAMES),
+ * and the report says when it hit that bound.
  */
 import { displayTime } from "./display.js";
 import { pinnedGitExit } from "./git.js";
@@ -36,11 +36,6 @@ const HORIZONS = [7, 30, 90] as const;
 const FIXUP_DAYS = 30;
 /** The single Objective's baseline period: this many days either side of its merges. */
 const BASELINE_MARGIN_DAYS = 30;
-const MAX_CHAIN = 50_000;
-const MAX_OBJECTIVES = 100;
-const MAX_BASELINE_COMMITS = 200;
-const MAX_FIXUP_COMMITS = 200;
-const MAX_CHANGE_COMMITS = 1_000;
 const MAX_BLAMES = 1_500;
 const GIT_TIMEOUT_MS = 120_000;
 
@@ -163,7 +158,6 @@ export async function survival(
           since: Date.parse(selection.since) / 1000,
           until: Date.parse(selection.until) / 1000,
         };
-  let skipped = 0;
   for (const issue of listAllObjectives(options.objectives)) {
     const loaded = findState(options.objectives, issue);
     if (loaded?.kind !== "ok") continue;
@@ -177,18 +171,12 @@ export async function survival(
         : merges.filter((m) => m.at >= range!.since && m.at <= range!.until);
     if (!chosen.length && !("issue" in selection && issue === selection.issue))
       continue;
-    if (selected.length < MAX_OBJECTIVES)
-      selected.push({ issue, merges: chosen });
-    else skipped++;
+    selected.push({ issue, merges: chosen });
   }
   if ("issue" in selection && !selected.length)
     throw new SurvivalError(
       "no_factory_state",
       `Factory has no state for #${selection.issue}.`,
-    );
-  if (skipped)
-    scan.cap(
-      `objectives: reported the first ${MAX_OBJECTIVES}; ${skipped} more merged in the range`,
     );
 
   const recorded = selected.flatMap((o) => o.merges.map((m) => m.at));
@@ -295,12 +283,8 @@ export async function survival(
       c.time <= period.until &&
       c.files.some((f) => paths.has(f)),
   );
-  if (human.length > MAX_BASELINE_COMMITS)
-    scan.cap(
-      `baseline: read the latest ${MAX_BASELINE_COMMITS} of ${human.length} commits in the same paths`,
-    );
   const baseline: [Commit, Counted][] = [];
-  for (const commit of human.slice(0, MAX_BASELINE_COMMITS)) {
+  for (const commit of human) {
     const result = await scan.count(
       commit,
       commit.files.filter((f) => paths.has(f)),
@@ -384,7 +368,6 @@ class Scan {
         "--diff-merges=first-parent",
         "--no-renames",
         "--name-only",
-        `--max-count=${MAX_CHAIN + 1}`,
         `--since=${iso(since)}`,
         "--format=%x01%H %ct %P%x02%s",
         tip,
@@ -401,12 +384,6 @@ class Scan {
         subject,
         files: rest.filter(Boolean),
       });
-    }
-    if (chain.length > MAX_CHAIN) {
-      this.cap(
-        `history: read the latest ${MAX_CHAIN} first-parent commits of the default branch`,
-      );
-      chain.length = MAX_CHAIN;
     }
     return chain;
   }
@@ -442,16 +419,9 @@ class Scan {
     own = new Set([commit.sha]);
     if (commit.parents.length > 1) {
       const out =
-        (await this.git([
-          "rev-list",
-          `--max-count=${MAX_CHANGE_COMMITS}`,
-          `${commit.parents[0]}..${commit.sha}`,
-        ])) ?? "";
+        (await this.git(["rev-list", `${commit.parents[0]}..${commit.sha}`])) ??
+        "";
       for (const sha of out.split("\n")) if (sha) own.add(sha);
-      if (own.size >= MAX_CHANGE_COMMITS)
-        this.cap(
-          `change: read ${MAX_CHANGE_COMMITS} commits of merge ${commit.sha.slice(0, 12)}'s branch`,
-        );
     }
     this.owned.set(commit.sha, own);
     return own;
@@ -547,12 +517,8 @@ class Scan {
           c.files.some((f) => files.has(f)),
       )
       .reverse();
-    if (later.length > MAX_FIXUP_COMMITS)
-      this.cap(
-        `fix-ups: read the first ${MAX_FIXUP_COMMITS} of ${later.length} commits after ${commit.sha.slice(0, 12)}`,
-      );
     const found: Fixup[] = [];
-    for (const next of later.slice(0, MAX_FIXUP_COMMITS)) {
+    for (const next of later) {
       const touched = next.files.filter((f) => files.has(f));
       if (!this.room(touched.length)) break;
       let lines = 0;

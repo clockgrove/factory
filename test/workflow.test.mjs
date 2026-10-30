@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
@@ -439,7 +439,19 @@ test("the default branch is origin's HEAD, none without one, and a git failure i
   );
 });
 
-test("the plan check flags a host node outside the target's Node pin, passing over an alias", async () => {
+test("the plan check flags a host node outside the target's Node pin, passing over an alias", async (t) => {
+  // This node first, without a host's mise shims, which would resolve the
+  // checkout's .nvmrc instead.
+  const path = process.env.PATH;
+  process.env.PATH = [
+    dirname(process.execPath),
+    ...(path ?? "")
+      .split(delimiter)
+      .filter((entry) => !/\/mise\/shims\/?$/.test(entry)),
+  ].join(delimiter);
+  t.after(() => {
+    process.env.PATH = path;
+  });
   const directory = tempDir("factory-node-pin-");
   const git = (...args) =>
     assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);

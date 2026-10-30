@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import { ObjectiveRunner, hold } from "../dist/engine.js";
+import { hold, ObjectiveRunner } from "../dist/engine.js";
 import { RunLog } from "../dist/log.js";
 import { providerWorkflow } from "../dist/providers/selection.js";
 import { newObjective } from "../dist/state.js";

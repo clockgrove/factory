@@ -37,9 +37,9 @@ import { type CriterionDecision, resultCriteria } from "./review/result.js";
 import {
   deadlineAt,
   type Frozen,
+  keptClosings,
   newObjective,
   type ObjectiveState,
-  keptClosings,
   planProblem,
   RESET_KEY,
   recordClosed,

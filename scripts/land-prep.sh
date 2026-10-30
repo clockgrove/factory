@@ -31,7 +31,6 @@ log=$(mktemp /tmp/land-prep.XXXXXX)
 trap 'rm -f "$log"' EXIT
 step() { echo "land-prep: $1"; shift; if ! "$@" >"$log" 2>&1; then echo "land-prep: FAILED: $*" >&2; tail -40 "$log" >&2; exit 1; fi; }
 step build npm run build
-step check npx biome check src test
 step lint npm run lint
 step format npm run format:check
 step notices npm run notices:check

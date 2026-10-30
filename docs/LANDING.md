@@ -71,7 +71,7 @@ gh stack merge --yes             # queue every layer; run again if layers drop o
 
 ## Before you push
 
-`scripts/land-prep.sh` gates a pull request's branch and pushes it only if every step passed. It refuses on `main`, with uncommitted changes, on a rebase conflict, on a branch with no commits of its own, and on a stacked branch (use `gh stack` there). It also refuses when it can't read the branch's pull request base, rather than guess `main`. It rebases onto `origin/main`, then runs what CI runs (build, Biome, lint, format, notices and `npm test`), and pushes with `--force-with-lease`. Pass `--no-push` to gate only.
+`scripts/land-prep.sh` gates a pull request's branch and pushes it only if every step passed. It refuses on `main`, with uncommitted changes, on a rebase conflict, on a branch with no commits of its own, and on a stacked branch (use `gh stack` there). It also refuses when it can't read the branch's pull request base, rather than guess `main`. It rebases onto `origin/main`, then runs what CI runs (build, lint, format, notices and `npm test`; lint is `biome check` without the formatter, so import order is checked too), and pushes with `--force-with-lease`. Pass `--no-push` to gate only.
 
 **Why:** chaining the steps by hand (`git rebase … | tail && git push`) hides a failed step's exit code. That once pushed a conflicted rebase and a format failure.
 

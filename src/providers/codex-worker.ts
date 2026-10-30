@@ -25,6 +25,7 @@ import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
 import { errored } from "../engine.js";
 import { redact } from "../log.js";
+import type { WorkItem } from "../planning/types.js";
 import {
   gitMetadata,
   LaunchedGroup,
@@ -35,7 +36,6 @@ import {
   runsAsRoot,
   toolchainDirectories,
 } from "../sandbox.js";
-import type { WorkItem } from "../planning/types.js";
 import { errorMessage } from "../text.js";
 import {
   FinishRequests,
@@ -63,7 +63,6 @@ import {
   trimCodexHome,
 } from "./codex.js";
 import { CodexStderr, withStderr } from "./codex-stderr.js";
-import { CODEX_VALIDATE_CALL, CodexValidate } from "./codex-validate.js";
 import {
   addCodexTelemetry,
   type CodexBaseline,
@@ -77,6 +76,7 @@ import {
   SDK_OPERATIONS,
   turnTokens,
 } from "./codex-telemetry.js";
+import { CODEX_VALIDATE_CALL, CodexValidate } from "./codex-validate.js";
 import {
   detail,
   IdleWatchdog,

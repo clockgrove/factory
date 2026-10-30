@@ -17,7 +17,6 @@ import type { Plan, WorkItem } from "../planning/types.js";
 import { type PromptFacts, sourceDigest } from "../providers/usage.js";
 import { resultCriteria } from "../review/result.js";
 import { hostGit } from "../worktree.js";
-import { VALIDATION_TOOL_NAME } from "./validate-tool.js";
 import {
   type HandoffNote,
   handoffPeers,
@@ -25,6 +24,7 @@ import {
   VALIDATE_LOGS,
   workHandoffSchema,
 } from "./collect.js";
+import { VALIDATION_TOOL_NAME } from "./validate-tool.js";
 
 /** What a repaired attempt is told about the attempt before it. */
 export interface RepairContext {

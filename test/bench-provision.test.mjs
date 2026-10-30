@@ -27,6 +27,8 @@ import {
   cherryPick,
   defaultRunId,
   enableOnlyKeptWorkflows,
+  GITHUB_RESERVE,
+  githubReserveSupport,
   harnessRun,
   provision,
   Runner,
@@ -132,6 +134,23 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
   assert.deepEqual(
     record.reviewArtifacts,
     loadDefinition(EXAMPLE).factory.reviewArtifacts,
+  );
+  // This checkout's version doesn't say whether its setup takes
+  // --github-reserve; its usage does, read even in a dry run.
+  assert.deepEqual(record.githubReserve, {
+    applied: true,
+    reserve: GITHUB_RESERVE,
+    by: "usage",
+  });
+  assert.ok(
+    out.includes(
+      "check: whether this Factory's setup takes --github-reserve, by its usage: it does",
+    ),
+    out,
+  );
+  assert.ok(
+    out.includes("--github-reserve 2000 --operator operator-login"),
+    out,
   );
   const steps = [
     "check: read acme/widgets#42",
@@ -847,7 +866,12 @@ async function provisionLocally(
   capacity,
   {
     StandInRunner = StandIn,
-    factory = { kind: "release", cli: "/opt/factory/dist/cli.js" },
+    // A release whose version says its setup takes --github-reserve.
+    factory = {
+      kind: "release",
+      cli: "/opt/factory/dist/cli.js",
+      version: "0.6.0",
+    },
   } = {},
 ) {
   const name = `bench-widgets-42-${runId}`;
@@ -1145,6 +1169,15 @@ test("provisioning writes the definition's reviewArtifacts into factory.json bef
     JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).reviewArtifacts,
     [EXPORT_REPORT],
   );
+  // This build's setup takes --github-reserve, as its usage says, and Factory accepted it.
+  assert.deepEqual(record.githubReserve, {
+    applied: true,
+    reserve: GITHUB_RESERVE,
+    by: "usage",
+  });
+  const setupCalls = runner.calls.filter((call) => call.includes(" setup "));
+  assert.equal(setupCalls.length, 2);
+  for (const call of setupCalls) assert.match(call, / --github-reserve 2000 /);
 
   // Provisioned again, the file is unchanged.
   const again = await provisionLocally(
@@ -1184,5 +1217,168 @@ test("provisioning writes the definition's reviewArtifacts into factory.json bef
   assert.deepEqual(
     JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).reviewArtifacts,
     [],
+  );
+});
+
+// --- --github-reserve: only for a Factory whose setup takes it ---------------
+
+test("whether setup takes --github-reserve: the version says when it can, else the CLI's own usage", () => {
+  const unread = () => assert.fail("the version says: no usage is read");
+  const at = (kind, version) => ({ kind, version, cli: "/nowhere/cli.js" });
+  for (const [factory, supported] of [
+    [at("release", "0.5.11"), false],
+    [at("release", "0.4.20"), false],
+    [at("release", "0.5.12"), true],
+    [at("release", "0.6.0"), true],
+    [at("candidate", "1.0.0"), true],
+  ])
+    assert.deepEqual(
+      githubReserveSupport(factory, unread),
+      { supported, by: "version" },
+      JSON.stringify(factory),
+    );
+  // A checkout at 0.5.11 may have it or not, as may a version that isn't
+  // plain: its usage says. This checkout's build has it.
+  const here = {
+    kind: "candidate",
+    cli: join(root, "dist", "cli.js"),
+    version: "0.5.11",
+  };
+  assert.deepEqual(githubReserveSupport(here), {
+    supported: true,
+    by: "usage",
+  });
+  assert.deepEqual(
+    githubReserveSupport({ ...here, kind: "release", version: "0.6.0-rc.1" }),
+    { supported: true, by: "usage" },
+  );
+  // Only the setup line's own [--github-reserve ...] counts.
+  const usage = (setupLine) => () =>
+    `Usage: factory <command>\n\n  serve  [--github-reserve GITHUB-RESERVE]\n      Run the service\n${setupLine}\n      Write the configuration; --github-reserve N is in the guide\n  help\n      Show this help\n`;
+  assert.deepEqual(
+    githubReserveSupport(
+      here,
+      usage("  setup  [--json] [--github-reserve-share SHARE]"),
+    ),
+    { supported: false, by: "usage" },
+  );
+  assert.deepEqual(
+    githubReserveSupport(
+      here,
+      usage("  setup  [--json] [--github-reserve GITHUB-RESERVE]"),
+    ),
+    { supported: true, by: "usage" },
+  );
+  assert.throws(
+    () => githubReserveSupport(here, () => "Usage: factory <command>\n"),
+    /has no setup lines, not one: can't tell whether its setup takes --github-reserve$/,
+  );
+  assert.throws(
+    () => githubReserveSupport({ ...here, cli: join(dir, "no-cli.js") }),
+    /^Error: Couldn't read \S+no-cli\.js's usage \(factory help\)/,
+  );
+  // Setup is given it only when the Factory takes it.
+  const given = (githubReserve) =>
+    setupArgs(
+      definition,
+      { toolchain: "/t" },
+      {
+        repository: REPO,
+        checkout: "/work/w",
+        projectId: "PVT_w",
+        ...(githubReserve === undefined ? {} : { githubReserve }),
+      },
+    );
+  const reserveAt = given().indexOf("--github-reserve");
+  assert.deepEqual(given().slice(reserveAt, reserveAt + 2), [
+    "--github-reserve",
+    String(GITHUB_RESERVE),
+  ]);
+  assert.ok(!given(null).includes("--github-reserve"));
+});
+
+/**
+ * An invented Factory CLI from before --github-reserve: its usage has no
+ * such option, and its setup refuses it as Factory refuses an option it
+ * doesn't know; any other setup writes the configuration and is configured.
+ */
+const OLD_FACTORY_CLI = String.raw`import { existsSync, writeFileSync } from "node:fs";
+const [command, ...args] = process.argv.slice(2);
+if (command === "help") {
+  process.stdout.write(
+    "Usage: factory <command> --repo OWNER/NAME (or FACTORY_REPOSITORY)\n\n" +
+      "  setup  [--background] [--json] [--checkout CHECKOUT] [--github-app-id GITHUB-APP-ID] [--operator OPERATOR...]\n" +
+      "      Write and check the configuration\n" +
+      "  help\n      Show this help\n",
+  );
+} else if (command === "setup" && args.includes("--github-reserve")) {
+  process.stderr.write(
+    '{"kind":"lifecycle-refusal","code":"usage"}\n' +
+      "factory: Unknown option --github-reserve for factory setup; see factory help\n",
+  );
+  process.exit(2);
+} else if (command === "setup") {
+  const { FACTORY_CONFIG, FACTORY_REPOSITORY } = process.env;
+  if (!existsSync(FACTORY_CONFIG))
+    writeFileSync(FACTORY_CONFIG, JSON.stringify({ repository: FACTORY_REPOSITORY }));
+  process.stdout.write('{"status":"configured"}\n');
+} else process.exit(2);
+`;
+
+/** The stand-in, running the Factory CLI it provisions with for real. */
+class RunsFactory extends StandIn {
+  run(argv, options = {}) {
+    if (argv[0] !== process.execPath) return super.run(argv, options);
+    this.calls.push(Runner.shown(argv));
+    return Runner.prototype.run.call(this, argv, options);
+  }
+}
+
+test("a Factory whose setup has no --github-reserve is provisioned without it, and the record says so", async () => {
+  const cli = join(dir, "factory-0.5.11", "dist", "cli.mjs");
+  mkdirSync(dirname(cli), { recursive: true });
+  writeFileSync(cli, OLD_FACTORY_CLI);
+  // As 0.5.11's does, its setup refuses the option.
+  const refused = spawnSync(
+    process.execPath,
+    [cli, "setup", "--github-reserve", "2000", "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.match(
+    refused.stderr,
+    /Unknown option --github-reserve for factory setup/,
+  );
+  // A checkout at 0.5.11: its usage says it doesn't take it.
+  const factory = { kind: "candidate", cli, version: "0.5.11" };
+  assert.deepEqual(githubReserveSupport(factory), {
+    supported: false,
+    by: "usage",
+  });
+  const definition = patchedDefinition("old-factory", []);
+  const { provisioned, runner, runDir } = await provisionLocally(
+    definition,
+    "o1",
+    runCapacity(definition),
+    { StandInRunner: RunsFactory, factory },
+  );
+  const record = await provisioned;
+  const setups = runner.calls.filter((call) => call.includes(`${cli} setup `));
+  assert.equal(setups.length, 2, runner.calls.join("\n"));
+  for (const call of setups) assert.doesNotMatch(call, /--github-reserve/);
+  const expected = { applied: false, reserve: null, by: "usage" };
+  assert.deepEqual(record.githubReserve, expected);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).githubReserve,
+    expected,
+  );
+  // The rest of provisioning carried on: the Objective is the run's issue.
+  assert.equal(record.issue, 42);
+  // A release at 0.5.11 is known by its version: its usage isn't read.
+  assert.deepEqual(
+    githubReserveSupport({ ...factory, kind: "release" }, () =>
+      assert.fail("read"),
+    ),
+    { supported: false, by: "version" },
   );
 });

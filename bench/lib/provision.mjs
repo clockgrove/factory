@@ -17,7 +17,9 @@
  * clone of the source, so one at a time fetches into it. With a dry run,
  * `Runner` prints each GitHub, Git and setup action instead of doing it
  * and answers each look with "not there yet", so the whole sequence
- * prints and nothing outside the process is touched.
+ * prints and nothing outside the process is touched. It still reads the
+ * Factory CLI's own usage when its version doesn't say whether setup takes
+ * --github-reserve (githubReserveSupport): that changes nothing.
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -431,11 +433,79 @@ export function harnessRun(record) {
   };
 }
 
-/** `factory setup`'s options for this definition, host, repository, checkout, Project and capacity (runCapacity). */
+/**
+ * The share of the installation's GitHub budget benchmark traffic leaves
+ * to production (`--github-reserve`, github.reserve): the installation's
+ * budget is production's too, so benchmark traffic yields first.
+ */
+export const GITHUB_RESERVE = 2000;
+
+/** The last Factory release whose setup has no --github-reserve: the option came after it. */
+const LAST_WITHOUT_GITHUB_RESERVE = [0, 5, 11];
+
+/** `cli`'s usage: the text `factory help` prints. Running it changes nothing. */
+function factoryUsage(cli) {
+  try {
+    return execFileSync(process.execPath, [cli, "help"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  } catch (error) {
+    throw new Error(
+      `Couldn't read ${cli}'s usage (factory help): ${String(error.stderr || error.message).trim()}`,
+    );
+  }
+}
+
+/**
+ * Whether the setup of `factory` (resolveFactory) takes --github-reserve,
+ * and how that is known (`by`). Its version says when it can: a build
+ * versioned after 0.5.11 has the option, and a release at 0.5.11 or before
+ * doesn't. A checkout at 0.5.11 or before may have it or not, as may a
+ * version that isn't plain MAJOR.MINOR.PATCH, so its own usage says: the
+ * one `setup` line of `factory help` lists `[--github-reserve ...]` or
+ * doesn't. A usage without exactly one setup line throws rather than guess.
+ */
+export function githubReserveSupport(factory, usage = factoryUsage) {
+  const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(factory.version ?? "");
+  if (version) {
+    const parts = version.slice(1).map(Number);
+    const at = parts.findIndex(
+      (part, i) => part !== LAST_WITHOUT_GITHUB_RESERVE[i],
+    );
+    if (at >= 0 && parts[at] > LAST_WITHOUT_GITHUB_RESERVE[at])
+      return { supported: true, by: "version" };
+    if (factory.kind === "release") return { supported: false, by: "version" };
+  }
+  const setup = usage(factory.cli)
+    .split("\n")
+    .filter((line) => /^ {2}setup\s/.test(line));
+  if (setup.length !== 1)
+    throw new Error(
+      `${factory.cli}'s usage (factory help) has ${setup.length ? setup.length : "no"} setup lines, not one: can't tell whether its setup takes --github-reserve`,
+    );
+  return {
+    supported: /\s\[--github-reserve [A-Z][A-Z-]*\]/.test(setup[0]),
+    by: "usage",
+  };
+}
+
+/**
+ * `factory setup`'s options for this definition, host, repository,
+ * checkout, Project and capacity (runCapacity), with `githubReserve`
+ * (null for a Factory whose setup has no --github-reserve).
+ */
 export function setupArgs(
   definition,
   host,
-  { repository, checkout, projectId, capacity = {} },
+  {
+    repository,
+    checkout,
+    projectId,
+    capacity = {},
+    githubReserve = GITHUB_RESERVE,
+  },
 ) {
   const f = definition.factory;
   const value = (text) => hostValue(text, host);
@@ -457,9 +527,10 @@ export function setupArgs(
         ]
       : ["--github-login"]),
     // The installation's budget is production's too: benchmark traffic
-    // yields first (github.reserve).
-    "--github-reserve",
-    "2000",
+    // yields first (github.reserve), when this Factory's setup can say so.
+    ...(githubReserve === null
+      ? []
+      : ["--github-reserve", String(githubReserve)]),
     ...(host.operator ? ["--operator", host.operator] : []),
     "--provider",
     f.provider,
@@ -725,6 +796,13 @@ export async function provision({
   };
   const checkout = join(host.workDir, name);
   const cache = join(host.cacheDir, source.replace("/", "__"));
+  // An older release under benchmark may have no --github-reserve: setup
+  // gets it only when this Factory takes it, so A/B runs of old releases
+  // still provision.
+  const reserve = githubReserveSupport(factory);
+  runner.print(
+    `check: whether this Factory's setup takes --github-reserve, by its ${reserve.by}: ${reserve.supported ? "it does" : "it doesn't, so the run's GitHub traffic doesn't yield to production's first"}`,
+  );
   // What run.mjs and scoring read stays while this provisioning carries on.
   const previous = recordedRun(runDir);
   const record = {
@@ -744,6 +822,12 @@ export async function provision({
     stateDir,
     env,
     factory,
+    // Whether setup was given --github-reserve, and how support was known.
+    githubReserve: {
+      applied: reserve.supported,
+      reserve: reserve.supported ? GITHUB_RESERVE : null,
+      by: reserve.by,
+    },
     // The service's capacity, as given to setup; a value missing is Factory's own for the host.
     capacity: previous?.capacity ?? capacity,
     // The source commits put on the base, each with the commit it made on main.
@@ -1146,6 +1230,7 @@ export async function provision({
     checkout,
     projectId,
     capacity,
+    githubReserve: record.githubReserve.reserve,
   });
   // A setup that refused or is blocked stops here: it names what to fix, and running again carries on.
   const setup = (title, extra, ok) => {

@@ -114,6 +114,17 @@ export interface ItemFacts {
    * its `amend` answer proposes the follow-up work from this.
    */
   blamed: { repair: number; predecessor: string; correction: Correction };
+  /**
+   * Repair `repair`'s failure, diagnosed as a missing prerequisite that
+   * Work Item `provider` provides (#2233): its `depend` answer proposes the
+   * dependency from this, with the diagnosis's evidence and the failure.
+   */
+  prerequisite: {
+    repair: number;
+    provider: string;
+    diagnosis: string;
+    failure: string;
+  };
   /** The worker's retained conversation, which a repair continues (providers/session.ts); `fresh` forgets it. */
   workSession: Session;
   /** The result reviewer's retained conversation, which a re-review continues. */

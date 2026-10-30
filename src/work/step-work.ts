@@ -614,7 +614,8 @@ export async function workStep(
     playbook: config.planning.playbook,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
-    // New candidates are a new result, even on the refused tree.
+    // New candidates are a new result, even on the refused tree, and so is
+    // that tree after an accepted amendment, until a result is refused again.
     refusedTree: refusedTreeFor(state, item.id, {
       sets,
       selectionStands: own !== undefined,

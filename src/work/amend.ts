@@ -62,6 +62,9 @@ export function propose(
  * so no diagnosis runs, moved onto the current start with the change so
  * far replayed. It runs with the amended plan's owned paths, acceptance
  * and dependencies, so it waits for any item the amendment put first.
+ * The amendment refused nothing: the kept refused result is marked with
+ * it, so the change so far, left as it is, is a result under the amended
+ * plan until a repair refuses a result again (refused.ts `refusedTreeFor`).
  */
 export function amendedAttempt(
   item: WorkItem,
@@ -91,9 +94,24 @@ export function amendedAttempt(
       ),
     },
   });
-  return outcome.kind === "repair"
-    ? { ...outcome, free: { target, repair } }
-    : outcome;
+  if (outcome.kind !== "repair") return outcome;
+  // Only a repair that refuses a result writes a refused fact again, so a
+  // repair that refuses none (a collection finding) keeps this mark.
+  const moved = outcome.keep ?? {};
+  const kept = written(moved, "refused", item.id);
+  const refused = kept === undefined ? fact(state, "refused", item.id) : kept;
+  return {
+    ...outcome,
+    free: { target, repair },
+    ...(refused && !refused.replayOnly
+      ? {
+          keep: {
+            ...moved,
+            ...facts({ refused: { ...refused, amended: amendment } }, item.id),
+          },
+        }
+      : {}),
+  };
 }
 
 /**

@@ -35,6 +35,7 @@ import {
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   loadReviewArtifacts,
   selectorIdentity,
@@ -512,28 +513,41 @@ export function setupArgs(
 }
 
 /**
- * `selectors` merged into the top-level `reviewArtifacts` of the
- * configuration `file`, which setup wrote: each one the file doesn't have
- * yet is added after those it has, so a run provisioned again leaves the
- * file as it is. Setup has no option for them and keeps the key when it
- * writes the file again. Whether the file changed; a merge Factory's own
- * loader refuses, such as one past its limit, throws.
+ * The top-level `reviewArtifacts` of the configuration `file`, which setup
+ * wrote, set to exactly the definition's `selectors`: the definition is
+ * what the run is configured with, so selectors it no longer has go. The
+ * file is written only when its list differs from them by Factory's
+ * selectorIdentity, so a run provisioned again leaves it byte for byte as
+ * it is. With no selectors, the key is dropped only when the file has one
+ * provisioning wrote (`carried`, as the run record says); otherwise the
+ * file is left alone. Setup has no option for them and keeps the key when
+ * it writes the file again. Whether the file changed; selectors Factory's
+ * own loader refuses, such as more than its limit, throw.
  */
-export function carryReviewArtifacts(file, selectors) {
+export function carryReviewArtifacts(file, selectors, carried = []) {
   const config = JSON.parse(readFileSync(file, "utf8"));
-  const kept = config.reviewArtifacts ?? [];
-  const have = new Set(kept.map(selectorIdentity));
-  const added = selectors.filter(
-    (selector) => !have.has(selectorIdentity(selector)),
-  );
-  if (!added.length) return false;
-  const problems = [];
-  loadReviewArtifacts([...kept, ...added], problems);
-  if (problems.length)
-    throw new Error(
-      `The definition's reviewArtifacts can't be added to ${file}: ${problems.join("; ")}`,
-    );
-  config.reviewArtifacts = [...kept, ...added];
+  const has = config.reviewArtifacts ?? [];
+  if (!selectors.length) {
+    const wrote = new Set(carried.map(selectorIdentity));
+    if (!has.some((selector) => wrote.has(selectorIdentity(selector))))
+      return false;
+    delete config.reviewArtifacts;
+  } else {
+    if (
+      isDeepStrictEqual(
+        has.map(selectorIdentity),
+        selectors.map(selectorIdentity),
+      )
+    )
+      return false;
+    const problems = [];
+    loadReviewArtifacts(selectors, problems);
+    if (problems.length)
+      throw new Error(
+        `The definition's reviewArtifacts can't be written into ${file}: ${problems.join("; ")}`,
+      );
+    config.reviewArtifacts = selectors;
+  }
   writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
   return true;
 }
@@ -734,8 +748,9 @@ export async function provision({
     capacity: previous?.capacity ?? capacity,
     // The source commits put on the base, each with the commit it made on main.
     basePatches: [],
-    // The definition's review artifact selectors, carried into factory.json.
-    reviewArtifacts: [],
+    // The definition's review artifact selectors, carried into factory.json;
+    // until this provisioning carries them, those a previous one did.
+    reviewArtifacts: previous?.reviewArtifacts ?? [],
     policyAs: def.operatorPolicy.as,
     provisionedAt: previous?.provisionedAt ?? null,
     ...(previous?.queuedAt ? { queuedAt: previous.queuedAt } : {}),
@@ -1148,14 +1163,25 @@ export async function provision({
   setup("configure Factory (setup)", [], (status) => status === "configured");
   record.capacity = capacity;
   // Setup has no option for reviewArtifacts: they go into the file it
-  // wrote, before the service starts and reads it.
+  // wrote, before the service starts and reads it, exactly as the
+  // definition has them.
   const selectors = def.factory.reviewArtifacts ?? [];
-  if (selectors.length)
+  if (selectors.length || record.reviewArtifacts.length)
     runner.local(
-      `carry the definition's ${selectors.length} reviewArtifacts selector(s) into ${env.FACTORY_CONFIG}`,
+      selectors.length
+        ? `carry the definition's ${selectors.length} reviewArtifacts selector(s) into ${env.FACTORY_CONFIG}`
+        : `drop the reviewArtifacts provisioning carried into ${env.FACTORY_CONFIG}: the definition has none`,
       () => {
-        if (!carryReviewArtifacts(env.FACTORY_CONFIG, selectors))
-          runner.print("    there already");
+        if (
+          !carryReviewArtifacts(
+            env.FACTORY_CONFIG,
+            selectors,
+            record.reviewArtifacts,
+          )
+        )
+          runner.print(
+            selectors.length ? "    there already" : "    none there",
+          );
       },
     );
   record.reviewArtifacts = selectors;

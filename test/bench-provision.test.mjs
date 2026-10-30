@@ -824,12 +824,13 @@ const realHost = {
   toolchain: "/opt/toolchain",
 };
 
-/** The example on the invented source, with `patches` on its base, loaded. */
-function patchedDefinition(name, patches) {
+/** The example on the invented source, with `patches` on its base and `edit` made to it, loaded. */
+function patchedDefinition(name, patches, edit = () => {}) {
   const value = JSON.parse(readFileSync(EXAMPLE, "utf8"));
   value.source = { repository: "acme/widgets", base: source.base, lfs: false };
   value.memory = { seed: "none" };
   value.basePatches = patches;
+  edit(value);
   const file = join(real, `${name}.json`);
   mkdirSync(real, { recursive: true });
   writeFileSync(file, JSON.stringify(value));
@@ -1000,32 +1001,66 @@ const stdoutSelector = (command) => ({
   text: { source: "package.json", stdout: { maxBytes: 4096 } },
 });
 
-test("the definition's selectors are added to factory.json once, after those it has", () => {
-  const other = stdoutSelector("npm run lint");
+test("factory.json gets exactly the definition's selectors, and is written only when they differ", () => {
+  const lint = stdoutSelector("npm run lint");
   const file = join(dir, "carry.json");
+  const config = { repository: "acme/bench-widgets-42-a", execution: {} };
   writeFileSync(
     file,
-    `${JSON.stringify({ repository: "acme/bench-widgets-42-a", reviewArtifacts: [other] }, null, 2)}\n`,
+    `${JSON.stringify({ ...config, reviewArtifacts: [lint] }, null, 2)}\n`,
   );
+  // A selector the definition doesn't have goes: the definition is the source of truth.
   assert.equal(carryReviewArtifacts(file, [EXPORT_REPORT]), true);
   const written = readFileSync(file, "utf8");
-  assert.deepEqual(JSON.parse(written).reviewArtifacts, [other, EXPORT_REPORT]);
-  // Again, its keys in another order: the same selector, so nothing changes.
+  assert.deepEqual(JSON.parse(written), {
+    ...config,
+    reviewArtifacts: [EXPORT_REPORT],
+  });
+  // Again, its keys in another order: the same selector, so the file is left byte for byte.
   const reordered = {
     text: EXPORT_REPORT.text,
     command: EXPORT_REPORT.command,
   };
   assert.equal(carryReviewArtifacts(file, [reordered]), false);
   assert.equal(readFileSync(file, "utf8"), written);
-  // A merge Factory's loader refuses leaves the file as it was.
-  const seven = [1, 2, 3, 4, 5, 6, 7].map((n) =>
+
+  // The definition's selectors changed: the file has the new ones only.
+  const types = stdoutSelector("npm run types");
+  assert.equal(
+    carryReviewArtifacts(file, [types, lint], [EXPORT_REPORT]),
+    true,
+  );
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).reviewArtifacts, [
+    types,
+    lint,
+  ]);
+  // In another order they are another list.
+  assert.equal(carryReviewArtifacts(file, [lint, types], [types, lint]), true);
+  const changed = readFileSync(file, "utf8");
+  assert.deepEqual(JSON.parse(changed).reviewArtifacts, [lint, types]);
+
+  // Selectors Factory's loader refuses leave the file as it was.
+  const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) =>
     stdoutSelector(`npm run check-${n}`),
   );
   assert.throws(
-    () => carryReviewArtifacts(file, seven),
-    /can't be added to \S+carry\.json: reviewArtifacts must be a list of at most 8 selectors$/,
+    () => carryReviewArtifacts(file, nine),
+    /can't be written into \S+carry\.json: reviewArtifacts must be a list of at most 8 selectors$/,
   );
-  assert.equal(readFileSync(file, "utf8"), written);
+  assert.equal(readFileSync(file, "utf8"), changed);
+
+  // The definition has none now: the key provisioning wrote goes, the rest stays.
+  assert.equal(carryReviewArtifacts(file, [], [lint, types]), true);
+  const removed = readFileSync(file, "utf8");
+  assert.deepEqual(JSON.parse(removed), config);
+  assert.equal(carryReviewArtifacts(file, [], [lint, types]), false);
+  assert.equal(readFileSync(file, "utf8"), removed);
+  // Selectors provisioning never wrote are left alone when the definition has none.
+  const own = `${JSON.stringify({ ...config, reviewArtifacts: [lint] }, null, 2)}\n`;
+  writeFileSync(file, own);
+  assert.equal(carryReviewArtifacts(file, []), false);
+  assert.equal(carryReviewArtifacts(file, [], [EXPORT_REPORT]), false);
+  assert.equal(readFileSync(file, "utf8"), own);
 });
 
 const setupHome = join(dir, "setup-home");
@@ -1075,7 +1110,7 @@ class FactorySetup extends StandIn {
   }
 }
 
-test("provisioning writes the definition's reviewArtifacts into factory.json before the service starts, and setup keeps them", async () => {
+test("provisioning writes the definition's reviewArtifacts into factory.json before the service starts, setup keeps them, and they go when the definition drops them", async () => {
   const definition = patchedDefinition("artifacts", []);
   assert.deepEqual(definition.factory.reviewArtifacts, [EXPORT_REPORT]);
   const factory = { kind: "candidate", cli: join(root, "dist", "cli.js") };
@@ -1131,4 +1166,23 @@ test("provisioning writes the definition's reviewArtifacts into factory.json bef
   const rewritten = JSON.parse(readFileSync(config, "utf8"));
   assert.equal(rewritten.execution.workers, 3);
   assert.deepEqual(rewritten.reviewArtifacts, [EXPORT_REPORT]);
+  // The definition drops its selectors: provisioned again, the file and the record have none.
+  const without = patchedDefinition("artifacts-none", [], (value) => {
+    delete value.factory.reviewArtifacts;
+  });
+  const none = await provisionLocally(
+    without,
+    "a1",
+    runCapacity(without, { workers: 3 }),
+    { StandInRunner: FactorySetup, factory },
+  );
+  assert.deepEqual((await none.provisioned).reviewArtifacts, []);
+  assert.equal(
+    Object.hasOwn(JSON.parse(readFileSync(config, "utf8")), "reviewArtifacts"),
+    false,
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).reviewArtifacts,
+    [],
+  );
 });

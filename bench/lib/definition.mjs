@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadReviewArtifacts } from "../../dist/review/artifacts.js";
 import { SCRIPTABLE } from "./holds.mjs";
 import { missingDir } from "./home.mjs";
 import { METRICS } from "./metrics.mjs";
@@ -95,6 +96,7 @@ const SHAPE = {
     allowances: Object.fromEntries(ALLOWANCES.map((key) => [key, true])),
     spend: { objectiveTokens: true, dayTokens: true },
     capacity: { workers: true, validations: true, memoryMib: true },
+    reviewArtifacts: true,
   },
   operatorPolicy: { as: true, answers: true, otherwise: true, policy: true },
   baseline: true,
@@ -291,6 +293,13 @@ export function definitionProblems(value) {
         (v) => Number.isSafeInteger(v) && v >= least,
         `a whole number, ${least} or more`,
       );
+  // Optional: the source installation's review artifact selectors, which
+  // setup has no option for. Factory's own loader checks them, in its words.
+  if (at("factory.reviewArtifacts") !== undefined) {
+    const found = [];
+    loadReviewArtifacts(at("factory.reviewArtifacts"), found);
+    problems.push(...found.map((problem) => `factory.${problem}`));
+  }
   need("operatorPolicy.as", string, "the name scripted answers are given as");
   need(
     "operatorPolicy.answers",

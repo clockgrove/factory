@@ -23,6 +23,7 @@ import { loadDefinition } from "../bench/lib/definition.mjs";
 import { handFixCommits } from "../bench/lib/grade.mjs";
 import { HOME_ENV } from "../bench/lib/home.mjs";
 import {
+  carryReviewArtifacts,
   cherryPick,
   defaultRunId,
   enableOnlyKeptWorkflows,
@@ -128,6 +129,10 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
       applied: "<the base with 89abcde>",
     },
   ]);
+  assert.deepEqual(
+    record.reviewArtifacts,
+    loadDefinition(EXAMPLE).factory.reviewArtifacts,
+  );
   const steps = [
     "check: read acme/widgets#42",
     "would: check its title and body digest (d0f6c906d9b1)",
@@ -156,6 +161,8 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
     "--toolchain-path /opt/toolchain/node-24/bin",
     // The definition's capacity.
     "--objective-tokens 40000000 --day-tokens 80000000 --workers 4 --validations 2 --memory-mib 16384 --json",
+    // Setup has no option for them: written into the file it wrote.
+    `would: carry the definition's 1 reviewArtifacts selector(s) into ${join(dir, "bench", "acme-widgets-42", "t1", "factory.json")}`,
     "would: seed memory from",
     "without #42's entries or any from 2031-03-04T09:00:00Z on",
     "would: start the background service (setup --background)",
@@ -758,7 +765,8 @@ test("a base patch is cherry-picked onto the base the same way every time, or re
 /**
  * A Runner that runs Git for real, with GitHub's URLs in `urls` going to
  * local repositories, and stands in for gh and Factory: the test
- * repository and Project exist, the Objective is filed, setup configures.
+ * repository and Project exist, the Objective is filed, setup configures
+ * and writes the configuration.
  */
 class StandIn extends Runner {
   constructor(urls, definition) {
@@ -783,7 +791,16 @@ class StandIn extends Runner {
         ...options,
         env: { ...options.env, ...this.gitEnv },
       });
-    if (argv[0] === process.execPath) return '{"status":"configured"}';
+    if (argv[0] === process.execPath) {
+      // Setup writes the run's configuration.
+      const { FACTORY_CONFIG, FACTORY_REPOSITORY } = options.env;
+      if (!existsSync(FACTORY_CONFIG))
+        writeFileSync(
+          FACTORY_CONFIG,
+          JSON.stringify({ repository: FACTORY_REPOSITORY }),
+        );
+      return '{"status":"configured"}';
+    }
     if (shown.startsWith("gh repo view"))
       return this.definition.repository.description;
     if (shown.includes("/rulesets")) return "protect-main";
@@ -819,8 +836,19 @@ function patchedDefinition(name, patches) {
   return loadDefinition(file);
 }
 
-/** Provision run `runId` of `definition` against local repositories; the stand-in runner too. */
-async function provisionLocally(definition, runId, capacity) {
+/**
+ * Provision run `runId` of `definition` against local repositories with
+ * `factory`, standing in with a `StandInRunner`; that runner too.
+ */
+async function provisionLocally(
+  definition,
+  runId,
+  capacity,
+  {
+    StandInRunner = StandIn,
+    factory = { kind: "release", cli: "/opt/factory/dist/cli.js" },
+  } = {},
+) {
   const name = `bench-widgets-42-${runId}`;
   const origin = join(real, "github", `${name}.git`);
   if (!existsSync(origin))
@@ -835,7 +863,7 @@ async function provisionLocally(definition, runId, capacity) {
   mkdirSync(runDir, { recursive: true });
   // Fetched and checked before: the digest check isn't what this tests.
   writeFileSync(join(runDir, "objective.md"), "The Objective\n");
-  const runner = new StandIn(
+  const runner = new StandInRunner(
     {
       "https://github.com/acme/widgets.git": source.at,
       [`https://github.com/acme/${name}.git`]: origin,
@@ -845,7 +873,7 @@ async function provisionLocally(definition, runId, capacity) {
   const provisioned = provision({
     definition,
     host: realHost,
-    factory: { kind: "release", cli: "/opt/factory/dist/cli.js" },
+    factory,
     runId,
     label: runId,
     group: "patched",
@@ -961,4 +989,146 @@ test("a base patch that doesn't apply stops provisioning before anything is push
   );
   // The lock is released for the next provisioning.
   assert.ok(!existsSync(join(realHost.cacheDir, "acme__widgets.lock")));
+});
+
+// --- review artifacts: in factory.json before the service starts ------------
+
+const [EXPORT_REPORT] = loadDefinition(EXAMPLE).factory.reviewArtifacts;
+/** An invented text selector of `command`'s stdout. */
+const stdoutSelector = (command) => ({
+  command,
+  text: { source: "package.json", stdout: { maxBytes: 4096 } },
+});
+
+test("the definition's selectors are added to factory.json once, after those it has", () => {
+  const other = stdoutSelector("npm run lint");
+  const file = join(dir, "carry.json");
+  writeFileSync(
+    file,
+    `${JSON.stringify({ repository: "acme/bench-widgets-42-a", reviewArtifacts: [other] }, null, 2)}\n`,
+  );
+  assert.equal(carryReviewArtifacts(file, [EXPORT_REPORT]), true);
+  const written = readFileSync(file, "utf8");
+  assert.deepEqual(JSON.parse(written).reviewArtifacts, [other, EXPORT_REPORT]);
+  // Again, its keys in another order: the same selector, so nothing changes.
+  const reordered = {
+    text: EXPORT_REPORT.text,
+    command: EXPORT_REPORT.command,
+  };
+  assert.equal(carryReviewArtifacts(file, [reordered]), false);
+  assert.equal(readFileSync(file, "utf8"), written);
+  // A merge Factory's loader refuses leaves the file as it was.
+  const seven = [1, 2, 3, 4, 5, 6, 7].map((n) =>
+    stdoutSelector(`npm run check-${n}`),
+  );
+  assert.throws(
+    () => carryReviewArtifacts(file, seven),
+    /can't be added to \S+carry\.json: reviewArtifacts must be a list of at most 8 selectors$/,
+  );
+  assert.equal(readFileSync(file, "utf8"), written);
+});
+
+const setupHome = join(dir, "setup-home");
+mkdirSync(setupHome);
+
+/**
+ * The stand-in, with Factory's own setup run offline: no gh, no provider
+ * login and a home of its own, so it reports itself blocked on GitHub and
+ * the provider, after it has written and loaded the configuration. It is
+ * given `--background` without it, which would start a service: setup
+ * writes the file the same way with it. Each setup is recorded with the
+ * file's reviewArtifacts before it ran and its own status.
+ */
+class FactorySetup extends StandIn {
+  setups = [];
+
+  run(argv, options = {}) {
+    if (argv[0] !== process.execPath) return super.run(argv, options);
+    this.calls.push(Runner.shown(argv));
+    const { FACTORY_CONFIG, FACTORY_STATE_DIR, FACTORY_REPOSITORY } =
+      options.env;
+    const before = existsSync(FACTORY_CONFIG)
+      ? JSON.parse(readFileSync(FACTORY_CONFIG, "utf8")).reviewArtifacts
+      : undefined;
+    const ran = spawnSync(
+      process.execPath,
+      argv.slice(1).filter((arg) => arg !== "--background"),
+      {
+        encoding: "utf8",
+        env: {
+          HOME: setupHome,
+          PATH: bin,
+          FACTORY_CONFIG,
+          FACTORY_STATE_DIR,
+          FACTORY_REPOSITORY,
+        },
+      },
+    );
+    const { status, problems } = JSON.parse(ran.stdout);
+    this.setups.push({
+      background: argv.includes("--background"),
+      before,
+      status,
+      problems,
+    });
+    return '{"status":"configured"}';
+  }
+}
+
+test("provisioning writes the definition's reviewArtifacts into factory.json before the service starts, and setup keeps them", async () => {
+  const definition = patchedDefinition("artifacts", []);
+  assert.deepEqual(definition.factory.reviewArtifacts, [EXPORT_REPORT]);
+  const factory = { kind: "candidate", cli: join(root, "dist", "cli.js") };
+  const { provisioned, runner, runDir } = await provisionLocally(
+    definition,
+    "a1",
+    runCapacity(definition),
+    { StandInRunner: FactorySetup, factory },
+  );
+  const record = await provisioned;
+  const config = join(runDir, "factory.json");
+  const written = readFileSync(config, "utf8");
+  // In the file before the service starts, and still there after setup ran again.
+  assert.deepEqual(JSON.parse(written).reviewArtifacts, [EXPORT_REPORT]);
+  assert.deepEqual(
+    runner.setups.map(({ background, before }) => ({ background, before })),
+    [
+      { background: false, before: undefined },
+      { background: true, before: [EXPORT_REPORT] },
+    ],
+  );
+  // Factory loaded the file each time: it stops at GitHub and the provider, never at the configuration.
+  for (const { status, problems } of runner.setups) {
+    assert.equal(status, "blocked");
+    assert.ok(
+      problems.every((problem) => !/reviewArtifacts/.test(problem)),
+      problems.join("\n"),
+    );
+  }
+  assert.deepEqual(record.reviewArtifacts, [EXPORT_REPORT]);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).reviewArtifacts,
+    [EXPORT_REPORT],
+  );
+
+  // Provisioned again, the file is unchanged.
+  const again = await provisionLocally(
+    definition,
+    "a1",
+    runCapacity(definition),
+    { StandInRunner: FactorySetup, factory },
+  );
+  assert.deepEqual((await again.provisioned).reviewArtifacts, [EXPORT_REPORT]);
+  assert.equal(readFileSync(config, "utf8"), written);
+  // With a new capacity, setup writes the file again and keeps the key.
+  const more = await provisionLocally(
+    definition,
+    "a1",
+    runCapacity(definition, { workers: 3 }),
+    { StandInRunner: FactorySetup, factory },
+  );
+  await more.provisioned;
+  const rewritten = JSON.parse(readFileSync(config, "utf8"));
+  assert.equal(rewritten.execution.workers, 3);
+  assert.deepEqual(rewritten.reviewArtifacts, [EXPORT_REPORT]);
 });

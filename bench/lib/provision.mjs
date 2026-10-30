@@ -5,7 +5,8 @@
  * mirrored merge settings, rulesets and variables and only the kept
  * workflows enabled; a checkout; a Project with Factory's fields; an
  * isolated Factory configuration and state directory (FACTORY_CONFIG,
- * FACTORY_STATE_DIR) running the given Factory with the run's capacity;
+ * FACTORY_STATE_DIR) running the given Factory with the run's capacity
+ * and the definition's review artifact selectors;
  * repository memory as it stood before the Objective; the background
  * service; and the Objective filed verbatim, its body checked against the
  * definition's digest. The run record (run.json) is what bench/run.mjs and
@@ -34,6 +35,10 @@ import {
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import {
+  loadReviewArtifacts,
+  selectorIdentity,
+} from "../../dist/review/artifacts.js";
 import { CAPACITY, hostValue } from "./definition.mjs";
 
 /** Runs commands, or with `dryRun` prints them; `print` gets each line. */
@@ -506,6 +511,33 @@ export function setupArgs(
   ];
 }
 
+/**
+ * `selectors` merged into the top-level `reviewArtifacts` of the
+ * configuration `file`, which setup wrote: each one the file doesn't have
+ * yet is added after those it has, so a run provisioned again leaves the
+ * file as it is. Setup has no option for them and keeps the key when it
+ * writes the file again. Whether the file changed; a merge Factory's own
+ * loader refuses, such as one past its limit, throws.
+ */
+export function carryReviewArtifacts(file, selectors) {
+  const config = JSON.parse(readFileSync(file, "utf8"));
+  const kept = config.reviewArtifacts ?? [];
+  const have = new Set(kept.map(selectorIdentity));
+  const added = selectors.filter(
+    (selector) => !have.has(selectorIdentity(selector)),
+  );
+  if (!added.length) return false;
+  const problems = [];
+  loadReviewArtifacts([...kept, ...added], problems);
+  if (problems.length)
+    throw new Error(
+      `The definition's reviewArtifacts can't be added to ${file}: ${problems.join("; ")}`,
+    );
+  config.reviewArtifacts = [...kept, ...added];
+  writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+  return true;
+}
+
 /** Copy `source` (a knowledge store) to `target` without Objective `issue`'s entries or any made at or after `before`. */
 export async function seedMemory(source, target, issue, before) {
   // `created` is stored as toISOString text and compared as text: compare it with the same form of the cut.
@@ -702,6 +734,8 @@ export async function provision({
     capacity: previous?.capacity ?? capacity,
     // The source commits put on the base, each with the commit it made on main.
     basePatches: [],
+    // The definition's review artifact selectors, carried into factory.json.
+    reviewArtifacts: [],
     policyAs: def.operatorPolicy.as,
     provisionedAt: previous?.provisionedAt ?? null,
     ...(previous?.queuedAt ? { queuedAt: previous.queuedAt } : {}),
@@ -1113,6 +1147,18 @@ export async function provision({
   };
   setup("configure Factory (setup)", [], (status) => status === "configured");
   record.capacity = capacity;
+  // Setup has no option for reviewArtifacts: they go into the file it
+  // wrote, before the service starts and reads it.
+  const selectors = def.factory.reviewArtifacts ?? [];
+  if (selectors.length)
+    runner.local(
+      `carry the definition's ${selectors.length} reviewArtifacts selector(s) into ${env.FACTORY_CONFIG}`,
+      () => {
+        if (!carryReviewArtifacts(env.FACTORY_CONFIG, selectors))
+          runner.print("    there already");
+      },
+    );
+  record.reviewArtifacts = selectors;
   save();
   if (def.memory.seed === "before-objective") {
     const from = join(

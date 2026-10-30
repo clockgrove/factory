@@ -176,6 +176,8 @@ export interface KeptValidation {
         shown?: string;
         /** The failed command, for `validationFailed`. */
         command?: string;
+        /** The complete output's file, when `detail` holds less (the finding's `output`). */
+        output?: string;
       };
 }
 

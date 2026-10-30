@@ -201,6 +201,15 @@ class CollectionStop extends Error {
   }
 }
 
+/**
+ * Where Factory writes failed validation commands' complete output in a
+ * worker's checkout, for the worker to read (work/self-validate.ts
+ * `writeValidateLog`, #2201): private staging, so never part of a result.
+ */
+export const VALIDATE_LOGS = ".factory-validate";
+/** The validate step's complete output of the command it failed, there for the next attempt. */
+export const VALIDATE_STEP_LOG = `${VALIDATE_LOGS}/validate-step.log`;
+
 /** Controller-owned staging that collection reads but never commits. */
 const PRIVATE_STAGING = [
   ".factory-discovery.json",
@@ -208,6 +217,7 @@ const PRIVATE_STAGING = [
   ".factory-inputs",
   ".factory-assets.json",
   ".factory-media",
+  VALIDATE_LOGS,
 ];
 
 /** Whether a Git-relative path is private staging, which is never a delivery candidate. */
@@ -323,6 +333,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
       handoffPath,
       join(worktree, ".factory-inputs"),
       join(worktree, ".factory-assets.json"),
+      join(worktree, VALIDATE_LOGS),
     ].map(forceRemove),
   );
   return {

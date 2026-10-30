@@ -6,23 +6,30 @@
  * declared ones run. Runs are queued one at a time.
  */
 
+import { closeSync, constants } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { SandboxConfig } from "../config.js";
 import { hold, objectiveWide } from "../engine.js";
 import { GitRefusal } from "../git.js";
 import { needsSelection } from "../media.js";
+import { forceRemove, openParent } from "../paths.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
+import type { RepairFinding } from "../repair.js";
 import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, failureExcerpt } from "../text.js";
-import { validateTree } from "../validate.js";
+import { type Validation, validateTree } from "../validate.js";
 import { hasGitlink, installStorePath } from "../worktree.js";
 import {
   type HandoffNote,
   handoffPeers,
   readHandoffNotes,
   snapshot,
+  VALIDATE_LOGS,
+  VALIDATE_STEP_LOG,
   workHandoffSchema,
 } from "./collect.js";
 import type { WorkerInput, WorkerResult } from "./worker.js";
@@ -52,7 +59,7 @@ export function formattedNote(formatted: {
 }
 
 export const VALIDATION_TOOL_DESCRIPTION =
-  "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.";
+  "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. A failed command's output in the result is an excerpt: its complete output is written to a log under .factory-validate/ in your checkout, which the result names. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.";
 
 /**
  * What a failed check asks of a fix outside the owned paths: the worker's
@@ -185,6 +192,116 @@ function bounded(output: string, bytes: number): string {
     if (size <= room) return excerpt;
     chars = Math.max(0, Math.floor((chars * room) / size) - 1);
   }
+}
+
+/**
+ * The most of one failed command's output a log under VALIDATE_LOGS holds:
+ * past it, its first and last halves, with the cut stated.
+ */
+export const VALIDATE_LOG_BYTES = 8 * 1024 ** 2;
+
+/**
+ * A failed command's complete output, as a log of it holds it (#2201): the
+ * command's attempt file, its streams in the order they arrived, under a
+ * line naming the command; without one, the output the run kept, which
+ * bounds each stream and puts stderr after stdout. Plain text.
+ */
+export function failedCommandLog(
+  result: Pick<
+    Extract<Validation, { kind: "failed" }>,
+    "output" | "outputFile"
+  >,
+  failed: { command: string; exit?: string } | undefined,
+): string {
+  const whole = failed ? result.outputFile?.read() : undefined;
+  return stripVTControlCharacters(
+    whole && failed
+      ? `Validation command failed (${failed.exit ?? "failed"}): ${failed.command}\n${whole.text}`
+      : result.output,
+  );
+}
+
+/**
+ * `text` as a log under VALIDATE_LOG_BYTES keeps it: whole, or past the
+ * bound its first and last halves, with the cut stated.
+ */
+export function boundedValidateLog(text: string): Buffer {
+  const bytes = Buffer.from(text, "utf8");
+  const half = VALIDATE_LOG_BYTES / 2;
+  return bytes.length <= VALIDATE_LOG_BYTES
+    ? bytes
+    : Buffer.concat([
+        bytes.subarray(0, half),
+        Buffer.from(
+          `\n[${bytes.length - 2 * half} bytes omitted: this log keeps the first and last ${half} bytes of ${bytes.length}]\n`,
+        ),
+        bytes.subarray(-half),
+      ]);
+}
+
+/**
+ * What a worker hears about the excerpt of a failed command's output, and
+ * where to see everything (#2201). A tool may leave diagnostics out of its
+ * own report as well; Factory passes no flag of any tool's.
+ */
+export function validateLogNote(command: string, path: string): string {
+  return `The output above is an excerpt, and a tool can leave diagnostics out of its own report too (a count of diagnostics not shown, say): the complete output of \`${command}\` is in ${path} in your checkout. Read that log, or run the command in your checkout, to see everything. The log is Factory's private staging, never part of your result, and your next Validate run replaces it.`;
+}
+
+/**
+ * Write `text` to `path`, a new file under VALIDATE_LOGS in `worktree`,
+ * read-only and within VALIDATE_LOG_BYTES. The checkout is the worker's,
+ * so the directory is reached by held descriptors (paths.ts `openParent`)
+ * and the file made new without following a link: nothing the worker
+ * planted there redirects the write.
+ */
+export async function writeValidateLog(
+  worktree: string,
+  path: string,
+  text: string,
+): Promise<void> {
+  const content = boundedValidateLog(text);
+  const parent = openParent(worktree, path, true);
+  try {
+    await writeFile(`${parent.anchor}/${parent.name}`, content, {
+      flag:
+        constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      mode: 0o400,
+    });
+  } finally {
+    closeSync(parent.fd);
+  }
+}
+
+/**
+ * A work attempt's VALIDATE_LOGS, made fresh before its worker runs: empty,
+ * or holding the validate step's complete output of the command it failed
+ * at VALIDATE_STEP_LOG, when the finding kept that in a file
+ * (step-validate.ts, #2201). Returns that path when it is there.
+ */
+export async function stageValidateLog(
+  worktree: string,
+  finding: RepairFinding | undefined,
+): Promise<string | undefined> {
+  await forceRemove(join(worktree, VALIDATE_LOGS));
+  if (finding?.kind !== "failure" || !finding.output) return undefined;
+  // Gone with its work directory: the finding's excerpt is what is left.
+  const text = await readFile(finding.output, "utf8").catch(() => undefined);
+  if (text === undefined) return undefined;
+  await writeValidateLog(worktree, VALIDATE_STEP_LOG, text);
+  return VALIDATE_STEP_LOG;
+}
+
+/** A Validate run's log of a failed command: the run, then the command as a file name. */
+function logPath(run: number, command: string): string {
+  const slug = command
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return `${VALIDATE_LOGS}/run-${run}-${slug || "command"}.log`;
 }
 
 /**
@@ -327,6 +444,8 @@ export class SelfValidation {
     const run = ++this.runs;
     const { input, options } = this;
     const signal = this.signal;
+    // An earlier run's logs, or the validate step's, describe other files.
+    await forceRemove(join(input.worktree, VALIDATE_LOGS));
     const handoff = await this.checkHandoff();
     const snapped = await snapshot(input.worktree, options.sandbox, signal);
     if ("problem" in snapped)
@@ -361,11 +480,15 @@ export class SelfValidation {
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);
     const passed = result.kind === "passed";
+    const logged =
+      result.kind === "failed" && result.failed
+        ? `\n${await this.logFailure(run, result, result.failed)}`
+        : "";
     const compose = (output: string) => {
       const declared =
         result.kind === "passed"
           ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-          : `Validation failed. Fix this before you finish.\n${output}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
+          : `Validation failed. Fix this before you finish.\n${output}${logged}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
       const composed = [
         result.produced ? `${declared}\n\n${result.produced}` : declared,
       ];
@@ -432,6 +555,29 @@ export class SelfValidation {
       handoffPassed: handoff.passed,
     });
     return parts.join("\n\n");
+  }
+
+  /**
+   * The failed command's complete output, written to a log in the worker's
+   * checkout (`writeValidateLog`), so no excerpt decides what the worker
+   * can see (#2201): what the result says about it (`failedCommandLog`).
+   */
+  private async logFailure(
+    run: number,
+    result: Extract<Validation, { kind: "failed" }>,
+    failed: { command: string; exit?: string },
+  ): Promise<string> {
+    const path = logPath(run, failed.command);
+    try {
+      await writeValidateLog(
+        this.input.worktree,
+        path,
+        failedCommandLog(result, failed),
+      );
+      return validateLogNote(failed.command, path);
+    } catch (error) {
+      return `The complete output of \`${failed.command}\` could not be written to your checkout (${errorMessage(error)}): run the command in your checkout to see everything.`;
+    }
   }
 
   /**

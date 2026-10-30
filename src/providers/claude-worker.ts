@@ -1291,7 +1291,7 @@ export class ClaudeWorker implements Worker {
       plugins: [],
       skills: [],
       systemPrompt: systemPrompt(
-        workItemContract(attempt.input.item),
+        workItemContract(attempt.options.plan, attempt.input.item),
         attempt.grants.shell,
         this.options.sandbox,
       ),

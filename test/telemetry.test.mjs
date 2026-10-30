@@ -307,6 +307,9 @@ test("a step's GitHub requests are traced with their failure category, time and 
     await until(traced, `the check's ${category} failure, traced`, 30_000);
     const request = traced();
     assert.equal(request.category, category);
+    // Its cause, not only fetch's "fetch failed" (#2192).
+    assert.ok(request.codes?.length, JSON.stringify(request));
+    assert.match(request.cause, /^fetch failed: \S/);
     assert.equal(request.status, null);
     assert.equal(request.job, "check");
     assert.match(request.attemptId, /^check#\d+$/);
@@ -322,6 +325,12 @@ test("a step's GitHub requests are traced with their failure category, time and 
       cli(inst, "diagnostics", "63", "--analyze", "--json").out,
     );
     assert.ok(analysis.github.traced[`network ${category}`] >= 1);
+    assert.ok(
+      Object.keys(analysis.github.causes).some((key) =>
+        key.startsWith(`${category} `),
+      ),
+      JSON.stringify(analysis.github.causes),
+    );
     await stopped(service);
   }
 });

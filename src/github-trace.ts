@@ -2,9 +2,11 @@
  * GitHub request tracing (docs/reference/run-log.md#Run log): what the
  * requests of one sync job, one step attempt or the rest of the service run
  * cost, and each request worth a line of its own. Counts, routes, statuses,
- * times and request ids only: never a body, a token or a query value.
+ * times, request ids and a failure's cause only: never a body, a token or a
+ * query value.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { oneLine } from "./text.js";
 
 /**
  * What one scope's GitHub requests cost (`github-call`): requests sent,
@@ -64,6 +66,12 @@ export interface NotedRequest {
   ms: number;
   /** Present when it failed. */
   category?: FailureCategory;
+  /** No answer, or its body cut short: the error's codes, syscall, hostname and remote address (`networkCause`), and the error as one line (`failureText`). */
+  codes?: string[];
+  syscall?: string;
+  hostname?: string;
+  address?: string;
+  cause?: string;
   rateLimited?: true;
   requestId?: string;
   retryAfterSeconds?: number;
@@ -111,20 +119,145 @@ const TIMEOUT = new Set([
   "UND_ERR_BODY_TIMEOUT",
 ]);
 
-/** A request that got no answer, by its error's structured fields (name and code, its cause's too). */
+/** One error of a failure's chain, with the fields Node and undici set. */
+interface Link {
+  name?: unknown;
+  message?: unknown;
+  code?: unknown;
+  syscall?: unknown;
+  hostname?: unknown;
+  host?: unknown;
+  address?: unknown;
+  port?: unknown;
+  /** undici's SocketError: the connection it lost. */
+  socket?: { remoteAddress?: unknown; remotePort?: unknown };
+  cause?: unknown;
+  errors?: unknown;
+}
+
+const MAX_LINKS = 8;
+
+/**
+ * `error` and what is under it, outermost first: its `cause` chain and an
+ * AggregateError's `errors` (a connection tried on each address), each
+ * once, at most MAX_LINKS. fetch's own error says only "fetch failed".
+ */
+function links(error: unknown): Link[] {
+  const found: Link[] = [];
+  const queue: unknown[] = [error];
+  while (queue.length && found.length < MAX_LINKS) {
+    const at = queue.shift();
+    if (!at || typeof at !== "object" || found.includes(at as Link)) continue;
+    const link = at as Link;
+    found.push(link);
+    if (Array.isArray(link.errors)) queue.push(...link.errors);
+    queue.push(link.cause);
+  }
+  return found;
+}
+
+const text = (value: unknown): string | undefined =>
+  typeof value === "string" && value ? value : undefined;
+
+/** A link's remote end, `address:port` (`[v6]:port`), from its own fields or its lost socket's. */
+function remote(link: Link): string | undefined {
+  const address = text(link.address) ?? text(link.socket?.remoteAddress);
+  if (!address) return undefined;
+  const port =
+    typeof link.port === "number"
+      ? link.port
+      : typeof link.socket?.remotePort === "number"
+        ? link.socket.remotePort
+        : undefined;
+  if (port === undefined) return address;
+  return `${address.includes(":") ? `[${address}]` : address}:${port}`;
+}
+
+/** What a request that got no answer met, for its `github-request` event (see `NotedRequest`). */
+export interface NetworkCause {
+  codes?: string[];
+  syscall?: string;
+  hostname?: string;
+  address?: string;
+}
+
+/** The structured fields of a failure's chain (`links`): its error codes, each once, and the first syscall, hostname and remote address. */
+export function networkCause(error: unknown): NetworkCause {
+  const chain = links(error);
+  const codes = [
+    ...new Set(chain.map((e) => text(e.code)).filter((code) => code)),
+  ] as string[];
+  const first = (pick: (e: Link) => string | undefined) => {
+    for (const link of chain) {
+      const value = pick(link);
+      if (value) return value;
+    }
+    return undefined;
+  };
+  const syscall = first((e) => text(e.syscall));
+  const hostname = first((e) => text(e.hostname) ?? text(e.host));
+  const address = first(remote);
+  return {
+    ...(codes.length ? { codes } : {}),
+    ...(syscall ? { syscall } : {}),
+    ...(hostname ? { hostname } : {}),
+    ...(address ? { address } : {}),
+  };
+}
+
+/** A URL's login and query dropped: a signed link's signature, a token in a remote. */
+const withoutSecrets = (line: string): string =>
+  line
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*@/gi, "$1")
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#][^\s)]*/gi, "$1");
+
+/**
+ * A failed request's error as one line: its message, then each cause's
+ * with the code, syscall, hostname and remote address it doesn't already
+ * say, as `fetch failed: other side closed (UND_ERR_SOCKET,
+ * 192.0.2.1:443)`. No URL's login or query.
+ */
+export function failureText(error: unknown): string {
+  const chain = links(error);
+  if (!chain.length) return oneLine(withoutSecrets(String(error)), 600);
+  const parts: string[] = [];
+  for (const link of chain) {
+    const message = oneLine(text(link.message) ?? text(link.name) ?? "", 200);
+    // Each field as it is shown, and as the message would already say it.
+    const fields: string[] = [];
+    for (const [shown, said] of [
+      [text(link.code), text(link.code)],
+      [text(link.syscall), text(link.syscall)],
+      [text(link.hostname) ?? text(link.host), undefined],
+      [remote(link), text(link.address) ?? text(link.socket?.remoteAddress)],
+    ])
+      if (shown && !message.includes(said ?? shown) && !fields.includes(shown))
+        fields.push(shown);
+    const part = [message, fields.length ? `(${fields.join(", ")})` : ""]
+      .filter(Boolean)
+      .join(" ");
+    if (part && !parts.includes(part)) parts.push(part);
+  }
+  const [top = String(error), ...causes] = parts;
+  return oneLine(
+    withoutSecrets(causes.length ? `${top}: ${causes.join("; ")}` : top),
+    600,
+  );
+}
+
+/** A failed request's cause, as its `github-request` event records it. */
+export function causeFields(error: unknown): NetworkCause & { cause: string } {
+  return { ...networkCause(error), cause: oneLine(failureText(error), 300) };
+}
+
+/** A request that got no answer, by its error's structured fields (name and code, its causes' too). */
 export function networkCategory(
   error: unknown,
   aborted: boolean,
 ): FailureCategory {
   if (aborted) return "aborted";
-  const chain: { name?: unknown; code?: unknown }[] = [];
-  for (
-    let at: unknown = error, depth = 0;
-    at && typeof at === "object" && depth < 4;
-    at = (at as { cause?: unknown }).cause, depth++
-  )
-    chain.push(at as { name?: unknown; code?: unknown });
-  const codes = chain.map((e) => (typeof e.code === "string" ? e.code : ""));
+  const chain = links(error);
+  const codes = chain.map((e) => text(e.code) ?? "");
   if (chain.some((e) => e.name === "TimeoutError")) return "timeout";
   if (codes.some((code) => DNS.has(code))) return "dns";
   if (codes.some((code) => TIMEOUT.has(code))) return "timeout";

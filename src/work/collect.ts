@@ -34,6 +34,7 @@ import {
 import { isRecord, ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS, type DesignRisk } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
+import { resultCriteria } from "../review/result.js";
 import { candidateBounds } from "../sandbox.js";
 import { errorMessage } from "../text.js";
 import {
@@ -246,11 +247,7 @@ async function collectResult(collected: CollectInput): Promise<Collection> {
     !(await text("ls-files", "--stage", "--", path));
 
   const handoffPath = join(worktree, ".factory-handoff.json");
-  const notes = await readHandoff(
-    handoffPath,
-    handoffPeers(input.plan, item),
-    item.acceptance.length,
-  );
+  const notes = await readHandoff(handoffPath, input.plan, item);
   if (notes) {
     if (!(await untracked(".factory-handoff.json")))
       throw new WorkFinding(
@@ -450,14 +447,14 @@ export async function snapshot(
  */
 export async function readHandoffNotes(
   worktree: string,
-  plan: Pick<Plan, "items">,
+  plan: Pick<Plan, "items" | "coverage">,
   item: WorkItem,
 ): Promise<HandoffNote[] | { problem: string } | undefined> {
   try {
     return await readHandoff(
       join(worktree, ".factory-handoff.json"),
-      handoffPeers(plan, item),
-      item.acceptance.length,
+      plan,
+      item,
     );
   } catch (error) {
     if (error instanceof WorkFinding) return { problem: error.message };
@@ -498,11 +495,16 @@ function noChangeDetail(finalResponse: string): string {
 
 // ── Private staging ─────────────────────────────────────────────────────
 
-/** The handoff notes, or undefined when the worker left none. */
+/**
+ * The handoff notes, or undefined when the worker left none. A
+ * verification note may name any criterion `item`'s result review judges
+ * (`resultCriteria`), not only the item's own acceptance; collection and
+ * Validate both read through here, so they share that bound.
+ */
 async function readHandoff(
   path: string,
-  peers: readonly { id: string; title: string }[],
-  criterionCount: number,
+  plan: Pick<Plan, "items" | "coverage">,
+  item: WorkItem,
 ): Promise<HandoffNote[] | undefined> {
   const stat = await lstat(path).catch(() => undefined);
   if (!stat) return undefined;
@@ -522,7 +524,11 @@ async function readHandoff(
       "handoff",
     );
   }
-  const decoded = decodeHandoff(value, peers, criterionCount);
+  const decoded = decodeHandoff(
+    value,
+    handoffPeers(plan, item),
+    resultCriteria(plan, item).length,
+  );
   if (!Array.isArray(decoded))
     throw new WorkFinding(decoded.problem, "handoff");
   return decoded;

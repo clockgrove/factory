@@ -267,4 +267,6 @@ export interface PlanningFacts {
   localAssetRoots: readonly string[];
   /** The base's `.gitattributes` lines that set filter=lfs, as `file: line`. */
   lfsRules: string[];
+  /** The base's protected files the May change section doesn't list (objective.ts `unlistedProtectedPaths`): plan review judges acceptance against them (#2248). */
+  unlistedProtectedPaths: string[];
 }

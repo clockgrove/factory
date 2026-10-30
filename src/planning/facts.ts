@@ -7,7 +7,13 @@ import { parse } from "yaml";
 import { gitEnvironment, lfsFiltered } from "../git.js";
 import { TransientError } from "../github.js";
 import { markdownLines } from "../markdown.js";
-import { checkObjective, type SourceRef, validPath } from "../objective.js";
+import {
+  checkObjective,
+  mayChange,
+  type SourceRef,
+  unlistedProtectedPaths,
+  validPath,
+} from "../objective.js";
 import type { ObjectiveBlock, ShownObjective } from "../shown.js";
 import { errorMessage } from "../text.js";
 import { skipsDispatchedRuns } from "./dispatch-guard.js";
@@ -1454,6 +1460,11 @@ export async function buildFacts(
     ...(args.playbookPath ? { playbookPath: args.playbookPath } : {}),
     localAssetRoots: args.localAssetRoots ?? [],
     lfsRules: await lfsRules(files),
+    unlistedProtectedPaths: unlistedProtectedPaths(
+      await files.paths(),
+      mayChange(args.shown.blocks).paths,
+      args.playbookPath ?? "",
+    ),
   };
   return { facts };
 }

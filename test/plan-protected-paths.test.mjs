@@ -110,9 +110,9 @@ async function findings(base, items, options = {}) {
       new BaseFiles(base.directory, base.commit),
       accepted,
       accepted,
-      new Set(),
+      new Set(options.started ?? []),
     )
-  ).filter((finding) => /a protected path/.test(finding.message));
+  ).filter((finding) => /protected path/.test(finding.message));
 }
 
 test("a plan giving an item a workflow the May change section doesn't list is refused, naming the path and the rule", async () => {
@@ -172,21 +172,23 @@ test("CODEOWNERS, other CI configuration and the playbook are protected; a direc
   );
 });
 
-test("an amendment that adds or grows an item with an unlisted workflow is refused; what the accepted plan owned isn't judged again", async () => {
+test("an amendment that adds or grows an item with an unlisted workflow is refused; what a started item owned isn't judged again", async () => {
   const base = target();
   const accepted = [item("app", ["src/check.js"]), item("old", [WORKFLOW])];
+  const started = ["old"];
   // Added: a new item owning the workflow.
-  const [added] = await findings(
+  const [added, ...others] = await findings(
     base,
     [...accepted, item("browser", [WORKFLOW])],
-    { accepted },
+    { accepted, started },
   );
+  assert.deepEqual(others, []);
   assert.equal(added.itemId, "browser");
   // Grown: an accepted item that gains it.
   const [grown, ...rest] = await findings(
     base,
     [item("app", ["src/check.js", WORKFLOW]), item("old", [WORKFLOW])],
-    { accepted },
+    { accepted, started },
   );
   assert.deepEqual(rest, []);
   assert.equal(grown.itemId, "app");
@@ -198,4 +200,54 @@ test("an amendment that adds or grows an item with an unlisted workflow is refus
     }),
     [],
   );
+});
+
+test("an amendment judges an unstarted accepted item's protected paths in full: only a started item can't drop one", async () => {
+  const base = target();
+  const accepted = [item("old", ["src/check.js", WORKFLOW])];
+  const [unstarted, ...rest] = await findings(base, accepted, { accepted });
+  assert.deepEqual(rest, []);
+  assert.equal(unstarted.itemId, "old");
+  assert.ok(unstarted.message.includes(`owns "${WORKFLOW}"`));
+  assert.deepEqual(
+    await findings(base, accepted, { accepted, started: ["old"] }),
+    [],
+  );
+});
+
+test("the finding's advice can be acted on: an amendment's asks for no answer, since only replanning lists a path in May change", async () => {
+  const base = target();
+  const [first] = await findings(base, [item("ci", [WORKFLOW])]);
+  assert.match(first.message, /decisionRequired/);
+  assert.match(first.message, /an answer alone can't/);
+  assert.match(first.message, /editing the Objective's May change section/);
+  const accepted = [item("app", ["src/check.js"])];
+  const [amended] = await findings(
+    base,
+    [...accepted, item("ci", [WORKFLOW])],
+    { accepted },
+  );
+  assert.equal(amended.itemId, "ci");
+  assert.doesNotMatch(amended.message, /decisionRequired/);
+  assert.match(amended.message, /no answer can list a path in May change/);
+  assert.match(amended.message, /editing that section and replanning/);
+});
+
+test("an owned directory that holds a CI directory is refused; one that holds other files of a CI host is not", async () => {
+  const base = target();
+  const refused = await findings(base, [
+    item("gitea", [".gitea/"]),
+    item("forgejo", [".forgejo/"]),
+    item("github", [".github/"]),
+    item("templates", [".gitea/ISSUE_TEMPLATE/", "src/"]),
+  ]);
+  assert.deepEqual(
+    refused.map((finding) => [finding.itemId, finding.message.split(",")[0]]),
+    [
+      ["gitea", 'Work Item gitea owns ".gitea/"'],
+      ["forgejo", 'Work Item forgejo owns ".forgejo/"'],
+      ["github", 'Work Item github owns ".github/"'],
+    ],
+  );
+  assert.match(refused[0].message, /a directory over protected paths/);
 });

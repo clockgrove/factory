@@ -260,9 +260,10 @@ function protectedPath(path: string, playbook: string): boolean {
 /**
  * The protected paths among `paths` that the May change section (`listed`)
  * doesn't name exactly: the one rule collection applies to a worker's
- * changed files and the plan check to an item's owned paths (#2246). An
- * owned directory under a CI directory is protected as a whole, and May
- * change lists files, so an item owns only the exact listed file there.
+ * changed files and the plan check to an item's owned paths (#2246,
+ * through `unlistedProtectedOwnedPaths`). An owned directory under a CI
+ * directory is protected as a whole, and May change lists files, so an
+ * item owns only the exact listed file there.
  */
 export function unlistedProtectedPaths(
   paths: readonly string[],
@@ -271,6 +272,28 @@ export function unlistedProtectedPaths(
 ): string[] {
   return paths.filter(
     (path) => protectedPath(path, playbook) && !listed.includes(path),
+  );
+}
+
+/**
+ * The owned paths among `paths` the plan check refuses (#2246): the
+ * unlisted protected paths, and an owned directory that holds a CI
+ * directory, such as `.gitea/` over `.gitea/workflows/`, whose worker
+ * could change CI configuration there that collection then refuses. A
+ * directory that holds only the playbook, such as `docs/`, isn't one.
+ */
+export function unlistedProtectedOwnedPaths(
+  paths: readonly string[],
+  listed: readonly string[],
+  playbook: string,
+): string[] {
+  const holdsCi = (path: string) =>
+    path.endsWith("/") &&
+    CI_DIRECTORIES.some((directory) => directory.startsWith(path));
+  return paths.filter(
+    (path) =>
+      (protectedPath(path, playbook) || holdsCi(path)) &&
+      !listed.includes(path),
   );
 }
 

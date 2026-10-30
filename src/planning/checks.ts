@@ -6,7 +6,7 @@ import {
   namesPath,
   objectiveText,
   PROTECTED_PATH_RULE,
-  unlistedProtectedPaths,
+  unlistedProtectedOwnedPaths,
   validPath,
 } from "../objective.js";
 import { localAssetPlace } from "../sandbox.js";
@@ -77,7 +77,7 @@ export async function checkPlan(
   const { items } = draft;
   commandFindings(items, facts, found);
   await exportPathFindings(items, files, found);
-  protectedPathFindings(items, facts, found, accepted);
+  protectedPathFindings(items, facts, found, accepted, started);
   await boundaryFindings(items, facts, files, found);
   graphLint(draft, facts.packageCommands, found);
   integratedBaseFindings(draft, facts.base, found);
@@ -114,29 +114,38 @@ async function exportPathFindings(
  * Protected paths (#2246): an item owns CI configuration, `.github/`,
  * CODEOWNERS or the playbook only by an exact path the Objective's May
  * change section lists, the rule collection refuses a worker's change by
- * (objective.ts `unlistedProtectedPaths`). In a benchmark run an amendment
- * gave an item workflow files; collection refused the worker's edits, and
- * the item held for the operator. An amendment answers for what it adds: a
- * path the accepted plan's item already owns isn't judged again.
+ * (objective.ts `unlistedProtectedOwnedPaths`). In a benchmark run an
+ * amendment gave an item workflow files; collection refused the worker's
+ * edits, and the item held for the operator. An amendment answers for what
+ * it adds: a path a started item already owns isn't judged again, since
+ * the started-item rule keeps it (a reattempt item's too, which only
+ * grows). An unstarted item can drop one, so it is judged in full. An
+ * amendment plans from the Objective as accepted, so its advice asks for
+ * no answer that would list a path in May change.
  */
 function protectedPathFindings(
   items: readonly WorkItem[],
   facts: PlanningFacts,
   found: Found,
   accepted?: Draft,
+  started?: ReadonlySet<string>,
 ): void {
   const listed = mayChange(facts.blocks).paths;
+  const advice = accepted
+    ? "Meet the need through paths the item may change (such as a script CI already runs). An amendment plans from the Objective as accepted, so no answer can list a path in May change: only the operator editing that section and replanning can"
+    : "Meet the need through paths the item may change (such as a script CI already runs), or, when only a protected file can, ask through decisionRequired for the operator to list that exact path: an answer alone can't, as the operator lists it by editing the Objective's May change section and replanning";
   for (const item of items) {
-    const kept =
-      accepted?.items.find((old) => old.id === item.id)?.ownedPaths ?? [];
+    const kept = started?.has(item.id)
+      ? (accepted?.items.find((old) => old.id === item.id)?.ownedPaths ?? [])
+      : [];
     const added = item.ownedPaths.filter((path) => !kept.includes(path));
-    for (const path of unlistedProtectedPaths(
+    for (const path of unlistedProtectedOwnedPaths(
       added,
       listed,
       facts.playbookPath ?? "",
     ))
       found(
-        `Work Item ${item.id} owns ${JSON.stringify(path)}, a protected path the Objective's May change section doesn't list. ${PROTECTED_PATH_RULE}, so collection would refuse the worker's change there. Meet the need through paths the item may change (such as a script CI already runs), or, when only this path can, ask through decisionRequired for the operator to list it in May change`,
+        `Work Item ${item.id} owns ${JSON.stringify(path)}, ${path.endsWith("/") ? "a directory over protected paths, which May change can't list: it lists exact files" : "a protected path the Objective's May change section doesn't list"}. ${PROTECTED_PATH_RULE}, so collection would refuse the worker's change there. ${advice}`,
         item.id,
       );
   }

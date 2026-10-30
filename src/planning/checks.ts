@@ -1,9 +1,12 @@
 import { isAbsolute } from "node:path";
 import { markdownLines } from "../markdown.js";
 import {
+  mayChange,
   namedTokens,
   namesPath,
   objectiveText,
+  PROTECTED_PATH_RULE,
+  unlistedProtectedPaths,
   validPath,
 } from "../objective.js";
 import { localAssetPlace } from "../sandbox.js";
@@ -74,6 +77,7 @@ export async function checkPlan(
   const { items } = draft;
   commandFindings(items, facts, found);
   await exportPathFindings(items, files, found);
+  protectedPathFindings(items, facts, found, accepted);
   await boundaryFindings(items, facts, files, found);
   graphLint(draft, facts.packageCommands, found);
   integratedBaseFindings(draft, facts.base, found);
@@ -104,6 +108,38 @@ async function exportPathFindings(
         `Work Item ${item.id} owns ${JSON.stringify(path)}, under ${prefix}, which is your read directory's copy of the repository, not a path in it: owned paths are relative to the repository root, so own ${JSON.stringify(path.slice(prefix.length))}`,
         item.id,
       );
+}
+
+/**
+ * Protected paths (#2246): an item owns CI configuration, `.github/`,
+ * CODEOWNERS or the playbook only by an exact path the Objective's May
+ * change section lists, the rule collection refuses a worker's change by
+ * (objective.ts `unlistedProtectedPaths`). In a benchmark run an amendment
+ * gave an item workflow files; collection refused the worker's edits, and
+ * the item held for the operator. An amendment answers for what it adds: a
+ * path the accepted plan's item already owns isn't judged again.
+ */
+function protectedPathFindings(
+  items: readonly WorkItem[],
+  facts: PlanningFacts,
+  found: Found,
+  accepted?: Draft,
+): void {
+  const listed = mayChange(facts.blocks).paths;
+  for (const item of items) {
+    const kept =
+      accepted?.items.find((old) => old.id === item.id)?.ownedPaths ?? [];
+    const added = item.ownedPaths.filter((path) => !kept.includes(path));
+    for (const path of unlistedProtectedPaths(
+      added,
+      listed,
+      facts.playbookPath ?? "",
+    ))
+      found(
+        `Work Item ${item.id} owns ${JSON.stringify(path)}, a protected path the Objective's May change section doesn't list. ${PROTECTED_PATH_RULE}, so collection would refuse the worker's change there. Meet the need through paths the item may change (such as a script CI already runs), or, when only this path can, ask through decisionRequired for the operator to list it in May change`,
+        item.id,
+      );
+  }
 }
 
 // ── Commands ────────────────────────────────────────────────────────────

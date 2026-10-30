@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import {
   type ObjectiveBlock,
   type ShownOptions,
@@ -211,6 +212,66 @@ export function mayChange(blocks: readonly ObjectiveBlock[]): {
       );
   }
   return { paths, problems };
+}
+
+/** CI configuration Factory knows of, by path from the root. */
+const CI_PATHS = [
+  ".appveyor.yml",
+  ".drone.yml",
+  ".gitlab-ci.yaml",
+  ".gitlab-ci.yml",
+  ".travis.yml",
+  ".woodpecker.yaml",
+  ".woodpecker.yml",
+  "appveyor.yml",
+  "azure-pipelines.yaml",
+  "azure-pipelines.yml",
+  "bitbucket-pipelines.yml",
+  "Jenkinsfile",
+];
+const CI_DIRECTORIES = [
+  ".buildkite/",
+  ".circleci/",
+  ".forgejo/workflows/",
+  ".gitea/workflows/",
+  ".github/",
+  ".woodpecker/",
+];
+
+/** The protected-path rule, as collection's and the plan check's findings state it. */
+export const PROTECTED_PATH_RULE =
+  "CI configuration, .github/, CODEOWNERS and the playbook change only when that section lists the exact path";
+
+/**
+ * Whether `path` steers CI, review or planning: anything under `.github/`
+ * (workflows, CODEOWNERS, settings), a CODEOWNERS file anywhere, another
+ * CI system's configuration, or the target's curated playbook. A worker
+ * changes one only when the Objective's May change section lists that path.
+ */
+function protectedPath(path: string, playbook: string): boolean {
+  return (
+    CI_DIRECTORIES.some((directory) => path.startsWith(directory)) ||
+    CI_PATHS.includes(path) ||
+    basename(path) === "CODEOWNERS" ||
+    path === playbook
+  );
+}
+
+/**
+ * The protected paths among `paths` that the May change section (`listed`)
+ * doesn't name exactly: the one rule collection applies to a worker's
+ * changed files and the plan check to an item's owned paths (#2246). An
+ * owned directory under a CI directory is protected as a whole, and May
+ * change lists files, so an item owns only the exact listed file there.
+ */
+export function unlistedProtectedPaths(
+  paths: readonly string[],
+  listed: readonly string[],
+  playbook: string,
+): string[] {
+  return paths.filter(
+    (path) => protectedPath(path, playbook) && !listed.includes(path),
+  );
 }
 
 /** A declaration's only entry, when it has exactly one. */

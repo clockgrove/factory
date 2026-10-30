@@ -1384,6 +1384,8 @@ export interface FactsArgs {
   formatCommand?: string;
   /** The approved playbook text. */
   playbook?: string;
+  /** The target's curated playbook's path (planning.playbook). */
+  playbookPath?: string;
   /** The operator's media.localAssetRoots. */
   localAssetRoots?: readonly string[];
   signal?: AbortSignal;
@@ -1449,6 +1451,7 @@ export async function buildFacts(
     ),
     coverageObligations: coverageObligations(args.shown.blocks),
     playbook: args.playbook ?? "",
+    ...(args.playbookPath ? { playbookPath: args.playbookPath } : {}),
     localAssetRoots: args.localAssetRoots ?? [],
     lfsRules: await lfsRules(files),
   };

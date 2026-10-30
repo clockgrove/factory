@@ -440,7 +440,7 @@ export function harnessRun(record) {
  */
 export const GITHUB_RESERVE = 2000;
 
-/** The last Factory release whose setup has no --github-reserve: the option came after it. */
+/** The last Factory release whose setup has no --github-reserve: 0.5.12 is the first with it. */
 const LAST_WITHOUT_GITHUB_RESERVE = [0, 5, 11];
 
 /** `cli`'s usage: the text `factory help` prints. Running it changes nothing. */

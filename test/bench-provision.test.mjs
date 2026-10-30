@@ -135,16 +135,19 @@ test("a dry run prints the whole provisioning and touches nothing", () => {
     record.reviewArtifacts,
     loadDefinition(EXAMPLE).factory.reviewArtifacts,
   );
-  // This checkout's version doesn't say whether its setup takes
-  // --github-reserve; its usage does, read even in a dry run.
+  // This checkout's setup takes --github-reserve: its version says so, or,
+  // at 0.5.11, its usage, which a dry run reads too.
+  const { by } = githubReserveSupport(
+    resolveFactory(join(root, "dist", "cli.js")),
+  );
   assert.deepEqual(record.githubReserve, {
     applied: true,
     reserve: GITHUB_RESERVE,
-    by: "usage",
+    by,
   });
   assert.ok(
     out.includes(
-      "check: whether this Factory's setup takes --github-reserve, by its usage: it does",
+      `check: whether this Factory's setup takes --github-reserve, by its ${by}: it does`,
     ),
     out,
   );

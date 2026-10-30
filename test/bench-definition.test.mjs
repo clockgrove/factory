@@ -15,6 +15,7 @@ import {
 } from "../bench/lib/definition.mjs";
 import { policyAnswer } from "../bench/lib/holds.mjs";
 import { benchDirs, HOME_ENV } from "../bench/lib/home.mjs";
+import { loadReviewArtifacts } from "../dist/review/artifacts.js";
 import { EXAMPLE } from "./bench-fixture.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "bench-definition-"));
@@ -313,6 +314,49 @@ test("base patches and capacity are optional, and checked when given", () => {
   assert.deepEqual(
     definitionProblems(capacity).map((p) => p.split(":")[0]),
     ["factory.capacity"],
+  );
+});
+
+test("factory.reviewArtifacts is optional, and Factory's own loader checks it, in its words", () => {
+  const without = example();
+  delete without.factory.reviewArtifacts;
+  assert.deepEqual(definitionProblems(without), []);
+  const [selector] = example().factory.reviewArtifacts;
+  assert.equal(selector.text.locator.stdoutPathPrefix, "EXPORT_REPORT_DIR=");
+  assert.deepEqual(loadReviewArtifacts([selector]), [selector]);
+  for (const bad of [
+    [{ ...selector, text: { ...selector.text, source: "../outside.js" } }],
+    [
+      {
+        command: "npm test",
+        text: {
+          source: "test/export.test.js",
+          locator: { stdoutPathPrefix: "", files: [] },
+        },
+      },
+    ],
+    [selector, selector],
+    Array(9).fill(selector),
+    selector,
+  ]) {
+    const value = example();
+    value.factory.reviewArtifacts = bad;
+    const factory = [];
+    loadReviewArtifacts(bad, factory);
+    assert.ok(factory.length, JSON.stringify(bad));
+    assert.deepEqual(
+      definitionProblems(value),
+      factory.map((problem) => `factory.${problem}`),
+    );
+  }
+  // The refusal names the field as the loader does.
+  const value = example();
+  value.factory.reviewArtifacts[0].text.source = "../outside.js";
+  const file = join(dir, "artifacts.json");
+  writeFileSync(file, JSON.stringify(value));
+  assert.throws(
+    () => loadDefinition(file),
+    /- factory\.reviewArtifacts\[0\]\.text\.source must be a relative path inside the checkout/,
   );
 });
 

@@ -5,7 +5,8 @@
  * mirrored merge settings, rulesets and variables and only the kept
  * workflows enabled; a checkout; a Project with Factory's fields; an
  * isolated Factory configuration and state directory (FACTORY_CONFIG,
- * FACTORY_STATE_DIR) running the given Factory with the run's capacity;
+ * FACTORY_STATE_DIR) running the given Factory with the run's capacity
+ * and the definition's review artifact selectors;
  * repository memory as it stood before the Objective; the background
  * service; and the Objective filed verbatim, its body checked against the
  * definition's digest. The run record (run.json) is what bench/run.mjs and
@@ -16,7 +17,9 @@
  * clone of the source, so one at a time fetches into it. With a dry run,
  * `Runner` prints each GitHub, Git and setup action instead of doing it
  * and answers each look with "not there yet", so the whole sequence
- * prints and nothing outside the process is touched.
+ * prints and nothing outside the process is touched. It still reads the
+ * Factory CLI's own usage when its version doesn't say whether setup takes
+ * --github-reserve (githubReserveSupport): that changes nothing.
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -34,6 +37,11 @@ import {
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
+import {
+  loadReviewArtifacts,
+  selectorIdentity,
+} from "../../dist/review/artifacts.js";
 import { CAPACITY, hostValue } from "./definition.mjs";
 
 /** Runs commands, or with `dryRun` prints them; `print` gets each line. */
@@ -425,11 +433,79 @@ export function harnessRun(record) {
   };
 }
 
-/** `factory setup`'s options for this definition, host, repository, checkout, Project and capacity (runCapacity). */
+/**
+ * The share of the installation's GitHub budget benchmark traffic leaves
+ * to production (`--github-reserve`, github.reserve): the installation's
+ * budget is production's too, so benchmark traffic yields first.
+ */
+export const GITHUB_RESERVE = 2000;
+
+/** The last Factory release whose setup has no --github-reserve: 0.5.12 is the first with it. */
+const LAST_WITHOUT_GITHUB_RESERVE = [0, 5, 11];
+
+/** `cli`'s usage: the text `factory help` prints. Running it changes nothing. */
+function factoryUsage(cli) {
+  try {
+    return execFileSync(process.execPath, [cli, "help"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  } catch (error) {
+    throw new Error(
+      `Couldn't read ${cli}'s usage (factory help): ${String(error.stderr || error.message).trim()}`,
+    );
+  }
+}
+
+/**
+ * Whether the setup of `factory` (resolveFactory) takes --github-reserve,
+ * and how that is known (`by`). Its version says when it can: a build
+ * versioned after 0.5.11 has the option, and a release at 0.5.11 or before
+ * doesn't. A checkout at 0.5.11 or before may have it or not, as may a
+ * version that isn't plain MAJOR.MINOR.PATCH, so its own usage says: the
+ * one `setup` line of `factory help` lists `[--github-reserve ...]` or
+ * doesn't. A usage without exactly one setup line throws rather than guess.
+ */
+export function githubReserveSupport(factory, usage = factoryUsage) {
+  const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(factory.version ?? "");
+  if (version) {
+    const parts = version.slice(1).map(Number);
+    const at = parts.findIndex(
+      (part, i) => part !== LAST_WITHOUT_GITHUB_RESERVE[i],
+    );
+    if (at >= 0 && parts[at] > LAST_WITHOUT_GITHUB_RESERVE[at])
+      return { supported: true, by: "version" };
+    if (factory.kind === "release") return { supported: false, by: "version" };
+  }
+  const setup = usage(factory.cli)
+    .split("\n")
+    .filter((line) => /^ {2}setup\s/.test(line));
+  if (setup.length !== 1)
+    throw new Error(
+      `${factory.cli}'s usage (factory help) has ${setup.length ? setup.length : "no"} setup lines, not one: can't tell whether its setup takes --github-reserve`,
+    );
+  return {
+    supported: /\s\[--github-reserve [A-Z][A-Z-]*\]/.test(setup[0]),
+    by: "usage",
+  };
+}
+
+/**
+ * `factory setup`'s options for this definition, host, repository,
+ * checkout, Project and capacity (runCapacity), with `githubReserve`
+ * (null for a Factory whose setup has no --github-reserve).
+ */
 export function setupArgs(
   definition,
   host,
-  { repository, checkout, projectId, capacity = {} },
+  {
+    repository,
+    checkout,
+    projectId,
+    capacity = {},
+    githubReserve = GITHUB_RESERVE,
+  },
 ) {
   const f = definition.factory;
   const value = (text) => hostValue(text, host);
@@ -451,9 +527,10 @@ export function setupArgs(
         ]
       : ["--github-login"]),
     // The installation's budget is production's too: benchmark traffic
-    // yields first (github.reserve).
-    "--github-reserve",
-    "2000",
+    // yields first (github.reserve), when this Factory's setup can say so.
+    ...(githubReserve === null
+      ? []
+      : ["--github-reserve", String(githubReserve)]),
     ...(host.operator ? ["--operator", host.operator] : []),
     "--provider",
     f.provider,
@@ -504,6 +581,46 @@ export function setupArgs(
       capacity[key] === undefined ? [] : [flag, String(capacity[key])],
     ),
   ];
+}
+
+/**
+ * The top-level `reviewArtifacts` of the configuration `file`, which setup
+ * wrote, set to exactly the definition's `selectors`: the definition is
+ * what the run is configured with, so selectors it no longer has go. The
+ * file is written only when its list differs from them by Factory's
+ * selectorIdentity, so a run provisioned again leaves it byte for byte as
+ * it is. With no selectors, the key is dropped only when the file has one
+ * provisioning wrote (`carried`, as the run record says); otherwise the
+ * file is left alone. Setup has no option for them and keeps the key when
+ * it writes the file again. Whether the file changed; selectors Factory's
+ * own loader refuses, such as more than its limit, throw.
+ */
+export function carryReviewArtifacts(file, selectors, carried = []) {
+  const config = JSON.parse(readFileSync(file, "utf8"));
+  const has = config.reviewArtifacts ?? [];
+  if (!selectors.length) {
+    const wrote = new Set(carried.map(selectorIdentity));
+    if (!has.some((selector) => wrote.has(selectorIdentity(selector))))
+      return false;
+    delete config.reviewArtifacts;
+  } else {
+    if (
+      isDeepStrictEqual(
+        has.map(selectorIdentity),
+        selectors.map(selectorIdentity),
+      )
+    )
+      return false;
+    const problems = [];
+    loadReviewArtifacts(selectors, problems);
+    if (problems.length)
+      throw new Error(
+        `The definition's reviewArtifacts can't be written into ${file}: ${problems.join("; ")}`,
+      );
+    config.reviewArtifacts = selectors;
+  }
+  writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+  return true;
 }
 
 /** Copy `source` (a knowledge store) to `target` without Objective `issue`'s entries or any made at or after `before`. */
@@ -679,6 +796,13 @@ export async function provision({
   };
   const checkout = join(host.workDir, name);
   const cache = join(host.cacheDir, source.replace("/", "__"));
+  // An older release under benchmark may have no --github-reserve: setup
+  // gets it only when this Factory takes it, so A/B runs of old releases
+  // still provision.
+  const reserve = githubReserveSupport(factory);
+  runner.print(
+    `check: whether this Factory's setup takes --github-reserve, by its ${reserve.by}: ${reserve.supported ? "it does" : "it doesn't, so the run's GitHub traffic doesn't yield to production's first"}`,
+  );
   // What run.mjs and scoring read stays while this provisioning carries on.
   const previous = recordedRun(runDir);
   const record = {
@@ -698,10 +822,19 @@ export async function provision({
     stateDir,
     env,
     factory,
+    // Whether setup was given --github-reserve, and how support was known.
+    githubReserve: {
+      applied: reserve.supported,
+      reserve: reserve.supported ? GITHUB_RESERVE : null,
+      by: reserve.by,
+    },
     // The service's capacity, as given to setup; a value missing is Factory's own for the host.
     capacity: previous?.capacity ?? capacity,
     // The source commits put on the base, each with the commit it made on main.
     basePatches: [],
+    // The definition's review artifact selectors, carried into factory.json;
+    // until this provisioning carries them, those a previous one did.
+    reviewArtifacts: previous?.reviewArtifacts ?? [],
     policyAs: def.operatorPolicy.as,
     provisionedAt: previous?.provisionedAt ?? null,
     ...(previous?.queuedAt ? { queuedAt: previous.queuedAt } : {}),
@@ -1097,6 +1230,7 @@ export async function provision({
     checkout,
     projectId,
     capacity,
+    githubReserve: record.githubReserve.reserve,
   });
   // A setup that refused or is blocked stops here: it names what to fix, and running again carries on.
   const setup = (title, extra, ok) => {
@@ -1113,6 +1247,29 @@ export async function provision({
   };
   setup("configure Factory (setup)", [], (status) => status === "configured");
   record.capacity = capacity;
+  // Setup has no option for reviewArtifacts: they go into the file it
+  // wrote, before the service starts and reads it, exactly as the
+  // definition has them.
+  const selectors = def.factory.reviewArtifacts ?? [];
+  if (selectors.length || record.reviewArtifacts.length)
+    runner.local(
+      selectors.length
+        ? `carry the definition's ${selectors.length} reviewArtifacts selector(s) into ${env.FACTORY_CONFIG}`
+        : `drop the reviewArtifacts provisioning carried into ${env.FACTORY_CONFIG}: the definition has none`,
+      () => {
+        if (
+          !carryReviewArtifacts(
+            env.FACTORY_CONFIG,
+            selectors,
+            record.reviewArtifacts,
+          )
+        )
+          runner.print(
+            selectors.length ? "    there already" : "    none there",
+          );
+      },
+    );
+  record.reviewArtifacts = selectors;
   save();
   if (def.memory.seed === "before-objective") {
     const from = join(

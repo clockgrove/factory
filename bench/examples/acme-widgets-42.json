@@ -84,7 +84,25 @@
       "workers": 4,
       "validations": 2,
       "memoryMib": 16384
-    }
+    },
+    "reviewArtifacts": [
+      {
+        "command": "npm test",
+        "text": {
+          "source": "test/export.test.js",
+          "locator": {
+            "stdoutPathPrefix": "EXPORT_REPORT_DIR=",
+            "files": [
+              {
+                "file": "export-report.json",
+                "mediaType": "application/json",
+                "maxBytes": 65536
+              }
+            ]
+          }
+        }
+      }
+    ]
   },
   "operatorPolicy": {
     "as": "factory-bench operator policy",

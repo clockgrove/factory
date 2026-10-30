@@ -401,6 +401,10 @@ new_issue() {
 # Adding the card and setting it Queued both repeat safely, so a GitHub
 # failure is tried again; one that lasts fails here, never as a silent wait.
 # A Project conflict is waited out under the Project's lock (gh.sh project_write).
+# `factory run` only writes a request: the service sets the card itself, later
+# and in its own process, and tries a failed write again after a backoff, so
+# the suite's lock can't cover it. Factory's own Project writes taking turns
+# is Factory's to fix, not the suite's (#2191).
 queue_issue() {
   if [ -n "${2:-}" ]; then cli_t 30 run "$1" --provider "$2" >>"$RUN_DIR/run.$(issue_key "$1").out" 2>&1; log "factory run #$1 --provider $2 (follower stopped: rc $?)"; return 0; fi
   gh_retry "$RUN_DIR/enqueue.$(issue_key "$1").err" "queueing #$1" gh_enqueue "$1" >/dev/null || return 1

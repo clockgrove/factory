@@ -261,6 +261,8 @@ export interface PlanningFacts {
   coverageObligations: CoverageObligation[];
   /** The approved playbook text; empty when there is none. */
   playbook: string;
+  /** The target's curated playbook's path (planning.playbook), protected like CI configuration; absent reads as none. */
+  playbookPath?: string;
   /** The operator's media.localAssetRoots: the only places a local source asset may come from. */
   localAssetRoots: readonly string[];
   /** The base's `.gitattributes` lines that set filter=lfs, as `file: line`. */

@@ -1571,6 +1571,7 @@ export async function planningFacts(
       files,
       playbook: (await files.text(config.planning.playbook)) ?? "",
     }),
+    playbookPath: config.planning.playbook,
     ...(files.signal ? { signal: files.signal } : {}),
   });
 }

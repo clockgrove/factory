@@ -25,7 +25,11 @@ import { type Held, hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
 import type { CommitAuthor } from "../github.js";
 import { inert } from "../markdown.js";
-import { validPath } from "../objective.js";
+import {
+  PROTECTED_PATH_RULE,
+  unlistedProtectedPaths,
+  validPath,
+} from "../objective.js";
 import { forceRemove, within } from "../paths.js";
 import {
   type WorkDiscovery,
@@ -65,45 +69,6 @@ export function factoryCommit(author: CommitAuthor | undefined): {
 /** The commit message of a collected result; the title can't close or mention (markdown.ts inert). */
 function collectionMessage(item: Pick<WorkItem, "title">): string {
   return `Factory: ${inert(item.title)}`;
-}
-
-/** CI configuration Factory knows of, by path from the root. */
-const CI_PATHS = [
-  ".appveyor.yml",
-  ".drone.yml",
-  ".gitlab-ci.yaml",
-  ".gitlab-ci.yml",
-  ".travis.yml",
-  ".woodpecker.yaml",
-  ".woodpecker.yml",
-  "appveyor.yml",
-  "azure-pipelines.yaml",
-  "azure-pipelines.yml",
-  "bitbucket-pipelines.yml",
-  "Jenkinsfile",
-];
-const CI_DIRECTORIES = [
-  ".buildkite/",
-  ".circleci/",
-  ".forgejo/workflows/",
-  ".gitea/workflows/",
-  ".github/",
-  ".woodpecker/",
-];
-
-/**
- * Whether `path` steers CI, review or planning: anything under `.github/`
- * (workflows, CODEOWNERS, settings), a CODEOWNERS file anywhere, another
- * CI system's configuration, or the target's curated playbook. A worker
- * changes one only when the Objective's May change section lists that path.
- */
-function protectedPath(path: string, playbook: string): boolean {
-  return (
-    CI_DIRECTORIES.some((directory) => path.startsWith(directory)) ||
-    CI_PATHS.includes(path) ||
-    basename(path) === "CODEOWNERS" ||
-    path === playbook
-  );
 }
 
 /** A worker's advisory note from `.factory-handoff.json`. */
@@ -726,13 +691,15 @@ async function checkStagedCandidate(input: Scan): Promise<string[]> {
     throw new WorkFinding(
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,
     );
-  const guarded = paths.filter(
-    (path) =>
-      protectedPath(path, input.playbook) && !input.mayChange.includes(path),
+  // The plan check refuses an item owning one by the same rule.
+  const guarded = unlistedProtectedPaths(
+    paths,
+    input.mayChange,
+    input.playbook,
   );
   if (guarded.length)
     throw new WorkFinding(
-      `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. CI configuration, .github/, CODEOWNERS and the playbook change only when that section lists the exact path; undo these changes`,
+      `Worker changed protected paths the Objective's May change section doesn't list: ${guarded.join(", ")}. ${PROTECTED_PATH_RULE}; undo these changes`,
     );
   // Every staged blob, and the work tree's copy where its bytes differ,
   // in one scan.

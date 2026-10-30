@@ -15,7 +15,9 @@
  *     queued: that is recorded and printed, and this exits 75; start the
  *     service and run it again. A refused request, or one not admitted in
  *     10 min, exits 1 and isn't recorded as queued. An unknown --policy
- *     exits 64. Holds of a kind the
+ *     exits 64. The policy is recorded in run.json with the queuing, and
+ *     the run follows it to its end: a later --policy that differs exits
+ *     64. Holds of a kind the
  *     policy scripts (spend and allowance raises: `more`; a changed
  *     configuration: `adopt`) are answered with `factory answer --as
  *     <policy>`. With the scripted policy (--policy scripted, else the
@@ -131,8 +133,18 @@ try {
   process.exit(64);
 }
 const policy = definition?.operatorPolicy;
-// The flag wins over the definition; answers by kind only by default.
-const scripting = (values.policy ?? policy?.policy ?? "stamps") === "scripted";
+// The policy the run follows: the one recorded once it was first followed,
+// so a run carried on after a pause keeps it and never mixes scripted and
+// unscripted judgments. Until then the flag wins over the definition;
+// answers by kind only by default.
+const runPolicy = record.policy ?? values.policy ?? policy?.policy ?? "stamps";
+if (following && values.policy !== undefined && values.policy !== runPolicy) {
+  process.stderr.write(
+    `This run follows the ${runPolicy} policy (run.json), so --policy ${values.policy} would mix policies in one run; provision a new run for it.\n`,
+  );
+  process.exit(64);
+}
+const scripting = runPolicy === "scripted";
 const log = join(runDir, "decisions.jsonl");
 const now = () => new Date().toISOString();
 const note = (entry) =>
@@ -418,8 +430,14 @@ if (!record.queuedAt) {
     process.exit(1);
   }
   record.queuedAt = now();
+  record.policy = runPolicy;
   writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`);
-  note({ event: "queued", issue: record.issue });
+  note({ event: "queued", issue: record.issue, policy: runPolicy });
+}
+if (!record.policy) {
+  // Queued before the policy was recorded: it follows this one from now on.
+  record.policy = runPolicy;
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`);
 }
 
 let serviceDown = seenDown();

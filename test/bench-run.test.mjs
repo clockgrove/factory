@@ -436,6 +436,35 @@ test("the definition's policy scripts answers, and --policy wins over it", () =>
   assert.match(unknown.stderr, /--policy is one of stamps, scripted/);
 });
 
+test("a run keeps the policy it was queued with: carried on after a pause without --policy, it still scripts", () => {
+  const at = runDir("scripted-kept", {
+    run: "hold",
+    status: [view("running", objective("building", [REVIEW]))],
+  });
+  const paused = benchRun(at, "--policy", "scripted");
+  assert.equal(paused.status, 2, paused.stderr);
+  assert.equal(recorded(at).policy, "scripted");
+  assert.deepEqual(
+    decisions(at)
+      .filter((e) => e.event === "queued")
+      .map((e) => e.policy),
+    ["scripted"],
+  );
+  // Answered by the operator; the next look finds the planner's decision.
+  rmSync(join(at, "calls.jsonl"));
+  const held = view("running", objective("building", [DECIDE]));
+  standIn(at, { status: [held, held, view("running", objective("done"))] });
+  const run = benchRun(at);
+  assert.equal(run.status, 0, run.stderr);
+  const answered = decisions(at).find((e) => e.event === "answered");
+  assert.equal(answered.rule, "planner-recommended");
+  assert.equal(answered.as, SCRIPTED_AS);
+  // Another policy for the same run would mix them: refused.
+  const mixed = benchRun(at, "--policy", "stamps");
+  assert.equal(mixed.status, 64);
+  assert.match(mixed.stderr, /follows the scripted policy \(run\.json\)/);
+});
+
 // --- stop: an ended run's service stops polling; a held run keeps it ---------
 
 const setups = (at) => calls(at).filter((call) => call.command === "setup");

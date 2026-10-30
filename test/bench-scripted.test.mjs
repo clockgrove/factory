@@ -109,11 +109,29 @@ test("1. a planner decision that names a recommended option takes it; one that n
   spent.question +=
     "\n\nPlanning has run 6 rounds, past what autonomy.allowances.planningRevisions allows, so an answer is kept and `more` then sends it to the planner.";
   assert.equal(scriptedAnswer(spent)?.answer, "answer");
-  // None named, or named as not recommended: pause.
+  for (const asked of [
+    "Should the export stream or buffer? Recommendation: stream it.",
+    "CSV or TSV? The recommended option is CSV.",
+    "We'd recommend CSV.\nShould the export default to CSV or TSV?",
+  ])
+    assert.equal(scriptedAnswer(planner(asked))?.rule, "planner-recommended");
+  // None named, named as not recommended, asked of the operator, or
+  // recommended by someone else or for something that isn't a choice: pause.
   for (const asked of [
     "Should the export default to CSV or TSV?",
     "Neither option is recommended by the docs; which should it be?",
     "There is no recommended choice here: CSV or TSV?",
+    "I can't recommend either option: CSV or TSV?",
+    "I cannot recommend one over the other. CSV or TSV?",
+    "The docs recommend neither. CSV or TSV?",
+    "We don't recommend a default; should it be CSV or TSV?",
+    "I'd recommend against TSV; should it be CSV or JSON?",
+    "CSV isn’t recommended. Should it be TSV or JSON?",
+    "Do you recommend CSV or TSV?",
+    "Would you recommend a default? CSV or TSV?",
+    "Should we skip the recommended lint rule or keep it?",
+    "Should CSV or TSV be used? The docs recommend CSV, but TSV is faster.",
+    "The recommended lint rules are on. Should the export use CSV or TSV?",
   ])
     assert.equal(scriptedAnswer(planner(asked)), null, asked);
 });
@@ -196,7 +214,7 @@ test("3. a request for a repository policy exception is refused with guidance, n
   assert.deepEqual(
     scriptedAnswer(
       amendmentPlanner(
-        "The tokenizer's new tests exceed added production lines under the test budget. Approve an entry in testLineExceptions for them?",
+        "The tokenizer's new tests go past the repository's test budget. Approve a budget exception for them?",
       ),
     ),
     refusal,
@@ -218,8 +236,16 @@ test("3. a request for a repository policy exception is refused with guidance, n
     ),
     refusal,
   );
-  // An exception in code isn't a policy's, and a question without answer
-  // offered isn't guided.
+  // A policy named without asking for an exception to it, an exception in
+  // code, and a question without answer offered: pause.
+  assert.equal(
+    scriptedAnswer(
+      diagnosis(
+        "The tokenizer's tests go past the repository's test budget. Should the worker trim them, or split the item?",
+      ),
+    ),
+    null,
+  );
   assert.equal(
     scriptedAnswer(
       diagnosis(
@@ -232,7 +258,7 @@ test("3. a request for a repository policy exception is refused with guidance, n
     scriptedAnswer(
       hold(
         "item:export-csv:review",
-        "The reviewer needs your judgment: the tests exceed added production lines",
+        "The reviewer needs your judgment: the tests need a budget exception",
         [option("accept"), option("refuse"), CANCEL],
       ),
     ),

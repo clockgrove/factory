@@ -10,9 +10,12 @@
  * `factory status --json` shows it (id, question, options). The first rule
  * that matches decides: its answer, or null to pause. The refusals come
  * before the planner's recommendation, so a recommended exception or
- * widening is refused, never taken. Each rule matches only Factory's own
- * question templates and phrases (cited with each), and gives an answer
- * only when the hold offers it. bench/README.md#The scripted operator
+ * widening is refused, never taken. Each rule matches a hold by its step
+ * and Factory's own question templates and phrases (cited with each); the
+ * policy-exception and planner-recommended rules also read the planner's
+ * or diagnosis's own words inside them, for explicit phrases only, and
+ * anything less pauses. A rule gives an answer only when the hold offers
+ * it. bench/README.md#The scripted operator
  * states each rule as written here; change both together.
  */
 
@@ -71,10 +74,45 @@ function plannerQuestion(hold) {
   return end < 0 ? own : own.slice(0, end);
 }
 
-/** A choice named as recommended, and not one named as not recommended. */
-const RECOMMENDED = /\brecommend(?:ed|ation|s)?\b/i;
-const NOT_RECOMMENDED =
-  /\b(?:no|not|none|neither|nor|never|without)\b[^.\n]{0,30}\brecommend/i;
+/** A recommendation stated outright, and the words that take one back. */
+const RECOMMEND = /recommend/i;
+const MARKED = /\(recommended\)/i;
+const STATED = [
+  MARKED,
+  /\b(?:is|are)(?: the| strongly)? recommended\b/i,
+  /\b(?:I|we)(?:['’]d| would)?(?: strongly)? recommend\b/i,
+  /\bthe recommended (?:option|choice|default|approach) is\b/i,
+  /\brecommendation(?::| is\b)/i,
+  /^recommended:/i,
+];
+const NEGATION =
+  /\b(?:no|not|none|neither|nor|never|without|against|cannot|either)\b|n['’]t\b/i;
+
+/**
+ * Whether the planner's own question names a recommended choice: every
+ * sentence that mentions a recommendation states one, as "X is
+ * recommended", "X (recommended)", "I recommend X", "the recommended
+ * option is X" or "Recommendation: X", with no negation in that sentence.
+ * One that asks (ends with "?") counts only with "(recommended)" on an
+ * option, so a question asking the operator to recommend, or one that
+ * names something recommended that isn't a choice, pauses; so does a
+ * recommendation someone else made ("the docs recommend X").
+ */
+function namesRecommended(asked) {
+  const mentions = asked
+    .split(/(?<=[.?!])\s+|\n+/)
+    .filter((sentence) => RECOMMEND.test(sentence));
+  return (
+    mentions.length > 0 &&
+    mentions.every(
+      (sentence) =>
+        !NEGATION.test(sentence) &&
+        (sentence.trimEnd().endsWith("?")
+          ? MARKED.test(sentence)
+          : STATED.some((pattern) => pattern.test(sentence))),
+    )
+  );
+}
 
 /**
  * A rejected amendment's reason (planning/amendments.ts `rejectionStep`):
@@ -97,14 +135,12 @@ const STARTED_ITEM = "has started, so it keeps its spec";
 const IN_FLIGHT = "Another amendment was in flight when it was taken in";
 
 /**
- * A request for an exception to a repository policy the owner records: the
- * test-budget check's own words (its `testLineExceptions` record, tests
- * that "exceed added production lines"), or a policy or budget exception
- * named as such.
+ * A request for an exception to a repository policy the owner records, in
+ * the planner's or diagnosis's own words: no Factory template asks it, and
+ * each repository names its policies its own way (a test budget, say), so
+ * only an exception named as one to a policy or budget counts.
  */
 const POLICY_EXCEPTION = [
-  /\btestLineExceptions\b/,
-  /\bexceeds? (?:the )?added production lines\b/i,
   /\b(?:policy|budget) exceptions?\b/i,
   /\bexceptions? (?:to|from) (?:the |its |this )?(?:\S+ ){0,3}(?:policy|budget)\b/i,
 ];
@@ -163,12 +199,7 @@ export const RULES = Object.freeze([
       const asked = /^decide:\d+:\d+$/.test(stepOf(hold))
         ? plannerQuestion(hold)
         : null;
-      return (
-        asked !== null &&
-        guides(hold) &&
-        RECOMMENDED.test(asked) &&
-        !NOT_RECOMMENDED.test(asked)
-      );
+      return asked !== null && guides(hold) && namesRecommended(asked);
     },
     answer: () => ({ answer: "answer", text: "Take the recommended option." }),
   },

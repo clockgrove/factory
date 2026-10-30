@@ -108,16 +108,28 @@ export async function integrationProblem(
   return undefined;
 }
 
-/** This Objective's merges, in merge order. */
+/**
+ * This Objective's merges, in merge order: an item final review sent back
+ * has its earlier merges too (`earlierMerges`), which stay on the default
+ * branch as part of its change.
+ */
 export function objectiveMerges(
   state: ObjectiveState,
   plan: Plan,
 ): { id: string; merged: MergeResult }[] {
   return plan.items
-    .map((item) => ({
-      id: item.id,
-      merged: state.done[stepKey(item.id, "merge")] as MergeResult | undefined,
-    }))
+    .flatMap((item) => [
+      ...(fact(state, "earlierMerges", item.id) ?? []).map(({ merged }) => ({
+        id: item.id,
+        merged: merged as MergeResult | undefined,
+      })),
+      {
+        id: item.id,
+        merged: state.done[stepKey(item.id, "merge")] as
+          | MergeResult
+          | undefined,
+      },
+    ])
     .filter(
       (entry): entry is { id: string; merged: MergeResult } =>
         !!entry.merged?.mergeSha,

@@ -62,7 +62,7 @@ import {
   worktreePath,
 } from "../worktree.js";
 import { fact, facts } from "./facts.js";
-import { mergeOf } from "./merged.js";
+import { type MergeResult, mergeOf } from "./merged.js";
 import {
   finalRetirable,
   keepFirst,
@@ -385,10 +385,11 @@ export function finalReviewStep(deps: BuildDeps): Step {
         fact(state, "final-review:held"),
         undefined,
       );
-      // Every merged item in merge order; a native stack's layers share its merge.
-      const mergedIds = merges.flatMap(
-        (entry) => entry.merged.items ?? [entry.id],
-      );
+      // Every merged item in merge order; a native stack's layers share its
+      // merge, and an item final review sent back has merged more than once.
+      const mergedIds = [
+        ...new Set(merges.flatMap((entry) => entry.merged.items ?? [entry.id])),
+      ];
       const sources = await pinnedSources(state, deps, signal);
       const acceptance = checkObjective(
         acceptedInputs(state).shown.blocks,
@@ -625,7 +626,10 @@ function repairOffer(route: FinalRepairRoute): HoldOption {
  * counted against its path's and the Objective's repair allowances. Its
  * merged result is on the default branch, so the item starts again there
  * with nothing to replay or check again (no base, no refused result), and
- * its PR merged already, so it publishes on a new one (`republish`).
+ * its PR merged already, so it publishes on a new one (`republish`). The
+ * cleared merge stays on the default branch as part of the item's change,
+ * so it is kept (`earlierMerges`): final validation and final review judge
+ * it with the repair's merge.
  */
 function finalRepair(
   state: ObjectiveState,
@@ -633,6 +637,16 @@ function finalRepair(
   route: FinalRepairRoute,
 ): Outcome {
   const { item } = route;
+  const merged = state.done[stepKey(item.id, "merge")] as
+    | MergeResult
+    | undefined;
+  const published = state.done[stepKey(item.id, "publish")] as
+    | PublishResult
+    | undefined;
+  const earlier = [
+    ...(fact(state, "earlierMerges", item.id) ?? []),
+    ...(merged ? [{ merged, ...(published ? { pr: published.pr } : {}) }] : []),
+  ];
   const finding: RepairFinding = {
     kind: "review",
     tree,
@@ -655,6 +669,7 @@ function finalRepair(
           onto: null,
           refused: null,
           republish: true,
+          ...(earlier.length ? { earlierMerges: earlier } : {}),
         },
         item.id,
       ),
@@ -732,7 +747,12 @@ export function reportComment(
       item.kind === "qa"
         ? (state.done[stepKey(item.id, "validate")] as QaResult | undefined)
         : undefined;
-    return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
+    // The merges final review sent back, each repaired on a new PR.
+    const earlier = (fact(state, "earlierMerges", item.id) ?? []).map(
+      (entry) =>
+        `${entry.pr ? `#${entry.pr} ` : ""}merged as \`${entry.merged.mergeSha.slice(0, 12)}\``,
+    );
+    return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}${earlier.length ? `; final review sent back ${earlier.join(", then ")}` : ""}`;
   });
   const repairs = Object.values(state.repairs ?? {}).reduce(
     (sum, r) => sum + r.count,

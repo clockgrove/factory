@@ -17,8 +17,10 @@ import {
   finalRefusal,
   finalRepairRoute,
   finalReviewStep,
+  objectiveMerges,
   PHASES,
   refusalOffers,
+  reportComment,
   stepKey,
 } from "../dist/work/steps.js";
 import { objectiveWorkflow } from "../dist/workflow.js";
@@ -262,6 +264,17 @@ test("repair reopens only the owning item, with the refused criterion verbatim, 
   assert.equal(fact(state, "base", "parse"), undefined);
   assert.equal(fact(state, "refused", "parse"), undefined);
   assert.equal(fact(state, "republish", "parse"), true);
+  // Its first merge stays on the default branch as part of its change.
+  assert.deepEqual(fact(state, "earlierMerges", "parse"), [
+    {
+      merged: {
+        mergeSha: "1".repeat(40),
+        integratedSha: "1".repeat(40),
+        at: "2026-10-29T01:00:00.000Z",
+      },
+      pr: 7,
+    },
+  ]);
   assert.deepEqual(fact(state, "pushed", "parse"), ["p".repeat(40)]);
   assert.equal(fact(state, "final-review:refused"), undefined);
   assert.equal(fact(state, "final-review:held"), undefined);
@@ -336,7 +349,7 @@ test("repair reopens only the owning item, with the refused criterion verbatim, 
   for (const phase of PHASES.slice(0, -1))
     runner.apply(stepKey("parse", phase), {
       kind: "done",
-      result: { tree: again, head: again, commit: again, base: HEAD },
+      result: { tree: again, head: again, commit: again, base: HEAD, pr: 8 },
     });
   assert.deepEqual(keys(deliverySteps(runner.state, installation)), [
     stepKey("parse", "merge"),
@@ -350,6 +363,19 @@ test("repair reopens only the owning item, with the refused criterion verbatim, 
     },
   });
   assert.deepEqual(keys(deliverySteps(runner.state, installation)), ["final"]);
+  // Final validation and final review judge parse's whole change: its first
+  // merge and its repair's, with render's, in merge order.
+  assert.deepEqual(
+    objectiveMerges(runner.state, PLAN).map(({ id, merged }) => [
+      id,
+      merged.mergeSha,
+    ]),
+    [
+      ["parse", "1".repeat(40)],
+      ["render", "2".repeat(40)],
+      ["parse", again],
+    ],
+  );
   runner.apply("final", {
     kind: "done",
     result: { commit: again, tree: again, commands: ["npm test"] },
@@ -357,6 +383,75 @@ test("repair reopens only the owning item, with the refused criterion verbatim, 
   assert.deepEqual(keys(deliverySteps(runner.state, installation)), [
     "final-review",
   ]);
+  // The report names both of parse's PRs.
+  const report = reportComment("<!-- report -->", runner.state, []);
+  assert.ok(
+    report.includes(
+      `- **parse** ${PLAN.items[0].title} — #8 merged as \`${again.slice(0, 12)}\`; final review sent back #7 merged as \`${"1".repeat(12)}\``,
+    ),
+    report,
+  );
+});
+
+test("a second repair of the same item keeps both earlier merges", async () => {
+  const { runner, run, answer } = harness();
+  assert.equal(answer("repair"), null);
+  runner.apply("final-review", await run());
+  const again = "3".repeat(40);
+  // No media to select, as in `delivered`.
+  for (const phase of PHASES.slice(0, -1).filter((p) => p !== "select"))
+    runner.apply(stepKey("parse", phase), {
+      kind: "done",
+      result: {
+        tree: again,
+        head: again,
+        commit: again,
+        base: HEAD,
+        sets: [],
+        pr: 8,
+      },
+    });
+  runner.apply(stepKey("parse", "merge"), {
+    kind: "done",
+    result: {
+      mergeSha: again,
+      integratedSha: again,
+      at: "2026-10-29T03:00:00.000Z",
+    },
+  });
+  runner.apply("final", {
+    kind: "done",
+    result: { commit: again, tree: again, commands: ["npm test"] },
+  });
+  // Final review refuses parse's criterion again; `repair` sends it back again.
+  const review = refusal([PARSE]);
+  runner.apply("final-review", {
+    ...finalRefusal(PLAN, review, deps()),
+    keep: facts({ "final-review:refused": true, "final-review:held": review }),
+  });
+  assert.equal(answer("repair"), null);
+  runner.apply("final-review", await run());
+  assert.deepEqual(
+    fact(runner.state, "earlierMerges", "parse").map((entry) => [
+      entry.merged.mergeSha,
+      entry.pr,
+    ]),
+    [
+      ["1".repeat(40), 7],
+      [again, 8],
+    ],
+  );
+  assert.deepEqual(
+    objectiveMerges(runner.state, PLAN).map(({ id, merged }) => [
+      id,
+      merged.mergeSha,
+    ]),
+    [
+      ["parse", "1".repeat(40)],
+      ["render", "2".repeat(40)],
+      ["parse", again],
+    ],
+  );
 });
 
 test("retry still validates the fixed default branch again, then reviews it", async () => {

@@ -2223,7 +2223,9 @@ export async function laterScriptChanges(input: {
       if ([name, ...hooks].some((key) => before[key] !== after[key]))
         changedBy.push(...merge.items);
     }
-    if (changedBy.length) changes.push({ command, changedBy });
+    // An item final review sent back has merged more than once.
+    if (changedBy.length)
+      changes.push({ command, changedBy: [...new Set(changedBy)] });
   }
   return changes;
 }

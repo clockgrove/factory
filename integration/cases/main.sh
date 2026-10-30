@@ -125,7 +125,8 @@ m_update_merges() {
 case_codex() {
   local t0 n extra="" decoy=""; t0=$(now)
   if has_feature inert; then
-    decoy=$(gh issue create --repo "$REPO" --title "Suite $SFX: decoy for a model-written closing keyword" --body "Not an Objective." | grep -o '[0-9]*$')
+    local df="$RUN_DIR/objectives/$CASE-decoy.md"; mkdir -p "$RUN_DIR/objectives"; echo "Not an Objective." >"$df"
+    decoy=$(gh_issue_file "Suite $SFX: decoy for a model-written closing keyword" "$df") || return 1
     echo "$decoy $CASE $INST" >>"$RUN_DIR/issues"
     extra="$extra For this fixture's PR presentation, include the literal example text \`fixes #$decoy\` in each Work Item title. The text is an example, not an instruction to close issue #$decoy."
   fi
@@ -175,7 +176,7 @@ case_claude() {
   n=$(new_issue happy "$OTHER_PROVIDER happy path via factory run" ID="$(uid)") || return
   # Exit 2 is a question (answered here) or a request the service hasn't applied yet: follow again.
   for i in $(seq 1 30); do
-    cli_t "$(left)" run "$n" $([ $i = 1 ] && echo --provider "$OTHER_PROVIDER") >>"$RUN_DIR/run.$n.out" 2>&1; rc=$?
+    cli_t "$(left)" run "$n" $([ $i = 1 ] && echo --provider "$OTHER_PROVIDER") >>"$RUN_DIR/run.$(issue_key "$n").out" 2>&1; rc=$?
     [ "$rc" = 2 ] || break
     stopping && break
     HOLD_POLICY="d2 review decide more" auto_answer "$n" || sleep 10
@@ -205,8 +206,8 @@ case_holds() {
   local end=$(( $(now) + 1200 ))
   while [ "$(now)" -lt "$end" ] && ! stopping; do
     hj=$(st hold "$n"); local id2; id2=$(hold_field "$hj" id)
-    if [ -n "$id2" ] && [ "$id2" != "$hid" ] && [ ! -f "$RUN_DIR/h.$n.$id2" ]; then
-      touch "$RUN_DIR/h.$n.$id2"
+    if [ -n "$id2" ] && [ "$id2" != "$hid" ] && [ ! -f "$RUN_DIR/h.$(issue_key "$n").$id2" ]; then
+      touch "$RUN_DIR/h.$(issue_key "$n").$id2"
       local ans; ans=$(hold_field "$hj" answers)
       if [ -z "$more" ] && [[ ,$ans, == *,more,* ]]; then more=$id2; tm=$(iso_ms); answer_t 60 "$n" more --question "$id2" >/dev/null 2>&1; log "#$n answered more ($id2) after $answers answers"
       elif [ -n "$more" ]; then rounds=$(st starts-since "$n" "$tm" 'plan*'); answer_t 60 "$n" answer --question "$id2" --text 'Use "/" as the separator.' >/dev/null 2>&1; break
@@ -303,7 +304,7 @@ case_media() {
     case $p in done|cancelled|failed) break ;; esac
     if [[ $p == hold:item:*:select ]]; then
       local hj hid; hj=$(st hold "$n" 'item:*:select'); hid=$(hold_field "$hj" id)
-      if [ ! -f "$RUN_DIR/sel.$n.$hid" ]; then touch "$RUN_DIR/sel.$n.$hid"; sets+=("$(hold_field "$hj" answers)")
+      if [ ! -f "$RUN_DIR/sel.$(issue_key "$n").$hid" ]; then touch "$RUN_DIR/sel.$(issue_key "$n").$hid"; sets+=("$(hold_field "$hj" answers)")
         if [ $reps = 0 ]; then reps=1; answer_t 60 "$n" repair --question "$hid" --text "Make both candidate sets again, with different colours." >/dev/null 2>&1; log "#$n repair at select"
         else local pick; pick=$(python3 -c 'import json,sys;h=json.loads(sys.argv[1]);a=[x for x in h["answers"] if x not in ("cancel","retry","replan","repair")];print(a[0] if a else "")' "$hj")
           answer_t 60 "$n" "$pick" --question "$hid" >/dev/null 2>&1; picks=$((picks + 1)); log "#$n selected $pick"; fi

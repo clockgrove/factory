@@ -54,6 +54,7 @@ import {
   SelfValidation,
   selectedMediaNote,
   UNOWNED_FIX,
+  validateFailed,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -1290,7 +1291,7 @@ export class ClaudeWorker implements Worker {
       plugins: [],
       skills: [],
       systemPrompt: systemPrompt(
-        workItemContract(attempt.input.item),
+        workItemContract(attempt.options.plan, attempt.input.item),
         attempt.grants.shell,
         this.options.sandbox,
       ),
@@ -1624,6 +1625,9 @@ export class ClaudeWorker implements Worker {
           }),
       ),
       ...(tree && { validated: { tree, commands: [...input.commands] } }),
+      ...validateFailed(
+        attempt.grants.validate ? attempt.validator : undefined,
+      ),
     };
   }
 }

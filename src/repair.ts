@@ -366,11 +366,9 @@ function reviewFindingsCorrection(
     source: "review-findings",
     failure: REVIEW_FINDINGS_FAILURE,
     diagnosis: `The independent result review refused ${count} acceptance ${count === 1 ? "criterion" : "criteria"} of candidate tree ${finding.tree} after its validation commands passed. Each finding states the gap the candidate must close.`,
-    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's position in the Work Item's acceptance; a finding without one refuses an Objective criterion this Work Item proves, quoted verbatim. evidence is what the reviewer cited.\n${JSON.stringify(
+    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's bracketed number [n] in the Work Item's Acceptance list, which quotes each Objective criterion this Work Item proves verbatim after its own. evidence is what the reviewer cited.\n${JSON.stringify(
       finding.refused.map(({ criterion, detail, evidence }) => ({
-        ...(item.acceptance.includes(criterion) && {
-          criterionIndex: item.acceptance.indexOf(criterion),
-        }),
+        criterionIndex: reviewed.indexOf(criterion),
         criterion,
         finding: detail,
         evidence: evidence.map(({ path, origin, complete }) => ({

@@ -169,7 +169,7 @@ async function validate(
     ...(store ? { installStore: store } : {}),
     commit: built,
     item: work,
-    plan: { base, items: [work], finalCommands: [] },
+    plan: { base, items: [work], coverage: [], finalCommands: [] },
     blocks: [],
     base,
     sandbox: configured.sandbox,
@@ -300,7 +300,7 @@ test("a worker's own Validate keeps the store beside its worktree, the one the v
     },
     {
       sandbox,
-      plan: { base, items: [work], finalCommands: [] },
+      plan: { base, items: [work], coverage: [], finalCommands: [] },
       blocks: [],
       repository: REPO,
       commandTimeoutMs: 60_000,

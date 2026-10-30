@@ -41,6 +41,7 @@ import {
   FinishRequests,
   type SelfValidateOptions,
   selectedMediaNote,
+  validateFailed,
 } from "../work/self-validate.js";
 import { COLLECTED_RESULT, shellDependencies } from "../work/validate-tool.js";
 import {
@@ -847,6 +848,7 @@ export class CodexWorker implements Worker {
         finalResponse,
         ...(session ? { session } : {}),
         ...(tree && { validated: { tree, commands: [...input.commands] } }),
+        ...validateFailed(validating ? validation?.validator : undefined),
       };
     } catch (error) {
       if (error instanceof ResumeOverflow) throw error;

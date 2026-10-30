@@ -2,33 +2,104 @@
 # Sourced; expects REPO OWNER NAME RUN_DIR CUR_CFG.
 
 # Project id, field "Factory" and its options, from the config's queue.projectId.
+# The cache is written whole: a wave's cases read it at once.
 gh_project() {
   local cache="$RUN_DIR/project.$INST.json"
   if [ ! -s "$cache" ]; then
     local pid; pid=$(cfg_get 'c["queue"]["projectId"]')
     gh api graphql -f id="$pid" -f query='query($id:ID!){node(id:$id){... on ProjectV2{id number owner{... on Organization{login} ... on User{login}} field(name:"Factory"){... on ProjectV2SingleSelectField{id options{id name}}}}}}' \
-      --jq .data.node >"$cache" || { rm -f "$cache"; return 1; }
+      --jq .data.node >"$cache.$BASHPID" && mv "$cache.$BASHPID" "$cache" || { rm -f "$cache.$BASHPID"; return 1; }
   fi
   cat "$cache"
 }
 gh_pj() { gh_project | python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
 gh_option_id() { gh_pj "next(o['id'] for o in d['field']['options'] if o['name']=='$1')"; }
 
+# project_write ARGS...: `gh project ARGS`, a change to a card (add, edit,
+# archive), one at a time on the installation's Project. A wave starts its
+# cases at once, and GitHub refuses concurrent changes to one Project ("a
+# temporary conflict", or "Something went wrong"; #2191), so the suite's
+# changes take turns on a lock per Project, and one GitHub still refuses that
+# way is tried again here after a pause, up to five tries, so it never reaches
+# the caller's own retry or its case. Its stdout passes through; a lasting
+# failure leaves gh's last error on stderr.
+PROJECT_CONFLICT='temporary conflict|Something went wrong while executing your query'
+project_write() (
+  local err try
+  err=$(mktemp "$RUN_DIR/project.err.XXXXXX") || return 1
+  trap 'rm -f "$err"' EXIT
+  flock 9 || return 1
+  for try in 1 2 3 4 5; do
+    gh project "$@" 2>"$err" && return 0
+    [ "$try" != 5 ] && grep -qE "$PROJECT_CONFLICT" "$err" || break
+    # To the journal only: the caller's stderr is its evidence of a lasting failure.
+    log "Project conflict on 'gh project $1' (try $try), trying again: $(head -c 200 "$err")" 2>/dev/null
+    sleep $(( try * ${PROJECT_PAUSE:-2} ))
+  done
+  cat "$err" >&2; return 1
+ ) 9>"$RUN_DIR/project.$(cfg_get 'c["queue"]["projectId"]').lock"
+
 # gh_item_add ISSUE: put an existing issue on the Project (an issue already
 # there keeps its card); prints the card's item id.
 gh_item_add() {
-  gh project item-add "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" \
+  project_write item-add "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" \
     --url "https://github.com/$REPO/issues/$1" --format json --jq .id
 }
 # gh_item_archive ITEM: archive a card on the Project.
-gh_item_archive() { gh project item-archive "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" --id "$1" >/dev/null; }
+gh_item_archive() { project_write item-archive "$(gh_pj "d['number']")" --owner "$(gh_pj "d['owner']['login']")" --id "$1" >/dev/null; }
 # gh_enqueue ISSUE: add an existing issue to the Project, set Queued; prints it.
 gh_enqueue() {
   local n=$1 item
   item=$(gh_item_add "$n") && [ -n "$item" ] || return 1
-  gh project item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" \
+  project_write item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" \
     --single-select-option-id "$(gh_option_id Queued)" >/dev/null || return 1
   echo "$n"
+}
+# gh_issue_file TITLE BODY_FILE: file an issue in REPO; prints its number.
+# GitHub can fail a create for a moment (run 2026-10-28T181930PDT-fb54: `Post
+# "https://api.github.com/graphql": EOF` ended the codex case before it began),
+# and a create that failed may still have filed the issue. So it is tried up
+# to three times, and before each retry the newest issues are searched for one
+# with this title and body the run hasn't recorded: found, that is the issue,
+# never a second copy. Each failure is logged; the last error stays in
+# RUN_DIR/file.INST.CASE.err.
+gh_issue_file() {
+  local title=$1 body=$2 err="$RUN_DIR/file.$INST.${CASE:-suite}.err" try n
+  for try in 1 2 3; do
+    if [ "$try" -gt 1 ]; then
+      sleep $(( (try - 1) * 5 ))
+      if ! n=$(gh_issue_filed "$title" "$body" 2>"$err"); then
+        log "looking for issue '$title' failed (try $try): $(head -c 300 "$err")"; continue
+      fi
+      [ -z "$n" ] || { log "issue '$title' was filed by the failed try: #$n"; echo "$n"; return 0; }
+    fi
+    n=$(gh issue create --repo "$REPO" --title "$title" --body-file "$body" 2>"$err" | grep -o '[0-9]*$' | tail -n 1)
+    [[ $n =~ ^[0-9]+$ ]] && { echo "$n"; return 0; }
+    log "filing issue '$title' failed (try $try): $(head -c 300 "$err")"
+  done
+  return 1
+}
+# gh_issue_filed TITLE BODY_FILE: the oldest of REPO's 100 newest issues with
+# this title and body that RUN_DIR/issues doesn't hold for this installation;
+# prints nothing when there is none.
+gh_issue_filed() {
+  local data; data=$(gh api "repos/$REPO/issues?state=all&sort=created&direction=desc&per_page=100") || return 1
+  python3 -c '
+import json, sys
+title, body_file, issues, inst = sys.argv[1:5]
+norm = lambda s: (s or "").replace("\r\n", "\n").strip()
+body = norm(open(body_file).read())
+known = set()
+try:
+    for line in open(issues):
+        f = line.split()
+        if len(f) >= 3 and f[2] == inst: known.add(f[0])
+except FileNotFoundError:
+    pass
+hits = sorted(i["number"] for i in json.load(sys.stdin)
+              if "pull_request" not in i and i.get("title") == title
+              and norm(i.get("body")) == body and str(i["number"]) not in known)
+if hits: print(hits[0])' "$1" "$2" "$RUN_DIR/issues" "$INST" <<<"$data"
 }
 gh_item() {
   gh api graphql -f query="query{repository(owner:\"$OWNER\",name:\"$NAME\"){issue(number:$1){projectItems(first:10){nodes{id project{id}}}}}}" \
@@ -39,9 +110,9 @@ gh_card() {
   local item; item=$(gh_item "$1")
   [ -n "$item" ] || return 1
   if [ -z "$2" ]; then
-    gh project item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" --clear >/dev/null
+    project_write item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" --clear >/dev/null
   else
-    gh project item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" \
+    project_write item-edit --project-id "$(gh_pj "d['id']")" --id "$item" --field-id "$(gh_pj "d['field']['id']")" \
       --single-select-option-id "$(gh_option_id "$2")" >/dev/null
   fi
   log "card #$1 -> ${2:-<cleared>}"
@@ -182,7 +253,8 @@ end_done() {
   local br=0
   if branch_rule; then EVID="#$n evidence unavailable: branch listing"; br=$(gh_branches_left "$n") || return 1; fi
   EVID="#$n status=$s prs=$np merged=$nm plan x$plan report x$rep issue=$iss worktrees=$wt$(branch_rule && echo " branches_left=$br")${d:+ DUPES: $d}"
-  [ -s "$RUN_DIR/notes.$n" ] && EVID="$EVID; $(paste -sd';' "$RUN_DIR/notes.$n")"
+  local notes; notes="$RUN_DIR/notes.$(issue_key "$n")"
+  [ -s "$notes" ] && EVID="$EVID; $(paste -sd';' "$notes")"
   [ "$s" = done ] && [ "$np" -ge 1 ] && [ "$np" = "$nm" ] && [ "$plan" = 1 ] && [ "$rep" = 1 ] && [ -z "$d" ] \
     && [ "$iss" = "CLOSED COMPLETED" ] && [ "$wt" = 0 ] && [ "$br" = 0 ]
 }

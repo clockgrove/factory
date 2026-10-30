@@ -11,6 +11,7 @@ import {
   gantt,
 } from "../analysis.js";
 import { diagnostics } from "../diagnostics.js";
+import { redactDeep } from "../display.js";
 import { configOf, Refusal } from "../host.js";
 import { CAPTURE_OFF, logFiles, runOfFile } from "../log.js";
 import type { Paths } from "../paths.js";
@@ -21,6 +22,7 @@ import {
   scorecardText,
 } from "../scorecard.js";
 import { listAllObjectives } from "../state.js";
+import { SurvivalError, survival, survivalText } from "../survival.js";
 import { errorMessage } from "../text.js";
 import {
   type Args,
@@ -46,11 +48,37 @@ export const spec: Command = {
     filter: "list",
     gantt: "switch",
     scorecard: "value",
+    survival: "switch",
+    since: "value",
+    until: "value",
     json: "switch",
   },
-  help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them) and each worker attempt's transcript (its tool calls with their targets and the provider's raw output), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs. Without ISSUE, --scorecard ABSOLUTE_FILE compares the Factory Objectives and codex-direct sessions the selection FILE names (docs/reference/run-log.md#Run log): per packet, per route and per pair, with how many of each Objective's runs the run log still has",
+  help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them) and each worker attempt's transcript (its tool calls with their targets and the provider's raw output), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs. Without ISSUE, --scorecard ABSOLUTE_FILE compares the Factory Objectives and codex-direct sessions the selection FILE names (docs/reference/run-log.md#Run log): per packet, per route and per pair, with how many of each Objective's runs the run log still has. --survival reports what happened to the code merged under ISSUE, or under the Objectives merged --since DATE [--until DATE], from the checkout's Git alone: lines still unchanged after 7, 30 and 90 days (git blame -w), reverts, fix-up commits within 30 days, and the same survival for the other commits in the same paths",
   check: (args, command) => {
     const { flags, lists } = args;
+    if (flags.survival !== undefined) {
+      const others = Object.keys(flags).filter(
+        (flag) =>
+          !["survival", "since", "until", "json", "repo"].includes(flag),
+      );
+      const dates = ["since", "until"].filter(
+        (flag) =>
+          flags[flag] !== undefined && Number.isNaN(Date.parse(flags[flag]!)),
+      );
+      return others.length || Object.keys(lists).length
+        ? `--survival goes with ISSUE or --since DATE [--until DATE], and --json, not --${[...others, ...Object.keys(lists)].join(", --")}`
+        : dates.length
+          ? `--${dates[0]} takes a date, such as 2026-10-01; not ${flags[dates[0]!]}`
+          : args.positional[1] !== undefined
+            ? flags.since !== undefined || flags.until !== undefined
+              ? "--survival takes ISSUE or --since DATE [--until DATE], not both"
+              : issueCheck(args, command)
+            : flags.since === undefined
+              ? "--survival needs ISSUE or --since DATE [--until DATE]"
+              : undefined;
+    }
+    if (flags.since !== undefined || flags.until !== undefined)
+      return "--since and --until go with --survival";
     if (flags.scorecard !== undefined) {
       const others = Object.keys(flags).filter(
         (flag) => !["scorecard", "json", "repo"].includes(flag),
@@ -99,7 +127,7 @@ export const spec: Command = {
     diagnosticsCommand(paths, repository, args),
 };
 
-/** `factory diagnostics --scorecard FILE [--json]`, or `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--captures [--content ID]] [--analyze [--group-by F]... [--filter F=V]...] [--gantt] [--run ID | --all-runs] [--json]`. */
+/** `factory diagnostics --scorecard FILE [--json]`, `factory diagnostics (ISSUE | --since DATE [--until DATE]) --survival [--json]`, or `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--captures [--content ID]] [--analyze [--group-by F]... [--filter F=V]...] [--gantt] [--run ID | --all-runs] [--json]`. */
 async function diagnosticsCommand(
   paths: Paths,
   repository: string,
@@ -107,6 +135,8 @@ async function diagnosticsCommand(
 ): Promise<number> {
   if (args.flags.scorecard !== undefined)
     return scorecardCommand(paths, repository, args);
+  if (args.flags.survival !== undefined)
+    return survivalCommand(paths, repository, args);
   const issue = issueOf(args);
   const runs = logFiles(paths.logs, issue).map(runOfFile);
   if (!runs.length && !listAllObjectives(paths.objectives).includes(issue))
@@ -180,6 +210,49 @@ async function diagnosticsCommand(
       maxBytesPerCall,
     },
     (text) => process.stdout.write(text),
+  );
+  return 0;
+}
+
+/** `factory diagnostics (ISSUE | --since DATE [--until DATE]) --survival [--json]`: read-only, local Git only, redacted. */
+async function survivalCommand(
+  paths: Paths,
+  repository: string,
+  args: Args,
+): Promise<number> {
+  const config = configOf(repository);
+  if (!config)
+    throw new Refusal(
+      "no_configuration",
+      `--survival reads ${repository}'s checkout, and Factory has no configuration for it.`,
+    );
+  const { flags } = args;
+  const day = (value: string) => new Date(Date.parse(value)).toISOString();
+  let report: Awaited<ReturnType<typeof survival>>;
+  try {
+    report = await survival(
+      {
+        repository,
+        checkout: config.checkout,
+        objectives: paths.objectives,
+      },
+      args.positional[1] !== undefined
+        ? { issue: issueOf(args) }
+        : {
+            since: day(flags.since!),
+            until: day(flags.until ?? new Date().toISOString()),
+          },
+    );
+  } catch (error) {
+    if (error instanceof SurvivalError)
+      throw new Refusal(error.code, error.message);
+    throw error;
+  }
+  report = redactDeep(report, config.secrets);
+  process.stdout.write(
+    flags.json !== undefined
+      ? `${JSON.stringify(report)}\n`
+      : survivalText(report),
   );
   return 0;
 }

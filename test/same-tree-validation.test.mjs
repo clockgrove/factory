@@ -198,7 +198,10 @@ test("a passed validation of a commit stands again for that same commit", async 
   assert.deepEqual(second.outcome, {
     kind: "done",
     result: first.outcome.result,
+    // The same Objective merges counted, none (#2240).
+    keep: { "item:a:validatedOn": first.outcome.keep["item:a:validatedOn"] },
   });
+  assert.deepEqual(first.outcome.keep["item:a:validatedOn"].merges, []);
 });
 
 test("a changed validation configuration, or a kept result of another commit, runs the commands again", async () => {

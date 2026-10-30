@@ -310,6 +310,22 @@ export function finalChecks(plan: Plan): string[] {
 }
 
 /**
+ * Whether final validation runs `command` itself on the default branch,
+ * with the plan's base as FACTORY_BASE_SHA (`finalChecks`): a Work Item's
+ * validation gives that command the plan's base too, and runs it on the
+ * Objective's merges, so a check that reads the base counts the
+ * Objective's change as final validation will (#2240). Any other Work
+ * Item command final validation never runs, so it keeps the item's own
+ * base: on the shared default branch the plan's base would count other
+ * Objectives' merges.
+ */
+export function checkedAtFinal(plan: Plan): (command: string) => boolean {
+  const checks = new Set(finalChecks(plan).map((command) => command.trim()));
+  return (command) =>
+    checks.has(command.trim()) && !namedBase(command, plan.base);
+}
+
+/**
  * The retirements as lines for the report and status: command, reason,
  * who and when.
  */

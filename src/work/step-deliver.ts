@@ -29,6 +29,7 @@ import { fact, facts, type KeptSelection, written } from "./facts.js";
 import { type MergeResult, mergeOf } from "./merged.js";
 import { refusedFact } from "./refused.js";
 import { integrated, objectiveEdited } from "./shared.js";
+import { validateBeforeMerge } from "./step-validate.js";
 import {
   type BuildDeps,
   baseBranch,
@@ -383,6 +384,10 @@ export async function mergeStep(
   const { state } = context;
   const plan = currentPlan(state)!;
   if (place) return mergeStack(place.unit, context, deps);
+  // Another Work Item of the Objective merged since this one's validation
+  // counted the merges: its commands run on that merge first (#2240).
+  const unvalidated = await validateBeforeMerge(item, context, deps);
+  if (unvalidated) return unvalidated;
   const ci = state.done[stepKey(item.id, "ci")] as { head: string };
   const result = await merge(delivery(context, deps), {
     ...pullInput(state, item, context, place),

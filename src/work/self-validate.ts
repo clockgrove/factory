@@ -222,6 +222,26 @@ export function criterionMap(
   return [head, ...shown.slice(0, fits), rest(fits)].join("\n");
 }
 
+/**
+ * A declared command the worker's Validate failed, and no later run of the
+ * attempt passed: the command, how it ended (`exit`, when it failed by
+ * itself) and its output as Validate returned it. An amendment may replace
+ * such a planned command, through its review (#2199).
+ */
+export interface WorkerValidateFailure {
+  command: string;
+  exit?: string;
+  output: string;
+}
+
+/** A finished result's `validateFailed`: what `validator`'s runs failed, or nothing. */
+export function validateFailed(validator: SelfValidation | undefined): {
+  validateFailed?: WorkerValidateFailure[];
+} {
+  const failures = validator?.failures() ?? [];
+  return failures.length ? { validateFailed: failures } : {};
+}
+
 export interface HandoffCheck {
   passed: boolean;
   text?: string;
@@ -252,6 +272,8 @@ export class SelfValidation {
   private readonly passedTrees = new Set<string>();
   /** Trees whose last run failed. */
   private readonly failedTrees = new Set<string>();
+  /** The commands a run failed and no later run passed, by command. */
+  private readonly failing = new Map<string, WorkerValidateFailure>();
 
   /** `signal` stops a running validation: cancel, or the attempt ending. */
   constructor(
@@ -352,6 +374,19 @@ export class SelfValidation {
       this.passedTrees.add(tree);
       this.failedTrees.delete(tree);
     } else this.failedTrees.add(tree);
+    // A command a later run passed can pass: it is no longer evidence.
+    if (result.kind === "passed") this.failing.clear();
+    else {
+      for (const ran of result.results) this.failing.delete(ran.command);
+      if (result.failed)
+        this.failing.set(result.failed.command, {
+          command: result.failed.command,
+          ...(result.failed.exit !== undefined
+            ? { exit: result.failed.exit }
+            : {}),
+          output: bounded(result.output || result.detail),
+        });
+    }
     input.log({
       event: "worker-validate",
       run,
@@ -425,6 +460,11 @@ export class SelfValidation {
     } catch {
       return undefined;
     }
+  }
+
+  /** The commands this attempt's runs failed that no later run passed (`WorkerValidateFailure`). */
+  failures(): WorkerValidateFailure[] {
+    return [...this.failing.values()];
   }
 
   /** Whether the last run on the files the worker has now failed. */

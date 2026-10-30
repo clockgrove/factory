@@ -13,7 +13,7 @@ import {
   repeated,
 } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
-import { headAndTail } from "../text.js";
+import { failureExcerpt, headAndTail } from "../text.js";
 import { hasGitlink } from "../worktree.js";
 import { AMEND } from "./amend.js";
 import { fact, facts, type ItemFacts, itemsWith } from "./facts.js";
@@ -237,7 +237,8 @@ export async function repairContext(
 
 /** The operator answers a diagnosis carries from other items: their whole size, and each one's. */
 const CARRIED_BYTES = 24_000;
-const CARRIED_FAILURE = { head: 400, tail: 600 };
+/** A carried failure keeps the lines that say why it failed (`failureExcerpt`). */
+const CARRIED_FAILURE_CHARS = 1000;
 const CARRIED_ANSWER = { head: 3000, tail: 1000 };
 
 /**
@@ -261,11 +262,7 @@ export function carriedAnswers(
         .filter((tried) => tried.source === "operator")
         .map((tried) => ({
           item: id,
-          failure: headAndTail(
-            tried.failure,
-            CARRIED_FAILURE.head,
-            CARRIED_FAILURE.tail,
-          ),
+          failure: failureExcerpt(tried.failure, CARRIED_FAILURE_CHARS),
           answer: headAndTail(
             tried.correction,
             CARRIED_ANSWER.head,

@@ -14,7 +14,7 @@ import { needsSelection } from "../media.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
-import { errorMessage, headAndTail } from "../text.js";
+import { errorMessage, failureExcerpt } from "../text.js";
 import { validateTree } from "../validate.js";
 import { hasGitlink, installStorePath } from "../worktree.js";
 import {
@@ -144,7 +144,10 @@ export class FinishRequests {
   }
 }
 
-/** Validate keeps the tail: failures report last. */
+/**
+ * The least of a failed command's output a Validate result keeps, whatever
+ * else it holds; it gets what the result has left when that is more.
+ */
 const VALIDATION_OUTPUT_CHARS = 8_000;
 /**
  * Note excerpts in the criterion map, longest first: enough of a note to see
@@ -163,11 +166,15 @@ const NOTE_EXCERPTS = [600, 200, 0] as const;
  */
 export const VALIDATE_RESULT_CHARS = 30_000;
 
-/** Plain text: the first line names the failed command; the tail holds the failures. */
-function bounded(output: string): string {
-  const plain = stripVTControlCharacters(output);
-  const head = (plain.split("\n", 1)[0] ?? "").slice(0, 300);
-  return headAndTail(plain, head.length, VALIDATION_OUTPUT_CHARS);
+/**
+ * Plain text within `chars`: the start, which names the failed command, the
+ * end, and the lines that say why it failed wherever they are (#2201).
+ */
+function bounded(output: string, chars: number): string {
+  return failureExcerpt(
+    stripVTControlCharacters(output),
+    Math.max(VALIDATION_OUTPUT_CHARS, chars),
+  );
 }
 
 /**
@@ -322,23 +329,39 @@ export class SelfValidation {
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);
     const passed = result.kind === "passed";
-    const declared =
+    const compose = (output: string) => {
+      const declared =
+        result.kind === "passed"
+          ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
+          : `Validation failed. Fix this before you finish.\n${output}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
+      const composed = [
+        result.produced ? `${declared}\n\n${result.produced}` : declared,
+      ];
+      if (result.regenerated)
+        composed.push(
+          `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
+        );
+      if (result.formatted) composed.push(formattedNote(result.formatted));
+      if (handoff.text)
+        if (handoff.passed) composed.push(handoff.text);
+        else composed.unshift(handoff.text);
+      if (passed && !handoff.passed)
+        composed.unshift("Validation failed. Fix this before you finish.");
+      return composed;
+    };
+    // A failed command's output gets what the rest of the result leaves
+    // (VALIDATE_RESULT_CHARS), cut to keep its failure lines (#2201).
+    const parts =
       result.kind === "passed"
-        ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
-    const parts = [
-      result.produced ? `${declared}\n\n${result.produced}` : declared,
-    ];
-    if (result.regenerated)
-      parts.push(
-        `Your dependency change left ${result.regenerated.lockfile} out of date, so Factory resolved it for this run, under the repository's package policy. It does the same when it validates your result, and commits the lockfile on it. Leave ${result.regenerated.lockfile} as it is: don't edit or regenerate it.`,
-      );
-    if (result.formatted) parts.push(formattedNote(result.formatted));
-    if (handoff.text)
-      if (handoff.passed) parts.push(handoff.text);
-      else parts.unshift(handoff.text);
-    if (passed && !handoff.passed)
-      parts.unshift("Validation failed. Fix this before you finish.");
+        ? compose("")
+        : compose(
+            bounded(
+              result.failed
+                ? `${result.failed.command} failed:\n${result.output}`
+                : result.output || result.detail,
+              VALIDATE_RESULT_CHARS - compose("").join("\n\n").length,
+            ),
+          );
     // Self-review follows a passing run, last and within what the result has
     // left (VALIDATE_RESULT_CHARS), so no worker's harness cuts it.
     if (passed && handoff.criteria)

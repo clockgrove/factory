@@ -293,8 +293,9 @@ function releaseCommit(repo, version) {
 /**
  * Score Objective `issue` in Factory state directory `stateDir` (an
  * installation's: `<root>/<owner>__<repo>`). `run` names the result: id,
- * label, group, source (`harness` or `backfill`), repository, and for a
- * candidate build its `factory: { commit }`. `factoryRepo`: the Factory
+ * label, group, source (`harness` or `backfill`), repository, for a
+ * candidate build its `factory: { commit }`, and for a harness run its run
+ * directory, `dir`. `factoryRepo`: the Factory
  * checkout releases' tags are resolved in. `checkout`: a checkout of the
  * run repository, where the end commit is read, and for a harness run (a
  * test repository no one else commits to) its hand fixes. `handFixes`:
@@ -1050,6 +1051,9 @@ export async function scoreRun({
       repository: run.repository,
       issue,
       ...(run.factory ? { factory: run.factory } : {}),
+      // A harness run's directory: its run record and Objective, which the
+      // blind pairwise review reads (bench/lib/judge.mjs).
+      ...(run.dir ? { dir: run.dir } : {}),
     },
     partial,
     factory: {

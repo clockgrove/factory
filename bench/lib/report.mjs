@@ -9,6 +9,8 @@
 import {
   compare,
   DIAGNOSTICS,
+  graderMetric,
+  graderMetricNames,
   isCurrent,
   isPartial,
   METRICS,
@@ -50,8 +52,16 @@ export function value(unit, v) {
   if (unit === "ms") return duration(v);
   if (unit === "rate") return percent(v);
   if (unit === "usd") return usd(v);
+  // A grader's metric: as it reported it, to three decimals.
+  if (unit === "number") return String(Number(v.toFixed(3)));
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
 }
+
+/** The grader's metrics of a grade, as `name value` text. */
+const gradeMetrics = (grade) =>
+  Object.entries(grade?.metrics ?? {})
+    .map(([name, v]) => `${name} ${value("number", v)}`)
+    .join(", ");
 
 const time = (at) => (at ? `${at.slice(0, 16).replace("T", " ")} UTC` : "n/a");
 const clock = (at) => (at ? at.slice(11, 16) : "");
@@ -63,7 +73,7 @@ const PARTIAL_NOTE =
 const RESCORE_NOTE =
   "This card is of an older scorecard version: it has no outcome metrics (grade, human effort, time to delivery, waste, escapes, cost), and it is left out of every comparison. Score it again with bench/score.mjs.";
 const ACCEPT_RULE =
-  "A candidate is accepted when its grade is not worse, its human effort or its time to delivery is better, its stage escapes are not worse, and its cost is not worse; better or worse means beyond the baseline's whole spread. Waste is shown, and the effort metrics after it are diagnostics: they don't decide.";
+  "A candidate is accepted when its grade is not worse, its human effort or its time to delivery is better, its stage escapes are not worse, and its cost is not worse (skipped, with a warning, when the cost is unknown on both sides); better or worse means beyond the baseline's whole spread. With a judge, its blind pairwise intent win rate is not below 50% too. Waste and the grader's own metrics are shown, and the effort metrics after them are diagnostics: they don't decide.";
 
 /** One line per outcome of `card`, label then value then detail (null: an older card). */
 export function outcomeLines(card) {
@@ -77,7 +87,7 @@ export function outcomeLines(card) {
       grade
         ? grade.error
           ? `the grader failed: ${grade.error}`
-          : `${grade.passed} passed, ${grade.failed} failed, ${grade.unknown} unknown of ${grade.criteria.length} criteria at ${grade.commit.slice(0, 12)} (${grade.graderVersion})`
+          : `${grade.passed} passed, ${grade.failed} failed, ${grade.unknown} unknown of ${grade.criteria.length} criteria at ${grade.commit.slice(0, 12)} (${grade.graderVersion})${gradeMetrics(grade) ? `; ${gradeMetrics(grade)}` : ""}`
         : `not graded: ${gradeGap?.reason ?? "no grade"}`,
     ],
     [
@@ -312,9 +322,8 @@ function timeline(card) {
 <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Timeline of the Work Items, UTC"><g class="grid">${axis}</g>${off}${marks}</svg></div>`;
 }
 
-/** One metric across runs: a dot per run, each group's median and min–max band, x in run order grouped. */
-function historyChart(metricId, cards, baselineGroup) {
-  const metric = METRICS[metricId];
+/** One metric (METRICS's, or a grader's) across runs: a dot per run, each group's median and min–max band, x in run order grouped. */
+function historyChart(metric, cards, baselineGroup) {
   const groups = [];
   for (const card of cards) {
     const group = groups.find((g) => g.name === card.run.group);
@@ -379,7 +388,7 @@ function historyChart(metricId, cards, baselineGroup) {
         `<line x1="${left}" x2="${W - right}" y1="${y(t)}" y2="${y(t)}"/><text x="${left - 6}" y="${y(t) + 4}" text-anchor="end">${esc(value(metric.unit, t))}</text>`,
     )
     .join("");
-  return `<div class="chart"><h3>${esc(metric.label)} <span class="meta">(${metric.better} is better)</span></h3>
+  return `<div class="chart"><h3>${esc(metric.label)} <span class="meta">(${metric.better ? `${metric.better} is better` : "the grader's measure"})</span></h3>
 <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(metric.label)} per run"><g class="grid">${grid}</g><line class="axis" x1="${left}" x2="${W - right}" y1="${H - bottom}" y2="${H - bottom}"/>${parts.join("")}</svg></div>`;
 }
 
@@ -453,6 +462,18 @@ ${
         ]),
       )
     : `<p class="meta">${esc(outcomeLines(card)[0][2])}</p>`
+}
+${
+  Object.keys(grade?.metrics ?? {}).length
+    ? table(
+        ["Grader metric", "Value"],
+        Object.entries(grade.metrics).map(([name, v]) => [
+          esc(name),
+          esc(value("number", v)),
+        ]),
+        [1],
+      )
+    : ""
 }
 </section>
 <section>
@@ -893,10 +914,20 @@ export function runMarkdown(card, cards, definition) {
 
 // --- history ----------------------------------------------------------------
 
+/** The history's columns: the outcomes and diagnostics, then each grader metric any card has. */
+function historyColumns(cards) {
+  return [
+    ...SHOWN.map((id) => METRICS[id]),
+    ...graderMetricNames(cards).map(graderMetric),
+  ];
+}
+
 export function historyPage(cards, definition) {
   const sorted = [...cards].sort((a, b) =>
     (a.startedAt ?? "").localeCompare(b.startedAt ?? ""),
   );
+  const columns = historyColumns(sorted);
+  const graderMetrics = graderMetricNames(sorted);
   const body = `
 <header style="display:grid;gap:8px">
 <span class="eyebrow">Benchmark history</span>
@@ -906,13 +937,24 @@ export function historyPage(cards, definition) {
 <section>
 <h2>Outcomes</h2>
 <div class="small">
-${OUTCOMES.map((id) => historyChart(id, sorted, definition.baseline)).join("\n")}
+${OUTCOMES.map((id) => historyChart(METRICS[id], sorted, definition.baseline)).join("\n")}
 </div>
 </section>
+${
+  graderMetrics.length
+    ? `<section>
+<h2>Grader metrics</h2>
+<p class="meta">What the benchmark's grader measured besides its verdicts, such as the delivered tests' mutation score. Shown, never deciding.</p>
+<div class="small">
+${graderMetrics.map((name) => historyChart(graderMetric(name), sorted, definition.baseline)).join("\n")}
+</div>
+</section>`
+    : ""
+}
 <section>
 <h2>Diagnostics</h2>
 <div class="small">
-${DIAGNOSTICS.map((id) => historyChart(id, sorted, definition.baseline)).join("\n")}
+${DIAGNOSTICS.map((id) => historyChart(METRICS[id], sorted, definition.baseline)).join("\n")}
 </div>
 </section>
 <section>
@@ -924,7 +966,7 @@ ${table(
     "Started",
     "Factory",
     "Outcome",
-    ...SHOWN.map((id) => METRICS[id].label),
+    ...columns.map((metric) => metric.label),
   ],
   sorted.map((c) => [
     esc(c.run.id),
@@ -932,9 +974,9 @@ ${table(
     esc(time(c.startedAt)),
     esc(c.factory.versions.join(" → ")),
     esc(outcomeOf(c)),
-    ...SHOWN.map((id) => esc(value(METRICS[id].unit, METRICS[id].get(c)))),
+    ...columns.map((metric) => esc(value(metric.unit, metric.get(c)))),
   ]),
-  SHOWN.map((_, i) => i + 5),
+  columns.map((_, i) => i + 5),
 )}
 </section>`;
   return page(`${definition.id} history`, body);
@@ -944,16 +986,17 @@ export function historyMarkdown(cards, definition) {
   const sorted = [...cards].sort((a, b) =>
     (a.startedAt ?? "").localeCompare(b.startedAt ?? ""),
   );
+  const columns = historyColumns(sorted);
   return `${[
     `# ${definition.title}: history`,
     "",
     `${sorted.length} run(s); baseline: ${definition.baseline}. ${ACCEPT_RULE}`,
     "",
-    `| Run | Group | Outcome | ${SHOWN.map((id) => METRICS[id].label).join(" | ")} |`,
-    `| --- | --- | --- | ${SHOWN.map(() => "---:").join(" | ")} |`,
+    `| Run | Group | Outcome | ${columns.map((metric) => metric.label).join(" | ")} |`,
+    `| --- | --- | --- | ${columns.map(() => "---:").join(" | ")} |`,
     ...sorted.map(
       (c) =>
-        `| ${c.run.id} | ${c.run.group} | ${outcomeOf(c)} | ${SHOWN.map((id) => value(METRICS[id].unit, METRICS[id].get(c))).join(" | ")} |`,
+        `| ${c.run.id} | ${c.run.group} | ${outcomeOf(c)} | ${columns.map((metric) => value(metric.unit, metric.get(c))).join(" | ")} |`,
     ),
   ].join("\n")}\n`;
 }

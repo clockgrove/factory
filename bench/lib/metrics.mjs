@@ -4,8 +4,9 @@
  * group's spread (min to max). Better means beyond the whole spread; inside
  * it is noise. A candidate is accepted on outcomes (bench/README.md#Hill-climb):
  * its grade is not worse, its human effort or its time to delivery is
- * better, its stage escapes are not worse, and its cost is not worse. The
- * effort metrics (tokens, active time, repairs, first-pass rates) are
+ * better, its stage escapes are not worse, its cost is not worse, and with
+ * a judge, it wins at least half the blind pairwise judgments on intent.
+ * The effort metrics (tokens, active time, repairs, first-pass rates) are
  * diagnostics: shown, never deciding.
  */
 /**
@@ -159,6 +160,24 @@ export const DIAGNOSTICS = [
 /** The order history and reports show metrics in. */
 export const SHOWN = [...OUTCOMES, ...DIAGNOSTICS];
 
+/**
+ * A metric the grader reported (`grade.metrics.<name>`, #2224), such as
+ * the delivered tests' mutation score: shown with the grade, never
+ * deciding. Which way is better is the grader's to say.
+ */
+export const graderMetric = (name) => ({
+  label: `Grader: ${name}`,
+  unit: "number",
+  better: null,
+  get: (card) => card.grade?.metrics?.[name] ?? null,
+});
+
+/** The names of the grader metrics any of `cards` has, sorted. */
+export const graderMetricNames = (cards) =>
+  [
+    ...new Set(cards.flatMap((card) => Object.keys(card.grade?.metrics ?? {}))),
+  ].sort();
+
 export function spread(values) {
   const known = values
     .filter((v) => typeof v === "number")
@@ -211,16 +230,33 @@ export const isCurrent = (card) => card.schemaVersion === SCORECARD_VERSION;
  * not worse; human effort or time to delivery better; escapes not worse;
  * cost not worse beyond the baseline's range. Unknown (no run graded,
  * priced, ...) never passes a rule: the decision is never made without it.
+ * Cost is a guard, not a goal (#2224): unknown on both sides, as for a
+ * subscription-priced provider, or for the baseline alone, it is skipped
+ * with a warning; a candidate's unknown cost against a known one fails it.
  * Waste is shown with them but doesn't decide.
  */
-function acceptance(rows) {
+function acceptance(rows, warnings) {
   const row = (id) => rows.find((r) => r.id === id);
   const reasons = [];
-  for (const id of ["grade.passRate", "escapes.total", "cost.usd"]) {
+  for (const id of ["grade.passRate", "escapes.total"]) {
     const { verdict } = row(id);
     if (verdict === "worse" || verdict === "unknown")
       reasons.push(
         `${id} is ${verdict}${verdict === "worse" ? "" : ": it decides, so it must be known"}`,
+      );
+  }
+  const cost = row("cost.usd");
+  if (cost.verdict === "worse") reasons.push("cost.usd is worse");
+  else if (cost.verdict === "unknown") {
+    if (!cost.candidate && cost.baseline)
+      reasons.push(
+        "cost.usd is unknown for the candidate and known for the baseline: the cost guard needs it known",
+      );
+    else
+      warnings.push(
+        cost.baseline || cost.candidate
+          ? "cost.usd is unknown for the baseline: the cost guard is skipped"
+          : "cost.usd is unknown on both sides (no prices, or a provider without per-token prices): the cost guard is skipped",
       );
   }
   const human = row("human.score").verdict;
@@ -233,14 +269,46 @@ function acceptance(rows) {
 }
 
 /**
+ * The blind pairwise review's rule (#2224), when the definition has a
+ * judge: the candidate's intent win rate is not below 50%. Unknown (no
+ * pair judged) never passes. Without `pairwise` (a run report, which
+ * judges nothing), a warning says it is left to compare.
+ */
+function pairwiseRule(definition, pairwise, reasons, warnings) {
+  if (!definition.judge) return;
+  if (pairwise === undefined) {
+    warnings.push(
+      "the blind pairwise review isn't in this decision: report.mjs compare judges it",
+    );
+    return;
+  }
+  const rate = pairwise.rates.intent;
+  if (rate === null)
+    reasons.push(
+      "pairwise intent win rate is unknown: no pair was judged, and with a judge it decides",
+    );
+  else if (rate < 0.5)
+    reasons.push(
+      `pairwise intent win rate ${Math.round(rate * 100)}% is below 50%`,
+    );
+}
+
+/**
  * The hill-climb decision for a candidate group against the baseline group.
  * Partial cards are left out (a warning says so): an unfinished run's
  * tokens and time are lower only because it is unfinished. Cards of an
  * older scorecard version are left out too: score them again. The
  * definition's `hillClimb` metrics, when it names any, are the diagnostics
- * shown; otherwise DIAGNOSTICS.
+ * shown; otherwise DIAGNOSTICS. `pairwise`: the blind pairwise review
+ * (bench/lib/judge.mjs `pairwise`), which decides too when the definition
+ * has a judge.
  */
-export function verdict(definition, baselineCards, candidateCards) {
+export function verdict(
+  definition,
+  baselineCards,
+  candidateCards,
+  { pairwise } = {},
+) {
   const warnings = [];
   const ended = (cards, which) => {
     const left = cards.filter(isPartial);
@@ -270,11 +338,12 @@ export function verdict(definition, baselineCards, candidateCards) {
         ]
       : DIAGNOSTICS,
   );
-  const reasons = acceptance(outcomes);
   if (baseline.length < 3 || candidate.length < 3)
     warnings.push(
       `${baseline.length} baseline and ${candidate.length} candidate runs: a spread needs at least 3 of each`,
     );
+  const reasons = acceptance(outcomes, warnings);
+  pairwiseRule(definition, pairwise, reasons, warnings);
   return {
     accept: reasons.length === 0,
     reasons,

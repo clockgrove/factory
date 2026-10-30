@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -319,6 +320,131 @@ test("the hill-climb accepts on outcomes: grade and escapes not worse, human or 
   );
 });
 
+test("cost is a guard: unknown on both sides it is skipped with a warning; the candidate's alone, rejected", () => {
+  const three = (change) =>
+    [1, 2, 3].map((n) =>
+      candidate(`r${n}`, (_, card) => {
+        card.human.score = 10;
+        change(card);
+      }),
+    );
+  const unpriced = (card) => {
+    card.cost = null;
+  };
+  // A subscription-priced provider: no per-token price on either side.
+  const neither = verdict(
+    definition,
+    [candidate("b", (_, card) => unpriced(card))],
+    three(unpriced),
+  );
+  assert.equal(neither.accept, true, neither.reasons.join("; "));
+  assert.ok(
+    neither.warnings.includes(
+      "cost.usd is unknown on both sides (no prices, or a provider without per-token prices): the cost guard is skipped",
+    ),
+    neither.warnings.join("\n"),
+  );
+  // Only the candidate's is unknown: rejected.
+  assert.deepEqual(verdict(definition, [baseline], three(unpriced)).reasons, [
+    "cost.usd is unknown for the candidate and known for the baseline: the cost guard needs it known",
+  ]);
+  // Only the baseline's is unknown: nothing to guard against, a warning.
+  const known = verdict(
+    definition,
+    [candidate("b", (_, card) => unpriced(card))],
+    three(() => {}),
+  );
+  assert.equal(known.accept, true, known.reasons.join("; "));
+  assert.ok(
+    known.warnings.includes(
+      "cost.usd is unknown for the baseline: the cost guard is skipped",
+    ),
+  );
+  // Known and worse beyond the range: rejected, as before.
+  assert.deepEqual(
+    verdict(
+      definition,
+      [baseline],
+      three((card) => {
+        card.cost.usd = 9;
+      }),
+    ).reasons,
+    ["cost.usd is worse"],
+  );
+});
+
+test("with a judge, the intent win rate decides too; a run report leaves it to compare", () => {
+  const runs = [1, 2, 3].map((n) =>
+    candidate(`r${n}`, (_, card) => {
+      card.human.score = 10;
+    }),
+  );
+  const decide = (intent) =>
+    verdict(definition, [baseline], runs, {
+      pairwise: { rates: { pairs: 3, intent, quality: 0.5 } },
+    });
+  assert.equal(decide(0.5).accept, true);
+  assert.deepEqual(decide(1 / 3).reasons, [
+    "pairwise intent win rate 33% is below 50%",
+  ]);
+  assert.deepEqual(decide(null).reasons, [
+    "pairwise intent win rate is unknown: no pair was judged, and with a judge it decides",
+  ]);
+  // Without the review (a run report), it accepts on outcomes and says so.
+  const unreviewed = verdict(definition, [baseline], runs);
+  assert.equal(unreviewed.accept, true);
+  assert.ok(
+    unreviewed.warnings.includes(
+      "the blind pairwise review isn't in this decision: report.mjs compare judges it",
+    ),
+  );
+  // A definition without a judge has no pairwise rule.
+  const { judge: _, ...unjudged } = definition;
+  assert.deepEqual(
+    verdict(unjudged, [baseline], runs, {
+      pairwise: { rates: { pairs: 3, intent: 0, quality: 0 } },
+    }).reasons,
+    [],
+  );
+});
+
+test("the grader's own metrics are shown with the grade and graphed in the history", () => {
+  const scored = (id, mutationScore) =>
+    candidate(id, (_, card) => {
+      card.grade.metrics = { mutationScore };
+    });
+  const cards = [baseline, scored("m1", 0.625), scored("m2", 0.875)];
+  const html = runReport(cards[1], cards, definition);
+  assertSelfContained(html);
+  assert.match(
+    html,
+    /Grade: 3 passed, 1 failed, 1 unknown of 1 criteria at c0ffee \(acme-widgets-42 stand-in 1\); mutationScore 0\.625/,
+  );
+  assert.match(html, /<td>mutationScore<\/td><td class="n">0\.625<\/td>/);
+  assert.match(
+    runMarkdown(cards[1], cards, definition),
+    /\| Grade \| 60% \| .*; mutationScore 0\.625 \|/,
+  );
+  const history = historyPage(cards, definition);
+  assertSelfContained(history);
+  assert.match(history, /<h2>Grader metrics<\/h2>/);
+  assert.match(
+    history,
+    /Grader: mutationScore <span class="meta">\(the grader's measure\)/,
+  );
+  assert.match(
+    history,
+    /Factory 0\.6\.0: 2 run\(s\), median 0\.75, 0\.625 to 0\.875/,
+  );
+  // One more chart than the outcomes and diagnostics, and a column.
+  assert.equal((history.match(/<svg /g) ?? []).length, SHOWN.length + 1);
+  const md = historyMarkdown(cards, definition);
+  assert.match(md, /\| Grader: mutationScore \|\n/);
+  assert.match(md, /\| m2 \| Factory 0\.6\.0 \| done \| .* \| 0\.875 \|\n/);
+  // A run without the metric shows n/a, never 0.
+  assert.match(md, /\| baseline \| .* \| n\/a \|\n/);
+});
+
 test("report.mjs reads the results and writes the reports in the bench home", () => {
   const home = mkdtempSync(join(tmpdir(), "bench-home-"));
   after(() => rmSync(home, { recursive: true, force: true }));
@@ -327,10 +453,15 @@ test("report.mjs reads the results and writes the reports in the bench home", ()
   writeFileSync(join(results, "baseline.json"), JSON.stringify(baseline));
   writeFileSync(join(results, "old.json"), JSON.stringify(versionTwo("old")));
   const env = { ...process.env, [HOME_ENV]: home };
+  // The example without its judge: the pairwise review has its own tests (bench-judge.test.mjs).
+  const unjudged = join(home, "unjudged.json");
+  const example = JSON.parse(readFileSync(EXAMPLE, "utf8"));
+  delete example.judge;
+  writeFileSync(unjudged, JSON.stringify(example));
   const report = (...args) =>
     spawnSync(
       process.execPath,
-      [join(BENCH_DIR, "report.mjs"), "--benchmark", EXAMPLE, ...args],
+      [join(BENCH_DIR, "report.mjs"), "--benchmark", unjudged, ...args],
       { encoding: "utf8", env },
     );
   const run = report();

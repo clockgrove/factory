@@ -190,7 +190,7 @@ test("the review is told a passing command is required, not sufficient, and its 
   );
   assert.ok(
     prompt.includes(
-      `Command-proven criteria: the plan proves criterion 2 by validation command 1 (${JSON.stringify(COMMAND)}) of this Work Item; the Validation command passes row lists each command at that index, and it passed on this tree. That pass is required, not sufficient`,
+      `Command-proven criteria: the plan proves criterion 2 by validation command 1 (${JSON.stringify(COMMAND)}) of this Work Item; the Validation command passes row lists each command at that index, and it passed on this tree. When a criterion states only what that command's own exit decides`,
     ),
     prompt,
   );

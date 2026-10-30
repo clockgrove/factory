@@ -160,7 +160,8 @@ test("replace-validation to a repair diagnosis proposes an amendment of the auth
   const runs = validationAmendment(a, context(state, answer), undefined, {});
   assert.equal(runs.kind, "repair", JSON.stringify(runs));
   assert.deepEqual(runs.free, { target: "item:a:work", repair: 2 });
-  assert.equal(runs.keep["item:a:refused"].replayOnly, true);
+  assert.equal(runs.keep["item:a:refused"].amended, "validation-a-1");
+  assert.equal(runs.keep["item:a:refused"].replayOnly, undefined);
 
   // Rejected and continued past: the repair goes on as usual.
   state.done["amend:validation-a-1"] = { rejected: "Refused." };

@@ -562,7 +562,8 @@ test("a started item's dependency an earlier round's enables made stands when th
   merged(state, "fixture");
   assert.deepEqual(runnable(state, deps), ["item:a:work"]);
   const runs = assertBroughtUpToDate(state, "a", "op-1");
-  assert.equal(runs.keep["item:a:refused"].replayOnly, true);
+  assert.equal(runs.keep["item:a:refused"].amended, "op-1");
+  assert.equal(runs.keep["item:a:refused"].replayOnly, undefined);
 });
 
 test("a started item's grown dependency that no enables entry made goes back saying to name it in enables (#2233)", () => {
@@ -981,7 +982,8 @@ test("a missing prerequisite answered depend amends the plan so the item depends
   assert.equal(runs.kind, "repair", JSON.stringify(runs));
   assert.deepEqual(runs.free, { target: "item:a:work", repair: 3 });
   assert.equal(runs.keep["item:a:rebase"], true);
-  assert.equal(runs.keep["item:a:refused"].replayOnly, true);
+  assert.equal(runs.keep["item:a:refused"].amended, "prerequisite-a-2");
+  assert.equal(runs.keep["item:a:refused"].replayOnly, undefined);
   assert.equal(runs.keep["item:a:prerequisite"], null);
   // Its own route took it: the edge's record goes with it.
   assert.equal(runs.keep["item:a:enabled"], null);

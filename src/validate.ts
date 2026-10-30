@@ -324,6 +324,12 @@ export type Validation =
       detail: string;
       /** The complete output, for diagnosis and the next attempt. */
       output: string;
+      /**
+       * The failed command's attempt file (`runFile`): its whole output as
+       * it arrived, stdout and stderr interleaved. Present when the command
+       * itself failed.
+       */
+      outputFile?: RunFile;
       produced?: string;
       regenerated?: RegeneratedLockfile;
       formatted?: AppliedFormatter;
@@ -928,6 +934,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         failed: { index, command, exit },
         detail,
         output: `${failed}${offlineBecause}${overflow ? `${overflow}\n` : ""}${output}`,
+        outputFile: whole,
         ...(produced && { produced }),
         ...(regenerated && { regenerated }),
         ...(formatted && { formatted }),

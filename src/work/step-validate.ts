@@ -6,10 +6,12 @@ import { runningBuild } from "../log.js";
 import { validationMembers } from "../media.js";
 import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
+import { FAILURE_CHARS } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt } from "../text.js";
 import { formatRef, lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, installStorePath, worktreePath } from "../worktree.js";
+import { VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaValidateStep } from "./step-qa.js";
@@ -134,28 +136,32 @@ export async function validateStep(
           (flaky) => facts({ flaky }, item.id),
         );
       if (rerun) return rerun;
-      // State is saved on every step: it keeps a bounded finding. Output
-      // longer than that (up to the raised review-artifact stream bounds)
-      // is kept whole in a file for the operator; no model can read it.
+      // State is saved on every step: it keeps a bounded finding, whose
+      // excerpt keeps the failure lines wherever they are (#2201). Output
+      // longer than a repair's brief keeps (repair.ts FAILURE_CHARS, up to
+      // the raised review-artifact stream bounds) is kept whole in a file:
+      // the operator's, the diagnosis can ask for it, and the next worker
+      // attempt reads a copy in its checkout (step-work.ts). Named by its
+      // content, so the same failure again reads as the same finding.
       let keptOutput = result.output;
-      if (result.output.length > KEPT_OUTPUT_CHARS) {
-        const outputFile = join(
+      let outputFile: string | undefined;
+      if (result.output.length > FAILURE_CHARS) {
+        outputFile = join(
           workDir,
           "outputs",
           item.id,
-          `${result.tree}.txt`,
+          `${createHash("sha256").update(result.output).digest("hex").slice(0, 16)}.txt`,
         );
         await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
         await writeFile(outputFile, result.output, { mode: 0o600 });
-        // The excerpt keeps the failure lines wherever they are: the
-        // diagnosis and the worker's repair read it (#2201).
-        keptOutput = `${failureExcerpt(result.output, KEPT_OUTPUT_CHARS)}\n[The complete output is kept for the operator at ${outputFile}; it is not readable from the worker's checkout.]`;
+        keptOutput = `${result.output.length > KEPT_OUTPUT_CHARS ? failureExcerpt(result.output, KEPT_OUTPUT_CHARS) : result.output}\n[The complete output is kept for the operator at ${outputFile}. The repair diagnosis can ask for it as ${VALIDATE_STEP_LOG}, and the next worker attempt reads it there in its checkout.]`;
       }
       const failed: Extract<KeptValidation["result"], { kind: "failed" }> = {
         kind: "failed",
         detail: keptOutput,
         shown: result.detail,
         ...(result.failed ? { command: result.failed.command } : {}),
+        ...(outputFile ? { output: outputFile } : {}),
       };
       return failedOutcome(
         item,
@@ -221,7 +227,11 @@ function failedOutcome(
   return repairOutcome(
     item,
     "validate",
-    { kind: "failure", detail: failed.detail },
+    {
+      kind: "failure",
+      detail: failed.detail,
+      ...(failed.output ? { output: failed.output } : {}),
+    },
     state,
     place,
     {

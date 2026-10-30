@@ -213,6 +213,17 @@ export function rateLimitOf(
   return { ms, ...(resource ? { resource } : {}) };
 }
 
+/** The hourly budgets `github.reserve` keeps a reserve of: search's per-minute ones are always small. */
+const RESERVED = new Set(["core", "graphql"]);
+
+/** A budget below the installation's reserve (`GitHub.lowBudget`), until its reset (this host's clock). */
+export interface LowBudget {
+  resource: string;
+  remaining: number;
+  reserve: number;
+  resetAt: number;
+}
+
 /** The rate-limit resource a request spends (GitHub's `x-ratelimit-resource`). */
 function resourceOf(path: string): string {
   const route = path.split("?")[0]!;
@@ -492,6 +503,15 @@ export class GitHub {
    */
   private readonly heldUntil = new Map<string, number>();
   /**
+   * Each hourly budget's remaining requests, as the latest answer that
+   * spent it said (`x-ratelimit-remaining`), and its reset (this host's
+   * clock): `lowBudget` reads it.
+   */
+  private readonly budget = new Map<
+    string,
+    { remaining: number; resetAt: number }
+  >();
+  /**
    * Set once GitHub refused (403) a read of the repository's classic
    * branch protection that Factory expected it to answer: a user's login
    * without admin access, or a GitHub App whose Administration access was
@@ -506,7 +526,26 @@ export class GitHub {
     readonly repository: string,
     private readonly api = "https://api.github.com",
     private readonly app?: AppIdentity,
+    /** The requests of each hourly budget kept for work that can't wait (`github.reserve`). */
+    private readonly reserve = 0,
   ) {}
+
+  /**
+   * The budget an answer said is below the reserve, until its reset (the
+   * latest reset of several): work that can wait waits for it (github-sync.ts
+   * `tick`). Nothing is refused here: every request is still sent.
+   */
+  lowBudget(now = Date.now()): LowBudget | undefined {
+    let low: LowBudget | undefined;
+    for (const [resource, { remaining, resetAt }] of this.budget)
+      if (
+        remaining < this.reserve &&
+        now < resetAt &&
+        resetAt > (low?.resetAt ?? 0)
+      )
+        low = { resource, remaining, reserve: this.reserve, resetAt };
+    return low;
+  }
 
   /** Factory acts as its GitHub App, not a user's login. */
   get isApp(): boolean {
@@ -2757,6 +2796,21 @@ export class GitHub {
     const ms = Date.now() - sentAt;
     counted.requestMs += ms;
     counted.bytes += Number(response.headers.get("content-length")) || 0;
+    // The installation's budget, as GitHub reports it on every answer.
+    const resource = response.headers.get("x-ratelimit-resource");
+    const remaining = response.headers.get("x-ratelimit-remaining");
+    const reset = Number(response.headers.get("x-ratelimit-reset"));
+    if (
+      !headers.authorization &&
+      resource &&
+      RESERVED.has(resource) &&
+      remaining !== null &&
+      reset > 0
+    )
+      this.budget.set(resource, {
+        remaining: Number(remaining),
+        resetAt: reset * 1000,
+      });
     const answered = { method, path, status: response.status, attempt, ms };
     if (response.ok) {
       // A re-send that worked is traced too: it was retried.

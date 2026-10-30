@@ -129,6 +129,7 @@ const CONFIG_OPTIONS: Record<string, Option> = {
     key: "github.app.installationId",
     read: "number",
   },
+  "github-reserve": { key: "github.reserve", read: "number" },
   operator: { key: "operators", read: "list" },
 };
 

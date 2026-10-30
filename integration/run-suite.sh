@@ -252,6 +252,8 @@ c = {
   "repository": repo, "checkout": checkout,
   "queue": {"projectId": os.environ["SUITE_PROJECT_ID"], "pollSeconds": 15, "maxActiveObjectives": int(active)},
   "execution": {"concurrency": 4, "workers": 12, "validations": 6},
+  # The suite's installation is production's too: its traffic yields first.
+  "github": {"reserve": 2000},
   "providers": {
     "codex": {"planner": "codex", "models": {"planner": fast, "reviewer": fast}, "worker": {"kind": "codex", **fast}},
     "codex-plan": {"planner": "codex", "models": {"reviewer": fast, "planner": {"model": "gpt-6.1-sol", "effort": "high"}}, "worker": {"kind": "codex", **fast}},
@@ -293,6 +295,7 @@ write_results() {
     fi
     echo "## Checks"; echo; echo "| Check | Case | Result | Evidence | Duration |"; echo "|---|---|---|---|---|"
     awk -F'\t' '{gsub(/\|/,"\\|",$5); d=$6+0; printf "| %s | %s | %s | %s | %dm %02ds |\n", $1, $2, ($4=="FAIL"?"**FAIL**":$4), $5, d/60, d%60}' "$RUN_DIR/results.tsv"
+    python3 "$SUITE/lib/github-calls.py" "$STATE_BASE" "$RUN_DIR" 2>/dev/null
     [ -s "$RUN_DIR/issues" ] && { echo; echo "Objectives: $(awk '{printf "%s#%s (%s) ", ($3=="C"||$3=="H"||$3=="Q")?"C ":($3 ~ /^[NTFR]$/?$3" ":""), $1, $2}' "$RUN_DIR/issues")"; }
   } >"$out"
   echo "results: $out" >&2

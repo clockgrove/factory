@@ -686,7 +686,8 @@ case_prod() {
   local HOLD_POLICY="d2 review decide more"
   local co="$STATE_BASE/checkout-q"
   # --default: on a fresh configuration setup keeps codex first and default otherwise.
-  cli_t 120 setup --checkout "$co" --project-id "$C_PROJECT_ID" --provider "$PROVIDER" --planner "$PROVIDER" --worker "$PROVIDER" --default "${IDENTITY_ARGS[@]}" --json >"$RUN_DIR/q.setup.out" 2>&1; local rs=$?
+  # --github-reserve: the installation is production's too, so suite traffic yields first.
+  cli_t 120 setup --checkout "$co" --project-id "$C_PROJECT_ID" --provider "$PROVIDER" --planner "$PROVIDER" --worker "$PROVIDER" --default --github-reserve 2000 "${IDENTITY_ARGS[@]}" --json >"$RUN_DIR/q.setup.out" 2>&1; local rs=$?
   local sj; sj=$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 node=[c for c in (d.get("readiness") or {}).get("checks", []) if c.get("name")=="node version"]

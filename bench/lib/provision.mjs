@@ -241,6 +241,10 @@ export function setupArgs(
           host.githubApp.keyPath,
         ]
       : ["--github-login"]),
+    // The installation's budget is production's too: benchmark traffic
+    // yields first (github.reserve).
+    "--github-reserve",
+    "2000",
     ...(host.operator ? ["--operator", host.operator] : []),
     "--provider",
     f.provider,

@@ -219,21 +219,27 @@ export function factoryGitHub(
   api = process.env.FACTORY_GITHUB_API,
 ): GitHub {
   const app = config.github.app;
-  if (!app) return new GitHub(config.repository, api);
+  const { reserve } = config.github;
+  if (!app) return new GitHub(config.repository, api, undefined, reserve);
   const root = installationPaths(config.repository).root;
-  const github = new GitHub(config.repository, api, {
-    ...(app.installationId !== undefined && {
-      installationId: app.installationId,
-    }),
-    jwt: () => {
-      const key = appKey(root);
-      if (!key)
-        throw new Error(
-          `no private key: give it with factory setup --github-app-key PATH (or ${GITHUB_APP_KEY})`,
-        );
-      return appJwt(app.id, key);
+  const github = new GitHub(
+    config.repository,
+    api,
+    {
+      ...(app.installationId !== undefined && {
+        installationId: app.installationId,
+      }),
+      jwt: () => {
+        const key = appKey(root);
+        if (!key)
+          throw new Error(
+            `no private key: give it with factory setup --github-app-key PATH (or ${GITHUB_APP_KEY})`,
+          );
+        return appJwt(app.id, key);
+      },
     },
-  });
+    reserve,
+  );
   remoteToken(config.repository, () => github.serviceToken());
   return github;
 }

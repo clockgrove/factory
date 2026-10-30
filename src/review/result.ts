@@ -57,9 +57,14 @@ import {
  * The criteria a result review judges: the item's own acceptance, then each
  * Objective criterion or source exit item the plan says this item's review
  * proves. A single-item plan's review also judges what final review proves.
- * The indices match the worker's notes.
+ * The worker gets this same list, numbered the same (work/prompt.ts
+ * `workItemContract`), so the indices match its notes, and an obligation
+ * its acceptance only paraphrases reaches it word for word (#2197).
  */
-export function resultCriteria(plan: Plan, item: WorkItem): string[] {
+export function resultCriteria(
+  plan: Pick<Plan, "items" | "coverage">,
+  item: Pick<WorkItem, "id" | "acceptance">,
+): string[] {
   const whole = plan.items.length === 1 && plan.items[0]!.id === item.id;
   const owned = plan.coverage
     .filter(

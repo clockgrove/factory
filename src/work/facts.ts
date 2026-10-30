@@ -2,7 +2,7 @@ import type { BaseRerun, CiRerun } from "../delivery.js";
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { WorkDiscovery } from "../planning/amendments.js";
 import type { IgnoredPredecessor } from "../planning/predecessors.js";
-import type { Retirement } from "../planning/types.js";
+import type { Retirement, ValidationAuthorization } from "../planning/types.js";
 import type { Session } from "../providers/session.js";
 import type { Correction, RepairFinding } from "../repair.js";
 import type { CriterionDecision, ResultReview } from "../review/result.js";
@@ -197,6 +197,12 @@ export interface ObjectiveFacts {
   "final:failed": { index: number; command: string };
   /** The commands the operator retired from final validation (planning/plan.ts reads them). */
   "final:retired": Retirement[];
+  /**
+   * The validation commands the operator authorized an amendment to
+   * replace (`replace-validation`), oldest first (planning/amendments.ts
+   * `authorizeReplacement`).
+   */
+  "validation:authorized": ValidationAuthorization[];
   /** The Objective runs again (work/steps.ts `RERUN`). */
   rerun: true;
   /** The re-run's cleanup reopened the issue (planning/steps.ts `REOPENED`). */

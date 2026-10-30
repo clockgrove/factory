@@ -181,6 +181,29 @@ export interface Retirement {
   plan: string;
 }
 
+/**
+ * An operator's `replace-validation <item> <index>[,<index>...] <reason>`
+ * to an amendment's or a repair diagnosis's question: an amendment may
+ * replace validation command `index` of Work Item or QA item `itemId`,
+ * and its review judges the replacement on the reason (#2199). Recorded
+ * against the plan accepted then (`plan`, its acceptance time), one per
+ * command an answer names: a replan's plan admits none of them.
+ */
+export interface ValidationAuthorization {
+  itemId: string;
+  /** The command's index in the item's validation when it was authorized, from 0. */
+  index: number;
+  /** The command, exactly as the plan ran it then: it admits only while the item still runs it. */
+  command: string;
+  reason: string;
+  by: string;
+  at: string;
+  /** The question answered: a rerun records an answer once. */
+  holdId: string;
+  /** The accepted plan it applies to (plan.ts ACCEPTED_AT). */
+  plan: string;
+}
+
 /** A problem with a draft, with a message that names what would pass. */
 export interface Finding {
   source: "check" | "review" | "operator";

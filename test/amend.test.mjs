@@ -149,7 +149,7 @@ test("an amendment comes before the build: intake is checked where it enters, a 
   assert.equal(question.step, "amend:op-1:continue");
   assert.deepEqual(
     question.options.map((option) => option.answer),
-    ["replace", "continue", "cancel"],
+    ["replace", "replace-validation", "continue", "cancel"],
   );
   assert.match(question.question, /removes Work Item a/);
   // A new proposal waits for the rejection to be settled.

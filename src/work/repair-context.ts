@@ -1,6 +1,12 @@
 import { overrun } from "../allowances.js";
 import { hold, type Outcome, type StepContext } from "../engine.js";
-import { revisionsLeft } from "../planning/amendments.js";
+import {
+  amendmentStatus,
+  REPLACE_VALIDATION_NOTE,
+  replacementOffered,
+  revisionsLeft,
+  validationList,
+} from "../planning/amendments.js";
 import { currentPlan } from "../planning/plan.js";
 import { itemValidates } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
@@ -15,7 +21,7 @@ import {
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt, headAndTail } from "../text.js";
 import { hasGitlink } from "../worktree.js";
-import { AMEND } from "./amend.js";
+import { AMEND, REPLACE_FOR_REPAIR, validationAmendmentId } from "./amend.js";
 import { fact, facts, type ItemFacts, itemsWith } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
@@ -171,11 +177,20 @@ export async function repairContext(
     // sentence of the step's own once offered it where the answer was
     // refused (#2120).
     const offer = refusalOffers(finding);
+    // A broken validation command is the operator's to authorize
+    // replacing, once per repair (amend.ts `validationAmendment`).
+    const replacing =
+      replacementOffered(state) &&
+      !amendmentStatus(state, validationAmendmentId(item.id, history.count));
+    const commands = item.validation.length
+      ? ` (${item.id}'s commands are ${validationList(item)})`
+      : "";
     return {
       outcome: hold(
-        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, \`retry\` to diagnose the failure again, or \`replan\` to plan again.${offer.note}`,
+        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, \`retry\` to diagnose the failure again, or \`replan\` to plan again.${replacing ? ` ${REPLACE_VALIDATION_NOTE}${commands}; ${item.id} then runs again on the amended plan.` : ""}${offer.note}`,
         [
           "answer",
+          ...(replacing ? [REPLACE_FOR_REPAIR] : []),
           {
             answer: "retry",
             family: "retry",

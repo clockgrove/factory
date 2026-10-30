@@ -1106,6 +1106,264 @@ test("a worker's Validate failure admits only a command the item still runs, und
   );
 });
 
+// #2199, part 2: in the same replay the operator explicitly authorized the
+// replacement, and the amendment was rejected again, as no failure fact
+// named the command; the QA item's command had the same flaw, and a QA
+// item has no worker to fail it. An operator's `replace-validation` now
+// records the authorization against the plan, and the amendment's review
+// judges the replacement on the operator's reason.
+const REASON =
+  "Its delimiter also matches the table's separator row; split at the horizontal rule instead.";
+/** The operator's answer `replace-validation <text>` to question `holdId`. */
+const replaceValidation = (text, holdId = "amend:op-1:plan@1") => ({
+  holdId,
+  question: "Planning amendment op-1 needs a decision: which delimiter?",
+  answer: "replace-validation",
+  text,
+  by: "octo",
+  at: "2026-01-01T02:00:00.000Z",
+});
+/** The operator's authorization to replace `item`'s command `index`. */
+const authorization = (itemId, index, command, plan = ACCEPTED_AT) => ({
+  itemId,
+  index,
+  command,
+  reason: REASON,
+  by: "octo",
+  at: "2026-01-01T02:00:00.000Z",
+  holdId: "amend:op-0:continue@1",
+  plan,
+});
+const authorized = (...entries) => ({ "validation:authorized": entries });
+
+test("a work item's validation command the operator authorized replacing is replaced through the amendment's review, judged on the reason (#2199)", async () => {
+  // No validate step or worker's Validate failed it.
+  const { checkout, state } = await discovered({ answer: withCut });
+  const { planner, asked } = scripted(replacesCut, { findings: [] });
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+
+  // The planner's question answered `replace-validation`: recorded against
+  // the plan accepted now, and given to the planner as the operator's answer.
+  const answered = await step(state, deps, replaceValidation(`a 1 ${REASON}`));
+  assert.equal(answered.outcome.kind, "retry");
+  assert.deepEqual(state.kept["validation:authorized"], [
+    {
+      ...authorization("a", 1, CUT_AT_TABLE),
+      holdId: "amend:op-1:plan@1",
+    },
+  ]);
+  assert.equal(asked.length, 0);
+
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.rejected, undefined);
+  assert.equal(round.restored, undefined);
+  const a = round.draft.items.find((item) => item.id === "a");
+  assert.deepEqual(a.validation, [
+    { command: "npm test" },
+    { command: AT_RULE },
+  ]);
+  const [planning] = asked;
+  // The operator's answer, as a correction in the planner's instructions.
+  const said = `octo authorized replacing a's validation command 1 (${JSON.stringify(CUT_AT_TABLE)}): ${REASON}`;
+  assert.ok(planning.prompt.includes(inJson(inJson(said))));
+  const view = `"authorizedValidation":${JSON.stringify({ a: [{ index: 1, command: CUT_AT_TABLE, reason: REASON, by: "octo" }] })}`;
+  assert.ok(planning.prompt.includes(view));
+  assert.ok(
+    planning.prompt.includes(
+      `"replaceableValidation":${JSON.stringify({ a: [CUT_AT_TABLE] })}`,
+    ),
+  );
+
+  // The review is given the reason, the old command and the new, and
+  // told to judge the replacement on the reason; it accepts it.
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  const reviewing = asked[1];
+  assert.ok(reviewing.prompt.includes(view));
+  for (const command of [CUT_AT_TABLE, AT_RULE])
+    assert.ok(reviewing.prompt.includes(JSON.stringify(command)));
+  assert.ok(
+    reviewing.prompt.includes(
+      "Judge such a replacement on the operator's reason, with the old command in previousPlan and its replacement in the draft",
+    ),
+  );
+  assert.ok(
+    reviewing.prompt.includes("one it drops or weakens is a fix finding"),
+  );
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  const result = state.done["amend:op-1"];
+  assert.equal(result.rejected, undefined);
+  assert.deepEqual(
+    result.plan.items.find((item) => item.id === "a").validation,
+    a.validation,
+  );
+  assert.equal(posted.length, 1);
+});
+
+/** a and the integrated QA item, whose own command splits at the first `---` too. */
+const withQaCut = {
+  ...accepted,
+  items: [work("a"), { ...qa(["a"]), validation: ["npm test", CUT_AT_TABLE] }],
+};
+/** The QA item's command replaced, its goal reworded too. */
+const replacesQaCut = revision([
+  {
+    ...qa(["a"]),
+    goal: "Verify the integrated result, its guide split at the rule.",
+    validation: ["npm test", AT_RULE],
+  },
+]);
+
+test("a started QA item's validation command the operator authorized replacing is replaced through the amendment's review, though it is no reattempt item (#2199)", async () => {
+  // The QA item refused (it has no worker); a's worker proposed op-1.
+  const { checkout, state } = await discovered({
+    answer: withQaCut,
+    kept: {
+      "item:qa:qaRefused": true,
+      ...authorized(authorization("qa", 1, CUT_AT_TABLE)),
+    },
+  });
+  const { planner, asked } = scripted(replacesQaCut, { findings: [] });
+  const posted = [];
+  const deps = depsOf(checkout, planner, posted);
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.rejected, undefined);
+  // Its validation is replaced; everything else, its goal too, stays.
+  assert.deepEqual(round.restored, [{ itemId: "qa", fields: ["goal"] }]);
+  const checked = round.draft.items.find((item) => item.id === "qa");
+  assert.deepEqual(checked.validation, [
+    { command: "npm test" },
+    { command: AT_RULE },
+  ]);
+  assert.equal(checked.goal, "Verify the integrated result.");
+  const rule = inJson(
+    startedItemRule({
+      started: new Set(["a", "qa"]),
+      reattempt: new Set(["a"]),
+      replaceable: new Map([["qa", [CUT_AT_TABLE]]]),
+      authorized: new Map([["qa", [authorization("qa", 1, CUT_AT_TABLE)]]]),
+    }),
+  );
+  assert.ok(
+    rule.includes(
+      inJson(
+        "such a command of any started item, reattempt item or not, may be replaced",
+      ),
+    ),
+  );
+  assert.ok(asked[0].prompt.includes(rule));
+
+  const review = await step(state, deps);
+  assert.equal(review.key, "amend:op-1:review");
+  assert.ok(asked[1].prompt.includes(rule));
+  assert.ok(asked[1].prompt.includes(`"authorizedValidation":{"qa":`));
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  assert.deepEqual(
+    state.done["amend:op-1"].plan.items.find((item) => item.id === "qa")
+      .validation,
+    checked.validation,
+  );
+  assert.equal(posted.length, 1);
+});
+
+test("an unauthorized replacement, or one authorized under an earlier plan or for another command, is set back (#2199)", async () => {
+  const cases = [
+    // None.
+    {},
+    // Under an earlier plan: a replan accepted the plan in force.
+    authorized(
+      authorization("qa", 1, CUT_AT_TABLE, "2025-12-31T00:00:00.000Z"),
+    ),
+    // A command the item no longer runs.
+    authorized(authorization("qa", 1, "npm run lint")),
+    // Another item's.
+    authorized(authorization("a", 0, "npm test")),
+  ];
+  for (const kept of cases) {
+    const { checkout, state } = await discovered({
+      answer: withQaCut,
+      kept: { "item:qa:qaRefused": true, ...kept },
+    });
+    const { planner, asked } = scripted(replacesQaCut);
+    const first = await step(state, depsOf(checkout, planner));
+    assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+    const round = state.done["amend:op-1:plan"];
+    assert.deepEqual(round.restored, [
+      { itemId: "qa", fields: ["goal", "validation"] },
+    ]);
+    assert.deepEqual(
+      round.draft.items.find((item) => item.id === "qa").validation,
+      [{ command: "npm test" }, { command: CUT_AT_TABLE }],
+    );
+    assert.ok(!asked[0].prompt.includes(`"authorizedValidation":{"qa"`));
+  }
+});
+
+test("replace-validation to a rejected amendment records the authorization and takes in its replacement; one that names no command is asked again (#2199)", async () => {
+  const rejectedOn = async (kept = {}) => {
+    const built = await discovered({ answer: withQaCut, kept });
+    const why = "FACTORY_AMENDMENT lists no replaceable validation commands";
+    built.state.done["amend:op-1:plan"] = { rejected: why };
+    built.state.done["amend:op-1"] = { rejected: why };
+    return built;
+  };
+  const { checkout, state } = await rejectedOn(
+    // An earlier plan's authorization, which recording drops.
+    authorized(authorization("a", 0, "npm test", "2025-12-31T00:00:00.000Z")),
+  );
+  const deps = depsOf(checkout, scripted().planner);
+  const asks = await step(state, deps);
+  assert.equal(asks.key, "amend:op-1:continue");
+  assert.match(asks.outcome.question, /`replace-validation <item> <index>/);
+  for (const [text, problem] of [
+    [
+      REASON,
+      /answer `replace-validation <item> <index>\[,<index>\.\.\.\] <reason>`/,
+    ],
+    [
+      `z 1 ${REASON}`,
+      /the plan has no Work Item or QA item "z"; name one of a, qa/,
+    ],
+    [
+      `qa 2 ${REASON}`,
+      /Work Item qa has no validation command 2; its commands are 0 `npm test`, 1 `awk/,
+    ],
+    [`qa 1 0 ${REASON}`, /name every index before the reason/],
+  ]) {
+    const asked = await step(state, deps, replaceValidation(text, "h"));
+    assert.equal(asked.outcome.kind, "hold");
+    assert.match(asked.outcome.question, problem);
+    assert.equal(
+      state.kept["validation:authorized"].length,
+      1,
+      "nothing recorded",
+    );
+  }
+  const taken = await step(
+    state,
+    deps,
+    replaceValidation(`qa 1, 1 ${REASON}`, "h"),
+  );
+  assert.equal(taken.outcome.kind, "retry", JSON.stringify(taken.outcome));
+  assert.deepEqual(state.kept["validation:authorized"], [
+    { ...authorization("qa", 1, CUT_AT_TABLE), holdId: "h" },
+  ]);
+  const replacement = state.kept["amend:op-1-r2:proposal"];
+  assert.equal(replacement.replacement.amendmentId, "op-1");
+  assert.equal(
+    replacement.replacement.correction,
+    `octo authorized replacing qa's validation command 1 (${JSON.stringify(CUT_AT_TABLE)}): ${REASON}`,
+  );
+  assert.deepEqual(replacement.worker, { itemId: "a", attempt: 1 });
+});
+
 test("the validate step keeps every command it failed an item's results on, under the plan accepted then (#2107)", () => {
   const state = { kept: { "plan:acceptedAt": ACCEPTED_AT } };
   assert.deepEqual(failedCommandKept(state, "a", undefined), {});
@@ -1709,7 +1967,7 @@ test("an amendment planner's cannotPlan is reviewed, and a refusal its review co
   assert.ok(held.question.includes(REFUSED));
   assert.deepEqual(
     held.options.map((option) => option.answer),
-    ["replace", "continue", "cancel"],
+    ["replace", "replace-validation", "continue", "cancel"],
   );
 });
 

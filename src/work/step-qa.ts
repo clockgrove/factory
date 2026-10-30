@@ -1,14 +1,25 @@
 import { join } from "node:path";
 import { type NamedCheck, observeNamedCheck } from "../delivery.js";
-import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import {
+  hold,
+  type Offer,
+  type Outcome,
+  type Step,
+  type StepContext,
+} from "../engine.js";
 import { defaultHead } from "../git.js";
 import { validationMembers } from "../media.js";
+import {
+  REPLACE_VALIDATION_NOTE,
+  validationList,
+} from "../planning/amendments.js";
 import { acceptedInputs, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
 import { type ResultReview, reviewQa } from "../review/result.js";
 import { validateTree } from "../validate.js";
 import { installStorePath, worktreePath } from "../worktree.js";
+import { qaReplacement, REPLACE_FOR_QA, replacementTaken } from "./amend.js";
 import { fact, facts } from "./facts.js";
 import {
   integrationProblem,
@@ -55,6 +66,10 @@ export async function qaValidateStep(
 ): Promise<Outcome> {
   const { state, signal } = context;
   const { config } = deps;
+  // Its refusal answered `replace-validation`: the amendment first; once it
+  // is taken in, this checks again on the plan as it stands then.
+  const replacing = qaReplacement(item, context, qaRefusalOffers(item));
+  if (replacing) return replacing;
   const plan = currentPlan(state)!;
   const head = await defaultHead(config.checkout, config.repository, signal);
   const problem = await integrationProblem(state, plan, head, deps, signal);
@@ -152,11 +167,15 @@ export async function qaReviewStep(
   const { state, signal } = context;
   const steps = [stepKey(item.id, "validate"), stepKey(item.id, "review")];
   const again = context.answer?.answer;
-  // `retry` after the operator's fix, or `revalidate` (a result rereview,
-  // charged when it landed): validation and review again, on the default
-  // branch as it is now.
+  const replacing = qaReplacement(item, context, qaRefusalOffers(item));
+  if (replacing) return replacing;
+  // `retry` after the operator's fix, `revalidate` (a result rereview,
+  // charged when it landed) or a `replace-validation` taken in:
+  // validation and review again, on the default branch as it is now.
   if (
-    (again === "retry" || again === REVALIDATE) &&
+    (again === "retry" ||
+      again === REVALIDATE ||
+      replacementTaken(state, context.answer)) &&
     fact(state, "qaRefused", item.id)
   )
     return {
@@ -164,7 +183,9 @@ export async function qaReviewStep(
       finding:
         again === "retry"
           ? `Read-only QA item ${item.id} checks the default branch again after the operator's fix.`
-          : `The operator asked to check read-only QA item ${item.id} again on the current default branch (a result rereview).`,
+          : again === REVALIDATE
+            ? `The operator asked to check read-only QA item ${item.id} again on the current default branch (a result rereview).`
+            : `Read-only QA item ${item.id} checks the default branch again on the plan as it stands after the operator authorized replacing validation commands.`,
       target: steps[0]!,
       clear: steps,
       ...(again === REVALIDATE ? { rereview: true as const } : {}),
@@ -221,17 +242,32 @@ export async function qaReviewStep(
   );
 }
 
-/** A QA refusal: no worker repairs it, so it holds with the evidence. */
+/**
+ * A QA refusal: no worker repairs it, so it holds with the evidence.
+ * `replace-validation` authorizes an amendment to replace a broken command
+ * of its own (amend.ts `qaReplacement`).
+ */
 export function qaRefusal(
   item: WorkItem,
   commit: string,
   what: string,
   evidence: string,
 ): Outcome {
+  const replacing = item.validation.length > 0;
   return hold(
-    `Read-only QA item ${item.id} refused the integrated result at ${commit.slice(0, 12)}: ${what}.\n\n${evidence}\n\nAnswer \`replan\` to plan the fix, \`retry\` to check again once the default branch is fixed, or cancel.`,
-    ["replan", "retry", "cancel"],
+    `Read-only QA item ${item.id} refused the integrated result at ${commit.slice(0, 12)}: ${what}.\n\n${evidence}\n\nAnswer \`replan\` to plan the fix, \`retry\` to check again once the default branch is fixed, or cancel.${replacing ? ` If a command of its own can't pass on a correct result, ${REPLACE_VALIDATION_NOTE} (${item.id}'s commands are ${validationList(item)}); ${item.id} then checks again on the plan as it stands.` : ""}`,
+    qaRefusalOffers(item),
   );
+}
+
+/** What a QA refusal offers. */
+function qaRefusalOffers(item: WorkItem): Offer[] {
+  return [
+    "replan",
+    "retry",
+    ...(item.validation.length ? [REPLACE_FOR_QA] : []),
+    "cancel",
+  ];
 }
 
 /** The merge step of an item that delivers nothing (aggregate, QA): it settles. */

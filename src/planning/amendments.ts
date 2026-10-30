@@ -1,14 +1,22 @@
 import { isDeepStrictEqual } from "node:util";
 import { grant } from "../allowances.js";
 import { isObject } from "../checked.js";
-import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import {
+  hold,
+  type Offer,
+  type Outcome,
+  type Step,
+  type StepContext,
+} from "../engine.js";
 import { readBlobs } from "../git.js";
 import { code, prose } from "../markdown.js";
 import { validPath } from "../objective.js";
 import { logRefused } from "../providers/usage.js";
 import { EVIDENCE_NAMED_BYTES, namesPath, treeFiles } from "../repair.js";
 import {
+  type Answer,
   type AnsweredVia,
+  type HoldOption,
   type ObjectiveState,
   recordClosed,
 } from "../state.js";
@@ -66,7 +74,13 @@ import {
   sameFindings,
   workers,
 } from "./steps.js";
-import type { Draft, Finding, Plan, WorkItem } from "./types.js";
+import type {
+  Draft,
+  Finding,
+  Plan,
+  ValidationAuthorization,
+  WorkItem,
+} from "./types.js";
 import { units } from "./units.js";
 import {
   applyRevision,
@@ -94,7 +108,11 @@ import {
  *   `validationFailed` fact; #2107), or its worker's own Validate failed
  *   (`workerValidateFailed`, with the output its review judges; #2199),
  *   and it may restate acceptance, brief and non-goals. Whether such a
- *   command could pass at all is the review's to judge. Factory applies
+ *   command could pass at all is the review's to judge. Any started work
+ *   or QA item, reattempt item or not, may also replace a validation
+ *   command the operator authorized replacing under this plan
+ *   (`replace-validation`, `authorizeReplacement`; #2199), which its
+ *   review judges on the operator's reason. Factory applies
  *   the rule itself before checking a plan round (`restoreStarted`): each
  *   started item keeps the accepted spec, with its owned paths and
  *   dependencies grown by what the answer adds and, for a reworked
@@ -144,7 +162,9 @@ import {
  * under `amend:<id>`. Where they come from: an operator's
  * `factory propose-amendment` (`proposeAmendment`, applied by the
  * service), a worker's discovery or a merged predecessor's blame answered
- * `amend` (work/steps.ts), and a rejection answered `replace`.
+ * `amend` (work/steps.ts), a repair diagnosis's or a read-only QA item's
+ * question answered `replace-validation` (work/amend.ts), and a rejection
+ * answered `replace` or `replace-validation`.
  */
 
 /** A worker's or operator's proposal of further work, as `.factory-discovery.json` holds it. */
@@ -161,7 +181,9 @@ export interface AmendmentProposal {
   /**
    * Stable: the request id, `worker-<item>-<attempt>` for a worker's
    * discovery, `blame-<item>-<repair>` for a merged predecessor's blame,
-   * or `<rejected>-r<n>` for a replacement.
+   * `validation-<item>-<repair>` for a repair diagnosis's
+   * `replace-validation` (`validation-<item>-<n>` for a QA item's, its
+   * n-th proposal), or `<rejected>-r<n>` for a replacement.
    */
   id: string;
   actor: string;
@@ -725,6 +747,165 @@ export async function citedFiles(
   });
 }
 
+// ── Validation the operator authorizes replacing ────────────────────────
+
+/** The answer that authorizes replacing validation commands: `replace-validation <item> <index>[,<index>...] <reason>`. */
+export const REPLACE_VALIDATION = "replace-validation";
+
+/** The sentence a question offering `replace-validation` says it with. */
+export const REPLACE_VALIDATION_NOTE =
+  "`replace-validation <item> <index>[,<index>...] <reason>` authorizes an amendment to replace those validation commands of a Work Item or QA item (each by its index in the item's validation, from 0), and the amendment's independent review judges the replacement on your reason";
+
+/** The `replace-validation` option, doing `consequence`. */
+export function replaceValidationOption(consequence: string): HoldOption {
+  return {
+    answer: REPLACE_VALIDATION,
+    family: "repair",
+    consequence,
+    needsText: true,
+  };
+}
+
+/** Published: a head was pushed or a PR made, or it merged (a QA item settles there). */
+function published(state: ObjectiveState, id: string): boolean {
+  return (
+    (fact(state, "pushed", id)?.length ?? 0) > 0 ||
+    Boolean(state.done[`item:${id}:publish`]) ||
+    Boolean(state.done[`item:${id}:merge`])
+  );
+}
+
+/** A work or QA item runs validation of its own; an aggregate runs none. */
+const validates = (item: WorkItem) => (item.kind ?? "work") !== "aggregate";
+
+/**
+ * Whether the current plan has an item whose validation the operator can
+ * authorize replacing: an unpublished work or QA item with a command.
+ */
+export function replacementOffered(state: ObjectiveState): boolean {
+  return Boolean(
+    currentPlan(state)?.items.some(
+      (item) =>
+        validates(item) && item.validation.length && !published(state, item.id),
+    ),
+  );
+}
+
+/** An item's validation commands as `replace-validation` names them: `0 \`npm test\``. */
+export function validationList(item: WorkItem): string {
+  return item.validation
+    .map((entry, index) => `${index} ${code(entry.command)}`)
+    .join(", ");
+}
+
+const AUTHORIZATION = /^(\S+)\s+(\d+(?:\s*,\s*\d+)*)\s+(\S[\s\S]*)$/;
+
+/**
+ * The operator's `replace-validation <item> <index>[,<index>...] <reason>`
+ * answer as authorizations against the plan accepted now, one per command
+ * it names, with the keep that records them (`validation:authorized`,
+ * dropping any of an earlier plan); or what is wrong with it. The item is
+ * one of the current plan's work or QA items, unpublished, and each index
+ * one of its validation commands; a reason that starts with another index
+ * is refused, never read as authorizing only the first. A rerun of the
+ * step finds the answer's authorizations recorded (by its question's id),
+ * and records nothing again.
+ */
+export function authorizeReplacement(
+  state: ObjectiveState,
+  answer: Answer,
+):
+  | { authorized: ValidationAuthorization[]; keep: Record<string, unknown> }
+  | { problem: string } {
+  const accepted = String(state.kept[ACCEPTED_AT] ?? "");
+  const kept = fact(state, "validation:authorized") ?? [];
+  const recorded = kept.filter((entry) => entry.holdId === answer.holdId);
+  if (recorded.length) return { authorized: recorded, keep: {} };
+  const parsed = AUTHORIZATION.exec((answer.text ?? "").trim());
+  if (!parsed)
+    return {
+      problem:
+        "answer `replace-validation <item> <index>[,<index>...] <reason>`: the Work Item or QA item, the indices of the validation commands to replace (from 0), and why",
+    };
+  const [, id, list, reason] = parsed as unknown as [
+    string,
+    string,
+    string,
+    string,
+  ];
+  if (/^(?:and\s+)?\d+(?:[\s,]|$)/.test(reason))
+    return {
+      problem: `name every index before the reason, separated by commas (\`replace-validation ${id} 1,2 <reason>\`)`,
+    };
+  const items = (currentPlan(state)?.items ?? []).filter(validates);
+  const item = items.find((entry) => entry.id === id);
+  if (!item)
+    return {
+      problem: `the plan has no Work Item or QA item ${JSON.stringify(id)}; name one of ${items.map((entry) => entry.id).join(", ") || "none"}`,
+    };
+  if (published(state, id))
+    return {
+      problem: `Work Item ${id} is published, so an amendment no longer changes its validation`,
+    };
+  const indices = [...new Set(list.split(",").map((n) => Number(n.trim())))];
+  const unknown = indices.filter((index) => index >= item.validation.length);
+  if (unknown.length)
+    return {
+      problem: `Work Item ${id} has no validation command ${unknown.join(", ")}; its commands are ${validationList(item) || "none"}`,
+    };
+  const authorized = indices.map(
+    (index): ValidationAuthorization => ({
+      itemId: id,
+      index,
+      command: item.validation[index]!.command,
+      reason: reason.trim(),
+      by: answer.by,
+      at: answer.at,
+      holdId: answer.holdId,
+      plan: accepted,
+    }),
+  );
+  return {
+    authorized,
+    keep: facts({
+      "validation:authorized": [
+        ...kept.filter((entry) => entry.plan === accepted),
+        ...authorized,
+      ],
+    }),
+  };
+}
+
+/** One answer's authorizations as the planner reads them, and a replacement's correction. */
+export function authorizationText(
+  authorized: readonly ValidationAuthorization[],
+): string {
+  const commands = authorized
+    .map(
+      (entry) =>
+        `${entry.itemId}'s validation command ${entry.index} (${JSON.stringify(entry.command)})`,
+    )
+    .join(", ");
+  return `${authorized[0]?.by ?? "The operator"} authorized replacing ${commands}: ${authorized[0]?.reason ?? ""}`;
+}
+
+/** What a question that a `replace-validation` answer couldn't be taken for adds. */
+const NOT_TAKEN = "\n\nYour `replace-validation` answer wasn't taken: ";
+
+/**
+ * The question `answer` answered (else `fallback`), asked again with
+ * `offers` and why its `replace-validation` wasn't taken.
+ */
+export function askedAgain(
+  answer: Answer,
+  problem: string,
+  offers: readonly Offer[],
+  fallback: string,
+): Outcome {
+  const asked = answer.question?.split(NOT_TAKEN)[0] ?? fallback;
+  return hold(`${asked}${NOT_TAKEN}${problem}.`, offers);
+}
+
 // ── The plan as amended ─────────────────────────────────────────────────
 
 /**
@@ -750,11 +931,12 @@ export interface AmendmentProgress {
   /** Started, unpublished work items the amendment may widen and run again. */
   reattempt: Set<string>;
   /**
-   * By reattempt item, the validation commands it still runs that the
-   * validate step failed its results on under the plan accepted now (the
-   * item's `validationFailed` fact, #2107), or that its worker's own
-   * Validate failed (`workerValidateFailed`, #2199): the only ones the
-   * amendment may replace. Absent or empty: none.
+   * By item, the validation commands it still runs that the amendment may
+   * replace, the only ones: of a reattempt item, those the validate step
+   * failed its results on under the plan accepted now (the item's
+   * `validationFailed` fact, #2107) or its worker's own Validate failed
+   * (`workerValidateFailed`, #2199); of any item, those in `authorized`.
+   * Absent or empty: none.
    */
   replaceable?: ReadonlyMap<string, readonly string[]>;
   /**
@@ -763,6 +945,13 @@ export interface AmendmentProgress {
    * replacement on them. Absent: none.
    */
   workerFailures?: ReadonlyMap<string, readonly WorkerValidateFailure[]>;
+  /**
+   * By unpublished work or QA item, reattempt item or not, the commands it
+   * still runs that the operator authorized replacing under the plan
+   * accepted now (`authorizeReplacement`, #2199), each with the operator's
+   * reason: the review judges a replacement on it. Absent: none.
+   */
+  authorized?: ReadonlyMap<string, readonly ValidationAuthorization[]>;
 }
 
 const itemOf = (key: string): string | undefined =>
@@ -794,13 +983,6 @@ export function amendmentProgress(
       return id ? [id] : [];
     }),
   );
-  const published = (id: string) => {
-    return (
-      (fact(state, "pushed", id)?.length ?? 0) > 0 ||
-      Boolean(state.done[`item:${id}:publish`]) ||
-      Boolean(state.done[`item:${id}:merge`])
-    );
-  };
   // Failed: its step holds, or a repair has refused one of its results.
   const failed = (id: string) =>
     state.holds.some((hold) => hold.item === id || itemOf(hold.step) === id) ||
@@ -810,7 +992,7 @@ export function amendmentProgress(
   const eligible = (item: WorkItem) =>
     (item.kind ?? "work") === "work" &&
     started.has(item.id) &&
-    !published(item.id);
+    !published(state, item.id);
   const worker = proposal.worker;
   const reattempt = plan.items.filter((item) =>
     worker
@@ -842,22 +1024,44 @@ export function amendmentProgress(
     if (commands.length) replaceable.set(item.id, commands);
     if (failures.length) workerFailures.set(item.id, failures);
   }
+  // The commands the operator authorized replacing under this plan, of any
+  // unpublished work or QA item that still runs them.
+  const authorized = new Map<string, ValidationAuthorization[]>();
+  for (const entry of fact(state, "validation:authorized") ?? []) {
+    const item = plan.items.find((candidate) => candidate.id === entry.itemId);
+    if (
+      entry.plan !== accepted ||
+      !item ||
+      !validates(item) ||
+      published(state, item.id) ||
+      !item.validation.some((check) => check.command === entry.command)
+    )
+      continue;
+    authorized.set(item.id, [...(authorized.get(item.id) ?? []), entry]);
+  }
+  for (const [id, entries] of authorized)
+    replaceable.set(
+      id,
+      [
+        ...(replaceable.get(id) ?? []),
+        ...entries.map((entry) => entry.command),
+      ].filter((command, at, all) => all.indexOf(command) === at),
+    );
   return {
     started,
     reattempt: new Set(reattempt.map((item) => item.id)),
     ...(replaceable.size ? { replaceable } : {}),
     ...(workerFailures.size ? { workerFailures } : {}),
+    ...(authorized.size ? { authorized } : {}),
   };
 }
 
-/** A reattempt item's replaceable validation commands (`AmendmentProgress.replaceable`). */
+/** An item's replaceable validation commands (`AmendmentProgress.replaceable`). */
 function replaceableOf(
   progress: AmendmentProgress,
   itemId: string,
 ): readonly string[] {
-  return progress.reattempt.has(itemId)
-    ? (progress.replaceable?.get(itemId) ?? [])
-    : [];
+  return progress.replaceable?.get(itemId) ?? [];
 }
 
 /**
@@ -980,6 +1184,30 @@ function reworks(
   );
 }
 
+/**
+ * A started item that isn't a reattempt item changes only by replacing
+ * commands in `replaceable` (the operator authorized them,
+ * `authorizeReplacement`): every other field stays as it is.
+ */
+function replacesOnly(
+  old: WorkItem,
+  next: WorkItem,
+  replaceable: readonly string[],
+): boolean {
+  return (
+    replacesValidation(
+      old.validation,
+      next.validation,
+      replaceable,
+      draftCommand,
+    ) &&
+    isDeepStrictEqual(
+      normalized({ ...next, validation: old.validation }),
+      normalized(old),
+    )
+  );
+}
+
 /** The fields of a started item an amended draft changes, by name. */
 function changedFields(old: WorkItem, next: WorkItem): string[] {
   const before: Record<string, unknown> = normalized(old);
@@ -1031,9 +1259,10 @@ const DRAFT_RULE: StartedItemRule = {
 /**
  * Started item `old` as the started-item rule lets `next` change it: every
  * field as `old` has it, except that each list in `rule.grows` keeps all of
- * `old`'s entries and takes the ones `next` adds, and, when `restates` (a
- * reattempt item), its validation comes from `next` when that replaces only
- * commands in `replaceable` (`replacesValidation`), and, when one of those
+ * `old`'s entries and takes the ones `next` adds, its validation comes from
+ * `next` when that replaces only commands in `replaceable`
+ * (`replacesValidation`; none but a reattempt item's, or ones the operator
+ * authorized), and, when `restates` (a reattempt item) and one of those
  * lists grew or its validation was replaced, `rule.restates` come from
  * `next`; with `rule.schemaFields`, an item keeping its kind has `next`'s
  * field names. The field list comes from the items themselves, so a field
@@ -1062,7 +1291,6 @@ function restoreItem<T extends object>(
     reworked ||= added.length > 0;
   }
   if (
-    restates &&
     replacesValidation(
       before.validation,
       after.validation,
@@ -1226,18 +1454,28 @@ export function amendmentFindings(
     if (isDeepStrictEqual(normalized(item), normalized(old))) continue;
     if (!progress.started.has(old.id)) continue;
     const replaceable = replaceableOf(progress, old.id);
-    if (!progress.reattempt.has(old.id) || !reworks(old, item, replaceable)) {
+    const reattempt = progress.reattempt.has(old.id);
+    if (
+      reattempt
+        ? !reworks(old, item, replaceable)
+        : !replacesOnly(old, item, replaceable)
+    ) {
       const fields = changedFields(old, item);
       const changes = fields.length
         ? `; this answer changes its ${fields.join(", ")}`
         : "";
+      const commands = replaceable
+        .map((command) => JSON.stringify(command))
+        .join(", ");
       const replacing = replaceable.length
-        ? `, or a validation command Factory's validation or its worker's Validate failed it on (${replaceable.map((command) => JSON.stringify(command)).join(", ")}) may be replaced, keeping every other command in its order`
+        ? `, or a validation command Factory's validation or its worker's Validate failed it on, or the operator authorized replacing (${commands}), may be replaced, keeping every other command in its order`
         : "";
       found(
-        progress.reattempt.has(old.id)
+        reattempt
           ? `Work Item ${old.id} has started, so it keeps its spec, except that its owned paths or dependencies may grow, keeping every entry${replacing}, and only then may its acceptance, brief and non-goals be restated${changes}. Restore the rest, and put further work in a new item or grow its owned paths or dependencies to take it`
-          : `Work Item ${old.id} has started, so it keeps its spec${changes}. Leave it as it is, and put further work in a new item`,
+          : replaceable.length
+            ? `Work Item ${old.id} has started, so it keeps its spec, except that a validation command the operator authorized replacing (${commands}) may be replaced, keeping every other command in its order${changes}. Restore the rest, and put further work in a new item`
+            : `Work Item ${old.id} has started, so it keeps its spec${changes}. Leave it as it is, and put further work in a new item`,
         old.id,
       );
       continue;
@@ -1354,17 +1592,30 @@ export function startedItemRule(progress: AmendmentProgress): string {
   const replaceable = progress.replaceable?.size
     ? JSON.stringify(Object.fromEntries(progress.replaceable))
     : "none";
-  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation, or the item's worker's Validate (which runs the declared commands as Factory's validation does), failed its result on (replaceableValidation, by item: ${replaceable}; workerValidateFailures, when present, holds each such worker's Validate failure with how the command ended and its output) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+  const authorized = progress.authorized?.size
+    ? ` The operator also authorized replacing validation commands (authorizedValidation, by item: ${JSON.stringify(Object.fromEntries([...progress.authorized].map(([id, entries]) => [id, entries.map((entry) => entry.command)])))}, each with the operator's reason; replaceableValidation lists them too): such a command of any started item, reattempt item or not, may be replaced, keeping every other command in its order, by commands that prove what it was there to prove, as the operator's reason says, keeping every assertion it makes. Only a reattempt item may restate its acceptance, brief and non-goals to match; any other started item changes nothing else.`
+    : "";
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation, or the item's worker's Validate (which runs the declared commands as Factory's validation does), failed its result on (replaceableValidation, by item: ${replaceable}; workerValidateFailures, when present, holds each such worker's Validate failure with how the command ended and its output) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays.${authorized} Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+}
+
+/** An operator's authorization as the planner and the review get it. */
+interface AuthorizedView {
+  index: number;
+  command: string;
+  reason: string;
+  by: string;
 }
 
 /**
  * `replaceableValidation`, by item, as the planner and the review get it,
- * with `workerValidateFailures`, the worker's Validate failures behind it;
- * each absent when there is none.
+ * with `workerValidateFailures`, the worker's Validate failures behind it,
+ * and `authorizedValidation`, the operator's authorizations with their
+ * reasons; each absent when there is none.
  */
 function replaceableData(progress: AmendmentProgress): {
   replaceableValidation?: Record<string, readonly string[]>;
   workerValidateFailures?: Record<string, readonly WorkerValidateFailure[]>;
+  authorizedValidation?: Record<string, AuthorizedView[]>;
 } {
   return {
     ...(progress.replaceable?.size
@@ -1372,6 +1623,21 @@ function replaceableData(progress: AmendmentProgress): {
       : {}),
     ...(progress.workerFailures?.size
       ? { workerValidateFailures: Object.fromEntries(progress.workerFailures) }
+      : {}),
+    ...(progress.authorized?.size
+      ? {
+          authorizedValidation: Object.fromEntries(
+            [...progress.authorized].map(([id, entries]) => [
+              id,
+              entries.map(({ index, command, reason, by }) => ({
+                index,
+                command,
+                reason,
+                by,
+              })),
+            ]),
+          ),
+        }
       : {}),
   };
 }
@@ -1436,6 +1702,26 @@ function generationOf(state: ObjectiveState): number {
   return generation;
 }
 
+/** What the amendment planner's question offers. */
+const QUESTION_OFFERS: readonly Offer[] = [
+  {
+    answer: "answer",
+    family: "answer",
+    consequence: "Plans the amendment again with your answer.",
+    needsText: true,
+  },
+  replaceValidationOption(
+    "Authorizes replacing those validation commands, which the amendment's review judges on your reason, and plans the amendment again.",
+  ),
+  {
+    answer: "refuse",
+    family: "refuse",
+    consequence:
+      "Rejects the amendment, so it can be replaced or the plan runs without it.",
+  },
+  "cancel",
+];
+
 /** The planner revises the current plan for the discovery. */
 function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
   const key = `${KEY(proposal.id)}:plan`;
@@ -1459,6 +1745,38 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         answer: string;
       }[];
       const reply = context.answer;
+      // `replace-validation` is recorded as the operator's authorization
+      // (`authorizeReplacement`), and the planner gets it as their answer.
+      if (
+        reply?.answer === REPLACE_VALIDATION &&
+        !answered.some((entry) => entry.holdId === reply.holdId)
+      ) {
+        const authorized = authorizeReplacement(state, reply);
+        if ("problem" in authorized)
+          return askedAgain(
+            reply,
+            authorized.problem,
+            QUESTION_OFFERS,
+            `Planning amendment ${proposal.id} needs a decision.`,
+          );
+        return {
+          kind: "retry",
+          reason:
+            "Recorded the operator's authorization for the amendment planner",
+          afterMs: 0,
+          keep: {
+            ...authorized.keep,
+            [ANSWERS_KEY(proposal.id)]: [
+              ...answered,
+              {
+                holdId: reply.holdId,
+                question: reply.question ?? "",
+                answer: authorizationText(authorized.authorized),
+              },
+            ],
+          },
+        };
+      }
       if (
         reply?.answer === "answer" &&
         !answered.some((entry) => entry.holdId === reply.holdId)
@@ -1681,22 +1999,8 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       }
       if (decoded.question)
         return hold(
-          `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; \`refuse\` rejects the amendment.`,
-          [
-            {
-              answer: "answer",
-              family: "answer",
-              consequence: "Plans the amendment again with your answer.",
-              needsText: true,
-            },
-            {
-              answer: "refuse",
-              family: "refuse",
-              consequence:
-                "Rejects the amendment, so it can be replaced or the plan runs without it.",
-            },
-            "cancel",
-          ],
+          `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; ${REPLACE_VALIDATION_NOTE}, and plans it again; \`refuse\` rejects the amendment.`,
+          QUESTION_OFFERS,
         );
       if (!decoded.plan)
         return revise(full, decoded.findings, restoredAnswer.restored);
@@ -2136,8 +2440,11 @@ function amendAcceptStep(
  * A rejected amendment stops the build until it is settled: `replace
  * <correction>` takes in a replacement that repeats its discovery, with
  * the rejection as the diagnosis and the text as the correction (it
- * charges a planning revision, and its own review judges it); `continue`
- * runs the plan without it.
+ * charges a planning revision, and its own review judges it);
+ * `replace-validation <item> <index>[,<index>...] <reason>` records the
+ * operator's authorization (`authorizeReplacement`) and takes in the same
+ * replacement, with the authorization as its correction; `continue` runs
+ * the plan without it.
  */
 function rejectionStep(
   rejected: NonNullable<AmendmentLedger["rejected"]>,
@@ -2150,7 +2457,21 @@ function rejectionStep(
     async run({ state, answer }): Promise<Outcome> {
       if (answer?.answer === "continue") return done({});
       let refused = "";
-      if (answer?.answer === "replace") {
+      // `replace-validation` records the operator's authorization, and its
+      // replacement's correction says what it authorized.
+      const authorized =
+        answer?.answer === REPLACE_VALIDATION
+          ? authorizeReplacement(state, answer)
+          : undefined;
+      if (authorized && "problem" in authorized)
+        refused = `\n\nYour \`replace-validation\` answer wasn't taken: ${authorized.problem}.`;
+      const correction =
+        answer?.answer === "replace"
+          ? (answer.text ?? "").trim()
+          : authorized && "authorized" in authorized
+            ? authorizationText(authorized.authorized)
+            : undefined;
+      if (answer && correction !== undefined) {
         const replacement: AmendmentProposal = {
           id: `${proposal.id.replace(/-r\d+$/, "")}-r${amendmentLedger(state).used + 1}`,
           actor: answer.by,
@@ -2162,7 +2483,7 @@ function rejectionStep(
           replacement: {
             amendmentId: proposal.id,
             diagnosis: error,
-            correction: (answer.text ?? "").trim(),
+            correction,
           },
         };
         const problems = proposalProblems(replacement, state);
@@ -2171,13 +2492,20 @@ function rejectionStep(
             kind: "retry",
             reason: `Took in replacement amendment ${replacement.id}`,
             progress: true,
-            keep: { [proposalKey(replacement.id)]: replacement },
+            keep: {
+              ...(authorized && "keep" in authorized ? authorized.keep : {}),
+              [proposalKey(replacement.id)]: replacement,
+            },
           };
         refused = `\n\nThe replacement wasn't taken: ${problems.join("; ")}`;
       }
       const left = revisionsLeft(state);
+      const revisions =
+        left > 0
+          ? `${left} planning revision${left === 1 ? "" : "s"} left`
+          : "no planning revision left, so it asks for `more` first";
       return hold(
-        `Amendment ${code(proposal.id)} (${proposal.actor}) was rejected: ${error}\n\n${discoveryText(proposal.discovery)}${refused}\n\n\`replace <correction>\` plans it again with your correction (${left > 0 ? `${left} planning revision${left === 1 ? "" : "s"} left` : "no planning revision left, so it asks for `more` first"}); \`continue\` runs the plan without it.`,
+        `Amendment ${code(proposal.id)} (${proposal.actor}) was rejected: ${error}\n\n${discoveryText(proposal.discovery)}${refused}\n\n\`replace <correction>\` plans it again with your correction (${revisions}); ${REPLACE_VALIDATION_NOTE}, and plans it again the same way; \`continue\` runs the plan without it.`,
         [
           {
             answer: "replace",
@@ -2187,6 +2515,9 @@ function rejectionStep(
             needsText: true,
             ...(left > 0 ? { recommended: true } : {}),
           },
+          replaceValidationOption(
+            "Authorizes replacing those validation commands and plans the amendment again, its review judging the replacement on your reason; uses a planning revision.",
+          ),
           {
             answer: "continue",
             family: "accept",

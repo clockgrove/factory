@@ -1,16 +1,29 @@
-import { failure, type Outcome, type StepContext } from "../engine.js";
+import {
+  failure,
+  type Offer,
+  type Outcome,
+  type StepContext,
+} from "../engine.js";
 import { code } from "../markdown.js";
 import {
   type AmendmentProposal,
+  amendmentLedger,
   amendmentStatus,
+  askedAgain,
+  authorizationText,
+  authorizeReplacement,
   discoveryText,
   itemAttempt,
   proposalProblems,
+  REPLACE_VALIDATION,
+  replaceValidationOption,
   type WorkDiscovery,
 } from "../planning/amendments.js";
 import { ACCEPTED_AT, currentPlan, proposalKey } from "../planning/plan.js";
-import type { WorkItem } from "../planning/types.js";
-import type { HoldOption, ObjectiveState } from "../state.js";
+import type { ValidationAuthorization, WorkItem } from "../planning/types.js";
+import type { RepairFinding } from "../repair.js";
+import type { Answer, HoldOption, ObjectiveState } from "../state.js";
+import { failureExcerpt } from "../text.js";
 import type { Collection } from "./collect.js";
 import { fact, facts, written } from "./facts.js";
 import { refusedOf } from "./refused.js";
@@ -296,5 +309,253 @@ export function blameAmendment(
         correction,
         `The amendment can't be proposed: ${problems}`,
       ),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// `replace-validation` (planning/amendments.ts `authorizeReplacement`)
+
+/** The `replace-validation` option a repair diagnosis's question offers. */
+export const REPLACE_FOR_REPAIR: HoldOption = replaceValidationOption(
+  "Authorizes replacing those validation commands in an amendment, which its review judges on your reason; uses a planning revision, and the Work Item runs again on the amended plan with no repair charged.",
+);
+
+/** The `replace-validation` option a read-only QA item's refusal offers. */
+export const REPLACE_FOR_QA: HoldOption = replaceValidationOption(
+  "Authorizes replacing those validation commands in an amendment, which its review judges on your reason; uses a planning revision, and the QA item checks again on the plan as it then stands.",
+);
+
+/** What a repair diagnosis's question offers when it is asked again. */
+const DIAGNOSIS_OFFERS: readonly Offer[] = [
+  "answer",
+  REPLACE_FOR_REPAIR,
+  {
+    answer: "retry",
+    family: "retry",
+    consequence: "Diagnoses the failure again.",
+  },
+  "replan",
+  "cancel",
+];
+
+/** The amendment `replace-validation` proposes from repair `repair`'s diagnosis question. */
+export const validationAmendmentId = (itemId: string, repair: number) =>
+  `validation-${itemId}-${repair}`;
+
+/** The failure a discovery's evidence keeps, at most. */
+const EVIDENCE_CHARS = 4000;
+
+/**
+ * The discovery an operator's `replace-validation` proposes: only the
+ * authorized commands are replaced, by commands that prove what each was
+ * there to prove, with the failure its question was asked on as evidence.
+ */
+function replacementDiscovery(
+  authorized: readonly ValidationAuthorization[],
+  failed: string,
+  ownership: string[],
+): WorkDiscovery {
+  return {
+    scope: "in-scope",
+    reason: `${authorizationText(authorized)}\n\nReplace only these validation commands, each with commands that prove what it was there to prove; every other command and field stays as it is.`,
+    evidence: [
+      ...authorized.map(
+        (entry) =>
+          `${entry.itemId}'s validation command ${entry.index}: ${entry.command}`,
+      ),
+      ...(failed.trim() ? [failureExcerpt(failed, EVIDENCE_CHARS)] : []),
+    ],
+    ownership,
+    acceptance: authorized.map(
+      (entry) =>
+        `${entry.itemId} no longer runs ${JSON.stringify(entry.command)}; the commands in its place prove what it proved, keeping every assertion it makes.`,
+    ),
+    dependencies: [],
+  };
+}
+
+/** A repair finding as a discovery's evidence. */
+function findingText(finding: RepairFinding | undefined): string {
+  if (!finding) return "";
+  return finding.kind === "review"
+    ? finding.refused
+        .map((refused) => `${refused.criterion}: ${refused.detail}`)
+        .join("\n")
+    : finding.detail;
+}
+
+/**
+ * Take in `proposal`, recording the authorization behind it (`recorded`)
+ * with it; else ask with why, recording nothing.
+ */
+function proposeReplacement(
+  state: ObjectiveState,
+  proposal: AmendmentProposal,
+  keep: Record<string, unknown>,
+  recorded: Record<string, unknown>,
+  ask: (problem: string) => Outcome,
+): Outcome {
+  const problems = proposalProblems(proposal, state);
+  if (problems.length)
+    return withKeep(
+      ask(
+        `it can't be proposed as amendment ${proposal.id}: ${problems.join("; ")}`,
+      ),
+      keep,
+    );
+  // The amendment runs before every other step (workflow.ts); this step
+  // runs again once it settles.
+  return {
+    kind: "retry",
+    reason: `Proposed amendment ${proposal.id}`,
+    progress: true,
+    keep: { ...keep, ...recorded, [proposalKey(proposal.id)]: proposal },
+  };
+}
+
+/**
+ * A repair diagnosis's question answered `replace-validation`: the
+ * operator's authorization is recorded and proposed as amendment
+ * `validation-<item>-<repair>`, whose review judges the replacement on the
+ * operator's reason. The item waits for its outcome, as for a discovery.
+ * Accepted, it starts a new attempt on the amended plan (`amendedAttempt`)
+ * with its refused change replayed, which may now end on the same tree;
+ * rejected and continued past, or settled with the plan unchanged, its
+ * repair goes on as usual. An answer that names no command it can
+ * authorize asks again with why. Undefined: the repair goes on as usual.
+ */
+export function validationAmendment(
+  item: WorkItem,
+  context: StepContext,
+  place: StackPlace | undefined,
+  keep: Record<string, unknown>,
+): Outcome | undefined {
+  const { state, answer } = context;
+  const repair = state.repairs?.[stepKey(item.id, "work")]?.count ?? 0;
+  const id = validationAmendmentId(item.id, repair);
+  const amendment = amendmentStatus(state, id);
+  if (amendment?.status === "accepted") {
+    const refused = fact(state, "refused", item.id);
+    return amendedAttempt(item, state, place, amendment.id, {
+      ...keep,
+      ...(refused
+        ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
+        : {}),
+    });
+  }
+  if (amendment?.status === "continued") return undefined;
+  if (amendment)
+    return {
+      kind: "retry",
+      reason: `Waits for amendment ${amendment.id}`,
+      afterMs: MINUTE,
+      keep,
+    };
+  if (answer?.answer !== REPLACE_VALIDATION) return undefined;
+  const ask = (problem: string) =>
+    withKeep(
+      askedAgain(
+        answer,
+        problem,
+        DIAGNOSIS_OFFERS,
+        `Work Item ${item.id} needs your decision before it is repaired.`,
+      ),
+      keep,
+    );
+  const authorized = authorizeReplacement(state, answer);
+  if ("problem" in authorized) return ask(authorized.problem);
+  // The files it cites are read from the refused result, or the item's start.
+  const commit =
+    refusedOf(state, item.id)?.commit ?? fact(state, "base", item.id);
+  return proposeReplacement(
+    state,
+    {
+      id,
+      actor: answer.by,
+      at: new Date().toISOString(),
+      plan: String(state.kept[ACCEPTED_AT]),
+      discovery: replacementDiscovery(
+        authorized.authorized,
+        findingText(fact(state, "finding", item.id)),
+        item.ownedPaths,
+      ),
+      worker: { itemId: item.id, attempt: itemAttempt(state, item.id) },
+      ...(commit ? { commit } : {}),
+    },
+    keep,
+    authorized.keep,
+    ask,
+  );
+}
+
+/**
+ * A read-only QA item's refusal answered `replace-validation`: the
+ * operator's authorization is recorded and proposed as their amendment
+ * `validation-<item>-<n>` (the Objective's n-th proposal), whose review
+ * judges the replacement on the reason. It runs before every other step,
+ * and the QA item's step runs again on the plan as it then stands. A QA
+ * item owns nothing, so its discovery's ownership is what it checks: its
+ * dependencies' owned paths. An answer that can't be taken asks again with
+ * why, `offers` the refusal's. Undefined: no such answer, or one taken in
+ * already.
+ */
+export function qaReplacement(
+  item: WorkItem,
+  context: StepContext,
+  offers: readonly Offer[],
+): Outcome | undefined {
+  const { state, answer } = context;
+  if (answer?.answer !== REPLACE_VALIDATION || replacementTaken(state, answer))
+    return undefined;
+  const ask = (problem: string) =>
+    askedAgain(
+      answer,
+      problem,
+      offers,
+      `Read-only QA item ${item.id} refused the integrated result.`,
+    );
+  const authorized = authorizeReplacement(state, answer);
+  if ("problem" in authorized) return ask(authorized.problem);
+  const plan = currentPlan(state)!;
+  const ownership = [
+    ...new Set(
+      item.dependencies.flatMap(
+        (id) => plan.items.find((entry) => entry.id === id)?.ownedPaths ?? [],
+      ),
+    ),
+  ];
+  if (!ownership.length)
+    return ask(
+      `${item.id} depends on no Work Item that owns paths, so an amendment has none to name; answer \`replan\` instead`,
+    );
+  return proposeReplacement(
+    state,
+    {
+      id: `validation-${item.id}-${amendmentLedger(state).used + 1}`,
+      actor: answer.by,
+      at: new Date().toISOString(),
+      plan: String(state.kept[ACCEPTED_AT]),
+      discovery: replacementDiscovery(
+        authorized.authorized,
+        answer.question ?? "",
+        ownership,
+      ),
+    },
+    {},
+    authorized.keep,
+    ask,
+  );
+}
+
+/** Whether `answer` is a `replace-validation` already taken in (`qaReplacement`). */
+export function replacementTaken(
+  state: ObjectiveState,
+  answer: Answer | undefined,
+): boolean {
+  return (
+    answer?.answer === REPLACE_VALIDATION &&
+    (fact(state, "validation:authorized") ?? []).some(
+      (entry) => entry.holdId === answer.holdId,
+    )
   );
 }

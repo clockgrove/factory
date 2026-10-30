@@ -377,15 +377,8 @@ export function prerequisiteAmendment(
   if (!found || found.repair !== repair) return undefined;
   const id = prerequisiteAmendmentId(item.id, repair);
   const amendment = amendmentStatus(state, id);
-  if (amendment?.status === "accepted") {
-    const refused = fact(state, "refused", item.id);
-    return amendedAttempt(item, state, place, amendment.id, {
-      ...keep,
-      ...(refused
-        ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
-        : {}),
-    });
-  }
+  if (amendment?.status === "accepted")
+    return amendedAttempt(item, state, place, amendment.id, keep);
   if (amendment?.status === "continued")
     return answer?.answer === DEPEND.answer
       ? withKeep(
@@ -467,13 +460,7 @@ export function enabledAttempt(
   const { state } = context;
   const enabled = fact(state, "enabled", item.id);
   if (!enabled) return undefined;
-  const refused = fact(state, "refused", item.id);
-  return amendedAttempt(item, state, place, enabled.amendment, {
-    ...keep,
-    ...(refused
-      ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
-      : {}),
-  });
+  return amendedAttempt(item, state, place, enabled.amendment, keep);
 }
 
 // ---------------------------------------------------------------------------
@@ -585,15 +572,8 @@ export function validationAmendment(
   const repair = state.repairs?.[stepKey(item.id, "work")]?.count ?? 0;
   const id = validationAmendmentId(item.id, repair);
   const amendment = amendmentStatus(state, id);
-  if (amendment?.status === "accepted") {
-    const refused = fact(state, "refused", item.id);
-    return amendedAttempt(item, state, place, amendment.id, {
-      ...keep,
-      ...(refused
-        ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
-        : {}),
-    });
-  }
+  if (amendment?.status === "accepted")
+    return amendedAttempt(item, state, place, amendment.id, keep);
   if (amendment?.status === "continued") return undefined;
   if (amendment)
     return {

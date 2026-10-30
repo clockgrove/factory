@@ -440,6 +440,41 @@ export function unshownClosings(
 }
 
 /**
+ * A new question's id for step `key`, asked at `at`: `key@` an ISO time,
+ * past every id of the step the state still has (open and closed
+ * questions, a resetting record's old ones, and the answers' `holdId`).
+ * Times are to the millisecond, so a step asking twice in one (an answer
+ * and the narrower question after it) took the earlier one's id (#2211):
+ * the later takes the next millisecond instead. The id stays readable and
+ * sorts with the step's others; `askedAt` keeps the clock's time.
+ */
+export function newHoldId(
+  state: Pick<ObjectiveState, "holds" | "closedHolds" | "answers" | "kept">,
+  key: string,
+  at: string,
+): string {
+  const prefix = `${key}@`;
+  const old = (
+    state.kept?.[RESET_KEY] as
+      | { old?: Pick<ObjectiveState, "holds"> }
+      | undefined
+  )?.old;
+  const ids = [
+    ...state.holds,
+    ...(old?.holds ?? []),
+    ...(state.closedHolds ?? []),
+  ].map((hold) => hold.id);
+  for (const answer of Object.values(state.answers)) ids.push(answer.holdId);
+  let next = Date.parse(at);
+  for (const id of ids) {
+    if (!id.startsWith(prefix)) continue;
+    const time = Date.parse(id.slice(prefix.length));
+    if (time >= next) next = time + 1;
+  }
+  return `${prefix}${new Date(next).toISOString()}`;
+}
+
+/**
  * Why a retry waits (docs/reference/steps.md#Waits). Absent: an unknown transient cause,
  * such as the network, a GitHub or provider outage, or CI still running.
  */

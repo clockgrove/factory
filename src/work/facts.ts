@@ -54,13 +54,16 @@ export interface ItemFacts {
   /**
    * The correction diagnosed for repair `repair`, and every correction
    * diagnosed so far; `answered`: the question whose operator answer it
-   * carries, so that answer is applied once.
+   * carries, so that answer is applied once; `amendment`: the accepted
+   * amendment the repair continues on, which refused nothing (amend.ts
+   * `amendedAttempt`).
    */
   diagnosis: {
     repair: number;
     context: RepairContext;
     applied: Correction[];
     answered?: string;
+    amendment?: string;
   };
   /** A validation command run once more on a tree the worker's own Validate passed. */
   flaky: { tree: string; command: string };
@@ -245,8 +248,9 @@ export interface KeptSelection {
  * clears one. A rebase replays its change (`commit`, `notes` for a replay
  * without a worker). Unless `replayOnly`, the repair refused it: its commit
  * is the diagnosis's evidence, collection reads its tree again as no change
- * (on any base: what refused it judged the tree), and `revalidate` checks
- * it again with its notes.
+ * (on any base: what refused it judged the tree) unless an accepted
+ * amendment changed the plan since (refused.ts `refusedTreeFor`), and
+ * `revalidate` checks it again with its notes.
  * `replayOnly`: a media or conflict repair, which may rightly end on the
  * same tree, or a stack layer moved because the layer below is repaired.
  */

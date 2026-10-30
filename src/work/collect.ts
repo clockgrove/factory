@@ -136,7 +136,8 @@ export interface CollectInput {
   finalResponse: string;
   /**
    * The tree of the result a repair refused: submitting that same tree
-   * again is no change.
+   * again is no change. Absent when nothing refused it under the plan
+   * accepted now (refused.ts `refusedTreeFor`): the same tree is a result.
    */
   refusedTree?: string;
   /**

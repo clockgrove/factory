@@ -609,11 +609,14 @@ export async function workStep(
     playbook: config.planning.playbook,
     sandbox: config.sandbox,
     finalResponse: finished.finalResponse,
-    // New candidates are a new result, even on the refused tree.
-    refusedTree: refusedTreeFor(state, item.id, {
-      sets,
-      selectionStands: own !== undefined,
-    }),
+    // New candidates are a new result, even on the refused tree, and so is
+    // that tree after an accepted amendment nothing refused since.
+    refusedTree: refusedTreeFor(
+      state,
+      item.id,
+      { sets, selectionStands: own !== undefined },
+      keepAll,
+    ),
     // A Work Item that owns only its media destinations changes nothing
     // else: its candidates are its result.
     media: sets.length > 0,

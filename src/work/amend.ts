@@ -62,6 +62,9 @@ export function propose(
  * so no diagnosis runs, moved onto the current start with the change so
  * far replayed. It runs with the amended plan's owned paths, acceptance
  * and dependencies, so it waits for any item the amendment put first.
+ * The amendment refused nothing: its diagnosis names it, so the change so
+ * far, left as it is, is a result under the amended plan (refused.ts
+ * `amendedOnly`).
  */
 export function amendedAttempt(
   item: WorkItem,
@@ -83,6 +86,7 @@ export function amendedAttempt(
             repair,
             context: { finding },
             applied: fact(state, "diagnosis", item.id)?.applied ?? [],
+            amendment,
           },
           discovered: null,
           blamed: null,

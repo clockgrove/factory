@@ -64,6 +64,25 @@ test("a repair that isn't failed checks keeps no check failure, whatever its tex
   assert.equal(unmarked.keep["item:chainBase:checkFailures"], undefined);
 });
 
+test("a failed-checks repair's finding keeps what failed, for the diagnosis's repeat detection (#2215)", () => {
+  const identity = {
+    kind: "ci",
+    checks: [{ name: "test", conclusion: "failure" }],
+  };
+  const outcome = deliveryRepair(
+    { id: "chainBase" },
+    { state: state() },
+    undefined,
+    { finding: failure, checks: true, identity },
+    "ci",
+  );
+  assert.deepEqual(outcome.keep["item:chainBase:finding"], {
+    kind: "failure",
+    detail: failure,
+    identity,
+  });
+});
+
 test("result review gets the failures as the repository's convention, and the standard lets CI checks win", () => {
   assert.deepEqual(checkFailureRows([]), []);
   const [row] = checkFailureRows([failure]);

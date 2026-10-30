@@ -1,6 +1,7 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { CoreConfig } from "./config.js";
 import { crashPoint } from "./crash.js";
-import type { GitHub, GraphQLError } from "./github.js";
+import { type GitHub, type GraphQLError, TryAgain } from "./github.js";
 import { WORK_ITEM_LABEL } from "./github-roles.js";
 
 /** One Objective card on the Project. */
@@ -510,6 +511,56 @@ export async function readQueue(
   };
 }
 
+/** Tries of one Project write GitHub answers with `TryAgain`, in all. */
+const PROJECT_TRIES = 3;
+/** The pause before a Project write's second try; each later pause is longer by as much. */
+const PROJECT_PAUSE_MS = 1000;
+
+/** Each Project's last write, running or waiting its turn, by Project id. */
+const projectWrites = new Map<string, Promise<unknown>>();
+
+/**
+ * Change Project `project` with `write`, one change at a time per Project
+ * in this service: GitHub refuses concurrent changes to one Project v2
+ * ("a temporary conflict", #2210), and different Objectives' sync jobs
+ * write the queue's Project at once. A write GitHub still answers with
+ * `TryAgain` (another service on the same Project, or GitHub's own
+ * failure) is tried again after a pause, keeping its turn, PROJECT_TRIES
+ * times in all; then that TransientError is thrown. Each write here
+ * repeats safely: adding returns the card an issue already has, and
+ * unarchiving or setting an option again changes nothing. Different
+ * Projects never wait on each other.
+ */
+async function projectWrite<T>(
+  project: string,
+  write: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const turn = (projectWrites.get(project) ?? Promise.resolve()).then(
+    async () => {
+      for (let tried = 1; ; tried++) {
+        signal?.throwIfAborted();
+        try {
+          return await write();
+        } catch (error) {
+          if (!(error instanceof TryAgain) || tried === PROJECT_TRIES)
+            throw error;
+        }
+        await sleep(PROJECT_PAUSE_MS * tried, undefined, { signal });
+      }
+    },
+  );
+  const settled = turn.then(
+    () => undefined,
+    () => undefined,
+  );
+  projectWrites.set(project, settled);
+  void settled.then(() => {
+    if (projectWrites.get(project) === settled) projectWrites.delete(project);
+  });
+  return turn;
+}
+
 /** Queued Objectives in queue order: the order field, then issue number. */
 export function queued(items: QueueItem[], config: CoreConfig): QueueItem[] {
   return items
@@ -599,19 +650,25 @@ export class QueueDisplay {
       throw new Error(
         `The Project field "${this.config.queue.field}" has no option "${option}"`,
       );
-    const data = await this.github.graphql<{
-      updateProjectV2ItemFieldValue: {
-        projectV2Item: { value: { updatedAt?: string } | null } | null;
-      } | null;
-    }>(
-      SET,
-      {
-        project: this.config.queue.projectId,
-        item: itemId,
-        field: field.id,
-        option: optionId,
-        name: this.config.queue.field,
-      },
+    const project = this.config.queue.projectId;
+    const data = await projectWrite(
+      project,
+      () =>
+        this.github.graphql<{
+          updateProjectV2ItemFieldValue: {
+            projectV2Item: { value: { updatedAt?: string } | null } | null;
+          } | null;
+        }>(
+          SET,
+          {
+            project,
+            item: itemId,
+            field: field.id,
+            option: optionId,
+            name: this.config.queue.field,
+          },
+          signal,
+        ),
       signal,
     );
     return (
@@ -782,13 +839,23 @@ export async function queueIssue(
     return "dequeued";
   let itemId = card?.id;
   if (!itemId && found.cards[0]) {
-    itemId = found.cards[0].id;
-    await github.graphql(UNARCHIVE, { project, item: itemId }, signal);
+    const item = found.cards[0].id;
+    itemId = item;
+    await projectWrite(
+      project,
+      () => github.graphql(UNARCHIVE, { project, item }, signal),
+      signal,
+    );
   }
   if (!itemId) {
-    const added = await github.graphql<{
-      addProjectV2ItemById: { item: { id: string } | null } | null;
-    }>(ADD_ITEM, { project, content: found.id }, signal);
+    const added = await projectWrite(
+      project,
+      () =>
+        github.graphql<{
+          addProjectV2ItemById: { item: { id: string } | null } | null;
+        }>(ADD_ITEM, { project, content: found.id }, signal),
+      signal,
+    );
     itemId = added.addProjectV2ItemById?.item?.id;
     if (!itemId) throw new Error(`The Project didn't add #${issue}`);
   }
@@ -838,9 +905,14 @@ export async function addCard(
   signal?: AbortSignal,
 ): Promise<string> {
   crashPoint("sync:item-issue:card:before");
-  const added = await github.graphql<{
-    addProjectV2ItemById: { item: { id: string } | null } | null;
-  }>(ADD_ITEM, { project, content }, signal);
+  const added = await projectWrite(
+    project,
+    () =>
+      github.graphql<{
+        addProjectV2ItemById: { item: { id: string } | null } | null;
+      }>(ADD_ITEM, { project, content }, signal),
+    signal,
+  );
   const id = added.addProjectV2ItemById?.item?.id;
   if (!id)
     throw new Error(`The Project didn't add the Work Item issue ${content}`);
@@ -1056,15 +1128,22 @@ export async function moveStatusOffDone(
     ) ?? options[0];
   if (!target) return undefined;
   crashPoint(`${point}:before`);
-  await github.graphql(
-    SET,
-    {
-      project: config.queue.projectId,
-      item: item.id,
-      field: field.id,
-      option: target.id,
-      name: BUILT_IN_STATUS,
-    },
+  const card = item.id;
+  const fieldId = field.id;
+  await projectWrite(
+    config.queue.projectId,
+    () =>
+      github.graphql(
+        SET,
+        {
+          project: config.queue.projectId,
+          item: card,
+          field: fieldId,
+          option: target.id,
+          name: BUILT_IN_STATUS,
+        },
+        signal,
+      ),
     signal,
   );
   crashPoint(`${point}:after`);

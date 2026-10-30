@@ -53,6 +53,7 @@ import {
   workflowFileCheckNames,
 } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
+import type { FailureIdentity } from "./repair.js";
 import { errorMessage } from "./text.js";
 import { FACTORY_EMAIL } from "./work/collect.js";
 import { hostGit, isAncestor } from "./worktree.js";
@@ -127,6 +128,8 @@ export interface Repair {
    * (work/facts.ts `checkFailures`), whichever step observed it.
    */
   checks?: true;
+  /** What failed, for the repair's diagnosis (repair.ts `FailureIdentity`): the failed checks. */
+  identity?: FailureIdentity;
 }
 
 /**
@@ -1220,6 +1223,18 @@ async function judge(
     return {
       kind: "repair",
       checks: true,
+      // The checks by name and conclusion, never the head or the logs,
+      // which every attempt changes.
+      identity: {
+        kind: "ci",
+        checks: broken
+          .map(({ name, conclusion }) => ({ name, conclusion }))
+          .sort(
+            (a, b) =>
+              a.name.localeCompare(b.name) ||
+              a.conclusion.localeCompare(b.conclusion),
+          ),
+      },
       // The log excerpts last: a long finding keeps its end (repair.ts).
       finding: [
         `Checks failed on PR #${pr} at ${head}: ${listed(broken)}${reran ? `. Factory reran the failed Actions jobs of ${bounded(reran.checks, ", ")} once on this head, and the failure stands` : ""}`,

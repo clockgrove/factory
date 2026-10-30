@@ -7,8 +7,10 @@
  * the work (source repository, base commit, Objective), how the test
  * repository mirrors the source (merge settings, rulesets, variables,
  * workflows kept), how memory is seeded, the Factory settings, the
- * operator policy and the hill-climb metrics. `${name}` in a Factory
- * setting is a host value (bench/README.md#Host profile).
+ * operator policy, and how runs are scored: the grader, the pairwise judge
+ * and a person's choices that calibrate it, the charge per question, model
+ * prices and the diagnostics compare shows. `${name}` in a
+ * Factory setting is a host value (bench/README.md#Host profile).
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -94,7 +96,20 @@ const SHAPE = {
   baseline: true,
   hillClimb: { primary: true, guards: true },
   budget: { tokens: true, hours: true },
+  grader: { command: true, timeoutMinutes: true },
+  judge: { command: true, timeoutMinutes: true },
+  judgeCalibration: true,
+  scoring: { questionChargeMinutes: true, minJudgeAgreement: true },
+  prices: true,
 };
+
+/** A pairwise judge's or a person's choice between trees A and B. */
+export const CHOICES = ["A", "B", "tie"];
+/** A person's pairwise choice in `judgeCalibration`: every field. */
+const CALIBRATION = ["runA", "runB", "intent", "quality", "by", "at"];
+
+/** A price's rates, US dollars per million tokens. */
+const RATES = ["uncachedInput", "cachedInput", "output"];
 
 /** The paths of `value`'s fields that `shape` doesn't have. */
 function unknownFields(value, shape, path = "") {
@@ -248,14 +263,87 @@ export function definitionProblems(value) {
   );
   need("operatorPolicy.otherwise", (v) => v === "pause", "pause");
   need("baseline", string, "the result group that is the baseline");
-  for (const list of ["primary", "guards"])
+  // Optional: the diagnostics `compare` shows. The outcomes decide (metrics.mjs).
+  if (at("hillClimb") !== undefined)
+    for (const list of ["primary", "guards"])
+      need(
+        `hillClimb.${list}`,
+        (v) =>
+          strings(v) &&
+          v.length > 0 &&
+          v.every((id) => Object.hasOwn(METRICS, id)),
+        `metric ids among ${Object.keys(METRICS).join(", ")}`,
+      );
+  // Optional: the benchmark's own grader of the merged result (bench/lib/grade.mjs).
+  if (at("grader") !== undefined) {
+    need("grader.command", string, "the grader's shell command");
     need(
-      `hillClimb.${list}`,
+      "grader.timeoutMinutes",
+      (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
+      "minutes the grader may run, more than 0",
+    );
+  }
+  // Optional: the benchmark's own blind pairwise judge (bench/lib/judge.mjs),
+  // and a person's choices it is calibrated against.
+  if (at("judge") !== undefined) {
+    need("judge.command", string, "the judge's shell command");
+    need(
+      "judge.timeoutMinutes",
+      (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
+      "minutes the judge may run per pair, more than 0",
+    );
+  }
+  if (at("judgeCalibration") !== undefined)
+    need(
+      "judgeCalibration",
       (v) =>
-        strings(v) &&
-        v.length > 0 &&
-        v.every((id) => Object.hasOwn(METRICS, id)),
-      `metric ids among ${Object.keys(METRICS).join(", ")}`,
+        Array.isArray(v) &&
+        v.every(
+          (choice) =>
+            object(choice) &&
+            Object.keys(choice).every((key) => CALIBRATION.includes(key)) &&
+            string(choice.runA) &&
+            string(choice.runB) &&
+            choice.runA !== choice.runB &&
+            CHOICES.includes(choice.intent) &&
+            CHOICES.includes(choice.quality) &&
+            string(choice.by) &&
+            string(choice.at) &&
+            UTC.test(choice.at),
+        ),
+      `a person's pairwise choices: { runA, runB, intent and quality (${CHOICES.join(" | ")}), by, at (UTC) }`,
+    );
+  if (at("scoring") !== undefined)
+    need("scoring", object, "questionChargeMinutes and minJudgeAgreement");
+  if (at("scoring.questionChargeMinutes") !== undefined)
+    need(
+      "scoring.questionChargeMinutes",
+      (v) => typeof v === "number" && Number.isFinite(v) && v >= 0,
+      "minutes time to delivery charges per question for the operator, 0 or more",
+    );
+  if (at("scoring.minJudgeAgreement") !== undefined)
+    need(
+      "scoring.minJudgeAgreement",
+      (v) => typeof v === "number" && v >= 0 && v <= 1,
+      "the share of a person's choices the judge must agree with, 0 to 1",
+    );
+  if (at("prices") !== undefined)
+    need(
+      "prices",
+      (v) =>
+        object(v) &&
+        Object.values(v).every(
+          (price) =>
+            object(price) &&
+            Object.keys(price).length === RATES.length &&
+            RATES.every(
+              (rate) =>
+                typeof price[rate] === "number" &&
+                Number.isFinite(price[rate]) &&
+                price[rate] >= 0,
+            ),
+        ),
+      `per model: ${RATES.join(", ")}, US dollars per million tokens`,
     );
   need(
     "budget",

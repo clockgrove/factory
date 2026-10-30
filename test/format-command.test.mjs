@@ -328,6 +328,8 @@ test("a formatter that fails fails the candidate with its output, before any of 
   assert.match(result.output, /parse error/);
   // No command failed: nothing to rerun or retire.
   assert.equal(result.failed, undefined);
+  // The formatter is what failed, for the repair's repeat detection (#2215).
+  assert.deepEqual(result.formatter, { command: "fmt --fail", exit: "2" });
   assert.equal(result.formatted, undefined);
   // Only the install ran.
   assert.deepEqual(

@@ -320,10 +320,22 @@ export type Validation =
        * `time limit` or `disk budget`).
        */
       failed?: { index: number; command: string; exit?: string };
+      /**
+       * The repository's formatter, when it failed by itself: its command
+       * and how it ended, as `failed.exit`. It is no validation command, so
+       * `failed` stays absent.
+       */
+      formatter?: { command: string; exit: string };
       /** What people read: the start and end of the output. */
       detail: string;
       /** The complete output, for diagnosis and the next attempt. */
       output: string;
+      /**
+       * The failed command's attempt file (`runFile`): its whole output as
+       * it arrived, stdout and stderr interleaved. Present when the command
+       * itself failed.
+       */
+      outputFile?: RunFile;
       produced?: string;
       regenerated?: RegeneratedLockfile;
       formatted?: AppliedFormatter;
@@ -596,6 +608,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           tree,
           commands: sequence,
           results,
+          ...(applied.exit !== undefined && {
+            formatter: { command: formatter!.command, exit: applied.exit },
+          }),
           detail: applied.detail,
           output: applied.output,
           ...(regenerated && { regenerated }),
@@ -928,6 +943,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         failed: { index, command, exit },
         detail,
         output: `${failed}${offlineBecause}${overflow ? `${overflow}\n` : ""}${output}`,
+        outputFile: whole,
         ...(produced && { produced }),
         ...(regenerated && { regenerated }),
         ...(formatted && { formatted }),
@@ -1555,8 +1571,11 @@ type Formatting =
   | { kind: "unchanged" }
   /** With no install before it, the formatter couldn't run and changed nothing: validation goes on unformatted. */
   | { kind: "skipped" }
-  /** The candidate's fault: the formatter failed, or changed what it may not. */
-  | { kind: "failed"; detail: string; output: string }
+  /**
+   * The candidate's fault: the formatter failed, or changed what it may not.
+   * `exit`: how a formatter that failed by itself ended, as `failed.exit`.
+   */
+  | { kind: "failed"; detail: string; output: string; exit?: string }
   | Extract<Outcome, { kind: "hold" }>;
 
 interface FormatContext {
@@ -1665,11 +1684,17 @@ async function applyFormatter(context: FormatContext): Promise<Formatting> {
       });
       return { kind: "skipped" };
     }
-    const failed = `The repository's formatter failed (${run.diskOverflow ? "disk budget" : run.timedOut ? "time limit" : run.exitCode}): ${command}: `;
+    const exit = run.diskOverflow
+      ? "disk budget"
+      : run.timedOut
+        ? "time limit"
+        : String(run.exitCode);
+    const failed = `The repository's formatter failed (${exit}): ${command}: `;
     return {
       kind: "failed",
       detail: `${failed}${overflow ?? failedOutput(output)}`,
       output: `${failed}${overflow ? `${overflow}\n` : ""}${output}`,
+      exit,
     };
   }
   const moved = movedLinks(worktree, context.linked);

@@ -283,6 +283,12 @@ test("a check main passes, hasn't run or only cancelled is rerun and repaired as
     const repair = await observe(again);
     assert.equal(repair.kind, "repair", name);
     assert.equal(repair.checks, true, name);
+    // What failed, never the head or the logs (#2215).
+    assert.deepEqual(
+      repair.identity,
+      { kind: "ci", checks: [{ name: "tests", conclusion: "failure" }] },
+      name,
+    );
     assert.match(
       repair.finding,
       new RegExp(

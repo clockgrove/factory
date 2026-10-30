@@ -46,6 +46,32 @@ export class TransientError extends Error {
  */
 export class Unreadable extends TransientError {}
 
+/**
+ * A GraphQL error GitHub answers for a passing failure on its side, which
+ * asks to try again (`tryAgain`): a concurrent change to one Project v2,
+ * or "Something went wrong". A TransientError, and a Project write tries
+ * it again after a pause, a few times (queue.ts `projectWrite`).
+ */
+export class TryAgain extends TransientError {}
+
+/**
+ * The known starts of the GraphQL errors `TryAgain` covers (#2191,
+ * #2210). The answers seen show only their message, no `type` that tells
+ * them apart, so they are told by it here, and only here.
+ */
+const TRY_AGAIN = [
+  // "… temporary conflict. Please try again. (addProjectV2ItemById)"
+  "Your attempt to move this item created a temporary conflict",
+  // "… This may be the result of a timeout, or it could be a GitHub bug.
+  // Please include `<request id>` when reporting this issue."
+  "Something went wrong while executing your query",
+];
+
+/** Whether GitHub answered `error` for a passing failure that asks to try again (`TryAgain`). */
+export function tryAgain(error: GraphQLError): boolean {
+  return TRY_AGAIN.some((start) => error.message.startsWith(start));
+}
+
 /** GitHub answered, and the answer won't change by asking again: 404, 422. */
 export class GitHubError extends Error {
   /** The permission the refused call needs, for its hold (`needing`). */
@@ -1441,23 +1467,34 @@ export class GitHub {
     const refused = errors.filter((e) => !accept(e));
     if (refused.length) {
       const message = refused.map((e) => e.message).join("; ");
-      if (refused.some((e) => e.type === "RATE_LIMITED")) {
-        const counted = transport.getStore() ?? this.ambient;
-        counted.rateLimited += 1;
-        // One line per answer: the one send() traced becomes the rate-limit.
+      const counted = transport.getStore() ?? this.ambient;
+      // One line per answer: the one send() traced becomes the failure.
+      const retrace = (
+        fields: Omit<
+          NotedRequest,
+          "method" | "route" | "status" | "attempt" | "ms"
+        >,
+      ) => {
         const { answered, noted } = answers.get(response)!;
         if (noted) counted.requests?.splice(counted.requests.indexOf(noted), 1);
-        note(
-          counted,
-          { ...answered, category: "rate-limit", rateLimited: true },
-          response,
-        );
+        note(counted, { ...answered, ...fields }, response);
+      };
+      if (refused.some((e) => e.type === "RATE_LIMITED")) {
+        counted.rateLimited += 1;
+        retrace({ category: "rate-limit", rateLimited: true });
         const reset = Number(response.headers.get("x-ratelimit-reset"));
         throw this.limited(
           `GitHub GraphQL: ${message}`,
           reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : LIMIT_UNSAID_MS,
           "graphql",
         );
+      }
+      // GitHub's own passing failure, in a 200: traced as a failed request
+      // with its message as the cause (fixed text, and the request id).
+      if (refused.every(tryAgain)) {
+        counted.failed += 1;
+        retrace({ category: "server", ...causeFields(new Error(message)) });
+        throw new TryAgain(`GitHub GraphQL: ${message}`);
       }
       throw this.marked(new GitHubError(`GitHub GraphQL: ${message}`, 200));
     }

@@ -79,8 +79,18 @@
 {"at":"2031-03-04T11:59:31.690Z","seq":79,"event":"start","step":"final-review","attemptId":"final-review#1"}
 {"at":"2031-03-04T12:01:41.690Z","seq":80,"event":"model-usage","step":"final-review","attemptId":"final-review#1","role":"reviewer","provider":"codex","model":"gpt-test","effort":"medium","phase":"objective-review","tokens":{"input":1091200,"output":8800,"cached":982080,"reasoning":3520,"total":1100000,"cacheWrite":0},"ms":130000,"outcome":"done","costUsd":null,"sessionMode":"fresh","sessionTurn":1,"thread":"t-5a025"}
 {"at":"2031-03-04T12:01:41.790Z","seq":81,"event":"model-usage","step":"final-review","attemptId":"final-review#1","role":"reviewer","provider":"codex","model":"gpt-test","effort":"medium","phase":"objective-review","tokens":{"input":595200,"output":4800,"cached":535680,"reasoning":1920,"total":600000,"cacheWrite":0},"ms":100,"outcome":"error","costUsd":null,"sessionMode":"fresh","sessionTurn":1,"thread":"t-5a026","hedge":1,"error":"aborted: hedged"}
-{"at":"2031-03-04T12:01:41.790Z","seq":82,"event":"objective-review","step":"final-review","attemptId":"final-review#1","outcome":"pass","criteria":19}
-{"at":"2031-03-04T12:01:41.790Z","seq":83,"event":"outcome","step":"final-review","attemptId":"final-review#1","outcome":"done"}
-{"at":"2031-03-04T12:01:42.790Z","seq":84,"event":"start","step":"report","attemptId":"report#1"}
-{"at":"2031-03-04T12:01:47.790Z","seq":85,"event":"outcome","step":"report","attemptId":"report#1","outcome":"done"}
-{"at":"2031-03-04T18:01:47.790Z","seq":86,"event":"run-end","outcome":"stopped"}
+{"at":"2031-03-04T12:01:41.790Z","seq":82,"event":"objective-review","step":"final-review","attemptId":"final-review#1","outcome":"refused","criteria":19}
+{"at":"2031-03-04T12:01:41.790Z","seq":83,"event":"hold","step":"final-review","id":"final-review@2031-03-04T12:01:41.790Z","cause":"question","question":"Final review refused the integrated result:\n\n12. Values with commas are quoted: a value with a comma is written as it is"}
+{"at":"2031-03-04T12:01:41.790Z","seq":84,"event":"outcome","step":"final-review","attemptId":"final-review#1","outcome":"hold"}
+{"at":"2031-03-04T12:11:41.790Z","seq":85,"event":"request","by":"operator","message":"ok","request":{"kind":"answer","issue":42,"answer":"retry","question":"final-review@2031-03-04T12:01:41.790Z"}}
+{"at":"2031-03-04T12:11:41.890Z","seq":86,"event":"start","step":"final-review","attemptId":"final-review#2"}
+{"at":"2031-03-04T12:11:42.090Z","seq":87,"event":"outcome","step":"final-review","attemptId":"final-review#2","outcome":"repair","target":"final","finding":"Final review runs again after the operator's fix."}
+{"at":"2031-03-04T12:11:42.390Z","seq":88,"event":"start","step":"final","attemptId":"final#2"}
+{"at":"2031-03-04T12:19:32.390Z","seq":89,"event":"outcome","step":"final","attemptId":"final#2","outcome":"done"}
+{"at":"2031-03-04T12:19:32.990Z","seq":90,"event":"start","step":"final-review","attemptId":"final-review#3"}
+{"at":"2031-03-04T12:21:02.990Z","seq":91,"event":"model-usage","step":"final-review","attemptId":"final-review#3","role":"reviewer","provider":"codex","model":"gpt-test","effort":"medium","phase":"objective-review","tokens":{"input":297600,"output":2400,"cached":267840,"reasoning":960,"total":300000,"cacheWrite":0},"ms":90000,"outcome":"done","costUsd":null,"sessionMode":"fresh","sessionTurn":1,"thread":"t-5a027"}
+{"at":"2031-03-04T12:21:02.990Z","seq":92,"event":"objective-review","step":"final-review","attemptId":"final-review#3","outcome":"pass","criteria":19}
+{"at":"2031-03-04T12:21:02.990Z","seq":93,"event":"outcome","step":"final-review","attemptId":"final-review#3","outcome":"done"}
+{"at":"2031-03-04T12:21:03.990Z","seq":94,"event":"start","step":"report","attemptId":"report#1"}
+{"at":"2031-03-04T12:21:08.990Z","seq":95,"event":"outcome","step":"report","attemptId":"report#1","outcome":"done"}
+{"at":"2031-03-04T18:21:08.990Z","seq":96,"event":"run-end","outcome":"stopped"}

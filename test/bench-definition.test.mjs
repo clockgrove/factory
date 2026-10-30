@@ -178,6 +178,79 @@ test("metric ids are METRICS' own: no prototype names", () => {
   );
 });
 
+test("grader, scoring and prices are optional, and checked when given", () => {
+  // A definition from before scorecard v3 loads as it is.
+  const before = example();
+  for (const key of ["grader", "scoring", "prices", "hillClimb"])
+    delete before[key];
+  assert.deepEqual(definitionProblems(before), []);
+  const definition = example();
+  assert.deepEqual(definition.grader.timeoutMinutes, 10);
+  definition.grader = { command: " ", timeoutMinutes: 0, extra: 1 };
+  definition.scoring.questionChargeMinutes = -1;
+  definition.prices["gpt-test"] = { uncachedInput: 1, cachedInput: "0.1" };
+  assert.deepEqual(
+    definitionProblems(definition).map((p) => p.split(":")[0]),
+    [
+      "grader.command",
+      "grader.timeoutMinutes",
+      "scoring.questionChargeMinutes",
+      "prices",
+      "grader.extra",
+    ],
+  );
+  const extraRate = example();
+  extraRate.prices["gpt-test"].reasoning = 1;
+  assert.deepEqual(
+    definitionProblems(extraRate).map((p) => p.split(":")[0]),
+    ["prices"],
+  );
+});
+
+test("the judge, its calibration and the agreement it needs are optional, and checked when given", () => {
+  const before = example();
+  delete before.judge;
+  delete before.judgeCalibration;
+  delete before.scoring.minJudgeAgreement;
+  assert.deepEqual(definitionProblems(before), []);
+  // Either scoring field alone will do.
+  const agreementOnly = example();
+  agreementOnly.scoring = { minJudgeAgreement: 0.9 };
+  assert.deepEqual(definitionProblems(agreementOnly), []);
+  const definition = example();
+  assert.equal(definition.judge.timeoutMinutes, 20);
+  assert.equal(definition.judgeCalibration[0].intent, "B");
+  definition.judge = { command: "", timeoutMinutes: -1 };
+  definition.judgeCalibration[0].intent = "C";
+  definition.scoring.minJudgeAgreement = 1.5;
+  assert.deepEqual(
+    definitionProblems(definition).map((p) => p.split(":")[0]),
+    [
+      "judge.command",
+      "judge.timeoutMinutes",
+      "judgeCalibration",
+      "scoring.minJudgeAgreement",
+    ],
+  );
+  // A choice of one run against itself, with a field it doesn't have, at
+  // a time that isn't UTC, or by no one.
+  const entry = example().judgeCalibration[0];
+  for (const bad of [
+    { ...entry, runB: entry.runA },
+    { ...entry, note: "close call" },
+    { ...entry, at: "the 6th" },
+    { ...entry, by: undefined },
+  ]) {
+    const value = example();
+    value.judgeCalibration = [bad];
+    assert.deepEqual(
+      definitionProblems(value).map((p) => p.split(":")[0]),
+      ["judgeCalibration"],
+      JSON.stringify(bad),
+    );
+  }
+});
+
 test("a field the schema doesn't have is refused, at every level", () => {
   const definition = example();
   definition.factory.worker.netwrok = definition.factory.worker.network;

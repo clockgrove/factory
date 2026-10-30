@@ -202,6 +202,7 @@ export function harnessRun(record) {
     group: record.group,
     source: "harness",
     repository: record.repository,
+    dir: record.runDir ?? null,
     factory: {
       kind: factory.kind ?? null,
       cli: factory.cli ?? null,

@@ -1,12 +1,13 @@
 // Reports from scorecards: self-contained HTML (no network asset, inline SVG,
 // light and dark), Markdown, the history graph across groups, and the
-// hill-climb decision against the baseline's spread.
+// hill-climb decision on outcomes against the baseline's spread (#2223).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -15,7 +16,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { BENCH_DIR, loadDefinition } from "../bench/lib/definition.mjs";
 import { HOME_ENV } from "../bench/lib/home.mjs";
-import { verdict } from "../bench/lib/metrics.mjs";
+import { SHOWN, verdict } from "../bench/lib/metrics.mjs";
 import {
   historyMarkdown,
   historyPage,
@@ -25,10 +26,28 @@ import {
 import { EXAMPLE, fixtureCard } from "./bench-fixture.mjs";
 
 const definition = loadDefinition(EXAMPLE);
+/** The fixture's card, graded as the stand-in grader grades it (bench-outcomes.test.mjs). */
 const baseline = await fixtureCard({ id: "baseline" });
+baseline.grade = {
+  graderVersion: "acme-widgets-42 stand-in 1",
+  commit: "c0ffee",
+  passed: 3,
+  failed: 1,
+  unknown: 1,
+  passRate: 0.6,
+  criteria: [
+    {
+      id: "csv-limit",
+      text: "An export over 10,000 rows is refused",
+      verdict: "fail",
+      method: "read the source",
+      evidence: "no row limit",
+    },
+  ],
+};
 const hours = 3_600_000;
 
-/** A run of another group: the baseline's card with some totals changed. */
+/** A run of another group: the baseline's card with some numbers changed. */
 function candidate(id, change) {
   const card = structuredClone(baseline);
   card.run = {
@@ -37,7 +56,27 @@ function candidate(id, change) {
     label: `candidate ${id}`,
     group: "Factory 0.6.0",
   };
-  change(card.totals);
+  change(card.totals, card);
+  return card;
+}
+
+/** A card as scorecard version 2 wrote it: no outcome metrics. */
+function versionTwo(id, group = baseline.run.group) {
+  const card = structuredClone(baseline);
+  card.schemaVersion = 2;
+  card.run = { ...card.run, id, group };
+  for (const key of [
+    "grade",
+    "human",
+    "deliveryMs",
+    "delivery",
+    "waste",
+    "escapes",
+    "cost",
+    "endCommit",
+    "defaultBranch",
+  ])
+    delete card[key];
   return card;
 }
 
@@ -50,26 +89,60 @@ function assertSelfContained(html) {
   assert.doesNotMatch(html, /(src|href)=["']?https?:/i);
 }
 
-test("a run's report: against the baseline, per Work Item, holds, outages, checks", () => {
-  const better = candidate("c1", (t) => {
+test("a run's report: outcomes first, then diagnostics, against the baseline", () => {
+  const better = candidate("c1", (t, card) => {
     t.tokens.total = 15_000_000;
     t.activeWallMs = 1.2 * hours;
+    card.human.score = 20;
   });
   const cards = [baseline, better];
   const html = runReport(better, cards, definition);
   assertSelfContained(html);
   assert.match(html, /candidate c1/);
   assert.match(html, /15\.00M/);
-  assert.match(html, /Hill-climb: (accept|reject)/);
+  assert.match(html, /Hill-climb: accept/);
   for (const item of ["tokenizer", "query-api", "export-csv", "release-smoke"])
     assert.match(html, new RegExp(item));
   assert.match(html, /operator pause/);
   assert.match(html, /agree/);
+  // The outcomes come before the diagnostics, in each part of the report.
+  const order = (...parts) =>
+    parts
+      .map((part) => html.indexOf(part))
+      .every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1]));
+  assert.ok(
+    order(
+      "<h2>Outcomes</h2>",
+      "<h2>Diagnostics</h2>",
+      "<h3>Outcomes</h3>",
+      "<h3>Diagnostics</h3>",
+      "<h2>Grade</h2>",
+      "<h2>Human effort</h2>",
+      "<h2>Waste</h2>",
+      "<h2>Cost</h2>",
+    ),
+  );
+  assert.match(html, /<b>60%<\/b><span>Grade: 3 passed, 1 failed, 1 unknown/);
+  assert.match(html, /<b>csv-limit<\/b>/);
+  assert.match(html, /<b>20<\/b><span>Human effort: 11 stamp/);
+  assert.match(
+    html,
+    /<b>\$6\.25<\/b><span>Cost: at the definition&#39;s prices/,
+  );
   const md = runMarkdown(better, cards, definition);
   assert.match(
     md,
-    /\| Tokens, own and child threads \| 15\.00M \| 19\.61M \| 19\.61M – 19\.61M \| better \|/,
+    /\| Grade \| 60% \| 3 passed, 1 failed, 1 unknown of 1 criteria/,
   );
+  assert.match(
+    md,
+    /\| Human effort \(weighted touches\) \| 20 \| 36 \| 36 – 36 \| better \|/,
+  );
+  assert.match(
+    md,
+    /\| Tokens, own and child threads \| 15\.00M \| 19\.91M \| 19\.91M – 19\.91M \| better \|/,
+  );
+  assert.match(md, /Hill-climb: \*\*accept\*\*\./);
   // The baseline's own report says it is the baseline.
   assert.match(
     runReport(baseline, [baseline], definition),
@@ -77,7 +150,7 @@ test("a run's report: against the baseline, per Work Item, holds, outages, check
   );
 });
 
-test("the history graph plots every group with its spread", () => {
+test("the history graph plots every outcome and diagnostic with each group's spread", () => {
   const cards = [
     baseline,
     candidate("c1", (t) => {
@@ -94,17 +167,19 @@ test("the history graph plots every group with its spread", () => {
     html,
     /Factory 0\.6\.0: 2 run\(s\), median 16\.00M, 15\.00M to 17\.00M/,
   );
-  assert.equal((html.match(/<svg /g) ?? []).length, 8);
+  assert.equal((html.match(/<svg /g) ?? []).length, SHOWN.length);
+  assert.ok(html.indexOf("Grade: criteria") < html.indexOf("Tokens, own"));
+  // Grade, human effort, time to delivery, waste, escapes and cost, then the diagnostics.
   assert.match(
     historyMarkdown(cards, definition),
-    /\| c2 \| Factory 0\.6\.0 \| done \| 17\.00M \|/,
+    /\| c2 \| Factory 0\.6\.0 \| done \| 60% \| 36 \| 3 h 28 m \| 8% \| 1 \| \$6\.25 \| 17\.00M \|/,
   );
 });
 
 test("partial cards are left out of comparisons and marked in the reports", () => {
   const base = [
     [18, 1.4],
-    [19.61, 1.56],
+    [19.91, 1.56],
     [21, 1.7],
   ].map(([m, h], i) => {
     const card = structuredClone(baseline);
@@ -133,7 +208,9 @@ test("partial cards are left out of comparisons and marked in the reports", () =
   const decision = verdict(definition, base, [...finished, live]);
   assert.equal(decision.accept, false);
   assert.deepEqual(
-    decision.primary.map((row) => [row.id, row.candidate.n, row.verdict]),
+    decision.diagnostics
+      .slice(0, 2)
+      .map((row) => [row.id, row.candidate.n, row.verdict]),
     [
       ["tokens.total", 2, "within"],
       ["activeWallMs", 2, "within"],
@@ -162,23 +239,210 @@ test("partial cards are left out of comparisons and marked in the reports", () =
   );
 });
 
-test("the hill-climb accepts only better primaries with no worse guard", () => {
-  const good = [14, 14.5, 15].map((m) =>
-    candidate(`g${m}`, (t) => {
-      t.tokens.total = m * 1_000_000;
-      t.activeWallMs = 1.2 * hours;
+test("the hill-climb accepts on outcomes: grade and escapes not worse, human or delivery better, cost not worse", () => {
+  const three = (change) =>
+    [1, 2, 3].map((n) => candidate(`r${n}`, (t, card) => change(card, n)));
+  const decide = (change) => verdict(definition, [baseline], three(change));
+  // Less human effort is enough, even with more repairs and tokens: the
+  // effort metrics are diagnostics, and don't decide.
+  const careful = decide((card, n) => {
+    card.human.score = 20 + n;
+    card.totals.repairs = 9;
+    card.totals.tokens.total = 25_000_000;
+  });
+  assert.equal(careful.accept, true, careful.reasons.join("; "));
+  assert.deepEqual(
+    careful.diagnostics
+      .filter((row) => row.verdict === "worse")
+      .map((row) => row.id),
+    ["tokens.total", "repairs"],
+  );
+  assert.match(careful.warnings[0], /1 baseline and 3 candidate runs/);
+  // So is a shorter time to delivery.
+  assert.equal(
+    decide((card) => {
+      card.deliveryMs = 2 * hours;
+    }).accept,
+    true,
+  );
+  // Neither better: rejected.
+  assert.deepEqual(decide(() => {}).reasons, [
+    "neither human.score (within) nor deliveryMs (within) is better",
+  ]);
+  // Better on effort but worse on grade, escapes or cost: rejected.
+  const faster = (change) => (card, n) => {
+    card.human.score = 10;
+    change(card, n);
+  };
+  assert.deepEqual(
+    decide(
+      faster((card) => {
+        card.grade.passRate = 0.4;
+      }),
+    ).reasons,
+    ["grade.passRate is worse"],
+  );
+  assert.deepEqual(
+    decide(
+      faster((card) => {
+        card.escapes.total = 2;
+      }),
+    ).reasons,
+    ["escapes.total is worse"],
+  );
+  assert.deepEqual(
+    decide(
+      faster((card) => {
+        card.cost.usd = 9;
+      }),
+    ).reasons,
+    ["cost.usd is worse"],
+  );
+  // An ungraded run decides nothing: unknown never passes.
+  assert.deepEqual(
+    decide(
+      faster((card) => {
+        card.grade = null;
+      }),
+    ).reasons,
+    ["grade.passRate is unknown: it decides, so it must be known"],
+  );
+  // A version 2 card is left out, with a warning to score it again.
+  const mixed = verdict(
+    definition,
+    [baseline, versionTwo("old")],
+    three(faster(() => {})),
+  );
+  assert.equal(mixed.accept, true);
+  assert.match(
+    mixed.warnings[0],
+    /left out 1 baseline run\(s\) of an older scorecard version.*: old\. Score them again/,
+  );
+});
+
+test("cost is a guard: unknown on both sides it is skipped with a warning; the candidate's alone, rejected", () => {
+  const three = (change) =>
+    [1, 2, 3].map((n) =>
+      candidate(`r${n}`, (_, card) => {
+        card.human.score = 10;
+        change(card);
+      }),
+    );
+  const unpriced = (card) => {
+    card.cost = null;
+  };
+  // A subscription-priced provider: no per-token price on either side.
+  const neither = verdict(
+    definition,
+    [candidate("b", (_, card) => unpriced(card))],
+    three(unpriced),
+  );
+  assert.equal(neither.accept, true, neither.reasons.join("; "));
+  assert.ok(
+    neither.warnings.includes(
+      "cost.usd is unknown on both sides (no prices, or a provider without per-token prices): the cost guard is skipped",
+    ),
+    neither.warnings.join("\n"),
+  );
+  // Only the candidate's is unknown: rejected.
+  assert.deepEqual(verdict(definition, [baseline], three(unpriced)).reasons, [
+    "cost.usd is unknown for the candidate and known for the baseline: the cost guard needs it known",
+  ]);
+  // Only the baseline's is unknown: nothing to guard against, a warning.
+  const known = verdict(
+    definition,
+    [candidate("b", (_, card) => unpriced(card))],
+    three(() => {}),
+  );
+  assert.equal(known.accept, true, known.reasons.join("; "));
+  assert.ok(
+    known.warnings.includes(
+      "cost.usd is unknown for the baseline: the cost guard is skipped",
+    ),
+  );
+  // Known and worse beyond the range: rejected, as before.
+  assert.deepEqual(
+    verdict(
+      definition,
+      [baseline],
+      three((card) => {
+        card.cost.usd = 9;
+      }),
+    ).reasons,
+    ["cost.usd is worse"],
+  );
+});
+
+test("with a judge, the intent win rate decides too; a run report leaves it to compare", () => {
+  const runs = [1, 2, 3].map((n) =>
+    candidate(`r${n}`, (_, card) => {
+      card.human.score = 10;
     }),
   );
-  assert.equal(verdict(definition, [baseline], good).accept, true);
-  const regressed = good.map((card) => {
-    const copy = structuredClone(card);
-    copy.totals.repairs = 9;
-    return copy;
-  });
-  const decision = verdict(definition, [baseline], regressed);
-  assert.equal(decision.accept, false);
-  assert.deepEqual(decision.reasons, ["guard repairs is worse"]);
-  assert.match(decision.warnings[0], /1 baseline and 3 candidate runs/);
+  const decide = (intent) =>
+    verdict(definition, [baseline], runs, {
+      pairwise: { rates: { pairs: 3, intent, quality: 0.5 } },
+    });
+  assert.equal(decide(0.5).accept, true);
+  assert.deepEqual(decide(1 / 3).reasons, [
+    "pairwise intent win rate 33% is below 50%",
+  ]);
+  assert.deepEqual(decide(null).reasons, [
+    "pairwise intent win rate is unknown: no pair was judged, and with a judge it decides",
+  ]);
+  // Without the review (a run report), it accepts on outcomes and says so.
+  const unreviewed = verdict(definition, [baseline], runs);
+  assert.equal(unreviewed.accept, true);
+  assert.ok(
+    unreviewed.warnings.includes(
+      "the blind pairwise review isn't in this decision: report.mjs compare judges it",
+    ),
+  );
+  // A definition without a judge has no pairwise rule.
+  const { judge: _, ...unjudged } = definition;
+  assert.deepEqual(
+    verdict(unjudged, [baseline], runs, {
+      pairwise: { rates: { pairs: 3, intent: 0, quality: 0 } },
+    }).reasons,
+    [],
+  );
+});
+
+test("the grader's own metrics are shown with the grade and graphed in the history", () => {
+  const scored = (id, mutationScore) =>
+    candidate(id, (_, card) => {
+      card.grade.metrics = { mutationScore };
+    });
+  const cards = [baseline, scored("m1", 0.625), scored("m2", 0.875)];
+  const html = runReport(cards[1], cards, definition);
+  assertSelfContained(html);
+  assert.match(
+    html,
+    /Grade: 3 passed, 1 failed, 1 unknown of 1 criteria at c0ffee \(acme-widgets-42 stand-in 1\); mutationScore 0\.625/,
+  );
+  assert.match(html, /<td>mutationScore<\/td><td class="n">0\.625<\/td>/);
+  assert.match(
+    runMarkdown(cards[1], cards, definition),
+    /\| Grade \| 60% \| .*; mutationScore 0\.625 \|/,
+  );
+  const history = historyPage(cards, definition);
+  assertSelfContained(history);
+  assert.match(history, /<h2>Grader metrics<\/h2>/);
+  assert.match(
+    history,
+    /Grader: mutationScore <span class="meta">\(the grader's measure\)/,
+  );
+  assert.match(
+    history,
+    /Factory 0\.6\.0: 2 run\(s\), median 0\.75, 0\.625 to 0\.875/,
+  );
+  // One more chart than the outcomes and diagnostics, and a column.
+  assert.equal((history.match(/<svg /g) ?? []).length, SHOWN.length + 1);
+  const md = historyMarkdown(cards, definition);
+  assert.match(md, /\| Grader: mutationScore \|\n/);
+  assert.match(md, /\| m2 \| Factory 0\.6\.0 \| done \| .* \| 0\.875 \|\n/);
+  // A run without the metric shows n/a, never 0.
+  assert.match(md, /\| baseline \| .* \| n\/a \|\n/);
 });
 
 test("report.mjs reads the results and writes the reports in the bench home", () => {
@@ -187,21 +451,60 @@ test("report.mjs reads the results and writes the reports in the bench home", ()
   const results = join(home, "results", definition.id);
   mkdirSync(results, { recursive: true });
   writeFileSync(join(results, "baseline.json"), JSON.stringify(baseline));
+  writeFileSync(join(results, "old.json"), JSON.stringify(versionTwo("old")));
   const env = { ...process.env, [HOME_ENV]: home };
+  // The example without its judge: the pairwise review has its own tests (bench-judge.test.mjs).
+  const unjudged = join(home, "unjudged.json");
+  const example = JSON.parse(readFileSync(EXAMPLE, "utf8"));
+  delete example.judge;
+  writeFileSync(unjudged, JSON.stringify(example));
   const report = (...args) =>
     spawnSync(
       process.execPath,
-      [join(BENCH_DIR, "report.mjs"), "--benchmark", EXAMPLE, ...args],
+      [join(BENCH_DIR, "report.mjs"), "--benchmark", unjudged, ...args],
       { encoding: "utf8", env },
     );
   const run = report();
   assert.equal(run.status, 0, run.stderr);
-  assert.deepEqual(readdirSync(join(home, "reports", definition.id)).sort(), [
+  // A version 2 card is reported, with a warning to score it again.
+  assert.match(
+    run.stderr,
+    /old\.json is scorecard version 2: reported without the outcome metrics .* Score it again with bench\/score\.mjs/,
+  );
+  const reports = join(home, "reports", definition.id);
+  assert.deepEqual(readdirSync(reports).sort(), [
     "baseline.html",
     "baseline.md",
     "history.html",
     "history.md",
+    "old.html",
+    "old.md",
   ]);
+  // compare: the outcome rows, then the diagnostics, and the decision.
+  const better = candidate("c1", (_, card) => {
+    card.human.score = 12;
+  });
+  writeFileSync(join(results, "c1.json"), JSON.stringify(better));
+  writeFileSync(
+    join(results, "c-old.json"),
+    JSON.stringify(versionTwo("c-old", "Factory 0.6.0")),
+  );
+  const compared = report("compare", "--candidate", "Factory 0.6.0");
+  assert.equal(compared.status, 0, compared.stdout + compared.stderr);
+  assert.match(compared.stdout, /: accept\n/);
+  assert.match(
+    compared.stdout,
+    /\| outcome \| Human effort \(weighted touches\) \| 12 \| 36 \(36 – 36\) \| better \|/,
+  );
+  assert.ok(
+    compared.stdout.indexOf("| outcome |") <
+      compared.stdout.indexOf("| diagnostic |"),
+  );
+  assert.match(compared.stdout, /Warning: 1 baseline and 1 candidate runs/);
+  assert.match(
+    compared.stderr,
+    /c-old \(Factory 0\.6\.0\) is scorecard version 2: left out of the comparison/,
+  );
   // Without a bench home or --results, it refuses.
   delete env[HOME_ENV];
   const refused = report();

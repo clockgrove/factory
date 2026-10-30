@@ -98,5 +98,34 @@
   "budget": {
     "tokens": [10000000, 20000000],
     "hours": [2, 4]
+  },
+  "grader": {
+    "command": "node \"$(dirname \"$BENCH_DEFINITION\")/../graders/acme-widgets-42.mjs\"",
+    "timeoutMinutes": 10
+  },
+  "judge": {
+    "command": "node \"$(dirname \"$BENCH_DEFINITION\")/../graders/acme-widgets-42-judge.mjs\"",
+    "timeoutMinutes": 20
+  },
+  "judgeCalibration": [
+    {
+      "runA": "widgets-0.5.8-1",
+      "runB": "widgets-0.6.0-1",
+      "intent": "B",
+      "quality": "tie",
+      "by": "a widgets maintainer",
+      "at": "2031-03-06T10:00:00.000Z"
+    }
+  ],
+  "scoring": {
+    "questionChargeMinutes": 15,
+    "minJudgeAgreement": 0.8
+  },
+  "prices": {
+    "gpt-test": {
+      "uncachedInput": 1.25,
+      "cachedInput": 0.125,
+      "output": 10
+    }
   }
 }

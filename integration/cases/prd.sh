@@ -96,17 +96,44 @@ p_held_since() { settled "$1" || [ "$(p_hold_since "$1" "$2")" != null ]; }
 # p_close N...: close issues the suite filed but never ran.
 p_close() { local n; for n; do gh issue close "$n" --repo "$REPO" --reason "not planned" >/dev/null 2>&1; done; }
 # p_bot_issue TITLE BODYFILE: file an issue as github-actions[bot] (drill-issue.yml) -> its number.
+# GitHub can fail a dispatch for a moment, as it can a create (gh_issue_file),
+# and a dispatch that failed may still have run the workflow. So it is tried up
+# to three times (#2207), and after each failure the bot's issues since the
+# first try are watched for this title as long as a dispatch that worked is:
+# found, that is the issue, never a second one. Not looked for (the lookup
+# failed), it is never dispatched again. Each failure is logged; the last
+# error stays in RUN_DIR/bot-issue.INST.CASE.err.
 p_bot_issue() {
-  local since; since=$(iso)
-  gh workflow run drill-issue.yml --repo "$REPO" -f title="$1" -f body="$(cat "$2")" >/dev/null || return 1
-  local end=$(( $(now) + 240 )) n=""
-  while [ "$(now)" -lt "$end" ] && [ -z "$n" ] && ! stopping; do
-    sleep 10
-    n=$(gh api "repos/$REPO/issues?creator=github-actions%5Bbot%5D&since=$since&state=open&per_page=50" \
-      --jq ".[]|select(.title==\"$1\")|.number" 2>/dev/null | head -1)
+  local since err="$RUN_DIR/bot-issue.$INST.${CASE:-suite}.err" try n=""
+  since=$(iso)
+  for try in 1 2 3; do
+    if gh workflow run drill-issue.yml --repo "$REPO" -f title="$1" -f body="$(cat "$2")" >/dev/null 2>"$err"; then
+      n=$(p_bot_found "$1" "$since" "$err"); break
+    fi
+    log "dispatching drill-issue.yml for '$1' failed (try $try): $(head -c 300 "$err")"
+    n=$(p_bot_found "$1" "$since" "$err") || { log "looking for bot issue '$1' failed: $(head -c 300 "$err")"; break; }
+    [ -z "$n" ] || { log "bot issue '$1' was filed by the failed dispatch: #$n"; break; }
   done
   [ -n "$n" ] || return 1
   echo "$n $CASE $INST" >>"$RUN_DIR/issues"; log "filed #$n as github-actions[bot]"; echo "$n"
+}
+# p_bot_found TITLE SINCE ERRFILE: the open issue titled TITLE that
+# github-actions[bot] filed since SINCE, looked for every 10 s for up to 240 s;
+# prints its number, or nothing. Fails when the last lookup failed (its error
+# in ERRFILE), since "not found" is then unknown.
+p_bot_found() {
+  local end=$(( $(now) + 240 )) n="" rows looked=1
+  while [ "$(now)" -lt "$end" ] && [ -z "$n" ] && ! stopping; do
+    sleep 10
+    if rows=$(gh api "repos/$REPO/issues?creator=github-actions%5Bbot%5D&since=$2&state=open&per_page=50" \
+      --jq ".[]|select(.title==\"$1\")|.number" 2>"$3"); then
+      looked=0; n=$(head -1 <<<"$rows")
+    else
+      looked=1
+    fi
+  done
+  [ -z "$n" ] || echo "$n"
+  return $looked
 }
 
 # ---------- lane P ----------

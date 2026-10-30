@@ -6,12 +6,15 @@ import { runningBuild } from "../log.js";
 import { validationMembers } from "../media.js";
 import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
+import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt } from "../text.js";
 import { formatRef, lockfileRef, validateTree } from "../validate.js";
 import { addWorktree, installStorePath, worktreePath } from "../worktree.js";
+import { VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import { repairOutcome } from "./step-deliver.js";
+import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { qaValidateStep } from "./step-qa.js";
 import {
   type BuildDeps,
@@ -134,28 +137,38 @@ export async function validateStep(
           (flaky) => facts({ flaky }, item.id),
         );
       if (rerun) return rerun;
-      // State is saved on every step: it keeps a bounded finding. Output
-      // longer than that (up to the raised review-artifact stream bounds)
-      // is kept whole in a file for the operator; no model can read it.
+      // State is saved on every step: it keeps a bounded finding, whose
+      // excerpt keeps the failure lines wherever they are (#2201). Output
+      // longer than a repair's brief keeps (repair.ts FAILURE_CHARS) is kept
+      // in a file: the operator's, the diagnosis can ask for it, and the
+      // next worker attempt reads a copy in its checkout (step-work.ts).
+      // `result.output` bounds each stream and puts stderr after stdout, so
+      // the file holds the command's attempt file, as the worker's Validate
+      // log does (self-validate.ts `failedCommandLog`). Named by its
+      // content, so the same failure again reads as the same finding.
       let keptOutput = result.output;
-      if (result.output.length > KEPT_OUTPUT_CHARS) {
-        const outputFile = join(
+      let outputFile: string | undefined;
+      if (result.output.length > FAILURE_CHARS) {
+        const log = boundedValidateLog(failedCommandLog(result, result.failed));
+        outputFile = join(
           workDir,
           "outputs",
           item.id,
-          `${result.tree}.txt`,
+          `${createHash("sha256").update(log).digest("hex").slice(0, 16)}.txt`,
         );
         await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
-        await writeFile(outputFile, result.output, { mode: 0o600 });
-        // The excerpt keeps the failure lines wherever they are: the
-        // diagnosis and the worker's repair read it (#2201).
-        keptOutput = `${failureExcerpt(result.output, KEPT_OUTPUT_CHARS)}\n[The complete output is kept for the operator at ${outputFile}; it is not readable from the worker's checkout.]`;
+        await writeFile(outputFile, log, { mode: 0o600 });
+        keptOutput = `${result.output.length > KEPT_OUTPUT_CHARS ? failureExcerpt(result.output, KEPT_OUTPUT_CHARS) : result.output}\n[The complete output is kept for the operator at ${outputFile}. The repair diagnosis can ask for it as ${VALIDATE_STEP_LOG}, and the next worker attempt reads it there in its checkout.]`;
       }
+      const exit = result.failed?.exit ?? result.formatter?.exit;
       const failed: Extract<KeptValidation["result"], { kind: "failed" }> = {
         kind: "failed",
         detail: keptOutput,
         shown: result.detail,
         ...(result.failed ? { command: result.failed.command } : {}),
+        ...(result.formatter ? { formatter: result.formatter.command } : {}),
+        ...(exit !== undefined ? { exit } : {}),
+        ...(outputFile ? { output: outputFile } : {}),
       };
       return failedOutcome(
         item,
@@ -210,7 +223,27 @@ function keptValidation(
   );
 }
 
-/** A validation failure as the work step's repair. */
+/**
+ * A failed validation's identity (repair.ts `FailureIdentity`): the failed
+ * command, or the repository's formatter that failed by itself, with how it
+ * ended. A pin, the formatter's refused change or the mutation check has
+ * none, and neither has a result kept before 0.5.10.
+ */
+export function validationIdentity(
+  failed: Extract<KeptValidation["result"], { kind: "failed" }>,
+): FailureIdentity | undefined {
+  if (failed.command !== undefined)
+    return {
+      kind: "validation",
+      command: failed.command,
+      ...(failed.exit !== undefined && { exit: failed.exit }),
+    };
+  if (failed.formatter !== undefined && failed.exit !== undefined)
+    return { kind: "format", command: failed.formatter, exit: failed.exit };
+  return undefined;
+}
+
+/** A validation failure as the work step's repair, with its identity (`validationIdentity`). */
 function failedOutcome(
   item: WorkItem,
   state: ObjectiveState,
@@ -218,10 +251,16 @@ function failedOutcome(
   failed: Extract<KeptValidation["result"], { kind: "failed" }>,
   keep: Record<string, unknown> = {},
 ): Outcome {
+  const identity = validationIdentity(failed);
   return repairOutcome(
     item,
     "validate",
-    { kind: "failure", detail: failed.detail },
+    {
+      kind: "failure",
+      detail: failed.detail,
+      ...(failed.output ? { output: failed.output } : {}),
+      ...(identity && { identity }),
+    },
     state,
     place,
     {

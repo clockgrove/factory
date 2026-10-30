@@ -88,6 +88,7 @@ export function reviewObjective(input: {
     ...input,
     phase: "objective-review",
     criteria: finalCriteria(input.plan, input.acceptance),
+    unreachableScope: input.plan.items.flatMap((item) => item.ownedPaths),
     instructions: FINAL_INSTRUCTIONS,
     design: [
       ...input.plan.items.map((item) => ({

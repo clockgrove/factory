@@ -103,6 +103,7 @@ test("human effort: every operator touch by its weight, and the hand fix in the 
       judgments: 5,
       handFixes: 0,
       policyStamps: 6,
+      scriptedJudgments: 0,
       fixes: 0,
     },
   );
@@ -121,6 +122,69 @@ test("human effort: every operator touch by its weight, and the hand fix in the 
   ]);
   assert.equal(run.human.score, 11 + 25 + 25);
   assert.ok(!run.unavailable.some((gap) => gap.metric === "hand fixes"));
+});
+
+test("human effort: the scripted operator's answers weigh as judgments and are counted apart", async () => {
+  // The fixture's run with two answers given as the scripted operator: a
+  // diagnosis answer (a judgment anyway) and CI's plain retry (else a stamp).
+  const scripted = new Set([
+    "item:export-csv:work@2031-03-04T11:04:32.670Z",
+    "item:export-csv:ci@2031-03-04T11:33:27.170Z",
+  ]);
+  const stateDir = fixtureCopy((at) => {
+    const logs = join(at, "logs", "42");
+    for (const name of readdirSync(logs)) {
+      const file = join(logs, name);
+      const events = readFileSync(file, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .map((event) =>
+          event.event === "request" && scripted.has(event.request?.question)
+            ? { ...event, as: "factory-bench operator policy (scripted)" }
+            : event,
+        );
+      writeFileSync(
+        file,
+        `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      );
+    }
+  });
+  after(() => rmSync(dirname(stateDir), { recursive: true, force: true }));
+  const card = await fixtureCard({}, stateDir);
+  assert.deepEqual(
+    card.operator.decisions
+      .filter((d) => d.scripted)
+      .map((d) => [d.question, d.answer, d.touch]),
+    [
+      ["item:export-csv:work@2031-03-04T11:04:32.670Z", "answer", "judgment"],
+      ["item:export-csv:ci@2031-03-04T11:33:27.170Z", "retry", "judgment"],
+    ],
+  );
+  // CI's retry moves from the stamps to the judgments: 10 × 1 + 6 × 5.
+  assert.deepEqual(
+    { ...card.human, fixes: card.human.fixes.length },
+    {
+      score: 10 + 30,
+      unattended: false,
+      weights: { stamp: 1, judgment: 5, handFix: 25 },
+      stamps: 10,
+      judgments: 6,
+      handFixes: 0,
+      policyStamps: 6,
+      scriptedJudgments: 2,
+      fixes: 0,
+    },
+  );
+  // The report shows them.
+  assert.match(
+    runMarkdown(card, [card], loadDefinition(EXAMPLE)),
+    /6 judgment\(s\) × 5 \(2 scripted\)/,
+  );
+  assert.match(
+    runReport(card, [card], loadDefinition(EXAMPLE)),
+    /2 of the judgments are the scripted operator's/,
+  );
 });
 
 test("hand fixes: a merge Factory didn't record is one; a merge of a head Factory published isn't", async () => {

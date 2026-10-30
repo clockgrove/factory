@@ -301,7 +301,8 @@ function pairwiseRule(definition, pairwise, reasons, warnings) {
  * definition's `hillClimb` metrics, when it names any, are the diagnostics
  * shown; otherwise DIAGNOSTICS. `pairwise`: the blind pairwise review
  * (bench/lib/judge.mjs `pairwise`), which decides too when the definition
- * has a judge.
+ * has a judge. Runs with scripted judgments beside runs without
+ * (bench/lib/scripted.mjs) get a warning: their human effort isn't alike.
  */
 export function verdict(
   definition,
@@ -341,6 +342,19 @@ export function verdict(
   if (baseline.length < 3 || candidate.length < 3)
     warnings.push(
       `${baseline.length} baseline and ${candidate.length} candidate runs: a spread needs at least 3 of each`,
+    );
+  // A scripted judgment weighs as an operator's would, but runs where some
+  // answers were scripted and others a person's aren't compared as equals.
+  const scripted = (cards) =>
+    cards.filter((card) => card.human?.scriptedJudgments > 0).length;
+  const scriptedBase = scripted(baseline);
+  const scriptedCand = scripted(candidate);
+  if (
+    (scriptedBase || scriptedCand) &&
+    (scriptedBase < baseline.length || scriptedCand < candidate.length)
+  )
+    warnings.push(
+      `${scriptedBase} of ${baseline.length} baseline and ${scriptedCand} of ${candidate.length} candidate runs had scripted judgments (human.scriptedJudgments): their human effort counts answers a script gave alongside a person's`,
     );
   const reasons = acceptance(outcomes, warnings);
   pairwiseRule(definition, pairwise, reasons, warnings);

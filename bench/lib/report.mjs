@@ -93,7 +93,7 @@ export function outcomeLines(card) {
     [
       "Human effort",
       String(human.score),
-      `${human.stamps} stamp(s) × ${WEIGHTS.stamp}, ${human.judgments} judgment(s) × ${WEIGHTS.judgment}, ${human.handFixes} hand fix(es) × ${WEIGHTS.handFix}; ${human.unattended ? "unattended" : "attended"}`,
+      `${human.stamps} stamp(s) × ${WEIGHTS.stamp}, ${human.judgments} judgment(s) × ${WEIGHTS.judgment}${human.scriptedJudgments ? ` (${human.scriptedJudgments} scripted)` : ""}, ${human.handFixes} hand fix(es) × ${WEIGHTS.handFix}; ${human.unattended ? "unattended" : "attended"}`,
     ],
     [
       "Time to delivery",
@@ -421,13 +421,13 @@ function outcomeSections(card) {
       .filter((d) => d.touch)
       .map((d) => [
         d.answeredAt,
-        d.touch,
+        d.scripted ? `${d.touch}, scripted` : d.touch,
         `${d.answer} to a ${d.kind} hold${d.step ? ` (${d.step})` : ""}`,
         [d.by, d.as].filter(Boolean).join(" as "),
       ]),
     ...card.operator.actions.map((a) => [
       a.at,
-      a.touch ?? "",
+      a.scripted ? `${a.touch}, scripted` : (a.touch ?? ""),
       `${a.kind}${a.answer ? ` ${a.answer}` : ""}${a.item ? ` (${a.item})` : ""}`,
       [a.by, a.as].filter(Boolean).join(" as "),
     ]),
@@ -478,7 +478,7 @@ ${
 </section>
 <section>
 <h2>Human effort</h2>
-<p class="meta">Every operator touch, weighted: a stamp (more, a plain retry, adopt, continue, pause, resume) ${WEIGHTS.stamp}, a judgment (an answer with text, accept, refuse, replan, repair, cancel, ...) ${WEIGHTS.judgment}, a hand fix (a commit on the default branch no Factory merge made) ${WEIGHTS.handFix}. ${human.policyStamps} of the stamps are on holds of the kinds the policy answers.</p>
+<p class="meta">Every operator touch, weighted: a stamp (more, a plain retry, adopt, continue, pause, resume) ${WEIGHTS.stamp}, a judgment (an answer with text, accept, refuse, replan, repair, cancel, ...) ${WEIGHTS.judgment}, a hand fix (a commit on the default branch no Factory merge made) ${WEIGHTS.handFix}. ${human.policyStamps} of the stamps are on holds of the kinds the policy answers. ${human.scriptedJudgments ?? 0} of the judgments are the scripted operator's (bench/README.md#The scripted operator), weighed as an operator's would be.</p>
 ${
   touches.length
     ? table(

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { SCRIPTABLE } from "./holds.mjs";
 import { missingDir } from "./home.mjs";
 import { METRICS } from "./metrics.mjs";
+import { POLICIES } from "./scripted.mjs";
 
 /** This directory, bench/: the scripts and the example definition, never a benchmark's data. */
 export const BENCH_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -95,7 +96,7 @@ const SHAPE = {
     spend: { objectiveTokens: true, dayTokens: true },
     capacity: { workers: true, validations: true, memoryMib: true },
   },
-  operatorPolicy: { as: true, answers: true, otherwise: true },
+  operatorPolicy: { as: true, answers: true, otherwise: true, policy: true },
   baseline: true,
   hillClimb: { primary: true, guards: true },
   budget: { tokens: true, hours: true },
@@ -306,6 +307,13 @@ export function definitionProblems(value) {
       )}; every other hold pauses for the operator, and no policy accepts or cancels`,
   );
   need("operatorPolicy.otherwise", (v) => v === "pause", "pause");
+  // Optional: the scripted operator's rules too (bench/lib/scripted.mjs); run.mjs --policy overrides it.
+  if (at("operatorPolicy.policy") !== undefined)
+    need(
+      "operatorPolicy.policy",
+      (v) => POLICIES.includes(v),
+      POLICIES.join(" | "),
+    );
   need("baseline", string, "the result group that is the baseline");
   // Optional: the diagnostics `compare` shows. The outcomes decide (metrics.mjs).
   if (at("hillClimb") !== undefined)

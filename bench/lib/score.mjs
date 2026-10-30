@@ -41,6 +41,7 @@ import {
   requestTouch,
   wasteOf,
 } from "./outcomes.mjs";
+import { isScripted } from "./scripted.mjs";
 
 export { SCORECARD_VERSION };
 
@@ -670,6 +671,7 @@ export async function scoreRun({
             by: null,
             as: null,
             touch: null,
+            scripted: false,
           });
           openHolds.set(event.id, { step, item: itemId ?? null });
           if (step) lastHold.set(step, kind);
@@ -682,13 +684,19 @@ export async function scoreRun({
         if (request.kind === "answer") {
           openHolds.delete(request.question);
           const hold = holds.get(request.question);
-          const touch = answerTouch(request.answer, request);
+          // A scripted answer is a judgment a real operator would have made,
+          // whatever its answer (`continue` included).
+          const scripted = isScripted(event.as);
+          const touch = scripted
+            ? "judgment"
+            : answerTouch(request.answer, request);
           if (hold && !hold.answeredAt) {
             hold.answeredAt = event.at;
             hold.answer = request.answer ?? null;
             hold.by = event.by;
             hold.as = event.as ?? null;
             hold.touch = touch;
+            hold.scripted = scripted;
           } else
             actions.push({
               kind: "answer",
@@ -698,6 +706,7 @@ export async function scoreRun({
               by: event.by,
               as: event.as ?? null,
               touch,
+              scripted,
             });
           break;
         }

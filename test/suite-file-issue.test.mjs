@@ -22,8 +22,9 @@ const LIB = join(import.meta.dirname, "../integration/lib");
 const REPO = "clockgrove/fd-test-m";
 
 // A stand-in for gh: `issue create` and `api repos/R/issues`, over a JSON
-// list of issues. FAKE_GH_FAIL holds how the next creates fail, one word each:
-// "filed" (files the issue, then EOF), "lost" (EOF, nothing filed), "ok".
+// list of issues. The file "fail" holds how the next creates fail, one word
+// each: "filed" (files the issue, then EOF), "lost" (EOF, nothing filed), "ok".
+// While the file "api-down" exists, every lookup fails with EOF.
 const FAKE_GH = `#!/usr/bin/env node
 const fs = require("node:fs");
 const dir = process.env.FAKE_GH_DIR;
@@ -47,6 +48,10 @@ if (args[0] === "issue" && args[1] === "create") {
   }
   process.stdout.write("https://github.com/" + flag("--repo") + "/issues/" + number + "\\n");
 } else if (args[0] === "api" && args[1].startsWith("repos/${REPO}/issues?")) {
+  if (fs.existsSync(dir + "/api-down")) {
+    process.stderr.write('Get "https://api.github.com/repos": EOF\\n');
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify([...issues].reverse()));
 } else {
   process.stderr.write("fake gh: unexpected " + args.join(" ") + "\\n");
@@ -54,7 +59,17 @@ if (args[0] === "issue" && args[1] === "create") {
 }
 `;
 
-function file(fail, { issues = [], recorded = "" } = {}) {
+// Runs CALL (gh_issue_file by default) against the stand-in gh, whose creates
+// go as FAIL says.
+function file(
+  fail,
+  {
+    issues = [],
+    recorded = "",
+    apiDown = false,
+    call = 'gh_issue_file "Suite 10281819: codex stack happy path" "$RUN_DIR/body.md"',
+  } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "suite-file-issue-"));
   try {
     writeFileSync(join(dir, "gh"), FAKE_GH);
@@ -64,15 +79,15 @@ function file(fail, { issues = [], recorded = "" } = {}) {
     writeFileSync(join(dir, "creates"), "");
     writeFileSync(join(dir, "issues"), recorded);
     writeFileSync(join(dir, "body.md"), "Add `padEndQabcd`.\n");
+    if (apiDown) writeFileSync(join(dir, "api-down"), "");
     const r = spawnSync(
       "bash",
       [
         "-c",
         // No waiting between tries here.
-        'source "$1/common.sh"; source "$1/gh.sh"; sleep() { :; }; gh_issue_file "$2" "$RUN_DIR/body.md"',
+        `source "$1/common.sh"; source "$1/gh.sh"; sleep() { :; }; ${call}`,
         "_",
         LIB,
-        "Suite 10281819: codex stack happy path",
       ],
       {
         encoding: "utf8",
@@ -81,6 +96,9 @@ function file(fail, { issues = [], recorded = "" } = {}) {
           PATH: `${dir}:${process.env.PATH}`,
           FAKE_GH_DIR: dir,
           RUN_DIR: dir,
+          SUITE: join(LIB, ".."),
+          SFX: "10281819",
+          RUN_ID: "test-run",
           REPO,
           INST: "M",
           CASE: "codex",
@@ -92,6 +110,7 @@ function file(fail, { issues = [], recorded = "" } = {}) {
       stdout: r.stdout,
       creates: readFileSync(join(dir, "creates"), "utf8").length,
       issues: JSON.parse(readFileSync(join(dir, "issues.json"), "utf8")),
+      recorded: readFileSync(join(dir, "issues"), "utf8"),
       journal: existsSync(join(dir, "journal"))
         ? readFileSync(join(dir, "journal"), "utf8")
         : "",
@@ -151,4 +170,31 @@ test("a failure that lasts fails after three tries, each logged", () => {
   assert.equal(r.stdout, "");
   assert.equal(r.creates, 3);
   assert.equal(r.journal.match(/failed \(try [123]\)/g).length, 3);
+});
+
+test("a retry that can't look for the lost issue files nothing", () => {
+  // The failed create may have filed it: creating again without looking could
+  // leave two copies, so the suite gives up instead.
+  const r = file("filed", { apiDown: true });
+  assert.equal(r.status, 1);
+  assert.equal(r.creates, 1);
+  assert.equal(r.issues.length, 1);
+  assert.match(r.journal, /looking for issue .* failed \(try 2\): Get .*: EOF/);
+  assert.match(r.journal, /looking for issue .* failed \(try 3\)/);
+});
+
+test("new_issue records the issue a failed create filed, once", () => {
+  const r = file("filed", {
+    call: 'new_issue withdraw "queue withdraw before planning" ID=q1',
+  });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "1\n");
+  assert.equal(r.creates, 1);
+  assert.equal(r.issues.length, 1);
+  assert.equal(
+    r.issues[0].title,
+    "Suite 10281819: queue withdraw before planning",
+  );
+  assert.equal(r.recorded, "1 codex M\n");
+  assert.match(r.journal, /filed #1 \(withdraw\)/);
 });

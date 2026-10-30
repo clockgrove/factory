@@ -54,16 +54,13 @@ export interface ItemFacts {
   /**
    * The correction diagnosed for repair `repair`, and every correction
    * diagnosed so far; `answered`: the question whose operator answer it
-   * carries, so that answer is applied once; `amendment`: the accepted
-   * amendment the repair continues on, which refused nothing (amend.ts
-   * `amendedAttempt`).
+   * carries, so that answer is applied once.
    */
   diagnosis: {
     repair: number;
     context: RepairContext;
     applied: Correction[];
     answered?: string;
-    amendment?: string;
   };
   /** A validation command run once more on a tree the worker's own Validate passed. */
   flaky: { tree: string; command: string };
@@ -248,8 +245,7 @@ export interface KeptSelection {
  * clears one. A rebase replays its change (`commit`, `notes` for a replay
  * without a worker). Unless `replayOnly`, the repair refused it: its commit
  * is the diagnosis's evidence, collection reads its tree again as no change
- * (on any base: what refused it judged the tree) unless an accepted
- * amendment changed the plan since (refused.ts `refusedTreeFor`), and
+ * (on any base: what refused it judged the tree) unless `amended`, and
  * `revalidate` checks it again with its notes.
  * `replayOnly`: a media or conflict repair, which may rightly end on the
  * same tree, or a stack layer moved because the layer below is repaired.
@@ -259,6 +255,14 @@ export interface Refused {
   tree: string;
   notes: HandoffNote[];
   replayOnly?: true;
+  /**
+   * The accepted amendment that changed the plan since the repair refused
+   * it (amend.ts `amendedAttempt`): its tree, never judged under the
+   * amended plan, is a result again, not no change (refused.ts
+   * `refusedTreeFor`), until a repair refuses a result and writes a new
+   * refused fact.
+   */
+  amended?: string;
   /** The work step found it can't be checked again as it is (gone, or off its base): `revalidate` isn't offered until a new repair. */
   unrecheckable?: true;
 }

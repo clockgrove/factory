@@ -315,12 +315,6 @@ test("a collected in-scope discovery is proposed as amendment worker-<item>-<att
   });
   assert.equal(amended.keep["item:feature:rebase"], true);
   assert.equal(amended.keep["item:feature:discovered"], null);
-  // Its diagnosis names the amendment, which refused nothing (#2229).
-  assert.equal(
-    amended.keep["item:feature:diagnosis"].amendment,
-    "worker-feature-1",
-  );
-  assert.equal(amended.keep["item:feature:diagnosis"].repair, 1);
 });
 
 test("a no-change repair's discovery is proposed for the attempt that made it, and a backlog discovery is only logged", async () => {

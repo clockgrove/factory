@@ -4,7 +4,7 @@ import { currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
 import { hostGitExit } from "../worktree.js";
-import { fact, facts, type Refused, written } from "./facts.js";
+import { fact, facts, type Refused } from "./facts.js";
 import { mergeOf } from "./merged.js";
 import { stepKey, type WorkResult } from "./steps.js";
 
@@ -43,42 +43,23 @@ export function refusedOf(
  * stands). The refused tree is the work commit's, before the select step
  * wrote the chosen set on it, so new candidates (a refusal about the media
  * drops the selection) are a new result even on that same tree: for an
- * item that owns only its destinations, the base's. An attempt an accepted
- * amendment started, with nothing refused since (`amendedOnly`), has none
- * either: the plan the refused tree was judged under is gone, so that tree
- * left as it is is a result, validated and reviewed under the amended
- * plan. A result with media keeps the rule above.
+ * item that owns only its destinations, the base's. A refused result an
+ * accepted amendment changed the plan for since (its `amended`, amend.ts
+ * `amendedAttempt`) has none either: the plan its tree was judged under is
+ * gone, so that tree left as it is is a result, validated and reviewed
+ * under the amended plan, until a repair refuses a result again (a new
+ * refused fact). A result with media keeps the rule above.
  */
 export function refusedTreeFor(
   state: ObjectiveState,
   id: string,
   result: { sets: readonly CandidateSet[]; selectionStands: boolean },
-  keep: Record<string, unknown> = {},
 ): string | undefined {
   if (result.sets.length > 0 && !result.selectionStands) return undefined;
-  if (result.sets.length === 0 && amendedOnly(state, id, keep))
+  const refused = refusedOf(state, id);
+  if (result.sets.length === 0 && refused?.amended !== undefined)
     return undefined;
-  return refusedOf(state, id)?.tree;
-}
-
-/**
- * Whether the item's current attempt runs only because an amendment was
- * accepted (amend.ts `amendedAttempt`): the diagnosis for its current
- * repair, written by this run (`keep`) or saved for it, is the
- * amendment's. Every refusal since, of any tree under the amended plan, is
- * a repair with a diagnosis of its own, and so is the operator's guidance.
- */
-export function amendedOnly(
-  state: ObjectiveState,
-  id: string,
-  keep: Record<string, unknown> = {},
-): boolean {
-  const now = written(keep, "diagnosis", id);
-  const diagnosis = now === undefined ? fact(state, "diagnosis", id) : now;
-  return (
-    diagnosis?.amendment !== undefined &&
-    diagnosis.repair === state.repairs?.[stepKey(id, "work")]?.count
-  );
+  return refused?.tree;
 }
 
 /**

@@ -7,7 +7,7 @@
 // no change.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { implementationRepairs, perPath } from "../dist/allowances.js";
@@ -17,7 +17,7 @@ import { RunLog } from "../dist/log.js";
 import { providerWorkflow } from "../dist/providers/selection.js";
 import { newObjective } from "../dist/state.js";
 import { amendedAttempt } from "../dist/work/amend.js";
-import { amendedOnly, refusedTreeFor } from "../dist/work/refused.js";
+import { refusedTreeFor } from "../dist/work/refused.js";
 import { repairOutcome } from "../dist/work/step-deliver.js";
 import { objectiveWorkflow } from "../dist/workflow.js";
 import {
@@ -223,7 +223,13 @@ test("after an accepted amendment, the change left as it was is collected for va
   const { runner, asked, prompts, base, tree } = served1;
   served1.amend();
   assert.deepEqual(runner.state.repairs[WORK].free, [2]);
-  assert.equal(amendedOnly(runner.state, "a"), true);
+  // The refused result, kept for the replay, is marked with the amendment.
+  assert.deepEqual(runner.state.kept["item:a:refused"], {
+    commit: served1.commit,
+    tree,
+    notes: [],
+    amended: AMENDMENT,
+  });
   await served1.run("the work step", served1.settled(2));
 
   assert.equal(runner.state.holds.length, 0, runner.state.holds[0]?.question);
@@ -258,7 +264,7 @@ test("an amendment followed by a refusal of the same tree is no change again (#2
   );
   assert.equal(runner.state.repairs[WORK].count, 3);
   assert.equal(runner.state.kept["item:a:refused"].tree, tree);
-  assert.equal(amendedOnly(runner.state, "a"), false);
+  assert.equal(runner.state.kept["item:a:refused"].amended, undefined);
   await served1.run("the repair", served1.settled(3));
 
   assert.equal(runner.state.done[WORK], undefined);
@@ -275,8 +281,11 @@ test("an amendment followed by a refusal of the same tree is no change again (#2
 
 test("after a review refusal, with no amendment, an unchanged tree is still an empty repair (#2229)", async () => {
   const served1 = served(reviewRefusal, { perPath: 5 });
-  const { runner, prompts } = served1;
-  assert.equal(amendedOnly(runner.state, "a"), false);
+  const { runner, prompts, tree } = served1;
+  assert.equal(
+    refusedTreeFor(runner.state, "a", { sets: [], selectionStands: false }),
+    tree,
+  );
   await served1.run("the repair", served1.settled(1));
   assert.equal(runner.state.done[WORK], undefined);
   assert.equal(runner.state.repairs[WORK].count, 2);
@@ -310,21 +319,51 @@ test("after an accepted amendment, a result with media keeps its rule: its kept 
     refusedTreeFor(runner.state, "a", { sets: [set], selectionStands: false }),
     undefined,
   );
-  // The operator's guidance diagnosed for the same repair replaces the
-  // amendment's correction: the refused tree is no change again.
-  assert.equal(
-    refusedTreeFor(
-      runner.state,
-      "a",
-      { sets: [], selectionStands: false },
-      {
-        "item:a:diagnosis": {
-          repair: 2,
-          context: { finding: "refused", operator: "Keep it." },
-          applied: [],
-        },
-      },
-    ),
-    tree,
+});
+
+test("after an accepted amendment, a repair that refuses no result keeps the mark: the unchanged tree is still collected (#2229)", async () => {
+  // The amended attempt also changes a path outside the item's ownership,
+  // which collection refuses; the next attempt drops that path and leaves
+  // the item's change as it was, the tree refused under the old plan.
+  let runs = 0;
+  const served1 = served(failedValidation, {
+    perPath: 5,
+    work: async (input) => {
+      runs += 1;
+      const outside = join(input.worktree, "src", "b.js");
+      if (runs === 1) writeFileSync(outside, "export const b = 1;\n");
+      else rmSync(outside, { force: true });
+      return keeps(input);
+    },
+  });
+  const { runner, asked, prompts, base, commit, tree } = served1;
+  served1.amend();
+  await served1.run("the amended attempt", served1.settled(2));
+  assert.equal(runner.state.done[WORK], undefined);
+  assert.equal(runner.state.repairs[WORK].count, 3);
+  assert.match(
+    runner.state.repairs[WORK].findings.at(-1),
+    /^Worker changed paths outside ownership: src\/b\.js/,
   );
+  // That repair refused no result, so the old plan's refused result keeps
+  // its mark.
+  assert.deepEqual(runner.state.kept["item:a:refused"], {
+    commit,
+    tree,
+    notes: [],
+    amended: AMENDMENT,
+  });
+  await served1.run("the repair", served1.settled(3));
+
+  assert.equal(runner.state.holds.length, 0, runner.state.holds[0]?.question);
+  const done = runner.state.done[WORK];
+  assert.ok(done, "the work step is done");
+  assert.equal(done.tree, tree);
+  assert.equal(done.base, base);
+  // Only the collection finding's repair is charged.
+  assert.equal(runner.state.repairs[WORK].count, 3);
+  assert.deepEqual(runner.state.repairs[WORK].free, [2]);
+  assert.equal(perPath(runner.state)[WORK].used, 2);
+  assert.equal(asked.length, 1, "the collection finding was diagnosed");
+  assert.equal(prompts.length, 2);
 });

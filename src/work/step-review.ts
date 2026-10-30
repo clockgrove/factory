@@ -515,13 +515,15 @@ function refusedReview(
 /**
  * The `accept <n>` answers to the review refusal `finding` driving a Work
  * Item's repairs (criterionOffers), for its work step's repair diagnosis
- * and repair-allowance questions, and the note those questions carry.
+ * and repair-allowance questions, and the note those questions carry. None
+ * for final review's refusal: its criteria are decided at final review.
  */
 export function refusalOffers(finding: RepairFinding | undefined): {
   note: string;
   options: HoldOption[];
 } {
-  if (finding?.kind !== "review") return { note: "", options: [] };
+  if (finding?.kind !== "review" || finding.final)
+    return { note: "", options: [] };
   const options = criterionOffers(refusedReview(finding), REFUSES_ITEM);
   const listed = finding.refused
     .filter((entry) => entry.source === "model")

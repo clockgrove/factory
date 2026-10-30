@@ -17,12 +17,18 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import { amendmentSteps } from "../dist/planning/amendments.js";
+import {
+  amendmentFindings,
+  amendmentSteps,
+  dependencyChangesStack,
+  failingItems,
+  startedStacks,
+} from "../dist/planning/amendments.js";
 import { buildFacts } from "../dist/planning/facts.js";
 import { decodePlan } from "../dist/planning/wire.js";
 import { correction } from "../dist/repair.js";
 import { readShown } from "../dist/shown.js";
-import { prerequisiteAmendment } from "../dist/work/amend.js";
+import { enabledAttempt, prerequisiteAmendment } from "../dist/work/amend.js";
 import { missingPrerequisite } from "../dist/work/repair-context.js";
 import { buildSteps } from "../dist/work/steps.js";
 import {
@@ -265,6 +271,44 @@ function depsOf(checkout, planner, posted = []) {
 /** The item steps that can run now. */
 const runnable = (state, deps) => buildSteps(state, deps).map((s) => s.key);
 
+/** A work step's context on `state`. */
+const contextOf = (state, answer) => ({
+  state,
+  ...(answer ? { answer } : {}),
+  signal: AbortSignal.timeout(60_000),
+  log: () => {},
+  keep: () => {},
+});
+
+/** Records Work Item `id`'s merge, as the merge step does. */
+const merged = (state, id) => {
+  state.done[`item:${id}:merge`] = {
+    mergeSha: "5".repeat(40),
+    integratedSha: "5".repeat(40),
+    at: "2026-01-01T03:00:00.000Z",
+  };
+};
+
+/**
+ * Once its providers merged, Work Item `id` of `state`'s plan, which an
+ * accepted amendment made wait for them, runs again: a free attempt on the
+ * amended plan, moved onto the default branch with its change replayed.
+ */
+function assertBroughtUpToDate(state, id, amendment) {
+  const target = state.done.plan.items.find((entry) => entry.id === id);
+  const runs = enabledAttempt(target, contextOf(state), undefined, {});
+  assert.equal(runs.kind, "repair", JSON.stringify(runs));
+  const repair = state.repairs[`item:${id}:work`].count + 1;
+  assert.deepEqual(runs.free, { target: `item:${id}:work`, repair });
+  assert.equal(runs.keep[`item:${id}:rebase`], true);
+  assert.equal(runs.keep[`item:${id}:enabled`], null);
+  assert.match(
+    runs.keep[`item:${id}:diagnosis`].context.finding,
+    new RegExp(`Amendment ${amendment} was accepted`),
+  );
+  return runs;
+}
+
 const dependenciesOf = (plan, id) =>
   plan.items.find((entry) => entry.id === id).dependencies;
 
@@ -358,15 +402,19 @@ test("an amendment's item that provisions what a published, failing item lacks n
   assert.equal(result.rejected, undefined, result.rejected);
   assert.deepEqual(dependenciesOf(result.plan, "a"), ["browser"]);
   assert.equal(posted.length, 1);
+  // a didn't propose op-1 (its worker's own would be worker-a-3), so
+  // acceptance records what it now waits for.
+  assert.deepEqual(state.kept["item:a:enabled"], {
+    amendment: "op-1",
+    providers: ["browser"],
+  });
 
-  // a waits for browser; once browser merges, a runs again.
+  // a waits for browser; once browser merges, a runs again, brought up to
+  // date with browser's result instead of diagnosing its stale failure.
   assert.deepEqual(runnable(state, deps), ["item:browser:work"]);
-  state.done["item:browser:merge"] = {
-    mergeSha: "5".repeat(40),
-    integratedSha: "5".repeat(40),
-    at: "2026-01-01T03:00:00.000Z",
-  };
+  merged(state, "browser");
   assert.deepEqual(runnable(state, deps), ["item:a:work"]);
+  assertBroughtUpToDate(state, "a", "op-1");
 });
 
 test("an enables entry that names no current item yet to merge goes back to the planner with what passes (#2233)", async () => {
@@ -386,13 +434,17 @@ test("an enables entry that names no current item yet to merge goes back to the 
       },
     },
   });
-  const { planner } = scripted(
+  const { planner, asked } = scripted(
     revision(
       [browser, qa(["a", "browser"])],
       [{ itemId: "browser", enables: ["a", "nowhere"] }],
     ),
+    // Round 2 sees a's dependency on browser in currentPlan already, and
+    // names no entry again.
+    revision([], []),
   );
-  const first = await step(state, depsOf(checkout, planner));
+  const deps = depsOf(checkout, planner);
+  const first = await step(state, deps);
   assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
   const [kept] = state.kept["amend:op-1:revisions"];
   assert.deepEqual(
@@ -401,8 +453,266 @@ test("an enables entry that names no current item yet to merge goes back to the 
       `browser's enables names "nowhere", which is not another item of the plan being amended that has yet to merge; name only the current items that need what browser provides (a new item depends on it through its own dependencies)`,
     ],
   );
-  // The valid entry still made its edge.
+  // The valid entry still made its edge, which the round keeps.
   assert.deepEqual(dependenciesOf(kept.answer, "a"), ["browser"]);
+  assert.deepEqual(kept.enables, ENABLES_A);
+
+  // The edge stands in round 2, which is told the entry behind it.
+  const second = await step(state, deps);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  assert.ok(
+    asked[1].prompt.includes(`"earlierEnables":${JSON.stringify(ENABLES_A)}`),
+  );
+  const round = state.done["amend:op-1:plan"];
+  assert.deepEqual(dependenciesOf(round.draft, "a"), ["browser"]);
+  assert.deepEqual(round.enables, ENABLES_A);
+});
+
+test("a started item's dependency an earlier round's enables made stands when the review sends the round back and the next answer names no entry; the failing item, not the proposer, is brought up to date for its validation failure once the provider merges (#2233)", async () => {
+  const FIXTURE =
+    "Validation command failed (1): npm test: \nnot ok 1 - fixture db/seed.sql is missing";
+  const { checkout, state } = await building(accepted([work("a"), qa(["a"])]), {
+    "item:a:finding": {
+      kind: "failure",
+      detail: FIXTURE,
+      identity: { kind: "validation", command: "npm test", exit: "1" },
+    },
+    "item:a:refused": {
+      commit: "1".repeat(40),
+      tree: "2".repeat(40),
+      notes: [],
+    },
+    "amend:op-1:proposal": {
+      id: "op-1",
+      actor: "octo",
+      at: "2026-01-01T01:00:00.000Z",
+      plan: ACCEPTED_AT,
+      discovery: {
+        scope: "in-scope",
+        reason: "Tests need the shared seed fixture",
+        evidence: [FIXTURE],
+        ownership: ["db/seed.sql"],
+        acceptance: ["The shared seed fixture exists"],
+        dependencies: [],
+      },
+    },
+  });
+  const fixture = work("fixture", {
+    title: "Add the shared seed fixture",
+    goal: "Add the shared seed fixture the tests load.",
+    acceptance: ["db/seed.sql holds the shared seed fixture."],
+    ownedPaths: ["db/seed.sql"],
+    brief: "Write db/seed.sql.",
+  });
+  const ENABLES_FIXTURE = [{ itemId: "fixture", enables: ["a"] }];
+  const { planner, asked } = scripted(
+    revision([fixture, qa(["a", "fixture"])], ENABLES_FIXTURE),
+    {
+      findings: [
+        {
+          kind: "fix",
+          itemIds: ["fixture"],
+          evidenceIndices: [],
+          detail: "fixture's brief should name the seed's tables",
+          question: "",
+        },
+      ],
+    },
+    // Round 2 changes only fixture's brief, and names no entry again.
+    revision([{ ...fixture, brief: "Write db/seed.sql with every table." }]),
+    { findings: [] },
+  );
+  const deps = depsOf(checkout, planner);
+  assert.equal((await step(state, deps)).outcome.kind, "done");
+  assert.ok(asked[0].prompt.includes('"failed":{"kind":"validation"'));
+  const sentBack = await step(state, deps);
+  assert.equal(
+    sentBack.outcome.kind,
+    "retry",
+    JSON.stringify(sentBack.outcome),
+  );
+  assert.deepEqual(
+    state.kept["amend:op-1:revisions"][0].enables,
+    ENABLES_FIXTURE,
+  );
+
+  // The fence still lets a, published and no reattempt item, take it.
+  const second = await step(state, deps);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.deepEqual(dependenciesOf(round.draft, "a"), ["fixture"]);
+  assert.deepEqual(round.enables, ENABLES_FIXTURE);
+  assert.deepEqual((await step(state, deps)).outcome, {
+    kind: "done",
+    result: { round: 2 },
+  });
+  assert.ok(
+    asked[3].prompt.includes(`"enables":${JSON.stringify(ENABLES_FIXTURE)}`),
+  );
+  await step(state, deps);
+  assert.equal(state.done["amend:op-1"].rejected, undefined);
+  assert.deepEqual(state.kept["item:a:enabled"], {
+    amendment: "op-1",
+    providers: ["fixture"],
+  });
+
+  // Once fixture merged, a is checked again on the default branch with it,
+  // its refused change replayed and free to end on the same tree.
+  assert.deepEqual(runnable(state, deps), ["item:fixture:work"]);
+  merged(state, "fixture");
+  assert.deepEqual(runnable(state, deps), ["item:a:work"]);
+  const runs = assertBroughtUpToDate(state, "a", "op-1");
+  assert.equal(runs.keep["item:a:refused"].replayOnly, true);
+});
+
+test("a started item's grown dependency that no enables entry made goes back saying to name it in enables (#2233)", () => {
+  const a = item("a", { ownedPaths: ["src/a.js"] });
+  const current = plan([a, item("qa", { kind: "qa", dependencies: ["a"] })]);
+  const provider = item("browser", { ownedPaths: ["ci/browser.sh"] });
+  const draft = plan([
+    { ...a, dependencies: ["browser"] },
+    provider,
+    item("qa", { kind: "qa", dependencies: ["a", "browser"] }),
+  ]);
+  const progress = { started: new Set(["a"]), reattempt: new Set() };
+  assert.deepEqual(
+    amendmentFindings(current, draft, progress, {
+      answered: false,
+      nativeStack: false,
+    }).map((finding) => finding.message),
+    [
+      "Work Item a has started, so it keeps its spec; this answer adds browser to its dependencies, and a started item depends on another only through that item's enables entry. Name a in the enables entry of each of browser when a needs what it provides, else leave a's dependencies as they are",
+    ],
+  );
+  assert.deepEqual(
+    amendmentFindings(current, draft, progress, {
+      answered: false,
+      nativeStack: false,
+      enables: [{ itemId: "browser", enables: ["a"] }],
+    }),
+    [],
+  );
+});
+
+test("under native-stack delivery a layer of a started stack takes no enables edge and isn't offered depend, and a lone item's edge that would stack it says how to keep it apart (#2233)", async () => {
+  const { checkout, state } = await building(
+    accepted([
+      work("x"),
+      work("a", { dependencies: ["x"] }),
+      browser,
+      qa(["a", "browser"]),
+    ]),
+    {
+      "item:x:base": "0".repeat(40),
+      "amend:op-1:proposal": {
+        id: "op-1",
+        actor: "octo",
+        at: "2026-01-01T01:00:00.000Z",
+        plan: ACCEPTED_AT,
+        discovery: {
+          scope: "in-scope",
+          reason: "a's CI lacks the headless browser",
+          evidence: [LAUNCH],
+          ownership: ["ci/browser.sh"],
+          acceptance: ["a's CI has the headless browser"],
+          dependencies: [],
+        },
+      },
+    },
+  );
+  const current = state.done.plan;
+  const started = new Set(["x", "a"]);
+  const stacked = startedStacks(current, started, true);
+  assert.deepEqual(Object.fromEntries(stacked), { x: "x > a", a: "x > a" });
+  assert.deepEqual(startedStacks(current, started, false).size, 0);
+  assert.equal(failingItems(state, current, stacked)[0].stack, "x > a");
+
+  // depend: a depending on browser would take it out of the stack x > a.
+  assert.equal(
+    dependencyChangesStack(current, started, "a", "browser"),
+    "x > a",
+  );
+  const a = current.items.find((entry) => entry.id === "a");
+  const found = {
+    repair: 2,
+    provider: "browser",
+    diagnosis: "The database job never installs the browser.",
+    failure: LAUNCH,
+    stack: "x > a",
+  };
+  const asked = missingPrerequisite(state, a, found);
+  assert.ok(!asked.options.some((option) => option.answer === "depend"));
+  assert.match(
+    asked.question,
+    /`depend` isn't offered: under native-stack delivery, a depending on browser would change the layers of the started native stack x > a/,
+  );
+  // Nor is an answer of depend taken.
+  state.kept["item:a:prerequisite"] = found;
+  assert.equal(
+    prerequisiteAmendment(
+      a,
+      contextOf(state, { holdId: "h", answer: "depend", by: "octo" }),
+      undefined,
+      {},
+    ),
+    undefined,
+  );
+  delete state.kept["item:a:prerequisite"];
+
+  // An enables entry naming a makes no edge and goes back.
+  const { planner, asked: calls } = scripted(
+    revision([], [{ itemId: "browser", enables: ["a"] }]),
+  );
+  const deps = depsOf(checkout, planner);
+  deps.config.delivery = { kind: "native-stack" };
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "retry", JSON.stringify(first.outcome));
+  assert.ok(calls[0].prompt.includes('"stack":"x > a"'));
+  const [kept] = state.kept["amend:op-1:revisions"];
+  assert.deepEqual(
+    kept.findings.map((finding) => finding.message),
+    [
+      "browser's enables names a, a layer of the started native stack x > a: a new dependency would take it out of that stack, whose layers an amendment keeps, so leave it out of enables",
+    ],
+  );
+  assert.deepEqual(dependenciesOf(kept.answer, "a"), ["x"]);
+  assert.equal(kept.enables, undefined);
+
+  // A lone started item whose new provider nothing else depends on would
+  // join that provider's stack: the fence says how to keep it apart.
+  const lone = item("b", { ownedPaths: ["src/b.js"] });
+  const provider = item("tool", { ownedPaths: ["ci/tool.sh"] });
+  const findings = amendmentFindings(
+    plan([lone]),
+    plan([{ ...lone, dependencies: ["tool"] }, provider]),
+    { started: new Set(["b"]), reattempt: new Set() },
+    {
+      answered: false,
+      nativeStack: true,
+      enables: [{ itemId: "tool", enables: ["b"] }],
+    },
+  ).map((finding) => finding.message);
+  assert.deepEqual(findings, [
+    "The amendment changes the started native stack b; keep its layers as they are. b took a new dependency (an enables entry, or the prerequisite), and an item whose only dependency is an item nothing else depends on joins that item's stack: make another item (such as the QA item) depend on the item that provides the prerequisite too",
+  ]);
+  // With another dependent, the provider starts no stack with it.
+  assert.deepEqual(
+    amendmentFindings(
+      plan([lone, item("qa", { kind: "qa", dependencies: ["b"] })]),
+      plan([
+        { ...lone, dependencies: ["tool"] },
+        provider,
+        item("qa", { kind: "qa", dependencies: ["b", "tool"] }),
+      ]),
+      { started: new Set(["b"]), reattempt: new Set() },
+      {
+        answered: false,
+        nativeStack: true,
+        enables: [{ itemId: "tool", enables: ["b"] }],
+      },
+    ),
+    [],
+  );
 });
 
 /** A checkout whose result commit changes src/a.js, for a diagnosis. */
@@ -486,6 +796,74 @@ test("a repair diagnosis that finds a missing prerequisite another item provides
   assert.match(
     asked[1].prompt,
     /a prerequisite names one of prerequisiteItems \(browser\); base is not one/,
+  );
+});
+
+test("a CI failure that repeated unchanged after the last correction may still be diagnosed a missing prerequisite: the diagnosis is told so, and a repeated repair is refused naming it (#2233)", async () => {
+  const a = item("a", {
+    ownedPaths: ["src/a.js"],
+    validation: [{ command: "npm test" }],
+  });
+  const provider = item("browser", {
+    title: "Provision the headless browser in CI",
+    goal: "Provision the pinned headless browser in the CI database job.",
+    ownedPaths: ["ci/browser.sh"],
+  });
+  const failed = `Required checks failed: database\n${LAUNCH}`;
+  // Repair 1 tried a correction of a's own; the same check failed the same way.
+  const tried = {
+    source: "diagnosis",
+    failure: failed,
+    identity: CI_FAILED,
+    diagnosis: "The test launches the browser before it is ready.",
+    path: "src/a.js",
+    correction: "Wait for the browser in src/a.js.",
+    repair: 1,
+  };
+  const repo = failedResult();
+  const asked = [];
+  const result = await correction({
+    planner: {
+      answer: async (call) => {
+        asked.push(call);
+        return {
+          value:
+            asked.length === 1
+              ? diagnosis({
+                  decision: "repair",
+                  predecessor: "",
+                  path: "src/a.js",
+                  correction: "Wait longer for the browser in src/a.js.",
+                })
+              : diagnosis({}),
+        };
+      },
+    },
+    plan: plan([a, provider, item("qa", { kind: "qa" })]),
+    item: a,
+    finding: { kind: "failure", detail: failed, identity: CI_FAILED },
+    checkout: repo.dir,
+    base: repo.base,
+    commit: repo.commit,
+    sources: [],
+    prior: [tried],
+    repair: 2,
+    validate: false,
+    signal: AbortSignal.timeout(60_000),
+    log: () => {},
+  });
+  assert.equal(result.kind, "prerequisite", JSON.stringify(result));
+  assert.equal(result.provider, "browser");
+  assert.match(asked[0].prompt, /"failureRepeatedUnchanged":true/);
+  assert.ok(
+    asked[0].prompt.includes(
+      "never decide repair again; decide predecessor, prerequisite or discover when the evidence shows one, otherwise operator",
+    ),
+  );
+  assert.ok(
+    asked[1].prompt.includes(
+      "so another repair of this Work Item is refused: return predecessor, prerequisite or discover when the evidence shows one",
+    ),
   );
 });
 
@@ -605,6 +983,8 @@ test("a missing prerequisite answered depend amends the plan so the item depends
   assert.equal(runs.keep["item:a:rebase"], true);
   assert.equal(runs.keep["item:a:refused"].replayOnly, true);
   assert.equal(runs.keep["item:a:prerequisite"], null);
+  // Its own route took it: the edge's record goes with it.
+  assert.equal(runs.keep["item:a:enabled"], null);
 
   // Its question no longer offers depend for this repair.
   assert.ok(

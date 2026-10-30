@@ -124,7 +124,20 @@ export interface ItemFacts {
     provider: string;
     diagnosis: string;
     failure: string;
+    /**
+     * Under native-stack delivery, the started stack (`x > a`) the
+     * dependency would change (planning/amendments.ts
+     * `dependencyChangesStack`): `depend` isn't offered.
+     */
+    stack?: string;
   };
+  /**
+   * Accepted amendment `amendment` made this started item depend on
+   * `providers`, through their `enables` (#2233): once they merged, its
+   * next work step brings it up to date and checks it again, as it would
+   * its proposer (amend.ts `enabledAttempt`).
+   */
+  enabled: { amendment: string; providers: string[] };
   /** The worker's retained conversation, which a repair continues (providers/session.ts); `fresh` forgets it. */
   workSession: Session;
   /** The result reviewer's retained conversation, which a re-review continues. */

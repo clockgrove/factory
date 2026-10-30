@@ -74,7 +74,8 @@ export function propose(
 }
 
 /**
- * The item's new attempt once the amendment it proposed was accepted: a
+ * The item's new attempt once the amendment it proposed, or one that made
+ * it wait for another item (`enabledAttempt`), was accepted: a
  * repair that counts against no allowance (`free`), its correction saved
  * so no diagnosis runs, moved onto the current start with the change so
  * far replayed. It runs with the amended plan's owned paths, acceptance
@@ -107,6 +108,7 @@ export function amendedAttempt(
           discovered: null,
           blamed: null,
           prerequisite: null,
+          enabled: null,
         },
         item.id,
       ),
@@ -403,7 +405,9 @@ export function prerequisiteAmendment(
       afterMs: MINUTE,
       keep,
     };
-  if (answer?.answer !== DEPEND.answer) return undefined;
+  // A started native stack's layers keep it from being offered.
+  if (answer?.answer !== DEPEND.answer || found.stack !== undefined)
+    return undefined;
   // The files it cites are read from the failed result, or the item's start.
   const commit =
     refusedOf(state, item.id)?.commit ?? fact(state, "base", item.id);
@@ -441,6 +445,35 @@ export function prerequisiteAmendment(
         `The amendment can't be proposed: ${problems}`,
       ),
   );
+}
+
+/**
+ * An accepted amendment made this started item depend on the items whose
+ * `enables` named it (its `enabled` fact), and those merged, or the item
+ * wouldn't run: its result was refused, or kept, on a base without them.
+ * Unless its own amendment's route took it first, its next work step is
+ * a new attempt on the amended plan (`amendedAttempt`), as its proposer's
+ * would be: moved onto the default branch with what it now depends on, its
+ * change replayed and free to end on the same tree, then checked again,
+ * with no diagnosis of the failure that predates them. Undefined: no such
+ * fact.
+ */
+export function enabledAttempt(
+  item: WorkItem,
+  context: StepContext,
+  place: StackPlace | undefined,
+  keep: Record<string, unknown>,
+): Outcome | undefined {
+  const { state } = context;
+  const enabled = fact(state, "enabled", item.id);
+  if (!enabled) return undefined;
+  const refused = fact(state, "refused", item.id);
+  return amendedAttempt(item, state, place, enabled.amendment, {
+    ...keep,
+    ...(refused
+      ? facts({ refused: { ...refused, replayOnly: true } }, item.id)
+      : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------

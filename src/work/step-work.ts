@@ -41,6 +41,7 @@ import {
 import {
   blameAmendment,
   discoveryOutcome,
+  enabledAttempt,
   prerequisiteAmendment,
   validationAmendment,
 } from "./amend.js";
@@ -302,7 +303,9 @@ export async function workStep(
       validationAmendment(item, context, place, keepBase) ??
       // A missing prerequisite answered `depend`, or its amendment
       // settled: likewise.
-      prerequisiteAmendment(item, context, place, keepBase);
+      prerequisiteAmendment(item, context, place, keepBase) ??
+      // Another's amendment made it wait for items that merged since.
+      enabledAttempt(item, context, place, keepBase);
     if (amended) return amended;
     const repair = await repairContext(
       item,

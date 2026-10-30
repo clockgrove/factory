@@ -6,6 +6,8 @@ import { crashPoint } from "./crash.js";
 import { redactDeep } from "./display.js";
 import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
+  causeFields,
+  failureText,
   type NotedRequest,
   networkCategory,
   newTransport,
@@ -615,8 +617,27 @@ export class GitHub {
       return as === "json" ? await response.json() : await response.text();
     } catch (error) {
       if (signal?.aborted) throw error;
+      // A failed request after all: its one trace line says why.
+      const sent = answers.get(response);
+      if (sent) {
+        const counted = transport.getStore() ?? this.ambient;
+        counted.failed += 1;
+        const at = sent.noted
+          ? (counted.requests?.indexOf(sent.noted) ?? -1)
+          : -1;
+        if (at >= 0) counted.requests?.splice(at, 1);
+        sent.noted = note(
+          counted,
+          {
+            ...sent.answered,
+            category: networkCategory(error, false),
+            ...causeFields(error),
+          },
+          response,
+        );
+      }
       throw new TransientError(
-        `GitHub ${method} ${path}: the answer's body didn't arrive whole: ${errorMessage(error)}`,
+        `GitHub ${method} ${path}: the answer's body didn't arrive whole: ${failureText(error)}`,
       );
     }
   }
@@ -1989,7 +2010,7 @@ export class GitHub {
       });
     } catch (failure) {
       if (signal?.aborted) throw failure;
-      throw new TransientError(`${what}: ${errorMessage(failure)}`);
+      throw new TransientError(`${what}: ${failureText(failure)}`);
     }
     if (response.ok) return response;
     await response.body?.cancel().catch(() => undefined);
@@ -2017,7 +2038,7 @@ export class GitHub {
       }
     } catch (error) {
       if (signal?.aborted) throw error;
-      throw new TransientError(`${what}: ${errorMessage(error)}`);
+      throw new TransientError(`${what}: ${failureText(error)}`);
     } finally {
       await reader.cancel().catch(() => undefined);
     }
@@ -2665,12 +2686,15 @@ export class GitHub {
           attempt,
           ms,
           category: networkCategory(error, Boolean(signal?.aborted)),
+          // fetch says only "fetch failed": the cause tells an outage
+          // (DNS, a reset, a TLS failure) from a bug.
+          ...(signal?.aborted ? {} : causeFields(error)),
         },
         undefined,
       );
       if (signal?.aborted) throw error;
       throw new TransientError(
-        `GitHub ${method} ${path}: ${errorMessage(error)}`,
+        `GitHub ${method} ${path}: ${failureText(error)}`,
       );
     }
     const ms = Date.now() - sentAt;

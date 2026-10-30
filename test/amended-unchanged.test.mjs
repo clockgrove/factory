@@ -16,7 +16,7 @@ import { ObjectiveRunner } from "../dist/engine.js";
 import { RunLog } from "../dist/log.js";
 import { providerWorkflow } from "../dist/providers/selection.js";
 import { newObjective } from "../dist/state.js";
-import { amendedAttempt } from "../dist/work/amend.js";
+import { amendedAttempt, validationAmendment } from "../dist/work/amend.js";
 import { refusedTreeFor } from "../dist/work/refused.js";
 import { repairOutcome } from "../dist/work/step-deliver.js";
 import { objectiveWorkflow } from "../dist/workflow.js";
@@ -213,7 +213,26 @@ function served(finding, { perPath: allowed = 1, work = keeps } = {}) {
     runner.state.done[WORK] ||
     runner.state.holds.length > 0 ||
     runner.state.repairs[WORK].count > count;
-  return { runner, run, amend, settled, asked, prompts, base, commit, tree };
+  /** The operator's `answer` to question `hold`. */
+  const answer = (hold, answer) =>
+    assert.equal(
+      runner.transact(() =>
+        runner.answer(answer, undefined, "kirk", undefined, hold.id),
+      ),
+      null,
+    );
+  return {
+    runner,
+    run,
+    amend,
+    answer,
+    settled,
+    asked,
+    prompts,
+    base,
+    commit,
+    tree,
+  };
 }
 
 test("after an accepted amendment, the change left as it was is collected for validation, charging no repair (#2229)", async () => {
@@ -366,4 +385,57 @@ test("after an accepted amendment, a repair that refuses no result keeps the mar
   assert.equal(perPath(runner.state)[WORK].used, 2);
   assert.equal(asked.length, 1, "the collection finding was diagnosed");
   assert.equal(prompts.length, 2);
+});
+
+test("after an accepted validation replacement, a hold that leaves the tree unchanged offers revalidate, which checks the refused result under the amended plan (#2237)", async () => {
+  // The amended attempt's worker stops before any result (here, a sandbox
+  // it can't start), leaving the refused change as it was.
+  const served1 = served(failedValidation, {
+    work: async () => ({
+      kind: "hold",
+      question: "The worker's sandbox is unavailable.",
+      options: ["retry", "cancel"],
+    }),
+  });
+  const { runner, asked, prompts, commit, tree } = served1;
+  // The operator's replace-validation of repair 1 was proposed and accepted.
+  runner.state.kept["amend:validation-a-1:proposal"] = {
+    id: "validation-a-1",
+    actor: "kirk",
+    at: "2026-10-30T00:00:00.000Z",
+    worker: { itemId: "a", attempt: 2 },
+  };
+  runner.state.done["amend:validation-a-1"] = { plan: runner.state.done.plan };
+  runner.apply(
+    WORK,
+    validationAmendment(
+      a,
+      {
+        state: runner.state,
+        signal: new AbortController().signal,
+        log: () => {},
+        keep: () => {},
+      },
+      undefined,
+      {},
+    ),
+  );
+  delete runner.state.kept["item:a:rebase"];
+  assert.deepEqual(runner.state.repairs[WORK].free, [2]);
+  assert.equal(runner.state.kept["item:a:refused"].amended, "validation-a-1");
+
+  await served1.run("the hold", () => runner.state.holds.length > 0);
+  const [held] = runner.state.holds;
+  assert.ok(
+    held.options.some((option) => option.answer === "revalidate"),
+    JSON.stringify(held.options),
+  );
+  // The refused result is checked again under the amended plan, no worker.
+  served1.answer(held, "revalidate");
+  await served1.run("the work step", () => runner.state.done[WORK]);
+  assert.equal(runner.state.done[WORK].commit, commit);
+  assert.equal(runner.state.done[WORK].tree, tree);
+  assert.equal(runner.state.kept["allowances:rereviews"], 1);
+  assert.equal(asked.length, 0);
+  assert.equal(prompts.length, 1);
 });

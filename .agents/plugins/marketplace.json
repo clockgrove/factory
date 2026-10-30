@@ -10,7 +10,7 @@
         "source": "git-subdir",
         "url": "https://github.com/clockgrove/factory.git",
         "path": "./plugin",
-        "ref": "v0.5.10"
+        "ref": "v0.5.11"
       },
       "policy": {
         "installation": "AVAILABLE",

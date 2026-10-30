@@ -18,9 +18,9 @@ import {
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { publish } from "../dist/delivery.js";
 import { originBound } from "../dist/git.js";
 import { GitHubError, githubOutcome } from "../dist/github.js";
-import { publish } from "../dist/delivery.js";
 import {
   APP_PERMISSIONS,
   appJwt,

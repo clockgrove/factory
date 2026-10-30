@@ -6,8 +6,8 @@
 // warns of it. Nothing here reaches the network: a fake gh stands in for the
 // release download and the attestation check, and npm runs offline.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   copyFileSync,

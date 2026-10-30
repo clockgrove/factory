@@ -15,8 +15,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { loadDefinition } from "../bench/lib/definition.mjs";
 import { HOME_ENV } from "../bench/lib/home.mjs";
 import {

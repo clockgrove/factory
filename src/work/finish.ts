@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { deleteFactoryBranch } from "../delivery.js";
+import { answeredBy, displayTime } from "../display.js";
 import {
   CANCEL_CLEANUP,
   type Held,
@@ -12,12 +13,12 @@ import {
 import { defaultHead } from "../git.js";
 import { GitHubError, issueGone, TransientError } from "../github.js";
 import { roleMemory } from "../knowledge/index.js";
-import { answeredBy, displayTime } from "../display.js";
 import { code, mentions } from "../markdown.js";
 import { validationMembers, verifyOriginMedia } from "../media.js";
 import { checkObjective } from "../objective.js";
 import { forceRemove } from "../paths.js";
 import { namedBase } from "../planning/facts.js";
+import { coverageCriterion, ownsPath } from "../planning/graph.js";
 import {
   acceptedInputs,
   currentPlan,
@@ -26,7 +27,6 @@ import {
   retiredLines,
 } from "../planning/plan.js";
 import { objectiveNotes } from "../planning/schedule.js";
-import { coverageCriterion, ownsPath } from "../planning/graph.js";
 import { REOPENED } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { moveStatusOffDone } from "../queue.js";

@@ -116,11 +116,14 @@ esac
   return { bin, nodeBin, log, pins, calls };
 }
 
-/** PATH without any real mise, so only a fake one is found. */
+/** PATH without any real mise or its shims, so only a fake one is found. */
 const withoutMise = (path) =>
   path
     .split(delimiter)
-    .filter((entry) => !existsSync(join(entry, "mise")))
+    .filter(
+      (entry) =>
+        !existsSync(join(entry, "mise")) && !/\/mise\/shims\/?$/.test(entry),
+    )
     .join(delimiter);
 
 test("the checkout's mise pins resolve in the checkout, global pins and missing tools apart; mise never installs or trusts", () => {

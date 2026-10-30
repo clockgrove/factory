@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
+import { workerCapability } from "../dist/planning/rubric.js";
 import { itemValidates, workers } from "../dist/planning/steps.js";
 import { shellPrompt } from "../dist/providers/claude-worker.js";
 import {
@@ -34,7 +35,6 @@ import {
   codexShellNote,
   codexWorkerHome,
 } from "../dist/providers/codex-worker.js";
-import { workerCapability } from "../dist/planning/rubric.js";
 import { profileWorker } from "../dist/providers/selection.js";
 import {
   criterionMap,

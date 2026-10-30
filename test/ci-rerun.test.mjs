@@ -5,8 +5,8 @@
 // kept rerun bound it, so a restart or GitHub's lag never reruns twice.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GitHubError } from "../dist/github.js";
 import { observeCi } from "../dist/delivery.js";
+import { GitHubError } from "../dist/github.js";
 import { fact, facts } from "../dist/work/facts.js";
 import { passedRerun, rerunOutcome } from "../dist/work/step-deliver.js";
 

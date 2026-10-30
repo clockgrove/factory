@@ -21,12 +21,12 @@ import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { observedRecords } from "../dist/knowledge/memory.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
+import { operatorAnswers } from "../dist/planning/plan.js";
 import {
   continuation,
   VALIDATE_REQUEST,
   validateRequest,
 } from "../dist/providers/claude-worker.js";
-import { operatorAnswers } from "../dist/planning/plan.js";
 import { correction, workerShellRule } from "../dist/repair.js";
 import { newObjective } from "../dist/state.js";
 import { discoveryOutcome } from "../dist/work/amend.js";

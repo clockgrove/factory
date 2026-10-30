@@ -1212,7 +1212,7 @@ export async function baseRerunWorkflow(
     try {
       others.set(other, parse((await files.text(other)) ?? ""));
     } catch {
-      continue;
+      // Skip a workflow that doesn't parse.
     }
   }
   // GitHub names a workflow without `name` by its path.

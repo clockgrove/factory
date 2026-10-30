@@ -34,9 +34,9 @@ import {
 import { factoryCommit, VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import type { MergeResult } from "./merged.js";
+import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { integrated, objectiveMerges } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
-import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { qaValidateStep } from "./step-qa.js";
 import {
   type BuildDeps,

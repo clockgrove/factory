@@ -48,7 +48,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "lint": "biome lint --error-on-warnings .",
+    "lint": "biome check --error-on-warnings --formatter-enabled=false .",
     "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
     "test": "npm run build && node --test --test-timeout=120000 test/*.test.mjs",

@@ -947,6 +947,8 @@ function fixture() {
         ]),
       ),
       "item:release-smoke:merge": { settled: "qa" },
+      // Final review passed: the step is done (a refusal holds it).
+      "final-review": true,
     },
     attempts: {},
     appliedRequests: [],

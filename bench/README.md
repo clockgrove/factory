@@ -216,7 +216,7 @@ In priority order. Each is read from the run log's events, the state and the run
    - `hedge`: one of a hedged pair, aborted as `hedged` because the other answered first.
    - `amendment`: a call of an amendment the plan rejected or left unchanged (the state's `amend:<id>` record).
    - `superseded`: a call of a result that a later attempt of the same step made again. A step's attempts up to one that ends `done` make one result; it is superseded when the step ends `done` again with no `repair` outcome sending work back to that step in between. A repair builds on the result it repairs (the worker's conversation and branch go on), so a repaired result is no waste; a review of a result its step then reviewed again, or an amendment's plan its review sent back, is.
-5. **`escapes`: stage escapes.** Defects caught later than the stage meant to catch them: `finalReviewRefusals` (final review refused the integrated result: an `objective-review` event `refused`), `handFixesAfterFinalReview` (hand fixes made after final review first started), and `graderFailedPassed` (criteria the grader failed although final review passed the result; null until graded). `total` sums them.
+5. **`escapes`: stage escapes.** Defects caught later than the stage meant to catch them: `finalReviewRefusals` (final review refused the integrated result: an `objective-review` event `refused`), `handFixesAfterFinalReview` (hand fixes made after final review first started), and `graderFailedPassed` (criteria the grader failed although final review passed the result, by `totals.final.reviewPassed`; null until graded). `total` sums them.
 6. **`cost`, a guard.** Each call's uncached input, cached input and output tokens (child threads included; reasoning is output) at its model's price from `definition.prices`: `{ usd, byModel, unpriced, unknownCalls }`. Null without prices; `usd` is null when any model has no price, never a partial sum.
 
 ### Diagnostics
@@ -252,7 +252,7 @@ The rest of the card, unchanged from version 2: shown after the outcomes, never 
   - `conflicts`: pushes that conflicted with their base branch before any check failed. They are rebased, not CI results.
   - `passedFirstTime`: pushes whose checks passed with no rerun, repair or hold.
   - `firstPassRate`: `passedFirstTime` over `published` less `conflicts`.
-- **`totals.final`.** Final validation runs and the final review.
+- **`totals.final`.** Final validation runs and the final review: `review` is the last logged review's outcome, and `reviewPassed` whether final review passed, from the state (its step is done). They can differ: when the operator's `accept <n>` answers settle every criterion, final review passes without logging a review.
 - **`items[]`.** The same numbers per Work Item, plus `activeWallMs` from its first step to its merge, less the excluded time. An amendment's calls count toward the Work Item whose worker proposed it. `objective` holds the calls of no Work Item.
 - **`operator`.** Every hold with its kind, step, asked and answered times, answer, `by` and `as`. Also the other operator actions: pause, resume, decline-discovery.
 - **`telemetry`.** The critical path, hedges, Factory's time breakdown, retries, validation commands, GitHub requests and cache rate per Work Item.

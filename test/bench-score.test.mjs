@@ -351,6 +351,7 @@ test("repairs, holds by kind, validation, CI and per Work Item", async () => {
     runs: 2,
     passed: 2,
     review: { outcome: "pass", criteria: 19 },
+    reviewPassed: true,
   });
   // The plan as amended: tokenizer's amendment added a criterion.
   assert.equal(totals.criteria, 19);

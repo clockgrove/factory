@@ -6,7 +6,14 @@
 // escapes and cost.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -318,6 +325,67 @@ test("grade: the stand-in grader's mixed verdicts on a fresh checkout at the end
     graderFailedPassed: 1,
   });
   assert.ok(!card.unavailable.some((gap) => gap.metric === "grade"));
+});
+
+test("escapes: final review passed by its step, not its last logged review", async () => {
+  /** The merged fixture with final review's last review, its call and its event, left out; `done` false: the step not done either. */
+  const variant = (done) =>
+    fixtureCopy((stateDir) => {
+      cpSync(merged, stateDir, { recursive: true });
+      const file = join(stateDir, "objectives", "finished", "42.json");
+      const state = JSON.parse(readFileSync(file, "utf8"));
+      if (!done) delete state.done["final-review"];
+      writeFileSync(file, JSON.stringify(state));
+      const logs = join(stateDir, "logs", "42");
+      for (const name of readdirSync(logs)) {
+        const lines = readFileSync(join(logs, name), "utf8")
+          .split("\n")
+          .filter(
+            (line) =>
+              !(
+                line.includes('"attemptId":"final-review#3"') &&
+                line.includes("objective-review")
+              ),
+          );
+        writeFileSync(join(logs, name), lines.join("\n"));
+      }
+    });
+  const graded = definitionWith("settled");
+  const escapes = async (stateDir) => {
+    const card = await fixtureCard({ source: "harness" }, stateDir, {
+      checkout: repo.checkout,
+    });
+    await gradeCard(card, graded, { repo: repo.checkout });
+    rmSync(dirname(stateDir), { recursive: true, force: true });
+    return [card.totals.final, card.escapes];
+  };
+  // The operator answered the refusal with `accept <n>`: every criterion
+  // settled, final review passed without a review, and the last one logged
+  // is the refusal. The row limit the grader fails still escaped it.
+  assert.deepEqual(await escapes(variant(true)), [
+    {
+      runs: 2,
+      passed: 2,
+      review: { outcome: "refused", criteria: 19 },
+      reviewPassed: true,
+    },
+    {
+      total: 3,
+      finalReviewRefusals: 1,
+      handFixesAfterFinalReview: 1,
+      graderFailedPassed: 1,
+    },
+  ]);
+  // Final review never passed (the Objective ended on its refusal): what
+  // the grader fails didn't get past it.
+  const [final, never] = await escapes(variant(false));
+  assert.equal(final.reviewPassed, false);
+  assert.deepEqual(never, {
+    total: 2,
+    finalReviewRefusals: 1,
+    handFixesAfterFinalReview: 1,
+    graderFailedPassed: 0,
+  });
 });
 
 test("grade: a grader that fails, times out or writes nonsense is an error, never a rate", async () => {

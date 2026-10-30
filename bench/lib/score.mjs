@@ -410,7 +410,16 @@ export async function scoreRun({
   const validated = new Set();
   /** Each step's latest hold kind. */
   const lastHold = new Map();
-  const final = { runs: 0, passed: 0, review: null };
+  // Final review passed when its step is done, not by its last logged
+  // outcome: a review whose criteria the operator's answers all settled
+  // (`accept <n>` to a refusal or a needs-human hold) passes without one
+  // (review/result.ts).
+  const final = {
+    runs: 0,
+    passed: 0,
+    review: null,
+    reviewPassed: Boolean(state.done?.["final-review"]),
+  };
   let modelMs = 0;
   let costUsd = 0;
   let costed = 0;
@@ -1080,7 +1089,7 @@ export async function scoreRun({
       refusals,
       handFixesAfter: fixes.filter((fix) => fix.afterFinalReview).length,
       grade: null,
-      finalPassed: final.review?.outcome === "pass",
+      finalPassed: final.reviewPassed,
     }),
     cost,
     totals: {

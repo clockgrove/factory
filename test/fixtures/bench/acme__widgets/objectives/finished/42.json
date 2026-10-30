@@ -311,7 +311,8 @@
     },
     "item:release-smoke:merge": {
       "settled": "qa"
-    }
+    },
+    "final-review": true
   },
   "attempts": {},
   "appliedRequests": [],

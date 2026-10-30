@@ -772,7 +772,7 @@ ${table(
     ],
     [
       "Final validation, final review",
-      `${t.final.passed} of ${t.final.runs} passed; ${t.final.review ? `${t.final.review.outcome}, ${t.final.review.criteria} criteria` : "n/a"}`,
+      `${t.final.passed} of ${t.final.runs} passed; ${t.final.review ? `${t.final.review.outcome}, ${t.final.review.criteria} criteria` : "n/a"}${t.final.reviewPassed && t.final.review?.outcome !== "pass" ? "; passed on the operator's answers" : ""}`,
     ],
     [
       "Hedged calls (lost, tokens)",

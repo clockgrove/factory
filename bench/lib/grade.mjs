@@ -313,7 +313,7 @@ export function setGrade(card, grade) {
     refusals: card.escapes.finalReviewRefusals,
     handFixesAfter: card.escapes.handFixesAfterFinalReview,
     grade,
-    finalPassed: card.totals.final.review?.outcome === "pass",
+    finalPassed: card.totals.final.reviewPassed === true,
   });
   card.unavailable = [
     ...ungraded(card),

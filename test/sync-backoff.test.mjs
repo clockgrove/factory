@@ -3,10 +3,11 @@
 // Objective that finished while GitHub's rate limit was spent are still
 // written, and a check-only item's issue, which no PR closes, is closed;
 // a withdrawal's comment edit is made, so the service can let the run go.
-// GitHub is a fake; the clock is the test's.
+// One GitHub keeps answering "Something went wrong" gives up after three
+// failures. GitHub is a fake; the clock is the test's.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TransientError } from "../dist/github.js";
+import { TransientError, TryAgain } from "../dist/github.js";
 import { GitHubSync } from "../dist/github-sync.js";
 import { Jobs } from "../dist/jobs.js";
 import { mark } from "../dist/markdown.js";
@@ -229,6 +230,80 @@ test("a finished Objective's status and Work Item issues are written after a rat
   assert.ok(state.modules.github.tracking.items["integrated-test"].closed);
   assert.equal(trackingDue(state, clock), false);
   assert.ok(comments.has(mark(issue, "status", startedAt)));
+});
+
+test('a tracking job GitHub keeps answering "Something went wrong" gives up after three failures', async () => {
+  const issue = 5;
+  const startedAt = "2026-10-27T01:41:25.238Z";
+  let clock = Date.parse("2026-10-27T01:44:00.000Z");
+  const events = [];
+  let asked = 0;
+  // The role labels are found; every GraphQL call answers GitHub's
+  // "Something went wrong" (github.ts sends it as a TryAgain), which it
+  // also answers for its timeouts and its own bugs.
+  const github = {
+    repository: REPO,
+    owner: REPO.split("/")[0],
+    name: REPO.split("/")[1],
+    rest: async () => ({}),
+    graphqlPartial: async () => {
+      asked += 1;
+      throw new TryAgain(
+        "GitHub GraphQL: Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug.",
+      );
+    },
+  };
+  // A finished Objective whose item's issue is still to be shown.
+  const state = {
+    version: 9,
+    issue,
+    status: "done",
+    holds: [],
+    answers: {},
+    repairs: {},
+    kept: {},
+    attempts: {},
+    appliedRequests: [],
+    retries: {},
+    done: { plan: plan([item("pair")]) },
+    modules: { github: { itemId: "I_5", commentsSince: startedAt } },
+    startedAt,
+    ended: { at: "2026-10-27T01:43:59.000Z" },
+    updatedAt: startedAt,
+  };
+  const runner = {
+    state,
+    settled: true,
+    blocked: () => false,
+    transact: (change) => change(),
+  };
+  const sync = syncOf(github, events, () => clock);
+  const failures = () =>
+    events.filter(
+      (event) =>
+        event.event === "github-sync" && event.job === `track:${issue}`,
+    ).length;
+  // Each pass fails; the next runs once its backoff is over.
+  for (let pass = 1; pass <= 3; pass++) {
+    await until(() => {
+      sync.track(runner);
+      return failures() === pass;
+    }, `failed pass ${pass}`);
+    clock += 60_000;
+  }
+  await until(
+    () => state.modules.github.trackingGivenUp === true,
+    "tracking given up",
+  );
+  const given = events.filter((event) => event.event === "tracking-given-up");
+  assert.equal(given.length, 1);
+  assert.equal(given[0].failures, 3);
+  assert.match(given[0].error, /Something went wrong/);
+  // Given up, it is not tried again this run.
+  clock += 60_000;
+  sync.track(runner);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(asked, 3);
 });
 
 test("a withdrawal whose comment edit failed is shown once its backoff ends", async () => {

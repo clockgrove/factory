@@ -27,7 +27,8 @@ import {
   QueueDisplay,
   queueIssue,
 } from "../dist/queue.js";
-import { REPO } from "./helpers.mjs";
+import { track } from "../dist/tracking.js";
+import { item, plan, REPO } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -153,6 +154,87 @@ test("a conflict that lasts surfaces as the TransientError after three tries", a
   assert.equal(requests.length, 3);
   // Paused 1 s, then 2 s.
   assert.ok(requests[2] - requests[0] >= 2900, `${requests[2] - requests[0]}`);
+});
+
+test("a Work Item's card GitHub answers with a conflict once still lands: the item gets its card", async () => {
+  const startedAt = "2026-10-27T01:41:25.238Z";
+  const events = [];
+  let adds = 0;
+  const [owner, name] = REPO.split("/");
+  // The role labels and types are found; the card's add answers a
+  // conflict once, then adds it. The issue's other writes land.
+  const github = {
+    repository: REPO,
+    owner,
+    name,
+    rest: async () => ({}),
+    graphqlPartial: async () => ({
+      data: { repository: { issueTypes: { nodes: [] } } },
+    }),
+    async graphql(query) {
+      assert.match(query, /addProjectV2ItemById/);
+      adds += 1;
+      if (adds === 1) throw new TryAgain(`GitHub GraphQL: ${CONFLICT}`);
+      return { addProjectV2ItemById: { item: { id: "PVTI_card" } } };
+    },
+    editIssue: async () => {},
+    upsertComment: async () => ({}),
+  };
+  // A building Objective whose item's issue is recorded without its card.
+  const state = {
+    version: 9,
+    issue: 3,
+    status: "building",
+    holds: [],
+    answers: {},
+    repairs: {},
+    kept: {},
+    attempts: {},
+    appliedRequests: [],
+    retries: {},
+    done: { plan: plan([item("pair")]) },
+    modules: {
+      github: {
+        itemId: "I_3",
+        commentsSince: startedAt,
+        tracking: {
+          items: {
+            pair: {
+              issue: 9,
+              id: 9009,
+              node: "I_9",
+              body: "as created",
+              parent: true,
+              blockedBy: [],
+              labels: [],
+            },
+          },
+          objective: { priority: [] },
+          untyped: true,
+          project: "P_item_card",
+        },
+      },
+    },
+    startedAt,
+    updatedAt: startedAt,
+  };
+  await track({
+    github,
+    state: () => state,
+    issueType: { objective: "Objective", workItem: "Task" },
+    save: (change) => change(state.modules.github.tracking),
+    log: (event) => events.push(event),
+    signal: new AbortController().signal,
+  });
+  assert.equal(adds, 2);
+  const { tracking } = state.modules.github;
+  assert.equal(tracking.items.pair.card, true);
+  assert.equal(tracking.items.pair.cardItem, "PVTI_card");
+  assert.equal(tracking.uncarded, undefined);
+  assert.deepEqual(
+    events.filter((event) => event.event === "item-card-refused"),
+    [],
+  );
 });
 
 test("a write that isn't GitHub's passing failure is never tried again", async () => {

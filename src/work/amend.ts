@@ -25,10 +25,11 @@ import type { RepairFinding } from "../repair.js";
 import type { Answer, HoldOption, ObjectiveState } from "../state.js";
 import { failureExcerpt } from "../text.js";
 import type { Collection } from "./collect.js";
-import { fact, facts, written } from "./facts.js";
+import { fact, facts, type ItemFacts, written } from "./facts.js";
 import { refusedOf } from "./refused.js";
 import {
   diagnosisQuestion,
+  freed,
   mergedBlame,
   missingPrerequisite,
 } from "./repair-context.js";
@@ -347,14 +348,49 @@ export const DEPEND: HoldOption = {
     "Asks the planner to amend the plan so this Work Item depends on the one that provides its missing prerequisite, reviewed independently; uses a planning revision, and the Work Item waits for that one's merge, then runs again on the default branch with no repair charged.",
 };
 
-/** The amendment `depend` proposes from repair `repair`'s missing prerequisite. */
+/** The amendment a missing prerequisite of repair `repair` proposes. */
 export const prerequisiteAmendmentId = (itemId: string, repair: number) =>
   `prerequisite-${itemId}-${repair}`;
 
 /**
- * A repair diagnosis's missing prerequisite answered `depend`
- * (repair-context.ts `missingPrerequisite`): propose amendment
- * `prerequisite-<item>-<repair>`, which makes the item depend on the
+ * A repair diagnosis's missing prerequisite (repair-context.ts
+ * `repairContext`), its repair `free`: proposed at once as amendment
+ * `prerequisite-<item>-<repair>` by the diagnosis, with no question, as a
+ * worker's discovery is, and the amendment's review judges it
+ * (`prerequisiteAmendment` reads its outcome). It asks instead
+ * (`missingPrerequisite`, offering `depend` where it would) while the
+ * provider has a question open, when the dependency would change a started
+ * native stack (`found.stack`), when this repair's amendment was proposed
+ * already, or when intake refuses the proposal.
+ */
+export function diagnosedPrerequisite(
+  state: ObjectiveState,
+  item: WorkItem,
+  found: NonNullable<ItemFacts["prerequisite"]>,
+): Outcome {
+  const asks =
+    found.stack !== undefined ||
+    state.holds.some((hold) => hold.item === found.provider) ||
+    amendmentStatus(state, prerequisiteAmendmentId(item.id, found.repair));
+  return freed(
+    asks
+      ? missingPrerequisite(state, item, found)
+      : proposePrerequisite(
+          state,
+          item,
+          found,
+          `Work Item ${item.id}'s repair diagnosis`,
+          {},
+        ),
+    stepKey(item.id, "work"),
+    found.repair,
+  );
+}
+
+/**
+ * The outcome of a missing prerequisite's amendment, or the operator's
+ * `depend` to its question (repair-context.ts `missingPrerequisite`),
+ * which proposes it as theirs. The amendment makes the item depend on the
  * provider (`AmendmentProposal.prerequisite`; its fence refuses a round
  * that doesn't) with its own review. The item waits for its outcome, as
  * for a discovery. Accepted, the item depends on the provider, so it
@@ -362,8 +398,8 @@ export const prerequisiteAmendmentId = (itemId: string, repair: number) =>
  * plan (`amendedAttempt`) moves its change onto the default branch with
  * the provider's result and checks it again, its refused change replayed,
  * which may end on the same tree. Rejected and continued past, or settled
- * with the plan unchanged, it asks again without `depend`. Undefined: the
- * repair goes on as usual.
+ * with the plan unchanged, it asks once more without `depend`, and its
+ * answer goes on as usual. Undefined: the repair goes on as usual.
  */
 export function prerequisiteAmendment(
   item: WorkItem,
@@ -375,22 +411,23 @@ export function prerequisiteAmendment(
   const repair = state.repairs?.[stepKey(item.id, "work")]?.count ?? 0;
   const found = fact(state, "prerequisite", item.id);
   if (!found || found.repair !== repair) return undefined;
-  const id = prerequisiteAmendmentId(item.id, repair);
-  const amendment = amendmentStatus(state, id);
+  const amendment = amendmentStatus(
+    state,
+    prerequisiteAmendmentId(item.id, repair),
+  );
   if (amendment?.status === "accepted")
     return amendedAttempt(item, state, place, amendment.id, keep);
+  // Asked once: with the fact gone, its answer goes on as usual.
   if (amendment?.status === "continued")
-    return answer?.answer === DEPEND.answer
-      ? withKeep(
-          missingPrerequisite(
-            state,
-            item,
-            found,
-            `Amendment ${amendment.id} didn't change the plan, which continues as it is.`,
-          ),
-          keep,
-        )
-      : undefined;
+    return withKeep(
+      missingPrerequisite(
+        state,
+        item,
+        found,
+        `Amendment ${amendment.id} didn't change the plan, which continues as it is.`,
+      ),
+      { ...keep, ...facts({ prerequisite: null }, item.id) },
+    );
   if (amendment)
     return {
       kind: "retry",
@@ -401,6 +438,20 @@ export function prerequisiteAmendment(
   // A started native stack's layers keep it from being offered.
   if (answer?.answer !== DEPEND.answer || found.stack !== undefined)
     return undefined;
+  return proposePrerequisite(state, item, found, answer.by, keep);
+}
+
+/**
+ * Take in amendment `prerequisite-<item>-<repair>` for `found`, as
+ * `actor`'s; else ask (`missingPrerequisite`) with why.
+ */
+function proposePrerequisite(
+  state: ObjectiveState,
+  item: WorkItem,
+  found: NonNullable<ItemFacts["prerequisite"]>,
+  actor: string,
+  keep: Record<string, unknown>,
+): Outcome {
   // The files it cites are read from the failed result, or the item's start.
   const commit =
     refusedOf(state, item.id)?.commit ?? fact(state, "base", item.id);
@@ -408,8 +459,8 @@ export function prerequisiteAmendment(
   return propose(
     state,
     {
-      id,
-      actor: answer.by,
+      id: prerequisiteAmendmentId(item.id, found.repair),
+      actor,
       at: new Date().toISOString(),
       plan: String(state.kept[ACCEPTED_AT]),
       discovery: {

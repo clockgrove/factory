@@ -27,6 +27,7 @@ import { hasGitlink } from "../worktree.js";
 import {
   AMEND,
   DEPEND,
+  diagnosedPrerequisite,
   prerequisiteAmendmentId,
   REPLACE_FOR_REPAIR,
   validationAmendmentId,
@@ -181,8 +182,8 @@ export async function repairContext(
     return {
       outcome: blameOutcome(state, deps, item, result, history.count, saved),
     };
-  // Not this item's own work either: its repair is free, and it asks to
-  // depend on the provider.
+  // Not this item's own work either: its repair is free, and an amendment
+  // makes it depend on the provider (amend.ts `diagnosedPrerequisite`).
   if (result.kind === "prerequisite") {
     // A native stack's layers stay as they are, so a dependency that
     // changes a started one can't be amended in.
@@ -204,11 +205,7 @@ export async function repairContext(
     };
     return {
       outcome: withKeep(
-        freed(
-          missingPrerequisite(state, item, found),
-          stepKey(item.id, "work"),
-          history.count,
-        ),
+        diagnosedPrerequisite(state, item, found),
         facts({ prerequisite: found }, item.id),
       ),
     };
@@ -518,9 +515,11 @@ export function blameOutcome(
     : outcome;
 }
 
-/** `asked`, when it holds, with repair `repair` of `target` free. */
+/** `asked`, when it holds or proposes (a retry), with repair `repair` of `target` free. */
 export function freed(asked: Outcome, target: string, repair: number): Outcome {
-  return asked.kind === "hold" ? { ...asked, free: { target, repair } } : asked;
+  return asked.kind === "hold" || asked.kind === "retry"
+    ? { ...asked, free: { target, repair } }
+    : asked;
 }
 
 /**
@@ -563,12 +562,13 @@ export function mergedBlame(
 /**
  * The diagnosis found the item's failure is a missing prerequisite that
  * Work Item `found.provider`, which it doesn't depend on, provides
- * (#2233): no repair of the item can fix it, and guidance to its worker
- * can't either, so it asks. `depend` (once per repair; past the allowance
- * its planning asks for `more`) proposes an amendment that makes the item
- * depend on the provider (amend.ts `prerequisiteAmendment`): the item then
- * waits for the provider's merge and runs again on the default branch with
- * it. `note` says why `depend` isn't offered. Nor is it under native-stack
+ * (#2233), and its amendment wasn't proposed at once (amend.ts
+ * `diagnosedPrerequisite`): no repair of the item can fix it, and guidance
+ * to its worker can't either, so it asks. `depend` (once per repair; past
+ * the allowance its planning asks for `more`) proposes the amendment that
+ * makes the item depend on the provider (amend.ts `prerequisiteAmendment`):
+ * the item then waits for the provider's merge and runs again on the
+ * default branch with it. `note` says why `depend` isn't offered. Nor is it under native-stack
  * delivery when the dependency would change a started stack's layers
  * (`found.stack`), which no amendment may: the question says so.
  */

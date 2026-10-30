@@ -603,8 +603,10 @@ export class GitHub {
 
   /**
    * The response's body. Its headers came, but the body can still fail
-   * (a socket reset, the deadline, truncated JSON): that is a
-   * TransientError like any network failure, so it retries.
+   * (a socket reset, the deadline), or not be JSON (truncated, a proxy's
+   * page): either is a TransientError like any network failure, so it
+   * retries. Only a body that failed to arrive is traced as a failed
+   * request; a parser's message, which quotes the body, is never kept.
    */
   private async body(
     response: Response,
@@ -613,8 +615,26 @@ export class GitHub {
     signal: AbortSignal | undefined,
     as: "json" | "text",
   ): Promise<unknown> {
+    const text = await this.bodyText(response, method, path, signal);
+    if (as === "text") return text;
     try {
-      return as === "json" ? await response.json() : await response.text();
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new TransientError(
+        `GitHub ${method} ${path}: the answer's body isn't JSON (${response.headers.get("content-type")?.slice(0, 80) ?? "no content type"}, ${text.length} characters)`,
+      );
+    }
+  }
+
+  /** The response's body as text; a body cut short is traced with its cause. */
+  private async bodyText(
+    response: Response,
+    method: string,
+    path: string,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    try {
+      return await response.text();
     } catch (error) {
       if (signal?.aborted) throw error;
       // A failed request after all: its one trace line says why.

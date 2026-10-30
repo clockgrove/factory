@@ -345,6 +345,47 @@ test("a body cut short is traced as a failed request with its cause", async () =
   assert.equal(events[0].address, `127.0.0.1:${port}`);
 });
 
+test("a whole answer that isn't JSON is no network failure, and its body is never quoted", async () => {
+  const github = await client();
+  for (const [type, page] of [
+    ["text/html", "<!DOCTYPE html><html>synthetic-portal</html>"],
+    ["application/json", ""],
+    ["application/json", '{"id":'],
+  ]) {
+    answer = (_req, res) => {
+      res.writeHead(200, { "content-type": type });
+      res.end(page);
+    };
+    const counted = newTransport();
+    const error = await transport
+      .run(counted, () => github.rest("GET", PATH))
+      .then(
+        () => assert.fail("the request succeeded"),
+        (thrown) => thrown,
+      );
+    assert.ok(error instanceof TransientError, String(error));
+    assert.equal(
+      error.message,
+      `GitHub GET ${PATH}: the answer's body isn't JSON (${type}, ${page.length} characters)`,
+    );
+    assert.equal(counted.failed, 0);
+    const events = requestEvents("sync", counted);
+    assert.ok(
+      events.every(
+        (event) =>
+          event.category === undefined &&
+          event.cause === undefined &&
+          event.codes === undefined,
+      ),
+      JSON.stringify(events),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(events),
+      /synthetic-portal|DOCTYPE|JSON input/,
+    );
+  }
+});
+
 test("a request the caller aborts records no cause", async () => {
   const github = await client();
   answer = () => {};

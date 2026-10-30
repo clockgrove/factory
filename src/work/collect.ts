@@ -31,9 +31,10 @@ import {
   type WorkDiscovery,
   workDiscoveryProblem,
 } from "../planning/amendments.js";
-import { isRecord, ownsPath, resultCriteria } from "../planning/graph.js";
+import { isRecord, ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS, type DesignRisk } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
+import { resultCriteria } from "../review/result.js";
 import { candidateBounds } from "../sandbox.js";
 import { errorMessage } from "../text.js";
 import {

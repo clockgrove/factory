@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { type MediaInput, needsSelection, stageInputs } from "../media.js";
 import { forceRemove } from "../paths.js";
 import { BaseFiles, sectionText } from "../planning/facts.js";
-import { resultCriteria } from "../planning/graph.js";
 import { operatorAnswers } from "../planning/plan.js";
 import { packageManagerInstructions } from "../planning/prompts.js";
 import { DESIGN_CHECKLIST, ENGINEERING_STANDARD } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { type PromptFacts, sourceDigest } from "../providers/usage.js";
+import { resultCriteria } from "../review/result.js";
 import { hostGit } from "../worktree.js";
 import { VALIDATION_TOOL_NAME } from "./validate-tool.js";
 import {
@@ -380,9 +380,10 @@ function numberedAcceptance(acceptance: readonly string[]): string {
 /**
  * The exact Work Item terms a worker must keep in view for its whole
  * attempt. Its Acceptance is every criterion its result review judges
- * (planning/graph.ts resultCriteria), numbered as that review numbers
+ * (review/result.ts `resultCriteria`), numbered as that review numbers
  * them: the item's own acceptance, then each Objective criterion or source
- * exit item its review proves, word for word as the review reads it.
+ * exit item its review proves, word for word as the review reads it, so an
+ * acceptance entry that only paraphrases one can't stand in for it (#2197).
  */
 export function workItemContract(
   plan: Pick<Plan, "items" | "coverage">,
@@ -390,9 +391,10 @@ export function workItemContract(
 ): string {
   const criteria = resultCriteria(plan, item);
   const own = item.acceptance.length;
+  const one = criteria.length - own === 1;
   const obligations =
     criteria.length > own
-      ? `\nCriteria [${own}] to [${criteria.length - 1}] are what this item's result review also proves for the Objective, exactly as their source states them: meet each as written, every value and example in it included, as you meet the ones before.`
+      ? `\n${one ? `Criterion [${own}] is` : `Criteria [${own}] to [${criteria.length - 1}] are`} also judged by this item's result review for the Objective, quoted exactly as the source states ${one ? "it" : "them"}: meet ${one ? "it" : "each"} as written, every value and example included. Where an entry before restates ${one ? "it" : "one"} in other words, the quoted text is what is judged.`
       : "";
   return `Title: ${item.title}\nGoal: ${item.goal}\nAcceptance:\n${numberedAcceptance(criteria)}${obligations}\nOwned paths:\n${item.ownedPaths.join("\n")}`;
 }

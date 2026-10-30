@@ -1,21 +1,28 @@
 // A worker is held to every criterion its result review judges, so it gets
-// them all, numbered as the review numbers them (#2175). In run
-// 2026-10-28T204933PDT-180b (Claude lane, main, happy.claude), the plan's
-// acceptance for the counter item paraphrased the Objective criterion as
-// "including the pinned examples for "banana", "Banana", and the empty
-// string" and covered the criterion itself with a result-semantic proof.
-// The worker's prompt listed only the paraphrase and cited no OBJECTIVE, so
-// it never saw that `countCharQudbz("Banana", "b")` is `0`: it tested
-// ("Banana", "a") instead, and final review refused the Objective criterion.
+// them all, numbered as the review numbers them (#2197). Live, a plan's
+// acceptance for a counter item paraphrased the Objective criterion as
+// "including the pinned examples for ..." without the values, and covered
+// the criterion itself with a result-semantic proof. The worker's prompt
+// listed only the paraphrase, so it never saw one pinned example's exact
+// arguments: it tested others, and final review refused the Objective
+// criterion. Its verification notes couldn't even name that criterion: the
+// collector bounded criterionIndex by the item's own acceptance.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { correction } from "../dist/repair.js";
 import { resultCriteria } from "../dist/review/result.js";
-import { readHandoffNotes } from "../dist/work/collect.js";
+import {
+  handoffPeers,
+  maxHandoffSources,
+  readHandoffNotes,
+  workHandoffSchema,
+} from "../dist/work/collect.js";
 import { prepareWorkPrompt, workItemContract } from "../dist/work/prompt.js";
+import { SelfValidation } from "../dist/work/self-validate.js";
 import { item, plan, tempDir } from "./helpers.mjs";
 
 const git = (cwd, ...args) => {
@@ -39,20 +46,20 @@ function repository() {
 }
 
 const CRITERION =
-  '`countCharQudbz(s, ch)` returns how many times the single character `ch` occurs in `s`, case-sensitive: `countCharQudbz("banana", "a")` is `3`, `countCharQudbz("Banana", "b")` is `0` and `countCharQudbz("", "a")` is `0`.';
+  '`tallyChar(s, ch)` returns how many times the single character `ch` occurs in `s`, case-sensitive: `tallyChar("level", "e")` is `2`, `tallyChar("Level", "l")` is `1` and `tallyChar("", "e")` is `0`.';
 const PARAPHRASE =
-  '`countCharQudbz(s, ch)` returns the number of occurrences of the single character `ch` in `s`, case-sensitively, including the pinned examples for `"banana"`, `"Banana"`, and the empty string.';
-const TESTS = "The dedicated `countCharQudbz` tests pass under `npm test`.";
+  '`tallyChar(s, ch)` returns the number of occurrences of the single character `ch` in `s`, case-sensitively, including the pinned examples for `"level"`, `"Level"`, and the empty string.';
+const TESTS = "The dedicated `tallyChar` tests pass under `npm test`.";
 
-const counter = item("countCharQudbz", {
+const counter = item("tallyChar", {
   acceptance: [PARAPHRASE, TESTS],
-  ownedPaths: ["src/countCharQudbz.js", "test/countCharQudbz.test.js"],
+  ownedPaths: ["src/tallyChar.js", "test/tallyChar.test.js"],
   validation: [{ command: "npm test" }],
 });
 const qa = item("integratedNpmTest", {
   kind: "qa",
   acceptance: ["`npm test` passes on the integrated result."],
-  dependencies: ["countCharQudbz"],
+  dependencies: ["tallyChar"],
   validation: [{ command: "npm test" }],
 });
 
@@ -80,7 +87,15 @@ function covered(acceptance = counter.acceptance, fields = {}) {
   };
 }
 
-test("the worker's Acceptance is every criterion its result review judges, the Objective's own text after the item's (#2175)", async () => {
+const note = (criterionIndex) => ({
+  kind: "verification",
+  criterionIndex,
+  summary: `criterion ${criterionIndex}: test/tallyChar.test.js:6-8`,
+  paths: ["test/tallyChar.test.js"],
+  consumerIndices: [],
+});
+
+test("the worker's Acceptance is every criterion its result review judges, the Objective's own text after the item's (#2197)", async () => {
   const { worktree, base } = repository();
   const { work, accepted } = covered();
   accepted.base = base;
@@ -101,19 +116,49 @@ test("the worker's Acceptance is every criterion its result review judges, the O
     fixedScripts: [],
   });
   assert.equal(prepared.problem, undefined);
+  // The same contract is the Claude worker's system prompt.
   const contract = workItemContract(accepted, work);
   assert.ok(prepared.prompt.includes(contract));
   assert.ok(
     contract.includes(
-      `Acceptance:\n[0] ${PARAPHRASE}\n[1] ${TESTS}\n[2] ${CRITERION}\nCriteria [2] to [2] are what this item's result review also proves for the Objective, exactly as their source states them: meet each as written, every value and example in it included, as you meet the ones before.\nOwned paths:\n`,
+      `Acceptance:\n[0] ${PARAPHRASE}\n[1] ${TESTS}\n[2] ${CRITERION}\nCriterion [2] is also judged by this item's result review for the Objective, quoted exactly as the source states it: meet it as written, every value and example included. Where an entry before restates it in other words, the quoted text is what is judged.\nOwned paths:\n`,
     ),
     contract,
   );
   // The pinned example the paraphrase dropped reaches the worker.
-  assert.ok(prepared.prompt.includes('`countCharQudbz("Banana", "b")` is `0`'));
+  assert.ok(prepared.prompt.includes('`tallyChar("Level", "l")` is `1`'));
+  // Its handoff schema and file bound count all three.
+  assert.ok(
+    prepared.prompt.includes(
+      JSON.stringify(workHandoffSchema(handoffPeers(accepted, work).length, 3)),
+    ),
+    "the handoff schema counts the review's criteria",
+  );
+  assert.ok(
+    prepared.prompt.includes(
+      `All notes together may cite at most ${maxHandoffSources(3)} distinct files.`,
+    ),
+  );
 });
 
-test("an item whose acceptance states the covered criterion word for word keeps its contract as it was (#2175)", () => {
+test("more than one covered criterion is named as a range (#2197)", () => {
+  const second =
+    "`tallyChar` throws a `TypeError` when `ch` is not one character.";
+  const { work, accepted } = covered();
+  accepted.coverage.push({
+    source: { path: "OBJECTIVE", text: second },
+    itemId: work.id,
+    proof: { kind: "integrated-semantic" },
+    environment: null,
+  });
+  assert.ok(
+    workItemContract(accepted, work).includes(
+      `[2] ${CRITERION}\n[3] ${second}\nCriteria [2] to [3] are also judged by this item's result review for the Objective, quoted exactly as the source states them: meet each as written`,
+    ),
+  );
+});
+
+test("an item whose acceptance states the covered criterion word for word keeps its contract as it was (#2197)", () => {
   const { work, accepted } = covered([CRITERION, TESTS]);
   assert.deepEqual(resultCriteria(accepted, work), [CRITERION, TESTS]);
   assert.equal(
@@ -122,16 +167,9 @@ test("an item whose acceptance states the covered criterion word for word keeps 
   );
 });
 
-test("a verification note for a covered Objective criterion decodes at its review's index, and one past it is refused (#2175)", async () => {
+test("a verification note for a covered Objective criterion decodes at its review's index, and one past it is refused (#2197)", async () => {
   const { worktree } = repository();
   const { work, accepted } = covered();
-  const note = (criterionIndex) => ({
-    kind: "verification",
-    criterionIndex,
-    summary: `criterion ${criterionIndex}: test/countCharQudbz.test.js:6-8`,
-    paths: ["test/countCharQudbz.test.js"],
-    consumerIndices: [],
-  });
   const manifest = join(worktree, ".factory-handoff.json");
   writeFileSync(manifest, JSON.stringify({ notes: [0, 1, 2].map(note) }));
   const notes = await readHandoffNotes(worktree, accepted, work);
@@ -145,5 +183,91 @@ test("a verification note for a covered Objective criterion decodes at its revie
   assert.match(
     refused.problem,
     /criterionIndex 3 names no acceptance criterion of this Work Item \(it has 3\)/,
+  );
+});
+
+test("Validate's criterion map sets the covered Objective criterion's exact text beside its note (#2197)", async () => {
+  const { worktree } = repository();
+  const { work, accepted } = covered();
+  const signal = new AbortController().signal;
+  const validation = new SelfValidation(
+    { worktree, item: work, signal, log: () => {} },
+    { plan: accepted },
+    signal,
+  );
+  const none = await validation.checkHandoff();
+  assert.match(none.text, /for each of the 3 acceptance criteria/);
+  assert.ok(
+    none
+      .criteria(Number.POSITIVE_INFINITY)
+      .includes(`[2] ${CRITERION}\nnote [2]: none recorded`),
+  );
+  writeFileSync(
+    join(worktree, ".factory-handoff.json"),
+    JSON.stringify({ notes: [0, 1].map(note) }),
+  );
+  const partial = await validation.checkHandoff();
+  assert.equal(partial.passed, true, partial.text);
+  assert.match(
+    partial.text,
+    /verification notes for 2 of 3 acceptance criteria/,
+  );
+  const map = partial.criteria(Number.POSITIVE_INFINITY);
+  assert.match(map, /No note yet for criteria 2\./);
+  assert.ok(map.includes(`[2] ${CRITERION}\nnote [2]: none recorded`), map);
+});
+
+test("a review refusal of the covered Objective criterion reaches the repair at its Acceptance number (#2197)", async () => {
+  const { work, accepted } = covered();
+  const result = await correction({
+    planner: {
+      answer: async () => {
+        throw new Error("diagnosis called");
+      },
+    },
+    plan: accepted,
+    item: work,
+    finding: {
+      kind: "review",
+      tree: "a".repeat(40),
+      refused: [
+        {
+          criterionIndex: 2,
+          criterion: CRITERION,
+          source: "model",
+          detail: 'no test asserts tallyChar("Level", "l") is 1',
+          question: "",
+          evidence: [
+            {
+              path: "test/tallyChar.test.js",
+              origin: "candidate",
+              complete: true,
+            },
+          ],
+        },
+      ],
+    },
+    checkout: "/nonexistent",
+    base: "0".repeat(40),
+    commit: "1".repeat(40),
+    sources: [],
+    prior: [],
+    validate: true,
+    signal: new AbortController().signal,
+    log() {},
+  });
+  assert.equal(result.kind, "correction", JSON.stringify(result));
+  assert.equal(result.correction.source, "review-findings");
+  const findings = JSON.parse(
+    result.correction.correction.slice(
+      result.correction.correction.indexOf("\n") + 1,
+    ),
+  );
+  assert.deepEqual(
+    findings.map(({ criterionIndex, criterion }) => [
+      criterionIndex,
+      criterion,
+    ]),
+    [[2, CRITERION]],
   );
 });

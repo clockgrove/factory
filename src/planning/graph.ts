@@ -4,7 +4,6 @@ import type {
   Draft,
   Finding,
   PinnedSource,
-  Plan,
   WorkItem,
 } from "./types.js";
 
@@ -79,33 +78,6 @@ export function sourceLines(
 export function coverageCriterion(entry: CoverageObligation): string {
   // A source exit item always has a statement; an Objective criterion its text.
   return entry.statement ?? entry.source.text ?? "";
-}
-
-/**
- * The criteria a result review judges: the item's own acceptance, then each
- * Objective criterion or source exit item the plan says this item's review
- * proves. A single-item plan's review also judges what final review proves.
- * The worker gets the same list, numbered the same, so the indices match
- * its notes: an obligation its acceptance only paraphrases is still judged
- * as written (#2175: a paraphrase dropped an Objective criterion's pinned
- * example, and the worker, never told it, tested another).
- */
-export function resultCriteria(
-  plan: Pick<Plan, "items" | "coverage">,
-  item: Pick<WorkItem, "id" | "acceptance">,
-): string[] {
-  const whole = plan.items.length === 1 && plan.items[0]!.id === item.id;
-  const owned = plan.coverage
-    .filter(
-      (entry) =>
-        entry.itemId === item.id &&
-        (entry.proof.kind === "result-semantic" ||
-          entry.proof.kind === "integrated-semantic" ||
-          (whole && entry.proof.kind === "final-review")),
-    )
-    .map(coverageCriterion)
-    .filter((criterion) => !item.acceptance.includes(criterion));
-  return [...item.acceptance, ...new Set(owned)];
 }
 
 /**

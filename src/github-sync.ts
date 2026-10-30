@@ -116,7 +116,7 @@ export interface GitHubModule {
   noted?: string;
   /** The human gate a reminder was posted for (`<step>@<since>`). */
   reminded?: string;
-  /** Open questions whose 24 h reminder is posted, by hold id (its step and `askedAt`). */
+  /** Open questions whose 24 h reminder is posted, by hold id (unique per step, see newHoldId). */
   remindedHolds?: string[];
   /** A cancelled run's closing comment is posted, or GitHub refused it: it counts as shown. */
   cancelShown?: boolean;

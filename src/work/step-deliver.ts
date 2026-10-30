@@ -545,7 +545,13 @@ export function deliveryRepair(
   return repairOutcome(
     item,
     phase,
-    { kind: repair.conflict ? "conflict" : "failure", detail: repair.finding },
+    repair.conflict
+      ? { kind: "conflict", detail: repair.finding }
+      : {
+          kind: "failure",
+          detail: repair.finding,
+          ...(repair.identity ? { identity: repair.identity } : {}),
+        },
     context.state,
     place,
     {

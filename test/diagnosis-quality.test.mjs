@@ -331,7 +331,7 @@ test("a failure that repeats unchanged after its last correction is escalated, n
   );
   assert.ok(
     model.asked[0].prompt.includes(
-      "When failureRepeatedUnchanged is true, the last entry of prior left this exact failure as it was",
+      "When failureRepeatedUnchanged is true, the last entry of prior left the same failure as it was",
     ),
   );
 

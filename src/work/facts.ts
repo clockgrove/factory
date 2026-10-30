@@ -176,6 +176,8 @@ export interface KeptValidation {
         shown?: string;
         /** The failed command, for `validationFailed`. */
         command?: string;
+        /** How the failed command ended (validate.ts `failed.exit`): with `command`, the failure's identity. */
+        exit?: string;
       };
 }
 

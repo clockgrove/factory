@@ -156,6 +156,9 @@ export async function validateStep(
         detail: keptOutput,
         shown: result.detail,
         ...(result.failed ? { command: result.failed.command } : {}),
+        ...(result.failed?.exit !== undefined
+          ? { exit: result.failed.exit }
+          : {}),
       };
       return failedOutcome(
         item,
@@ -210,7 +213,11 @@ function keptValidation(
   );
 }
 
-/** A validation failure as the work step's repair. */
+/**
+ * A validation failure as the work step's repair. A failed command, with
+ * how it ended, is the failure's identity (repair.ts `FailureIdentity`); a
+ * pin, the formatter or the mutation check has none.
+ */
 function failedOutcome(
   item: WorkItem,
   state: ObjectiveState,
@@ -221,7 +228,17 @@ function failedOutcome(
   return repairOutcome(
     item,
     "validate",
-    { kind: "failure", detail: failed.detail },
+    {
+      kind: "failure",
+      detail: failed.detail,
+      ...(failed.command !== undefined && {
+        identity: {
+          kind: "validation",
+          command: failed.command,
+          ...(failed.exit !== undefined && { exit: failed.exit }),
+        },
+      }),
+    },
     state,
     place,
     {

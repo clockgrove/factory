@@ -67,7 +67,7 @@ Each step looks before it acts, so running provisioning again with the same `--r
 node bench/run.mjs --run-dir <benchRoot>/acme-widgets-42/<run id>
 ```
 
-This queues the Objective and follows it. The operator policy answers by hold kind, always through `factory answer --as "<policy as>"`:
+This queues the Objective and follows it. `factory run` follows the Objective itself once it asks the service to run it, so `run.mjs` stops it, as Ctrl-C would, once `factory status` shows the Objective admitted, and follows with `factory status`. Its "Queued #N" line comes before the service admits or refuses the request, so it isn't taken as queued. While the service isn't running nothing is queued: `run.mjs` says so and exits 75; start the service and run it again. A request the service refuses, or doesn't admit in 10 minutes, exits 1 without recording the run as queued; run it again once the cause is fixed. A status that fails while following, such as during a restart, counts as the service seen down and is tried again. The operator policy answers by hold kind, always through `factory answer --as "<policy as>"`:
 
 | Hold kind   | Asked when                                       | Policy                 |
 | ----------- | ------------------------------------------------ | ---------------------- |
@@ -78,7 +78,7 @@ This queues the Objective and follows it. The operator policy answers by hold ki
 
 These three are the only answers a policy may script. A definition that scripts any other kind or answer, such as `accept` or `cancel`, is refused, and the follower never gives one.
 
-A pause is recorded and printed, and `run.mjs` exits 2. Answer it with `node bench/run.mjs answer --run-dir DIR --question ID ANSWER [ARG] [--text-file F] [--as NAME]`, then run `run.mjs` again. `DIR/decisions.jsonl` records every decision (asked, answered, answer, by whom) and every time the service was seen down. When the Objective ends, the run is scored into the results directory the run record names, unless `--results DIR` or `--bench-home DIR` is given. An exported `FACTORY_BENCH_HOME` is used only for a record that names none, never over it.
+A pause is recorded and printed, and `run.mjs` exits 2. A scripted answer Factory refuses is recorded too; if its hold is still open at the next look, it pauses for the operator. Answer it with `node bench/run.mjs answer --run-dir DIR --question ID ANSWER [ARG] [--text-file F] [--as NAME]`, then run `run.mjs` again. `DIR/decisions.jsonl` records every decision (asked, answered, answer, by whom) and every time the service was seen down. When the Objective ends, the run is scored into the results directory the run record names, unless `--results DIR` or `--bench-home DIR` is given. An exported `FACTORY_BENCH_HOME` is used only for a record that names none, never over it.
 
 ### 3. Score
 

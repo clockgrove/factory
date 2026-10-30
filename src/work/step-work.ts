@@ -44,6 +44,7 @@ import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
+import type { WorkerValidateFailure } from "./self-validate.js";
 import { itemMemory } from "./shared.js";
 import { correctsMedia, repairOutcome } from "./step-deliver.js";
 import { refusalDecisions } from "./step-review.js";
@@ -499,7 +500,11 @@ export async function workStep(
       ...(result.validated ? { validated: result.validated } : {}),
       ...(bare ? { bare: true as const } : {}),
     };
-    keepAll = { ...keepAll, ...dropped };
+    keepAll = {
+      ...keepAll,
+      ...dropped,
+      ...workerFailedKept(state, item.id, result.validateFailed),
+    };
   }
 
   // Capture before collection, which deletes the media manifest, and keep
@@ -708,6 +713,29 @@ export async function workStep(
     default:
       return withKeep(collected, keepFinished);
   }
+}
+
+/**
+ * The item's `workerValidateFailed` fact for a finished worker run: the
+ * commands its own Validate failed and passed no more, under the plan
+ * accepted now, which an amendment may replace (#2199); none deletes it.
+ */
+export function workerFailedKept(
+  state: ObjectiveState,
+  itemId: string,
+  failures: readonly WorkerValidateFailure[] | undefined,
+): Record<string, unknown> {
+  return facts(
+    {
+      workerValidateFailed: failures?.length
+        ? {
+            plan: String(state.kept[ACCEPTED_AT] ?? ""),
+            failures: [...failures],
+          }
+        : null,
+    },
+    itemId,
+  );
 }
 
 /**

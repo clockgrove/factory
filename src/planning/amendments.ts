@@ -13,6 +13,7 @@ import {
   recordClosed,
 } from "../state.js";
 import { fact, facts } from "../work/facts.js";
+import type { WorkerValidateFailure } from "../work/self-validate.js";
 import { hostGit, hostGitExit } from "../worktree.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
@@ -90,19 +91,21 @@ import {
  *   unpublished work item) may widen: its owned paths or dependencies
  *   strictly grow, or its validation replaces or drops commands the
  *   validate step failed its results on under this plan (the item's
- *   `validationFailed` fact; #2107), and it may restate acceptance, brief
- *   and non-goals. Whether such a command could pass at all is the
- *   review's to judge. Factory applies the rule itself before checking a
- *   plan round (`restoreStarted`): each started item keeps the accepted
- *   spec, with its owned paths and dependencies grown by what the answer
- *   adds and, for a reworked reattempt item, the answer's validation when
- *   it replaces only those commands, and its acceptance, brief and
- *   non-goals. Every other change is set back, in the round's answer and
- *   its draft (a round whose draft was set back beyond its answer keeps
- *   none), and recorded with the round (`restored`), logged
- *   (`amendment-restored`), told to its review and, when it goes back, to
- *   the planner. What that can't settle, a removed started item or one
- *   that isn't a reattempt item grown, the fence finds.
+ *   `validationFailed` fact; #2107), or its worker's own Validate failed
+ *   (`workerValidateFailed`, with the output its review judges; #2199),
+ *   and it may restate acceptance, brief and non-goals. Whether such a
+ *   command could pass at all is the review's to judge. Factory applies
+ *   the rule itself before checking a plan round (`restoreStarted`): each
+ *   started item keeps the accepted spec, with its owned paths and
+ *   dependencies grown by what the answer adds and, for a reworked
+ *   reattempt item, the answer's validation when it replaces only those
+ *   commands, and its acceptance, brief and non-goals. Every other change
+ *   is set back, in the round's answer and its draft (a round whose draft
+ *   was set back beyond its answer keeps none), and recorded with the
+ *   round (`restored`), logged (`amendment-restored`), told to its review
+ *   and, when it goes back, to the planner. What that can't settle, a
+ *   removed started item or one that isn't a reattempt item grown, the
+ *   fence finds.
  * - Every coverage obligation and source exclusion stays accounted for, and
  *   a started native stack keeps its layers.
  * - Every proposal is charged once, when it is taken in, against
@@ -749,10 +752,17 @@ export interface AmendmentProgress {
   /**
    * By reattempt item, the validation commands it still runs that the
    * validate step failed its results on under the plan accepted now (the
-   * item's `validationFailed` fact): the only ones the amendment may
-   * replace (#2107). Absent or empty: none.
+   * item's `validationFailed` fact, #2107), or that its worker's own
+   * Validate failed (`workerValidateFailed`, #2199): the only ones the
+   * amendment may replace. Absent or empty: none.
    */
   replaceable?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * By reattempt item, the worker's Validate failures behind `replaceable`,
+   * with how each command ended and its output: the review judges a
+   * replacement on them. Absent: none.
+   */
+  workerFailures?: ReadonlyMap<string, readonly WorkerValidateFailure[]>;
 }
 
 const itemOf = (key: string): string | undefined =>
@@ -809,22 +819,34 @@ export function amendmentProgress(
         eligible(item)
       : eligible(item) && failed(item.id),
   );
-  // The commands the validate step failed each one on, under this plan,
-  // that it still runs.
+  // The commands the validate step, or the item's worker's own Validate,
+  // failed each one on under this plan, that it still runs.
   const accepted = String(state.kept[ACCEPTED_AT] ?? "");
   const replaceable = new Map<string, string[]>();
+  const workerFailures = new Map<string, WorkerValidateFailure[]>();
   for (const item of reattempt) {
+    const runs = (command: string) =>
+      item.validation.some((entry) => entry.command === command);
     const failedOn = fact(state, "validationFailed", item.id);
-    if (failedOn?.plan !== accepted) continue;
-    const commands = failedOn.commands.filter((command) =>
-      item.validation.some((entry) => entry.command === command),
+    const byWorker = fact(state, "workerValidateFailed", item.id);
+    const failures =
+      byWorker?.plan === accepted
+        ? byWorker.failures.filter((failure) => runs(failure.command))
+        : [];
+    const commands = [
+      ...(failedOn?.plan === accepted ? failedOn.commands : []),
+      ...failures.map((failure) => failure.command),
+    ].filter(
+      (command, at, all) => runs(command) && all.indexOf(command) === at,
     );
     if (commands.length) replaceable.set(item.id, commands);
+    if (failures.length) workerFailures.set(item.id, failures);
   }
   return {
     started,
     reattempt: new Set(reattempt.map((item) => item.id)),
     ...(replaceable.size ? { replaceable } : {}),
+    ...(workerFailures.size ? { workerFailures } : {}),
   };
 }
 
@@ -1210,7 +1232,7 @@ export function amendmentFindings(
         ? `; this answer changes its ${fields.join(", ")}`
         : "";
       const replacing = replaceable.length
-        ? `, or a validation command Factory's validation failed it on (${replaceable.map((command) => JSON.stringify(command)).join(", ")}) may be replaced, keeping every other command in its order`
+        ? `, or a validation command Factory's validation or its worker's Validate failed it on (${replaceable.map((command) => JSON.stringify(command)).join(", ")}) may be replaced, keeping every other command in its order`
         : "";
       found(
         progress.reattempt.has(old.id)
@@ -1332,16 +1354,26 @@ export function startedItemRule(progress: AmendmentProgress): string {
   const replaceable = progress.replaceable?.size
     ? JSON.stringify(Object.fromEntries(progress.replaceable))
     : "none";
-  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation failed its result on (replaceableValidation, by item: ${replaceable}) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
+  return `Started Work Items (startedItemIds: ${ids(progress.started)}) keep their spec exactly as the plan being amended has it: kind, title, goal, acceptance, non-goals, brief, validation, citations, owned paths, dependencies, priority and every other field. The only exception is a reattempt item (reattemptItemIds: ${ids(progress.reattempt)}), a started, unpublished item this amendment may rework: its owned paths and dependencies may grow, keeping every current entry; and a validation command Factory's own validation, or the item's worker's Validate (which runs the declared commands as Factory's validation does), failed its result on (replaceableValidation, by item: ${replaceable}; workerValidateFailures, when present, holds each such worker's Validate failure with how the command ended and its output) may be replaced or dropped, keeping every other command in its order, but only when the discovery's evidence and that failure show the command can't pass on any correct result, because it is malformed or depends on what validation never has, such as the result being committed. A replacement proves what the command was there to prove, as the Validation environment runs it; a command that fails because the result is wrong stays. Only when its owned paths or dependencies grow, or a command is so replaced, may its acceptance, brief and non-goals be restated to match; every other field stays. Never otherwise relax, move or drop a started item's acceptance or validation, and never remove a started item. Further work goes in a new item, which may depend on started items. When a reattempt item's own acceptance or validation needs the discovered work, grow its owned paths to take that work, or its dependencies to wait for a new item that delivers it. Factory sets any other change to a started item back to the plan being amended (every owned path and dependency it had stays) and says which fields it set back; it sends a round back to the planner when it removes a started item or grows one that isn't a reattempt item.`;
 }
 
-/** `replaceableValidation`, by item, as the planner and the review get it; absent when there is none. */
+/**
+ * `replaceableValidation`, by item, as the planner and the review get it,
+ * with `workerValidateFailures`, the worker's Validate failures behind it;
+ * each absent when there is none.
+ */
 function replaceableData(progress: AmendmentProgress): {
   replaceableValidation?: Record<string, readonly string[]>;
+  workerValidateFailures?: Record<string, readonly WorkerValidateFailure[]>;
 } {
-  return progress.replaceable?.size
-    ? { replaceableValidation: Object.fromEntries(progress.replaceable) }
-    : {};
+  return {
+    ...(progress.replaceable?.size
+      ? { replaceableValidation: Object.fromEntries(progress.replaceable) }
+      : {}),
+    ...(progress.workerFailures?.size
+      ? { workerValidateFailures: Object.fromEntries(progress.workerFailures) }
+      : {}),
+  };
 }
 
 /**

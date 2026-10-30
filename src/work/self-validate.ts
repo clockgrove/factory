@@ -418,7 +418,10 @@ export class SelfValidation {
           ...(result.failed.exit !== undefined
             ? { exit: result.failed.exit }
             : {}),
-          output: bounded(result.output || result.detail),
+          output: bounded(
+            result.output || result.detail,
+            VALIDATION_OUTPUT_CHARS,
+          ),
         });
     }
     input.log({

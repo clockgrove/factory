@@ -243,6 +243,38 @@ test("judgments are kept: a judged pair isn't judged again, unless the judge's c
   );
 });
 
+test("judgments are kept per judge: one edited in place in graders/, under the same command, judges again", async () => {
+  // The judge where a benchmark keeps it, found as the example finds it.
+  const script = join(home, "graders", "judge.mjs");
+  const source = readFileSync(JUDGE, "utf8");
+  writeFileSync(script, source);
+  try {
+    const definition = judged("", (d) => {
+      d.judge.command = `node "$(dirname "$BENCH_DEFINITION")/../graders/judge.mjs"`;
+    });
+    const first = await review(definition);
+    assert.deepEqual(first.rates, { pairs: 4, intent: 0.75, quality: 0.25 });
+    assert.ok((await review(definition)).pairs.every((pair) => pair.cached));
+    // Tuned in place: it now prefers the plain export, its command and its
+    // judgeVersion the same.
+    const tuned = source.replace(
+      'process.argv.includes("prefer-plain")',
+      "true",
+    );
+    assert.notEqual(tuned, source);
+    writeFileSync(script, tuned);
+    const before = calls().length;
+    const again = await review(definition);
+    assert.ok(again.pairs.every((pair) => !pair.cached));
+    assert.equal(calls().length, before + 4);
+    assert.deepEqual(again.rates, { pairs: 4, intent: 0.25, quality: 0.25 });
+    assert.notEqual(again.pairs[0].judgeDigest, first.pairs[0].judgeDigest);
+    assert.equal(again.pairs[0].command, first.pairs[0].command);
+  } finally {
+    rmSync(script, { force: true });
+  }
+});
+
 test("a judge that fails is no judgment: not kept, and unknown never passes", async () => {
   const definition = {
     ...judged(),

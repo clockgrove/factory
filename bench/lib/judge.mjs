@@ -17,7 +17,8 @@
  * directory, so nothing the judge is given names a run, a Factory version,
  * a group or a date. The harness unblinds the answers to run ids, keeps
  * each pair's judgment in the results, and never judges a pair again unless
- * the judge's command or either tree changes.
+ * the judge (its command and the bench home's graders/, where it lives) or
+ * either tree changes.
  */
 import { createHash } from "node:crypto";
 import {
@@ -34,6 +35,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CHOICES } from "./definition.mjs";
 import { checkoutInto, runCommand } from "./grade.mjs";
+import { treeDigest } from "./provision.mjs";
 
 /** The share of a person's choices a judge agrees with, below which it isn't trusted (`scoring.minJudgeAgreement`). */
 export const MIN_JUDGE_AGREEMENT = 0.8;
@@ -59,6 +61,23 @@ export function blindOrder(x, y) {
   return Number.parseInt(pairKey(x, y).slice(0, 2), 16) % 2
     ? [second, first]
     : [first, second];
+}
+
+/** The bench home's graders/, beside the definition's benchmarks/: where its judge lives. */
+const gradersOf = (definition) =>
+  resolve(dirname(definition.file), "..", "graders");
+
+/**
+ * The judge's identity: a hash of its command and of the bench home's
+ * graders/ (treeDigest), so a judge edited in place under the same command
+ * is another judge, and the pairs it judged are judged again.
+ */
+export function judgeDigest(definition) {
+  const graders = gradersOf(definition);
+  return createHash("sha256")
+    .update(`${definition.judge.command}\0`)
+    .update(existsSync(graders) ? treeDigest(graders) : "no graders")
+    .digest("hex");
 }
 
 /** A judgment's answer on `aspect` as a run id, or `tie`. */
@@ -157,7 +176,7 @@ export async function runJudge(definition, a, b) {
     mkdirSync(join(root, "benchmarks"));
     const copy = join(root, "benchmarks", basename(definition.file));
     writeFileSync(copy, `${JSON.stringify(blinded, null, 2)}\n`);
-    const graders = resolve(dirname(definition.file), "..", "graders");
+    const graders = gradersOf(definition);
     if (existsSync(graders)) symlinkSync(graders, join(root, "graders"));
     const out = join(root, "judgment.json");
     const run = await runCommand(command, {
@@ -203,12 +222,18 @@ export async function runJudge(definition, a, b) {
 
 /**
  * Cards `x` and `y` judged as a blind pair, or the judgment kept in `dir`
- * (the results' judgments/) when the same judge command judged the same two
- * trees before. A judgment: `{ A: { run, commit }, B: { run, commit },
- * command, judgeVersion, intent, quality, reasons }`, with `cached`; or
- * `{ error }`, which isn't kept, so the pair is judged again next time.
+ * (the results' judgments/) when the same judge (`digest`, judgeDigest's)
+ * judged the same two trees before. A judgment: `{ A: { run, commit }, B:
+ * { run, commit }, command, judgeDigest, judgeVersion, intent, quality,
+ * reasons }`, with `cached`; or `{ error }`, which isn't kept, so the pair
+ * is judged again next time.
  */
-export async function judgePair(definition, x, y, { dir, benchRoot }) {
+export async function judgePair(
+  definition,
+  x,
+  y,
+  { dir, benchRoot, digest = judgeDigest(definition) },
+) {
   const order = blindOrder(x.run.id, y.run.id);
   const cards = order.map((id) => (id === x.run.id ? x : y));
   const [a, b] = cards.map((card) => runSource(card, benchRoot));
@@ -223,7 +248,7 @@ export async function judgePair(definition, x, y, { dir, benchRoot }) {
     // Not judged yet.
   }
   if (
-    kept?.command === command &&
+    kept?.judgeDigest === digest &&
     kept.A?.run === a.run &&
     kept.A?.commit === a.commit &&
     kept.B?.run === b.run &&
@@ -236,6 +261,7 @@ export async function judgePair(definition, x, y, { dir, benchRoot }) {
     A: { run: a.run, commit: a.commit },
     B: { run: b.run, commit: b.commit },
     command,
+    judgeDigest: digest,
     ...judged,
   };
   mkdirSync(dir, { recursive: true });
@@ -308,7 +334,10 @@ export async function pairwise(
   { baseline, candidate, cards, dir, benchRoot = null },
 ) {
   const warnings = [];
-  const judge = (x, y) => judgePair(definition, x, y, { dir, benchRoot });
+  // Once per review: graders/ doesn't change while it judges.
+  const digest = judgeDigest(definition);
+  const judge = (x, y) =>
+    judgePair(definition, x, y, { dir, benchRoot, digest });
   const pairs = [];
   for (const c of candidate)
     for (const b of baseline) {

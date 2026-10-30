@@ -402,7 +402,7 @@ function replacementChain(
  * The operator's corrections in `proposal`'s replacement chain, oldest
  * first: each rejection's answer that took in a replacement, with who gave
  * it, when, and the rejection it answers. Its review reads them as operator
- * answers (#2247); its planner is given the latest (`amendPlanStep`).
+ * answers (#2247); its planner gets the same chain (`amendPlanStep`).
  */
 function operatorCorrections(
   state: ObjectiveState,
@@ -427,7 +427,7 @@ function operatorCorrections(
  * The operator's answers to the questions the planners in `proposal`'s
  * replacement chain asked, oldest first, each with the amendment whose
  * planner asked. Its review reads them as operator answers, as it does the
- * corrections (#2247); its planner is given its own (`amendPlanStep`).
+ * corrections (#2247); its planner gets the same chain (`amendPlanStep`).
  */
 function operatorPlannerAnswers(
   state: ObjectiveState,
@@ -2309,19 +2309,23 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const revisions = revisionsOf(state, proposal.id);
       const last = revisions.at(-1);
       const round = revisions.length + 1;
+      // The chain's corrections and answers to its planners' questions,
+      // oldest first: the same chain its review gets (#2249).
       const corrections: Finding[] = [
-        ...answered.map(({ question, answer }) => ({
-          source: "operator" as const,
-          message: `${question}\nAnswer: ${answer}`,
-        })),
-        ...(proposal.replacement
-          ? [
-              {
-                source: "operator" as const,
-                message: `The previous amendment was rejected. Diagnosis: ${proposal.replacement.diagnosis}\nCorrection: ${proposal.replacement.correction}`,
-              },
-            ]
-          : []),
+        ...replacementChain(state, proposal).flatMap((at) => [
+          ...(at.replacement
+            ? [
+                {
+                  source: "operator" as const,
+                  message: `Amendment ${at.replacement.amendmentId} was rejected. Diagnosis: ${at.replacement.diagnosis}\nCorrection: ${at.replacement.correction}`,
+                },
+              ]
+            : []),
+          ...keptAnswers(state, at.id).map(({ question, answer }) => ({
+            source: "operator" as const,
+            message: `${question}\nAnswer: ${answer}`,
+          })),
+        ]),
         ...(last?.findings ?? []),
         ...(last?.restored?.length
           ? [

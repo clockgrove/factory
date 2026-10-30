@@ -856,6 +856,42 @@ test("a replacement's refusal review gets the answers to the planner of the amen
   assert.ok(prompt.includes(OPERATOR_CORRECTIONS));
 });
 
+test("a replacement's planner gets every correction and planner answer in its chain, oldest first (#2249)", async () => {
+  const { checkout, state } = await building();
+  const { planner, asked } = scripted(
+    asksPlanner,
+    withB,
+    asksOperator(),
+    withB,
+    asksOperator(),
+    withB,
+  );
+  const deps = depsOf(checkout, planner);
+  await answeredPlanner(state, deps, "op-1", APPROVE);
+  assert.equal((await step(state, deps)).key, "amend:op-1:plan");
+  assert.equal((await step(state, deps)).key, "amend:op-1:review");
+  const first = await replaced(state, deps, "op-1", FIRST_CORRECTION);
+  assert.equal((await step(state, deps)).key, "amend:op-1-r2:plan");
+  // The answer to op-1's planner reaches the replacement's planner.
+  assert.ok(asked[3].prompt.includes(APPROVE));
+  assert.equal((await step(state, deps)).key, "amend:op-1-r2:review");
+  const second = await replaced(state, deps, "op-1-r2", SECOND_CORRECTION);
+  assert.equal((await step(state, deps)).key, "amend:op-1-r3:plan");
+  // Each correction with the rejection it answers, after the answer.
+  const prompt = asked[5].prompt;
+  const at = [
+    `Answer: ${APPROVE}`,
+    `Amendment op-1 was rejected. Diagnosis: ${first.correction.rejection.split("\n")[0]}`,
+    `Correction: ${FIRST_CORRECTION}`,
+    `Amendment op-1-r2 was rejected. Diagnosis: ${second.correction.rejection.split("\n")[0]}`,
+    `Correction: ${SECOND_CORRECTION}`,
+  ].map((text) => prompt.indexOf(text));
+  assert.ok(
+    at.every((index, i) => index >= 0 && (i === 0 || index > at[i - 1])),
+    String(at),
+  );
+});
+
 // The run's slip: a's own worker proposed b, and the planner relaxed a's
 // acceptance, brief and validation so that b, after a, could make
 // `npm test` pass.

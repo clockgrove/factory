@@ -386,7 +386,7 @@ function numberedAcceptance(acceptance: readonly string[]): string {
  * Objective's tests by duplication past the repository's test budget.
  */
 export const PROOF_ECONOMY =
-  "Add missing proof as assertions inside the existing test that covers that behaviour where one does, not as a new test or harness, and remove a test or setup your change duplicates before adding one. Leave headroom under any budget-style check the repository declares (test lines, file sizes): final validation runs it on the Objective's integrated change, where every Work Item's additions count against it.";
+  "Add missing proof as assertions inside an existing test in your owned paths that covers that behaviour where one does, not as a new test or harness; import a test setup you don't own, never copy it. Never add a test or setup that duplicates one the repository already has, and remove duplication among the tests and setup you add; existing tests stay protected. Leave headroom under any budget-style check the repository declares (test lines, file sizes): final validation runs it on the Objective's integrated change, where every Work Item's additions count against it.";
 
 /**
  * The exact Work Item terms a worker must keep in view for its whole

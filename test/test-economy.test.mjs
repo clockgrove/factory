@@ -139,7 +139,7 @@ test("graph review flags one claim proved by two items and a harness each item b
 test("the engineering standard and the review's verification standard bound proof to one test per claim (#2241)", () => {
   assert.ok(
     ENGINEERING_STANDARD.includes(
-      "- Test economy: prove each claim once, through the strongest existing or added integration test; extend an existing test or harness before adding one; don't re-prove a claim that a dependency's merged test already proves. Apply the repository's cited testing policy on test kind, count, reuse and budget.\n",
+      "- Test economy: prove each claim once, through the strongest existing or added integration test; extend an existing test or harness in your owned paths before adding one, and import one you don't own instead of copying it; don't re-prove a claim that a dependency's merged test already proves. Apply the repository's cited testing policy on test kind, count, reuse and budget.\n",
     ),
   );
   // Result and final review share it; proof strength stays.
@@ -148,7 +148,7 @@ test("the engineering standard and the review's verification standard bound proo
     "a criterion is proven by the strongest test that establishes it by this standard, a dependency's merged test the review base already holds included (in base/, or unchanged in candidate/), so a claim such a test proves needs no second test;",
     "the enumerated items of one sentence may share one table-driven assertion that checks each item's exact value;",
     "a prohibition on behaviour the candidate does not implement is proven by source evidence, over its complete scope, that no such path exists, cited in place of a mutation;",
-    "a missing-verification finding asks for the smallest assertion that proves the omitted fact, added to an existing test that covers that behaviour where one does.",
+    "a missing-verification finding asks for the smallest assertion that proves the omitted fact, added to an existing test within the candidate's accepted ownership that covers that behaviour where one does.",
     "A verification deliverable proves a sub-clause only when its assertion would fail if that sub-clause were wrong",
     "when you cannot name one, the criterion lacks verification: refuse it as missing verification, naming the surviving mutation.",
   ])
@@ -185,9 +185,17 @@ test("the worker adds missing proof inside existing tests and leaves budget head
     ),
   );
   assert.equal(first.prompt.includes("add whatever is missing"), false);
+  // Economy stays inside ownership and never removes an existing test.
+  for (const rule of [
+    "Add missing proof as assertions inside an existing test in your owned paths that covers that behaviour where one does, not as a new test or harness; import a test setup you don't own, never copy it.",
+    "Never add a test or setup that duplicates one the repository already has, and remove duplication among the tests and setup you add; existing tests stay protected.",
+    "final validation runs it on the Objective's integrated change, where every Work Item's additions count against it.",
+  ])
+    assert.ok(PROOF_ECONOMY.includes(rule), rule);
+  assert.equal(/remove a test|remove what/.test(PROOF_ECONOMY), false);
   assert.ok(
-    PROOF_ECONOMY.includes(
-      "final validation runs it on the Objective's integrated change, where every Work Item's additions count against it.",
+    first.prompt.includes(
+      "Existing tests are protected: change an existing assertion, golden or baseline only where an acceptance entry states that behaviour change.",
     ),
   );
 

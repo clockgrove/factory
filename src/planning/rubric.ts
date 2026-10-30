@@ -382,7 +382,7 @@ export const ENGINEERING_STANDARD = `Engineering standard. Each rule names a def
 - Structure, not prose: decide on error types, codes or fields, never on message text.
 - Handle or propagate every error; never swallow one (no empty catch).
 - Tests assert exact values that fail if the behaviour changes: no presence or type checks, tautologies or a value compared with itself.
-- Test economy: prove each claim once, through the strongest existing or added integration test; extend an existing test or harness before adding one; don't re-prove a claim that a dependency's merged test already proves. Apply the repository's cited testing policy on test kind, count, reuse and budget.
+- Test economy: prove each claim once, through the strongest existing or added integration test; extend an existing test or harness in your owned paths before adding one, and import one you don't own instead of copying it; don't re-prove a claim that a dependency's merged test already proves. Apply the repository's cited testing policy on test kind, count, reuse and budget.
 - Docs, comments and READMEs state only what the code does.
 - No dead code, debug leftovers, placeholder assertions or unrelated changes.
 - Validate input once at the boundary, with the repository's parsers and validators; do not re-check what a callee validates or hand-roll a parser.

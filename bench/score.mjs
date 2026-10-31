@@ -33,7 +33,8 @@
  *                    bench/grade-auto.mjs's standalone output (#2273), in
  *                    place of running the definition's grader: checked as a
  *                    grader's output is, at its own commit (or
- *                    --grade-commit SHA, which must agree).
+ *                    --grade-commit SHA, which must agree). A commit other
+ *                    than the card's end commit needs --grade-commit.
  *
  * Exit codes: 0 scored (and graded, where it is); 64 usage; 65 a partial
  * card not written into the results; 70 the grader failed, its error
@@ -172,6 +173,18 @@ if (values["grade-only"]) {
     checkout: repo,
     handFixes: values["hand-fix"] ?? [],
   });
+// A grade of another commit than the Objective's end is attached only when
+// --grade-commit names it.
+if (
+  attached &&
+  !card.partial &&
+  card.endCommit &&
+  attached.commit !== card.endCommit &&
+  !values["grade-commit"]
+)
+  usage(
+    `--grade-file: ${values["grade-file"]} grades ${attached.commit}, not the Objective's end commit ${card.endCommit}: give --grade-commit ${attached.commit} to attach it anyway`,
+  );
 if (!card.partial) {
   if (attached) setGrade(card, attached);
   else

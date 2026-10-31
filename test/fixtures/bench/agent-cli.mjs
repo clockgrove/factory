@@ -11,7 +11,8 @@
  * It refuses (exit 3) to run without a --json-schema, or anywhere but a
  * scratch checkout of the graded commit with no remote, and it writes a
  * file into that checkout, as an agent's probes do. Asked to sleep, it
- * starts a child that outlives it unless its whole process group is killed.
+ * starts a child that outlives it unless its whole process group is
+ * killed, and appends both pids to STAND_IN_AGENT_PIDS when that is set.
  */
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -57,9 +58,14 @@ const script = JSON.parse(
 )[key];
 if (!script) refuse(`the script has nothing for ${key}`);
 if (script.sleepMs) {
-  spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
     stdio: "inherit",
   });
+  if (process.env.STAND_IN_AGENT_PIDS)
+    appendFileSync(
+      process.env.STAND_IN_AGENT_PIDS,
+      `${process.pid}\n${child.pid}\n`,
+    );
   await new Promise((done) => setTimeout(done, script.sleepMs));
 }
 const event = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);

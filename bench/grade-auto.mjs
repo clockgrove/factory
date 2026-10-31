@@ -8,9 +8,10 @@
  *   As a grader:  a definition's `grader.command`, such as
  *                 `node bench/grade-auto.mjs --evidence DIR`: the checkout,
  *                 commit, output and Objective come from BENCH_TREE,
- *                 BENCH_COMMIT, BENCH_OUT and BENCH_OBJECTIVE, and the base
- *                 and the declared checks from BENCH_DEFINITION's
- *                 `source.base` and `factory.requiredCommands`. A flag wins.
+ *                 BENCH_COMMIT, BENCH_OUT and BENCH_OBJECTIVE, the base
+ *                 from BENCH_BASE (past the definition's base patches),
+ *                 else BENCH_DEFINITION's `source.base`, and the declared
+ *                 checks from its `factory.requiredCommands`. A flag wins.
  *
  *   --evidence DIR              each role's prompt, transcript and answer
  *                               (default: beside --out, <out>.evidence/)
@@ -25,7 +26,8 @@
  *   --role-timeout-minutes N    each role (default: 30)
  *
  * Exit codes: 0 graded; 1 no grader vote split the acceptance into
- * criteria (the output is written, with `error`); 64 usage.
+ * criteria (the output is written, with `error`); 64 usage. Stopped by a
+ * signal, it kills every role first and dies of it.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -69,7 +71,11 @@ if (env.BENCH_DEFINITION)
   }
 const repo = values.repo ?? env.BENCH_TREE;
 const commit = values.commit ?? env.BENCH_COMMIT ?? "HEAD";
-const base = values.base ?? definition?.source?.base;
+// A graded card's BENCH_BASE is past the base patches provisioning applied,
+// which aren't the run's change; the definition's source.base is not.
+const base = values.base ?? env.BENCH_BASE ?? definition?.source?.base;
+const patched =
+  !values.base && !env.BENCH_BASE && definition?.basePatches?.length;
 const objective = values.objective ?? env.BENCH_OBJECTIVE;
 const out = values.out ?? env.BENCH_OUT;
 for (const [flag, value] of [
@@ -122,11 +128,15 @@ try {
 } catch (error) {
   usage(error.message);
 }
+if (patched)
+  output.warnings.push(
+    `the base is the definition's source.base, before its ${definition.basePatches.length} base patch(es): their changes are graded as the run's (give --base)`,
+  );
 writeFileSync(out, `${JSON.stringify(output, null, 2)}\n`);
-const { criteria, findings = [] } = output;
+const { criteria, findings } = output;
 process.stdout.write(
   output.error
     ? `${out}\n${output.error}\n`
-    : `${out}\n${criteria.filter((c) => c.verdict === "pass").length} of ${criteria.length} criteria passed; ${findings.length} verified finding(s), ${findings.filter((f) => f.severity === "defect").length} defect(s)\n`,
+    : `${out}\n${criteria.filter((c) => c.verdict === "pass").length} of ${criteria.length} criteria passed; ${findings ? `${findings.length} verified finding(s), ${findings.filter((f) => f.severity === "defect").length} defect(s)` : "the findings are unknown"}\n`,
 );
 if (output.error) process.exit(1);

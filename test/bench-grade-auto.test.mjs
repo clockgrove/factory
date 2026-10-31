@@ -21,7 +21,12 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { BENCH_DIR, loadDefinition } from "../bench/lib/definition.mjs";
-import { runGrader, setGrade } from "../bench/lib/grade.mjs";
+import {
+  gradeCard,
+  runBase,
+  runGrader,
+  setGrade,
+} from "../bench/lib/grade.mjs";
 import {
   autoGrade,
   combineVotes,
@@ -357,7 +362,8 @@ test("the verifier sees at most --max-findings, and what it doesn't confirm is d
     ["adversary-1"],
   );
   assert.equal(output.verification.overCap, 3);
-  // A verifier answer out of its schema confirms nothing.
+  // A verifier answer out of its schema confirms nothing, and denies
+  // nothing either: the findings are unknown.
   const invalid = await grade((script) => {
     script.verifier.answer.verdicts[0].confirmed = "yes";
   });
@@ -365,7 +371,21 @@ test("the verifier sees at most --max-findings, and what it doesn't confirm is d
     invalid.output.roles.find((r) => r.role === "verifier").status,
     "invalid",
   );
-  assert.deepEqual(invalid.output.findings, []);
+  assert.equal(invalid.output.findings, undefined);
+  assert.equal(invalid.output.verification.confirmed, null);
+  assert.match(
+    invalid.output.warnings.join("\n"),
+    /^the findings are unknown, so none is counted: verifier invalid$/m,
+  );
+  // One reviewer failing leaves them unknown too: only half the review ran.
+  const half = await grade((script) => {
+    script.adversary.exit = 1;
+  });
+  assert.equal(half.output.findings, undefined);
+  assert.match(half.output.warnings.join("\n"), /: adversary error$/m);
+  // The verifier's confirmations are still counted, and the mutants.
+  assert.equal(half.output.verification.confirmed, 1);
+  assert.equal(half.output.mutation.survived, 2);
   // Nothing non-minor reported: no verifier.
   const quiet = await grade((script) => {
     script.quality.answer.findings = [script.quality.answer.findings[1]];
@@ -393,8 +413,15 @@ test("a role that times out is unknown, never a fail", async () => {
     output.criteria.map((c) => c.verdict),
     ["pass", "unknown"],
   );
-  // A verifier that timed out confirms nothing: no finding is counted.
-  assert.deepEqual(output.findings, []);
+  // A verifier that timed out leaves the findings unknown: no defect is
+  // counted, as 0 or otherwise.
+  assert.equal(output.findings, undefined);
+  assert.match(output.warnings.join("\n"), /: verifier timeout$/m);
+  const card = await fixtureCard();
+  setGrade(card, { ...output, passed: 1, failed: 0, unknown: 1 });
+  assert.equal(card.totals.final.reviewPassed, true);
+  assert.equal(card.escapes.graderDefects, null);
+  assert.equal(METRICS["quality.verifiedFindings"].get(card), null);
   // A timed-out role's cost is unknown, so the total is.
   assert.equal(output.cost.usd, null);
 
@@ -418,22 +445,129 @@ test("a role that times out is unknown, never a fail", async () => {
 });
 
 /** The example definition with `grader`, as a file. */
-function definitionWith(name, command) {
+function definitionWith(name, command, timeoutMinutes = 1) {
   const value = JSON.parse(readFileSync(EXAMPLE, "utf8"));
-  value.grader = { command, timeoutMinutes: 1 };
+  value.grader = { command, timeoutMinutes };
   const file = join(dir, `${name}.json`);
   writeFileSync(file, JSON.stringify(value));
   return loadDefinition(file);
 }
 
-/** The environment that points the stand-in at SCRIPT, logging to `log`. */
-function scripted(name) {
+/** The environment that points the stand-in at SCRIPT (changed by `change`), logging to `log`. */
+function scripted(name, change) {
+  const script = structuredClone(SCRIPT);
+  change?.(script);
   const scriptFile = join(dir, `${name}-script.json`);
-  writeFileSync(scriptFile, JSON.stringify(SCRIPT));
+  writeFileSync(scriptFile, JSON.stringify(script));
   const log = join(dir, `${name}-log.jsonl`);
   writeFileSync(log, "");
   return { STAND_IN_AGENT_SCRIPT: scriptFile, STAND_IN_AGENT_LOG: log };
 }
+
+/** What the stand-in logged in `env`'s log: one call per role. */
+const logged = (env) =>
+  readFileSync(env.STAND_IN_AGENT_LOG, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+/** `work()` with `env` in process.env, as runGrader passes it to a grader. */
+async function withEnv(env, work) {
+  Object.assign(process.env, env);
+  try {
+    return await work();
+  } finally {
+    for (const name of Object.keys(env)) delete process.env[name];
+  }
+}
+
+/** The command that runs bench/grade-auto.mjs on the stand-in, with `flags`. */
+const autoCommand = (...flags) =>
+  [
+    "node",
+    JSON.stringify(join(BENCH_DIR, "grade-auto.mjs")),
+    "--cli",
+    JSON.stringify(cli),
+    "--model",
+    "stand-in-model",
+    ...flags,
+  ].join(" ");
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+test("stopped by the grader contract's timeout, it kills every role it started and removes their checkouts", async () => {
+  const pids = join(dir, "stopped-pids.txt");
+  writeFileSync(pids, "");
+  const env = {
+    ...scripted("stopped", (script) => {
+      for (const role of ["grader-1", "quality", "adversary"])
+        script[role].sleepMs = 60_000;
+    }),
+    STAND_IN_AGENT_PIDS: pids,
+  };
+  const definition = definitionWith(
+    "stopped",
+    autoCommand(
+      "--base",
+      repo.base,
+      "--evidence",
+      JSON.stringify(join(dir, "stopped-evidence")),
+    ),
+    0.05,
+  );
+  const grade = await withEnv(env, () =>
+    runGrader(definition, { repo: repo.dir, commit: repo.commit, objective }),
+  );
+  assert.match(grade.error, /^the grader timed out after 0\.05 min/);
+  // Each sleeping stand-in and the child it started, in its own process group.
+  const started = readFileSync(pids, "utf8").split("\n").filter(Boolean);
+  assert.equal(started.length, 6, "three roles, each with its child");
+  const until = Date.now() + 5_000;
+  while (started.some((pid) => alive(Number(pid))) && Date.now() < until)
+    await new Promise((done) => setTimeout(done, 100));
+  assert.deepEqual(
+    started.filter((pid) => alive(Number(pid))),
+    [],
+    "nothing it started outlived it",
+  );
+  for (const call of logged(env)) assert.ok(!existsSync(call.cwd), call.cwd);
+});
+
+test("a graded card's base is past the definition's base patches, which aren't the run's change", async () => {
+  const definition = definitionWith(
+    "patched",
+    autoCommand(
+      "--objective",
+      JSON.stringify(objective),
+      "--evidence",
+      JSON.stringify(join(dir, "patched-evidence")),
+    ),
+  );
+  const plain = await fixtureCard();
+  assert.equal(runBase(plain, definition), definition.source.base);
+  // The patch provisioning applied is the graded change's base. The
+  // definition's source.base is invented: had the grade started there, the
+  // auto-grader would have found no such commit.
+  const card = await fixtureCard({
+    basePatches: [{ ...definition.basePatches[0], applied: repo.base }],
+  });
+  assert.equal(runBase(card, definition), repo.base);
+  const env = scripted("patched");
+  await withEnv(env, () =>
+    gradeCard(card, definition, { repo: repo.dir, commit: repo.commit }),
+  );
+  assert.equal(card.grade.error, undefined, card.grade.error);
+  assert.equal(card.grade.passRate, 1 / 2);
+  for (const call of logged(env))
+    assert.match(call.prompt, new RegExp(`^Base commit: ${repo.base}$`, "m"));
+});
 
 test("as a definition's grader it keeps the grader contract, and the scorecard counts its defects", async () => {
   const env = scripted("contract");
@@ -543,6 +677,7 @@ function benchCli(script, args, extra = {}) {
     "BENCH_OUT",
     "BENCH_DEFINITION",
     "BENCH_OBJECTIVE",
+    "BENCH_BASE",
   ])
     delete env[name];
   return spawnSync(process.execPath, [join(BENCH_DIR, script), ...args], {
@@ -619,5 +754,31 @@ test("standalone, it grades any Objective, and score.mjs --grade-file attaches i
   assert.match(
     other.stderr,
     /--grade-file: .* grades [0-9a-f]+, not [0-9a-f]+/,
+  );
+  // A card that knows its end commit takes a grade of another only when
+  // --grade-commit names it.
+  writeFileSync(
+    card,
+    JSON.stringify({ ...graded, endCommit: repo.base, grade: null }),
+  );
+  const again = [...backfill, "--grade-only", "--grade-file", out];
+  const stale = benchCli("score.mjs", again);
+  assert.equal(stale.status, 64, stale.stderr);
+  assert.match(
+    stale.stderr,
+    new RegExp(
+      `grades ${repo.commit}, not the Objective's end commit ${repo.base}: give --grade-commit ${repo.commit}`,
+    ),
+  );
+  assert.equal(JSON.parse(readFileSync(card, "utf8")).grade, null);
+  const named = benchCli("score.mjs", [
+    ...again,
+    "--grade-commit",
+    repo.commit,
+  ]);
+  assert.equal(named.status, 0, named.stderr);
+  assert.equal(
+    JSON.parse(readFileSync(card, "utf8")).grade.commit,
+    repo.commit,
   );
 });

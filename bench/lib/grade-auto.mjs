@@ -32,10 +32,15 @@
  * (bench/grade-auto/<role>.md, repository-neutral), transcript and answer
  * are kept in the evidence directory. A role is bounded by a wall-clock
  * timeout, and the whole run by another; a role that times out yields
- * unknown, never a fail.
+ * unknown, never a fail. Each role runs in a process group of its own,
+ * killed with the scratch checkouts removed when the auto-grader is
+ * stopped (SIGTERM, SIGINT, SIGHUP) or exits.
  *
  * The output keeps the grader contract (bench/lib/grade.mjs), plus
  * `findings`, `mutation`, `cost`, `durationMs` and the roles' outcomes.
+ * `findings` is left out, unknown rather than none, unless quality and
+ * adversary both answered and so did the verifier, when it had any to
+ * verify.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -310,10 +315,10 @@ export function agentArgs({ model, effort }, schema) {
 
 /**
  * The agent CLI `cli` with `args`, its prompt on stdin, in its own process
- * group, killed whole at `timeoutMs` (as runCommand kills a grader). Keeps
- * all of its output: stdout is the transcript.
+ * group, killed whole at `timeoutMs`. `groups`, a Set, holds the group's
+ * id while it runs. Keeps all of its output: stdout is the transcript.
  */
-export function runAgent(cli, args, { cwd, env, input, timeoutMs }) {
+export function runAgent(cli, args, { cwd, env, input, timeoutMs, groups }) {
   return new Promise((resolve) => {
     const child = spawn(cli, args, {
       cwd,
@@ -321,6 +326,7 @@ export function runAgent(cli, args, { cwd, env, input, timeoutMs }) {
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (child.pid) groups?.add(child.pid);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (text) => {
@@ -340,10 +346,12 @@ export function runAgent(cli, args, { cwd, env, input, timeoutMs }) {
     }, timeoutMs);
     child.on("error", (error) => {
       clearTimeout(timer);
+      groups?.delete(child.pid);
       resolve({ code: null, stdout, stderr: error.message, timedOut });
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      groups?.delete(child.pid);
       resolve({ code, signal, stdout, stderr, timedOut });
     });
     child.stdin.on("error", () => {
@@ -378,6 +386,45 @@ export function promptsDigest() {
   for (const name of readdirSync(PROMPTS).sort())
     hash.update(`${name}\0`).update(readFileSync(join(PROMPTS, name)));
   return hash.digest("hex").slice(0, 12);
+}
+
+/** What stops the auto-grader: the grader contract's timeout (SIGTERM), a Ctrl-C, a closed terminal. */
+const STOPS = ["SIGTERM", "SIGINT", "SIGHUP"];
+
+/**
+ * `work()`, and on a stop signal or the process's exit while it runs,
+ * every process group in `groups` killed and `scratch` removed first. The
+ * roles run in groups of their own, so whatever stops this process doesn't
+ * reach them; it dies of the signal after. `scratch` is removed after
+ * `work` too.
+ */
+async function stoppable(groups, scratch, work) {
+  const clean = () => {
+    for (const pid of groups)
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    rmSync(scratch, { recursive: true, force: true });
+  };
+  const stop = (signal) => {
+    release();
+    clean();
+    process.kill(process.pid, signal);
+  };
+  const release = () => {
+    for (const signal of STOPS) process.off(signal, stop);
+    process.off("exit", clean);
+  };
+  for (const signal of STOPS) process.on(signal, stop);
+  process.on("exit", clean);
+  try {
+    return await work();
+  } finally {
+    release();
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /** The inputs every role is given, after its prompt. */
@@ -450,6 +497,8 @@ export async function autoGrade({
   const scratch = mkdtempSync(join(tmpdir(), "bench-grade-auto-"));
   mkdirSync(evidence, { recursive: true });
   const roles = [];
+  // The process groups of the roles' running agents and installs.
+  const groups = new Set();
 
   /** One role, `name` (`grader-2`, `verifier`, ...), in its own scratch checkout: its answer, or null with its status. */
   async function run(name, role, label, extra = []) {
@@ -490,6 +539,7 @@ export async function autoGrade({
           cwd: copy,
           env,
           timeoutMs: until - Date.now(),
+          groups,
         });
         writeFileSync(join(dir, "install.txt"), step.output);
         if (step.timedOut)
@@ -520,6 +570,7 @@ export async function autoGrade({
           env,
           input: prompt,
           timeoutMs: until - Date.now(),
+          groups,
         },
       );
       writeFileSync(join(dir, "transcript.jsonl"), agent.stdout);
@@ -600,7 +651,7 @@ export async function autoGrade({
       run("adversary", "adversary", "adversary"),
     ]);
     const split = forVerification(quality, adversary, maxFindings);
-    const answer = split.sent.length
+    const verdicts = split.sent.length
       ? await run("verifier", "verifier", "verifier", [
           "Findings to verify, each by its id:",
           "",
@@ -632,26 +683,37 @@ export async function autoGrade({
           "",
         ])
       : null;
-    return {
-      quality,
-      adversary,
-      split,
-      findings: verifiedFindings(split.sent, answer),
-    };
+    // What the verifier confirmed: null when it had findings to verify and gave no answer.
+    const confirmed =
+      verdicts || !split.sent.length
+        ? verifiedFindings(split.sent, verdicts)
+        : null;
+    return { quality, adversary, split, verdicts, confirmed };
   }
 
-  let grading;
-  let reviewed;
-  try {
-    [grading, reviewed] = await Promise.all([grade(), review()]);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
+  const [grading, reviewed] = await stoppable(groups, scratch, () =>
+    Promise.all([grade(), review()]),
+  );
   const warnings = [];
   if (treeState(repo) !== before)
     warnings.push(`the original tree ${repo} changed while it was graded`);
   const known = roles.every((r) => r.costUsd !== null);
-  const { quality, adversary, split, findings } = reviewed;
+  const { quality, adversary, split, verdicts, confirmed } = reviewed;
+  // The findings are known only when both reviewers answered, and the
+  // verifier did when there was anything to verify: otherwise they are
+  // unknown, never none.
+  const unanswered = [
+    ["quality", quality],
+    ["adversary", adversary],
+    ...(split.sent.length ? [["verifier", verdicts]] : []),
+  ]
+    .filter(([, answer]) => !answer)
+    .map(([name]) => roles.find((r) => r.role === name));
+  const findings = unanswered.length ? null : confirmed;
+  if (unanswered.length)
+    warnings.push(
+      `the findings are unknown, so none is counted: ${unanswered.map((r) => `${r.role} ${r.status}`).join(", ")}`,
+    );
   const mutation = quality
     ? {
         survived: quality.mutation.survived,
@@ -668,16 +730,15 @@ export async function autoGrade({
       ? combineVotes(grading.criteria, grading.answers)
       : [],
     metrics: mutants ? { mutationScore: mutation.killed / mutants } : {},
-    // With no reviewer's answer, nothing was looked for: no findings, not none.
-    ...(quality || adversary ? { findings } : {}),
+    ...(findings ? { findings } : {}),
     mutation,
     verification: {
       reported: split.reported.length,
       minor: split.minor.length,
       sent: split.sent.length,
       overCap: split.overCap.length,
-      confirmed: findings.length,
-      rejected: split.sent.length - findings.length,
+      confirmed: confirmed?.length ?? null,
+      rejected: confirmed ? split.sent.length - confirmed.length : null,
       probes: adversary?.probes ?? null,
     },
     checks: grading.answers.find((a) => a?.checks)?.checks ?? [],

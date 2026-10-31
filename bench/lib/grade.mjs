@@ -17,9 +17,10 @@
  * (#2273): `findings` (each `{ id, severity, title, evidence, reproduce }`,
  * severity `defect`, `quality` or `minor`), `mutation` (`{ survived,
  * killed, examples }`), `cost` and `durationMs`. A harness run's
- * BENCH_OBJECTIVE is the Objective as filed. The harness never interprets
- * criteria itself: a grader that fails, times out or writes anything else
- * is recorded as `grade.error`, never as a pass rate.
+ * BENCH_OBJECTIVE is the Objective as filed, and a graded card's
+ * BENCH_BASE the commit its change starts from (runBase). The harness
+ * never interprets criteria itself: a grader that fails, times out or
+ * writes anything else is recorded as `grade.error`, never as a pass rate.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -175,8 +176,17 @@ export function checkoutInto(repo, commit, tree) {
   }
 }
 
-/** The command run in a shell of its own process group, killed whole at `timeoutMs`. */
-export function runCommand(command, { cwd, env, timeoutMs }) {
+/** How long a command that timed out has, after SIGTERM, before its process group is killed. */
+export const GRACE_MS = 5_000;
+
+/**
+ * The command run in a shell of its own process group, stopped whole at
+ * `timeoutMs`: SIGTERM, then SIGKILL once it exits or GRACE_MS later, so
+ * whatever it started in its group goes too, and a command that keeps
+ * process groups of its own (bench/grade-auto.mjs) can stop them first.
+ * `groups`, a Set, holds the group's id while it runs.
+ */
+export function runCommand(command, { cwd, env, timeoutMs, groups }) {
   return new Promise((resolve) => {
     const child = spawn(command, {
       shell: true,
@@ -185,28 +195,40 @@ export function runCommand(command, { cwd, env, timeoutMs }) {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (child.pid) groups?.add(child.pid);
     let output = "";
     const keep = (text) => {
       output = (output + text).slice(-TAIL);
     };
     child.stdout.setEncoding("utf8").on("data", keep);
     child.stderr.setEncoding("utf8").on("data", keep);
+    const signalGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     let timedOut = false;
+    let grace;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      signalGroup("SIGTERM");
+      grace = setTimeout(() => signalGroup("SIGKILL"), GRACE_MS);
     }, timeoutMs);
-    child.on("error", (error) => {
+    const settle = (result) => {
       clearTimeout(timer);
-      resolve({ code: null, output: error.message, timedOut });
+      clearTimeout(grace);
+      // Whatever of its group outlived it.
+      if (timedOut) signalGroup("SIGKILL");
+      groups?.delete(child.pid);
+      resolve(result);
+    };
+    child.on("error", (error) => {
+      settle({ code: null, output: error.message, timedOut });
     });
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, output, timedOut });
+      settle({ code, signal, output, timedOut });
     });
   });
 }
@@ -366,9 +388,19 @@ export function gradeFile(file, commit = null) {
 }
 
 /**
+ * The commit a run's change starts from: the definition's `source.base`
+ * with the base patches provisioning applied (the card's
+ * `run.basePatches`), which are the harness's, not the run's.
+ */
+export function runBase(card, definition) {
+  return card.run.basePatches?.at(-1)?.applied ?? definition.source?.base;
+}
+
+/**
  * Run the definition's grader on `commit` of repository `repo` (a fresh
  * checkout, removed after), with BENCH_OBJECTIVE when `objective` (the
- * Objective as filed) is known. The grade: per-criterion verdicts as the
+ * Objective as filed) is known and BENCH_BASE when `base` (runBase's) is.
+ * The grade: per-criterion verdicts as the
  * grader gave them, `passRate`, the share of criteria it passed (an
  * unknown verdict is not a pass), and the grader's own `metrics`, with any
  * findings, mutation, cost and duration it reported. A failure is `error`,
@@ -376,7 +408,7 @@ export function gradeFile(file, commit = null) {
  */
 export async function runGrader(
   definition,
-  { repo, commit, objective = null },
+  { repo, commit, objective = null, base = null },
 ) {
   const { command, timeoutMinutes } = definition.grader;
   let checkout;
@@ -396,6 +428,7 @@ export async function runGrader(
         BENCH_DEFINITION: definition.file,
         BENCH_OUT: out,
         ...(objective ? { BENCH_OBJECTIVE: objective } : {}),
+        ...(base ? { BENCH_BASE: base } : {}),
       },
       timeoutMs: timeoutMinutes * 60_000,
     });
@@ -481,6 +514,7 @@ export async function gradeCard(card, definition, { repo, commit }) {
       repo,
       commit: at,
       objective: filed && existsSync(filed) ? filed : null,
+      base: runBase(card, definition),
     }),
   );
 }

@@ -2302,6 +2302,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const profiles = offeredProfiles(config);
       const wire = {
         reviewArtifacts: inputs.reviewArtifacts.length > 0,
+        started: progress.started,
         ...(profiles ? { profiles } : {}),
       };
       const invalidBefore = state.kept[invalidKey(key)] as string | undefined;

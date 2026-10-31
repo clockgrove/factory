@@ -50,6 +50,12 @@ export interface WireOptions {
   }[];
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
+  /**
+   * In an amendment, the items the started-item rule binds: their planner
+   * cannot restate the acceptance accepted under an earlier, higher entry
+   * signal (#2282), so the entry-signal lint does not judge them.
+   */
+  started?: ReadonlySet<string>;
 }
 
 /** A choice the planner can revise. Caught inside this module and returned as a Finding. */
@@ -201,15 +207,23 @@ const LINE_REFERENCE =
 
 /**
  * The plan standard's deterministic lint, run before paid review on each
- * item the planner defined: an item above the entry signal states why it is
- * one outcome, and no acceptance entry cites a line.
+ * item the planner defined: an item above the entry signal, unless started,
+ * states why it is one outcome, and no acceptance entry cites a line.
  */
-function planStandardLint(item: ObjectValue, reason: string | null): string[] {
+function planStandardLint(
+  item: ObjectValue,
+  reason: string | null,
+  started: boolean,
+): string[] {
   if (!Array.isArray(item.acceptance)) return [];
   const findings: string[] = [];
-  if (item.acceptance.length > WORK_ITEM_ENTRY_SIGNAL && reason === null)
+  if (
+    !started &&
+    item.acceptance.length > WORK_ITEM_ENTRY_SIGNAL &&
+    reason === null
+  )
     findings.push(
-      `Work Item ${String(item.id)} has ${item.acceptance.length} acceptance entries, above the signal of ${WORK_ITEM_ENTRY_SIGNAL}, and no oneOutcomeReason: split it into one item per outcome, or state in oneOutcomeReason why it is one outcome`,
+      `Work Item ${String(item.id)} has ${item.acceptance.length} acceptance entries, above the signal of ${WORK_ITEM_ENTRY_SIGNAL}, and no oneOutcomeReason: split it into one item per independently verifiable capability, each proved by its own test, or state in oneOutcomeReason why it is one outcome`,
     );
   for (const [at, entry] of item.acceptance.entries())
     if (typeof entry === "string" && LINE_REFERENCE.test(entry))
@@ -658,6 +672,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     itemSchema,
     kindSchemas,
     profiles: options.profiles,
+    started: options.started,
     proofForms,
     modes,
     schema,
@@ -1176,7 +1191,11 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
   const reason = item.oneOutcomeReason;
   if (reason !== null && (typeof reason !== "string" || !reason.trim()))
     throw new Refusal("Planner oneOutcomeReason must be null or text", id);
-  for (const message of planStandardLint(item, reason))
+  for (const message of planStandardLint(
+    item,
+    reason,
+    wire.started?.has(id) === true,
+  ))
     lint.push({
       source: "check",
       message: `Plan standard: ${message}`,

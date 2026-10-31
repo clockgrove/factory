@@ -203,6 +203,8 @@ test("the review is told a passing command is required, not sufficient, and its 
     ),
   );
   assert.ok(prompt.includes(REVIEW_GUIDANCE.findings));
+  // A quantified criterion is judged over its class, siblings included (#2272).
+  assert.ok(prompt.includes(REVIEW_GUIDANCE.quantified));
   assert.ok(
     prompt.includes(
       "A test this result adds that proves again a claim another test in the tree already proves, or a harness or fixture setup it copies instead of importing, is a test-economy violation: refuse it, citing both locations.",

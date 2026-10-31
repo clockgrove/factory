@@ -231,6 +231,7 @@ const FINAL_INSTRUCTIONS = [
   "Final review independently judges every original Objective criterion, every source obligation, integrated interaction and final-only requirement on the integrated tree. Work Item reviews proved obligations one item at a time; judge each again against everything that now consumes or produces what it covers. A criterion beginning \"Integration of Work Item\" is a fixed integration question: read the producer's real outputs, types and helpers and the consumer's use of them in the integrated tree, and pass only with both sides' file:lines cited. Refuse it when the consumer rejects or reshapes what the producer actually emits or redefines a helper or type the producer owns, and refuse each criterion it names that the defect breaks, citing the same evidence. Every criterion needs sufficient current evidence.",
   REVIEW_GUIDANCE.behaviour,
   REVIEW_GUIDANCE.findings,
+  REVIEW_GUIDANCE.quantified,
   REVIEW_GUIDANCE.precedent,
   REVIEW_GUIDANCE.labels,
   REVIEW_GUIDANCE.design,

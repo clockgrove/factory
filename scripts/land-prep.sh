@@ -1,6 +1,7 @@
 #!/bin/bash
 # scripts/land-prep.sh [--no-push]: in a PR's worktree, rebase onto
-# origin/main, run the full gate, and push only if every step passed
+# origin/main, run the quick checks (build, lint, format, notices; CI runs
+# the tests), and push only if every step passed
 # (docs/LANDING.md#before-you-push). Any failure stops
 # with a non-zero exit before the push (set -euo pipefail: no step's
 # failure is hidden by a pipe or a `;`).
@@ -34,8 +35,6 @@ step build npm run build
 step lint npm run lint
 step format npm run format:check
 step notices npm run notices:check
-step tests npm test
-grep -E "^ℹ (pass|fail)" "$log" || true
 if git grep -n -e '^<<<<<<<' -e '^>>>>>>>' -- . >/dev/null; then echo "land-prep: conflict markers left" >&2; exit 1; fi
 if [ "$push" = 1 ]; then
   git push --force-with-lease -u origin "$branch" >/dev/null 2>&1 || { echo "land-prep: push failed" >&2; exit 1; }

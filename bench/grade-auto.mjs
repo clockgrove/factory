@@ -16,7 +16,8 @@
  *   --evidence DIR              each role's prompt, transcript and answer
  *                               (default: beside --out, <out>.evidence/)
  *   --cli PATH                  the agent CLI (default: claude)
- *   --model NAME, --effort LEVEL  the agents' model (default: opus) and effort
+ *   --model NAME, --effort LEVEL  the agents' model and effort (default:
+ *                               claude-sonnet-5-5, high)
  *   --install CMD               the repository's install command, run in
  *                               each role's scratch checkout
  *   --check CMD ...             the repository's declared checks

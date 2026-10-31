@@ -64,10 +64,13 @@ export const PROMPTS = join(
   dirname(dirname(fileURLToPath(import.meta.url))),
   "grade-auto",
 );
+// The model and effort are pinned, not aliases: an alias or the CLI's own default
+// effort can move under a series of runs and change their grades. Sonnet at high
+// effort matched Opus at a third of the cost in a sweep across Haiku to Opus.
 export const DEFAULTS = Object.freeze({
   cli: "claude",
-  model: "opus",
-  effort: null,
+  model: "claude-sonnet-5-5",
+  effort: "high",
   votes: 3,
   maxFindings: 20,
   timeoutMinutes: 30,

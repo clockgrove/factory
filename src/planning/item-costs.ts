@@ -81,7 +81,7 @@ function itemsOf(state: ObjectiveState, logs: string, run: string): PastItem[] {
   const since = Date.parse(run);
   for (const file of logFiles(logs, state.issue)) {
     const stat = statSync(file, { throwIfNoEntry: false });
-    if (stat && stat.mtimeMs >= since)
+    if (stat && !(stat.mtimeMs < since))
       streamFile(file, 0, (event) => {
         if (event.at >= run) telemetry.add(event);
       });

@@ -29,6 +29,12 @@
  *   --grade-only     grade the existing card again (the --out FILE, or the
  *                    run's card in the results) and rewrite it; nothing else
  *                    is scored again.
+ *   --grade-file F   attach a grade written outside the harness, such as
+ *                    bench/grade-auto.mjs's standalone output (#2273), in
+ *                    place of running the definition's grader: checked as a
+ *                    grader's output is, at its own commit (or
+ *                    --grade-commit SHA, which must agree). A commit other
+ *                    than the card's end commit needs --grade-commit.
  *
  * Exit codes: 0 scored (and graded, where it is); 64 usage; 65 a partial
  * card not written into the results; 70 the grader failed, its error
@@ -38,7 +44,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
-import { gradeCard } from "./lib/grade.mjs";
+import { gradeCard, gradeFile, setGrade } from "./lib/grade.mjs";
 import {
   benchDirs,
   DIR_OPTIONS,
@@ -64,6 +70,7 @@ const { values } = parseArgs({
     print: { type: "boolean" },
     "grade-tree": { type: "string" },
     "grade-commit": { type: "string" },
+    "grade-file": { type: "string" },
     "hand-fix": { type: "string", multiple: true },
     "grade-only": { type: "boolean" },
   },
@@ -114,8 +121,18 @@ if (values["run-dir"]) {
 }
 if (!Number.isSafeInteger(input.issue) || input.issue <= 0)
   usage("--issue takes an issue number");
-if (values["grade-commit"] && !input.checkout)
+if (values["grade-commit"] && !input.checkout && !values["grade-file"])
   usage("--grade-commit needs --grade-tree DIR, the repository it is in");
+let attached = null;
+if (values["grade-file"])
+  try {
+    attached = gradeFile(
+      resolve(values["grade-file"]),
+      values["grade-commit"] ?? null,
+    );
+  } catch (error) {
+    usage(`--grade-file: ${error.message}`);
+  }
 if (input.checkout && !existsSync(input.checkout) && values["grade-tree"])
   usage(`--grade-tree ${input.checkout} does not exist`);
 const writes = !values.print && !values.out;
@@ -156,11 +173,26 @@ if (values["grade-only"]) {
     checkout: repo,
     handFixes: values["hand-fix"] ?? [],
   });
-if (!card.partial)
-  await gradeCard(card, definition, {
-    repo,
-    commit: values["grade-commit"] ?? null,
-  });
+// A grade of another commit than the Objective's end is attached only when
+// --grade-commit names it.
+if (
+  attached &&
+  !card.partial &&
+  card.endCommit &&
+  attached.commit !== card.endCommit &&
+  !values["grade-commit"]
+)
+  usage(
+    `--grade-file: ${values["grade-file"]} grades ${attached.commit}, not the Objective's end commit ${card.endCommit}: give --grade-commit ${attached.commit} to attach it anyway`,
+  );
+if (!card.partial) {
+  if (attached) setGrade(card, attached);
+  else
+    await gradeCard(card, definition, {
+      repo,
+      commit: values["grade-commit"] ?? null,
+    });
+}
 const text = `${JSON.stringify(card, null, 2)}\n`;
 const graded = card.grade?.error
   ? `; the grader failed: ${card.grade.error}`

@@ -12,17 +12,25 @@
  * its environment. It writes `{ graderVersion, criteria: [{ id, text,
  * verdict, method, evidence }], metrics }` to BENCH_OUT, each verdict
  * `pass`, `fail` or `unknown`; `metrics`, optional, maps a name to a number,
- * such as the delivered tests' mutation score (#2224). The harness never
- * interprets criteria itself: a grader that fails, times out or writes
- * anything else is recorded as `grade.error`, never as a pass rate.
+ * such as the delivered tests' mutation score (#2224). Also optional, from a
+ * grader that reviews as well as grades, such as bench/grade-auto.mjs
+ * (#2273): `findings` (each `{ id, severity, title, evidence, reproduce }`,
+ * severity `defect`, `quality` or `minor`), `mutation` (`{ survived,
+ * killed, examples }`), `cost` and `durationMs`. A harness run's
+ * BENCH_OBJECTIVE is the Objective as filed, and a graded card's
+ * BENCH_BASE the commit its change starts from (runBase). The harness
+ * never interprets criteria itself: a grader that fails, times out or
+ * writes anything else is recorded as `grade.error`, never as a pass rate.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { escapesOf } from "./outcomes.mjs";
 
 const VERDICTS = ["pass", "fail", "unknown"];
+/** A finding's severity: `defect` violates a criterion the Objective states. */
+export const SEVERITIES = ["defect", "quality", "minor"];
 /** How much of a failed grader's output the error keeps. */
 const TAIL = 2000;
 
@@ -168,8 +176,17 @@ export function checkoutInto(repo, commit, tree) {
   }
 }
 
-/** The command run in a shell of its own process group, killed whole at `timeoutMs`. */
-export function runCommand(command, { cwd, env, timeoutMs }) {
+/** How long a command that timed out has, after SIGTERM, before its process group is killed. */
+export const GRACE_MS = 5_000;
+
+/**
+ * The command run in a shell of its own process group, stopped whole at
+ * `timeoutMs`: SIGTERM, then SIGKILL once it exits or GRACE_MS later, so
+ * whatever it started in its group goes too, and a command that keeps
+ * process groups of its own (bench/grade-auto.mjs) can stop them first.
+ * `groups`, a Set, holds the group's id while it runs.
+ */
+export function runCommand(command, { cwd, env, timeoutMs, groups }) {
   return new Promise((resolve) => {
     const child = spawn(command, {
       shell: true,
@@ -178,28 +195,40 @@ export function runCommand(command, { cwd, env, timeoutMs }) {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (child.pid) groups?.add(child.pid);
     let output = "";
     const keep = (text) => {
       output = (output + text).slice(-TAIL);
     };
     child.stdout.setEncoding("utf8").on("data", keep);
     child.stderr.setEncoding("utf8").on("data", keep);
+    const signalGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     let timedOut = false;
+    let grace;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      signalGroup("SIGTERM");
+      grace = setTimeout(() => signalGroup("SIGKILL"), GRACE_MS);
     }, timeoutMs);
-    child.on("error", (error) => {
+    const settle = (result) => {
       clearTimeout(timer);
-      resolve({ code: null, output: error.message, timedOut });
+      clearTimeout(grace);
+      // Whatever of its group outlived it.
+      if (timedOut) signalGroup("SIGKILL");
+      groups?.delete(child.pid);
+      resolve(result);
+    };
+    child.on("error", (error) => {
+      settle({ code: null, output: error.message, timedOut });
     });
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, output, timedOut });
+      settle({ code, signal, output, timedOut });
     });
   });
 }
@@ -225,9 +254,73 @@ function graderOutput(text) {
     )
   )
     throw new Error("BENCH_OUT's metrics must map each name to a number");
+  const words = (v) => (typeof v === "string" ? v : null);
+  const whole = (n) => Number.isSafeInteger(n) && n >= 0;
+  const { findings, mutation, cost, durationMs } = value;
+  if (
+    findings !== undefined &&
+    !(
+      Array.isArray(findings) &&
+      findings.every(
+        (f) => typeof f?.id === "string" && SEVERITIES.includes(f.severity),
+      )
+    )
+  )
+    throw new Error(
+      `BENCH_OUT's findings must each have an id and a severity of ${SEVERITIES.join(", ")}`,
+    );
+  if (
+    mutation !== undefined &&
+    mutation !== null &&
+    !(
+      whole(mutation.survived) &&
+      whole(mutation.killed) &&
+      (mutation.examples === undefined || Array.isArray(mutation.examples))
+    )
+  )
+    throw new Error(
+      "BENCH_OUT's mutation must give survived and killed as whole numbers",
+    );
+  if (
+    cost !== undefined &&
+    cost !== null &&
+    !(
+      typeof cost === "object" &&
+      (cost.usd === null || (typeof cost.usd === "number" && cost.usd >= 0))
+    )
+  )
+    throw new Error("BENCH_OUT's cost must give usd as a number or null");
+  if (
+    durationMs !== undefined &&
+    !(typeof durationMs === "number" && durationMs >= 0)
+  )
+    throw new Error("BENCH_OUT's durationMs must be a number");
   return {
     graderVersion: value.graderVersion,
     metrics: { ...metrics },
+    // Only what the grader reported: a grader that reviews nothing has none.
+    ...(findings
+      ? {
+          findings: findings.map((f) => ({
+            id: f.id,
+            severity: f.severity,
+            title: words(f.title),
+            evidence: f.evidence ?? null,
+            reproduce: words(f.reproduce),
+          })),
+        }
+      : {}),
+    ...(mutation !== undefined
+      ? {
+          mutation: mutation && {
+            survived: mutation.survived,
+            killed: mutation.killed,
+            examples: mutation.examples ?? [],
+          },
+        }
+      : {}),
+    ...(cost !== undefined ? { cost } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
     criteria: value.criteria.map((criterion, index) => {
       if (
         typeof criterion?.id !== "string" ||
@@ -260,14 +353,63 @@ const failed = (commit, error, graderVersion = null) => ({
   error,
 });
 
+/** The grade of `commit` from what a grader wrote (graderOutput's): its verdicts counted. */
+function gradeOf(graded, commit) {
+  const count = (verdict) =>
+    graded.criteria.filter((c) => c.verdict === verdict).length;
+  const { graderVersion, criteria, metrics, ...reviewed } = graded;
+  return {
+    graderVersion,
+    commit,
+    passed: count("pass"),
+    failed: count("fail"),
+    unknown: count("unknown"),
+    passRate: count("pass") / criteria.length,
+    criteria,
+    metrics,
+    ...reviewed,
+  };
+}
+
+/**
+ * The grade in `file`, a grader's output written outside the harness (such
+ * as bench/grade-auto.mjs run standalone), checked as BENCH_OUT is. Its
+ * commit is `commit`, or the file's own `commit`. Throws naming what is wrong.
+ */
+export function gradeFile(file, commit = null) {
+  const text = readFileSync(file, "utf8");
+  const graded = graderOutput(text);
+  const own = JSON.parse(text).commit ?? null;
+  if (commit && own && commit !== own)
+    throw new Error(`${file} grades ${own}, not ${commit}`);
+  if (!commit && !own)
+    throw new Error(`${file} names no commit: give --grade-commit SHA`);
+  return gradeOf(graded, commit ?? own);
+}
+
+/**
+ * The commit a run's change starts from: the definition's `source.base`
+ * with the base patches provisioning applied (the card's
+ * `run.basePatches`), which are the harness's, not the run's.
+ */
+export function runBase(card, definition) {
+  return card.run.basePatches?.at(-1)?.applied ?? definition.source?.base;
+}
+
 /**
  * Run the definition's grader on `commit` of repository `repo` (a fresh
- * checkout, removed after). The grade: per-criterion verdicts as the
+ * checkout, removed after), with BENCH_OBJECTIVE when `objective` (the
+ * Objective as filed) is known and BENCH_BASE when `base` (runBase's) is.
+ * The grade: per-criterion verdicts as the
  * grader gave them, `passRate`, the share of criteria it passed (an
- * unknown verdict is not a pass), and the grader's own `metrics`. A
- * failure is `error`, never a rate.
+ * unknown verdict is not a pass), and the grader's own `metrics`, with any
+ * findings, mutation, cost and duration it reported. A failure is `error`,
+ * never a rate.
  */
-export async function runGrader(definition, { repo, commit }) {
+export async function runGrader(
+  definition,
+  { repo, commit, objective = null, base = null },
+) {
   const { command, timeoutMinutes } = definition.grader;
   let checkout;
   try {
@@ -285,6 +427,8 @@ export async function runGrader(definition, { repo, commit }) {
         BENCH_COMMIT: commit,
         BENCH_DEFINITION: definition.file,
         BENCH_OUT: out,
+        ...(objective ? { BENCH_OBJECTIVE: objective } : {}),
+        ...(base ? { BENCH_BASE: base } : {}),
       },
       timeoutMs: timeoutMinutes * 60_000,
     });
@@ -310,18 +454,7 @@ export async function runGrader(definition, { repo, commit }) {
           : error.message,
       );
     }
-    const count = (verdict) =>
-      graded.criteria.filter((c) => c.verdict === verdict).length;
-    return {
-      graderVersion: graded.graderVersion,
-      commit,
-      passed: count("pass"),
-      failed: count("fail"),
-      unknown: count("unknown"),
-      passRate: count("pass") / graded.criteria.length,
-      criteria: graded.criteria,
-      metrics: graded.metrics,
-    };
+    return gradeOf(graded, commit);
   } finally {
     rmSync(checkout.root, { recursive: true, force: true });
   }
@@ -373,5 +506,15 @@ export async function gradeCard(card, definition, { repo, commit }) {
         ? "no end commit: give --grade-commit SHA"
         : "no checkout of the run repository to grade: give --grade-tree DIR --grade-commit SHA",
     );
-  return setGrade(card, await runGrader(definition, { repo, commit: at }));
+  // A harness run's directory holds the Objective as filed.
+  const filed = card.run.dir ? join(card.run.dir, "objective.md") : null;
+  return setGrade(
+    card,
+    await runGrader(definition, {
+      repo,
+      commit: at,
+      objective: filed && existsSync(filed) ? filed : null,
+      base: runBase(card, definition),
+    }),
+  );
 }

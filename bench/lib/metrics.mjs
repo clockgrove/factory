@@ -127,6 +127,20 @@ export const METRICS = {
     better: "higher",
     get: totals("ci.firstPassRate"),
   },
+  // From a grader that reviews as well as grades (bench/grade-auto.mjs,
+  // #2273): null for one that reports no findings or mutants.
+  "quality.verifiedFindings": {
+    label: "Grader's verified findings",
+    unit: "count",
+    better: "lower",
+    get: (card) => card.grade?.findings?.length ?? null,
+  },
+  "quality.mutantsSurvived": {
+    label: "Mutants the delivered tests let survive",
+    unit: "count",
+    better: "lower",
+    get: (card) => card.grade?.mutation?.survived ?? null,
+  },
   done: {
     label: "Done",
     unit: "rate",
@@ -155,6 +169,8 @@ export const DIAGNOSTICS = [
   "holds.operator",
   "validation.firstPassRate",
   "ci.firstPassRate",
+  "quality.verifiedFindings",
+  "quality.mutantsSurvived",
 ];
 
 /** The order history and reports show metrics in. */

@@ -215,15 +215,29 @@ export function wasteOf({
  *   ran (final review let it through to the operator);
  * - `graderFailedPassed`: criteria the grader failed although final review
  *   passed them (it passed the result last); null until graded.
+ * - `graderDefects`: verified findings of severity `defect` (they violate a
+ *   stated criterion) in a result final review passed (#2273); null until
+ *   graded by a grader that reports findings.
  */
 export function escapesOf({ refusals, handFixesAfter, grade, finalPassed }) {
   const graded = typeof grade?.failed === "number";
   const graderFailedPassed = graded ? (finalPassed ? grade.failed : 0) : null;
+  const graderDefects =
+    graded && Array.isArray(grade.findings)
+      ? finalPassed
+        ? grade.findings.filter((f) => f.severity === "defect").length
+        : 0
+      : null;
   return {
-    total: refusals + handFixesAfter + (graderFailedPassed ?? 0),
+    total:
+      refusals +
+      handFixesAfter +
+      (graderFailedPassed ?? 0) +
+      (graderDefects ?? 0),
     finalReviewRefusals: refusals,
     handFixesAfterFinalReview: handFixesAfter,
     graderFailedPassed,
+    graderDefects,
   };
 }
 

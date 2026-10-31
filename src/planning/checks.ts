@@ -76,6 +76,7 @@ export async function checkPlan(
   if (!graph.usable) return findings;
   const { items } = draft;
   commandFindings(items, facts, found);
+  commandOrderFindings(items, found);
   await exportPathFindings(items, files, found);
   protectedPathFindings(items, facts, found, accepted, started);
   await boundaryFindings(items, facts, files, found);
@@ -178,6 +179,33 @@ function commandFindings(
           `Work Item ${item.id} validation runs ${command}, which runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}: validation pins only those root script forms, so it would refuse this command after the work is built. Use one of those forms (root package scripts: ${listCommands(facts.packageCommands)}), or run the tool directly without npm or pnpm`,
           item.id,
         );
+}
+
+/**
+ * A command's `after` (#2290) names earlier commands of its own item, each
+ * once: validation runs a command only after what it needs, so a later or
+ * missing one can't be run first. Whether it needs them is the planner's.
+ */
+function commandOrderFindings(items: readonly WorkItem[], found: Found): void {
+  for (const item of items)
+    item.validation.forEach(({ command, after }, index) => {
+      if (
+        after === undefined ||
+        (after.every(
+          (earlier) =>
+            Number.isSafeInteger(earlier) && earlier >= 0 && earlier < index,
+        ) &&
+          new Set(after).size === after.length)
+      )
+        return;
+      const earlier = item.validation
+        .slice(0, Math.min(index, 20))
+        .map((check, at) => `${at} \`${check.command}\``);
+      found(
+        `Work Item ${item.id} validation command ${index} (\`${command}\`) has after ${JSON.stringify(after)}, but after lists only this item's commands before it, each once, by index: ${index ? `${earlier.join(", ")}${index > 20 ? ` and ${index - 20} more` : ""}` : "it is the first, so []"}. Use [] when it needs none of them, or null when it may need any`,
+        item.id,
+      );
+    });
 }
 
 // ── Boundaries ──────────────────────────────────────────────────────────

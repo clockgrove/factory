@@ -158,22 +158,32 @@ function runs(events) {
   return out;
 }
 
+/** Validation entries that declare no `after`. */
+const declared = (...commands) => commands.map((command) => ({ command }));
+
 test("a run keeps the declared order and the exact install, each command once", () => {
-  const commands = ["sh a.sh", "sh b.sh", "sh c.sh"];
+  const commands = declared("sh a.sh", "sh b.sh", "sh c.sh");
   assert.deepEqual(runOrder(commands), [0, 1, 2]);
   // No command runs ahead of one declared before it, whatever is named.
-  assert.deepEqual(runOrder(commands, [2, 0, 1]), [0, 1, 2]);
-  assert.deepEqual(runOrder(commands, [2, 1]), [1, 2]);
-  assert.deepEqual(runOrder(commands, [1, 1, 7, -1, 0.5]), [1]);
+  assert.deepEqual(runOrder(commands, { only: [2, 0, 1] }), [0, 1, 2]);
+  assert.deepEqual(runOrder(commands, { only: [2, 1] }), [1, 2]);
+  assert.deepEqual(runOrder(commands, { only: [1, 1, 7, -1, 0.5] }), [1]);
+  // A command that declares nothing may need every earlier one.
+  assert.deepEqual(runOrder(commands, { first: 2 }), [0, 1, 2]);
   // An install the commands need always runs, first.
-  const installed = [BOOTSTRAP, ...commands];
-  assert.deepEqual(runOrder(installed, [3]), [0, 3]);
-  assert.deepEqual(runOrder(installed, [3, 1]), [0, 1, 3]);
+  const installed = declared(BOOTSTRAP, "sh a.sh", "sh b.sh", "sh c.sh");
+  assert.deepEqual(runOrder(installed, { only: [3] }), [0, 3]);
+  assert.deepEqual(runOrder(installed, { only: [3, 1] }), [0, 1, 3]);
   assert.deepEqual(runOrder(installed), [0, 1, 2, 3]);
 });
 
 test("a failure says what a targeted run of it would skip, and a targeted failure what it skipped", () => {
-  const commands = [BOOTSTRAP, "sh build.sh", "sh lint.sh", "sh test.sh"];
+  const commands = declared(
+    BOOTSTRAP,
+    "sh build.sh",
+    "sh lint.sh",
+    "sh test.sh",
+  );
   // After a full run: the earlier commands a targeted run would leave out,
   // never the install, which always runs.
   assert.equal(

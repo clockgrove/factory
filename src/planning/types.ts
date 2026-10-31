@@ -60,6 +60,13 @@ export interface WorkItem {
  */
 export interface ValidationCommand {
   command: string;
+  /**
+   * The earlier commands of the item this one needs (#2290), by index:
+   * what they make, such as a build or generated code. Absent, it may need
+   * every earlier command, so it runs only after them all; `[]`, none. The
+   * exact install, run first, needs no listing.
+   */
+  after?: number[];
 }
 
 /**

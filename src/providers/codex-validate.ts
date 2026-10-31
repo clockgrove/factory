@@ -50,7 +50,7 @@ export const CODEX_VALIDATION_TOOL_ID = `mcp__${CODEX_VALIDATION_SERVER.replaceA
  * `omit_tools_from = ["deferred"]` (codexMcpServerConfig) lists it in
  * exec's description, and the worker is also given the exact call.
  */
-export const CODEX_VALIDATE_CALL = `Validate is the MCP tool ${VALIDATION_TOOL_NAME} of Factory's server ${CODEX_VALIDATION_SERVER}, id ${CODEX_VALIDATION_TOOL_ID}. Inside exec, call it as \`const result = await tools.${CODEX_VALIDATION_TOOL_ID}({}); text(result.content.map((part) => part.text).join(""));\` for a full run, or with \`{ commands: [2] }\` for a targeted run of only those declared commands (by index, 0 the first, with any earlier one they need, such as a build) after the install, which never counts as validating your result; where your tools list ${VALIDATION_TOOL_NAME} directly, call it there.`;
+export const CODEX_VALIDATE_CALL = `Validate is the MCP tool ${VALIDATION_TOOL_NAME} of Factory's server ${CODEX_VALIDATION_SERVER}, id ${CODEX_VALIDATION_TOOL_ID}. Inside exec, call it as \`const result = await tools.${CODEX_VALIDATION_TOOL_ID}({}); text(result.content.map((part) => part.text).join(""));\` for a full run, or with \`{ commands: [2] }\` for a targeted run of only those declared commands and the earlier ones their after lists (by index, 0 the first, with any other earlier one they need, such as a build) after the install, which never counts as validating your result; where your tools list ${VALIDATION_TOOL_NAME} directly, call it there.`;
 
 /**
  * One Codex worker attempt's Validate: the shared runs (`validator`, whose

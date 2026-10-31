@@ -45,10 +45,16 @@ export interface PredecessorEvidence {
   items: { id: string; title: string; pr?: number; merged?: string }[];
 }
 
-/** A predecessor the operator answered `ignore` to: the Objective proceeds without it. */
+/**
+ * A predecessor the operator answered `ignore` to: the Objective proceeds
+ * without it, through replans, while the blocked-by link and the
+ * predecessor's issue state (`issueState`) are what they were.
+ */
 export interface IgnoredPredecessor {
   /** `#N` in this repository, `owner/repo#N` in another (`reference`). */
   ref: string;
+  /** The blocker's issue state when ignored (`issueState`). */
+  state: string;
   reason: string;
   by: string;
   at: string;
@@ -89,6 +95,13 @@ function reference(github: GitHub, blocker: IssueSummary): string {
   return `${repository ?? "another repository"}#${blocker.number}`;
 }
 
+/** A blocker's GitHub state: `open`, or `closed` with why it closed. */
+function issueState(blocker: IssueSummary): string {
+  return blocker.state === "open"
+    ? "open"
+    : `closed:${blocker.state_reason ?? ""}`;
+}
+
 /** The `ignore` option for a blocker: its arg is the number here, else `owner/repo#N`. */
 function ignoreOffer(ref: string): Offer {
   return {
@@ -108,24 +121,38 @@ export function predecessorsStep(deps: PlanningDeps): Step {
     deadlineMs: 10 * MINUTE,
     run: async ({ state, answer, signal }): Promise<Outcome> => {
       const { github } = deps;
-      let ignored = fact(state, "predecessors:ignored") ?? [];
+      const all = await github.blockedBy(state.issue, signal);
+      // An ignore stands while its link and the predecessor's state are
+      // unchanged, across replans; else the question is asked again.
+      let ignored = (fact(state, "predecessors:ignored") ?? []).filter(
+        (entry) =>
+          all.some(
+            (blocker) =>
+              reference(github, blocker) === entry.ref &&
+              issueState(blocker) === entry.state,
+          ),
+      );
       const arg = answer?.answer === "ignore" ? answer.arg : undefined;
       const ignoring = arg?.includes("#") ? arg : arg && `#${arg}`;
-      if (ignoring && !ignored.some((entry) => entry.ref === ignoring))
+      const answered = all.find(
+        (blocker) => reference(github, blocker) === ignoring,
+      );
+      if (answered && !ignored.some((entry) => entry.ref === ignoring))
         ignored = [
           ...ignored,
           {
-            ref: ignoring,
+            ref: ignoring!,
+            state: issueState(answered),
             reason: (answer!.text ?? "").trim(),
             by: answer!.by,
             at: answer!.at,
           },
         ];
-      const keep = ignored.length
-        ? facts({ "predecessors:ignored": ignored })
-        : {};
+      const keep = facts({
+        "predecessors:ignored": ignored.length ? ignored : null,
+      });
       const skip = new Set(ignored.map((entry) => entry.ref));
-      const linked = (await github.blockedBy(state.issue, signal)).filter(
+      const linked = all.filter(
         (blocker) => !skip.has(reference(github, blocker)),
       );
       const blockers: Blocker[] = [];

@@ -154,7 +154,7 @@ Every worker (Codex, Claude, Copilot, managed) reports what it is doing through 
 }
 ```
 
-- `counts`: what happened since the previous event; every field is always present. `commandsFailed` counts commands that ended with a non-zero exit, a signal or their time limit (Codex's shell, Claude's Factory shell).
+- `counts`: what happened since the previous event; every field is always present. `edits` counts each edit an edit tool reported, and once each file a sample of the worktree (see `changed`) finds changed that no edit tool reported, such as a shell command's rewrite; files already changed when the run began are not counted. `commandsFailed` counts commands that ended with a non-zero exit, a signal or their time limit (Codex's shell, Claude's Factory shell).
 - `tools`: the distinct tools started in that window, at most 8; `targets`: the first 8 started tools that named a target, each target relative to the worktree when inside it and cut to 200 characters (absent when none did); `paths`: the distinct files edited, relative to the worktree when inside it, at most 8.
 - `command`: the last command started in the window, on one line and cut to 200 characters; absent when none ran.
 - `changed`: the worktree's files that differ from its HEAD, untracked ones included, whatever wrote them (an edit tool or a shell command): `count` and the first 20 `files`. The worktree is sampled every 30 s while the worker runs and once when it ends (`git --no-optional-locks status`), and `changed` goes out only when the set changed since the last report; absent otherwise.

@@ -6,8 +6,10 @@
  * bubblewrap. Validate, which runs the item's declared commands through
  * `validateTree` on a snapshot commit of its current files as the Claude
  * and Copilot workers' does, is served to Codex as an MCP tool
- * (codex-validate.ts); Factory's validation still decides. Factory collects
- * and commits the result.
+ * (codex-validate.ts); Factory's validation still decides. The worker is
+ * told to edit through Codex's apply_patch (`CODEX_EDIT_CALL`), and asked
+ * again about a scripted rewrite that changed nothing (work/scripted-edits.ts).
+ * Factory collects and commits the result.
  */
 import { spawn } from "node:child_process";
 import {
@@ -37,6 +39,7 @@ import {
   toolchainDirectories,
 } from "../sandbox.js";
 import { errorMessage } from "../text.js";
+import { HeadRewrites, SCRIPTED_EDITS } from "../work/scripted-edits.js";
 import {
   FinishRequests,
   type SelfValidateOptions,
@@ -134,6 +137,21 @@ export interface CodexWorkerOptions {
 }
 
 /**
+ * How a Codex worker edits files (#2283). Codex's apply_patch is a nested
+ * tool of code mode's `exec` under this configuration, declared in exec's
+ * description, and its edits come back as `file_change` items: a probe of
+ * gpt-6.1-sol on Codex 0.160 with this worker home, asked for a one-line
+ * edit, called `tools.apply_patch`. Live (0.5.12) workers still edited
+ * through Python heredocs' `str.replace`, whose misses fail silently, and
+ * no edit was counted. So the worker is told to use it, and how, as for
+ * Validate (codex-validate.ts `CODEX_VALIDATE_CALL`).
+ */
+export const CODEX_EDIT_CALL = `Edit files with Codex's apply_patch tool: it fails when a patch's context lines don't match the file, instead of changing nothing. Inside exec, call it as \`text(await tools.apply_patch("*** Begin Patch\\n*** Update File: path/to/file\\n@@\\n-old line\\n+new line\\n*** End Patch"));\`; where your tools list apply_patch directly, call it there. ${SCRIPTED_EDITS}`;
+
+/** Requests a Codex worker gets about a scripted rewrite that changed nothing (#2283). */
+const MAX_REWRITE_REQUESTS = 2;
+
+/**
  * The truth about the worker's own shell, after its prompt (#1647, #2156):
  * Codex's sandbox, not Factory's validation environment. Live (#800), a
  * Codex worker without Validate tried `pnpm install` in it, found no
@@ -151,7 +169,7 @@ export function codexShellNote(
   const check = validating
     ? `Your Validate tool runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell, fix what it reports, and finish only after it passes on your final files. ${CODEX_VALIDATE_CALL}`
     : "You have no tool that runs the declared validation: Factory runs it after you finish.";
-  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${shellDependencies(network)} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp. ${COLLECTED_RESULT} ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? "check with Validate instead" : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}`;
+  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${shellDependencies(network)} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp. ${COLLECTED_RESULT} ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? "check with Validate instead" : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}\n\n${CODEX_EDIT_CALL}`;
 }
 
 const real = (path: string) => realpathSync(path);
@@ -758,6 +776,10 @@ export class CodexWorker implements Worker {
       let request =
         turn.prompt +
         codexShellNote(this.options.network === "host", validating, input.item);
+      // Codex runs the commands, so a scripted rewrite that changed nothing
+      // is told in the next request, before the result is taken (#2283).
+      const rewrites = new HeadRewrites(input.worktree, watchdog.signal);
+      let rewriteRequests = 0;
       for (let run = 0; ; run++) {
         if (run) {
           // Each run is a codex process of its own: the last one's group
@@ -794,6 +816,11 @@ export class CodexWorker implements Worker {
           if (modelItem(item)) firstToken(record, callStarted);
           if (item?.type === "agent_message") finalResponse = item.text;
           if (item) codexActivity(input, event.type, item);
+          if (
+            event.type === "item.completed" &&
+            item?.type === "command_execution"
+          )
+            rewrites.ran(item.command);
           if (item && SDK_OPERATIONS.has(item.type)) {
             operations.add(item.type, item.id);
             record.sdkOperations = operations.value;
@@ -817,6 +844,15 @@ export class CodexWorker implements Worker {
           return streamError
             ? failure(streamError)
             : { kind: "retry", reason: "Codex ended without a completed turn" };
+        const missed =
+          rewriteRequests < MAX_REWRITE_REQUESTS
+            ? await watchdog.race(rewrites.note("apply_patch"))
+            : undefined;
+        if (missed) {
+          rewriteRequests += 1;
+          request = `${missed}\nThen give your final report.`;
+          continue;
+        }
         const next = await finish?.next((operation) =>
           watchdog.race(operation),
         );

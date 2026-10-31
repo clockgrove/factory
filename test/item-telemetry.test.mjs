@@ -242,13 +242,52 @@ function fixture() {
     ...attempt("b", "publish", 1, at(38), at(38, 30)),
     ...attempt("b", "ci", 1, at(38, 30), at(39, 30)),
     ...attempt("b", "merge", 1, at(39, 30), at(40)),
+    // `c` continues its work step once, then misses a deadline, and is on
+    // its third attempt: what it spent shows though no step has finished.
+    ...attempt(
+      "c",
+      "work",
+      1,
+      at(41),
+      at(45),
+      { outcome: "retry", progress: true },
+      [
+        codex(
+          at(45),
+          "worker",
+          tokens(1_200_000, 20_000, 1_000_000, null, 4_000),
+          null,
+          { exec: 6 },
+        ),
+      ],
+    ),
+    ...attempt(
+      "c",
+      "work",
+      2,
+      at(45),
+      at(52),
+      { outcome: "retry", wait: "error", reason: "deadline" },
+      [
+        {
+          ...codex(
+            at(52),
+            "worker",
+            tokens(1_100_000, 10_000, 900_000, null, 2_000),
+            null,
+            { exec: 5 },
+          ),
+          outcome: "error",
+        },
+      ],
+    ),
     {
-      at: at(41),
+      at: at(52),
       step: "item:c:work",
-      attemptId: "item:c:work#1",
+      attemptId: "item:c:work#3",
       event: "start",
     },
-    activity(at(42), "c", { turns: 1 }),
+    activity(at(53), "c", { turns: 1 }),
   ];
 }
 
@@ -309,7 +348,7 @@ function stateOf() {
       ...merged("b", 13),
       ...merged("d", 9),
     },
-    attempts: { "item:c:work": { startedAt: at(41), id: "item:c:work#1" } },
+    attempts: { "item:c:work": { startedAt: at(52), id: "item:c:work#3" } },
     appliedRequests: [],
     modules: {
       github: {
@@ -338,15 +377,29 @@ test("each Work Item's telemetry is the sum of its own events this run, as of it
   const inst = logged();
   const tally = new RunTally(inst.logs);
   const { items, calls } = tally.read(ISSUE, STARTED);
-  // `c` has finished no step: nothing settled yet. The call before the run is left out.
-  assert.deepEqual(Object.keys(items).sort(), ["a", "b"]);
+  // The call before the run is left out.
+  assert.deepEqual(Object.keys(items).sort(), ["a", "b", "c"]);
   assert.deepEqual(calls, {
     planner: 3,
-    worker: 3,
-    tokens: 50_000 + 1_735_000 + 410_000,
-    items: 1_735_000 + 410_000,
+    worker: 5,
+    tokens: 50_000 + 1_735_000 + 410_000 + 2_330_000,
+    items: 1_735_000 + 410_000 + 2_330_000,
   });
-  const { a, b } = items;
+  const { a, b, c } = items;
+  // `c` as of its errored second attempt: its continuation and the error
+  // both settle it, with what their calls spent.
+  assert.equal(c.to, at(52));
+  assert.equal(c.calls, 2);
+  assert.deepEqual(c.tokens.total, { sum: 2_330_000, calls: 2 });
+  assert.deepEqual(c.stages.work, {
+    attempts: 2,
+    ms: 11 * 60_000,
+    outcomes: { retry: 2 },
+  });
+  assert.equal(
+    summaryLine(c),
+    "11 min · 2,330,000 tokens · 2 model calls · 0 repairs",
+  );
   assert.equal(a.from, at(0));
   assert.equal(a.to, at(28, 20));
   assert.equal(a.calls, 3);
@@ -406,10 +459,48 @@ test("each Work Item's telemetry is the sum of its own events this run, as of it
     summaryLine(b),
     "10 min · 410,000 tokens · 2 model calls · 0 repairs",
   );
-  // The running item is in the live view only, with its running step.
+  // The running attempt is in the live view only.
   const live = tally.live(ISSUE);
-  assert.equal(live.c.stages.work.running, at(41));
+  assert.equal(c.stages.work.running, undefined);
+  assert.equal(live.c.stages.work.running, at(52));
+  assert.equal(live.c.stages.work.attempts, 3);
   assert.deepEqual(live.a, a);
+});
+
+test("a poll that spent nothing leaves the settled view, and a step dropped at cancel settles it", () => {
+  const fold = new ItemTelemetries();
+  const step = "item:g:work";
+  fold.add({ at: at(0), step, attemptId: `${step}#1`, event: "start" });
+  fold.add({
+    at: at(1),
+    step,
+    attemptId: `${step}#1`,
+    event: "outcome",
+    outcome: "retry",
+    wait: "gate",
+  });
+  assert.equal(fold.settledItems().g, undefined);
+  fold.add({ at: at(1), step, attemptId: `${step}#2`, event: "start" });
+  fold.add({
+    ...codex(at(4), "worker", tokens(70_000, 1_000, 0, null, 0), null, {}),
+    step,
+  });
+  // Cancel drops the attempt's outcome (engine.ts `apply`): it ends there.
+  fold.add({
+    at: at(5),
+    step,
+    attemptId: `${step}#2`,
+    event: "ignored",
+    outcome: "done",
+  });
+  const g = fold.settledItems().g;
+  assert.equal(g.to, at(5));
+  assert.deepEqual(g.tokens.total, { sum: 71_000, calls: 1 });
+  assert.deepEqual(g.stages.work, {
+    attempts: 2,
+    ms: 5 * 60_000,
+    outcomes: { retry: 1 },
+  });
 });
 
 test("a settled view moves at a step's end, not with a worker's report or a CI poll", () => {
@@ -468,7 +559,7 @@ test("the Work Item comment shows its telemetry in a summary line and a details 
     "- **Tokens:** 1,735,000 in all, input 1,700,000, cached 1,530,000, 90% of input, cache writes not reported, output 35,000, reasoning 8,000, child threads 200,000 by 2 threads",
     "- **Cost:** not reported",
     "- **Tool calls:** 19: `exec` 17, `apply_patch` 2",
-    "- **Worker:** 7 turns, 19 commands (1 failed), 0 edits by edit tools, 0 compactions",
+    "- **Worker:** 7 turns, 19 commands (1 failed), 0 edits by edit tools (shell edits not counted), 0 compactions",
     "- **Validation:** 3 runs, 1 failed, 4 min: `npm run lint` 1 in 20 s; `npm test` 2 (1 failed) in 3 min",
     "- **Repairs:** 1: validate sent work back",
     "- **Review:** 1 accepted",
@@ -492,11 +583,14 @@ test("the Work Item comment shows its telemetry in a summary line and a details 
     "- **Changes:** not published yet",
   ])
     assert.ok(b.includes(line), `${line}\nnot in:\n${b}`);
-  // `c` has finished no step: no telemetry yet.
-  assert.doesNotMatch(
-    comments.get(mark(ISSUE, "item-status", "c")),
-    /Telemetry/,
-  );
+  // `c`, still at work, shows what its continuation and its errored attempt spent.
+  const c = comments.get(mark(ISSUE, "item-status", "c"));
+  for (const line of [
+    "**Telemetry:** 11 min · 2,330,000 tokens · 2 model calls · 0 repairs",
+    "- **Time:** 11 min in all; work 11 min (2 attempts)",
+    "- **Model calls:** worker 2 (`codex gpt-6.1-sol high`)",
+  ])
+    assert.ok(c.includes(line), `${line}\nnot in:\n${c}`);
   assert.ok(!comments.has(mark(ISSUE, "item-status", "d")));
   for (const body of comments.values())
     for (const text of PRIVATE) assert.ok(!body.includes(text), text);
@@ -562,11 +656,11 @@ test("the Objective's table shows each item's tokens and wall time, and the run 
   );
   assert.match(
     body,
-    /\| `c` \| work \| work \(running\) \| - \| 0 \| - \| - \| - \|/,
+    /\| `c` \| work \| work \(running\) \| - \| 0 \| 2\.3M \| 11 min \| - \|/,
   );
   assert.match(
     body,
-    /- Model calls so far: 6 \(planner 3, worker 3\), 2195000 tokens reported: 2145000 by Work Items, 50000 outside them \(planning, plan and final review, Dream\)/,
+    /- Model calls so far: 8 \(planner 3, worker 5\), 4525000 tokens reported: 4475000 by Work Items, 50000 outside them \(planning, plan and final review, Dream\)/,
   );
 });
 
@@ -657,10 +751,10 @@ test("factory status ISSUE --item ID prints the same breakdown from the local lo
   assert.equal(json.phase, "merged");
   assert.equal(json.telemetry.tokens.total.sum, 410_000);
   assert.deepEqual(json.telemetry.tokens.reasoning, { sum: 0, calls: 0 });
-  // A running item shows its step running.
+  // A running item shows its step running, as of the last event logged.
   assert.match(
     cli(inst, "status", String(ISSUE), "--item", "c").out,
-    /Time: 1 min in all; work 0 s, running since /,
+    /Time: 12 min in all; work 11 min \(3 attempts\), running since /,
   );
   const unknown = cli(inst, "status", String(ISSUE), "--item", "zz");
   assert.equal(refusal(unknown), "no_factory_state");

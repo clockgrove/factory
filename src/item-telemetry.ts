@@ -124,9 +124,10 @@ export function testsOf(files: readonly ChangedFile[]): string[] {
 
 /**
  * The fold, fed a run's events in log order. `settled` is each item as of
- * its last step outcome that wasn't a retry: the GitHub views show that,
- * so they change as the item moves through its steps, not with every
- * worker report or CI poll. `live` is everything read so far.
+ * its last step outcome that wasn't a poll (`polled`), or its attempt
+ * dropped at cancel: the GitHub views show that, so they change as the
+ * item moves through its steps, not with every worker report or CI poll.
+ * `live` is everything read so far.
  */
 export class ItemTelemetries {
   private readonly live = new Map<string, ItemTelemetry>();
@@ -174,18 +175,9 @@ export class ItemTelemetries {
         if (id && itemOf(step)) {
           const item = this.record(id, event.at);
           const phase = phaseOf(step);
-          const stage = item.stages[phase];
-          const started = this.open.get(step);
-          this.open.delete(step);
-          if (stage) {
-            delete stage.running;
-            if (started)
-              stage.ms += Math.max(
-                0,
-                Date.parse(event.at) - Date.parse(started),
-              );
+          const stage = this.close(item, step, event.at);
+          if (stage)
             stage.outcomes[outcome] = (stage.outcomes[outcome] ?? 0) + 1;
-          }
           if (phase === "ci" && outcome === "retry") item.ci.polls += 1;
           if (phase === "review" && outcome !== "retry") {
             const verdict =
@@ -198,9 +190,17 @@ export class ItemTelemetries {
                     : outcome;
             item.reviews[verdict] = (item.reviews[verdict] ?? 0) + 1;
           }
-          if (outcome !== "retry") this.settle(id);
+          if (outcome !== "retry" || !this.polled(event, item)) this.settle(id);
         }
         if (repaired && repaired !== id) this.settle(repaired);
+        return;
+      }
+      case "ignored": {
+        // A step from before cancel (engine.ts `apply`): its attempt ended
+        // there, and the closed issue's comment shows what it spent.
+        if (!step || !id || !itemOf(step)) return;
+        this.close(this.record(id, event.at), step, event.at);
+        this.settle(id);
         return;
       }
       case "model-usage": {
@@ -295,6 +295,38 @@ export class ItemTelemetries {
   private settle(id: string): void {
     const item = this.live.get(id);
     if (item) this.settled.set(id, structuredClone(item));
+  }
+
+  /** End `step`'s attempt running now at `at`: its stage, with the attempt's time added. */
+  private close(item: ItemTelemetry, step: string, at: string) {
+    const stage = item.stages[phaseOf(step)];
+    const started = this.open.get(step);
+    this.open.delete(step);
+    if (!stage) return undefined;
+    delete stage.running;
+    if (started) stage.ms += Math.max(0, Date.parse(at) - Date.parse(started));
+    return stage;
+  }
+
+  /**
+   * Whether a retry is a poll (CI checks running, a gate, GitHub's lag):
+   * neither an error nor a continuation, and nothing spent since the item
+   * last settled. An error or a continuation ends an attempt that may have
+   * worked, so a step that keeps failing or continuing shows what it spent.
+   */
+  private polled(event: LogEvent, item: ItemTelemetry): boolean {
+    if (event.progress === true || event.wait === "error") return false;
+    const last = this.settled.get(item.item);
+    const runs = (of: ItemTelemetry | undefined) =>
+      Object.values(of?.validation ?? {}).reduce(
+        (sum, row) => sum + row.runs,
+        0,
+      );
+    return (
+      (last?.calls ?? 0) === item.calls &&
+      runs(last) === runs(item) &&
+      (last?.ci.reruns ?? 0) === item.ci.reruns
+    );
   }
 
   private record(id: string, at: string): ItemTelemetry {
@@ -526,10 +558,14 @@ function rows(
           },
         ]
       : []),
+    // Edits count only what a provider reports as an edit (Codex's
+    // `file_change` items, Claude's edit tools): a file a shell command
+    // writes, as Codex workers mostly do, is in none, so the count says so
+    // rather than read as all the item changed.
     {
       label: "Worker",
       value: activity
-        ? `${plural(activity.turns, "turn")}, ${plural(activity.commands, "command")} (${activity.commandsFailed} failed), ${plural(activity.edits, "edit")} by edit tools, ${plural(activity.compactions, "compaction")}`
+        ? `${plural(activity.turns, "turn")}, ${plural(activity.commands, "command")} (${activity.commandsFailed} failed), ${plural(activity.edits, "edit")} by edit tools (shell edits not counted), ${plural(activity.compactions, "compaction")}`
         : "not reported",
     },
     {

@@ -121,12 +121,14 @@ export function validationTargets(
  * and declares nothing fails alone however it is fixed: after a full run,
  * the note names the earlier commands a targeted run of it would skip;
  * after a targeted run, the ones it skipped, if any. After a full run it
- * also says when the next full run starts with this command.
+ * also says whether the next full run starts with this command: not after
+ * a run that `started` with it (`SelfValidation.validate`).
  */
 export function targetedNote(
   validation: readonly ValidationCommand[],
   index: number,
   targeted?: readonly number[],
+  started = false,
 ): string {
   const list = (indices: readonly number[]) =>
     `command${indices.length === 1 ? "" : "s"} ${indices.join(", ")}`;
@@ -140,11 +142,19 @@ export function targetedNote(
     (at) =>
       at !== index && packageBootstrap(validation[at]!.command) === undefined,
   );
-  const reordered = runOrder(validation, { first: index }).some(
+  const next = !reorders(validation, index)
+    ? ""
+    : started
+      ? " This run started with it, ahead of earlier commands it doesn't declare it needs, so your next full run goes in declared order, in case one of them makes what it needs; if it fails there too, the run after that starts with it again."
+      : ` Your next full run starts with it${needed.length ? " and what it needs" : ""}, then runs the others in declared order.`;
+  return `That is command ${index}: while you fix it, a targeted run (\`commands: [${index}]\`) reruns only it${needed.length ? ` and ${list(needed)}, which it needs,` : ""} after the install${skipped.length ? `, without ${list(skipped)} declared before it, so add the index of any it needs, such as a build or code generation` : ""}; finish only after a full run passes.${next}`;
+}
+
+/** Whether a full run started from failed command `index` leaves the declared order (#2290). */
+const reorders = (validation: readonly ValidationCommand[], index: number) =>
+  runOrder(validation, { first: index }).some(
     (at, position) => at !== position,
   );
-  return `That is command ${index}: while you fix it, a targeted run (\`commands: [${index}]\`) reruns only it${needed.length ? ` and ${list(needed)}, which it needs,` : ""} after the install${skipped.length ? `, without ${list(skipped)} declared before it, so add the index of any it needs, such as a build or code generation` : ""}; finish only after a full run passes.${reordered ? ` Your next full run starts with it${needed.length ? " and what it needs" : ""}, then runs the others in declared order.` : ""}`;
-}
 
 /**
  * What a failed check asks of a fix outside the owned paths: the worker's
@@ -650,13 +660,25 @@ export class SelfValidation {
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);
     const passed = result.kind === "passed";
+    // This full run started with the command it failed at, out of
+    // declared order (`first`).
+    const startedFailed =
+      first !== undefined &&
+      result.kind === "failed" &&
+      result.failed?.index === first &&
+      reorders(input.item.validation, first);
     const verdictAt = Date.now();
     const logged =
       result.kind === "failed" && result.failed
         ? [
             "",
             await this.logFailure(run, result, result.failed),
-            targetedNote(input.item.validation, result.failed.index, targeted),
+            targetedNote(
+              input.item.validation,
+              result.failed.index,
+              targeted,
+              startedFailed,
+            ),
           ]
             .filter((line, at) => !at || line)
             .join("\n")
@@ -713,8 +735,11 @@ export class SelfValidation {
       this.failedTrees.delete(tree);
     } else if (!passed) this.failedTrees.add(tree);
     // A command a later run passed can pass: it is no longer evidence.
+    // A reordered run that fails at the command it started with goes in
+    // declared order next: the plan's `after` may leave out what the
+    // command needs, and a run reordered every time could never pass.
     if (result.kind === "failed" && result.failed)
-      this.failedAt = result.failed.index;
+      this.failedAt = startedFailed ? undefined : result.failed.index;
     if (result.kind === "passed" && !targeted) {
       this.failing.clear();
       this.failedAt = undefined;

@@ -191,9 +191,12 @@ const ordered = item("ordered", {
   ],
 });
 
-test("the worker's next full run starts with the command that failed, and a targeted run runs what it declares it needs", {
-  skip,
-}, async () => {
+/**
+ * A worker's Validate of `validated` on a repository of `scripts`, the
+ * state file it writes, and each run's commands, verdict, first and
+ * targeted commands.
+ */
+function workerValidate(validated, scripts) {
   const inst = installation();
   configured(inst, "http://127.0.0.1:1");
   const saved = process.env.FACTORY_CONFIG;
@@ -205,7 +208,7 @@ test("the worker's next full run starts with the command that failed, and a targ
     if (saved === undefined) delete process.env.FACTORY_CONFIG;
     else process.env.FACTORY_CONFIG = saved;
   }
-  const { directory: worktree, base } = repository(SCRIPTS);
+  const { directory: worktree, base } = repository(scripts);
   const log = new RunLog(
     inst.logs,
     "2026-01-01T00-00-00-000Z-1",
@@ -218,26 +221,46 @@ test("the worker's next full run starts with the command that failed, and a targ
     {
       worktree,
       prompt: "",
-      item: ordered,
-      commands: ordered.validation.map((check) => check.command),
+      item: validated,
+      commands: validated.validation.map((check) => check.command),
       base,
       signal,
       log: (event) => events.push(event),
       activity: () => {},
       output: () => {},
-      runFile: (kind) => log.runFile(1, `item:ordered:work#1.${kind}`),
+      runFile: (kind) => log.runFile(1, `item:${validated.id}:work#1.${kind}`),
     },
     {
       sandbox,
-      plan: plan([ordered], { base }),
+      plan: plan([validated], { base }),
       blocks: [],
       repository: REPO,
       commandTimeoutMs: 60_000,
     },
     signal,
   );
-  const state = (text) =>
-    writeFileSync(join(worktree, "src", "state.txt"), text);
+  const runs = () => {
+    const out = [];
+    let ran = [];
+    for (const event of events)
+      if (event.event === "validation-command") ran.push(event.index);
+      else if (event.event === "worker-validate") {
+        out.push([ran, event.passed, event.first, event.targeted]);
+        ran = [];
+      }
+    return out;
+  };
+  return {
+    validator,
+    runs,
+    state: (text) => writeFileSync(join(worktree, "src", "state.txt"), text),
+  };
+}
+
+test("the worker's next full run starts with the command that failed, and a targeted run runs what it declares it needs", {
+  skip,
+}, async () => {
+  const { validator, runs, state } = workerValidate(ordered, SCRIPTS);
   // Declared order: the lint, last, fails, and says the next run starts with it.
   state("check ok\n");
   const failed = await validator.call();
@@ -246,7 +269,15 @@ test("the worker's next full run starts with the command that failed, and a targ
     failed.text,
     /That is command 2: .*finish only after a full run passes\. Your next full run starts with it, then runs the others in declared order\./,
   );
-  // Unfixed, the next full run fails at once.
+  // Unfixed, the next full run fails at once, and says the one after it
+  // goes in declared order, in case the plan left out what it needs.
+  const fast = await validator.call();
+  assert.ok(fast.text.startsWith("Validation failed."), fast.text);
+  assert.match(
+    fast.text,
+    /This run started with it, .* so your next full run goes in declared order, .* if it fails there too, the run after that starts with it again\./,
+  );
+  // It fails there too: a real failure, so the run after starts with it.
   assert.ok((await validator.call()).text.startsWith("Validation failed."));
   // Fixed, it starts with the lint and runs every command: a full run.
   state("check ok\nlint ok\n");
@@ -269,19 +300,41 @@ test("the worker's next full run starts with the command that failed, and a targ
   // Naming the check and the lint runs every command: a full run.
   const every = await validator.call([2, 1]);
   assert.ok(every.text.startsWith("All 3 declared"), every.text);
-  const runs = [];
-  let ran = [];
-  for (const event of events)
-    if (event.event === "validation-command") ran.push(event.index);
-    else if (event.event === "worker-validate") {
-      runs.push([ran, event.passed, event.first, event.targeted]);
-      ran = [];
-    }
-  assert.deepEqual(runs, [
+  assert.deepEqual(runs(), [
     [[0, 1, 2], false, undefined, undefined],
     [[2], false, 2, undefined],
+    [[0, 1, 2], false, undefined, undefined],
     [[2, 0, 1], true, 2, undefined],
     [[0, 1], true, undefined, [1]],
     [[0, 1, 2], true, undefined, undefined],
+  ]);
+});
+
+test("a command whose after leaves out the build it needs still reaches a passing full run", {
+  skip,
+}, async () => {
+  // The check reads the build's output but declares it needs nothing.
+  const underDeclared = item("under", {
+    ownedPaths: ["src/**"],
+    validation: [
+      { command: "sh build.sh" },
+      { command: "sh check.sh", after: [] },
+    ],
+  });
+  const { validator, runs, state } = workerValidate(underDeclared, SCRIPTS);
+  assert.ok((await validator.call()).text.startsWith("Validation failed."));
+  // Fixed, the reordered run fails without the build; the next one, in
+  // declared order, passes.
+  state("check ok\n");
+  assert.ok((await validator.call()).text.startsWith("Validation failed."));
+  const passed = await validator.call();
+  assert.ok(
+    passed.text.startsWith("All 2 declared validation commands passed:"),
+    passed.text,
+  );
+  assert.deepEqual(runs(), [
+    [[0, 1], false, undefined, undefined],
+    [[1], false, 1, undefined],
+    [[0, 1], true, undefined, undefined],
   ]);
 });

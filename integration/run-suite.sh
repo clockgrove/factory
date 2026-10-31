@@ -237,8 +237,10 @@ check_complete() {
 
 # ---------- configuration ----------
 # Plumbing runs on the fastest model and lowest effort each provider offers;
-# `codex-plan` and `claude-plan` keep the production planner, for the cases
-# whose check is a planner decision (it must ask its question). The default
+# `codex-plan` and `claude-plan` keep the production planner and reviewer
+# (src/providers/codex.ts and claude.ts defaults), for the cases whose check
+# is a planner decision (it must ask its question), so both providers' runs
+# judge it at their production settings. The default
 # provider is --provider's. The queue is repository M's Project, this run's
 # own (setup_repos); an installation on another repository sets its own.
 write_config() { # FILE REPO CHECKOUT MAX_ACTIVE [PY_EXPR...]
@@ -250,6 +252,8 @@ f, repo, checkout, active, *more = sys.argv[1:]
 fast = {"model": "gpt-6-luna", "effort": "low", "serviceTier": "fast"}
 haiku = {"model": "claude-haiku-5-5", "effort": "low"}
 opus = {"model": "claude-opus-5-5", "effort": "medium"}  # Factory's Claude planner and reviewer default
+sol_high = {"model": "gpt-6.1-sol", "effort": "high"}  # Factory's Codex planner default
+sol_medium = {"model": "gpt-6.1-sol", "effort": "medium"}  # Factory's Codex reviewer default
 c = {
   "repository": repo, "checkout": checkout,
   "queue": {"projectId": os.environ["SUITE_PROJECT_ID"], "pollSeconds": 15, "maxActiveObjectives": int(active)},
@@ -258,7 +262,7 @@ c = {
   "github": {"reserve": 2000},
   "providers": {
     "codex": {"planner": "codex", "models": {"planner": fast, "reviewer": fast}, "worker": {"kind": "codex", **fast}},
-    "codex-plan": {"planner": "codex", "models": {"reviewer": fast, "planner": {"model": "gpt-6.1-sol", "effort": "high"}}, "worker": {"kind": "codex", **fast}},
+    "codex-plan": {"planner": "codex", "models": {"planner": sol_high, "reviewer": sol_medium}, "worker": {"kind": "codex", **fast}},
     "claude": {"planner": "claude", "models": {"planner": haiku, "reviewer": haiku}, "worker": {"kind": "claude", **haiku}},
     "claude-plan": {"planner": "claude", "models": {"planner": opus, "reviewer": opus}, "worker": {"kind": "claude", **haiku}},
   },

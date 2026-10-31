@@ -33,7 +33,7 @@ const INVENTED = {
 /** Factory's own repository and the issues of it that the harness cites. */
 const FACTORY = {
   repository: "clockgrove/factory",
-  issues: new Set([2168, 2200, 2223, 2224, 2266, 2273]),
+  issues: new Set([2168, 2200, 2223, 2224, 2266, 2273, 2275]),
 };
 
 const allowedRepository = (owner, name) =>

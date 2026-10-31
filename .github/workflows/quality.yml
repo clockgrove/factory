@@ -28,10 +28,10 @@ jobs:
       - run: npm run notices:check
 
   # npm test's run, split round-robin across the shards by node --test. Four
-  # shards beat two or three; service.test.mjs alone takes nearly two minutes,
-  # so more would gain little. Each shard builds for itself: tsc takes under
-  # 10 s, less than a build job and its artifact would add before any shard
-  # could start.
+  # shards beat two or three on runner-sized CPUs; service.test.mjs alone
+  # takes nearly two minutes, so more would gain little. Each shard builds for
+  # itself: tsc takes under 10 s, and a build job would put its own runner,
+  # setup, build and artifact upload ahead of every shard.
   tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

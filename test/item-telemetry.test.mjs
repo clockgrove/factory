@@ -559,7 +559,7 @@ test("the Work Item comment shows its telemetry in a summary line and a details 
     "- **Tokens:** 1,735,000 in all, input 1,700,000, cached 1,530,000, 90% of input, cache writes not reported, output 35,000, reasoning 8,000, child threads 200,000 by 2 threads",
     "- **Cost:** not reported",
     "- **Tool calls:** 19: `exec` 17, `apply_patch` 2",
-    "- **Worker:** 7 turns, 19 commands (1 failed), 0 edits by edit tools (shell edits not counted), 0 compactions",
+    "- **Worker:** 7 turns, 19 commands (1 failed), 0 edits, 0 compactions",
     "- **Validation:** 3 runs, 1 failed, 4 min: `npm run lint` 1 in 20 s; `npm test` 2 (1 failed) in 3 min",
     "- **Repairs:** 1: validate sent work back",
     "- **Review:** 1 accepted",

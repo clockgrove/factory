@@ -218,6 +218,13 @@ export class ActivityLog {
   private sampling: Promise<void> | undefined;
   /** The changed files last reported, sorted. */
   private reported: string[] = [];
+  /**
+   * The files this run's edits counted (#2283): an edit tool's, and a file
+   * a sample found changed that no tool reported, a shell's edit.
+   */
+  private readonly edited = new Set<string>();
+  /** The worktree's changed files as the run began: not this run's edits. */
+  private readonly before: Promise<void> | undefined;
 
   constructor(
     private readonly item: string,
@@ -238,16 +245,36 @@ export class ActivityLog {
     if (this.transcript)
       log({ event: "transcript", item, file: this.transcript.file });
     if (this.changes) {
+      this.before = this.changes().then(
+        (files) => {
+          for (const file of files) this.edited.add(file);
+        },
+        () => {
+          // The worktree is busy: the first sample counts every changed file.
+        },
+      );
       this.sampler = setInterval(() => void this.sample(), CHANGES_INTERVAL_MS);
       this.sampler.unref();
     }
   }
 
-  /** Sample the worktree's changed files now; a set that differs from the last report goes out with the next event. */
+  /**
+   * Sample the worktree's changed files now; a set that differs from the
+   * last report goes out with the next event, and each changed file no
+   * edit counted yet counts as one, so edits through a shell count too.
+   */
   sample(): Promise<void> {
     if (!this.changes || this.closed) return Promise.resolve();
-    this.sampling ??= this.changes()
+    const changes = this.changes;
+    this.sampling ??= (this.before ?? Promise.resolve())
+      .then(() => changes())
       .then((files) => {
+        for (const file of files)
+          if (!this.edited.has(file)) {
+            this.edited.add(file);
+            this.window.counts.edits += 1;
+            listOnce(this.window.paths, this.clean(file, NAME_CHARS));
+          }
         const sorted = [...files].sort();
         if (sorted.join("\0") === this.reported.join("\0")) return;
         this.reported = sorted;
@@ -298,6 +325,7 @@ export class ActivityLog {
         break;
       case "edit":
         window.counts.edits += 1;
+        this.edited.add(this.inTree(activity.path));
         listOnce(
           window.paths,
           this.clean(this.inTree(activity.path), NAME_CHARS),

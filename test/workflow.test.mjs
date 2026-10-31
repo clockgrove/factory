@@ -9,6 +9,7 @@ import { observeLocalExecutables } from "../dist/planning/executables.js";
 import { ownedSince } from "../dist/planning/plan.js";
 import { repositoryView } from "../dist/planning/repository.js";
 import { readShown } from "../dist/shown.js";
+import { stalled } from "./helpers/service.mjs";
 import {
   cli,
   closedPort,
@@ -20,7 +21,6 @@ import {
   plan,
   seed,
   serve,
-  silentServer,
   stateOf,
   status,
   stopped,
@@ -445,12 +445,9 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
   // GitHub never answers, so a step that reads it stays running. One
   // planning revision: #74's accepted amendment spent it, so a second
   // amendment's planning asks before any planner runs.
-  configured(
-    inst,
-    `http://127.0.0.1:${await silentServer()}`,
-    {},
-    { autonomy: { allowances: { planningRevisions: 1 } } },
-  );
+  await stalled(inst, {
+    autonomy: { allowances: { planningRevisions: 1 } },
+  });
   const at = new Date().toISOString();
   const seeded = new Date(Date.parse(at) - 60_000).toISOString();
   // #73 owns src/: its one item merged, and its final validation asks.
@@ -597,7 +594,7 @@ test("overlapping owned paths take turns while busy, after an amendment, until t
 
 test("an amendment's new paths rank by its acceptance: an earlier Objective waits on a later one that builds them, and a circle of waits is broken", async () => {
   const inst = installation();
-  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  await stalled(inst);
   const at = new Date().toISOString();
   const seeded = new Date(Date.parse(at) - 60_000).toISOString();
   const day = (n) => `2026-01-0${n}T00:00:00.000Z`;
@@ -714,7 +711,7 @@ test("an amendment's new paths rank by its acceptance: an earlier Objective wait
 
 test("a plan that shows up after another Objective started building the same path waits on it, though its acceptance is earlier (#1992)", async () => {
   const inst = installation();
-  configured(inst, `http://127.0.0.1:${await silentServer()}`);
+  await stalled(inst);
   const at = new Date().toISOString();
   const seeded = new Date(Date.parse(at) - 60_000).toISOString();
   // #91 builds src/o.ts: its work retried a minute ago and is due. #92's

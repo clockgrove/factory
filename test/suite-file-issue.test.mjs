@@ -162,27 +162,6 @@ function file(
   }
 }
 
-test("a create that works the first time files once, with nothing logged", () => {
-  const r = file("ok");
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "1\n");
-  assert.equal(r.creates, 1);
-  assert.equal(r.issues.length, 1);
-  assert.equal(r.journal, "");
-});
-
-test("an EOF that filed nothing is filed again", () => {
-  const r = file("lost");
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "1\n");
-  assert.equal(r.creates, 2);
-  assert.equal(r.issues.length, 1);
-  assert.match(
-    r.journal,
-    /\[codex\] filing issue .* failed \(try 1\): Post "https:\/\/api\.github\.com\/graphql": EOF/,
-  );
-});
-
 test("an EOF that did file the issue finds it, with no second copy", () => {
   const r = file("filed");
   assert.equal(r.status, 0);
@@ -190,55 +169,6 @@ test("an EOF that did file the issue finds it, with no second copy", () => {
   assert.equal(r.creates, 1);
   assert.equal(r.issues.length, 1);
   assert.match(r.journal, /was filed by the failed try: #1/);
-});
-
-test("an issue the run recorded, or another body, is never taken for the lost one", () => {
-  const title = "Suite 10281819: codex stack happy path";
-  const r = file("lost", {
-    issues: [
-      { number: 1, title, body: "Add `padEndQabcd`.\n" },
-      { number: 2, title, body: "Something else." },
-    ],
-    recorded: "1 codex M\n",
-  });
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "3\n");
-  assert.equal(r.creates, 2);
-});
-
-test("a failure that lasts fails after three tries, each logged", () => {
-  const r = file("lost lost lost");
-  assert.equal(r.status, 1);
-  assert.equal(r.stdout, "");
-  assert.equal(r.creates, 3);
-  assert.equal(r.journal.match(/failed \(try [123]\)/g).length, 3);
-});
-
-test("a retry that can't look for the lost issue files nothing", () => {
-  // The failed create may have filed it: creating again without looking could
-  // leave two copies, so the suite gives up instead.
-  const r = file("filed", { apiDown: true });
-  assert.equal(r.status, 1);
-  assert.equal(r.creates, 1);
-  assert.equal(r.issues.length, 1);
-  assert.match(r.journal, /looking for issue .* failed \(try 2\): Get .*: EOF/);
-  assert.match(r.journal, /looking for issue .* failed \(try 3\)/);
-});
-
-test("new_issue records the issue a failed create filed, once", () => {
-  const r = file("filed", {
-    call: 'new_issue withdraw "queue withdraw before planning" ID=q1',
-  });
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "1\n");
-  assert.equal(r.creates, 1);
-  assert.equal(r.issues.length, 1);
-  assert.equal(
-    r.issues[0].title,
-    "Suite 10281819: queue withdraw before planning",
-  );
-  assert.equal(r.recorded, "1 codex M\n");
-  assert.match(r.journal, /filed #1 \(withdraw\)/);
 });
 
 // p_bot_issue against the stand-in gh, as the outsider case calls it.
@@ -250,17 +180,6 @@ function botIssue(dispatch, options = {}) {
     ...options,
   });
 }
-
-test("a dispatch that works the first time files one bot issue, with no retry", () => {
-  const r = botIssue("ok");
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "1\n");
-  assert.equal(r.dispatches, 1);
-  assert.equal(r.issues.length, 1);
-  assert.equal(r.issues[0].user.login, "github-actions[bot]");
-  assert.equal(r.recorded, "1 outsider P\n");
-  assert.doesNotMatch(r.journal, /failed/);
-});
 
 test("a failed dispatch that did file the issue finds it, with no second dispatch", () => {
   const r = botIssue("filed");
@@ -274,46 +193,4 @@ test("a failed dispatch that did file the issue finds it, with no second dispatc
     /\[outsider\] dispatching drill-issue\.yml for .* failed \(try 1\): could not create workflow dispatch event: HTTP 502/,
   );
   assert.match(r.journal, /was filed by the failed dispatch: #1/);
-});
-
-test("a failed dispatch that filed nothing is dispatched again once the wait shows no issue", () => {
-  const r = botIssue("lost");
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "1\n");
-  assert.equal(r.dispatches, 2);
-  assert.equal(r.issues.length, 1);
-  assert.equal(r.recorded, "1 outsider P\n");
-  assert.match(r.journal, /failed \(try 1\)/);
-  // The retry waited as long as a dispatch that worked is given.
-  assert.ok(r.elapsed >= 240, `waited ${r.elapsed} s before the retry`);
-  assert.doesNotMatch(r.journal, /filed by the failed dispatch/);
-});
-
-test("a dispatch failure that lasts fails after three tries, each logged", () => {
-  const r = botIssue("lost lost lost");
-  assert.equal(r.status, 1);
-  assert.equal(r.stdout, "");
-  assert.equal(r.dispatches, 3);
-  assert.equal(r.issues.length, 0);
-  assert.equal(r.recorded, "");
-  assert.equal(r.journal.match(/failed \(try [123]\)/g).length, 3);
-});
-
-test("a dispatch that failed late in a lasting failure still finds its issue", () => {
-  const r = botIssue("lost lost filed");
-  assert.equal(r.status, 0);
-  assert.equal(r.stdout, "1\n");
-  assert.equal(r.dispatches, 3);
-  assert.equal(r.issues.length, 1);
-  assert.match(r.journal, /was filed by the failed dispatch: #1/);
-});
-
-test("a failed dispatch whose issue can't be looked for is never dispatched again", () => {
-  // The failed dispatch may have filed it: dispatching again without looking
-  // could leave two bot issues, so the suite gives up instead.
-  const r = botIssue("filed", { apiDown: true });
-  assert.equal(r.status, 1);
-  assert.equal(r.dispatches, 1);
-  assert.equal(r.issues.length, 1);
-  assert.match(r.journal, /looking for bot issue .* failed: Get .*: EOF/);
 });

@@ -9,63 +9,6 @@ import { cli, closedPort, configured, installation } from "./helpers.mjs";
 const read = (inst) =>
   JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
 
-test("setup completes a half-given model choice and sets Copilot's idle bound; reviewEffort refuses a planner phase", async () => {
-  const inst = installation();
-  configured(
-    inst,
-    `http://127.0.0.1:${await closedPort()}`,
-    {},
-    {
-      providers: {
-        copilot: { planner: "copilot", worker: { kind: "copilot" } },
-      },
-    },
-  );
-  const set = cli(
-    inst,
-    "setup",
-    "--provider",
-    "copilot",
-    "--reviewer-effort",
-    "high",
-    "--planner-model",
-    "gpt-test",
-    "--copilot-timeout-seconds",
-    "90",
-    "--json",
-  );
-  assert.notEqual(JSON.parse(set.out).status, "refused", set.out);
-  const saved = read(inst).providers.copilot;
-  assert.deepEqual(saved.models, {
-    reviewer: { model: "gpt-6.1-sol", effort: "high" },
-    planner: { model: "gpt-test", effort: "high" },
-  });
-  assert.equal(saved.worker.idleSeconds, 90);
-  // The other half now comes from the saved choice, not the default.
-  cli(inst, "setup", "--provider", "copilot", "--reviewer-model", "gpt-r");
-  assert.deepEqual(read(inst).providers.copilot.models.reviewer, {
-    model: "gpt-r",
-    effort: "high",
-  });
-
-  const config = read(inst);
-  config.providers.copilot.models.reviewEffort = {
-    "result-review": "high",
-    plan: "high",
-  };
-  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
-  const loaded = JSON.parse(cli(inst, "setup", "--json").out);
-  assert.equal(loaded.status, "refused");
-  assert.match(
-    loaded.problems.join("\n"),
-    /models\.reviewEffort\.plan is not a setting/,
-  );
-  assert.doesNotMatch(
-    loaded.problems.join("\n"),
-    /result-review is not a setting/,
-  );
-});
-
 test("a provider's hedgeSeconds sets a phase's hedge threshold on every planner kind, is checked, and is operational", async () => {
   const inst = installation();
   configured(

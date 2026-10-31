@@ -72,7 +72,7 @@ const gradersOf = (definition) =>
  * graders/ (treeDigest), so a judge edited in place under the same command
  * is another judge, and the pairs it judged are judged again.
  */
-export function judgeDigest(definition) {
+function judgeDigest(definition) {
   const graders = gradersOf(definition);
   return createHash("sha256")
     .update(`${definition.judge.command}\0`)
@@ -93,7 +93,7 @@ export function winner(judgment, aspect) {
  * checkout and which holds the Objective as filed (objective.md). The tree
  * is the commit the card was graded at, or its end commit.
  */
-export function runSource(card, benchRoot = null) {
+function runSource(card, benchRoot = null) {
   const id = card.run.id;
   const dir =
     card.run.dir ??

@@ -241,7 +241,7 @@ const ANSWER_OPTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
  * `factory queue` does; `cancel` cancels; `retry` with no question open
  * retries; anything else answers a question.
  */
-export function commentRequest(
+function commentRequest(
   issue: number,
   comment: Pick<UncheckedComment, "body" | "createdAt">,
   holding: boolean,

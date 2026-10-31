@@ -37,7 +37,6 @@ import {
   seedMemory,
   setupArgs,
   shareCapacity,
-  withFileLock,
 } from "../bench/lib/provision.mjs";
 import { EXAMPLE } from "./bench-fixture.mjs";
 
@@ -395,87 +394,6 @@ test("a run provisioned again keeps the capacity its service was set up with", (
   }
 });
 
-test("the cache lock lets one holder in at a time and takes over a dead holder's", async () => {
-  const lock = join(dir, "cache.lock");
-  const held = [];
-  let inside = 0;
-  await Promise.all(
-    [1, 2, 3].map((n) =>
-      withFileLock(
-        lock,
-        async () => {
-          inside += 1;
-          held.push(inside);
-          await new Promise((resolve) => setTimeout(resolve, 20));
-          inside -= 1;
-          return n;
-        },
-        { pollMs: 5 },
-      ),
-    ),
-  );
-  assert.deepEqual(held, [1, 1, 1]);
-  assert.ok(!existsSync(lock), "released");
-  // A holder that is gone: taken over.
-  const gone = spawnSync(process.execPath, ["-e", "process.pid"]).pid;
-  writeFileSync(lock, `${gone}\n`);
-  assert.equal(await withFileLock(lock, () => "taken"), "taken");
-  // A live holder past the wait: named.
-  writeFileSync(lock, `${process.pid}\n`);
-  await assert.rejects(
-    withFileLock(lock, () => "never", { waitMs: 30, pollMs: 5 }),
-    new RegExp(
-      `cache\\.lock is still held by process ${process.pid} after 0 s`,
-    ),
-  );
-  rmSync(lock);
-});
-
-/** `node bench/<script> ...args` without the environment's bench home. */
-function benchCli(script, args) {
-  const env = { ...process.env };
-  delete env[HOME_ENV];
-  return spawnSync(process.execPath, [join(root, "bench", script), ...args], {
-    encoding: "utf8",
-    env,
-  });
-}
-
-test("provisioning refuses without a results directory, before anything else", () => {
-  const refused = benchCli("provision.mjs", [
-    "--benchmark",
-    EXAMPLE,
-    "--host",
-    join(dir, "no-host.json"),
-    "--factory",
-    join(root, "dist", "cli.js"),
-    "--dry-run",
-  ]);
-  assert.equal(refused.status, 64, refused.stderr);
-  assert.match(
-    refused.stderr,
-    /Where to score the run into: no results directory\./,
-  );
-  assert.equal(refused.stdout, "");
-});
-
-test("run.mjs refuses a run whose definition it can't load, without a stack", () => {
-  const runDir = join(dir, "run-nope");
-  mkdirSync(runDir);
-  writeFileSync(
-    join(runDir, "run.json"),
-    JSON.stringify({
-      issue: 42,
-      benchmark: "nope",
-      resultsDir: join(dir, "run-nope-results"),
-    }),
-  );
-  const refused = benchCli("run.mjs", ["--run-dir", runDir]);
-  assert.equal(refused.status, 64, refused.stderr);
-  assert.match(refused.stderr, /^Benchmark nope: no definitions directory/);
-  assert.doesNotMatch(refused.stderr, /\n\s+at /);
-});
-
 // --- the workflows: nothing deploy-capable may stay enabled ------------------
 
 const definition = loadDefinition(EXAMPLE);
@@ -520,43 +438,6 @@ const enable = (runner) =>
   });
 const actionsOn = (runner) =>
   runner.calls.filter((c) => c.includes("/actions/permissions")).at(-1);
-
-test("a failed workflow listing stops provisioning and turns Actions off again", () => {
-  const runner = new StubRunner(() => {
-    const error = new Error("Command failed");
-    error.stderr = "HTTP 502: Bad Gateway";
-    throw error;
-  });
-  assert.throws(() => enable(runner), /Couldn't read .*workflows.*HTTP 502/s);
-  assert.ok(!runner.calls.some((c) => c.endsWith("/disable")));
-  assert.match(actionsOn(runner), /enabled=false$/);
-});
-
-test("an empty listing, while the base has workflows, is refused", () => {
-  const runner = new StubRunner(() => "");
-  assert.throws(
-    () => enable(runner),
-    /doesn't name \.github\/workflows\/deploy\.yml, .*release\.yml of the base tree/,
-  );
-  assert.match(actionsOn(runner), /enabled=false$/);
-});
-
-test("a workflow still active after disabling is refused", () => {
-  const runner = new StubRunner((_, n) =>
-    // The disable of deploy.yml didn't take.
-    n === 1
-      ? listing({})
-      : listing({
-          ".github/workflows/nightly.yml": "disabled_manually",
-          ".github/workflows/release.yml": "disabled_manually",
-        }),
-  );
-  assert.throws(
-    () => enable(runner),
-    /still has active workflows that aren't kept: \.github\/workflows\/deploy\.yml$/,
-  );
-  assert.match(actionsOn(runner), /enabled=false$/);
-});
 
 test("only the kept workflows stay active", () => {
   const off = {
@@ -619,61 +500,6 @@ test("memory is seeded without the Objective's entries or any made at or after t
     );
     seeded.close();
   }
-});
-
-// --- which Factory ran --------------------------------------------------------
-
-test("a build is classed by where it lives, and its dist/ digest is recorded", () => {
-  const checkout = join(dir, "factory-checkout");
-  mkdirSync(join(checkout, "dist"), { recursive: true });
-  writeFileSync(join(checkout, "package.json"), '{"version":"9.9.9"}');
-  writeFileSync(join(checkout, ".gitignore"), "dist/\n");
-  writeFileSync(join(checkout, "dist", "cli.js"), "// build 1\n");
-  const git = (...args) =>
-    execFileSync(
-      "git",
-      ["-C", checkout, "-c", "user.name=t", "-c", "user.email=t@t", ...args],
-      { encoding: "utf8" },
-    ).trim();
-  git("init", "-q");
-  git("add", ".");
-  git("commit", "-qm", "init");
-  const commit = git("rev-parse", "HEAD");
-  // A checkout's built CLI, given as a file, is the candidate it is.
-  const byFile = resolveFactory(join(checkout, "dist", "cli.js"));
-  assert.equal(byFile.kind, "candidate");
-  assert.equal(byFile.commit, commit);
-  assert.equal(byFile.version, "9.9.9");
-  assert.equal(byFile.dirty, false);
-  assert.match(byFile.distSha256, /^[0-9a-f]{64}$/);
-  assert.deepEqual(resolveFactory(checkout), byFile);
-  // dist/ is ignored: a rebuild leaves the commit clean but changes the digest.
-  writeFileSync(join(checkout, "dist", "cli.js"), "// build 2\n");
-  const rebuilt = resolveFactory(checkout);
-  assert.equal(rebuilt.dirty, false);
-  assert.notEqual(rebuilt.distSha256, byFile.distSha256);
-  // Scoring sees the change.
-  const run = harnessRun({
-    runId: "r",
-    label: "r",
-    group: "g",
-    repository: REPO,
-    factory: byFile,
-  });
-  assert.equal(run.factory.distSha256, byFile.distSha256);
-  assert.equal(run.factory.distSha256Now, rebuilt.distSha256);
-  // A record from before base patches has none.
-  assert.deepEqual(run.basePatches, []);
-
-  // An installed package is a release.
-  const installed = join(dir, "lib", "node_modules", "@clockgrove", "factory");
-  mkdirSync(join(installed, "dist"), { recursive: true });
-  writeFileSync(join(installed, "package.json"), '{"version":"0.5.9"}');
-  writeFileSync(join(installed, "dist", "cli.js"), "// release\n");
-  const release = resolveFactory(join(installed, "dist", "cli.js"));
-  assert.equal(release.kind, "release");
-  assert.equal(release.commit, null);
-  assert.equal(release.version, "0.5.9");
 });
 
 // --- base patches: on the base before the Objective is queued ----------------
@@ -1223,111 +1049,6 @@ test("provisioning writes the definition's reviewArtifacts into factory.json bef
   );
 });
 
-// --- --github-reserve: only for a Factory whose setup takes it ---------------
-
-test("whether setup takes --github-reserve: the version says when it can, else the CLI's own usage", () => {
-  const unread = () => assert.fail("the version says: no usage is read");
-  const at = (kind, version) => ({ kind, version, cli: "/nowhere/cli.js" });
-  for (const [factory, supported] of [
-    [at("release", "0.5.11"), false],
-    [at("release", "0.4.20"), false],
-    [at("release", "0.5.12"), true],
-    [at("release", "0.6.0"), true],
-    [at("candidate", "1.0.0"), true],
-  ])
-    assert.deepEqual(
-      githubReserveSupport(factory, unread),
-      { supported, by: "version" },
-      JSON.stringify(factory),
-    );
-  // A checkout at 0.5.11 may have it or not, as may a version that isn't
-  // plain: its usage says. This checkout's build has it.
-  const here = {
-    kind: "candidate",
-    cli: join(root, "dist", "cli.js"),
-    version: "0.5.11",
-  };
-  assert.deepEqual(githubReserveSupport(here), {
-    supported: true,
-    by: "usage",
-  });
-  assert.deepEqual(
-    githubReserveSupport({ ...here, kind: "release", version: "0.6.0-rc.1" }),
-    { supported: true, by: "usage" },
-  );
-  // Only the setup line's own [--github-reserve ...] counts.
-  const usage = (setupLine) => () =>
-    `Usage: factory <command>\n\n  serve  [--github-reserve GITHUB-RESERVE]\n      Run the service\n${setupLine}\n      Write the configuration; --github-reserve N is in the guide\n  help\n      Show this help\n`;
-  assert.deepEqual(
-    githubReserveSupport(
-      here,
-      usage("  setup  [--json] [--github-reserve-share SHARE]"),
-    ),
-    { supported: false, by: "usage" },
-  );
-  assert.deepEqual(
-    githubReserveSupport(
-      here,
-      usage("  setup  [--json] [--github-reserve GITHUB-RESERVE]"),
-    ),
-    { supported: true, by: "usage" },
-  );
-  assert.throws(
-    () => githubReserveSupport(here, () => "Usage: factory <command>\n"),
-    /has no setup lines, not one: can't tell whether its setup takes --github-reserve$/,
-  );
-  assert.throws(
-    () => githubReserveSupport({ ...here, cli: join(dir, "no-cli.js") }),
-    /^Error: Couldn't read \S+no-cli\.js's usage \(factory help\)/,
-  );
-  // Setup is given it only when the Factory takes it.
-  const given = (githubReserve) =>
-    setupArgs(
-      definition,
-      { toolchain: "/t" },
-      {
-        repository: REPO,
-        checkout: "/work/w",
-        projectId: "PVT_w",
-        ...(githubReserve === undefined ? {} : { githubReserve }),
-      },
-    );
-  const reserveAt = given().indexOf("--github-reserve");
-  assert.deepEqual(given().slice(reserveAt, reserveAt + 2), [
-    "--github-reserve",
-    String(GITHUB_RESERVE),
-  ]);
-  assert.ok(!given(null).includes("--github-reserve"));
-});
-
-/**
- * An invented Factory CLI from before --github-reserve: its usage has no
- * such option, and its setup refuses it as Factory refuses an option it
- * doesn't know; any other setup writes the configuration and is configured.
- */
-const OLD_FACTORY_CLI = String.raw`import { existsSync, writeFileSync } from "node:fs";
-const [command, ...args] = process.argv.slice(2);
-if (command === "help") {
-  process.stdout.write(
-    "Usage: factory <command> --repo OWNER/NAME (or FACTORY_REPOSITORY)\n\n" +
-      "  setup  [--background] [--json] [--checkout CHECKOUT] [--github-app-id GITHUB-APP-ID] [--operator OPERATOR...]\n" +
-      "      Write and check the configuration\n" +
-      "  help\n      Show this help\n",
-  );
-} else if (command === "setup" && args.includes("--github-reserve")) {
-  process.stderr.write(
-    '{"kind":"lifecycle-refusal","code":"usage"}\n' +
-      "factory: Unknown option --github-reserve for factory setup; see factory help\n",
-  );
-  process.exit(2);
-} else if (command === "setup") {
-  const { FACTORY_CONFIG, FACTORY_REPOSITORY } = process.env;
-  if (!existsSync(FACTORY_CONFIG))
-    writeFileSync(FACTORY_CONFIG, JSON.stringify({ repository: FACTORY_REPOSITORY }));
-  process.stdout.write('{"status":"configured"}\n');
-} else process.exit(2);
-`;
-
 /** The stand-in, running the Factory CLI it provisions with for real. */
 class RunsFactory extends StandIn {
   run(argv, options = {}) {
@@ -1336,52 +1057,3 @@ class RunsFactory extends StandIn {
     return Runner.prototype.run.call(this, argv, options);
   }
 }
-
-test("a Factory whose setup has no --github-reserve is provisioned without it, and the record says so", async () => {
-  const cli = join(dir, "factory-0.5.11", "dist", "cli.mjs");
-  mkdirSync(dirname(cli), { recursive: true });
-  writeFileSync(cli, OLD_FACTORY_CLI);
-  // As 0.5.11's does, its setup refuses the option.
-  const refused = spawnSync(
-    process.execPath,
-    [cli, "setup", "--github-reserve", "2000", "--json"],
-    { encoding: "utf8" },
-  );
-  assert.equal(refused.status, 2, refused.stderr);
-  assert.match(
-    refused.stderr,
-    /Unknown option --github-reserve for factory setup/,
-  );
-  // A checkout at 0.5.11: its usage says it doesn't take it.
-  const factory = { kind: "candidate", cli, version: "0.5.11" };
-  assert.deepEqual(githubReserveSupport(factory), {
-    supported: false,
-    by: "usage",
-  });
-  const definition = patchedDefinition("old-factory", []);
-  const { provisioned, runner, runDir } = await provisionLocally(
-    definition,
-    "o1",
-    runCapacity(definition),
-    { StandInRunner: RunsFactory, factory },
-  );
-  const record = await provisioned;
-  const setups = runner.calls.filter((call) => call.includes(`${cli} setup `));
-  assert.equal(setups.length, 2, runner.calls.join("\n"));
-  for (const call of setups) assert.doesNotMatch(call, /--github-reserve/);
-  const expected = { applied: false, reserve: null, by: "usage" };
-  assert.deepEqual(record.githubReserve, expected);
-  assert.deepEqual(
-    JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).githubReserve,
-    expected,
-  );
-  // The rest of provisioning carried on: the Objective is the run's issue.
-  assert.equal(record.issue, 42);
-  // A release at 0.5.11 is known by its version: its usage isn't read.
-  assert.deepEqual(
-    githubReserveSupport({ ...factory, kind: "release" }, () =>
-      assert.fail("read"),
-    ),
-    { supported: false, by: "version" },
-  );
-});

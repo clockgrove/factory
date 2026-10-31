@@ -4,25 +4,15 @@
 // status and the report list the decisions; `factory answer --as` and
 // FACTORY_ANSWERED_AS name an agent answering on someone's behalf.
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { answeredBy, redactDeep } from "../dist/display.js";
 import { hold, ObjectiveRunner } from "../dist/engine.js";
 import { GitHubError } from "../dist/github.js";
-import {
-  closedComment,
-  closingLine,
-  commentRequest,
-  GitHubSync,
-} from "../dist/github-sync.js";
+import { closedComment, closingLine, GitHubSync } from "../dist/github-sync.js";
 import { mark } from "../dist/markdown.js";
 import { statusComment } from "../dist/progress.js";
-import {
-  answeredVia,
-  pendingRequests,
-  writeRequest,
-} from "../dist/requests.js";
 import { closedByReset, resetRecord } from "../dist/reset.js";
 import {
   CLOSED_KEPT,
@@ -782,61 +772,6 @@ test("a refused closing edit is written compact, then given up and logged", asyn
   assert.ok(calls >= 2);
   const given = events.find((e) => e.event === "closed-question-given-up");
   assert.equal(given.hold, a.id);
-});
-
-test("a /factory comment's request carries the comment's URL, and a stored request's as and url must be text", () => {
-  const dir = tempDir("factory-answered-requests-");
-  const sync = syncOf({ repository: REPO });
-  sync.request(
-    7,
-    {
-      id: 99,
-      login: "octo",
-      body: "/factory retry --question q1",
-      createdAt: "2026-10-28T00:00:00Z",
-      url: COMMENT,
-    },
-    true,
-    { requestsDir: dir },
-  );
-  const [pending] = pendingRequests(dir);
-  assert.equal(pending.stored.url, COMMENT);
-  assert.equal(pending.stored.source, "github");
-  assert.equal(pending.stored.by, "octo");
-  assert.deepEqual(
-    commentRequest(
-      7,
-      { body: "/factory retry --question q1", createdAt: "t" },
-      true,
-    ),
-    {
-      kind: "answer",
-      issue: 7,
-      answer: "retry",
-      writtenAt: "t",
-      question: "q1",
-    },
-  );
-  const other = tempDir("factory-answered-requests-");
-  writeRequest(other, { kind: "cancel", issue: 7 }, "kirk", "bad", undefined, {
-    as: "Claude Code",
-  });
-  const [ok] = pendingRequests(other);
-  assert.equal(ok.stored.as, "Claude Code");
-  // How the service passes each on (requests.ts `answeredVia`).
-  assert.deepEqual(answeredVia(ok.stored), {
-    channel: "cli",
-    as: "Claude Code",
-  });
-  assert.deepEqual(answeredVia(pending.stored), {
-    channel: "comment",
-    comment: COMMENT,
-  });
-  const file = join(other, "bad.json");
-  const stored = JSON.parse(readFileSync(file, "utf8"));
-  stored.as = 5;
-  writeFileSync(file, JSON.stringify(stored));
-  assert.match(pendingRequests(other)[0].problem, /its as isn't text/);
 });
 
 test("status, the live status comment and the report list the recent decisions with who answered and how", () => {

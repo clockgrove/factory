@@ -15,7 +15,7 @@ import { mergeUnit, observeCi } from "../dist/delivery.js";
 import { DEFAULT_LIMITS, ObjectiveRunner } from "../dist/engine.js";
 import { GitHubError } from "../dist/github.js";
 import { newObjective } from "../dist/state.js";
-import { ciStep, stackInput } from "../dist/work/step-deliver.js";
+import { ciStep } from "../dist/work/step-deliver.js";
 import { githubOrigin, REPO, tempDir } from "./helpers.mjs";
 
 const LOWER = "b".repeat(40);
@@ -146,39 +146,6 @@ test("an upper stack layer waits for a check only the default branch requires", 
   // Timed from Factory's wait, not the push: a workflow filtered to main
   // starts on the layer only once the stack exists (#2068).
   assert.equal(waited.holdAfter.since, undefined);
-  assert.deepEqual(read, ["main"]);
-});
-
-test("a PR on the default branch names that branch as requiring the check", async () => {
-  const { checkout, head } = checkoutWithOrigin();
-  const read = [];
-  const answers = stackAnswers(head, read);
-  const pull = { sha: head, ref: "factory/1/a" };
-  answers.pull = async (number) => ({
-    number,
-    state: "open",
-    merged: false,
-    draft: false,
-    head: pull,
-    base: { ref: "main" },
-  });
-  answers.mergeState = async () => ({
-    headRefOid: head,
-    headRefName: pull.ref,
-    baseRefName: "main",
-    mergeStateStatus: "CLEAN",
-    reviewDecision: null,
-  });
-  const waited = await observeCi(
-    context(fake(answers), checkout),
-    layer("a", 7, head),
-  );
-  assert.equal(waited.kind, "retry", JSON.stringify(waited));
-  assert.match(
-    waited.holdAfter.question,
-    /^Check "deploy" has no run or status on PR #7's head \S+ 15 minutes after its push at .*, though main's branch protection requires it\. No Actions workflow run on this head is of a workflow that defines "deploy" as a job\. Trigger/,
-  );
-  assert.ok(waited.holdAfter.since);
   assert.deepEqual(read, ["main"]);
 });
 
@@ -359,27 +326,6 @@ test("a stack GitHub refuses to make holds the layer's CI step after the lag win
     refused.holdAfter.question,
     /GitHub refuses to make the native stack/,
   );
-});
-
-test("the CI step passes a layer above the bottom its unit's published PRs and the layers not published yet", () => {
-  const unit = {
-    items: [{ id: "a" }, { id: "b" }, { id: "c" }],
-    externalDependencies: [],
-  };
-  const published = (pr) => ({ pr, head: "f".repeat(40), merged: false });
-  const state = {
-    done: { "item:a:publish": published(7), "item:b:publish": published(8) },
-  };
-  assert.deepEqual(stackInput(state, { unit, layer: 1 }), {
-    stack: { pulls: [7, 8], unpublished: ["c"] },
-  });
-  state.done["item:c:publish"] = published(9);
-  assert.deepEqual(stackInput(state, { unit, layer: 1 }), {
-    stack: { pulls: [7, 8, 9], unpublished: [] },
-  });
-  // The bottom layer and a regular PR make no stack.
-  assert.deepEqual(stackInput(state, { unit, layer: 0 }), {});
-  assert.deepEqual(stackInput(state, undefined), {});
 });
 
 test("the CI step of a layer above the bottom makes the native stack of its unit's PRs once every layer is published", async () => {

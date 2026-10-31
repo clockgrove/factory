@@ -124,7 +124,7 @@ export function tempDir(prefix) {
  * Spawn `node ...args`, killed if this test process dies first: after()
  * never runs then, and Node can't set a parent-death signal, but setpriv can.
  */
-export function spawnNode(args, options) {
+function spawnNode(args, options) {
   return spawn(
     "setpriv",
     ["--pdeathsig", "KILL", process.execPath, ...args],

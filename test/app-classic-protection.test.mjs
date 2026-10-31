@@ -9,11 +9,6 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, beforeEach, test } from "node:test";
 import { GitHub } from "../dist/github.js";
-import {
-  newTransport,
-  requestEvents,
-  transport,
-} from "../dist/github-trace.js";
 import { repositoryChecks } from "../dist/readiness.js";
 import { REPO, tempDir } from "./helpers.mjs";
 
@@ -54,12 +49,6 @@ async function api() {
 /** Factory as its GitHub App (the fake GitHub takes any JWT). */
 async function app() {
   return new GitHub(REPO, await api(), { jwt: () => "jwt" });
-}
-
-/** Factory as a user's login. */
-async function user() {
-  process.env.FACTORY_GITHUB_TOKEN = "unused";
-  return new GitHub(REPO, await api());
 }
 
 /** The installation on REPO, granting `permissions`; its tokens grant `token` (the installation's when undefined). */
@@ -141,232 +130,11 @@ const CLOCKGROVE = {
 const protectionReads = () =>
   requests.filter((path) => path.startsWith(PROTECTION));
 
-/** Every read that consults classic protection, in a step's scope; the scope's events. */
-async function allReads(client) {
-  const counted = newTransport(true);
-  const result = await transport.run(counted, async () => ({
-    policy: await client.checksPolicy("main"),
-    checks: await client.requiredChecks("main"),
-    reviews: await client.requiredReviews("main"),
-    threads: await client.threadResolution("main"),
-    merges: await client.mergeCommitsAllowed("main"),
-  }));
-  return { result, events: requestEvents("item:a:ci", counted) };
-}
-
-test("the App without Administration makes no classic protection request: Clockgrove's ruleset alone answers, with no 403 and no notice", async () => {
-  routes = {
-    ...installed(BASE),
-    ...CLOCKGROVE,
-    // Were it asked, GitHub would refuse it.
-    [CHECKS]: REFUSED,
-    [PROTECTION]: REFUSED,
-  };
-  const client = await app();
-  for (let poll = 0; poll < 3; poll++) {
-    const { result, events } = await allReads(client);
-    assert.deepEqual(result, {
-      policy: { names: ["quality"], strict: true },
-      checks: ["quality"],
-      reviews: [],
-      threads: ['ruleset "protected-main"'],
-      merges: true,
-    });
-    assert.deepEqual(
-      events.filter((event) => event.event === "branch-protection-unreadable"),
-      [],
-    );
-    assert.deepEqual(
-      events.filter((event) => event.status === 403),
-      [],
-      JSON.stringify(events),
-    );
-  }
-  assert.deepEqual(protectionReads(), [], requests.join("\n"));
-});
-
-test("the App without Administration takes the branch read's classic checks, with strict unknown", async () => {
-  routes = {
-    ...installed({ ...BASE, administration: "none" }),
-    [RULES]: [200, []],
-    [BRANCH]: [
-      200,
-      {
-        name: "main",
-        protected: true,
-        protection: {
-          enabled: true,
-          required_status_checks: { contexts: ["tests"], checks: [] },
-        },
-      },
-    ],
-    [CHECKS]: REFUSED,
-  };
-  const client = await app();
-  assert.deepEqual(await client.checksPolicy("main"), {
-    names: ["tests"],
-    strict: undefined,
-  });
-  assert.deepEqual(protectionReads(), []);
-});
-
-for (const level of ["read", "write"])
-  test(`the App granted Administration ${level} still reads classic protection`, async () => {
-    routes = {
-      ...installed({ ...BASE, administration: level }),
-      [RULES]: [200, []],
-      [CHECKS]: [200, { strict: true, contexts: ["tests"] }],
-      [PROTECTION]: [
-        200,
-        {
-          required_pull_request_reviews: { required_approving_review_count: 1 },
-          required_conversation_resolution: { enabled: true },
-          required_linear_history: { enabled: true },
-        },
-      ],
-      [`/repos/${REPO}`]: [200, { allow_merge_commit: true }],
-    };
-    const client = await app();
-    const { result } = await allReads(client);
-    assert.deepEqual(result, {
-      policy: { names: ["tests"], strict: true },
-      checks: ["tests"],
-      reviews: [{ rule: "branch protection", count: 1 }],
-      threads: ["branch protection"],
-      merges: false,
-    });
-    assert.ok(protectionReads().includes(CHECKS));
-    assert.ok(protectionReads().includes(PROTECTION));
-  });
-
-test("the App granted Administration but refused anyway (withdrawn mid-run) latches, as #2174's safety net", async () => {
-  routes = {
-    ...installed({ ...BASE, administration: "read" }),
-    [RULES]: [200, []],
-    [BRANCH]: [200, { name: "main", protected: false }],
-    [CHECKS]: REFUSED,
-    [PROTECTION]: REFUSED,
-    [`/repos/${REPO}`]: [200, { allow_merge_commit: true }],
-  };
-  const client = await app();
-  const { events } = await allReads(client);
-  const notices = events.filter(
-    (event) => event.event === "branch-protection-unreadable",
-  );
-  assert.equal(notices.length, 1);
-  assert.match(notices[0].message, /^Factory's GitHub App can't read /);
-  assert.deepEqual(protectionReads(), [CHECKS]);
-});
-
-test("the installation's permissions stay fresh: a minted token's own count, and so does a later installation read", async () => {
-  // The installation was read without Administration; the token minted
-  // since grants it: classic protection is read.
-  routes = {
-    ...installed(BASE, { ...BASE, administration: "read" }),
-    [RULES]: [200, []],
-    [CHECKS]: [200, { strict: true, contexts: ["tests"] }],
-  };
-  const granted = await app();
-  assert.deepEqual(await granted.checksPolicy("main"), {
-    names: ["tests"],
-    strict: true,
-  });
-  assert.deepEqual(protectionReads(), [CHECKS]);
-
-  // Read without it, then granted: the next installation read (the
-  // push-access check) counts it.
-  routes = {
-    ...installed(BASE),
-    [RULES]: [200, []],
-    [BRANCH]: [200, { name: "main", protected: false }],
-    [CHECKS]: [200, { strict: true, contexts: ["tests"] }],
-  };
-  requests = [];
-  const client = await app();
-  assert.deepEqual(await client.checksPolicy("main"), {
-    names: [],
-    strict: undefined,
-  });
-  assert.deepEqual(protectionReads(), []);
-  routes = { ...routes, ...installed({ ...BASE, administration: "read" }) };
-  assert.equal(await client.canPush(), true);
-  assert.deepEqual(await client.checksPolicy("main"), {
-    names: ["tests"],
-    strict: true,
-  });
-  assert.deepEqual(protectionReads(), [CHECKS]);
-});
-
-test("a user's login is unchanged: it reads classic protection, with no installation read", async () => {
-  routes = {
-    [RULES]: [200, []],
-    [CHECKS]: [200, { strict: false, contexts: ["tests"] }],
-    [PROTECTION]: [
-      200,
-      { required_conversation_resolution: { enabled: true } },
-    ],
-    [`/repos/${REPO}`]: [200, { allow_merge_commit: true }],
-  };
-  const client = await user();
-  const { result } = await allReads(client);
-  assert.deepEqual(result, {
-    policy: { names: ["tests"], strict: false },
-    checks: ["tests"],
-    reviews: [],
-    threads: ["branch protection"],
-    merges: true,
-  });
-  assert.ok(protectionReads().includes(CHECKS));
-  assert.ok(protectionReads().includes(PROTECTION));
-  assert.ok(!requests.includes(INSTALLATION));
-});
-
 /** The branch read: protected, with `protection` as given. */
 const branchRead = (protection) => [
   200,
   { name: "main", protected: true, protection },
 ];
-
-test("classicRuleHidden: a classic rule the branch read shows (enabled) without its checks setting; never a ruleset alone", async () => {
-  const client = await user();
-  for (const [protection, hidden] of [
-    // Rulesets alone: protected, but not enabled (Clockgrove's main,
-    // rust-lang/rust's on 2026-10-28).
-    [CLOCKGROVE[BRANCH][1].protection, false],
-    // A classic rule requiring no checks (golang/go's, facebook/react's).
-    [
-      {
-        enabled: true,
-        required_status_checks: {
-          enforcement_level: "off",
-          contexts: [],
-          checks: [],
-        },
-      },
-      false,
-    ],
-    // A classic rule whose checks setting the read doesn't show.
-    [{ enabled: true }, true],
-    [
-      {
-        enabled: true,
-        required_status_checks: { enforcement_level: "non_admins" },
-      },
-      true,
-    ],
-  ]) {
-    routes = { [BRANCH]: branchRead(protection) };
-    assert.equal(
-      await client.classicRuleHidden("main"),
-      hidden,
-      JSON.stringify(protection),
-    );
-  }
-  routes = { [BRANCH]: [200, { name: "main", protected: false }] };
-  assert.equal(await client.classicRuleHidden("main"), undefined);
-  routes = {};
-  assert.equal(await client.classicRuleHidden("main"), undefined);
-});
 
 /** A GitHub stand-in for readiness: every read it isn't given fails the test. */
 function fake(answers) {

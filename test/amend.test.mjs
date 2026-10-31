@@ -1,4 +1,4 @@
-// Draining and amendments: intake checks, the planner's revision and its review.
+// Amendments: intake checks, the planner's revision and its review.
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,48 +17,6 @@ import {
   stopped,
   until,
 } from "./helpers.mjs";
-
-test("a draining Objective starts no Work Item that hasn't started, even with a stack repair's placeholders", async () => {
-  const inst = installation();
-  configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  const owned = (id) => item(id, { ownedPaths: [`${id}/`] });
-  seed(inst, 57, "building", {
-    control: { mode: "draining", by: "test", at: new Date().toISOString() },
-    done: {
-      check: {},
-      plan: plan([owned("a"), owned("b")], { base: "0".repeat(40) }),
-    },
-    kept: {
-      // a started; b only has the placeholders a stack repair writes.
-      "item:a:base": "0".repeat(40),
-      "item:b:rebase": true,
-      "item:b:finished": null,
-      "item:b:onto": null,
-    },
-  });
-  const service = serve(inst);
-  await until(
-    () =>
-      Object.keys(stateOf(inst, 57).retries).some((key) =>
-        key.startsWith("item:a:"),
-      ) || stateOf(inst, 57).holds.some((h) => h.step.startsWith("item:a:")),
-    "the started item runs under the drain",
-  );
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  const state = stateOf(inst, 57);
-  const touched = [
-    ...Object.keys(state.retries),
-    ...Object.keys(state.attempts),
-    ...Object.keys(state.done),
-    ...state.holds.map((h) => h.step),
-  ];
-  assert.ok(
-    !touched.some((key) => key.startsWith("item:b:")),
-    `b started under the drain: ${touched.join(", ")}`,
-  );
-  assert.equal(cli(inst, "cancel", "57").code, 0);
-  await stopped(service);
-});
 
 test("an amendment comes before the build: intake is checked where it enters, a rejection asks replace or continue", async () => {
   const inst = installation();

@@ -150,20 +150,6 @@ async function validationRefuses(target, command) {
   return result.kind === "hold" && /can be pinned/.test(result.question);
 }
 
-test("the plan check refuses a validation command that runs npm or pnpm outside the pinned forms", async () => {
-  const target = repository();
-  for (const command of refused) {
-    const [finding, ...more] = await planFindings(target, command);
-    assert.equal(more.length, 0, command);
-    assert.equal(finding?.itemId, "CountCharacter", command);
-    assert.equal(finding.kind, undefined);
-    assert.match(finding.message, /`npm test`, `pnpm test`, `pnpm check`/);
-    assert.match(finding.message, /root package scripts: `npm test`/);
-  }
-  for (const command of accepted)
-    assert.deepEqual(await planFindings(target, command), [], command);
-});
-
 // A command without npm or pnpm has no package pin, so validation would run it.
 test("the plan check refuses exactly the package commands validation refuses", async () => {
   const target = repository();

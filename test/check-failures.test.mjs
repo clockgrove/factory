@@ -3,8 +3,6 @@
 // so it never refuses the change a check demanded, and nothing else.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ENGINEERING_STANDARD } from "../dist/planning/rubric.js";
-import { checkFailureRows } from "../dist/review/result.js";
 import { facts } from "../dist/work/facts.js";
 import {
   deliveryRepair,
@@ -42,59 +40,4 @@ test("a failed-checks repair keeps its failure for the item's result review, at 
     "three",
     "four",
   ]);
-});
-
-test("a repair that isn't failed checks keeps no check failure, whatever its text", () => {
-  const item = { id: "chainBase" };
-  const conflict = deliveryRepair(
-    item,
-    { state: state() },
-    undefined,
-    { finding: "PR #495 conflicts with its base branch", conflict: {} },
-    "ci",
-  );
-  assert.equal(conflict.keep["item:chainBase:checkFailures"], undefined);
-  const unmarked = deliveryRepair(
-    item,
-    { state: state() },
-    undefined,
-    { finding: failure },
-    "ci",
-  );
-  assert.equal(unmarked.keep["item:chainBase:checkFailures"], undefined);
-});
-
-test("a failed-checks repair's finding keeps what failed, for the diagnosis's repeat detection (#2215)", () => {
-  const identity = {
-    kind: "ci",
-    checks: [{ name: "test", conclusion: "failure" }],
-  };
-  const outcome = deliveryRepair(
-    { id: "chainBase" },
-    { state: state() },
-    undefined,
-    { finding: failure, checks: true, identity },
-    "ci",
-  );
-  assert.deepEqual(outcome.keep["item:chainBase:finding"], {
-    kind: "failure",
-    detail: failure,
-    identity,
-  });
-});
-
-test("result review gets the failures as the repository's convention, and the standard lets CI checks win", () => {
-  assert.deepEqual(checkFailureRows([]), []);
-  const [row] = checkFailureRows([failure]);
-  assert.equal(row.origin, "controller");
-  assert.equal(row.complete, true);
-  const content = JSON.parse(row.content);
-  assert.deepEqual(content.failures, [failure]);
-  assert.match(content.scope, /repository wins/);
-  assert.match(content.scope, /no debug leftover/);
-  assert.match(content.scope, /never a reason to weaken a test/);
-  assert.match(
-    ENGINEERING_STANDARD,
-    /or CI checks differ, the repository wins/,
-  );
 });

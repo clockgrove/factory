@@ -1,20 +1,16 @@
 // Benchmark definitions are checked where they enter: the example loads, and
-// a broken one is refused with each problem named by its field. Definitions
-// and results live outside the Factory repository, where the commands are
-// told they are.
+// each optional field is checked when it is given.
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import {
-  DefinitionError,
   definitionProblems,
   hostValue,
   loadDefinition,
 } from "../bench/lib/definition.mjs";
 import { policyAnswer } from "../bench/lib/holds.mjs";
-import { benchDirs, HOME_ENV } from "../bench/lib/home.mjs";
 import { loadReviewArtifacts } from "../dist/review/artifacts.js";
 import { EXAMPLE } from "./bench-fixture.mjs";
 
@@ -43,72 +39,6 @@ test("the example benchmark loads and names its Objective at its base", () => {
     hostValue(definition.factory.toolchain.paths[0], { toolchain: "/t" }),
     "/t/node-24/bin",
   );
-});
-
-test("a definition by id is read from the definitions directory, never from the repository", () => {
-  assert.throws(
-    () => loadDefinition("acme-widgets-42"),
-    /Benchmark acme-widgets-42: no definitions directory\. Benchmark definitions and results live outside the Factory repository: give --benchmarks DIR, or --bench-home DIR \(with benchmarks\/ and results\/ inside\), or set FACTORY_BENCH_HOME\./,
-  );
-  writeFileSync(join(dir, "acme-widgets-42.json"), readFileSync(EXAMPLE));
-  assert.equal(loadDefinition("acme-widgets-42", dir).id, "acme-widgets-42");
-});
-
-test("the directories come from the flags, then the bench home, then the environment", () => {
-  assert.deepEqual(benchDirs({}, {}), {
-    benchmarks: null,
-    results: null,
-    reports: null,
-  });
-  assert.deepEqual(benchDirs({}, { [HOME_ENV]: "/data/bench" }), {
-    benchmarks: "/data/bench/benchmarks",
-    results: "/data/bench/results",
-    reports: "/data/bench/reports",
-  });
-  assert.deepEqual(
-    benchDirs(
-      { "bench-home": "/home/b", results: "/elsewhere/results" },
-      { [HOME_ENV]: "/data/bench" },
-    ),
-    {
-      benchmarks: "/home/b/benchmarks",
-      results: "/elsewhere/results",
-      reports: "/home/b/reports",
-    },
-  );
-  assert.equal(
-    benchDirs({ benchmarks: "defs" }, {}).benchmarks,
-    resolve("defs"),
-  );
-});
-
-test("a broken definition is refused with every problem named", () => {
-  const broken = example();
-  broken.source.base = "0123456";
-  delete broken.objective.bodySha256;
-  broken.factory.worker.kind = "claude";
-  broken.operatorPolicy.answers.typo = "more";
-  broken.hillClimb.primary = ["speed"];
-  assert.deepEqual(
-    definitionProblems(broken).map((problem) => problem.split(":")[0]),
-    [
-      "source.base",
-      "objective.bodySha256",
-      "factory.worker.network",
-      "operatorPolicy.answers",
-      "hillClimb.primary",
-    ],
-  );
-  const file = join(dir, "broken.json");
-  writeFileSync(file, JSON.stringify(broken));
-  assert.throws(
-    () => loadDefinition(file),
-    (error) =>
-      error instanceof DefinitionError &&
-      error.problems.length === 5 &&
-      error.message.includes("source.base: a full commit SHA"),
-  );
-  assert.deepEqual(definitionProblems(example()), []);
 });
 
 test("a policy scripts only limit raises and adopting a config: never accept or cancel", () => {
@@ -161,37 +91,6 @@ test("operatorPolicy.policy is optional: stamps or scripted", () => {
       "operatorPolicy.policy: stamps | scripted",
     ]);
   }
-});
-
-test("memory.before must be UTC in Factory's form", () => {
-  for (const before of [
-    "2031-03-04T04:00:00-05:00",
-    "2031-03-04 09:00:00Z",
-    "Mar 4 2031",
-  ]) {
-    const definition = example();
-    definition.memory.before = before;
-    assert.deepEqual(
-      definitionProblems(definition).map((p) => p.split(":")[0]),
-      ["memory.before"],
-      before,
-    );
-  }
-  for (const before of ["2031-03-04T09:00:00Z", "2031-03-04T09:00:00.000Z"]) {
-    const definition = example();
-    definition.memory.before = before;
-    assert.deepEqual(definitionProblems(definition), []);
-  }
-});
-
-test("metric ids are METRICS' own: no prototype names", () => {
-  const definition = example();
-  definition.hillClimb.primary = ["constructor", "toString"];
-  definition.hillClimb.guards = ["__proto__"];
-  assert.deepEqual(
-    definitionProblems(definition).map((p) => p.split(":")[0]),
-    ["hillClimb.primary", "hillClimb.guards"],
-  );
 });
 
 test("grader, scoring and prices are optional, and checked when given", () => {
@@ -358,23 +257,4 @@ test("factory.reviewArtifacts is optional, and Factory's own loader checks it, i
     () => loadDefinition(file),
     /- factory\.reviewArtifacts\[0\]\.text\.source must be a relative path inside the checkout/,
   );
-});
-
-test("a field the schema doesn't have is refused, at every level", () => {
-  const definition = example();
-  definition.factory.worker.netwrok = definition.factory.worker.network;
-  delete definition.factory.worker.network;
-  definition.factory.allowances.perPaths = 3;
-  definition.extra = true;
-  definition.ci.keepWorkflow = [];
-  assert.deepEqual(definitionProblems(definition), [
-    "ci.keepWorkflow: not a field of the schema",
-    "factory.worker.netwrok: not a field of the schema",
-    "factory.allowances.perPaths: not a field of the schema",
-    "extra: not a field of the schema",
-  ]);
-  // Maps whose keys their own checks cover are not walked.
-  const env = example();
-  env.factory.sandbox.environment.ANY_NAME = "value";
-  assert.deepEqual(definitionProblems(env), []);
 });

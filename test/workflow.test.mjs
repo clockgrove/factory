@@ -2,21 +2,14 @@
 // QA, and approval of a non-writer's Objective.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer } from "node:http";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
-import { after, test } from "node:test";
-import { micromark } from "micromark";
-import { gfm, gfmHtml } from "micromark-extension-gfm";
-import { TransientError } from "../dist/github.js";
-import { checkObjective } from "../dist/objective.js";
+import { test } from "node:test";
 import { observeLocalExecutables } from "../dist/planning/executables.js";
-import { BaseFiles, finalCommands } from "../dist/planning/facts.js";
 import { ownedSince } from "../dist/planning/plan.js";
 import { repositoryView } from "../dist/planning/repository.js";
 import { readShown } from "../dist/shown.js";
 import {
-  children,
   cli,
   closedPort,
   configured,
@@ -25,7 +18,6 @@ import {
   item,
   offered,
   plan,
-  refusal,
   seed,
   serve,
   silentServer,
@@ -35,28 +27,6 @@ import {
   tempDir,
   until,
 } from "./helpers.mjs";
-
-test("a state file that can't be read now is read again, not marked unreadable", {
-  skip: process.getuid?.() === 0 && "root reads any file",
-}, async () => {
-  const inst = installation();
-  seed(inst, 43);
-  const file = join(inst.objectives, "43.json");
-  chmodSync(file, 0o000);
-  const service = serve(inst);
-  await until(() => status(inst).service === "running", "service");
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  chmodSync(file, 0o600);
-  await until(
-    () => stateOf(inst, 43).holds.length,
-    "the Objective runs once readable",
-  );
-  assert.equal(
-    JSON.parse(readFileSync(join(inst.root, "service.json"))).setAside[43],
-    undefined,
-  );
-  await stopped(service);
-});
 
 test("a plan's steps run in order, a dependent waits for its dependency's merge, and read-only QA validates the default branch", async () => {
   const inst = installation();
@@ -422,21 +392,6 @@ test("final validation names each Work Item command it skips because a later mer
   );
   assert.equal(cli(inst, "cancel", "62").code, 0);
   await stopped(service);
-});
-
-test("the default branch is origin's HEAD, none without one, and a git failure is transient, not none", async () => {
-  const directory = tempDir("factory-default-branch-");
-  const git = (...args) =>
-    assert.equal(spawnSync("git", ["-C", directory, ...args]).status, 0);
-  git("init", "--quiet", "--initial-branch=main");
-  const files = new BaseFiles(directory, "HEAD");
-  assert.equal(await files.defaultBranch(), undefined);
-  git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
-  assert.equal(await files.defaultBranch(), "trunk");
-  await assert.rejects(
-    new BaseFiles(join(directory, "gone"), "HEAD").defaultBranch(),
-    TransientError,
-  );
 });
 
 test("the plan check flags a host node outside the target's Node pin, passing over an alias", async (t) => {

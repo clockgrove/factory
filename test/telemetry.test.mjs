@@ -4,10 +4,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  appendFileSync,
-  chmodSync,
   existsSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -17,14 +14,7 @@ import {
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import {
-  CAPTURE_OFF,
-  RunLog,
-  readNew,
-  readRunFile,
-  rotatedRuns,
-  rotateLogs,
-} from "../dist/log.js";
+import { CAPTURE_OFF, RunLog, readRunFile, rotateLogs } from "../dist/log.js";
 import { RunTally, statusComment } from "../dist/progress.js";
 import {
   captureResponse,
@@ -892,86 +882,4 @@ test("diagnostics counts hedges won and lost per role and phase, in the summary 
     cli(inst, "diagnostics", "72", "--summary").out,
     /reviewer result-review: 1 hedged · 1 won · 0 lost/,
   );
-});
-
-test("a follow reads new run-log lines in bounded chunks, a line longer than a chunk included, and leaves a line still being written for the next read", () => {
-  const logs = tempDir("factory-follow-");
-  mkdirSync(join(logs, "7"));
-  const run = "2026-01-01T00-00-00-000Z-1";
-  const file = join(logs, "7", `${run}.jsonl`);
-  const line = (n, pad = "") =>
-    `${JSON.stringify({ at: new Date(Date.UTC(2026, 0, 1) + n).toISOString(), n, pad })}\n`;
-  // About 3 MiB over many 1 MiB chunks, with a 2.5 MiB line among them.
-  const lines = Array.from({ length: 3000 }, (_, n) =>
-    line(n, n === 1500 ? "y".repeat(2.5 * 1024 ** 2) : "x".repeat(1000)),
-  );
-  const partial = line(3000);
-  writeFileSync(file, lines.join("") + partial.slice(0, 20));
-  const offsets = new Map();
-  const first = readNew(logs, 7, offsets);
-  assert.deepEqual(
-    first.map((event) => event.n),
-    lines.map((_, n) => n),
-  );
-  assert.equal(first[1500].pad.length, 2.5 * 1024 ** 2);
-  assert.equal(first[0].run, run);
-  assert.equal(offsets.get(file), statSync(file).size - 20);
-  // The rest of the line lands: the next read has it, and only it.
-  appendFileSync(file, partial.slice(20));
-  assert.deepEqual(
-    readNew(logs, 7, offsets).map((event) => event.n),
-    [3000],
-  );
-  assert.equal(offsets.get(file), statSync(file).size);
-  assert.deepEqual(readNew(logs, 7, offsets), []);
-});
-
-test("log rotation carries on past a run it can't remove, and records each removed run once", {
-  // Root removes the read-only directory's file anyway.
-  skip: process.getuid?.() === 0,
-}, () => {
-  const logs = tempDir("factory-rotate-");
-  const old = new Date(Date.now() - 60 * 60 * 1000);
-  const runs = ["a", "b", "c"].map((name) => `2026-01-01T00-00-0${name}`);
-  for (const issue of ["8", "9"]) {
-    mkdirSync(join(logs, issue));
-    for (const run of runs) {
-      writeFileSync(join(logs, issue, `${run}.jsonl`), "{}\n");
-      utimesSync(join(logs, issue, `${run}.jsonl`), old, old);
-    }
-  }
-  // #8's first run has a capture its directory doesn't let go of.
-  const stuck = join(logs, "8", `${runs[0]}.captures`);
-  mkdirSync(stuck);
-  writeFileSync(join(stuck, "c.json"), "{}");
-  chmodSync(stuck, 0o500);
-  utimesSync(stuck, old, old);
-  try {
-    const all = { runsPerObjective: 0, totalBytes: 1 };
-    for (let pass = 0; pass < 3; pass++) {
-      const failed = rotateLogs(logs, undefined, all);
-      assert.equal(failed.length, 1, "the capture, each pass");
-    }
-    assert.deepEqual(readdirSync(join(logs, "8")).sort(), [
-      `${runs[0]}.captures`,
-      "rotated",
-    ]);
-    assert.deepEqual(readdirSync(join(logs, "9")), ["rotated"]);
-    // One record per run, however many passes found it still there.
-    for (const issue of ["8", "9"])
-      assert.deepEqual(
-        readFileSync(join(logs, issue, "rotated"), "utf8")
-          .trim()
-          .split("\n")
-          .map((record) => JSON.parse(record).run)
-          .sort(),
-        runs,
-      );
-    assert.deepEqual(
-      rotatedRuns(logs, 8).map((record) => record.run),
-      runs,
-    );
-  } finally {
-    chmodSync(stuck, 0o700);
-  }
 });

@@ -561,7 +561,7 @@ function droppedPath(
  * - A Windows directory WSL added isn't offered toolchain.path: ahead of
  *   the shell's PATH, its tools (Windows' npm) would shadow Linux's.
  */
-export function lostPathProblems(
+function lostPathProblems(
   lost: readonly string[],
   config: Pick<CoreConfig, "checkout" | "toolchain">,
   toolchain: MiseToolchain | undefined,

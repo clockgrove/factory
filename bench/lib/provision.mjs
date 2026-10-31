@@ -213,7 +213,7 @@ function alive(pid) {
  * process is gone (it crashed) is taken over; one still held after
  * `waitMs` throws, naming its holder.
  */
-export async function withFileLock(
+async function withFileLock(
   file,
   fn,
   { waitMs = 30 * 60_000, pollMs = 250 } = {},

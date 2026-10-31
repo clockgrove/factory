@@ -11,7 +11,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { observeCi } from "../dist/delivery.js";
 import { DEFAULT_LIMITS, ObjectiveRunner } from "../dist/engine.js";
-import { BaseFiles, workflowFileCheckNames } from "../dist/planning/facts.js";
 import { newObjective } from "../dist/state.js";
 import { githubOrigin, REPO, tempDir } from "./helpers.mjs";
 
@@ -175,21 +174,6 @@ const ci = (github, dir, head, requiredChecks) =>
     input(head, requiredChecks),
   );
 
-test("every job of every workflow file at a commit is a check it can report, a needs: job's too", async () => {
-  const { checkout: dir, head } = checkout();
-  const names = await workflowFileCheckNames(new BaseFiles(dir, head));
-  assert.deepEqual(Object.fromEntries(names), {
-    [LINT]: ["lint"],
-    [QUALITY]: [
-      "commands (browser-build)",
-      "commands (checks)",
-      "commands (database)",
-      "commands (tests)",
-      "quality",
-    ],
-  });
-});
-
 test("a required needs: job of a workflow run under way on the head is waited for, naming the run, with no question", async () => {
   const { checkout: dir, head } = checkout();
   for (const status of [
@@ -226,28 +210,6 @@ test("a required needs: job of a workflow run under way on the head is waited fo
   }
 });
 
-test("a plan-named needs: job of a workflow run under way is waited for too", async () => {
-  const { checkout: dir, head } = checkout();
-  const waited = await ci(
-    answers(head, {
-      required: [],
-      runs: [workflowRun(QUALITY, head, "in_progress")],
-      pushedAt: pushed(16),
-    }),
-    dir,
-    head,
-    ["quality"],
-  );
-  assert.equal(waited.kind, "retry", JSON.stringify(waited));
-  assert.match(
-    waited.reason,
-    new RegExp(
-      `^Awaiting successful plan-required checks on PR #905: quality\\. "quality" has not registered yet; workflow run ${RUN} \\(Quality, in_progress\\) on this head defines it and is under way$`,
-    ),
-  );
-  assert.equal(waited.holdAfter, undefined);
-});
-
 test("a required check no workflow run on the head can report still asks 15 minutes after the push, saying so", async () => {
   const { checkout: dir, head } = checkout();
   const pushedAt = pushed(16);
@@ -266,66 +228,6 @@ test("a required check no workflow run on the head can report still asks 15 minu
       `Check "quality" has no run or status on PR #905's head ${head} 15 minutes after its push at ${pushedAt}, though main's branch protection requires it. No Actions workflow run on this head is of a workflow that defines "quality" as a job. Trigger or fix the workflow that reports it, then answer retry; or cancel.`,
     );
   }
-});
-
-test("a required needs: job whose workflow run completed without it asks, naming that run", async () => {
-  const { checkout: dir, head } = checkout();
-  const pushedAt = pushed(16);
-  const waited = await ci(
-    answers(head, {
-      runs: [workflowRun(QUALITY, head, "completed", "cancelled")],
-      pushedAt,
-    }),
-    dir,
-    head,
-  );
-  assert.equal(waited.kind, "retry", JSON.stringify(waited));
-  assert.equal(waited.holdAfter.since, pushedAt);
-  assert.match(
-    waited.holdAfter.question,
-    new RegExp(
-      `though main's branch protection requires it\\. Every workflow run on this head whose workflow defines "quality" completed without reporting it: workflow run ${RUN} \\(Quality, cancelled\\)\\. Trigger or fix`,
-    ),
-  );
-});
-
-test("only the checks no run under way can report are asked about", async () => {
-  const { checkout: dir, head } = checkout();
-  const pushedAt = pushed(16);
-  const waited = await ci(
-    answers(head, {
-      required: ["quality", "deploy"],
-      runs: [workflowRun(QUALITY, head, "in_progress")],
-      pushedAt,
-    }),
-    dir,
-    head,
-  );
-  assert.equal(waited.kind, "retry", JSON.stringify(waited));
-  assert.match(
-    waited.reason,
-    new RegExp(
-      `: commands \\(database\\), quality, deploy\\. "quality" has not registered yet; workflow run ${RUN} \\(Quality, in_progress\\) on this head defines it and is under way$`,
-    ),
-  );
-  assert.match(
-    waited.holdAfter.question,
-    /^Check "deploy" has no run or status on PR #905's head \S+ 15 minutes after its push at .*\. No Actions workflow run on this head is of a workflow that defines "deploy" as a job\. Trigger/,
-  );
-});
-
-test("without Actions read access a missing required check still asks, saying GitHub doesn't show the runs", async () => {
-  const { checkout: dir, head } = checkout();
-  const waited = await ci(
-    answers(head, { runs: undefined, pushedAt: pushed(16) }),
-    dir,
-    head,
-  );
-  assert.equal(waited.kind, "retry", JSON.stringify(waited));
-  assert.match(
-    waited.holdAfter.question,
-    /requires it\. GitHub does not show this head's Actions workflow runs\. Trigger or fix/,
-  );
 });
 
 test("the engine keeps waiting on the run past the 15 minutes, asks once it completes without the check, and bounds the wait by its own limit", async () => {

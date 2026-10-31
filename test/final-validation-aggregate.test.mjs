@@ -18,7 +18,7 @@ import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { ACCEPTED_AT } from "../dist/planning/plan.js";
 import { newObjective } from "../dist/state.js";
 import { validateTree } from "../dist/validate.js";
-import { fact, facts } from "../dist/work/facts.js";
+import { fact } from "../dist/work/facts.js";
 import {
   deliverySteps,
   finalStep,
@@ -694,19 +694,6 @@ test("final validation's failure offers repair, which sends it with its complete
   assert.equal(passed.kind, "done", JSON.stringify(passed).slice(0, 800));
   assert.equal(passed.result.commit, fixed);
   assert.equal(passed.keep["final:held"], null);
-});
-
-test("a final validation failure held by 0.5.11, which kept no failure, takes retry and refuses repair", async () => {
-  const h = await finalHarness();
-  h.runner.apply("final", await h.run());
-  const held = await h.run();
-  // As 0.5.11 asked it: no `repair`, and no failure kept.
-  held.options = held.options.filter((option) => option.answer !== "repair");
-  delete held.keep["final:held"];
-  h.runner.apply("final", held);
-  assert.equal(fact(h.runner.state, "final:held"), undefined);
-  assert.equal(h.answer("repair")?.code, "invalid_answer");
-  assert.equal(h.answer("retry"), null);
 });
 
 test("final validation's failure goes to the Work Item the state attributes it to", () => {

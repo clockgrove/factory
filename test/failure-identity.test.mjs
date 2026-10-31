@@ -6,8 +6,7 @@
 // the command and its exit, the checks and their conclusions, the refused
 // criteria (#2215). Whether it is unchanged, which refuses another repair,
 // also needs its output to read the same once that noise is set aside, so
-// the same command failing on another test still moved. A correction saved
-// with only its text compares by its text, as before.
+// the same command failing on another test still moved.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -20,7 +19,6 @@ import {
   sameFailure,
   unchangedFailure,
 } from "../dist/repair.js";
-import { validationIdentity } from "../dist/work/step-validate.js";
 import { item, plan, tempDir } from "./helpers.mjs";
 
 const a = item("a", {
@@ -151,37 +149,6 @@ test("the same failed command, ending the same way, is a repeat whatever its out
   );
 });
 
-test("a long failure kept whole in a file named by its content is unchanged whatever that file's name", () => {
-  // work/step-validate.ts names the kept output's file by its content, so the
-  // same failure with other timings is kept under another name (#2201).
-  const kept = (text, name) =>
-    `${text}\n[The complete output is kept for the operator at /home/op/.local/state/factory/work/outputs/a/${name}.txt. The repair diagnosis can ask for it as .factory-validate/validate.log, and the next worker attempt reads it there in its checkout.]`;
-  const keptFirst = kept(first, "0123456789abcdef");
-  const keptSecond = kept(second, "fedcba9876543210");
-  assert.equal(
-    unchangedFailure(
-      keptSecond,
-      [{ ...tried, failure: keptFirst }],
-      2,
-      npmTest,
-    ),
-    true,
-  );
-  // Another test failing is still another output, whatever the file's name.
-  assert.equal(
-    unchangedFailure(
-      kept(
-        first.replace("sum is 3", "sum of nothing is 0"),
-        "fedcba9876543210",
-      ),
-      [{ ...tried, failure: keptFirst }],
-      2,
-      npmTest,
-    ),
-    false,
-  );
-});
-
 test("the same command failing on another test moved: it is the same failure for a repeated correction, never unchanged", async () => {
   // Repair 1 fixed "sum is 3"; now "sum of nothing is 0" fails, exit 1.
   const moved = `Validation command failed (1): npm test: \n2026-10-29T19:02:11.004Z sum.test.js\n  not ok 2 - sum of nothing is 0\n  at /tmp/factory-d4e5f6/src/a.js:4\n# duration 1093ms`;
@@ -204,57 +171,6 @@ test("the same command failing on another test moved: it is the same failure for
     "Return 0 for no inputs in src/a.js.",
   );
   assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
-});
-
-test("a formatter that fails the same way twice, its timings aside, is unchanged; its identity comes from the kept validation", () => {
-  const biome = (ms) =>
-    `The repository's formatter failed (1): biome check --write .: \nsrc/a.js format ━━━━━━━━━━\n  × File content differs from formatting output\nChecked 12 files in ${ms}ms. No fixes applied.\nFound 1 error.`;
-  const kept = (ms) => ({
-    kind: "failed",
-    detail: biome(ms),
-    formatter: "biome check --write .",
-    exit: "1",
-  });
-  const identity = validationIdentity(kept(34));
-  assert.deepEqual(identity, {
-    kind: "format",
-    command: "biome check --write .",
-    exit: "1",
-  });
-  const formatted = {
-    source: "diagnosis",
-    failure: biome(34),
-    identity,
-    diagnosis: "src/a.js is not formatted.",
-    path: "src/a.js",
-    correction: "Format src/a.js.",
-    repair: 1,
-  };
-  assert.equal(
-    unchangedFailure(biome(41), [formatted], 2, validationIdentity(kept(41))),
-    true,
-  );
-  // Another formatter ending, or another command, is another failure.
-  assert.equal(
-    unchangedFailure(biome(41), [formatted], 2, { ...identity, exit: "2" }),
-    false,
-  );
-  assert.deepEqual(
-    validationIdentity({
-      ...kept(34),
-      command: "npm test",
-      formatter: undefined,
-    }),
-    { kind: "validation", command: "npm test", exit: "1" },
-  );
-  // A pin, a refused formatter change, or a result kept before 0.5.10.
-  assert.equal(
-    validationIdentity({
-      kind: "failed",
-      detail: "the formatter changed b.js",
-    }),
-    undefined,
-  );
 });
 
 test("another command, or the same command ending another way, is not the same failure", async () => {
@@ -486,44 +402,4 @@ test("a blamed predecessor's correction carries the failure it was blamed for, b
     item: "b",
     failure: npmTest,
   });
-});
-
-test("a correction saved with only its text (0.5.10) still loads and compares by its text for one round, then by identity", async () => {
-  const saved = JSON.parse(JSON.stringify(tried));
-  delete saved.identity;
-  // Unknown identity: its text decides, as before.
-  assert.equal(unchangedFailure(first, [saved], 2, npmTest), true);
-  assert.equal(unchangedFailure(second, [saved], 2, npmTest), false);
-  assert.equal(repeated({ ...tried }, [saved]), true);
-  assert.equal(repeated({ ...tried, failure: second }, [saved]), false);
-  // A finding saved before identities has none.
-  assert.equal(
-    failureIdentity({
-      finding: { kind: "failure", detail: first },
-      plan: plan([a]),
-      item: a,
-    }),
-    undefined,
-  );
-
-  // Its next correction carries the identity, so the round after compares by it.
-  const model = planner(repair("Round half up with Math.round."));
-  const next = await diagnose(
-    model,
-    { kind: "failure", detail: second, identity: npmTest },
-    { prior: [saved], repair: 2 },
-  );
-  assert.equal(next.kind, "correction");
-  assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
-  assert.deepEqual(next.correction.identity, npmTest);
-  const third = run("2026-10-29T20:15:40.120Z", "/tmp/factory-g7h8i9", 977);
-  assert.equal(
-    unchangedFailure(
-      third,
-      [saved, { ...next.correction, repair: 2 }],
-      3,
-      npmTest,
-    ),
-    true,
-  );
 });

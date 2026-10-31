@@ -250,7 +250,7 @@ export function pullInput(
  * runs the workflows filtered to the default branch on the layer
  * (delivery.ts `observeCi`, #2068).
  */
-export function stackInput(
+function stackInput(
   state: ObjectiveState,
   place: StackPlace | undefined,
 ): Pick<PullInput, "stack"> {
@@ -307,7 +307,7 @@ export async function ciStep(
  * (delivery.ts `freshBase`): logged, and kept so it runs at most once a
  * day per default-branch head for the item, and its run is waited for.
  */
-export function rerunOutcome(
+function rerunOutcome(
   context: StepContext,
   item: WorkItem,
   { rerun, baseRerun, reason, afterMs }: Rerun,
@@ -358,7 +358,7 @@ function logBaseRerun(
  * rerunOutcome keeps and logs: each layer's is logged and kept with
  * `outcome`, whatever it is, so no layer dispatches again for that head.
  */
-export function keepBaseReruns(
+function keepBaseReruns(
   context: StepContext,
   outcome: Outcome,
   reruns: { item: string; baseRerun: BaseRerun }[],
@@ -388,7 +388,7 @@ export function keepBaseReruns(
  * The item's checks passed on `head` after their failed Actions jobs were
  * rerun there: a flake, logged once and kept `passed` for the report.
  */
-export function passedRerun(
+function passedRerun(
   context: StepContext,
   item: WorkItem,
   head: string,
@@ -453,7 +453,7 @@ export async function mergeStep(
  * A kept one is logged; a refused one is the merge step's retry, which
  * finds the PR merged and deletes again.
  */
-export async function deleteBranches(
+async function deleteBranches(
   context: StepContext,
   deps: BuildDeps,
   items: readonly WorkItem[],

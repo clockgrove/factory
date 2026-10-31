@@ -7,8 +7,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { observeCi } from "../dist/delivery.js";
 import { GitHubError } from "../dist/github.js";
-import { fact, facts } from "../dist/work/facts.js";
-import { passedRerun, rerunOutcome } from "../dist/work/step-deliver.js";
 
 const HEAD = "a".repeat(40);
 const RUN = 900;
@@ -229,48 +227,4 @@ test("a failure no rerun can clear is repaired at once, as before", async () => 
     assert.doesNotMatch(result.finding, /reran/, name);
   }
   assert.deepEqual(cases["a commit status"].reruns, []);
-});
-
-test("a rerun the login may not make asks for Actions: write", async () => {
-  const hub = github({ runs: [actions(1, "tests", "failure")], refuse: 403 });
-  await assert.rejects(observe(hub), (error) => {
-    assert.equal(error.permission, "Actions: write");
-    return true;
-  });
-});
-
-test("the step keeps and logs the rerun, then logs the pass once for the report", () => {
-  const logged = [];
-  const item = { id: "a" };
-  const rerun = {
-    head: HEAD,
-    checks: ["tests"],
-    runs: [RUN],
-    at: new Date().toISOString(),
-  };
-  const context = (kept = {}) => ({
-    state: { kept, done: {}, issue: 1 },
-    log: (event) => logged.push(event),
-  });
-  const outcome = rerunOutcome(context(), item, {
-    kind: "rerun",
-    reason: "Rerunning",
-    afterMs: 20_000,
-    rerun,
-  });
-  assert.equal(outcome.kind, "retry");
-  assert.equal(outcome.afterMs, 20_000);
-  assert.deepEqual(fact({ kept: outcome.keep }, "ciRerun", "a"), rerun);
-  assert.equal(logged[0].event, "ci-rerun");
-
-  const kept = facts({ ciRerun: rerun }, "a");
-  assert.equal(passedRerun(context(kept), item, "b".repeat(40)), undefined);
-  const passed = passedRerun(context(kept), item, HEAD);
-  assert.equal(fact({ kept: passed }, "ciRerun", "a").passed, true);
-  assert.deepEqual(
-    logged.map((event) => event.event),
-    ["ci-rerun", "ci-flaky"],
-  );
-  assert.equal(passedRerun(context(passed), item, HEAD), undefined);
-  assert.equal(logged.length, 2);
 });

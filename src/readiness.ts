@@ -292,7 +292,7 @@ function hostChecks(
  * `--prefix` holds is fixed with that prefix. Workers never get it either
  * way.
  */
-export function launcherChecks(env: NodeJS.ProcessEnv): ReadinessCheck[] {
+function launcherChecks(env: NodeJS.ProcessEnv): ReadinessCheck[] {
   const data =
     env.XDG_DATA_HOME || join(env.HOME || homedir(), ".local", "share");
   const seen = new Set<string>();
@@ -420,7 +420,7 @@ export interface ServicePath {
  * while neither list is set. `file` is the configuration file, where a
  * name no longer needed is removed (setup can't empty a list).
  */
-export function toolchainChecks(
+function toolchainChecks(
   toolchain: CoreConfig["toolchain"],
   path: ServicePath,
   file: string,
@@ -1051,7 +1051,7 @@ export async function repositoryChecks(
  * Undefined while it is unset: Factory runs nothing on the default branch.
  * `files` stands in for the default branch's files.
  */
-export async function baseRerunCheck(
+async function baseRerunCheck(
   config: CoreConfig,
   branch: string,
   files?: BaseFiles,

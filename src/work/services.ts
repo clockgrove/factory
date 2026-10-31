@@ -62,7 +62,7 @@ export function servicesNote(config: Pick<SandboxConfig, "services">): string {
 
 /** The question for an attempt whose services didn't start. */
 export const servicesHold = (problem: string) =>
-  `${problem}. Fix sandbox.services in the Factory configuration or the host, restart the service (it reads its configuration only at start), then answer retry.`;
+  `${problem}. Fix sandbox.services in the Factory configuration or the host, restart Factory's service (it reads its configuration only at start), then answer retry.`;
 
 /** One attempt's running services. */
 export class AttemptServices {

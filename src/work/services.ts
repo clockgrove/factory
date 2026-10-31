@@ -19,9 +19,12 @@
  *
  * A service's sandbox dies with Factory (bubblewrap's --die-with-parent ends
  * its PID namespace, and every process in it), so a crash at any point
- * leaves none running; the next attempt starts its own.
+ * leaves none running; the next attempt starts its own. A directory is
+ * named for the Factory process that made it, and one whose process is gone
+ * (a crash's) is removed when an attempt starts its services: never another
+ * live installation's.
  */
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -42,6 +45,25 @@ const CHECK_MS = 10_000;
 const LIFETIME_MS = 24 * 60 * 60 * 1000;
 /** Characters of a service's output kept, for a failure's message. */
 const OUTPUT_LIMIT = 64 * 1024;
+
+/** Whether process `pid` is alive: EPERM is another user's live process. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Remove services directories whose Factory process is gone. */
+function sweep(): void {
+  for (const entry of readdirSync(tmpdir())) {
+    const pid = Number(/^factory-services-(\d+)-/.exec(entry)?.[1]);
+    if (pid > 0 && !alive(pid))
+      rmSync(join(tmpdir(), entry), { recursive: true, force: true });
+  }
+}
 
 /** The end of a command's output, for a failure's message. */
 const tail = (run: Extract<SandboxRun, { kind: "ran" }>) =>
@@ -99,8 +121,9 @@ export class AttemptServices {
     log: (event: Record<string, unknown>) => void,
   ): Promise<AttemptServices | { problem: string }> {
     const started = Date.now();
+    sweep();
     const services = new AttemptServices(
-      mkdtempSync(join(tmpdir(), "factory-services-")),
+      mkdtempSync(join(tmpdir(), `factory-services-${process.pid}-`)),
       config,
       network,
       signal,

@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
+import { AttemptServices } from "../dist/work/services.js";
 import {
   children,
   cli,
@@ -245,7 +246,6 @@ process.exit(3);`,
     const [root] = readdirSync(temporary);
     const socket = join(temporary, root, "kv", "kv.sock");
     assert.equal(existsSync(socket), point === "worker:service:after");
-    if (!existsSync(socket)) return;
     // The socket stays; nothing listens on it once the sandbox is gone.
     const refused = () =>
       new Promise((resolve) => {
@@ -257,12 +257,31 @@ process.exit(3);`,
         probe.once("error", (error) => resolve(error.code === "ECONNREFUSED"));
       });
     const deadline = Date.now() + 10_000;
-    while (!(await refused())) {
+    while (existsSync(socket) && !(await refused())) {
       assert.ok(
         Date.now() < deadline,
         "the service outlived its crashed parent",
       );
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // The next attempt's start removes the crashed process's directory,
+    // never a live process's.
+    const live = join(temporary, `factory-services-${process.pid}-live`);
+    mkdirSync(live);
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = temporary;
+    try {
+      const next = await AttemptServices.start(
+        { ...config, services: undefined },
+        "off",
+        AbortSignal.timeout(10_000),
+        () => {},
+      );
+      await next.stop();
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+    assert.deepEqual(readdirSync(temporary), [basename(live)]);
   });
 }

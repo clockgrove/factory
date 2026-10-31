@@ -49,12 +49,19 @@ import { validationDeadlineMs } from "../validate.js";
 import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
+  rewriteSnapshot,
+  SCRIPTED_EDITS,
+  unchangedRewrite,
+} from "../work/scripted-edits.js";
+import {
   FinishRequests,
   type SelfValidateOptions,
   SelfValidation,
   selectedMediaNote,
   UNOWNED_FIX,
+  VALIDATION_TOOL_INPUT,
   validateFailed,
+  validationTargets,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -181,13 +188,20 @@ const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
     : "the network is off and only loopback works";
 
 /**
+ * How a worker with a shell edits files (#2283), as a Codex worker is told
+ * (codex-worker.ts `CODEX_EDIT_CALL`): through Edit and Write, which fail
+ * loudly, and a script only for a mechanical change across many files.
+ */
+export const CLAUDE_EDITS = `Edit files with Edit and Write: Edit fails when its old_string doesn't match the file, instead of changing nothing. ${SCRIPTED_EDITS}`;
+
+/**
  * The truth about the worker's own shell (#2156), as a Codex worker is told
  * (codex-worker.ts `codexShellNote`): it differs from Factory's validation
  * environment, has no installed dependencies, and isn't where the result is
  * validated. A worker has the shell only with Validate granted.
  */
 export const shellPrompt = (sandbox: Pick<SandboxConfig, "network">) =>
-  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead.`;
+  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead. ${CLAUDE_EDITS}`;
 
 /**
  * Compaction summarizes the first user turn, so the exact contract also
@@ -300,6 +314,20 @@ const text = (value: string, isError = false): ToolText => ({
   content: [{ type: "text", text: value }],
   ...(isError && { isError }),
 });
+
+/**
+ * Validate's input in Zod, as the Codex and Copilot workers' JSON Schema
+ * (self-validate.ts `VALIDATION_TOOL_INPUT`): a targeted run's command
+ * indices, absent for a full run (#2281).
+ */
+export function validateToolShape(z: Zod) {
+  return {
+    commands: z
+      .array(z.number().int().min(0))
+      .optional()
+      .describe(VALIDATION_TOOL_INPUT.properties.commands.description),
+  };
+}
 
 /** Plain text, cut to its start and end. */
 function returned(output: string): string {
@@ -474,6 +502,9 @@ class Attempt {
     if (signal.aborted) throw new Error("the Factory shell closed");
     const started = Date.now();
     const output = new BoundedText(KEPT_HEAD, KEPT_TAIL);
+    // Commands run one at a time, so what a scripted rewrite names is read
+    // just before it runs and compared after (#2283).
+    const rewrite = rewriteSnapshot(command, this.input.worktree);
     let run: Awaited<ReturnType<typeof runSandboxed>>;
     try {
       run = await runSandboxed(command, {
@@ -508,7 +539,8 @@ class Attempt {
     const status = run.timedOut
       ? `Stopped after ${timeoutMs} ms, with everything it started`
       : `Exit code ${run.exitCode ?? "none (ended by a signal)"}`;
-    return `${status} (${ms} ms)\n${returned(output.toString())}`;
+    const missed = rewrite && unchangedRewrite(rewrite, "Edit");
+    return `${status} (${ms} ms)\n${returned(output.toString())}${missed ? `\n${missed}` : ""}`;
   }
 
   // copy_file and delete_file
@@ -729,6 +761,7 @@ class Attempt {
 
   private validation(): McpSdkServerConfigWithInstance {
     const { tool, createSdkMcpServer } = this.sdk;
+    const { z } = this;
     return createSdkMcpServer({
       name: VALIDATION_SERVER,
       version: "1.0.0",
@@ -736,9 +769,9 @@ class Attempt {
         tool(
           VALIDATION_TOOL_NAME,
           validationToolDescription(this.input.item),
-          {},
-          async () => {
-            const result = await this.validator.call();
+          validateToolShape(z),
+          async ({ commands }) => {
+            const result = await this.validator.call(commands);
             return text(result.text, result.isError);
           },
           {
@@ -769,10 +802,11 @@ function provenance(server: unknown, name: string): boolean {
 
 /**
  * The one access rule both SDK permission callbacks apply: Factory's own
- * tools only from its in-process servers with exactly their arguments, and
- * file tools only inside the worktree, with bounded globs.
+ * tools only from its in-process servers with exactly their arguments
+ * (Validate's: none, or a targeted run's `commands`, #2281), and file tools
+ * only inside the worktree, with bounded globs.
  */
-function toolAllowed(
+export function toolAllowed(
   attempt: Attempt,
   toolName: string,
   toolInput: unknown,
@@ -785,7 +819,12 @@ function toolAllowed(
   const keys = Object.keys(args).sort().join(",");
   switch (toolName) {
     case VALIDATION_TOOL:
-      return grants.validate && provenance(server, VALIDATION_SERVER) && !keys;
+      return (
+        grants.validate &&
+        provenance(server, VALIDATION_SERVER) &&
+        (!keys ||
+          (keys === "commands" && !("problem" in validationTargets(args))))
+      );
     case SHELL_TOOL:
       return (
         grants.shell &&

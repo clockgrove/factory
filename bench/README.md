@@ -316,6 +316,10 @@ The rest of the card, unchanged from version 2: shown after the outcomes, never 
   - `runs`: its verdicts (done, repair, fail); `passed`: the done ones; `passRate`: `passed` over `runs`; `holds`: runs that stopped for a question.
   - `results`: each result's first validation, the first after the work that made it. An operator's `retry` validates the same result again and isn't counted. A hold for a spend limit or a config change isn't a verdict. Any other hold counts as the result not passing.
   - `firstPassRate`: `passedFirstTime` over `results`.
+- **`totals.workerValidation`.** Workers' own Validate calls.
+  - `runs`: every call; `passed`: the full runs that passed with a handoff collection accepts; `targeted`: the calls that ran only some commands, which never count as passing.
+  - `feedbackMs`: the median time from the worker's last edit (the newest file its result changes) to a call's verdict.
+  - `passedShare`: the share of the calls' time their passing commands took: the time spent before the command that mattered. Lower is a faster inner loop.
 - **`totals.ci`.**
   - `published`: pushes of a result.
   - `rounds`: pushes and reruns.

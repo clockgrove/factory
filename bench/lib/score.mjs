@@ -191,6 +191,55 @@ function finishValidation(tally) {
   return tally;
 }
 
+/**
+ * A worker's own Validate calls: `runs`, the full ones that
+ * `passed`, the `targeted` ones, and their feedback latency: the median
+ * time from the worker's last edit to a call's verdict (`feedbackMs`), and
+ * the share of the calls' time their passing commands took (`passedShare`).
+ */
+function workerValidationTally() {
+  return {
+    runs: 0,
+    passed: 0,
+    targeted: 0,
+    feedbackMs: null,
+    passedShare: null,
+    sinceEdit: [],
+    durationMs: 0,
+    passedMs: 0,
+  };
+}
+
+function finishWorkerValidation(tally) {
+  const { sinceEdit, durationMs, passedMs, ...shown } = tally;
+  const sorted = [...sinceEdit].sort((a, b) => a - b);
+  const middle = sorted.length >> 1;
+  return {
+    ...shown,
+    feedbackMs: sorted.length
+      ? sorted.length % 2
+        ? sorted[middle]
+        : (sorted[middle - 1] + sorted[middle]) / 2
+      : null,
+    passedShare: durationMs ? passedMs / durationMs : null,
+  };
+}
+
+function addWorkerValidation(tally, event) {
+  tally.runs += 1;
+  if (event.targeted !== undefined) tally.targeted += 1;
+  else if (event.passed === true) tally.passed += 1;
+  if (typeof event.sinceEditMs === "number")
+    tally.sinceEdit.push(event.sinceEditMs);
+  if (
+    typeof event.durationMs === "number" &&
+    typeof event.passedMs === "number"
+  ) {
+    tally.durationMs += event.durationMs;
+    tally.passedMs += event.passedMs;
+  }
+}
+
 function itemScore(id, kind, criteria) {
   return {
     id,
@@ -210,7 +259,7 @@ function itemScore(id, kind, criteria) {
     holdBlockedMs: null,
     holds: { total: 0, operator: 0, operatorWaitMs: 0, waitMs: 0 },
     validation: validationTally(),
-    workerValidation: { runs: 0, passed: 0 },
+    workerValidation: workerValidationTally(),
     ci: {
       rounds: 0,
       published: 0,
@@ -409,6 +458,7 @@ export async function scoreRun({
   const amendmentAnswers = new Map();
   const ciRound = new Map();
   const validation = validationTally();
+  const workerValidation = workerValidationTally();
   /** Items whose current result has had its first validation. */
   const validated = new Set();
   /** Each step's latest hold kind. */
@@ -644,10 +694,8 @@ export async function scoreRun({
         if (event.outcome === "refused") refusals += 1;
         break;
       case "worker-validate":
-        if (item) {
-          item.workerValidation.runs += 1;
-          if (event.passed === true) item.workerValidation.passed += 1;
-        }
+        if (item) addWorkerValidation(item.workerValidation, event);
+        addWorkerValidation(workerValidation, event);
         break;
       case "amendment-answer": {
         const id = event.amendment ?? /^amend:([^:]+)/.exec(step ?? "")?.[1];
@@ -852,6 +900,7 @@ export async function scoreRun({
       item.holdBlockedMs = covered(from, to, off) - covered(from, to, downtime);
     }
     finishValidation(item.validation);
+    item.workerValidation = finishWorkerValidation(item.workerValidation);
     item.ci.firstPassRate = rate(
       item.ci.passedFirstTime,
       item.ci.published - item.ci.conflicts,
@@ -1135,6 +1184,7 @@ export async function scoreRun({
       amendments,
       holds: holdTotals,
       validation: finishValidation(validation),
+      workerValidation: finishWorkerValidation(workerValidation),
       ci: {
         ...ci,
         firstPassRate: rate(ci.passedFirstTime, ci.published - ci.conflicts),

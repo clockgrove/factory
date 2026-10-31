@@ -17,6 +17,7 @@ import {
   removeLabel,
   WORK_ITEM_LABEL,
 } from "./github-roles.js";
+import { type ItemTelemetry, telemetryMarkdown } from "./item-telemetry.js";
 import { code, inert, mark, prose } from "./markdown.js";
 import { currentPlan } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
@@ -31,7 +32,8 @@ import { errorMessage } from "./text.js";
  * with blocked-by links that mirror the plan's dependencies, the
  * configured native type, the `factory:work-item` label, the Objective's
  * priority labels, a card on the Objective's Project and one live
- * comment that shows the item's state. The Objective gets its own role
+ * comment that shows the item's state and its telemetry
+ * (item-telemetry.ts). The Objective gets its own role
  * once per run: the `factory:objective` label and its type when it has
  * none (github-roles.ts); its priority labels are read then for its
  * items. An item's issue is closed as completed when the item merges, and as not planned, with the reason in its comment, when
@@ -125,7 +127,8 @@ interface Wanted {
   title: string;
   body: string;
   dependencies: string[];
-  comment: string;
+  /** Undefined: the comment stays as last written (a closed issue's final numbers, `wanted`). */
+  comment: string | undefined;
   /** Closed, and how; open when absent. */
   close?: "completed" | "not_planned";
   /** The card's Factory option for the item's phase; none before it starts. */
@@ -148,8 +151,19 @@ function trackingOf(state: ObjectiveState): Tracking | undefined {
 /**
  * Each Work Item's wanted issue: the plan's items, and the items recorded
  * earlier that left it. Nothing here reads GitHub.
+ *
+ * `telemetry` is each item's this run, as of its last finished step
+ * (progress.ts RunTally), redacted: its comment shows it, so the comment
+ * changes as the item moves and keeps the final numbers once it closes.
+ * An issue closed already whose item has none this run (a run again of a
+ * finished Objective) keeps its comment as it is, with the numbers of the
+ * run that built it. Without `telemetry` (no run log read yet) the
+ * comment shows none.
  */
-function wanted(state: ObjectiveState): Map<string, Wanted> {
+function wanted(
+  state: ObjectiveState,
+  telemetry?: Record<string, ItemTelemetry>,
+): Map<string, Wanted> {
   const objective = state.issue;
   const plan = currentPlan(state);
   const ended = TERMINAL.includes(state.status);
@@ -157,6 +171,13 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
   const rows = new Map(
     (plan ? itemRows(state, plan) : []).map((row) => [row.id, row]),
   );
+  const recorded = trackingOf(state)?.items ?? {};
+  const kept = (id: string) =>
+    telemetry !== undefined && !telemetry[id] && recorded[id]?.closed === true;
+  const spent = (id: string) => {
+    const item = telemetry?.[id];
+    return item ? telemetryMarkdown(item) : [];
+  };
   for (const item of plan?.items ?? []) {
     const row = rows.get(item.id)!;
     const close =
@@ -187,36 +208,43 @@ function wanted(state: ObjectiveState): Map<string, Wanted> {
       title: inert(cut(item.title, 200)),
       body: issueBody(objective, item, plan!),
       dependencies: [...item.dependencies].sort(),
-      comment: liveComment(objective, item.id, [
-        `**Phase:** ${prose(row.phase)}`,
-        `**PR:** ${row.pr === null ? "none yet" : `#${row.pr}`}`,
-        ...(row.repairs ? [`**Repairs:** ${row.repairs}`] : []),
-        ...(row.hold
-          ? [
-              state.holds.find((open) => open.id === row.hold)?.cause ===
-              "failure"
-                ? `**Failed:** ${code(row.hold)} on #${objective} names the failure, its evidence and the answers; answer it there.`
-                : `**Question:** ${code(row.hold)} is open on #${objective}; answer it there.`,
-            ]
-          : []),
-        ...(close ? [`**Closed:** ${why}`] : []),
-      ]),
+      comment:
+        close && kept(item.id)
+          ? undefined
+          : liveComment(objective, item.id, [
+              `**Phase:** ${prose(row.phase)}`,
+              `**PR:** ${row.pr === null ? "none yet" : `#${row.pr}`}`,
+              ...(row.repairs ? [`**Repairs:** ${row.repairs}`] : []),
+              ...(row.hold
+                ? [
+                    state.holds.find((open) => open.id === row.hold)?.cause ===
+                    "failure"
+                      ? `**Failed:** ${code(row.hold)} on #${objective} names the failure, its evidence and the answers; answer it there.`
+                      : `**Question:** ${code(row.hold)} is open on #${objective}; answer it there.`,
+                  ]
+                : []),
+              ...(close ? [`**Closed:** ${why}`] : []),
+              ...spent(item.id),
+            ]),
       ...(close ? { close } : {}),
     });
   }
   // With no plan in force yet (a run again, or a replan, still planning),
   // the issues recorded earlier stay as they are until one is accepted.
   if (!plan && !ended) return items;
-  for (const id of Object.keys(trackingOf(state)?.items ?? {}))
+  for (const id of Object.keys(recorded))
     if (!items.has(id))
       items.set(id, {
         planned: false,
         title: "",
         body: "",
         dependencies: [],
-        comment: liveComment(objective, id, [
-          `**Closed:** not planned: ${state.status === "cancelled" ? "the Objective was cancelled" : "it is not in the current plan (replanned or amended)"}.`,
-        ]),
+        comment: kept(id)
+          ? undefined
+          : liveComment(objective, id, [
+              `**Closed:** not planned: ${state.status === "cancelled" ? "the Objective was cancelled" : "it is not in the current plan (replanned or amended)"}.`,
+              ...spent(id),
+            ]),
         close: "not_planned",
         status: "cancelled",
       });
@@ -264,12 +292,16 @@ function sweepDue(state: ObjectiveState, now: number): boolean {
   );
 }
 
-/** Whether a tracking pass has a write to make. */
-export function trackingDue(state: ObjectiveState, now = Date.now()): boolean {
+/** Whether a tracking pass has a write to make, with the items' `telemetry` as `track` gets it. */
+export function trackingDue(
+  state: ObjectiveState,
+  now = Date.now(),
+  telemetry?: Record<string, ItemTelemetry>,
+): boolean {
   const tracking = trackingOf(state);
   if (Object.keys(tracking?.creating ?? {}).length) return true;
   if (sweepDue(state, now)) return true;
-  const all = wanted(state);
+  const all = wanted(state, telemetry);
   if (all.size && !tracking?.objective) return true;
   const priority = tracking?.objective?.priority.join("\n");
   for (const [id, want] of all) {
@@ -291,7 +323,7 @@ export function trackingDue(state: ObjectiveState, now = Date.now()): boolean {
     )
       return true;
     if (
-      has.comment !== hash(want.comment) ||
+      (want.comment !== undefined && has.comment !== hash(want.comment)) ||
       Boolean(has.closed) !== Boolean(want.close) ||
       (want.planned &&
         (has.body !== hash(want.title, want.body) ||
@@ -317,6 +349,8 @@ export interface TrackContext {
   /** Log an event on the Objective's run log. */
   log(event: Record<string, unknown>): void;
   signal: AbortSignal;
+  /** Each item's telemetry this run, redacted, for its comment (`wanted`); absent, the comments show none. */
+  telemetry?: Record<string, ItemTelemetry>;
   /**
    * The queue's Project and how to set a card's Factory option on it
    * (queue.ts QueueDisplay); absent, the cards show no phase.
@@ -342,7 +376,7 @@ export async function track(context: TrackContext): Promise<void> {
   const objective = state.issue;
   const issueMark = (id: string) => mark(objective, "item", id);
   const record = () => trackingOf(context.state()) ?? { items: {} };
-  const want = wanted(state);
+  const want = wanted(state, context.telemetry);
   const roles = await ensureRoles(github, context.issueType);
   if (!record().objective) {
     const role = await objectiveRole(
@@ -664,12 +698,13 @@ export async function track(context: TrackContext): Promise<void> {
     }
     if (item.status && has.card && has.status !== item.status)
       await status(has, item.status, update);
-    const comment = hash(item.comment);
-    if (has.comment !== comment) {
+    const body = item.comment;
+    const comment = body === undefined ? undefined : hash(body);
+    if (body !== undefined && has.comment !== comment) {
       await github.upsertComment(
         has.issue,
         mark(objective, "item-status", id),
-        item.comment,
+        body,
         "sync:item-issue:comment",
         signal,
       );

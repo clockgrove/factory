@@ -852,6 +852,12 @@ ${table(
       `${card.telemetry.validationCommands.commands} (${card.telemetry.validationCommands.failed}), ${duration(card.telemetry.validationCommands.ms)}`,
     ],
     [
+      "Worker Validate runs (targeted), edit to verdict (median), passing commands' share",
+      t.workerValidation
+        ? `${t.workerValidation.runs} (${t.workerValidation.targeted}), ${t.workerValidation.feedbackMs === null ? "n/a" : `${Math.round(t.workerValidation.feedbackMs / 1000)} s`},${percent(t.workerValidation.passedShare)}`
+        : "n/a",
+    ],
+    [
       "Retry waits (time)",
       `${card.telemetry.retries.waits} (${duration(card.telemetry.retries.waitMs)})`,
     ],

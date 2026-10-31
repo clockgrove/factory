@@ -36,6 +36,7 @@ import {
   changedFiles,
   hostGit,
   hostGitExit,
+  sharedInstallStorePath,
   worktreePath,
 } from "../worktree.js";
 import {
@@ -497,6 +498,7 @@ export async function workStep(
         item,
         commands: item.validation.map((v) => v.command),
         base,
+        sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
         signal,
         log: context.log,
         activity: activity.report,

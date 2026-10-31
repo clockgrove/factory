@@ -26,7 +26,9 @@ import {
   type SelfValidateOptions,
   SelfValidation,
   selectedMediaNote,
+  VALIDATION_TOOL_INPUT,
   validateFailed,
+  validationTargets,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -155,7 +157,7 @@ interface Turn {
   directory: string;
   /** Built-in tools, as the SDK names them. */
   tools: string[];
-  /** Factory's own tools; each is approved only with no arguments. */
+  /** Factory's own tools; each is approved only with no arguments, or Validate with its `commands` (`copilotPermission`). */
   custom?: Tool[];
   writes: boolean;
   system?: string;
@@ -277,8 +279,9 @@ async function bounded(operation: Promise<unknown>): Promise<void> {
 
 /**
  * A turn's answer to each permission request: Factory's own tools (`custom`)
- * called with no arguments, and file reads, or writes when `writes`, inside
- * `root` alone. Anything else is refused.
+ * called with no arguments, or Validate with a targeted run's `commands`
+ * (#2281), and file reads, or writes when `writes`, inside `root` alone.
+ * Anything else is refused.
  */
 export function copilotPermission(
   root: string,
@@ -286,12 +289,15 @@ export function copilotPermission(
   custom: ReadonlySet<string>,
 ) {
   return (request: PermissionRequest) => {
-    // Factory's own tool takes no arguments: the model names no command.
+    // Factory's own tools name no command: Validate takes at most the
+    // indices of declared ones, and any other tool no arguments.
     if (request.kind === "custom-tool")
       return !request.managedApprovalRequired &&
         custom.has(request.toolName) &&
         (request.args === undefined ||
-          (isObject(request.args) && !Object.keys(request.args).length))
+          (isObject(request.args) && !Object.keys(request.args).length) ||
+          (request.toolName === VALIDATION_TOOL_NAME &&
+            !("problem" in validationTargets(request.args))))
         ? { kind: "approve-once" as const }
         : {
             kind: "reject" as const,
@@ -824,14 +830,17 @@ export class CopilotWorker implements Worker {
           {
             name: VALIDATION_TOOL_NAME,
             description: validationToolDescription(input.item),
-            parameters: {
-              type: "object",
-              properties: {},
-              additionalProperties: false,
-            },
+            parameters: VALIDATION_TOOL_INPUT,
             defer: "never",
-            handler: async () => {
-              const run = await validator.call();
+            handler: async (args: unknown) => {
+              const targets = validationTargets(args);
+              const run =
+                "problem" in targets
+                  ? {
+                      text: `${VALIDATION_TOOL_NAME} did not run: ${targets.problem}`,
+                      isError: true,
+                    }
+                  : await validator.call(targets.commands);
               return run.isError
                 ? { textResultForLlm: run.text, resultType: "failure" }
                 : run.text;

@@ -180,6 +180,7 @@ export async function serveInstallation(
           planner: providerPlanner(settings),
           workDir: (issue) => join(paths.root, "work", String(issue)),
           objectives: paths.objectives,
+          logs: paths.logs,
           worker: providerWorker(settings, config),
         }),
       });

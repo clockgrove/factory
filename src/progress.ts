@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { isObject } from "./checked.js";
-import { answeredBy, displayTime, redactDeep } from "./display.js";
+import { itemOfEvent } from "./diagnostics.js";
+import { answeredBy, displayTime, duration, redactDeep } from "./display.js";
+import {
+  ItemTelemetries,
+  type ItemTelemetry,
+  shortTokens,
+  wallMs,
+} from "./item-telemetry.js";
 import { type LogEvent, logFiles, readNew } from "./log.js";
 import { code, digest, prose } from "./markdown.js";
 import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
@@ -14,8 +21,9 @@ import type { ObjectiveView } from "./status.js";
  * The live status comment: one per Objective run, on its issue, created
  * once and then edited in place (found by its marker). Its body is the
  * `factory status` model (status.ts statusOf), redacted, plus what the run
- * log adds: model calls so far and each running Work Item's latest
- * `worker-activity` event. github-sync.ts writes it in the background;
+ * log adds: model calls so far, each running Work Item's latest
+ * `worker-activity` event, and each Work Item's tokens and wall time as of
+ * its last finished step (item-telemetry.ts). github-sync.ts writes it in the background;
  * nothing here can stop a step. Its last line is the run's record
  * (`StatusRecord`): what `factory reset` rebuilds and GitHub holds nowhere
  * else.
@@ -34,8 +42,14 @@ export interface ProgressInput {
   view: Omit<ObjectiveView, "plan">;
   /** Each Work Item's latest `worker-activity` event this run. */
   activity: Record<string, LogEvent>;
-  /** Model calls logged this run: planner-seam (planning, review, Dream) and worker, and the tokens they reported. */
-  calls: { planner: number; worker: number; tokens: number };
+  /**
+   * Model calls logged this run: planner-seam (planning, review, Dream)
+   * and worker, the tokens they reported, and of those the tokens of
+   * calls made for a Work Item (its worker, result review, diagnosis).
+   */
+  calls: { planner: number; worker: number; tokens: number; items?: number };
+  /** Each Work Item's telemetry this run, as of its last finished step (item-telemetry.ts). */
+  items?: Record<string, ItemTelemetry>;
   /** Planner-seam calls running now (`model-call` without its `model-usage`), oldest first. */
   running: RunningCall[];
   /** Answers taken: planning decisions and step answers, oldest first. */
@@ -86,7 +100,9 @@ export interface ProgressOptions {
 /**
  * The run log, read forward per Objective run: only new lines after the
  * first read, and files last written before the run began are skipped, so
- * the cost follows the run, not the Objective's history.
+ * the cost follows the run, not the Objective's history. The Work Item
+ * issues (tracking.ts), the PR body (work/step-deliver.ts) and `factory
+ * status ISSUE --item ID` read each item's telemetry through it too.
  */
 export class RunTally {
   private readonly runs = new Map<
@@ -94,9 +110,10 @@ export class RunTally {
     {
       run: string;
       offsets: Map<string, number>;
-      calls: { planner: number; worker: number; tokens: number };
+      calls: { planner: number; worker: number; tokens: number; items: number };
       activity: Record<string, LogEvent>;
       running: Map<string, RunningCall & { step?: string }>;
+      items: ItemTelemetries;
     }
   >();
 
@@ -105,15 +122,18 @@ export class RunTally {
   read(
     issue: number,
     run: string,
-  ): Pick<ProgressInput, "calls" | "activity" | "running"> {
+  ): Pick<ProgressInput, "calls" | "activity" | "running"> & {
+    items: Record<string, ItemTelemetry>;
+  } {
     let tally = this.runs.get(issue);
     if (tally?.run !== run) {
       tally = {
         run,
         offsets: new Map(),
-        calls: { planner: 0, worker: 0, tokens: 0 },
+        calls: { planner: 0, worker: 0, tokens: 0, items: 0 },
         activity: {},
         running: new Map(),
+        items: new ItemTelemetries(),
       };
       this.runs.set(issue, tally);
     }
@@ -125,6 +145,7 @@ export class RunTally {
       }
     for (const event of readNew(this.dir, issue, tally.offsets)) {
       if (event.at < run) continue;
+      tally.items.add(event);
       // One `model-usage` event per model call (docs/reference/run-log.md#Model usage).
       if (event.event === "model-call" && typeof event.callId === "string")
         tally.running.set(event.callId, runningCall(event));
@@ -147,7 +168,10 @@ export class RunTally {
         if (event.role === "worker") tally.calls.worker += 1;
         else tally.calls.planner += 1;
         const total = (event.tokens as { total?: unknown } | null)?.total;
-        if (typeof total === "number") tally.calls.tokens += total;
+        if (typeof total === "number") {
+          tally.calls.tokens += total;
+          if (itemOfEvent(event)) tally.calls.items += total;
+        }
       } else if (
         event.event === "worker-activity" &&
         typeof event.item === "string"
@@ -160,7 +184,13 @@ export class RunTally {
       running: [...tally.running.values()].map(({ step: _step, ...call }) => ({
         ...call,
       })),
+      items: tally.items.settledItems(),
     };
+  }
+
+  /** Each Work Item's telemetry as of the last event `read` saw, not only its last finished step. */
+  live(issue: number): Record<string, ItemTelemetry> {
+    return this.runs.get(issue)?.items.liveItems() ?? {};
   }
 
   forget(issue: number): void {
@@ -357,17 +387,17 @@ function render(
     `**Phase:** ${prose(view.phase)}${view.mode !== "running" ? ` (${view.mode})` : ""}`,
     `**Next:** ${text(view.nextAction.reason)}${view.nextAction.command ? ` ${code(view.nextAction.command)}` : ""}`,
   ];
+  // Each item's tokens and wall time as of its last finished step.
+  const telemetry = input.items ?? {};
   if (view.items.length)
     lines.push(
       "",
-      "| Work Item | Kind | Phase | PR | Repairs | Question |",
-      "| --- | --- | --- | --- | --- | --- |",
-      ...view.items
-        .slice(0, LISTED.items)
-        .map(
-          (item) =>
-            `| ${cell(code(item.id))} | ${item.kind} | ${cell(prose(item.phase))} | ${item.pr === null ? "-" : `#${item.pr}`} | ${item.repairs} | ${item.hold ? cell(code(item.hold)) : "-"} |`,
-        ),
+      "| Work Item | Kind | Phase | PR | Repairs | Tokens | Time | Question |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+      ...view.items.slice(0, LISTED.items).map((item) => {
+        const spent = telemetry[item.id];
+        return `| ${cell(code(item.id))} | ${item.kind} | ${cell(prose(item.phase))} | ${item.pr === null ? "-" : `#${item.pr}`} | ${item.repairs} | ${spent ? shortTokens(spent) : "-"} | ${spent ? duration(wallMs(spent)) : "-"} | ${item.hold ? cell(code(item.hold)) : "-"} |`;
+      }),
       ...(view.items.length > LISTED.items
         ? ["", ...more(view.items.length - LISTED.items, "Work Items")]
         : []),
@@ -464,6 +494,7 @@ function render(
     );
   }
   const calls = input.calls.planner + input.calls.worker;
+  const { tokens, items: itemTokens } = input.calls;
   const details = [
     "",
     "<details><summary>Run details</summary>",
@@ -475,7 +506,7 @@ function render(
           `- Frozen configuration: ${code(view.frozen.digest)}`,
         ]
       : []),
-    `- Model calls so far: ${calls ? `${calls} (planner ${input.calls.planner}, worker ${input.calls.worker})${input.calls.tokens ? `, ${input.calls.tokens} tokens reported` : ""}` : "none logged"}`,
+    `- Model calls so far: ${calls ? `${calls} (planner ${input.calls.planner}, worker ${input.calls.worker})${tokens ? `, ${tokens} tokens reported${itemTokens !== undefined ? `: ${itemTokens} by Work Items, ${tokens - itemTokens} outside them (planning, plan and final review, Dream)` : ""}` : ""}` : "none logged"}`,
     ...(view.endedAt ? [`- Ended: ${when(view.endedAt)}`] : []),
     "",
     "</details>",

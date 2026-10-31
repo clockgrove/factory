@@ -20,7 +20,11 @@ import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
 import { type ResultReview, reviewQa } from "../review/result.js";
 import { validateTree } from "../validate.js";
-import { installStorePath, worktreePath } from "../worktree.js";
+import {
+  installStorePath,
+  sharedInstallStorePath,
+  worktreePath,
+} from "../worktree.js";
 import { qaReplacement, REPLACE_FOR_QA, replacementTaken } from "./amend.js";
 import { fact, facts } from "./facts.js";
 import {
@@ -113,6 +117,7 @@ export async function qaValidateStep(
     repository: config.repository,
     directory: `${worktreePath(workDir, state.issue, item.id)}.validation`,
     installStore: installStorePath(worktreePath(workDir, state.issue, item.id)),
+    sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
     commit: head,
     item,
     plan,

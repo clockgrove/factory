@@ -86,7 +86,7 @@ function statusRoutes(limited) {
 function harness(github, now, random = () => 0, fields = {}) {
   const started = iso(now() - 60_000);
   const state = {
-    version: 9,
+    version: 10,
     issue: ISSUE,
     status: "planning",
     holds: [],

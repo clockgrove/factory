@@ -260,7 +260,7 @@ export function seed(inst, issue, status = "checking", fields = {}) {
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 9,
+      version: 10,
       issue,
       status,
       frozen: frozen(inst),

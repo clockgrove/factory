@@ -67,7 +67,9 @@ test("a coverage entry carries the Objective criterion's exact text", async () =
           priority: 0,
           resources: [],
           scheduling: null,
-          validation: ["node --test test/padEndQjgwl.test.js"],
+          validation: [
+            { command: "node --test test/padEndQjgwl.test.js", after: null },
+          ],
           brief: "Pad on the right with spaces.",
           oneOutcomeReason: null,
           sourceAssets: [],

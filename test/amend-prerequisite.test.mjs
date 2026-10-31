@@ -97,7 +97,7 @@ const work = (id, fields = {}) => ({
   priority: 1,
   resources: [],
   scheduling: null,
-  validation: ["npm test"],
+  validation: [{ command: "npm test", after: null }],
   brief: `Export ${id} from src/${id}.js.`,
   oneOutcomeReason: null,
   sourceAssets: [],
@@ -129,7 +129,7 @@ const qa = (dependencies) => ({
   priority: 1,
   resources: [],
   scheduling: null,
-  validation: ["npm test"],
+  validation: [{ command: "npm test", after: null }],
   brief: "Run the Objective's command on the integrated result.",
   oneOutcomeReason: null,
 });

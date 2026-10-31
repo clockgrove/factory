@@ -1509,19 +1509,18 @@ function replaceableOf(
  * `old` that `replaceable` names, and it keeps every other command of
  * `old` once, in its order (#2107). Commands may be added only in place
  * of one it drops, so a list that only adds, or reorders the commands it
- * keeps, replaces nothing. `command` reads an entry as its command line;
- * a list with an entry it can't read replaces nothing.
+ * keeps, replaces nothing. A list with an entry that has no command line
+ * replaces nothing.
  */
 function replacesValidation(
   old: unknown,
   next: unknown,
   replaceable: readonly string[],
-  command: (entry: unknown) => string | undefined,
 ): boolean {
   if (!replaceable.length || !Array.isArray(old) || !Array.isArray(next))
     return false;
   const lines = (list: unknown[]) =>
-    list.map(command).filter((line) => line !== undefined);
+    list.map(entryCommand).filter((line) => line !== undefined);
   const before = lines(old);
   const after = lines(next);
   if (before.length !== old.length || after.length !== next.length)
@@ -1538,12 +1537,8 @@ function replacesValidation(
   );
 }
 
-/** A validation entry's command line, in the answer's form (a string). */
-const answerCommand = (entry: unknown): string | undefined =>
-  typeof entry === "string" ? entry.trim() : undefined;
-
-/** A validation entry's command line, in the draft's form (`ValidationCommand`). */
-const draftCommand = (entry: unknown): string | undefined =>
+/** A validation entry's command line, in the answer's form and the draft's (`ValidationCommand`). */
+const entryCommand = (entry: unknown): string | undefined =>
   isObject(entry) && typeof entry.command === "string"
     ? entry.command.trim()
     : undefined;
@@ -1600,7 +1595,6 @@ function reworks(
     old.validation,
     next.validation,
     replaceable,
-    draftCommand,
   );
   return (
     isDeepStrictEqual(
@@ -1634,12 +1628,7 @@ function replacesOnly(
   replaceable: readonly string[],
 ): boolean {
   return (
-    replacesValidation(
-      old.validation,
-      next.validation,
-      replaceable,
-      draftCommand,
-    ) &&
+    replacesValidation(old.validation, next.validation, replaceable) &&
     isDeepStrictEqual(
       normalized({ ...next, validation: old.validation }),
       normalized(old),
@@ -1671,8 +1660,6 @@ interface StartedItemRule {
   grows: string[];
   /** What a reattempt item may restate once one of them grows, or its validation replaces a command. */
   restates: string[];
-  /** A `validation` entry's command line in this form. */
-  command: (entry: unknown) => string | undefined;
   /**
    * Every item of a kind has the same fields, the answer schema's: an
    * item keeping its kind keeps the answer's field names (a field the
@@ -1685,13 +1672,11 @@ interface StartedItemRule {
 const ANSWER_RULE: StartedItemRule = {
   grows: ["ownedPaths", "dependencies", "newPackages"],
   restates: ["acceptance", "brief", "nonGoals", "oneOutcomeReason"],
-  command: answerCommand,
   schemaFields: true,
 };
 const DRAFT_RULE: StartedItemRule = {
   grows: ["ownedPaths", "dependencies"],
   restates: ["acceptance", "brief", "nonGoals"],
-  command: draftCommand,
   schemaFields: false,
 };
 
@@ -1729,14 +1714,7 @@ function restoreItem<T extends object>(
     item[field] = [...kept, ...added];
     reworked ||= added.length > 0;
   }
-  if (
-    replacesValidation(
-      before.validation,
-      after.validation,
-      replaceable,
-      rule.command,
-    )
-  ) {
+  if (replacesValidation(before.validation, after.validation, replaceable)) {
     item.validation = structuredClone(after.validation);
     reworked = true;
   }

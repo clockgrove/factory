@@ -76,7 +76,7 @@ import {
   finalChecks,
 } from "./planning/plan.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
-import type { Plan, WorkItem } from "./planning/types.js";
+import type { Plan, ValidationCommand, WorkItem } from "./planning/types.js";
 import {
   captureReviewArtifacts,
   outputLimit,
@@ -143,26 +143,87 @@ function validationSequence(item: WorkItem): {
 }
 
 /**
- * The indices of `sequence` a run takes, always in declared order (#2281):
- * every one when `only` is absent, else those `only` names, each once. The
- * exact install, when the sequence starts with one, always runs, since the
- * commands after it need what it installs. No command runs before one
- * declared ahead of it, which may make what it needs (a build, codegen).
+ * The earlier commands of `validation` that command `index` needs, and
+ * theirs, transitively (#2290): each one's declared `after`, or, for one
+ * that declares none, every command before it, unless `declared`, where
+ * it adds none.
+ */
+function prerequisites(
+  validation: readonly ValidationCommand[],
+  index: number,
+  declared = false,
+): Set<number> {
+  const found = new Set<number>();
+  const visit = (at: number) => {
+    const after =
+      validation[at]?.after ??
+      (declared ? [] : validation.slice(0, at).map((_, earlier) => earlier));
+    for (const earlier of after)
+      if (!found.has(earlier)) {
+        found.add(earlier);
+        visit(earlier);
+      }
+  };
+  visit(index);
+  return found;
+}
+
+/**
+ * The indices of a Work Item's `validation` a run takes, in order. A full
+ * run takes every command in declared order, or, with `first` (the
+ * command the worker's last run failed, #2290), that command and what it
+ * needs (`prerequisites`) first, then the rest in declared order: a
+ * command that declares nothing needs every earlier one, so the order is
+ * the declared one unless the plan said otherwise. A targeted run (#2281)
+ * takes those `only` names, each once, and the earlier ones they declare
+ * they need, in declared order. The exact install, when the commands
+ * start with one, always runs first, since the commands after it need
+ * what it installs. No command runs before one it may need.
  */
 export function runOrder(
-  sequence: readonly string[],
-  only?: readonly number[],
+  validation: readonly ValidationCommand[],
+  run: { only?: readonly number[]; first?: number } = {},
 ): number[] {
-  if (!only) return sequence.map((_, index) => index);
-  const chosen = new Set(
-    only.filter(
-      (index) =>
-        Number.isInteger(index) && index >= 0 && index < sequence.length,
-    ),
-  );
-  if (sequence.length && packageBootstrap(sequence[0]!) !== undefined)
+  const all = validation.map((_, index) => index);
+  const valid = (index: number) =>
+    Number.isInteger(index) && index >= 0 && index < validation.length;
+  const { only, first } = run;
+  const chosen = new Set<number>();
+  if (
+    validation.length &&
+    packageBootstrap(validation[0]!.command) !== undefined
+  )
     chosen.add(0);
-  return sequence.map((_, index) => index).filter((index) => chosen.has(index));
+  if (only) {
+    for (const index of only.filter(valid)) {
+      chosen.add(index);
+      for (const earlier of prerequisites(validation, index, true))
+        chosen.add(earlier);
+    }
+    return all.filter((index) => chosen.has(index));
+  }
+  if (first === undefined || !valid(first)) return all;
+  chosen.add(first);
+  for (const earlier of prerequisites(validation, first)) chosen.add(earlier);
+  return [
+    ...all.filter((index) => chosen.has(index)),
+    ...all.filter((index) => !chosen.has(index)),
+  ];
+}
+
+/**
+ * The earlier commands command `index` may need that a run in `order`
+ * doesn't run before it, for the worker's notes (#2281).
+ */
+export function skippedPrerequisites(
+  validation: readonly ValidationCommand[],
+  index: number,
+  order: readonly number[],
+): number[] {
+  const before = new Set(order.slice(0, order.indexOf(index)));
+  return [...prerequisites(validation, index)]
+    .filter((earlier) => !before.has(earlier))
+    .sort((a, b) => a - b);
 }
 
 export interface ValidateInput {
@@ -200,12 +261,20 @@ export interface ValidateInput {
   item?: WorkItem;
   /**
    * The worker's own targeted Validate, with `item` (#2281): the indices of
-   * the only commands that run, in declared order (`runOrder`). The exact
-   * install, when the list starts with one, still runs first, and the
-   * formatter after it; every command's scripts are still pinned.
-   * `commands` in the answer are the ones that ran. Absent: every command.
+   * the commands that run, with the earlier ones they declare they need,
+   * in declared order (`runOrder`). The exact install, when the list
+   * starts with one, still runs first, and the formatter after it; every
+   * command's scripts are still pinned. `commands` in the answer are the
+   * ones that ran. Absent: every command.
    */
   only?: readonly number[];
+  /**
+   * The worker's own full Validate, with `item` (#2290): the command its
+   * last run failed, which runs first after what it needs (`runOrder`),
+   * so the run fails fast where the last one did. Every command still
+   * runs. Absent: declared order.
+   */
+  first?: number;
   plan: Plan;
   /** The Objective as planned (shown.ts): its Package manager update and Workspace package additions. */
   blocks: readonly ObjectiveBlock[];
@@ -435,7 +504,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   // Every command is pinned below; only those of `only` run (#2281).
-  const order = runOrder(sequence, item ? input.only : undefined);
+  const order = item
+    ? runOrder(item.validation, { only: input.only, first: input.first })
+    : sequence.map((_, index) => index);
   const ran = order.map((index) => sequence[index]!);
   const atFinal = checkedAtFinal(plan);
   const { signal } = input;

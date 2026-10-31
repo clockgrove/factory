@@ -270,9 +270,14 @@ export function fallbackRuns(plan: Plan): WorkItem[] {
   const listed = new Set<string>();
   return dependencyOrder(plan).flatMap((item) => {
     if (!["work", "qa"].includes(item.kind ?? "work")) return [];
-    const validation = item.validation.filter(
+    const kept = item.validation.filter(
       (check) => !retired.has(check.command.trim()),
     );
+    // A retired command shifts the indices `after` names: declared order.
+    const validation =
+      kept.length < item.validation.length
+        ? kept.map(({ command }) => ({ command }))
+        : kept;
     const key = JSON.stringify(validation.map((check) => check.command.trim()));
     if (!validation.length || listed.has(key)) return [];
     listed.add(key);

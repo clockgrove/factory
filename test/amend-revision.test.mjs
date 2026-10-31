@@ -75,6 +75,10 @@ const shown = readShown(
   { sources: true },
 );
 
+/** Validation entries in the answer's form: commands that declare no after. */
+const checks = (...commands) =>
+  commands.map((command) => ({ command, after: null }));
+
 const work = (id, fields = {}) => ({
   kind: "work",
   id,
@@ -90,7 +94,7 @@ const work = (id, fields = {}) => ({
   priority: 1,
   resources: [],
   scheduling: null,
-  validation: ["npm test"],
+  validation: checks("npm test"),
   brief: `Export ${id} from src/${id}.js.`,
   oneOutcomeReason: null,
   sourceAssets: [],
@@ -111,7 +115,7 @@ const qa = (dependencies) => ({
   priority: 1,
   resources: [],
   scheduling: null,
-  validation: ["npm test"],
+  validation: checks("npm test"),
   brief: "Run the Objective's command on the integrated result.",
   oneOutcomeReason: null,
 });
@@ -899,7 +903,7 @@ const relaxesA = revision([
   work("a", {
     acceptance: ["a() returns 1 when its own test runs."],
     brief: "Export a from src/a.js; npm test is qa's to prove.",
-    validation: ["node --test test/a.test.js"],
+    validation: checks("node --test test/a.test.js"),
   }),
   work("b", { dependencies: ["a"] }),
   qa(["a", "b"]),
@@ -1089,7 +1093,7 @@ test("a reattempt item that grows still keeps its validation, kind and title; on
       ...grown,
       title: "Add a and b",
       nonGoals: ["Changing b's test."],
-      validation: ["node --test test/a.test.js"],
+      validation: checks("node --test test/a.test.js"),
       oneOutcomeReason: null,
     },
     ...rest,
@@ -1126,7 +1130,7 @@ const CHECK_ATTR =
   "git check-attr filter -- src/a.js | grep -qx 'src/a.js: filter: lfs'";
 const withMalformed = {
   ...accepted,
-  items: [work("a", { validation: ["npm test", MALFORMED] }), qa(["a"])],
+  items: [work("a", { validation: checks("npm test", MALFORMED) }), qa(["a"])],
 };
 /** The validate step failed a's results on `commands` under the plan accepted at `plan`. */
 const failedOn = (commands, plan = ACCEPTED_AT) => ({
@@ -1134,7 +1138,7 @@ const failedOn = (commands, plan = ACCEPTED_AT) => ({
 });
 const replacesMalformed = revision([
   work("a", {
-    validation: ["npm test", CHECK_ATTR],
+    validation: checks("npm test", CHECK_ATTR),
     brief:
       "Export a from src/a.js; check src/a.js's Git LFS routing with git check-attr.",
   }),
@@ -1170,7 +1174,7 @@ test("a reattempt item's validation command the validate step failed it on is re
   assert.equal(a.brief, replacesMalformed.items[0].brief);
   assert.deepEqual(
     round.answer.items.find((item) => item.id === "a").validation,
-    ["npm test", CHECK_ATTR],
+    checks("npm test", CHECK_ATTR),
   );
 
   // The planner is told which commands it may replace, and why a command
@@ -1258,7 +1262,7 @@ test("a reattempt item keeps every validation command the validate step didn't f
   const withThree = {
     ...accepted,
     items: [
-      work("a", { validation: ["npm test", "node --test", MALFORMED] }),
+      work("a", { validation: checks("npm test", "node --test", MALFORMED) }),
       qa(["a"]),
     ],
   };
@@ -1272,7 +1276,9 @@ test("a reattempt item keeps every validation command the validate step didn't f
       answer,
       kept: failedOn([MALFORMED]),
     });
-    const { planner } = scripted(revision([work("a", { validation })]));
+    const { planner } = scripted(
+      revision([work("a", { validation: checks(...validation) })]),
+    );
     assert.equal(
       (await step(state, depsOf(checkout, planner))).outcome.kind,
       "done",
@@ -1281,7 +1287,7 @@ test("a reattempt item keeps every validation command the validate step didn't f
     assert.deepEqual(round.restored, [{ itemId: "a", fields: ["validation"] }]);
     assert.deepEqual(
       round.draft.items.find((item) => item.id === "a").validation,
-      answer.items[0].validation.map((command) => ({ command })),
+      answer.items[0].validation.map(({ command }) => ({ command })),
     );
   }
   // Keeping the other commands in their order, it may drop the failed one.
@@ -1290,7 +1296,7 @@ test("a reattempt item keeps every validation command the validate step didn't f
     kept: failedOn([MALFORMED]),
   });
   const { planner } = scripted(
-    revision([work("a", { validation: ["npm test", "node --test"] })]),
+    revision([work("a", { validation: checks("npm test", "node --test") })]),
   );
   assert.equal(
     (await step(state, depsOf(checkout, planner))).outcome.kind,
@@ -1318,7 +1324,10 @@ const AT_RULE =
   "awk 'BEGIN { RS = \"\\n---\\n\" } NR == 2' docs/guide.md | grep -q 'Rollout steps'";
 const withCut = {
   ...accepted,
-  items: [work("a", { validation: ["npm test", CUT_AT_TABLE] }), qa(["a"])],
+  items: [
+    work("a", { validation: checks("npm test", CUT_AT_TABLE) }),
+    qa(["a"]),
+  ],
 };
 const CUT_FAILURE = {
   command: CUT_AT_TABLE,
@@ -1331,7 +1340,7 @@ const workerFailed = (failures, plan = ACCEPTED_AT) => ({
 });
 const replacesCut = revision([
   work("a", {
-    validation: ["npm test", AT_RULE],
+    validation: checks("npm test", AT_RULE),
     brief:
       "Export a from src/a.js; check the guide's rollout section, split at its horizontal rule.",
   }),
@@ -1589,14 +1598,17 @@ test("the amendment planner's question answered replace-validation it can't take
 /** a and the integrated QA item, whose own command splits at the first `---` too. */
 const withQaCut = {
   ...accepted,
-  items: [work("a"), { ...qa(["a"]), validation: ["npm test", CUT_AT_TABLE] }],
+  items: [
+    work("a"),
+    { ...qa(["a"]), validation: checks("npm test", CUT_AT_TABLE) },
+  ],
 };
 /** The QA item's command replaced, its goal reworded too. */
 const replacesQaCut = revision([
   {
     ...qa(["a"]),
     goal: "Verify the integrated result, its guide split at the rule.",
-    validation: ["npm test", AT_RULE],
+    validation: checks("npm test", AT_RULE),
   },
 ]);
 

@@ -195,11 +195,14 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
   if (
     !Array.isArray(value.validation) ||
     !value.validation.every(
-      (entry) => isRecord(entry) && typeof entry.command === "string",
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.command === "string" &&
+        (entry.after === undefined || Array.isArray(entry.after)),
     )
   ) {
     found(
-      `Work Item ${label} validation must be a list of {command} commands`,
+      `Work Item ${label} validation must be a list of {command, after?} commands, after a list of earlier command indices`,
       id,
     );
     usable = false;

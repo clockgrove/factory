@@ -339,11 +339,18 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     },
     validation: {
       type: "array",
-      items: {
-        ...text,
-        description:
-          "One command line, exactly as validation runs it in the item's checkout: finite, offline, exit zero on success. A root package script runs by its npm/pnpm invocation, never its JSON body.",
-      },
+      items: strict({
+        command: {
+          ...text,
+          description:
+            "One command line, exactly as validation runs it in the item's checkout: finite, offline, exit zero on success. A root package script runs by its npm/pnpm invocation, never its JSON body.",
+        },
+        after: {
+          description:
+            "The indices of this item's earlier validation commands whose output this one needs (a build, generated code), or [] when it needs none of them; the exact install always runs first and needs no listing. null when it may need any of them: it runs only after them all, as declared.",
+          anyOf: [{ type: "null" }, { type: "array", items: integer() }],
+        },
+      }),
     },
     brief: { ...text, minLength: 1 },
     oneOutcomeReason: {
@@ -1362,14 +1369,27 @@ function schedulingHint(value: unknown): WorkItem["scheduling"] | undefined {
   };
 }
 
-/** A validation command: one command line as the planner wrote it. */
+/**
+ * A validation command: one command line as the planner wrote it, and the
+ * earlier commands it needs when it declares them (checks.ts checks them).
+ */
 function selectCommand(selection: unknown, id: string): ValidationCommand {
-  if (typeof selection !== "string" || !validValidationCommand(selection))
+  const entry = object(selection, "validation entry");
+  keys(entry, ["command", "after"], "validation entry");
+  const { command, after } = entry;
+  if (after !== null && !Array.isArray(after))
+    throw new Shape(
+      "Planner validation entry after must be null or an array of command indices",
+    );
+  if (typeof command !== "string" || !validValidationCommand(command))
     throw new Refusal(
       "Planner validation entry is not one executable command line",
       id,
     );
-  return { command: selection.trim() };
+  return {
+    command: command.trim(),
+    ...(after !== null && { after: after as number[] }),
+  };
 }
 
 /** An owner, proof and environment choice, checked against the decoded items. */

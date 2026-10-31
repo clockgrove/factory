@@ -75,7 +75,7 @@ function answer(item) {
         priority: 0,
         resources: [],
         scheduling: null,
-        validation: ["npm test"],
+        validation: [{ command: "npm test", after: null }],
         sourceAssets: [],
         media: null,
         ...item,

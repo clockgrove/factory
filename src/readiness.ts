@@ -292,7 +292,7 @@ function hostChecks(
  * `--prefix` holds is fixed with that prefix. Workers never get it either
  * way.
  */
-function launcherChecks(env: NodeJS.ProcessEnv): ReadinessCheck[] {
+export function launcherChecks(env: NodeJS.ProcessEnv): ReadinessCheck[] {
   const data =
     env.XDG_DATA_HOME || join(env.HOME || homedir(), ".local", "share");
   const seen = new Set<string>();

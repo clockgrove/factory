@@ -350,6 +350,24 @@ test("redaction covers JWTs", () => {
   assert.equal(redact(`token ${jwt} here`), "token [REDACTED] here");
 });
 
+/** A checkout with one commit, whose credential entries name real paths. */
+function credentialCheckout() {
+  const checkout = realpathSync(tempDir("factory-credentials-"));
+  git(checkout, "init", "--quiet");
+  git(
+    checkout,
+    "-c",
+    "user.name=Factory",
+    "-c",
+    "user.email=factory@example.com",
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "--message=base",
+  );
+  return checkout;
+}
+
 const sortedEntries = (checkout) => {
   const entries = checkoutCredentialEntries(checkout);
   assert.ok(Array.isArray(entries), JSON.stringify(entries));
@@ -386,6 +404,222 @@ test("readiness finds credentials in the checkout's own Git configuration", () =
     `remote.mirror.url in ${config}`,
     `url.https://***@github.com/.insteadof in ${config}`,
   ]);
+});
+
+test("readiness reads a checkout with linked worktrees, and their worktree configuration only when enabled", () => {
+  const checkout = credentialCheckout();
+  const config = join(checkout, ".git", "config");
+  // As an Objective's Work Items add, with extensions.worktreeConfig off.
+  git(
+    checkout,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    tempDir("factory-wt-"),
+  );
+  git(checkout, "config", "credential.username", "octo");
+  // Read from the checkout and from the worktree, one entry, one file.
+  assert.deepEqual(checkoutCredentialEntries(checkout), [
+    `credential.username in ${config}`,
+  ]);
+  git(checkout, "config", "extensions.worktreeConfig", "true");
+  // On, but with no config.worktree yet: nothing more to read.
+  assert.deepEqual(checkoutCredentialEntries(checkout), [
+    `credential.username in ${config}`,
+  ]);
+  git(checkout, "config", "--worktree", "credential.password", "secret");
+  assert.deepEqual(sortedEntries(checkout), [
+    `credential.password in ${config}.worktree`,
+    `credential.username in ${config}`,
+  ]);
+});
+
+test("readiness reads the shared configuration as each Work Item worktree's Git reads it, and each file it includes under a condition", () => {
+  const checkout = credentialCheckout();
+  const common = join(checkout, ".git");
+  // A Work Item's worktree on its branch; extensions.worktreeConfig off.
+  git(
+    checkout,
+    "worktree",
+    "add",
+    "--quiet",
+    "-b",
+    "factory/wi-1",
+    tempDir("factory-wt-"),
+  );
+  const files = realpathSync(tempDir("factory-include-"));
+  const file = (name, text) => {
+    writeFileSync(join(files, name), text);
+    return join(files, name);
+  };
+  // Met by the Work Item's branch, not the checkout's.
+  const branch = file(
+    "branch",
+    "[http]\n\textraheader = AUTHORIZATION: basic abc\n",
+  );
+  git(checkout, "config", "includeIf.onbranch:factory/**.path", branch);
+  // Met by no worktree yet, but by a Work Item started later.
+  const later = file("later", "[credential]\n\tusername = octo\n");
+  git(checkout, "config", "includeIf.onbranch:factory/later/**.path", later);
+  // A condition inside an included file, met only by a linked worktree's
+  // Git directory: only that worktree's own read reaches it.
+  const nested = file("nested-credentials", "[credential]\n\tpassword = p\n");
+  const include = file(
+    "include",
+    `[includeIf "gitdir:${common}/worktrees/**"]\n\tpath = ${nested}\n`,
+  );
+  git(checkout, "config", "include.path", include);
+  git(
+    checkout,
+    "config",
+    "url.https://u:SECRET@github.com/.insteadOf",
+    "https://github.com/",
+  );
+  const entries = sortedEntries(checkout);
+  assert.deepEqual(entries, [
+    `credential.password in ${nested}`,
+    `credential.username in ${later}`,
+    `http.extraheader in ${branch}`,
+    `url.https://***@github.com/.insteadof in ${common}/config`,
+  ]);
+  assert.ok(!entries.join().includes("SECRET"));
+  // Removed as readiness's fix says, nothing is left.
+  for (const [path, name] of [
+    [nested, "credential.password"],
+    [later, "credential.username"],
+    [branch, "http.extraheader"],
+    // The real name, as `--name-only --list` shows it.
+    [`${common}/config`, "url.https://u:SECRET@github.com/.insteadof"],
+  ])
+    git(checkout, "config", "--file", path, "--unset-all", name);
+  assert.deepEqual(checkoutCredentialEntries(checkout), []);
+});
+
+test("readiness reads a condition inside an included file, which a Work Item started later may meet, and hides a password holding an @", () => {
+  const checkout = credentialCheckout();
+  const common = join(checkout, ".git");
+  git(
+    checkout,
+    "worktree",
+    "add",
+    "--quiet",
+    "-b",
+    "factory/wi-1",
+    tempDir("factory-wt-"),
+  );
+  const files = realpathSync(tempDir("factory-include-"));
+  mkdirSync(join(files, "deeper"));
+  const file = (name, text) => {
+    writeFileSync(join(files, name), text);
+    return join(files, name);
+  };
+  // Included unconditionally, it includes under a condition no worktree
+  // meets yet, by a path relative to itself.
+  const later = file("deeper/later", "[credential]\n\tusername = octo\n");
+  const include = file(
+    "include",
+    '[includeIf "onbranch:factory/later/**"]\n\tpath = deeper/later\n',
+  );
+  git(checkout, "config", "include.path", include);
+  // Met by the Work Item's branch, it includes under another condition.
+  const deep = file("deep", "[http]\n\textraheader = AUTHORIZATION: basic z\n");
+  const met = file(
+    "met",
+    `[includeIf "onbranch:factory/other/**"]\n\tpath = ${deep}\n[include]\n\tpath = include\n`,
+  );
+  git(checkout, "config", "includeIf.onbranch:factory/wi-*.path", met);
+  git(
+    checkout,
+    "config",
+    "url.https://u:p@SECRET@github.com/.insteadOf",
+    "https://github.com/",
+  );
+  const entries = sortedEntries(checkout);
+  assert.deepEqual(entries, [
+    `credential.username in ${later}`,
+    `http.extraheader in ${deep}`,
+    `url.https://***@github.com/.insteadof in ${common}/config`,
+  ]);
+  assert.ok(!entries.join().includes("SECRET"));
+  // What the later Work Item's Git reads, readiness found.
+  const second = tempDir("factory-wt-");
+  git(checkout, "worktree", "add", "--quiet", "-b", "factory/later/x", second);
+  assert.equal(
+    git(second, "config", "--includes", "--get", "credential.username"),
+    "octo",
+  );
+});
+
+test("readiness skips a linked worktree removed while it reads, and names one it can't read", () => {
+  const checkout = credentialCheckout();
+  git(
+    checkout,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    tempDir("factory-wt-"),
+  );
+  const worktrees = join(checkout, ".git", "worktrees");
+  // Listed, then gone by the time it is read, as worktree removal leaves it.
+  symlinkSync(join(worktrees, "removed-since"), join(worktrees, "gone"));
+  assert.deepEqual(checkoutCredentialEntries(checkout), []);
+  // There, but not a Git directory Git can read.
+  const broken = join(worktrees, "broken");
+  mkdirSync(broken);
+  assert.deepEqual(checkoutCredentialEntries(checkout), {
+    unreadable: `the Git configuration of linked worktree ${broken}`,
+    command: `git --git-dir=${broken} config --local --includes --list`,
+  });
+});
+
+test("readiness reads each Work Item worktree's own config.worktree when worktree configuration is on", () => {
+  const checkout = credentialCheckout();
+  const first = tempDir("factory-wt-");
+  const second = tempDir("factory-wt-");
+  for (const worktree of [first, second])
+    git(checkout, "worktree", "add", "--quiet", "--detach", worktree);
+  const admin = (worktree) =>
+    realpathSync(
+      git(worktree, "rev-parse", "--path-format=absolute", "--git-dir"),
+    );
+  // Off: Git reads no config.worktree, so one written anyway is not read.
+  writeFileSync(
+    join(admin(first), "config.worktree"),
+    "[credential]\n\tusername = octo\n",
+  );
+  assert.deepEqual(checkoutCredentialEntries(checkout), []);
+  git(checkout, "config", "extensions.worktreeConfig", "true");
+  // A Work Item worktree's own entry, which its sandbox mounts.
+  git(
+    second,
+    "config",
+    "--worktree",
+    "http.https://github.com/.extraheader",
+    "AUTHORIZATION: basic abc",
+  );
+  // And one reached through an include, resolved from that worktree's Git directory.
+  const included = join(tempDir("factory-include-"), "credentials");
+  writeFileSync(included, '[credential]\n\thelper = "!f() { echo x; }; f"\n');
+  git(second, "config", "--worktree", "include.path", included);
+  const firstFile = join(admin(first), "config.worktree");
+  const secondFile = join(admin(second), "config.worktree");
+  const includedFile = realpathSync(included);
+  // The included entry is named with the file it is in.
+  assert.deepEqual(sortedEntries(checkout), [
+    `credential.helper in ${includedFile}`,
+    `credential.username in ${firstFile}`,
+    `http.https://github.com/.extraheader in ${secondFile}`,
+  ]);
+  // Removed as readiness's fix says, nothing is left.
+  for (const [file, name] of [
+    [firstFile, "credential.username"],
+    [secondFile, "http.https://github.com/.extraheader"],
+    [includedFile, "credential.helper"],
+  ])
+    git(checkout, "config", "--file", file, "--unset-all", name);
+  assert.deepEqual(checkoutCredentialEntries(checkout), []);
 });
 
 for (const path of [

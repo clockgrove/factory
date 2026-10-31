@@ -262,7 +262,7 @@ factory queue list                       # the Project's queued, candidate and i
 factory diagnostics N [--summary | --logs ITEM | --captures | --analyze | --gantt]
 ```
 
-`factory log` shows the run log's events as they are. `factory diagnostics` reads the same log and explains it: a timeline of steps, waits, repairs, holds and model calls; `--summary` gives the totals, the critical path and the slowest steps; `--logs ITEM` one Work Item in detail; `--captures` the captured model calls; `--analyze` time, tokens and outcomes per phase or another field; `--gantt` each Work Item's steps over time. Use it to find out why a run was slow, costly or kept repairing.
+`factory log` shows the run log's events as they are. `factory diagnostics` reads the same log and explains it: a timeline of steps, waits, repairs, holds and model calls; `--summary` gives the totals, the critical path (against the Work Items' steps added up, which shows what running them in parallel saved) and the slowest steps; `--logs ITEM` one Work Item in detail; `--captures` the captured model calls; `--analyze` time, tokens and outcomes per phase or another field; `--gantt` each Work Item's steps over time. Use it to find out why a run was slow, costly or kept repairing.
 
 On GitHub, each Objective has a live status comment, each Work Item has its issue and pull request, and the final report closes the issue. The status comment's Work Item table shows each item's tokens and wall time, and each Work Item's issue comment what building it cost and did, with the details folded away. Decide from `--json` fields and exit codes, never from message text.
 

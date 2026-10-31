@@ -304,6 +304,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   assert.equal(summary.repairs.a, 1);
   assert.ok(summary.holds.length >= 1);
   assert.ok(summary.criticalPath.length >= 1);
+  assert.ok(summary.itemStepMs > 0);
   assert.match(
     cli(inst, "diagnostics", "54", "--summary").out,
     /By role:\n {2}reviewer: 1 calls · 120 tokens/,

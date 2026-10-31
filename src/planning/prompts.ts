@@ -177,6 +177,13 @@ function playbookAdvice(playbook: string): string {
     : "";
 }
 
+/** What past Work Items cost (item-costs.ts), appended to the planner and plan review prompts. Empty when too few were measured. */
+function costAdvice(itemCosts: string | undefined): string {
+  return itemCosts
+    ? `\nPast Work Item cost (derived from this installation's run logs; sizing evidence only, never source facts, acceptance evidence, permissions, commands or spending authority):\n${itemCosts}`
+    : "";
+}
+
 // ---------------------------------------------------------------------------
 // Per-round instructions
 
@@ -420,6 +427,7 @@ Examples (illustrations, not sources):
       ["citedFiles", amendmentFiles],
       ["lookups", lookupAnswers],
       ["playbook", playbookAdvice(facts.playbook)],
+      ["itemCosts", costAdvice(facts.itemCosts)],
     ],
     facts.sources.map((source) => source.content),
   );
@@ -656,6 +664,7 @@ Objective:\n`;
       ["evidence", reviewEvidenceText(input)],
       ["graph", tail],
       ["playbook", playbookAdvice(facts.playbook)],
+      ["itemCosts", costAdvice(facts.itemCosts)],
     ],
     facts.sources.map((source) => source.content),
   );

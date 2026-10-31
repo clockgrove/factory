@@ -149,9 +149,13 @@ const SOURCE_OBLIGATIONS =
 const CLAIM_ONCE =
   "Each distinct claim is assigned to one item, even when it appears both as an Objective criterion and in a pinned source's lines: flag a plan in which two items must each prove the same claim, and keep it with one owner.";
 
-/** Check 3: a shared test harness has one owner (#2241). */
+/**
+ * Check 3: a shared test harness has one owner (#2241). Live (#2293), a
+ * client item co-owned its upstream item's native harness, so work against
+ * a settled contract waited for the whole upstream item.
+ */
 const SHARED_HARNESS =
-  "Where several items' tests need the same harness or fixture setup (a runtime, browser or service harness), the first item that needs it owns it as a shared module, and the items after it that need it depend on that item and reuse it: flag a plan that leaves each of them to build its own.";
+  "Where several items' tests need the same harness or fixture setup (a runtime, browser or service harness), the first item that needs it owns it as a shared module, and the items after it that need it depend on that item and reuse it: flag a plan that leaves each of them to build its own. A harness that an upstream item and an end-to-end proof need, but contract-level work does not, belongs to the upstream item or the proof item, so it does not make the contract-level item wait.";
 
 /**
  * Check 3: ownership that lets independent items run concurrently. A later
@@ -168,7 +172,7 @@ const OWNERSHIP =
  * item's seven capabilities, so each failure hid the next.
  */
 const ONE_OUTCOME =
-  "Items split by independently verifiable capability, never by layer, and each includes its own tests and documentation. Flag an item that delivers more than one outcome, naming the outcomes to split it into; settled shared interfaces, data meanings and files do not make one outcome. Flag an item whose distinct capabilities are all proved by one new test file or one test, asking for a test per capability or a split, and an item one worker could not plausibly get green in a handful of validation cycles.";
+  "Items split by independently verifiable capability, never by layer, and each includes its own tests and documentation. Flag an item that delivers more than one outcome, naming the outcomes to split it into; settled shared interfaces, data meanings and files do not make one outcome. Flag an item whose distinct capabilities are all proved by one new test file or one test, asking for a test per capability or a split, and an item one worker could not plausibly get green in a handful of validation cycles. Where the request lists the measured cost of this installation's past Work Items, judge that cost against it: an item likely to need far more validation runs, repairs or time than their median, as the longest listed did, is too big. The figures are facts about past items, not limits.";
 
 /** Check 4: when an item's acceptance is judged. */
 const PHASES =
@@ -197,9 +201,15 @@ const OWNED_NEW_FILES =
 /** Check 8: the worker names what is new. */
 const NEW_IDENTIFIERS = `Flag acceptance or a brief that names a NEW identifier (a type, endpoint path, migration number, file or test name) the Objective and sources do not fix: describe it by role and data and leave the name to the worker. Existing identifiers at the base may be named. ${OWNED_NEW_FILES}`;
 
-/** Check 3: dependency edges follow the interface needed. */
+/**
+ * Check 3: dependency edges follow the interface needed, on both sides of
+ * the edge. Live (#2293), an 8-entry client item waited for all of its
+ * upstream item, 2 h 17 min, though only one entry (a real-browser journey)
+ * needed that implementation: the rest were client behaviour against a
+ * protocol the repository's contracts had settled.
+ */
 const INTERFACE_EDGES =
-  "A dependency edge points to the item that owns the exact interface the dependent needs, and independent sub-surfaces of one upstream item run in parallel: flag an item that waits on a whole upstream item when it needs only one sub-surface, or a plan that is serial where the interfaces are independent; split the upstream item at that interface.";
+  "A dependency edge points to the item that owns the exact interface the dependent needs, and independent sub-surfaces of one upstream item run in parallel: flag an item that waits on a whole upstream item when it needs only one sub-surface, or a plan that is serial where the interfaces are independent; split the upstream item at that interface. The dependent side splits too: when a dependent item's work divides into contract-level work (against a contract already settled in the repository or in supplied briefs, testable without the dependency's implementation) and an end-to-end proof that needs that implementation, plan two items, the contract-level one depending only on what it truly needs and a smaller proof item depending on both. Flag a dependency edge when most of the dependent's acceptance entries are provable against an already-settled contract, naming the contract-level item and the proof item to split it into. Do not split when handoff, preparation and review cost more than the overlap saves, or when the dependent needs the upstream implementation throughout.";
 
 /** Check 1: proofs are spread over their owners. */
 const PROOF_SPREAD =

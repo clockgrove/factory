@@ -6,7 +6,8 @@
  * model call's `model-usage` event is charged to its Objective
  * (`state.spend`) and to the installation's day (`spend.json`, a UTC
  * day), its child threads and sub-agents included. Reaching a limit holds the Objective before its next model step,
- * and `more` grants as much again of each limit reached.
+ * and `more` raises each limit reached to what is used plus one more step
+ * (the limit's size), so a call that overshot it still leaves a full step.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -135,7 +136,12 @@ export function reached(state: ObjectiveState, day: Day): Ceiling[] {
   );
 }
 
-/** The engine's `more`: as much again of each limit reached. */
+/** What `more` makes a reached limit allow: what is used plus one more step. */
+function raisedTo(ceiling: Ceiling, limits: SpendLimits): number {
+  return ceiling.used + limits[ceiling.scope]![ceiling.unit]!;
+}
+
+/** The engine's `more`: each limit reached allows one more step beyond what is used. */
 export function grantSpend(state: ObjectiveState, day: Day): void {
   const limits = spendLimits(state);
   const spend = state.spend ?? { tokens: 0, cents: 0 };
@@ -144,8 +150,9 @@ export function grantSpend(state: ObjectiveState, day: Day): void {
     spend.dayGranted?.day === day.day
       ? { ...spend.dayGranted }
       : { day: day.day };
-  for (const { scope, unit } of reached(state, day)) {
-    const more = limits[scope]![unit]!;
+  for (const ceiling of reached(state, day)) {
+    const { scope, unit, allowed } = ceiling;
+    const more = raisedTo(ceiling, limits) - allowed;
     if (scope === "perObjective") granted[unit] = (granted[unit] ?? 0) + more;
     else dayGranted[unit] = (dayGranted[unit] ?? 0) + more;
   }
@@ -174,12 +181,13 @@ export function childText(spend: Spend | undefined): string {
 /** The question a reached limit asks. */
 export function spendQuestion(state: ObjectiveState, day: Day): string {
   const limits = spendLimits(state);
-  const past = reached(state, day).map(({ scope, unit, used, allowed }) => {
+  const past = reached(state, day).map((ceiling) => {
+    const { scope, unit, used, allowed } = ceiling;
     const children =
       scope === "perObjective" && unit === "tokens"
         ? childText(state.spend)
         : "";
-    return `${SCOPE_TEXT[scope]} ${amountText(unit, used)} of ${amountText(unit, allowed)} (${children ? `${children}; ` : ""}autonomy.spend.${scope}.${unit}; \`more\` allows ${amountText(unit, limits[scope]![unit]!)} more)`;
+    return `${SCOPE_TEXT[scope]} ${amountText(unit, used)} of ${amountText(unit, allowed)} (${children ? `${children}; ` : ""}autonomy.spend.${scope}.${unit}; \`more\` allows ${amountText(unit, limits[scope]![unit]!)} more, to ${amountText(unit, raisedTo(ceiling, limits))})`;
   });
   return `Model spend reached ${past.join(" and ")}. Tokens count every call's child threads and sub-agents too (Codex \`spawn_agent\` threads, Claude sub-agents). Calls already running finish; no other model step starts until you answer.\n\nAnswer \`more\` to go on, or cancel.`;
 }

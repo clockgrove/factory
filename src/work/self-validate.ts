@@ -717,10 +717,12 @@ export class SelfValidation {
       ...(targeted && { targeted: [...targeted] }),
       // Feedback latency (#2281): the call's own time, the time from the
       // worker's last edit to this verdict, and the part of the call its
-      // passing commands took.
+      // passing commands took. The edit came before the call: a file time
+      // read past its start is the file clock running ahead of Date.now(),
+      // so the latency is never less than the call's own time.
       durationMs: verdictAt - started,
       ...(edited !== undefined && {
-        sinceEditMs: Math.max(0, Math.round(verdictAt - edited)),
+        sinceEditMs: Math.round(verdictAt - Math.min(edited, started)),
       }),
       passedMs: result.results.reduce((sum, ran) => sum + ran.durationMs, 0),
     });

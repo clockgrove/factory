@@ -17,6 +17,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -142,22 +143,26 @@ function validationSequence(item: WorkItem): {
 }
 
 /**
- * The indices of `sequence` a run takes, in order (`order`, #2281): every
- * one in declared order when `order` is absent, else `order`'s, each once.
- * The exact install, when the sequence starts with one, always runs first,
- * since the commands after it need what it installs.
+ * The indices of `sequence` a run takes, always in declared order (#2281):
+ * every one when `only` is absent, else those `only` names, each once. The
+ * exact install, when the sequence starts with one, always runs, since the
+ * commands after it need what it installs. No command runs before one
+ * declared ahead of it, which may make what it needs (a build, codegen).
  */
 export function runOrder(
   sequence: readonly string[],
-  order?: readonly number[],
+  only?: readonly number[],
 ): number[] {
-  if (!order) return sequence.map((_, index) => index);
-  const chosen = [...new Set(order)].filter(
-    (index) => Number.isInteger(index) && index >= 0 && index < sequence.length,
+  if (!only) return sequence.map((_, index) => index);
+  const chosen = new Set(
+    only.filter(
+      (index) =>
+        Number.isInteger(index) && index >= 0 && index < sequence.length,
+    ),
   );
-  return sequence.length && packageBootstrap(sequence[0]!) !== undefined
-    ? [0, ...chosen.filter((index) => index !== 0)]
-    : chosen;
+  if (sequence.length && packageBootstrap(sequence[0]!) !== undefined)
+    chosen.add(0);
+  return sequence.map((_, index) => index).filter((index) => chosen.has(index));
 }
 
 export interface ValidateInput {
@@ -170,12 +175,13 @@ export interface ValidateInput {
    * where the exact install keeps its package store across this item's
    * validations, such as `<item worktree>.packages` (#2169). The install
    * still runs every time, frozen, so each validation proves it works on
-   * the result; it reuses the store only when the last install that wrote
-   * it had the same key (`installKey`: the install command and every
-   * dependency input), else it starts from an empty one. Only sandboxed,
-   * and only without the operator's `sandbox.packageStore`, which every
-   * install shares already. Absent (final validation): each install's
-   * store is its own empty HOME's, as before.
+   * the result; it reuses a store only one of the item's recent installs of
+   * the same key filled (`installKey`: the install command and every
+   * dependency input; `keptStore`), else it starts from an empty one.
+   * Only sandboxed, and only without the operator's
+   * `sandbox.packageStore`, which every install shares already. Absent
+   * (final validation): each install's store is its own empty HOME's, as
+   * before.
    */
   installStore?: string;
   /**
@@ -193,14 +199,13 @@ export interface ValidateInput {
   /** One Work Item's commands, or, absent, the plan's final commands. */
   item?: WorkItem;
   /**
-   * The worker's own Validate, with `item` (#2281): the indices of its
-   * commands that run, in this order (`runOrder`), such as only the one
-   * that failed last, or every one with that one first. The exact install,
-   * when the list starts with one, still runs first, and the formatter
-   * after it; every command's scripts are still pinned. `commands` in the
-   * answer are the ones that ran. Absent: every command, in declared order.
+   * The worker's own targeted Validate, with `item` (#2281): the indices of
+   * the only commands that run, in declared order (`runOrder`). The exact
+   * install, when the list starts with one, still runs first, and the
+   * formatter after it; every command's scripts are still pinned.
+   * `commands` in the answer are the ones that ran. Absent: every command.
    */
-  order?: readonly number[];
+  only?: readonly number[];
   plan: Plan;
   /** The Objective as planned (shown.ts): its Package manager update and Workspace package additions. */
   blocks: readonly ObjectiveBlock[];
@@ -429,8 +434,8 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
-  // Every command is pinned below; only those of `order` run (#2281).
-  const order = runOrder(sequence, item ? input.order : undefined);
+  // Every command is pinned below; only those of `only` run (#2281).
+  const order = runOrder(sequence, item ? input.only : undefined);
   const ran = order.map((index) => sequence[index]!);
   const atFinal = checkedAtFinal(plan);
   const { signal } = input;
@@ -1373,30 +1378,54 @@ interface KeptStore {
 }
 
 /**
+ * How many keys' stores one item keeps (`keptStore`): a candidate whose
+ * lockfile Factory regenerates installs under two keys on every validation,
+ * its own (refused as out of date) and the regenerated one's (#2280).
+ */
+const KEPT_KEYS = 2;
+
+/**
  * The package store kept in `directory` across one item's validations
- * (`installStore`, #2169): its `cache` reused when the `key` beside it is
- * this install's, else emptied first and keyed anew. Only the install
- * writes `cache`, so what a reused one holds is what installs of these very
- * inputs fetched; the key stays outside, where no command reaches.
+ * (`installStore`, #2169): `<directory>/<key>/cache`, reused when it was
+ * made for this install's `key`, else made empty. The stores of the
+ * KEPT_KEYS most recently installed keys stay (`keys`, newest first), so an
+ * item that alternates between two keys reuses both; older ones, and
+ * anything else here, are removed. Only the install writes `cache`, so what
+ * a reused one holds is what installs of these very inputs fetched; the
+ * keys stay outside it, where no command reaches.
  */
 export async function keptStore(
   directory: string,
   key: string,
 ): Promise<KeptStore> {
-  const root = join(directory, "cache");
-  const keyFile = join(directory, "key");
-  let kept: string | undefined;
+  const kept = join(directory, key);
+  const root = join(kept, "cache");
+  const listed = join(directory, "keys");
+  let recent: string[] = [];
   try {
-    kept = readFileSync(keyFile, "utf8");
+    recent = readFileSync(listed, "utf8")
+      .split("\n")
+      .filter((entry) => /^[0-9a-f]{64}$/.test(entry));
   } catch {
     // None yet.
   }
-  if (kept === key && lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
-    return { root, directory, reused: true };
-  await forceRemove(directory);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  writeFileSync(keyFile, key, { mode: 0o600 });
-  return { root, directory, reused: false };
+  const keys = [key, ...recent.filter((entry) => entry !== key)].slice(
+    0,
+    KEPT_KEYS,
+  );
+  const reused =
+    recent.includes(key) &&
+    lstatSync(root, { throwIfNoEntry: false })?.isDirectory() === true;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (const entry of readdirSync(directory))
+    if (entry !== "keys" && !keys.includes(entry))
+      await forceRemove(join(directory, entry));
+  if (!reused) {
+    await forceRemove(kept);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+  }
+  writeFileSync(listed, `${keys.join("\n")}\n`, { mode: 0o600 });
+  return { root, directory: kept, reused };
 }
 
 /**

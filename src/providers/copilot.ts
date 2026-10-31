@@ -157,7 +157,7 @@ interface Turn {
   directory: string;
   /** Built-in tools, as the SDK names them. */
   tools: string[];
-  /** Factory's own tools; each is approved only with no arguments. */
+  /** Factory's own tools; each is approved only with no arguments, or Validate with its `commands` (`copilotPermission`). */
   custom?: Tool[];
   writes: boolean;
   system?: string;
@@ -279,8 +279,9 @@ async function bounded(operation: Promise<unknown>): Promise<void> {
 
 /**
  * A turn's answer to each permission request: Factory's own tools (`custom`)
- * called with no arguments, and file reads, or writes when `writes`, inside
- * `root` alone. Anything else is refused.
+ * called with no arguments, or Validate with a targeted run's `commands`
+ * (#2281), and file reads, or writes when `writes`, inside `root` alone.
+ * Anything else is refused.
  */
 export function copilotPermission(
   root: string,
@@ -288,12 +289,15 @@ export function copilotPermission(
   custom: ReadonlySet<string>,
 ) {
   return (request: PermissionRequest) => {
-    // Factory's own tool takes no arguments: the model names no command.
+    // Factory's own tools name no command: Validate takes at most the
+    // indices of declared ones, and any other tool no arguments.
     if (request.kind === "custom-tool")
       return !request.managedApprovalRequired &&
         custom.has(request.toolName) &&
         (request.args === undefined ||
-          (isObject(request.args) && !Object.keys(request.args).length))
+          (isObject(request.args) && !Object.keys(request.args).length) ||
+          (request.toolName === VALIDATION_TOOL_NAME &&
+            !("problem" in validationTargets(request.args))))
         ? { kind: "approve-once" as const }
         : {
             kind: "reject" as const,

@@ -56,6 +56,7 @@ import {
   UNOWNED_FIX,
   VALIDATION_TOOL_INPUT,
   validateFailed,
+  validationTargets,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -785,10 +786,11 @@ function provenance(server: unknown, name: string): boolean {
 
 /**
  * The one access rule both SDK permission callbacks apply: Factory's own
- * tools only from its in-process servers with exactly their arguments, and
- * file tools only inside the worktree, with bounded globs.
+ * tools only from its in-process servers with exactly their arguments
+ * (Validate's: none, or a targeted run's `commands`, #2281), and file tools
+ * only inside the worktree, with bounded globs.
  */
-function toolAllowed(
+export function toolAllowed(
   attempt: Attempt,
   toolName: string,
   toolInput: unknown,
@@ -801,7 +803,12 @@ function toolAllowed(
   const keys = Object.keys(args).sort().join(",");
   switch (toolName) {
     case VALIDATION_TOOL:
-      return grants.validate && provenance(server, VALIDATION_SERVER) && !keys;
+      return (
+        grants.validate &&
+        provenance(server, VALIDATION_SERVER) &&
+        (!keys ||
+          (keys === "commands" && !("problem" in validationTargets(args))))
+      );
     case SHELL_TOOL:
       return (
         grants.shell &&

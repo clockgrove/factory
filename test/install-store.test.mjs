@@ -211,6 +211,13 @@ function install({ result, events }) {
   };
 }
 
+/** The cache of the one key's store an item keeps in `directory`. */
+function keptRoot(directory) {
+  const keys = readdirSync(directory).filter((entry) => entry !== "keys");
+  assert.equal(keys.length, 1, keys.join(", "));
+  return join(directory, keys[0], "cache");
+}
+
 const sandboxed = sandboxAvailable().available;
 const skip = sandboxed ? false : "needs the command sandbox (bubblewrap)";
 
@@ -228,7 +235,7 @@ test("an unchanged lockfile reuses the item's store, and the frozen install stil
   // the install's private HOME.
   assert.equal(
     first.store,
-    join(`${checkout}.packages`, "cache", "pnpm-store"),
+    join(keptRoot(`${checkout}.packages`), "pnpm-store"),
   );
   assert.equal(statSync(`${checkout}.packages`).mode & 0o777, 0o700);
   // The same commit again (the worker's Validate, then the validate step):
@@ -260,7 +267,7 @@ test("a changed lockfile reinstalls from an empty store, and a broken one still 
   const { checkout, base } = target();
   const built = commit(checkout, { "src/index.js": "export const a = 1;\n" });
   install(await validate(checkout, base, built));
-  const store = join(`${checkout}.packages`, "cache", "pnpm-store");
+  const store = join(keptRoot(`${checkout}.packages`), "pnpm-store");
   assert.equal(readdirSync(store).length, 2);
   // The result's own dependency change: a new key, so nothing an earlier
   // install fetched is kept, and the install proves the change.
@@ -281,6 +288,46 @@ test("a changed lockfile reinstalls from an empty store, and a broken one still 
     events.find((event) => event.event === "validation-command").installStore,
     "new",
   );
+});
+
+test("an item whose installs alternate between two keys reuses both stores", {
+  skip,
+}, async () => {
+  // A candidate whose dependency change left its lockfile out of date
+  // installs under its own key, refused before fetching, then under
+  // Factory's resolved commit's, on every validation, since the worker's
+  // Validate never commits the resolved lockfile. With one store per item,
+  // each emptied the other's and the resolved install fetched everything
+  // every time (#2280).
+  const { checkout, base } = target();
+  const own = commit(checkout, { "pnpm-lock.yaml": "broken\n" });
+  const resolved = commit(checkout, {
+    "pnpm-lock.yaml": "left-pad@1.0.0\nis-number@7.0.0\nzod@4.0.0\n",
+  });
+  const refused = async () => {
+    const { result, events } = await validate(checkout, base, own);
+    assert.equal(result.kind, "failed", JSON.stringify(result).slice(0, 1500));
+    return events.find((event) => event.event === "validation-command")
+      .installStore;
+  };
+  const counts = async () => {
+    const { installStore, reused, downloaded } = install(
+      await validate(checkout, base, resolved),
+    );
+    return { installStore, reused, downloaded };
+  };
+  assert.equal(await refused(), "new");
+  assert.deepEqual(await counts(), {
+    installStore: "new",
+    reused: 0,
+    downloaded: 3,
+  });
+  assert.equal(await refused(), "reused");
+  assert.deepEqual(await counts(), {
+    installStore: "reused",
+    reused: 3,
+    downloaded: 0,
+  });
 });
 
 test("a worker's own Validate keeps the store beside its worktree, the one the validate step reuses", {
@@ -333,7 +380,7 @@ test("a worker's own Validate keeps the store beside its worktree, the one the v
     ["new", "reused"],
   );
   assert.equal(
-    readdirSync(join(`${worktree}.packages`, "cache", "pnpm-store")).length,
+    readdirSync(join(keptRoot(`${worktree}.packages`), "pnpm-store")).length,
     2,
   );
   // The validate step, on the worker's collected result: the same inputs.
@@ -350,7 +397,13 @@ test("only the install writes the kept store: a later command can't reach it", {
   const { checkout, base } = target();
   const built = commit(checkout, { "src/index.js": "export const a = 1;\n" });
   const kept = `${checkout}.packages`;
-  const poison = join(kept, "cache", "poison");
+  const key = await installKey(
+    checkout,
+    built,
+    BOOTSTRAP,
+    AbortSignal.timeout(30_000),
+  );
+  const poison = join(kept, key, "cache", "poison");
   // It can't write there, and no variable names the store.
   const later = `! sh -c 'echo poisoned > ${poison}' 2>/dev/null && ! printenv | grep -qF '${kept}'`;
   const { result } = await validate(checkout, base, built, {
@@ -359,9 +412,9 @@ test("only the install writes the kept store: a later command can't reach it", {
   assert.equal(result.kind, "passed", JSON.stringify(result).slice(0, 1500));
   assert.equal(result.results.length, 2);
   assert.equal(existsSync(poison), false);
-  assert.equal(readdirSync(join(kept, "cache", "pnpm-store")).length, 2);
-  // The key sits outside what the install may write.
-  assert.ok(existsSync(join(`${checkout}.packages`, "key")));
+  assert.equal(readdirSync(join(kept, key, "cache", "pnpm-store")).length, 2);
+  // The keys sit outside what the install may write.
+  assert.equal(readFileSync(join(kept, "keys"), "utf8"), `${key}\n`);
 });
 
 test("with the operator's sandbox.packageStore, or with no kept store, nothing is kept beside the worktree", {
@@ -427,39 +480,47 @@ test("removing an item's worktree removes its kept store", async () => {
   const worktree = join(tempDir("factory-items-"), "a");
   const signal = AbortSignal.timeout(30_000);
   await addWorktree(checkout, worktree, base, signal);
-  await keptStore(`${worktree}.packages`, "a".repeat(64));
-  writeFileSync(join(`${worktree}.packages`, "cache", "package"), "fetched");
+  const { root } = await keptStore(`${worktree}.packages`, "a".repeat(64));
+  writeFileSync(join(root, "package"), "fetched");
   await removeWorktree(checkout, worktree, signal);
   assert.equal(existsSync(`${worktree}.packages`), false);
   assert.equal(existsSync(worktree), false);
 });
 
-test("a kept store is reused only under its own key", async () => {
+test("a kept store is reused only under its own key, and an item keeps its two latest keys' stores", async () => {
   const directory = join(tempDir("factory-kept-"), "item.packages");
-  const fresh = await keptStore(directory, "a".repeat(64));
+  const [a, b, c] = ["a", "b", "c"].map((digit) => digit.repeat(64));
+  // A store of the layout before #2280, one `key` beside one `cache`.
+  mkdirSync(join(directory, "cache"), { recursive: true });
+  writeFileSync(join(directory, "key"), a);
+  const fresh = await keptStore(directory, a);
   assert.deepEqual(fresh, {
-    root: join(directory, "cache"),
-    directory,
+    root: join(directory, a, "cache"),
+    directory: join(directory, a),
     reused: false,
   });
+  assert.deepEqual(readdirSync(directory).sort(), [a, "keys"]);
   writeFileSync(join(fresh.root, "package"), "fetched");
-  assert.deepEqual(await keptStore(directory, "a".repeat(64)), {
-    root: fresh.root,
-    directory,
-    reused: true,
-  });
+  assert.deepEqual(await keptStore(directory, a), { ...fresh, reused: true });
   assert.ok(existsSync(join(fresh.root, "package")));
-  // Another key empties it first.
-  assert.deepEqual(await keptStore(directory, "b".repeat(64)), {
-    root: fresh.root,
-    directory,
-    reused: false,
-  });
-  assert.deepEqual(readdirSync(fresh.root), []);
-  assert.equal(readFileSync(join(directory, "key"), "utf8"), "b".repeat(64));
-  // A store whose cache is gone isn't reused, whatever its key says.
-  rmSync(fresh.root, { recursive: true });
-  assert.equal((await keptStore(directory, "b".repeat(64))).reused, false);
+  // Another key starts from an empty store of its own, and leaves the
+  // first: a candidate and Factory's resolved lockfile alternate, and each
+  // reuses its own.
+  const other = await keptStore(directory, b);
+  assert.equal(other.reused, false);
+  assert.deepEqual(readdirSync(other.root), []);
+  assert.ok(existsSync(join(fresh.root, "package")));
+  assert.equal((await keptStore(directory, a)).reused, true);
+  assert.equal((await keptStore(directory, b)).reused, true);
+  assert.equal(readFileSync(join(directory, "keys"), "utf8"), `${b}\n${a}\n`);
+  // A third key removes the store least recently installed.
+  assert.equal((await keptStore(directory, c)).reused, false);
+  assert.deepEqual(readdirSync(directory).sort(), [b, c, "keys"]);
+  assert.equal((await keptStore(directory, a)).reused, false);
+  assert.deepEqual(readdirSync(join(directory, a, "cache")), []);
+  // A store whose cache is gone isn't reused, whatever the keys say.
+  rmSync(join(directory, a, "cache"), { recursive: true });
+  assert.equal((await keptStore(directory, a)).reused, false);
 });
 
 // A package from the checkout (a `file:` tarball) is served from the store
@@ -665,7 +726,7 @@ test("items whose install inputs are their start's share the Objective's store; 
   );
   assert.equal(
     moved.store,
-    join(`${checkout}-c.packages`, "cache", "pnpm-store"),
+    join(keptRoot(`${checkout}-c.packages`), "pnpm-store"),
   );
   assert.deepEqual(readdirSync(shared), [key]);
   assert.equal(readdirSync(join(shared, key, "cache", "pnpm-store")).length, 2);
@@ -707,7 +768,8 @@ test("the kept store counts against the install's HOME budget, and one over it i
     result.reason,
     /Validation command failed \(disk budget\).*HOME and the install's package store hold 2\.0 MiB, more than sandbox\.limits\.homeMiB \(1 MiB\)/s,
   );
-  assert.equal(existsSync(installStorePath(checkout)), false);
+  // The key's store is gone; only the list of keys stays.
+  assert.deepEqual(readdirSync(installStorePath(checkout)), ["keys"]);
   // Within the budget, the next install starts from an empty store.
   assert.deepEqual(
     { ...install(await validate(checkout, base, built)), store: undefined },
@@ -723,7 +785,7 @@ test("the kept store counts against the install's HOME budget, and one over it i
     counted.result.reason,
     /HOME, the install's package store and TMPDIR hold more than sandbox\.limits\.files \(1\) files/,
   );
-  assert.equal(existsSync(installStorePath(checkout)), false);
+  assert.deepEqual(readdirSync(installStorePath(checkout)), ["keys"]);
 });
 
 /** The step context and dependencies a Work Item's steps run with. */

@@ -22,7 +22,7 @@ import type { RepairFinding } from "../repair.js";
 import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, failureExcerpt } from "../text.js";
-import { type Validation, validateTree } from "../validate.js";
+import { runOrder, type Validation, validateTree } from "../validate.js";
 import { hasGitlink, hostGit, installStorePath } from "../worktree.js";
 import {
   type HandoffNote,
@@ -61,7 +61,7 @@ export function formattedNote(formatted: {
 }
 
 export const VALIDATION_TOOL_DESCRIPTION =
-  "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. A failed command's output in the result is an excerpt: its complete output is written to a log under .factory-validate/ in your checkout, which the result names. A full run takes minutes; it runs the command that failed last first, so a repeated failure shows early. Run it after implementing and fix any failure it reports. While you fix a failure, pass `commands`, the indices of the declared commands to run (0 is the first; a failure names its command's index), for a targeted run of just those after the exact install: much faster, but it never counts as validating your result. Run it again with no `commands` after your last edit, including self-review and handoff fixes: finish only after a full run passes on your final files.";
+  "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. A failed command's output in the result is an excerpt: its complete output is written to a log under .factory-validate/ in your checkout, which the result names. A full run runs every command in declared order and takes minutes. Run it after implementing and fix any failure it reports. While you fix a failure, pass `commands`, the indices of the declared commands to run (0 is the first; a failure names its command's index), for a targeted run of just those, in declared order after the exact install: much faster, but it never counts as validating your result. A targeted run skips every command you don't name, so include any earlier command the failing one needs, such as a build or code generation. Run it again with no `commands` after your last edit, including self-review and handoff fixes: finish only after a full run passes on your final files.";
 
 /**
  * Validate's input, as JSON Schema (the Codex and Copilot workers'; the
@@ -75,7 +75,7 @@ export const VALIDATION_TOOL_INPUT = {
       type: "array",
       items: { type: "integer", minimum: 0 },
       description:
-        "Indices of the declared validation commands to run alone, after the exact install (0 is the first). Omit for a full run, the only one that counts before you finish.",
+        "Indices of the declared validation commands to run, in declared order after the exact install (0 is the first); include any earlier command they need, such as a build. Omit for a full run, the only one that counts before you finish.",
     },
   },
   additionalProperties: false,
@@ -105,6 +105,31 @@ export function validationTargets(
       problem: "`commands` must be a list of command indices (0 is the first)",
     };
   return { commands: commands as number[] };
+}
+
+/**
+ * What a failure at declared command `index` says of targeted runs (#2281).
+ * A targeted run runs only the commands it names, after the install
+ * (`runOrder`), so one that needs an earlier command's output (a build,
+ * generated code) fails alone however it is fixed: after a full run, the
+ * note names the earlier commands a targeted run of it would skip; after a
+ * targeted run, the ones it skipped, if any.
+ */
+export function targetedNote(
+  commands: readonly string[],
+  index: number,
+  targeted?: readonly number[],
+): string {
+  const ran = new Set(runOrder(commands, targeted ?? [index]));
+  const before = commands
+    .map((_, at) => at)
+    .filter((at) => at < index && !ran.has(at));
+  const named = `command${before.length === 1 ? "" : "s"} ${before.join(", ")}`;
+  if (targeted)
+    return before.length
+      ? `This targeted run skipped ${named}, declared before it: if \`${commands[index]}\` needs what ${before.length === 1 ? "it" : "one of them"} makes, such as a build or generated code, add its index to \`commands\`, or run a full run.`
+      : "";
+  return `That is command ${index}: while you fix it, a targeted run (\`commands: [${index}]\`) reruns only it after the install${before.length ? `, without ${named} declared before it, so add the index of any it needs, such as a build or code generation` : ""}; finish only after a full run passes.`;
 }
 
 /**
@@ -495,11 +520,6 @@ export class SelfValidation {
   private readonly failedTrees = new Set<string>();
   /** The commands a run failed and no later run passed, by command. */
   private readonly failing = new Map<string, WorkerValidateFailure>();
-  /**
-   * The index of the command the last run failed at, until a run passes
-   * it: a full run runs it first (#2281).
-   */
-  private lastFailed: number | undefined;
 
   /** `signal` stops a running validation: cancel, or the attempt ending. */
   constructor(
@@ -511,8 +531,8 @@ export class SelfValidation {
   /**
    * One tool call: the result text, or why validation is unavailable.
    * `commands`: the indices of the declared commands a targeted run runs,
-   * after the exact install (#2281); absent, empty or every one, a full
-   * run.
+   * in declared order after the exact install (#2281); absent, empty or
+   * every one, a full run.
    */
   async call(
     commands?: readonly number[],
@@ -527,8 +547,10 @@ export class SelfValidation {
         text: `Validation did not run: ${unknown.join(", ")} ${unknown.length === 1 ? "is not the index" : "are not indices"} of a declared command. Pass \`commands\` from these, or none for a full run:\n${declared.map((check, index) => `${index}: ${check.command}`).join("\n")}`,
         isError: true,
       };
-    // A selection of every declared command is a full run.
-    const chosen = [...new Set(commands ?? [])];
+    // A selection of every declared command is a full run. The chosen
+    // ones keep their declared order, so a build the worker names with
+    // the test that needs it runs first.
+    const chosen = [...new Set(commands ?? [])].sort((a, b) => a - b);
     const targeted =
       chosen.length && chosen.length < declared.length ? chosen : undefined;
     const result = this.queue.then(() => this.validate(targeted));
@@ -553,8 +575,10 @@ export class SelfValidation {
    * files, in a fresh checkout, so the worker's files never change and no
    * build output or other run's temporary files reach the commands. A
    * targeted run (`targeted`) runs only those commands after the install,
-   * and never covers the files for handoff; a full run runs the command
-   * the last run failed at first (#2281).
+   * and never covers the files for handoff (#2281). A full run keeps the
+   * declared order: each run is a fresh checkout that stops at its first
+   * failure, so a command moved ahead of the build or codegen it needs
+   * would fail however the worker fixed it.
    */
   private async validate(targeted?: readonly number[]): Promise<string> {
     const run = ++this.runs;
@@ -569,17 +593,6 @@ export class SelfValidation {
       return `Validation failed. Fix this before you finish.\n${snapped.problem}`;
     const { tree, commit } = snapped;
     const edited = await lastEdit(input.worktree, input.base, tree, signal);
-    const first = this.lastFailed;
-    const order =
-      targeted ??
-      (first === undefined
-        ? undefined
-        : [
-            first,
-            ...input.item.validation
-              .map((_, index) => index)
-              .filter((index) => index !== first),
-          ]);
     const result = await validateTree({
       checkout: input.worktree,
       repository: options.repository,
@@ -591,7 +604,7 @@ export class SelfValidation {
         : {}),
       commit,
       item: input.item,
-      ...(order ? { order } : {}),
+      ...(targeted ? { only: targeted } : {}),
       plan: options.plan,
       blocks: options.blocks,
       sandbox: options.sandbox,
@@ -616,7 +629,17 @@ export class SelfValidation {
     const verdictAt = Date.now();
     const logged =
       result.kind === "failed" && result.failed
-        ? `\n${await this.logFailure(run, result, result.failed)}\nThat is command ${result.failed.index}: while you fix it, a targeted run (\`commands: [${result.failed.index}]\`) reruns only it after the install; finish only after a full run passes.`
+        ? [
+            "",
+            await this.logFailure(run, result, result.failed),
+            targetedNote(
+              input.item.validation.map((check) => check.command),
+              result.failed.index,
+              targeted,
+            ),
+          ]
+            .filter((line, at) => !at || line)
+            .join("\n")
         : "";
     const listed = result.commands.map((command) => `- ${command}`).join("\n");
     const compose = (output: string) => {
@@ -685,13 +708,6 @@ export class SelfValidation {
           ),
         });
     }
-    if (result.kind === "failed" && result.failed)
-      this.lastFailed = result.failed.index;
-    else if (
-      passed &&
-      (!targeted || (first !== undefined && targeted.includes(first)))
-    )
-      this.lastFailed = undefined;
     input.log({
       event: "worker-validate",
       run,
@@ -699,7 +715,6 @@ export class SelfValidation {
       tree,
       handoffPassed: handoff.passed,
       ...(targeted && { targeted: [...targeted] }),
-      ...(!targeted && first !== undefined && { firstCommand: first }),
       // Feedback latency (#2281): the call's own time, the time from the
       // worker's last edit to this verdict, and the part of the call its
       // passing commands took.

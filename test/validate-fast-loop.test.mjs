@@ -2,9 +2,11 @@
 // failure, fix. Each Validate ran every declared command in order, so a
 // worker failing on its 4th command paid for the install and three
 // unrelated commands before each verdict that mattered. Validate now takes
-// the indices of the commands to run (a targeted run, which never counts
-// for handoff), runs the command that failed last first on a full run, and
-// logs the call's feedback latency. Real Git and the real sandbox.
+// the indices of the commands to run (a targeted run, in declared order,
+// which never counts for handoff), and logs the call's feedback latency. A
+// full run keeps the declared order: run first, a command that needs an
+// earlier one's output failed every full run however it was fixed. Real Git
+// and the real sandbox.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -14,13 +16,18 @@ import { test } from "node:test";
 import { z } from "zod";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
-import { validateToolShape } from "../dist/providers/claude-worker.js";
+import {
+  toolAllowed,
+  validateToolShape,
+} from "../dist/providers/claude-worker.js";
 import { CodexValidate } from "../dist/providers/codex-validate.js";
+import { copilotPermission } from "../dist/providers/copilot.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
 import { runOrder } from "../dist/validate.js";
 import {
   FinishRequests,
   SelfValidation,
+  targetedNote,
   VALIDATION_TOOL_INPUT,
   validateRequest,
   validationTargets,
@@ -67,19 +74,41 @@ const skip = sandboxAvailable().available
 const CHECKS = ["a", "b", "c"].map((name) => ({
   command: `sh check-${name}.sh`,
 }));
+const SCRIPTS = Object.fromEntries(
+  ["a", "b", "c"].map((name) => [
+    `check-${name}.sh`,
+    `grep -q "${name} ok" src/state.txt\n`,
+  ]),
+);
 const work = item("loop", { ownedPaths: ["src/**"], validation: CHECKS });
 
-/** A worker's checkout at its base, its Validate, and what it logged. */
-function workerValidate() {
+// A build, then a check of what it built (ignored output, as a build's is):
+// the check needs the build to have run in the same checkout. A slow
+// unrelated command comes after them.
+const BUILT = {
+  ".gitignore": "out/\n",
+  "build.sh": "mkdir -p out && cp src/state.txt out/built\n",
+  "check.sh": "test -f out/built && grep -q ok out/built\n",
+  "other.sh": "true\n",
+};
+const dependent = item("built", {
+  ownedPaths: ["src/**"],
+  validation: ["build", "check", "other"].map((name) => ({
+    command: `sh ${name}.sh`,
+  })),
+});
+
+/**
+ * A worker's checkout of `validated` at its base, with `scripts`, its
+ * Validate, and what it logged.
+ */
+function workerValidate({ validated = work, scripts = SCRIPTS } = {}) {
   const { sandbox, logs } = loaded();
   const worktree = join(tempDir("factory-fast-loop-"), "w");
   mkdirSync(join(worktree, "src"), { recursive: true });
   git(worktree, "init", "--quiet");
-  for (const name of ["a", "b", "c"])
-    writeFileSync(
-      join(worktree, `check-${name}.sh`),
-      `grep -q "${name} ok" src/state.txt\n`,
-    );
+  for (const [path, content] of Object.entries(scripts))
+    writeFileSync(join(worktree, path), content);
   writeFileSync(join(worktree, "src", "state.txt"), "\n");
   git(worktree, "add", ".");
   git(worktree, "commit", "--quiet", "-m", "base");
@@ -90,18 +119,18 @@ function workerValidate() {
   const input = {
     worktree,
     prompt: "",
-    item: work,
-    commands: CHECKS.map((check) => check.command),
+    item: validated,
+    commands: validated.validation.map((check) => check.command),
     base,
     signal,
     log: (event) => events.push(event),
     activity: () => {},
     output: () => {},
-    runFile: (kind) => log.runFile(1, `item:loop:work#1.${kind}`),
+    runFile: (kind) => log.runFile(1, `item:${validated.id}:work#1.${kind}`),
   };
   const options = {
     sandbox,
-    plan: plan([work], { base }),
+    plan: plan([validated], { base }),
     blocks: [],
     repository: REPO,
     commandTimeoutMs: 60_000,
@@ -129,16 +158,38 @@ function runs(events) {
   return out;
 }
 
-test("the run's order keeps the exact install first, each command once", () => {
+test("a run keeps the declared order and the exact install, each command once", () => {
   const commands = ["sh a.sh", "sh b.sh", "sh c.sh"];
   assert.deepEqual(runOrder(commands), [0, 1, 2]);
-  assert.deepEqual(runOrder(commands, [2, 0, 1]), [2, 0, 1]);
+  // No command runs ahead of one declared before it, whatever is named.
+  assert.deepEqual(runOrder(commands, [2, 0, 1]), [0, 1, 2]);
+  assert.deepEqual(runOrder(commands, [2, 1]), [1, 2]);
   assert.deepEqual(runOrder(commands, [1, 1, 7, -1, 0.5]), [1]);
-  // An install the commands need runs first, whatever the order names.
+  // An install the commands need always runs, first.
   const installed = [BOOTSTRAP, ...commands];
   assert.deepEqual(runOrder(installed, [3]), [0, 3]);
-  assert.deepEqual(runOrder(installed, [2, 0, 1, 3]), [0, 2, 1, 3]);
+  assert.deepEqual(runOrder(installed, [3, 1]), [0, 1, 3]);
   assert.deepEqual(runOrder(installed), [0, 1, 2, 3]);
+});
+
+test("a failure says what a targeted run of it would skip, and a targeted failure what it skipped", () => {
+  const commands = [BOOTSTRAP, "sh build.sh", "sh lint.sh", "sh test.sh"];
+  // After a full run: the earlier commands a targeted run would leave out,
+  // never the install, which always runs.
+  assert.equal(
+    targetedNote(commands, 3),
+    "That is command 3: while you fix it, a targeted run (`commands: [3]`) reruns only it after the install, without commands 1, 2 declared before it, so add the index of any it needs, such as a build or code generation; finish only after a full run passes.",
+  );
+  assert.equal(
+    targetedNote(commands, 1),
+    "That is command 1: while you fix it, a targeted run (`commands: [1]`) reruns only it after the install; finish only after a full run passes.",
+  );
+  // After a targeted run: the earlier ones it skipped, if any.
+  assert.equal(
+    targetedNote(commands, 3, [1, 3]),
+    "This targeted run skipped command 2, declared before it: if `sh test.sh` needs what it makes, such as a build or generated code, add its index to `commands`, or run a full run.",
+  );
+  assert.equal(targetedNote(commands, 2, [1, 2]), "");
 });
 
 test("every worker's Validate takes the targeted commands' indices, or none", () => {
@@ -170,7 +221,62 @@ test("every worker's Validate takes the targeted commands' indices, or none", ()
   }
 });
 
-test("a targeted run runs only its commands and never counts for handoff; a full run runs the last failing command first", {
+test("the Claude and Copilot permission checks admit a targeted run's commands and nothing else", () => {
+  // Claude's PreToolUse hook and canUseTool both apply toolAllowed.
+  const attempt = {
+    config: { tools: [], allowedTools: [] },
+    grants: { validate: true },
+    input: { worktree: tempDir("factory-validate-gate-") },
+  };
+  const server = { name: "factory-validation", source: "sdk" };
+  const claude = (args, from = server) =>
+    toolAllowed(attempt, "mcp__factory-validation__run_validation", args, from);
+  // Copilot's request for one of Factory's own tools carries its args.
+  const copilot = (args, toolName = "run_validation") =>
+    copilotPermission(
+      attempt.input.worktree,
+      false,
+      new Set(["run_validation", "other_tool"]),
+    )({ kind: "custom-tool", toolName, args, toolCallId: "call_1" }).kind;
+  for (const args of [
+    {},
+    { commands: [] },
+    { commands: [1] },
+    { commands: [0, 2] },
+  ]) {
+    assert.equal(claude(args), true, JSON.stringify(args));
+    assert.equal(copilot(args), "approve-once", JSON.stringify(args));
+  }
+  assert.equal(copilot(undefined), "approve-once");
+  for (const args of [
+    { commands: [-1] },
+    { commands: "1" },
+    { commands: [1], command: "rm -rf /" },
+    { command: "true" },
+  ]) {
+    assert.equal(claude(args), false, JSON.stringify(args));
+    assert.equal(copilot(args), "reject", JSON.stringify(args));
+  }
+  // Only from Factory's own server, and only with the grant.
+  assert.equal(
+    claude({ commands: [1] }, { name: "other", source: "sdk" }),
+    false,
+  );
+  assert.equal(
+    toolAllowed(
+      { ...attempt, grants: { validate: false } },
+      "mcp__factory-validation__run_validation",
+      { commands: [1] },
+      server,
+    ),
+    false,
+  );
+  // Factory's other tools still take no arguments.
+  assert.equal(copilot({}, "other_tool"), "approve-once");
+  assert.equal(copilot({ commands: [1] }, "other_tool"), "reject");
+});
+
+test("a targeted run runs only its commands, in declared order, and never counts for handoff; a full run runs every command in declared order", {
   skip,
 }, async () => {
   const { validator, events, state } = workerValidate();
@@ -179,7 +285,10 @@ test("a targeted run runs only its commands and never counts for handoff; a full
   const failed = await validator.call();
   assert.equal(failed.isError, false, failed.text);
   assert.ok(failed.text.startsWith("Validation failed."), failed.text);
-  assert.match(failed.text, /That is command 1: .*`commands: \[1\]`/);
+  assert.match(
+    failed.text,
+    /That is command 1: .*`commands: \[1\]`.*without command 0 declared before it/,
+  );
   // An index no declared command has runs nothing and lists them.
   const unknown = await validator.call([3]);
   assert.equal(unknown.isError, true);
@@ -205,13 +314,25 @@ test("a targeted run runs only its commands and never counts for handoff; a full
     await new FinishRequests(validator, true, work).next(race),
     validateRequest(work),
   );
-  // A full run, now in declared order again: the 3rd command fails.
+  // A full run, in declared order: the 3rd command fails.
   const third = await validator.call();
   assert.ok(third.text.startsWith("Validation failed."), third.text);
-  // The next full run runs it first, and stops there while it fails...
-  await validator.call();
-  // ...and once it passes, every declared command still runs.
+  // Targeted alone, it names the earlier commands it skipped.
+  const alone = await validator.call([2]);
+  assert.ok(alone.text.startsWith("Validation failed."), alone.text);
+  assert.match(
+    alone.text,
+    /This targeted run skipped commands 0, 1, declared before it: if `sh check-c\.sh` needs/,
+  );
+  // Named out of order, the targeted commands run in declared order.
   state("a ok\nb ok\nc ok\n");
+  const both = await validator.call([2, 1]);
+  assert.ok(
+    both.text.startsWith(
+      "The 2 commands of this targeted run passed:\n- sh check-b.sh\n- sh check-c.sh\n",
+    ),
+    both.text,
+  );
   const passed = await validator.call();
   assert.ok(
     passed.text.startsWith("All 3 declared validation commands passed:"),
@@ -224,21 +345,18 @@ test("a targeted run runs only its commands and never counts for handoff; a full
   const logged = runs(events);
   assert.deepEqual(
     logged.map(({ ran }) => ran),
-    [[0, 1], [1], [0, 1, 2], [2], [2, 0, 1], [0, 1, 2]],
+    [[0, 1], [1], [0, 1, 2], [2], [1, 2], [0, 1, 2], [0, 1, 2]],
   );
   assert.deepEqual(
-    logged.map(({ event }) => [
-      event.passed,
-      event.targeted,
-      event.firstCommand,
-    ]),
+    logged.map(({ event }) => [event.passed, event.targeted]),
     [
-      [false, undefined, undefined],
-      [true, [1], undefined],
-      [false, undefined, undefined],
-      [false, undefined, 2],
-      [true, undefined, 2],
-      [true, undefined, undefined],
+      [false, undefined],
+      [true, [1]],
+      [false, undefined],
+      [false, [2]],
+      [true, [1, 2]],
+      [true, undefined],
+      [true, undefined],
     ],
   );
   // Feedback latency: the call's time, the time from the last edit to the
@@ -249,6 +367,44 @@ test("a targeted run runs only its commands and never counts for handoff; a full
     assert.ok(event.passedMs >= 0 && event.passedMs <= event.durationMs);
   }
   assert.equal(logged[3].event.passedMs, 0);
+});
+
+test("a command that needs an earlier one's output passes the full run once fixed, and a targeted run with that one", {
+  skip,
+}, async () => {
+  const { validator, events, state } = workerValidate({
+    validated: dependent,
+    scripts: BUILT,
+  });
+  // The check fails on what the build made from the worker's files.
+  const failed = await validator.call();
+  assert.ok(failed.text.startsWith("Validation failed."), failed.text);
+  assert.match(failed.text, /sh check\.sh failed/);
+  assert.match(failed.text, /without command 0 declared before it/);
+  // Fixed: the next full run passes, the build still first. (Run first,
+  // the check would fail every full run, the fix notwithstanding.)
+  state("ok\n");
+  const passed = await validator.call();
+  assert.ok(
+    passed.text.startsWith("All 3 declared validation commands passed:"),
+    passed.text,
+  );
+  // The check alone fails without the build, and says what it skipped;
+  // with the build named too, it passes.
+  const alone = await validator.call([1]);
+  assert.ok(alone.text.startsWith("Validation failed."), alone.text);
+  assert.match(alone.text, /This targeted run skipped command 0, declared/);
+  const built = await validator.call([1, 0]);
+  assert.ok(
+    built.text.startsWith(
+      "The 2 commands of this targeted run passed:\n- sh build.sh\n- sh check.sh\n",
+    ),
+    built.text,
+  );
+  assert.deepEqual(
+    runs(events).map(({ ran }) => ran),
+    [[0, 1], [0, 1, 2], [1], [0, 1]],
+  );
 });
 
 /** JSON-RPC requests to an MCP server's socket; the answers, by id. */

@@ -344,8 +344,19 @@ const UNCHECKED_POLLS = 10;
 /** Exit code for that stop: systemd restarts on it (EX_TEMPFAIL). */
 const UNCHECKED_EXIT = 75;
 
-/** How long a start waits for the Project's repositories before it starts unchecked. */
-const PROJECT_START_MS = 5000;
+/**
+ * How long a start waits for the Project's repositories before it starts
+ * unchecked: 5 s, shorter from FACTORY_PROJECT_START_MS for tests whose
+ * GitHub never answers.
+ */
+function projectStartMs(): number {
+  const value = Number(process.env.FACTORY_PROJECT_START_MS);
+  return process.env.FACTORY_PROJECT_START_MS &&
+    Number.isFinite(value) &&
+    value >= 0
+    ? value
+    : 5000;
+}
 
 /** Attempts to confirm the record at a start, about 4 minutes in all. */
 const START_ATTEMPTS = 8;
@@ -414,7 +425,7 @@ export async function holderFor(
 /**
  * Refuse the start (ConfigurationError) while another installation serves
  * a repository on the Project. The Project is an input, never a
- * precondition: a read that fails or takes over PROJECT_START_MS, or a
+ * precondition: a read that fails or takes over projectStartMs, or a
  * repository whose record can't be read, is logged and the start goes on.
  */
 async function projectCheck(
@@ -426,7 +437,7 @@ async function projectCheck(
     found = await projectHolder(
       context,
       await context.repositories(
-        AbortSignal.any([signal, AbortSignal.timeout(PROJECT_START_MS)]),
+        AbortSignal.any([signal, AbortSignal.timeout(projectStartMs())]),
       ),
     );
   } catch (error) {

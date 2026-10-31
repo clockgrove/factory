@@ -27,18 +27,43 @@ jobs:
       - run: npm run format:check
       - run: npm run notices:check
 
+  # npm test's run, split round-robin across the shards by node --test. Four
+  # shards beat two or three on runner-sized CPUs; service.test.mjs alone
+  # takes nearly two minutes, so more would gain little. Each shard builds for
+  # itself: tsc takes under 10 s, and a build job would put its own runner,
+  # setup, build and artifact upload ahead of every shard.
   tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      # Report every shard's failures, as one unsharded run would.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/bubblewrap
       - run: git lfs version
-      - run: npm test
+      - run: npm run build
+      - run: >-
+          node --test --test-timeout=120000
+          --test-shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          --test-reporter=spec --test-reporter-destination=stdout
+          --test-reporter=./scripts/test-files.mjs
+          --test-reporter-destination=test-files.txt
+          test/*.test.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-files-${{ matrix.shard }}
+          path: test-files.txt
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
   # The single required check for main; it passes only when every job above
-  # passes, including offline installation in the CI tests.
+  # passes, including offline installation in the CI tests, and the test
+  # shards between them ran every test file exactly once.
   package-gate:
     if: always()
     needs: [checks, tests]
@@ -50,3 +75,9 @@ jobs:
         run: |
           test "$CHECKS" = success
           test "$TESTS" = success
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: test-files-*
+          path: test-files
+      - run: node scripts/test-shards.mjs test-files/*/test-files.txt

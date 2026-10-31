@@ -1514,3 +1514,77 @@ test("the spend ceiling holds before the next model step, per Objective and per 
   await settle();
   assert.equal(started.at(-1), "32 plan:1");
 });
+
+test("more after a call overshot the spend limit leaves a full step beyond what is spent", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { newObjective } = await import("../dist/state.js");
+  const { DaySpend } = await import("../dist/spend.js");
+  const root = tempDir("factory-spend-over-");
+  const run = {
+    id: "run",
+    finished: 0,
+    resumeAt: 0,
+    spend: new DaySpend(root),
+  };
+  const started = [];
+  // The first call spends 2,500 tokens against a 1,000 limit; later ones 400.
+  const objective = new ObjectiveRunner(
+    newObjective(33, new Date(), {
+      provider: "codex",
+      selectedBy: "defaultProvider",
+      digest: "x",
+      config: { autonomy: { spend: { perObjective: { tokens: 1000 } } } },
+    }),
+    {
+      steps: (state) =>
+        ["plan:1", "plan:2", "plan:3", "plan:4", "plan:5"]
+          .filter((key) => !state.done[key])
+          .slice(0, 1)
+          .map((key) => ({
+            key,
+            resource: "planner",
+            deadlineMs: 60_000,
+            run: async (context) => {
+              started.push(key);
+              context.log({
+                event: "model-usage",
+                tokens: { total: key === "plan:1" ? 2500 : 400 },
+              });
+              return { kind: "done" };
+            },
+          })),
+      status: () => "planning",
+    },
+    root,
+    { write() {} },
+    run,
+  );
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  for (let i = 0; i < 2; i++) {
+    objective.tick();
+    await settle();
+  }
+  assert.deepEqual(started, ["plan:1"]);
+  const [held] = objective.state.holds;
+  assert.match(
+    held.question,
+    /2,500 tokens of 1,000 tokens .*`more` allows 1,000 tokens more, to 3,500 tokens\)/,
+  );
+  assert.equal(
+    objective.transact(() =>
+      objective.answer("more", undefined, "op", undefined, held.id),
+    ),
+    null,
+  );
+  // 2,500 + 400 x 2 is still under the 3,500 now allowed: no hold until
+  // the full step is spent, then the next step asks again.
+  for (let i = 0; i < 4; i++) {
+    objective.tick();
+    await settle();
+  }
+  assert.deepEqual(started, ["plan:1", "plan:2", "plan:3", "plan:4"]);
+  assert.equal(objective.state.spend.tokens, 3700);
+  assert.match(objective.state.holds.at(-1).question, /3,700 tokens of 3,500/);
+});

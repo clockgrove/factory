@@ -839,7 +839,8 @@ export class ObjectiveRunner {
         continue;
       }
       // A model step past the spend ceiling asks before it starts
-      // (spend.ts): `more` grants as much again. Calls running finish.
+      // (spend.ts): `more` allows one more step beyond the spend. Calls
+      // running finish.
       const day =
         (step.resource === "planner" || step.resource === "worker") &&
         !this.state.attempts[step.key] &&
@@ -854,7 +855,7 @@ export class ObjectiveRunner {
                 answer: MORE,
                 family: "retry",
                 consequence:
-                  "Allows as much again of each spend limit reached, and model calls go on.",
+                  "Allows one more step of each spend limit reached beyond what is already spent, and model calls go on.",
               },
               "cancel",
             ]),

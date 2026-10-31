@@ -5,11 +5,15 @@ runs:
   steps:
     # apt-get update was most of this step's time on every shard: the two
     # packages are kept per runner image and installed with dpkg instead.
+    # The runner image's identity is in its environment, not the env context.
+    - id: image
+      run: echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      shell: bash
     - id: debs
       uses: actions/cache@v6
       with:
         path: ~/bubblewrap-debs
-        key: bubblewrap-debs-${{ runner.os }}-${{ env.ImageOS }}-${{ env.ImageVersion }}
+        key: bubblewrap-debs-${{ runner.os }}-${{ steps.image.outputs.image }}
     - run: |
         if [ "${{ steps.debs.outputs.cache-hit }}" != true ]; then
           sudo apt-get update -q

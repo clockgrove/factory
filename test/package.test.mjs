@@ -1,38 +1,58 @@
-// The release tarball, packed and installed offline as the README says:
-// it ships the CLI and its assets, and the installed CLI is the packed one.
+// The package as it ships: what it bundles, the files it packs, and its CLI
+// run from where an install puts it. The Release workflow packs the real
+// tarball, with the bundled Codex runtime (427 MB), and installs it offline
+// as the README does; here only the package's own files are packed, since
+// the runtime changes only with the lockfile and gzipping it took most of
+// a minute on every run.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-// Packing and installing a 170 MB tarball takes about a minute.
-test("the packed tarball installs offline and runs its own CLI", {
-  timeout: 300_000,
-}, () => {
+const project = resolve(import.meta.dirname, "..");
+const manifest = JSON.parse(
+  readFileSync(join(project, "package.json"), "utf8"),
+);
+
+test("every dependency is bundled, so the tarball installs offline", () => {
+  assert.deepEqual(
+    [...manifest.bundleDependencies].sort(),
+    Object.keys(manifest.dependencies).sort(),
+  );
+});
+
+test("the packed package ships the CLI and its assets, and its installed CLI runs", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-package-"));
   try {
-    const project = resolve(import.meta.dirname, "..");
+    // The package's own files, packed by npm from its files list, without
+    // the bundled dependencies.
+    const stage = join(root, "stage");
+    mkdirSync(stage);
+    for (const path of manifest.files)
+      if (existsSync(join(project, path)))
+        cpSync(join(project, path), join(stage, path), { recursive: true });
+    const { bundleDependencies: _, ...unbundled } = manifest;
+    writeFileSync(join(stage, "package.json"), JSON.stringify(unbundled));
     const pack = join(root, "pack");
     mkdirSync(pack);
     const tarball = join(
       pack,
-      // npm test built dist; rebuilding it here (prepack) would
-      // rewrite modules other tests are loading.
+      // npm test built dist; prepack would rebuild it.
       execFileSync(
         "npm",
         ["pack", "--silent", "--ignore-scripts", "--pack-destination", pack],
-        {
-          cwd: project,
-          encoding: "utf8",
-        },
+        { cwd: stage, encoding: "utf8" },
       )
         .trim()
         .split("\n")
@@ -40,7 +60,6 @@ test("the packed tarball installs offline and runs its own CLI", {
     );
     const listed = execFileSync("tar", ["tzf", tarball], {
       encoding: "utf8",
-      maxBuffer: 64 * 1024 ** 2,
     }).split("\n");
     assert.ok(listed.includes("package/dist/cli.js"), "dist ships");
     assert.ok(
@@ -48,24 +67,18 @@ test("the packed tarball installs offline and runs its own CLI", {
       "no source or test ships",
     );
 
+    // Where an install puts it, with its dependencies beside it.
     const prefix = join(root, "prefix");
-    execFileSync(
-      "npm",
-      [
-        "install",
-        "--offline",
-        "--omit=optional",
-        "--ignore-scripts",
-        "--prefix",
-        prefix,
-        tarball,
-      ],
-      {
-        stdio: "pipe",
-        env: { ...process.env, npm_config_cache: join(root, "empty-cache") },
-      },
-    );
     const installed = join(prefix, "node_modules", "@clockgrove", "factory");
+    mkdirSync(installed, { recursive: true });
+    execFileSync("tar", [
+      "xzf",
+      tarball,
+      "-C",
+      installed,
+      "--strip-components=1",
+    ]);
+    symlinkSync(join(project, "node_modules"), join(installed, "node_modules"));
     for (const path of [
       "plugin/.codex-plugin/plugin.json",
       "plugin/.claude-plugin/plugin.json",
@@ -81,13 +94,16 @@ test("the packed tarball installs offline and runs its own CLI", {
     ])
       assert.ok(existsSync(join(installed, path)), `missing: ${path}`);
 
-    const cli = join(prefix, "node_modules", ".bin", "factory");
+    const cli = join(installed, manifest.bin.factory);
     const env = {
       ...process.env,
       FACTORY_CONFIG: join(root, "config.json"),
       FACTORY_STATE_DIR: join(root, "state"),
     };
-    const help = spawnSync(cli, ["help"], { encoding: "utf8", env });
+    const help = spawnSync(process.execPath, [cli, "help"], {
+      encoding: "utf8",
+      env,
+    });
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /^ {2}setup /m);
 
@@ -105,8 +121,8 @@ test("the packed tarball installs offline and runs its own CLI", {
       }),
     );
     const loads = spawnSync(
-      cli,
-      ["status", "--repo", "example/target", "--capacity", "--json"],
+      process.execPath,
+      [cli, "status", "--repo", "example/target", "--capacity", "--json"],
       { encoding: "utf8", env },
     );
     assert.equal(loads.status, 0, loads.stderr);
@@ -114,8 +130,9 @@ test("the packed tarball installs offline and runs its own CLI", {
 
     rmSync(env.FACTORY_CONFIG);
     const own = spawnSync(
-      cli,
+      process.execPath,
       [
+        cli,
         "setup",
         "--repo",
         "clockgrove/factory",

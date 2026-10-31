@@ -1,0 +1,24 @@
+name: Caches
+
+# A pull request's or merge queue entry's runs can read only the caches of
+# their own ref and of main. Quality doesn't run on main (the merge queue
+# already tested each commit), so this keeps main's caches: node_modules for
+# the current lockfile, and bubblewrap's packages for the current image.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: caches
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/bubblewrap

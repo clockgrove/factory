@@ -209,4 +209,11 @@ test("the worker adds missing proof inside existing tests and leaves budget head
       `a test edit can drop another clause's check. ${PROOF_ECONOMY}`,
     ),
   );
+  // A refused criterion over a class is repaired as the class (#2272).
+  assert.ok(
+    repaired.prompt.includes(
+      "the finding's example is one member of that class",
+    ),
+  );
+  assert.equal(first.prompt.includes("one member of that class"), false);
 });

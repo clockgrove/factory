@@ -821,6 +821,8 @@ export class CodexWorker implements Worker {
             item?.type === "command_execution"
           )
             rewrites.ran(item.command);
+          if (event.type === "item.completed" && item?.type === "file_change")
+            for (const change of item.changes) rewrites.edited(change.path);
           if (item && SDK_OPERATIONS.has(item.type)) {
             operations.add(item.type, item.id);
             record.sdkOperations = operations.value;

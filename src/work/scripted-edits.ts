@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { within } from "../paths.js";
-import { hostGit } from "../worktree.js";
+import { changedFiles, hostGit } from "../worktree.js";
 
 /** What every worker with a shell hears beside its structured edit tool. */
 export const SCRIPTED_EDITS =
@@ -126,35 +126,80 @@ export function unchangedRewrite(
  * Scripted rewrites of a worker whose provider runs its commands (Codex):
  * Factory sees a command only as it is reported, with no moment before it
  * runs to read its files, so a finished rewrite's files are compared with
- * the checkout's HEAD. A file the turn already changed reads as changed, so
- * a rewrite of it that changes nothing goes unnoticed; one that changed a
- * file is never reported as a miss.
+ * the checkout's HEAD. A file that matches HEAD may have been changed back
+ * to it, so a rewrite naming a file seen changed since HEAD in this attempt
+ * (as it began, after an earlier command, or by apply_patch) is never
+ * checked: a rewrite of such a file that changes nothing goes unnoticed, and
+ * one that changed a file is never reported as a miss.
  */
 export class HeadRewrites {
   private checks: Promise<string[] | undefined>[] = [];
+  /** The files seen changed since HEAD in this attempt. */
+  private readonly changed = new Set<string>();
+  /** The tree's reads, in order: each sees the files the ones before it saw. */
+  private reads: Promise<unknown>;
 
   constructor(
     private readonly worktree: string,
     private readonly signal: AbortSignal,
-  ) {}
+  ) {
+    this.reads = this.sinceHead();
+  }
 
-  /** A finished command: checked now when it reads as a scripted rewrite. */
+  /** A file an edit tool changed (a `file_change` item's path). */
+  edited(path: string): void {
+    const root = resolve(this.worktree);
+    this.changed.add(relative(root, resolve(root, path)));
+  }
+
+  /**
+   * A finished command: checked when it reads as a scripted rewrite and its
+   * files weren't seen changed before it; then the tree is read again, so a
+   * later command that changes a file back to HEAD isn't taken for a miss.
+   */
   ran(command: string): void {
-    if (!scriptedRewrite(command)) return;
-    const files = namedFiles(command, this.worktree);
-    if (files.length) this.checks.push(this.unchanged(files));
+    const files = scriptedRewrite(command)
+      ? namedFiles(command, this.worktree)
+      : [];
+    if (files.length) {
+      const check = this.reads.then(() =>
+        files.some((file) => this.changed.has(file))
+          ? undefined
+          : this.unchanged(files),
+      );
+      this.checks.push(check);
+      this.reads = check;
+    }
+    this.reads = this.reads.then(() => this.sinceHead());
   }
 
   /**
    * The note (`rewriteNote`) for the rewrites since the last call that left
-   * their files as HEAD has them and that still do; undefined for none.
+   * their files as HEAD has them and that still do, untouched since;
+   * undefined for none.
    */
   async note(tool: string): Promise<string | undefined> {
+    const checks = this.checks.splice(0);
+    await this.reads;
     const missed: string[] = [];
-    for (const files of await Promise.all(this.checks.splice(0)))
-      if (files && (await this.unchanged(files)))
+    for (const files of await Promise.all(checks))
+      if (
+        files &&
+        !files.some((file) => this.changed.has(file)) &&
+        (await this.unchanged(files))
+      )
         for (const file of files) if (!missed.includes(file)) missed.push(file);
     return missed.length ? rewriteNote(missed, tool, true) : undefined;
+  }
+
+  /** Adds the files changed since HEAD now to those seen changed. */
+  private async sinceHead(): Promise<void> {
+    try {
+      for (const file of await changedFiles(this.worktree, this.signal))
+        this.changed.add(file);
+    } catch {
+      // The worktree is busy or gone: the next read sees what this missed.
+    }
   }
 
   /** `files` when each is tracked and as HEAD has it; undefined otherwise. */

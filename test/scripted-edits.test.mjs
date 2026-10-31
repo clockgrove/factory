@@ -210,6 +210,53 @@ test("a Codex worker's scripted rewrite that left its files as HEAD has them is 
   assert.equal(await rewrites.note("apply_patch"), undefined);
 });
 
+test("a Codex worker's rewrite that changed a file back to HEAD is no miss: not after a sed, a shell write or apply_patch changed it, nor when the attempt began with it changed (#2283)", async () => {
+  const worktree = checkout();
+  writeFileSync(join(worktree, "src", "b.js"), "export const b = 5;\n");
+  const signal = AbortSignal.timeout(60_000);
+  const rewrites = new HeadRewrites(worktree, signal);
+  // Each command's checks run before the next command: Codex reports one
+  // as it finishes, and the model takes its turn before the next.
+  const run = async (command) => {
+    sh(worktree, command);
+    rewrites.ran(command);
+    return rewrites.note("apply_patch");
+  };
+  assert.equal(await rewrites.note("apply_patch"), undefined);
+  // A sed, then a sed that undoes it.
+  assert.equal(await run("sed -i 's/a = 1/a = 2/' src/a.js"), undefined);
+  assert.equal(await run("sed -i 's/a = 2/a = 1/' src/a.js"), undefined);
+  // An earlier attempt's change, undone.
+  assert.equal(await run("sed -i 's/b = 5/b = 2/' src/b.js"), undefined);
+  // A write that reads as no rewrite, then undone by one.
+  const other = checkout();
+  const second = new HeadRewrites(other, signal);
+  await second.note("apply_patch");
+  const write = "printf 'export const a = 4;\\n' > src/a.js";
+  sh(other, write);
+  second.ran(write);
+  await second.note("apply_patch");
+  const undo = "sed -i 's/a = 4/a = 1/' src/a.js";
+  sh(other, undo);
+  second.ran(undo);
+  assert.equal(await second.note("apply_patch"), undefined);
+  // apply_patch's change, undone in the same turn.
+  writeFileSync(join(other, "src", "b.js"), "export const b = 6;\n");
+  second.edited(join(other, "src", "b.js"));
+  const undoB = "sed -i 's/b = 6/b = 2/' src/b.js";
+  sh(other, undoB);
+  second.ran(undoB);
+  assert.equal(await second.note("apply_patch"), undefined);
+  // A miss on a file this attempt never changed is still told.
+  const miss = "sed -i 's/nothing/x/' src/a.js";
+  const fresh = checkout();
+  const third = new HeadRewrites(fresh, signal);
+  await third.note("apply_patch");
+  sh(fresh, miss);
+  third.ran(miss);
+  assert.match(await third.note("apply_patch"), /left src\/a\.js unchanged/);
+});
+
 test("edits count from the worktree: in a run where every edit goes through the shell, the edit count matches the changed files, an earlier attempt's changes aside (#2283)", async () => {
   const worktree = checkout();
   // An earlier attempt's change the worktree starts with.

@@ -51,6 +51,8 @@ test("a step that can't run holds with answers that work", async () => {
   // clock, 5 minutes ahead of the host's; then another question's comment,
   // since closed. The sync saves these GitHub times (github-sync `ask`).
   await stopped(service);
+  // A clean stop says so, so the next start counts no death.
+  assert.equal(recordOf(inst).stopped, true, "a clean stop");
   const shown = Date.now() + 5 * 60_000;
   const at = (ms) => new Date(shown + ms).toISOString();
   const showAs = (lastShownAt) => {
@@ -112,6 +114,7 @@ test("a step that can't run holds with answers that work", async () => {
   assert.equal(stateOf(inst, 7).status, "cancelled");
   assert.deepEqual(stateOf(inst, 7).holds, []);
   await stopped(service);
+  assert.deepEqual(recordOf(inst).deaths, [], "two clean restarts, no deaths");
 });
 
 test("three deaths while two Objectives run hold neither; the restart backs off", async () => {

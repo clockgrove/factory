@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      checks: read
       id-token: write
       attestations: write
     steps:
@@ -34,15 +35,18 @@ jobs:
       - name: Require the tagged commit to be on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
+      # The merge queue ran Quality on this exact commit before main took
+      # it, so the release reuses that result instead of running the suite
+      # again on one runner.
+      - name: Require Quality to have passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=package-gate" \
+            --jq '[.check_runs[] | select(.app.slug == "github-actions" and .conclusion == "success")] | length')"
+          test "$passed" -gt 0
+
       - run: npm ci
-      - uses: ./.github/actions/bubblewrap
-      - run: git lfs version
-      - run: npm run lint
-      - run: npm run format:check
-      - run: npm run notices:check
-      - name: Run Factory's tests
-        timeout-minutes: 15
-        run: npm test
 
       - name: Pack
         run: |

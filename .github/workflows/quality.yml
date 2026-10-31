@@ -4,15 +4,15 @@ on:
   pull_request:
   # The merge queue runs the checks on each pull request on top of main and
   # everything queued ahead of it; package-gate is the check it waits for.
+  # It is the only way onto main, so a push to main runs nothing again: the
+  # queue already tested that exact commit.
   merge_group:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
-# A new push to a pull request cancels its older runs; every push to main
-# runs to completion in its own group.
+# A new push to a pull request cancels its older runs; every merge queue
+# entry runs to completion in its own group.
 concurrency:
   group: quality-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true

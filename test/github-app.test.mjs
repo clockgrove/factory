@@ -374,7 +374,7 @@ test("with operators set, the live status comment, the waiting note, reminders, 
   });
   const gate = { kind: "gate", gate: "a review by @kirk" };
   const state = {
-    version: 9,
+    version: 10,
     issue,
     status: "holding",
     holds: [asked("shown", { shownAt: old }), asked("new")],

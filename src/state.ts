@@ -18,7 +18,8 @@ import type { QueueMode, RefusalCode } from "./requests.js";
 import type { Spend } from "./spend.js";
 
 /**
- * 9: an attempt counts the service's deaths it ran at (`interrupted`),
+ * 10: a validation entry of a kept planner answer is `{command, after}`,
+ * not a string (#2290). 9: an attempt counts the service's deaths it ran at (`interrupted`),
  * and no question is saved per step (`asking`). 8: a diagnosis fact's `applied` corrections are records, not their
  * rendered findings (work/facts.ts). 6: a hold carries its answers as
  * `options`, each with its family and consequence. 5: a Work Item's
@@ -30,7 +31,7 @@ import type { Spend } from "./spend.js";
  * `factory reset` rebuilds it from GitHub (reset.ts), with no open
  * question.
  */
-const STATE_VERSION = 9;
+const STATE_VERSION = 10;
 
 export type ObjectiveStatus =
   | "checking"

@@ -147,11 +147,6 @@ test("a plan declares what each command needs, and the plan check refuses an aft
         `Work Item built validation command 1 (\`sh check.sh\`) has after ${JSON.stringify(after)}, but after lists only this item's commands before it, each once, by index: 0 \`sh build.sh\`. Use [] when it needs none of them, or null when it may need any`,
       ],
     );
-  // A kept answer of the older form is refused for the planner to restate.
-  const old = decodePlan(answer(["sh build.sh"]), facts);
-  assert.equal(old.plan, undefined);
-  assert.equal(old.invalidShape, undefined);
-  assert.match(old.findings[0].message, /\{"command", "after"\} objects/);
 });
 
 test("a full run starts with the failed command and what it needs; a targeted run brings what it declares", () => {

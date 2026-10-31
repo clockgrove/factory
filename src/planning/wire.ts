@@ -1374,20 +1374,12 @@ function schedulingHint(value: unknown): WorkItem["scheduling"] | undefined {
  * earlier commands it needs when it declares them (checks.ts checks them).
  */
 function selectCommand(selection: unknown, id: string): ValidationCommand {
-  // A revision applies to the answer as it was kept, so a kept one of an
-  // older form is refused for the planner to restate (`itemEdits`), never
-  // retried as a broken answer.
-  const entry = (selection ?? {}) as ObjectValue;
+  const entry = object(selection, "validation entry");
+  keys(entry, ["command", "after"], "validation entry");
   const { command, after } = entry;
-  if (
-    typeof selection !== "object" ||
-    Array.isArray(selection) ||
-    Object.keys(entry).sort().join() !== "after,command" ||
-    (after !== null && !Array.isArray(after))
-  )
-    throw new Refusal(
-      'Planner validation entries are {"command", "after"} objects: after is null or the indices of the earlier commands the command needs',
-      id,
+  if (after !== null && !Array.isArray(after))
+    throw new Shape(
+      "Planner validation entry after must be null or an array of command indices",
     );
   if (typeof command !== "string" || !validValidationCommand(command))
     throw new Refusal(

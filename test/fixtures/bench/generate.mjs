@@ -896,7 +896,7 @@ function fixture() {
     { checkName: "lint", source: { path: "CONTRIBUTING.md" } },
   ];
   const state = {
-    version: 9,
+    version: 10,
     issue: ISSUE,
     status: "done",
     frozen: {

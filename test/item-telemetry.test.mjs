@@ -327,7 +327,7 @@ function stateOf() {
     ...fields,
   });
   return {
-    version: 9,
+    version: 10,
     issue: ISSUE,
     status: "building",
     holds: [],

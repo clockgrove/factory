@@ -66,6 +66,11 @@ import {
   worktreeGitlinks,
 } from "../work/self-validate.js";
 import {
+  AttemptServices,
+  servicesHold,
+  servicesNote,
+} from "../work/services.js";
+import {
   COLLECTED_RESULT,
   shellDependencies,
   VALIDATION_TOOL_NAME,
@@ -200,8 +205,10 @@ export const CLAUDE_EDITS = `Edit files with Edit and Write: Edit fails when its
  * environment, has no installed dependencies, and isn't where the result is
  * validated. A worker has the shell only with Validate granted.
  */
-export const shellPrompt = (sandbox: Pick<SandboxConfig, "network">) =>
-  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead. ${CLAUDE_EDITS}`;
+export const shellPrompt = (
+  sandbox: Pick<SandboxConfig, "network" | "services">,
+) =>
+  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only.${servicesNote(sandbox)} ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead. ${CLAUDE_EDITS}`;
 
 /**
  * Compaction summarizes the first user turn, so the exact contract also
@@ -348,6 +355,8 @@ class Attempt {
   readonly root: string;
   /** Validate's runs, and the handoff and final-tree checks. */
   readonly validator: SelfValidation;
+  /** The attempt's throwaway services, for run_command; absent without any. */
+  services: AttemptServices | undefined;
   private shellQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -372,10 +381,11 @@ class Attempt {
     return AbortSignal.any([this.input.signal, this.closed.signal]);
   }
 
-  /** Stop running tools and wait for them, then remove the scratch. */
+  /** Stop running tools and wait for them, then the services, then remove the scratch. */
   async close(): Promise<void> {
     this.closed.abort(new Error("the worker attempt ended"));
     await Promise.all([this.shellQueue, this.validator.idle()]);
+    await this.services?.stop();
     rmSync(this.root, { recursive: true, force: true });
   }
 
@@ -514,7 +524,9 @@ class Attempt {
         env: {
           ...validationEnvironment(join(this.root, "gh")),
           ...secretEnvironment(this.options.allowedSecretNames),
+          ...this.services?.environment,
         },
+        ...(this.services && { services: this.services.root }),
         config: { ...this.options.sandbox, required: true },
         network: false,
         packageInstall: false,
@@ -1189,6 +1201,28 @@ export class ClaudeWorker implements Worker {
         recursive: true,
         mode: 0o700,
       });
+    // The shell's services, on its network, before the model starts.
+    if (attempt.grants.shell && this.options.sandbox.services) {
+      let services: Awaited<ReturnType<typeof AttemptServices.start>>;
+      try {
+        services = await AttemptServices.start(
+          this.options.sandbox,
+          this.options.sandbox.network === "host" ? "host" : "off",
+          attempt.signal,
+          input.log,
+        );
+      } catch (error) {
+        await attempt.close();
+        throw error;
+      }
+      if ("problem" in services) {
+        await attempt.close();
+        return providerOutcome(
+          new PlannerError("hold", servicesHold(services.problem)),
+        );
+      }
+      attempt.services = services;
+    }
     input.log({
       event: "worker-start",
       provider: "claude",

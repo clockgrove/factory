@@ -1,11 +1,13 @@
 /**
  * The operating-system sandbox for every command a worker can cause to run
  * on the controller's host: declared validation commands, setup and probe
- * commands, and the Claude worker's shell. Each command runs under
+ * commands, the Claude worker's shell and a worker attempt's services
+ * (work/services.ts). Each command runs under
  * bubblewrap in new user, PID, IPC, UTS, cgroup and network namespaces. It
  * sees the system read-only, the PATH's toolchains read-only, its checkout
  * (writable, its `.git` entry read-only) and the checkout's git metadata
- * read-only, a private HOME and TMPDIR, and nothing else: not the
+ * read-only, a private HOME and TMPDIR, a worker attempt's services
+ * directory read-only (work/services.ts), and nothing else: not the
  * operator's HOME, logins, SSH keys, gh or provider configuration, nor
  * Factory's own configuration, data or state. Network is off; loopback
  * works. A verified package install may get outbound network in its own
@@ -1160,6 +1162,12 @@ export interface SandboxOptions {
   /** Further host directories to mount read-only. */
   readOnly?: string[];
   /**
+   * A worker attempt's services directory (work/services.ts), Factory's
+   * own under the host's temporary directory, mounted read-only: the
+   * command connects to the sockets in it and writes nothing there.
+   */
+  services?: string;
+  /**
    * Regular files in the checkout, relative to `cwd`, mounted read-only
    * over it: no command can write, replace or remove them (hydrated Git
    * LFS files that are hard links to the operator's LFS store).
@@ -1324,6 +1332,17 @@ function launch(
     checkout,
     unsafe,
   );
+  const services = options.services && realpathSync(options.services);
+  if (
+    services &&
+    [checkout, temporary, home].some(
+      (path) => within(services, path) || within(path, services),
+    )
+  )
+    throw new Refusal(
+      `the services directory ${services} overlaps the checkout or the command's private directories`,
+      "Report it: Factory makes the services directory apart from both",
+    );
   const env: Record<string, string> = { ...base };
   // Configured values come first, so Factory's own variables win; the
   // networked install never receives them.
@@ -1429,6 +1448,7 @@ function launch(
     ...readOnly,
     ...metadata,
     ...(readOnlyStore ? [readOnlyStore] : []),
+    ...(services ? [services] : []),
   ])
     if (!system.some((root) => within(path, root))) mounts.set(path, "ro");
   for (const path of writable) mounts.set(path, "rw");

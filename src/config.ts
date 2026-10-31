@@ -295,7 +295,31 @@ export interface SandboxConfig {
    * are not redacted (a secret goes in policy.allowedSecretNames).
    */
   environment: Record<string, string>;
+  /**
+   * Throwaway services each worker attempt gets, by name (work/services.ts),
+   * such as a PostgreSQL its tests use; absent: none. Operational: they
+   * help a worker check its own work, and validation never uses them.
+   */
+  services?: Record<string, SandboxService>;
   limits: SandboxLimits;
+}
+
+/** One `sandbox.services` entry. */
+export interface SandboxService {
+  /**
+   * Starts the service in the foreground (`sh -c`, so `exec` the server):
+   * it is stopped when the attempt ends, and its exit before then is a
+   * failure. `$FACTORY_SERVICE_DIR` is its private directory, where it
+   * keeps its data and its socket.
+   */
+  start: string;
+  /** Exits zero once the service is ready; run until it does, for at most a minute. */
+  ready: string;
+  /**
+   * Variables the worker's commands get, checked as `sandbox.environment`;
+   * `${FACTORY_SERVICE_DIR}` in a value is the service's directory.
+   */
+  environment: Record<string, string>;
 }
 
 export interface SandboxLimits {
@@ -373,6 +397,34 @@ const sandboxEnvironment: Check<Record<string, string>> = (
   return environment;
 };
 
+const SERVICE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+
+const serviceSection = object({
+  start: text(),
+  ready: text(),
+  environment: sandboxEnvironment,
+});
+
+/** `sandbox.services`: entries by name; absent when there are none. */
+const sandboxServices: Check<Record<string, SandboxService> | undefined> = (
+  value,
+  path,
+  problems,
+) => {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) {
+    problems.push(`${path} must be an object`);
+    return undefined;
+  }
+  const services: Record<string, SandboxService> = {};
+  for (const [name, entry] of Object.entries(value)) {
+    if (!SERVICE_NAME.test(name))
+      problems.push(`${path} name ${name} must match ${SERVICE_NAME.source}`);
+    services[name] = serviceSection(entry, `${path}.${name}`, problems);
+  }
+  return Object.keys(services).length ? services : undefined;
+};
+
 const sandboxSection = object({
   required: flag(true),
   network: oneOf(["off", "package-install", "host"] as const, "off"),
@@ -383,6 +435,7 @@ const sandboxSection = object({
   }),
   readOnlyPaths: directories,
   environment: sandboxEnvironment,
+  services: sandboxServices,
   limits: object(
     Object.fromEntries(
       Object.entries(SANDBOX_LIMIT_MINIMUMS).map(([name, minimum]) => [

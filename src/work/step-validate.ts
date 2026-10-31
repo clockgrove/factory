@@ -29,6 +29,7 @@ import {
   hostGitExit,
   installStorePath,
   isAncestor,
+  sharedInstallStorePath,
   worktreePath,
 } from "../worktree.js";
 import { factoryCommit, VALIDATE_STEP_LOG } from "./collect.js";
@@ -103,8 +104,9 @@ export async function validateStep(
     checkout: config.checkout,
     repository: config.repository,
     directory: `${worktree}.validation`,
-    // The worker's Validate keeps the same store (self-validate.ts).
+    // The worker's Validate keeps the same stores (self-validate.ts).
     installStore: installStorePath(worktree),
+    sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
     commit,
     item,
     plan,
@@ -160,6 +162,7 @@ export async function validateStep(
             earlier,
             directory: `${worktree}.validation`,
             installStore: installStorePath(worktree),
+            sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
             blocks,
             media,
           })
@@ -345,6 +348,7 @@ async function integratedValidation(input: {
   earlier: { id: string; merged: MergeResult }[];
   directory: string;
   installStore: string;
+  sharedInstallStore: string;
   blocks: readonly ObjectiveBlock[];
   media: readonly SelectedMember[];
 }): Promise<Integrated | undefined> {
@@ -428,6 +432,7 @@ async function integratedValidation(input: {
     repository: deps.config.repository,
     directory: input.directory,
     installStore: input.installStore,
+    sharedInstallStore: input.sharedInstallStore,
     commit: merged,
     item: { ...item, validation },
     plan,
@@ -690,6 +695,7 @@ export async function validateBeforeMerge(
         earlier,
         directory: `${worktree}.validation`,
         installStore: installStorePath(worktree),
+        sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
         blocks: acceptedInputs(state).shown.blocks,
         media: validationMembers(plan, item, selection(state)),
       })

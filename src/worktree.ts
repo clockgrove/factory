@@ -428,6 +428,15 @@ export function installStorePath(worktree: string): string {
   return `${worktree}.packages`;
 }
 
+/**
+ * The install stores one Objective's items share (validate.ts
+ * `sharedInstallStore`, #2280): beside their worktrees, under a name no
+ * item's id can take, and removed with the Objective's work files.
+ */
+export function sharedInstallStorePath(workDir: string, issue: number): string {
+  return join(workDir, String(issue), ".packages");
+}
+
 /** `checkout`'s Git directory and common Git directory, absolute. */
 async function gitDirectories(
   checkout: string,

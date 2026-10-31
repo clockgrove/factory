@@ -23,13 +23,19 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
-import { installKey, keptStore, validateTree } from "../dist/validate.js";
+import {
+  installKey,
+  keptStore,
+  sharedStore,
+  validateTree,
+} from "../dist/validate.js";
 import { SelfValidation } from "../dist/work/self-validate.js";
 import { qaValidateStep, validateStep } from "../dist/work/steps.js";
 import {
   addWorktree,
   installStorePath,
   removeWorktree,
+  sharedInstallStorePath,
   worktreePath,
 } from "../dist/worktree.js";
 import {
@@ -141,14 +147,20 @@ function sandboxConfig(fields = {}) {
 
 /**
  * Validates `built` on `checkout` as a Work Item's validation does, with
- * `commands` and the item's kept store beside the checkout (`store`, else
- * none). The events validation logged come back.
+ * `commands`, the item's kept store beside the checkout (`store`, else
+ * none) and the Objective's shared one (`shared`, else none). The events
+ * validation logged come back.
  */
 async function validate(
   checkout,
   base,
   built,
-  { commands = [BOOTSTRAP], store = `${checkout}.packages`, sandbox } = {},
+  {
+    commands = [BOOTSTRAP],
+    store = `${checkout}.packages`,
+    shared,
+    sandbox,
+  } = {},
 ) {
   const configured = sandbox ?? sandboxConfig();
   const log = new RunLog(
@@ -167,6 +179,7 @@ async function validate(
     repository: REPO,
     directory: `${checkout}.validation`,
     ...(store ? { installStore: store } : {}),
+    ...(shared ? { sharedInstallStore: shared } : {}),
     commit: built,
     item: work,
     plan: { base, items: [work], coverage: [], finalCommands: [] },
@@ -191,6 +204,7 @@ function install({ result, events }) {
     /reused (\d+), downloaded (\d+)/.exec(result.results[0].tail) ?? [];
   return {
     installStore: started.installStore,
+    ...(started.installStoreShared ? { shared: true } : {}),
     reused: Number(reused),
     downloaded: Number(downloaded),
     store: /^store (.*)$/m.exec(result.results[0].tail)?.[1],
@@ -423,16 +437,22 @@ test("removing an item's worktree removes its kept store", async () => {
 test("a kept store is reused only under its own key", async () => {
   const directory = join(tempDir("factory-kept-"), "item.packages");
   const fresh = await keptStore(directory, "a".repeat(64));
-  assert.deepEqual(fresh, { root: join(directory, "cache"), reused: false });
+  assert.deepEqual(fresh, {
+    root: join(directory, "cache"),
+    directory,
+    reused: false,
+  });
   writeFileSync(join(fresh.root, "package"), "fetched");
   assert.deepEqual(await keptStore(directory, "a".repeat(64)), {
     root: fresh.root,
+    directory,
     reused: true,
   });
   assert.ok(existsSync(join(fresh.root, "package")));
   // Another key empties it first.
   assert.deepEqual(await keptStore(directory, "b".repeat(64)), {
     root: fresh.root,
+    directory,
     reused: false,
   });
   assert.deepEqual(readdirSync(fresh.root), []);
@@ -500,6 +520,174 @@ test("a changed vendored tarball installs from an empty store", {
     { ...install(await validate(checkout, base, changed)), store: undefined },
     { installStore: "new", reused: 0, downloaded: 2, store: undefined },
   );
+});
+
+// clockgrove/factory#2280: every pnpm lockfile's settings name
+// `excludeLinksFromLockfile: false`, which ends in "file:", so every pnpm
+// install was keyed by the whole tree as a vendored package's is: the store
+// was reused only on the very tree that filled it (5 of 21 installs, each
+// the validate step after a passing Validate on that tree).
+const PNPM_LOCK = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      left-pad:
+        specifier: 1.0.0
+        version: 1.0.0
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+
+packages:
+
+  is-number@7.0.0:
+    resolution: {integrity: sha512-a}
+
+  left-pad@1.0.0:
+    resolution: {integrity: sha512-b}
+`;
+
+test("a pnpm lockfile's own settings never key the install by the whole tree", async () => {
+  const { checkout } = target();
+  const signal = AbortSignal.timeout(30_000);
+  const key = (commit) => installKey(checkout, commit, BOOTSTRAP, signal);
+  const locked = commit(checkout, { "pnpm-lock.yaml": PNPM_LOCK });
+  const original = await key(locked);
+  // A source change, as each repair makes, keeps the key.
+  const source = commit(checkout, { "src/index.js": "export const b = 1;\n" });
+  assert.equal(await key(source), original);
+  // `file:` as a protocol still keys by the tree, wherever it is named.
+  for (const named of [
+    "  foo@file:vendor/foo.tgz:\n",
+    "    resolution: {tarball: file:vendor/foo.tgz}\n",
+    "        specifier: 'file:vendor/foo'\n",
+    "        version: git+file:vendor/foo\n",
+  ]) {
+    const local = commit(checkout, { "pnpm-lock.yaml": PNPM_LOCK + named });
+    const edited = commit(checkout, {
+      "src/index.js": `export const c = ${JSON.stringify(named)};\n`,
+    });
+    assert.notEqual(await key(edited), await key(local), named);
+  }
+});
+
+test("two validations of one item in a row reuse its store across a source change", {
+  skip,
+}, async () => {
+  const { checkout } = target();
+  const base = commit(checkout, { "pnpm-lock.yaml": PNPM_LOCK });
+  const built = commit(checkout, { "src/index.js": "export const a = 1;\n" });
+  assert.deepEqual(
+    { ...install(await validate(checkout, base, built)), store: undefined },
+    { installStore: "new", reused: 0, downloaded: 2, store: undefined },
+  );
+  const repaired = commit(checkout, {
+    "src/index.js": "export const a = 2;\n",
+  });
+  assert.deepEqual(
+    { ...install(await validate(checkout, base, repaired)), store: undefined },
+    { installStore: "reused", reused: 2, downloaded: 0, store: undefined },
+  );
+});
+
+test("items whose install inputs are their start's share the Objective's store; a changed input keeps the item's own", {
+  skip,
+}, async () => {
+  const { checkout } = target();
+  const base = commit(checkout, { "pnpm-lock.yaml": PNPM_LOCK });
+  const shared = join(tempDir("factory-objective-"), ".packages");
+  const validateItem = (id, built) =>
+    validate(checkout, base, built, {
+      store: `${checkout}-${id}.packages`,
+      shared,
+    });
+  const first = install(
+    await validateItem("a", commit(checkout, { "src/a.js": "export {};\n" })),
+  );
+  assert.deepEqual(
+    { ...first, store: undefined },
+    {
+      installStore: "new",
+      shared: true,
+      reused: 0,
+      downloaded: 2,
+      store: undefined,
+    },
+  );
+  const key = await installKey(
+    checkout,
+    base,
+    BOOTSTRAP,
+    AbortSignal.timeout(30_000),
+  );
+  assert.equal(first.store, join(shared, key, "cache", "pnpm-store"));
+  assert.equal(statSync(join(shared, key)).mode & 0o777, 0o700);
+  // Another item's first validation fetches nothing, and keeps no store of
+  // its own.
+  assert.deepEqual(
+    {
+      ...install(
+        await validateItem(
+          "b",
+          commit(checkout, { "src/b.js": "export {};\n" }),
+        ),
+      ),
+      store: undefined,
+    },
+    {
+      installStore: "reused",
+      shared: true,
+      reused: 2,
+      downloaded: 0,
+      store: undefined,
+    },
+  );
+  assert.equal(existsSync(`${checkout}-b.packages`), false);
+  // An item that changed the lockfile installs from its own store, and
+  // leaves the shared one as it was.
+  const moved = install(
+    await validateItem(
+      "c",
+      commit(checkout, {
+        "pnpm-lock.yaml": `${PNPM_LOCK}\n  zod@4.0.0:\n    resolution: {integrity: sha512-c}\n`,
+      }),
+    ),
+  );
+  assert.deepEqual(
+    { ...moved, store: undefined },
+    { installStore: "new", reused: 0, downloaded: 3, store: undefined },
+  );
+  assert.equal(
+    moved.store,
+    join(`${checkout}-c.packages`, "cache", "pnpm-store"),
+  );
+  assert.deepEqual(readdirSync(shared), [key]);
+  assert.equal(readdirSync(join(shared, key, "cache", "pnpm-store")).length, 2);
+});
+
+test("installs of one key at once share one store, neither emptying the other's", async () => {
+  const directory = join(tempDir("factory-objective-"), ".packages");
+  const key = "c".repeat(64);
+  const made = await Promise.all([
+    sharedStore(directory, key),
+    sharedStore(directory, key),
+  ]);
+  assert.deepEqual(
+    made.map((store) => store.root),
+    [join(directory, key, "cache"), join(directory, key, "cache")],
+  );
+  assert.deepEqual(made.map((store) => store.reused).sort(), [false, true]);
+  writeFileSync(join(made[0].root, "package"), "fetched");
+  assert.equal((await sharedStore(directory, key)).reused, true);
+  assert.ok(existsSync(join(made[0].root, "package")));
+  // Nothing half-made is left beside it.
+  assert.deepEqual(readdirSync(directory), [key]);
 });
 
 test("the kept store counts against the install's HOME budget, and one over it is not kept", {
@@ -573,7 +761,7 @@ const installEvents = (events) =>
     )
     .map((event) => event.installStore);
 
-test("the validate step reuses the store the worker's Validate filled beside the item's worktree", {
+test("the validate step reuses the store the worker's Validate filled", {
   skip,
 }, async () => {
   const configured = sandboxConfig();
@@ -594,12 +782,14 @@ test("the validate step reuses the store the worker's Validate filled beside the
     state,
     events,
   );
-  // The worker's worktree, where the work step put it, and its Validate.
+  // The worker's worktree, where the work step put it, and its Validate
+  // with the Objective's shared store, as the work step gives it.
   const worktree = worktreePath(workDir, state.issue, work.id);
+  const shared = sharedInstallStorePath(workDir, state.issue);
   await addWorktree(checkout, worktree, base, context.signal);
   writeFileSync(join(worktree, "src/index.js"), "export const a = 1;\n");
   const validator = new SelfValidation(
-    { ...context, worktree, item: work, base },
+    { ...context, worktree, item: work, base, sharedInstallStore: shared },
     {
       sandbox: configured.sandbox,
       plan: accepted,
@@ -623,13 +813,13 @@ test("the validate step reuses the store the worker's Validate filled beside the
   const outcome = await validateStep(work, context, deps, undefined);
   assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
   assert.deepEqual(installEvents(events), ["new", "reused"]);
-  assert.equal(
-    readdirSync(join(installStorePath(worktree), "cache", "pnpm-store")).length,
-    2,
-  );
+  // Neither changed an install input, so both used the Objective's store.
+  const [key] = readdirSync(shared);
+  assert.equal(readdirSync(join(shared, key, "cache", "pnpm-store")).length, 2);
+  assert.equal(existsSync(installStorePath(worktree)), false);
 });
 
-test("a QA item's validate step keeps its store beside the item's worktree, reused when it runs again", {
+test("a QA item's validate step keeps its store, reused when it runs again", {
   skip,
 }, async () => {
   const configured = sandboxConfig();
@@ -662,6 +852,12 @@ test("a QA item's validate step keeps its store beside the item's worktree, reus
     assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
   }
   assert.deepEqual(installEvents(events), ["new", "reused"]);
-  const kept = installStorePath(worktreePath(workDir, state.issue, qa.id));
-  assert.equal(readdirSync(join(kept, "cache", "pnpm-store")).length, 2);
+  // The head's install inputs are the base's: the Objective's store.
+  const shared = sharedInstallStorePath(workDir, state.issue);
+  const [key] = readdirSync(shared);
+  assert.equal(readdirSync(join(shared, key, "cache", "pnpm-store")).length, 2);
+  assert.equal(
+    existsSync(installStorePath(worktreePath(workDir, state.issue, qa.id))),
+    false,
+  );
 });

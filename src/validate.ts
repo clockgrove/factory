@@ -19,6 +19,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
@@ -158,6 +159,16 @@ export interface ValidateInput {
    * store is its own empty HOME's, as before.
    */
   installStore?: string;
+  /**
+   * With `installStore`: where the Objective's items share the exact
+   * install's store (#2280), such as `<workDir>/<issue>/.packages`. An
+   * install whose key is the one the item started from (`base`, else the
+   * plan's) has every dependency input as there, so it uses the store kept
+   * here under that key (`sharedStore`), which the Objective's first such
+   * install filled; one whose inputs the candidate changed keeps
+   * `installStore`, its own. Absent: always `installStore`.
+   */
+  sharedInstallStore?: string;
   /** The exact candidate commit. */
   commit: string;
   /** One Work Item's commands, or, absent, the plan's final commands. */
@@ -675,7 +686,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       const online =
         install && input.sandbox.network === "package-install" && !refused;
       // The item's kept package store, for the exact install alone, keyed
-      // by its inputs as this commit has them: the install still runs.
+      // by its inputs as this commit has them: the install still runs. An
+      // install with the inputs the item started from shares the
+      // Objective's store under that key (#2280).
       let store: KeptStore | undefined;
       if (
         install &&
@@ -684,10 +697,18 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         sandboxAvailable().available
       )
         try {
-          store = await keptStore(
-            input.installStore,
-            await installKey(checkout, commit, command, signal),
-          );
+          const key = await installKey(checkout, commit, command, signal);
+          store =
+            input.sharedInstallStore &&
+            key ===
+              (await installKey(
+                checkout,
+                input.base ?? plan.base,
+                command,
+                signal,
+              ))
+              ? await sharedStore(input.sharedInstallStore, key)
+              : await keptStore(input.installStore, key);
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof GitRefusal) throw error;
@@ -702,7 +723,10 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         index,
         command,
         preparing,
-        ...(store && { installStore: store.reused ? "reused" : "new" }),
+        ...(store && {
+          installStore: store.reused ? "reused" : "new",
+          ...(store.shared && { installStoreShared: true }),
+        }),
       });
       const limit = capture ? outputLimit(selectors, command) : undefined;
       // The whole output, as it arrives: what the run keeps of a failure.
@@ -763,7 +787,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       if (passed) whole.remove();
       // A store over the disk budget is never kept: the next install of the
       // item starts from an empty one.
-      if (store && run.diskOverflow) await forceRemove(input.installStore!);
+      if (store && run.diskOverflow) await forceRemove(store.directory);
       input.log({
         event: "validation-result",
         index,
@@ -1258,6 +1282,10 @@ function dependencyInput(path: string): boolean {
  * old package from a kept store, where an empty one fails the integrity
  * check. So when any dependency input names `file:`, the key covers every
  * path, mode and blob of the commit: only the very same tree reuses it.
+ * `file:` counts only as a protocol (LOCAL_PACKAGE): every pnpm lockfile's
+ * own `excludeLinksFromLockfile:` setting ends in it too, which once keyed
+ * every pnpm install by the whole tree, so a store was reused only on the
+ * very tree it was filled on (#2280).
  */
 export async function installKey(
   checkout: string,
@@ -1285,17 +1313,30 @@ export async function installKey(
       .filter(([, type]) => type === "blob")
       .map(([, , object]) => object!),
   );
-  const local = bodies.some((body) => body.includes("file:"));
+  const local = bodies.some((body) => LOCAL_PACKAGE.test(body.toString()));
   for (const entry of local ? entries : inputs) hash.update(`${entry}\0`);
   return hash.digest("hex");
 }
+
+/**
+ * A package from the checkout: the `file:` protocol, as a manifest's
+ * dependency (`"file:vendor/foo.tgz"`), a lockfile's specifier, version or
+ * tarball (`file:...`, `foo@file:...`) or `git+file:` names it, never a
+ * word ending in "file" before a colon, such as pnpm's
+ * `excludeLinksFromLockfile:`.
+ */
+const LOCAL_PACKAGE = /(?<![A-Za-z0-9])file:/;
 
 /** An item's kept package store, ready for one install. */
 interface KeptStore {
   /** The package-manager store and caches' root, the install's to write. */
   root: string;
+  /** What holds it, removed when the store is not kept. */
+  directory: string;
   /** The last install that wrote it had this one's key. */
   reused: boolean;
+  /** The Objective's store (`sharedStore`), not the item's own. */
+  shared?: true;
 }
 
 /**
@@ -1318,11 +1359,45 @@ export async function keptStore(
     // None yet.
   }
   if (kept === key && lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
-    return { root, reused: true };
+    return { root, directory, reused: true };
   await forceRemove(directory);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   writeFileSync(keyFile, key, { mode: 0o600 });
-  return { root, reused: false };
+  return { root, directory, reused: false };
+}
+
+/**
+ * The store the Objective's items share for installs of one `key`
+ * (`sharedInstallStore`, #2280): `<directory>/<key>/cache`. Never emptied
+ * for another key, since each key has its own; a new one is made whole
+ * under a temporary name and renamed into place, so installs of one key
+ * at once never remove the store another is filling, and both write it as
+ * a package manager's shared store is written. Only the exact install
+ * writes `cache`, only with this key's inputs, so what an item reads there
+ * is what installs of its very inputs fetched, whichever item ran them; the
+ * key is the directory's name, outside what the install may write.
+ */
+export async function sharedStore(
+  directory: string,
+  key: string,
+): Promise<KeptStore> {
+  const kept = join(directory, key);
+  const root = join(kept, "cache");
+  const store = { root, directory: kept, shared: true as const };
+  if (lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
+    return { ...store, reused: true };
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const made = await mkdtemp(join(directory, ".new-"));
+  try {
+    mkdirSync(join(made, "cache"), { mode: 0o700 });
+    renameSync(made, kept);
+  } catch (error) {
+    await forceRemove(made);
+    // Another install of this key made it first: this one shares it.
+    if (!lstatSync(root, { throwIfNoEntry: false })?.isDirectory()) throw error;
+    return { ...store, reused: true };
+  }
+  return { ...store, reused: false };
 }
 
 // ---------------------------------------------------------------------------

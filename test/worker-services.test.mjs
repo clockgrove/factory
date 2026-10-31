@@ -44,7 +44,10 @@ const ask = (request) =>
 
 /** A host listener on loopback, and the port a service must not reach under network off. */
 async function hostListener(t) {
-  const server = createServer((socket) => socket.end("host\n"));
+  // A probe that disconnects at once resets the reply: not a failure.
+  const server = createServer((socket) =>
+    socket.on("error", () => {}).end("host\n"),
+  );
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   return server.address().port;

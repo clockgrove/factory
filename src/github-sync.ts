@@ -1,6 +1,6 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
-import { answeredBy, displayTime } from "./display.js";
+import { answeredBy, displayTime, redactDeep } from "./display.js";
 import {
   CANCEL_CLEANUP,
   DEADLINE,
@@ -22,6 +22,7 @@ import {
   type Transport,
   transport,
 } from "./github-trace.js";
+import type { ItemTelemetry } from "./item-telemetry.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import { type RunLog, redact } from "./log.js";
 import { code, mark, mentions, prose } from "./markdown.js";
@@ -582,7 +583,7 @@ export class GitHubSync {
         this.closings(runner);
         if (!low) {
           this.status(runner, sync);
-          this.track(runner);
+          this.track(runner, sync);
         }
         this.reply(runner, module, sync);
         this.cancelled(runner, module);
@@ -694,7 +695,25 @@ export class GitHubSync {
             module.cancelShown === true))) &&
       (!this.config.tracking.enabled ||
         module.trackingGivenUp === true ||
-        !trackingDue(state))
+        !trackingDue(state, Date.now(), this.telemetry(state)))
+    );
+  }
+
+  /**
+   * Each Work Item's telemetry this run, as of its last finished step and
+   * redacted, from the tally the status comment reads (progress.ts
+   * RunTally): what tracking shows and what `synced` checks it against.
+   * Undefined until a SyncView has named the log directory.
+   */
+  private telemetry(
+    state: ObjectiveState,
+    sync?: SyncView,
+  ): Record<string, ItemTelemetry> | undefined {
+    if (sync) this.tally ??= new RunTally(sync.logs);
+    if (!this.tally) return undefined;
+    return redactDeep(
+      this.tally.read(state.issue, state.startedAt ?? "").items,
+      this.config.secrets,
     );
   }
 
@@ -1349,15 +1368,16 @@ export class GitHubSync {
   }
 
   /**
-   * The Work Item issues (tracking.ts): projected from the plan in force
-   * and each item's state by a background job, at most once per
+   * The Work Item issues (tracking.ts): projected from the plan in force,
+   * each item's state and its telemetry from the run log (`telemetry`) by
+   * a background job, at most once per
    * STATUS_EVERY_MS while the Objective runs and at once when it has
    * finished, and only when a write is due; a pass that failed runs again
    * once its backoff ends. A finished Objective settles
    * only once every item issue shows its end and is closed, or GitHub
    * refused that issue's close (it is never counted closed).
    */
-  private track(runner: ObjectiveRunner): void {
+  private track(runner: ObjectiveRunner, sync?: SyncView): void {
     const { state } = runner;
     const issue = state.issue;
     const module = state.modules.github as GitHubModule;
@@ -1373,7 +1393,9 @@ export class GitHubSync {
       now - (this.trackTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS
     )
       return;
-    if (this.jobs.held(`track:${issue}`) || !trackingDue(state)) return;
+    if (this.jobs.held(`track:${issue}`)) return;
+    const telemetry = this.telemetry(state, sync);
+    if (!trackingDue(state, now, telemetry)) return;
     this.trackTried.set(issue, now);
     this.background(
       issue,
@@ -1383,6 +1405,7 @@ export class GitHubSync {
           github: this.github,
           state: () => runner.state,
           issueType: this.config.tracking.issueType,
+          ...(telemetry ? { telemetry } : {}),
           save: (change) =>
             runner.transact(() => {
               const github = runner.state.modules.github as GitHubModule;

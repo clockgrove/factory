@@ -25,7 +25,7 @@ The rules live in `src/planning/rubric.ts`. The planner and the graph reviewer r
 
 **New identifiers are the worker's.** Acceptance and briefs name only identifiers that exist at the base. A new type, endpoint path, migration number, file or test name is described by role and data, unless the Objective or a pinned source fixes it. The rule stops at owned paths: an item owns each new file it creates, a new test file included, by the literal path the planner chooses, or by a directory prefix ending in `/` where narrow ownership allows one, and graph review never flags either as a new identifier. Why: a reviewer that applied the rule to owned paths refused a new test file's name, its directory as too broad, and dropping the test, which left no valid plan (#2108).
 
-**Size:** one outcome per item. About 15 acceptance entries is a signal, not a target: above it, split the item or say in its brief why it is one outcome.
+**Size:** one outcome per item, with a test per capability. About 5 acceptance entries is a signal, not a target: above it, split the item or state why it is one outcome in `oneOutcomeReason`, which Factory adds to the brief and graph review judges (check 3). Graph review also flags an item whose distinct capabilities one new test file or one test proves together, and an item one worker could not plausibly get green in a handful of validation cycles. Entry count alone is not a defect, and cohesive work stays together when handoff costs more than it saves. Why: live, a 9-entry item passed the old signal of 15 with seven capabilities proved by one new test file; each failing capability hid the next, and its worker found them one validation cycle at a time (#2282).
 
 **Briefs** carry settled decisions and cross-item contracts the worker cannot get from the repository. Workers read the code themselves.
 
@@ -66,7 +66,7 @@ All three happen in the planner's one session. Self-checking is a filter; the in
 - **A command proof is judged too.** Result review judges each Objective criterion or source exit item the item proves, verbatim, whether its proof is semantic or a `result-command`. For a command proof the reviewer is told which validation command proves it: that command passing is required, not sufficient, and the review passes the criterion only when the tests the command runs assert its text. Why: an item's own test passed on a stub that echoed its input, and only final review, after every merge, refused the criterion (#2203). Read-only QA's `integrated-command` criteria are still judged at final review.
 - **Proof is asked for once.** Result and final review share the verification standard (`REVIEW_GUIDANCE.findings` in `src/review/result.ts`): a criterion is proven by the strongest test that establishes it, a dependency's merged test included, so it needs no second test; the enumerated items of one sentence may share one table-driven assertion; a prohibition on behaviour the candidate doesn't implement is proven by source evidence that no such path exists; and a missing-verification finding asks for the smallest assertion added to an existing test. Proof strength is unchanged: a test that asserts less than the criterion, such as a stub that echoes its input, is still refused. Result review also refuses a test the result adds that re-proves a claim another test proves, or a harness it copies instead of importing. Why: reviews demanded a test per listed word and a test of a storage rule for a layer the candidate didn't have (#2241).
 - **Lint before review.** Before any paid review, Factory refuses:
-  - an item with more than 15 acceptance entries and no `oneOutcomeReason`;
+  - an item with more than 5 acceptance entries and no `oneOutcomeReason`, except one an amendment neither adds nor changes: an item whose acceptance and reason are as the plan being amended has them, which an earlier, higher signal may have accepted, or one the started-item rule binds, whose acceptance its planner cannot restate;
   - an acceptance entry that cites a line number next to a source file name (`store.ts:88`, `store.ts#L88`);
   - two items that own the same or overlapping paths when neither depends on the other, directly or transitively. Why: the scheduler would run them one after the other anyway, and wide shared ownership turns a plan into a serial chain;
   - when the plan selects any validation command (so the repository has one), a work item without a validation command, and a criterion proved only by final review or CI whose owner runs none. Why: final review and hosted CI run nothing inside Factory validation;
@@ -132,6 +132,8 @@ Acceptance:
 4. Invariant: the same jobs remain whether pruning runs once or in several smaller steps.
 5. Without `retention`, the queue lists and stores exactly what it does today.
 6. The configuration reference documents `retention` and its default.
+
+One outcome (6 entries, above the signal): retention is one rule, and each entry checks one side of it.
 
 Evidence: new tests in the repository suite prove 1–5; the full existing suite passes.
 Constraints: no new storage dependency.

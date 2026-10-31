@@ -49,6 +49,11 @@ import { validationDeadlineMs } from "../validate.js";
 import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
+  rewriteSnapshot,
+  SCRIPTED_EDITS,
+  unchangedRewrite,
+} from "../work/scripted-edits.js";
+import {
   FinishRequests,
   type SelfValidateOptions,
   SelfValidation,
@@ -183,13 +188,20 @@ const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
     : "the network is off and only loopback works";
 
 /**
+ * How a worker with a shell edits files (#2283), as a Codex worker is told
+ * (codex-worker.ts `CODEX_EDIT_CALL`): through Edit and Write, which fail
+ * loudly, and a script only for a mechanical change across many files.
+ */
+export const CLAUDE_EDITS = `Edit files with Edit and Write: Edit fails when its old_string doesn't match the file, instead of changing nothing. ${SCRIPTED_EDITS}`;
+
+/**
  * The truth about the worker's own shell (#2156), as a Codex worker is told
  * (codex-worker.ts `codexShellNote`): it differs from Factory's validation
  * environment, has no installed dependencies, and isn't where the result is
  * validated. A worker has the shell only with Validate granted.
  */
 export const shellPrompt = (sandbox: Pick<SandboxConfig, "network">) =>
-  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead.`;
+  `Your run_command tool runs shell commands in your checkout inside an OS sandbox (${shellNetwork(sandbox)}), which differs from Factory's validation environment: use it to inspect files, compute values and run what needs no dependencies. ${shellDependencies(sandbox.network === "host")} Your checkout's .git is read-only. ${COLLECTED_RESULT} Validate runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell. Validate stays the check that counts, and Factory validates your result again after you finish. When a command fails in your shell only because of this environment (no network, no installed dependencies, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; check with Validate instead. ${CLAUDE_EDITS}`;
 
 /**
  * Compaction summarizes the first user turn, so the exact contract also
@@ -490,6 +502,9 @@ class Attempt {
     if (signal.aborted) throw new Error("the Factory shell closed");
     const started = Date.now();
     const output = new BoundedText(KEPT_HEAD, KEPT_TAIL);
+    // Commands run one at a time, so what a scripted rewrite names is read
+    // just before it runs and compared after (#2283).
+    const rewrite = rewriteSnapshot(command, this.input.worktree);
     let run: Awaited<ReturnType<typeof runSandboxed>>;
     try {
       run = await runSandboxed(command, {
@@ -524,7 +539,8 @@ class Attempt {
     const status = run.timedOut
       ? `Stopped after ${timeoutMs} ms, with everything it started`
       : `Exit code ${run.exitCode ?? "none (ended by a signal)"}`;
-    return `${status} (${ms} ms)\n${returned(output.toString())}`;
+    const missed = rewrite && unchangedRewrite(rewrite, "Edit");
+    return `${status} (${ms} ms)\n${returned(output.toString())}${missed ? `\n${missed}` : ""}`;
   }
 
   // copy_file and delete_file

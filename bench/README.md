@@ -366,14 +366,14 @@ Quality and adversary run beside the grader's votes, and the verifier after them
 
 Each role is bounded by `--role-timeout-minutes` and the whole run by `--timeout-minutes`, 30 minutes each by default. A role that times out, fails or answers out of its schema is unknown, never a fail: a grader vote is unknown on every criterion, and a reviewer, or the verifier when there were findings to verify, leaves the findings unknown: the output has no `findings`, says why in `warnings`, and `escapes.graderDefects` stays null, never 0. With no grader vote to split the acceptance there is nothing to grade: the output has `error` and no criteria, and it exits 1, which the harness records as `grade.error`.
 
-| Flag                                              | What                                                                    |
-| ------------------------------------------------- | ----------------------------------------------------------------------- |
-| `--repo`, `--commit`, `--base`, `--objective`     | The checkout, the graded and base commits, the Objective's text         |
-| `--out`, `--evidence`                             | The output file, and the directory of each role's transcript            |
-| `--cli PATH`, `--model NAME`, `--effort LEVEL`    | The agent CLI (`claude`), its model (`opus`) and effort (the CLI's own) |
-| `--install CMD`, `--check CMD ...`                | The repository's install command and its declared checks                |
-| `--votes N`, `--max-findings N`                   | Grader votes per criterion (3), findings the verifier reproduces (20)   |
-| `--timeout-minutes N`, `--role-timeout-minutes N` | The whole run's and each role's wall-clock bound (30 each)              |
+| Flag                                              | What                                                                          |
+| ------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `--repo`, `--commit`, `--base`, `--objective`     | The checkout, the graded and base commits, the Objective's text               |
+| `--out`, `--evidence`                             | The output file, and the directory of each role's transcript                  |
+| `--cli PATH`, `--model NAME`, `--effort LEVEL`    | The agent CLI (`claude`), its model (`claude-sonnet-5-5`) and effort (`high`) |
+| `--install CMD`, `--check CMD ...`                | The repository's install command and its declared checks                      |
+| `--votes N`, `--max-findings N`                   | Grader votes per criterion (3), findings the verifier reproduces (20)         |
+| `--timeout-minutes N`, `--role-timeout-minutes N` | The whole run's and each role's wall-clock bound (30 each)                    |
 
 The output is the grader contract's, plus `commit` and `base`; `findings` (each verified one `{ id, role, title, severity, reported, evidence, reproduce }`, `reported` the reporter's severity); `mutation`; `verification`; the grader's `checks`; `cost` (`{ usd, byRole }`, each role's `total_cost_usd`, `usd` null when any is unknown); `durationMs`; each role's `status`, time and cost; and `graderVersion`, which names the auto-grader's version, a digest of its prompts, the CLI, the model, the effort and the votes. It exits 0 when graded, 1 with no criteria and 64 on a usage error.
 

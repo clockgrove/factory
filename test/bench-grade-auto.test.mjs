@@ -202,7 +202,7 @@ test("the roles' answers combine into the grader contract, with findings, mutati
   const { output, calls, evidence } = await grade();
   assert.match(
     output.graderVersion,
-    /^grade-auto 1 \(prompts [0-9a-f]{12}; agent-cli\.mjs stand-in-model; 3 votes\)$/,
+    /^grade-auto 1 \(prompts [0-9a-f]{12}; agent-cli\.mjs stand-in-model high; 3 votes\)$/,
   );
   assert.equal(output.commit, repo.commit);
   assert.equal(output.base, repo.base);

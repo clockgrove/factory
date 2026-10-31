@@ -8,15 +8,19 @@
  * 1. `grader`: splits the acceptance into criteria and gives each `pass`,
  *    `partial`, `fail` or `unknown` with file:line evidence, after running
  *    the repository's declared checks. It votes `votes` times (3 by
- *    default), independently: the first vote that answers splits the
- *    criteria, the others grade that list. A criterion's verdict is a strict
+ *    default), independently, all on one criteria list: given (`criteria`),
+ *    or stored for the Objective by a digest of its text (`store`), or else
+ *    split by the first vote that answers and stored, with a warning, for
+ *    the runs after (#2275). The digest of the list is part of
+ *    graderVersion. A criterion's verdict is a strict
  *    majority of all the votes: `pass` with a majority of passes, `fail`
  *    with a majority of fails and partials (a partial is not a pass), and
  *    `unknown` otherwise. A vote that timed out or failed is unknown on
  *    every criterion, so it never makes a fail.
  * 2. `quality`: reviews the change (design, the repository's conventions,
- *    test economy, dead code, duplication, docs) and mutates the changed
- *    lines, reporting the mutants the delivered tests let survive.
+ *    test economy, dead code, duplication, docs) and reads the survivors of
+ *    the mutation pass (bench/lib/mutate.mjs), which runs before it with no
+ *    model: seeded mutants of the changed lines, so one tree has one score.
  * 3. `adversary`: probes each guarantee the acceptance states and reports
  *    each break with a reproduce snippet.
  * 4. `verifier`: reproduces the non-minor findings of 2 and 3, at most
@@ -45,10 +49,12 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -56,9 +62,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkoutInto, runCommand, SEVERITIES } from "./grade.mjs";
+import { chooseMutants, runMutants } from "./mutate.mjs";
 
 /** The auto-grader's own version: part of graderVersion, with its prompts' digest. */
-export const AUTO_GRADER_VERSION = 1;
+export const AUTO_GRADER_VERSION = 2;
 /** Where the roles' prompts live: bench/grade-auto/<role>.md. */
 export const PROMPTS = join(
   dirname(dirname(fileURLToPath(import.meta.url))),
@@ -73,6 +80,8 @@ export const DEFAULTS = Object.freeze({
   effort: "high",
   votes: 3,
   maxFindings: 20,
+  mutants: 40,
+  seed: "0",
   timeoutMinutes: 30,
   roleTimeoutMinutes: 30,
 });
@@ -121,14 +130,7 @@ export const SCHEMAS = {
     },
     ["criteria"],
   ),
-  quality: object({
-    findings: list(finding({ category: string })),
-    mutation: object({
-      killed: whole,
-      survived: whole,
-      examples: list(object({ location: string, mutant: string })),
-    }),
-  }),
+  quality: object({ findings: list(finding({ category: string })) }),
   adversary: object({
     probes: whole,
     findings: list(finding({ guarantee: string })),
@@ -188,6 +190,59 @@ export function schemaProblems(schema, value, path = "answer") {
       ];
     }
   }
+}
+
+const sha = (text) => createHash("sha256").update(text).digest("hex");
+
+/** The key of an Objective's criteria list in the store: a digest of its text. */
+export const objectiveKey = (objective) => sha(objective.trim());
+
+/** A digest of a criteria list: part of graderVersion, so a list that changes is another grader. */
+export const criteriaDigest = (criteria) =>
+  sha(JSON.stringify(criteria.map(({ id, text }) => ({ id, text })))).slice(
+    0,
+    12,
+  );
+
+/** Where `criteria` isn't a list of `{ id, text }` with distinct ids; empty when it is. */
+export function criteriaProblems(criteria) {
+  const problems = schemaProblems(
+    list(object({ id: string, text: string })),
+    criteria,
+    "criteria",
+  );
+  if (!problems.length && !criteria.length)
+    problems.push("criteria has no criterion");
+  const ids = criteria.map((c) => c.id);
+  if (!problems.length && new Set(ids).size < ids.length)
+    problems.push("criteria give an id twice");
+  return problems;
+}
+
+/** The store of criteria lists in `file`, by Objective key; empty when there is none yet. */
+function readStore(file) {
+  if (!existsSync(file)) return {};
+  try {
+    const store = JSON.parse(readFileSync(file, "utf8"));
+    for (const [key, criteria] of Object.entries(store)) {
+      const problems = criteriaProblems(criteria);
+      if (problems.length) throw new Error(`${key}: ${problems[0]}`);
+    }
+    return store;
+  } catch (error) {
+    throw new Error(
+      `the criteria store ${file} is unusable (${error.message}); fix it or remove it to split the acceptance afresh`,
+    );
+  }
+}
+
+/** Keep `criteria` in the store `file` under `key`, beside the other Objectives' lists. */
+function writeStore(file, key, criteria) {
+  const store = { ...readStore(file), [key]: criteria };
+  mkdirSync(dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(store, null, 2)}\n`);
+  renameSync(temp, file);
 }
 
 /**
@@ -468,11 +523,15 @@ function inputs(
  * Grade `commit` of `repo` against the Objective in `objective` (its
  * text), the change being `base`..`commit`. Options: `cli`, `model`,
  * `effort`, `install` (a shell command run in each scratch checkout),
- * `checks` (the repository's declared checks), `votes`, `maxFindings`,
- * `timeoutMinutes` (the whole run), `roleTimeoutMinutes`, `evidence` (the
- * directory kept with each role's prompt, transcript and answer) and `env`.
- * Returns the output: the grader contract's fields, or `error` with no
- * criteria when no grader vote split the acceptance.
+ * `checks` (the repository's declared checks), `tests` (the commands each
+ * mutant runs, `checks` by default), `votes`, `maxFindings`, `mutants` (at
+ * most that many) and `seed` (which ones), `criteria` (the list to grade,
+ * `[{ id, text }]`) or `store` (a file of lists by Objective, read for this
+ * Objective's and written with the one the first vote makes when it has
+ * none), `timeoutMinutes` (the whole run), `roleTimeoutMinutes`, `evidence`
+ * (the directory kept with each role's prompt, transcript and answer) and
+ * `env`. Returns the output: the grader contract's fields, or `error` with
+ * no criteria when no grader vote split the acceptance.
  */
 export async function autoGrade({
   repo,
@@ -485,26 +544,50 @@ export async function autoGrade({
   effort = DEFAULTS.effort,
   install = null,
   checks = [],
+  tests = null,
+  criteria: given = null,
+  store = null,
   votes = DEFAULTS.votes,
   maxFindings = DEFAULTS.maxFindings,
+  mutants: mutantBound = DEFAULTS.mutants,
+  seed = DEFAULTS.seed,
   timeoutMinutes = DEFAULTS.timeoutMinutes,
   roleTimeoutMinutes = DEFAULTS.roleTimeoutMinutes,
   env = process.env,
 }) {
   const started = Date.now();
   const deadline = started + timeoutMinutes * 60_000;
+  // The criteria list to grade: given, else this Objective's in the store,
+  // else the first vote's split, which is stored for the runs after.
+  const key = objectiveKey(objective);
+  if (given) {
+    const problems = criteriaProblems(given);
+    if (problems.length) throw new Error(`the criteria given: ${problems[0]}`);
+  }
+  const fixed = given ?? (store ? (readStore(store)[key] ?? null) : null);
   const graded = commitOf(repo, commit);
   const from = commitOf(repo, base);
   const before = treeState(repo);
   const changed = git(repo, "diff", "--stat", from, graded);
+  const commands = tests ?? checks;
+  const mutants = commands.length
+    ? chooseMutants(repo, from, graded, { max: mutantBound, seed })
+    : [];
   const scratch = mkdtempSync(join(tmpdir(), "bench-grade-auto-"));
   mkdirSync(evidence, { recursive: true });
   const roles = [];
+  const warnings = [];
   // The process groups of the roles' running agents and installs.
   const groups = new Set();
 
-  /** One role, `name` (`grader-2`, `verifier`, ...), in its own scratch checkout: its answer, or null with its status. */
-  async function run(name, role, label, extra = []) {
+  /**
+   * One step, `name` (`grader-2`, `mutation`, ...), in its own scratch
+   * checkout after the install. `work` is given the checkout, the step's
+   * evidence directory, its deadline and the install's outcome as prose, and
+   * returns `{ status, error, answer, costUsd }`: `done` unless it says
+   * otherwise. The step's answer, or null with its status.
+   */
+  async function step(name, work) {
     const at = Date.now();
     const until = Math.min(at + roleTimeoutMinutes * 60_000, deadline);
     const dir = join(evidence, name);
@@ -538,20 +621,37 @@ export async function autoGrade({
       }
       let installed = "Nothing was installed in your checkout.";
       if (install) {
-        const step = await runCommand(install, {
+        const run = await runCommand(install, {
           cwd: copy,
           env,
           timeoutMs: until - Date.now(),
           groups,
         });
-        writeFileSync(join(dir, "install.txt"), step.output);
-        if (step.timedOut)
+        writeFileSync(join(dir, "install.txt"), run.output);
+        if (run.timedOut)
           return done("timeout", `the install timed out: ${install}`);
         installed =
-          step.code === 0
+          run.code === 0
             ? `The repository's install command ran in your checkout: \`${install}\`.`
-            : `The repository's install command \`${install}\` failed in your checkout (exit ${step.code ?? step.signal}); its output's end:\n\n\`\`\`\n${step.output.trim()}\n\`\`\``;
+            : `The repository's install command \`${install}\` failed in your checkout (exit ${run.code ?? run.signal}); its output's end:\n\n\`\`\`\n${run.output.trim()}\n\`\`\``;
       }
+      let result;
+      try {
+        result = await work({ copy, dir, until, installed, at });
+      } catch (error) {
+        return done("error", error.message);
+      }
+      if (result.costUsd !== undefined) outcome.costUsd = result.costUsd;
+      outcome.answer = result.answer;
+      return done(result.status ?? "done", result.error);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  }
+
+  /** One agent role, `name` (`grader-2`, `verifier`, ...): its answer, or null with its status. */
+  const run = (name, role, label, extra = []) =>
+    step(name, async ({ copy, dir, until, installed, at }) => {
       const prompt = `${readFileSync(join(PROMPTS, `${role}.md`), "utf8").trim()}\n\n${inputs(
         {
           role: label,
@@ -579,23 +679,26 @@ export async function autoGrade({
       writeFileSync(join(dir, "transcript.jsonl"), agent.stdout);
       if (agent.stderr) writeFileSync(join(dir, "stderr.txt"), agent.stderr);
       const result = agentResult(agent.stdout);
-      if (Number.isFinite(result?.total_cost_usd))
-        outcome.costUsd = result.total_cost_usd;
+      const costUsd = Number.isFinite(result?.total_cost_usd)
+        ? result.total_cost_usd
+        : null;
       if (agent.timedOut)
-        return done(
-          "timeout",
-          `timed out after ${Math.round((until - at) / 1000)} s`,
-        );
+        return {
+          status: "timeout",
+          error: `timed out after ${Math.round((until - at) / 1000)} s`,
+          costUsd,
+        };
       if (
         agent.code !== 0 ||
         !result ||
         result.is_error ||
         result.subtype !== "success"
       )
-        return done(
-          "error",
-          `the agent ${agent.code === 0 ? `ended ${result?.subtype ?? "without a result"}` : `exited ${agent.code ?? agent.signal}`}: ${agent.stderr.trim().slice(-500)}`,
-        );
+        return {
+          status: "error",
+          error: `the agent ${agent.code === 0 ? `ended ${result?.subtype ?? "without a result"}` : `exited ${agent.code ?? agent.signal}`}: ${agent.stderr.trim().slice(-500)}`,
+          costUsd,
+        };
       let answer = result.structured_output;
       if (answer === undefined)
         try {
@@ -605,22 +708,70 @@ export async function autoGrade({
         }
       const problems = schemaProblems(SCHEMAS[role], answer);
       if (problems.length)
-        return done("invalid", problems.slice(0, 5).join("; "));
+        return {
+          status: "invalid",
+          error: problems.slice(0, 5).join("; "),
+          costUsd,
+        };
       writeFileSync(
         join(dir, "answer.json"),
         `${JSON.stringify(answer, null, 2)}\n`,
       );
-      outcome.answer = answer;
-      return done("done");
-    } finally {
-      rmSync(copy, { recursive: true, force: true });
+      return { answer, costUsd };
+    });
+
+  /** The mutation pass: the chosen mutants run against the tests, no model. `{ killed, survived, survivors }`, or null with a warning. */
+  async function mutate() {
+    if (!commands.length) {
+      warnings.push(
+        "the mutation score is unknown: no checks or --test commands to run the mutants against",
+      );
+      return null;
     }
+    if (!mutants.length) {
+      warnings.push("no line the change added could be mutated");
+      return { killed: 0, survived: 0, survivors: [] };
+    }
+    const answer = await step("mutation", async ({ copy, dir, until }) => {
+      const ran = await runMutants(copy, mutants, {
+        tests: commands,
+        env,
+        deadline: until,
+        groups,
+      });
+      writeFileSync(
+        join(dir, "mutants.json"),
+        `${JSON.stringify(ran, null, 2)}\n`,
+      );
+      if (ran.status === "done") return { answer: ran.results, costUsd: 0 };
+      return {
+        status: ran.status === "timeout" ? "timeout" : "error",
+        error:
+          ran.status === "timeout"
+            ? "ran out of time before the last mutant"
+            : `\`${ran.command}\` fails on the graded commit, so no mutant can be told from it`,
+        costUsd: 0,
+      };
+    });
+    if (!answer) {
+      const outcome = roles.find((r) => r.role === "mutation");
+      warnings.push(
+        `the mutation score is unknown: mutation ${outcome.status}${outcome.error ? ` (${outcome.error})` : ""}`,
+      );
+      return null;
+    }
+    const killed = answer.filter((m) => m.result === "killed").length;
+    return {
+      killed,
+      survived: answer.length - killed,
+      survivors: answer.filter((m) => m.result === "survived"),
+    };
   }
 
-  /** The grader's votes: the first to answer splits the criteria, the rest grade that list at once. */
+  /** The grader's votes: the first to answer splits the criteria unless they are fixed, the rest grade that list at once. */
   async function grade() {
     const answers = [];
-    let criteria = null;
+    let criteria = fixed;
     while (answers.length < votes && !criteria) {
       const n = answers.length + 1;
       const answer = await run(
@@ -629,8 +780,10 @@ export async function autoGrade({
         `grader, vote ${n} of ${votes}`,
       );
       answers.push(answer);
-      if (answer?.criteria.length)
+      if (answer?.criteria.length) {
         criteria = answer.criteria.map(({ id, text }) => ({ id, text }));
+        remember(criteria);
+      }
     }
     const rest = Array.from({ length: votes - answers.length }, (_, i) => {
       const n = answers.length + i + 1;
@@ -647,12 +800,41 @@ export async function autoGrade({
     return { criteria, answers };
   }
 
-  /** Quality and adversary at once, then the verifier on their non-minor findings. */
+  /** A made list, kept for the runs after (if it can be), and said so. */
+  function remember(criteria) {
+    const problems = criteriaProblems(criteria);
+    let kept = "it isn't stored";
+    try {
+      if (problems.length) throw new Error(problems[0]);
+      if (store) {
+        writeStore(store, key, criteria);
+        kept = `it is stored in ${store}`;
+      }
+    } catch (error) {
+      kept = `it couldn't be stored: ${error.message}`;
+    }
+    warnings.push(
+      `no criteria list was stored for this Objective: the first grader vote made one of ${criteria.length}, and ${kept}`,
+    );
+  }
+
+  /** Mutation, then quality on its survivors, beside the adversary, then the verifier on their non-minor findings. */
   async function review() {
-    const [quality, adversary] = await Promise.all([
-      run("quality", "quality", "quality"),
-      run("adversary", "adversary", "adversary"),
+    const probing = run("adversary", "adversary", "adversary");
+    const mutated = await mutate();
+    const quality = await run("quality", "quality", "quality", [
+      ...(mutated
+        ? [
+            `The harness mutated the lines the change added by rule and ran the tests on each mutant: ${mutated.killed} killed, ${mutated.survived} survived.${mutated.survivors.length ? " The survivors:" : ""}`,
+            "",
+            ...mutated.survivors.map(
+              (m) => `- ${m.file}:${m.line} ${m.rule}: \`${m.text.trim()}\``,
+            ),
+            ...(mutated.survivors.length ? [""] : []),
+          ]
+        : ["The mutation pass gave no result.", ""]),
     ]);
+    const adversary = await probing;
     const split = forVerification(quality, adversary, maxFindings);
     const verdicts = split.sent.length
       ? await run("verifier", "verifier", "verifier", [
@@ -691,17 +873,16 @@ export async function autoGrade({
       verdicts || !split.sent.length
         ? verifiedFindings(split.sent, verdicts)
         : null;
-    return { quality, adversary, split, verdicts, confirmed };
+    return { mutated, quality, adversary, split, verdicts, confirmed };
   }
 
   const [grading, reviewed] = await stoppable(groups, scratch, () =>
     Promise.all([grade(), review()]),
   );
-  const warnings = [];
   if (treeState(repo) !== before)
     warnings.push(`the original tree ${repo} changed while it was graded`);
   const known = roles.every((r) => r.costUsd !== null);
-  const { quality, adversary, split, verdicts, confirmed } = reviewed;
+  const { mutated, quality, adversary, split, verdicts, confirmed } = reviewed;
   // The findings are known only when both reviewers answered, and the
   // verifier did when there was anything to verify: otherwise they are
   // unknown, never none.
@@ -717,22 +898,23 @@ export async function autoGrade({
     warnings.push(
       `the findings are unknown, so none is counted: ${unanswered.map((r) => `${r.role} ${r.status}`).join(", ")}`,
     );
-  const mutation = quality
-    ? {
-        survived: quality.mutation.survived,
-        killed: quality.mutation.killed,
-        examples: quality.mutation.examples,
-      }
-    : null;
-  const mutants = mutation ? mutation.survived + mutation.killed : 0;
+  const mutation = mutated && {
+    survived: mutated.survived,
+    killed: mutated.killed,
+    examples: mutated.survivors.map((m) => ({
+      location: `${m.file}:${m.line}`,
+      mutant: `${m.rule}: ${m.text.trim()}`,
+    })),
+  };
+  const total = mutation ? mutation.survived + mutation.killed : 0;
   const output = {
-    graderVersion: `grade-auto ${AUTO_GRADER_VERSION} (prompts ${promptsDigest()}; ${basename(cli)} ${model ?? "default model"}${effort ? ` ${effort}` : ""}; ${votes} votes)`,
+    graderVersion: `grade-auto ${AUTO_GRADER_VERSION} (prompts ${promptsDigest()}; ${basename(cli)} ${model ?? "default model"}${effort ? ` ${effort}` : ""}; ${votes} votes; ${grading.criteria ? `criteria ${criteriaDigest(grading.criteria)}` : "no criteria"}; up to ${mutantBound} mutants, seed ${seed})`,
     commit: graded,
     base: from,
     criteria: grading.criteria
       ? combineVotes(grading.criteria, grading.answers)
       : [],
-    metrics: mutants ? { mutationScore: mutation.killed / mutants } : {},
+    metrics: total ? { mutationScore: mutation.killed / total } : {},
     ...(findings ? { findings } : {}),
     mutation,
     verification: {

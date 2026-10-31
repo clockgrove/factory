@@ -31,11 +31,13 @@ import {
   autoGrade,
   combineVotes,
   majority,
+  objectiveKey,
   SCHEMAS,
   schemaProblems,
 } from "../bench/lib/grade-auto.mjs";
 import { HOME_ENV } from "../bench/lib/home.mjs";
 import { METRICS } from "../bench/lib/metrics.mjs";
+import { chooseMutants } from "../bench/lib/mutate.mjs";
 import { runMarkdown, runReport } from "../bench/lib/report.mjs";
 import { EXAMPLE, FIXTURE_STATE, fixtureCard } from "./bench-fixture.mjs";
 import {
@@ -69,6 +71,11 @@ const vote = (verdicts, costUsd = 0.5) => ({
     checks: [{ command: "npm test", passed: true, summary: "1 test passed" }],
   },
 });
+// The planted repository's tests, run on each mutant: under `node --test`
+// itself, a nested run would take the runner's environment and pass.
+const TESTS = "env -u NODE_TEST_CONTEXT node --test";
+// The one mutant of the planted repository its test lets survive.
+const MUTANT = "drop if: if (false) return [];";
 const reported = (title, severity, extra = {}) => ({
   title,
   severity,
@@ -97,14 +104,6 @@ const SCRIPT = {
         reported("No test gives a tag twice", "quality", { category: "tests" }),
         reported("A trailing blank line", "minor", { category: "style" }),
       ],
-      mutation: {
-        killed: 3,
-        survived: 2,
-        examples: [
-          { location: "src/tags.mjs:3", mutant: "drop toLowerCase()" },
-          { location: "src/tags.mjs:3", mutant: "drop new Set" },
-        ],
-      },
     },
   },
   adversary: {
@@ -174,6 +173,7 @@ async function grade(change, options = {}) {
     cli,
     model: "stand-in-model",
     checks: ["npm test"],
+    tests: [TESTS],
     env: {
       ...process.env,
       STAND_IN_AGENT_SCRIPT: scriptFile,
@@ -202,7 +202,7 @@ test("the roles' answers combine into the grader contract, with findings, mutati
   const { output, calls, evidence } = await grade();
   assert.match(
     output.graderVersion,
-    /^grade-auto 1 \(prompts [0-9a-f]{12}; agent-cli\.mjs stand-in-model high; 3 votes\)$/,
+    /^grade-auto 2 \(prompts [0-9a-f]{12}; agent-cli\.mjs stand-in-model high; 3 votes; criteria [0-9a-f]{12}; up to 40 mutants, seed 0\)$/,
   );
   assert.equal(output.commit, repo.commit);
   assert.equal(output.base, repo.base);
@@ -241,8 +241,14 @@ test("the roles' answers combine into the grader contract, with findings, mutati
     rejected: 2,
     probes: 12,
   });
-  assert.deepEqual(output.mutation, SCRIPT.quality.answer.mutation);
-  assert.deepEqual(output.metrics, { mutationScore: 3 / 5 });
+  // Mutants of the lines the change added, by rule: the test never gives
+  // an empty text, so the dropped guard survives.
+  assert.deepEqual(output.mutation, {
+    killed: 3,
+    survived: 1,
+    examples: [{ location: "src/tags.mjs:2", mutant: MUTANT }],
+  });
+  assert.deepEqual(output.metrics, { mutationScore: 3 / 4 });
   assert.deepEqual(output.checks, SCRIPT["grader-1"].answer.checks);
   assert.deepEqual(output.cost, {
     usd: 2.5,
@@ -250,6 +256,7 @@ test("the roles' answers combine into the grader contract, with findings, mutati
       "grader-1": 0.5,
       "grader-2": 0.5,
       "grader-3": 0.5,
+      mutation: 0,
       quality: 0.25,
       adversary: 0.25,
       verifier: 0.5,
@@ -263,12 +270,16 @@ test("the roles' answers combine into the grader contract, with findings, mutati
       ["grader-1", "done"],
       ["grader-2", "done"],
       ["grader-3", "done"],
+      ["mutation", "done"],
       ["quality", "done"],
       ["verifier", "done"],
     ],
   );
   assert.equal(output.error, undefined);
-  assert.deepEqual(output.warnings, []);
+  // No criteria list was stored: the first vote made this one, and says so.
+  assert.deepEqual(output.warnings, [
+    "no criteria list was stored for this Objective: the first grader vote made one of 2, and it isn't stored",
+  ]);
 
   // Each role: the CLI's flags, its own scratch checkout, its transcript kept.
   assert.equal(calls.length, 6);
@@ -315,6 +326,95 @@ test("the roles' answers combine into the grader contract, with findings, mutati
     "",
   );
   for (const call of calls) assert.ok(!existsSync(call.cwd), call.cwd);
+});
+
+test("the criteria are split once per Objective, and every later run grades that list", async () => {
+  const store = join(dir, "criteria-store", "criteria.json");
+  const first = await grade(null, { store });
+  assert.match(
+    first.output.warnings.join("\n"),
+    /the first grader vote made one of 2, and it is stored in /,
+  );
+  assert.deepEqual(JSON.parse(readFileSync(store, "utf8")), {
+    [objectiveKey(OBJECTIVE)]: CRITERIA,
+  });
+  // The first vote of a later run would split it otherwise: every vote is
+  // given the stored list, and the grader is the same grader.
+  const again = await grade(
+    (script) => {
+      script["grader-1"] = vote(["pass", "pass"]);
+    },
+    { store },
+  );
+  assert.equal(again.output.graderVersion, first.output.graderVersion);
+  assert.deepEqual(again.output.warnings, []);
+  assert.equal(
+    again.calls.filter((c) => /Grade exactly these criteria/.test(c.prompt))
+      .length,
+    3,
+  );
+  // A list edited in the store is the list graded, and another grader.
+  writeFileSync(
+    store,
+    JSON.stringify({ [objectiveKey(OBJECTIVE)]: [CRITERIA[1]] }),
+  );
+  const edited = await grade(null, { store });
+  assert.deepEqual(
+    edited.output.criteria.map((c) => c.id),
+    ["once-each"],
+  );
+  assert.notEqual(edited.output.graderVersion, first.output.graderVersion);
+  // A list given beats the store, and isn't stored.
+  const given = await grade(null, { store, criteria: [CRITERIA[0]] });
+  assert.deepEqual(
+    given.output.criteria.map((c) => c.id),
+    ["split-trim-lowercase"],
+  );
+  assert.deepEqual(Object.values(JSON.parse(readFileSync(store, "utf8"))), [
+    [CRITERIA[1]],
+  ]);
+  await assert.rejects(
+    grade(null, { criteria: [CRITERIA[0], CRITERIA[0]] }),
+    /the criteria given: criteria give an id twice/,
+  );
+  writeFileSync(store, "{");
+  await assert.rejects(grade(null, { store }), /is unusable/);
+});
+
+test("the same tree gets the same mutants, bounded and seeded, and the same score", async () => {
+  const choose = (options) =>
+    chooseMutants(repo.dir, repo.base, repo.commit, options);
+  // Mutants of the added lines of the source, not the test, by rule.
+  assert.deepEqual(
+    choose({ max: 40, seed: "0" }).map((m) => [m.file, m.line, m.rule]),
+    [
+      ["src/tags.mjs", 2, "=== to !=="],
+      ["src/tags.mjs", 2, "negate if"],
+      ["src/tags.mjs", 2, "drop if"],
+      ["src/tags.mjs", 4, "return null"],
+    ],
+  );
+  assert.deepEqual(
+    choose({ max: 2, seed: "0" }),
+    choose({ max: 2, seed: "0" }),
+  );
+  assert.equal(choose({ max: 2, seed: "0" }).length, 2);
+  // Another seed picks other mutants.
+  const picked = new Set(
+    ["0", "1", "2", "3", "4", "5"].map((seed) =>
+      choose({ max: 2, seed })
+        .map((m) => m.id)
+        .join(),
+    ),
+  );
+  assert.ok(picked.size > 1);
+  const [one, two] = [
+    await grade(null, { mutants: 3, seed: "5" }),
+    await grade(null, { mutants: 3, seed: "5" }),
+  ];
+  assert.equal(one.output.mutation.killed + one.output.mutation.survived, 3);
+  assert.deepEqual(one.output.mutation, two.output.mutation);
+  assert.deepEqual(one.output.metrics, two.output.metrics);
 });
 
 test("votes decide a criterion by a strict majority; a partial is not a pass", () => {
@@ -385,7 +485,7 @@ test("the verifier sees at most --max-findings, and what it doesn't confirm is d
   assert.match(half.output.warnings.join("\n"), /: adversary error$/m);
   // The verifier's confirmations are still counted, and the mutants.
   assert.equal(half.output.verification.confirmed, 1);
-  assert.equal(half.output.mutation.survived, 2);
+  assert.equal(half.output.mutation.survived, 1);
   // Nothing non-minor reported: no verifier.
   const quiet = await grade((script) => {
     script.quality.answer.findings = [script.quality.answer.findings[1]];
@@ -403,7 +503,7 @@ test("a role that times out is unknown, never a fail", async () => {
       script["grader-3"] = vote(["pass", "pass"]);
       script.verifier.sleepMs = 60_000;
     },
-    { roleTimeoutMinutes: 0.05 },
+    { roleTimeoutMinutes: 0.05, mutants: 0 },
   );
   const status = (role) => output.roles.find((r) => r.role === role).status;
   assert.equal(status("grader-2"), "timeout");
@@ -432,7 +532,7 @@ test("a role that times out is unknown, never a fail", async () => {
       script.quality.sleepMs = 60_000;
       script.adversary.sleepMs = 60_000;
     },
-    { roleTimeoutMinutes: 0.05 },
+    { roleTimeoutMinutes: 0.05, mutants: 0 },
   );
   assert.deepEqual(none.output.criteria, []);
   assert.match(
@@ -441,7 +541,6 @@ test("a role that times out is unknown, never a fail", async () => {
   );
   // No reviewer answered: no findings at all, not none found.
   assert.equal(none.output.findings, undefined);
-  assert.equal(none.output.mutation, null);
 });
 
 /** The example definition with `grader`, as a file. */
@@ -490,6 +589,8 @@ const autoCommand = (...flags) =>
     JSON.stringify(cli),
     "--model",
     "stand-in-model",
+    "--test",
+    JSON.stringify(TESTS),
     ...flags,
   ].join(" ");
 
@@ -575,7 +676,7 @@ test("as a definition's grader it keeps the grader contract, and the scorecard c
   const evidence = join(dir, "contract-evidence");
   const definition = definitionWith(
     "auto",
-    `node ${JSON.stringify(join(BENCH_DIR, "grade-auto.mjs"))} --cli ${JSON.stringify(cli)} --model stand-in-model --base ${repo.base} --evidence ${JSON.stringify(evidence)}`,
+    `node ${JSON.stringify(join(BENCH_DIR, "grade-auto.mjs"))} --cli ${JSON.stringify(cli)} --model stand-in-model --test ${JSON.stringify(TESTS)} --base ${repo.base} --evidence ${JSON.stringify(evidence)}`,
   );
   let grade;
   try {
@@ -602,14 +703,18 @@ test("as a definition's grader it keeps the grader contract, and the scorecard c
       unknown: 0,
       passRate: 1 / 2,
       criteria: ["pass", "fail"],
-      metrics: { mutationScore: 3 / 5 },
+      metrics: { mutationScore: 3 / 4 },
       findings: ["adversary-1 defect", "quality-1 quality"],
-      mutation: SCRIPT.quality.answer.mutation,
+      mutation: {
+        killed: 3,
+        survived: 1,
+        examples: [{ location: "src/tags.mjs:2", mutant: MUTANT }],
+      },
       cost: { usd: 2.5, byRole: grade.cost.byRole },
       durationMs: grade.durationMs,
     },
   );
-  assert.match(grade.graderVersion, /^grade-auto 1 /);
+  assert.match(grade.graderVersion, /^grade-auto 2 /);
   // BENCH_OBJECTIVE was the Objective, and the definition's required
   // commands were the declared checks.
   const calls = readFileSync(env.STAND_IN_AGENT_LOG, "utf8")
@@ -636,15 +741,15 @@ test("as a definition's grader it keeps the grader contract, and the scorecard c
     graderDefects: 1,
   });
   assert.equal(METRICS["quality.verifiedFindings"].get(card), 2);
-  assert.equal(METRICS["quality.mutantsSurvived"].get(card), 2);
+  assert.equal(METRICS["quality.mutantsSurvived"].get(card), 1);
   const html = runReport(card, [card], definition);
   assert.match(html, /<h3>Verified findings<\/h3>/);
   assert.match(html, /A tag given twice in two cases appears twice/);
-  assert.match(html, /2 of 5 mutants of the changed lines survived/);
+  assert.match(html, /1 of 4 mutants of the changed lines survived/);
   const markdown = runMarkdown(card, [card], definition);
   assert.match(
     markdown,
-    /\| Grade \| 50% \| .*; 2 verified finding\(s\), 1 defect\(s\), 2 of 5 mutant\(s\) survived \|/,
+    /\| Grade \| 50% \| .*; 2 verified finding\(s\), 1 defect\(s\), 1 of 4 mutant\(s\) survived \|/,
   );
   assert.match(
     markdown,

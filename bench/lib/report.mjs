@@ -63,6 +63,21 @@ const gradeMetrics = (grade) =>
     .map(([name, v]) => `${name} ${value("number", v)}`)
     .join(", ");
 
+/** What a reviewing grader (#2273) found of a grade, as text: verified findings and surviving mutants; "" for a grader that reports neither. */
+const gradeReview = (grade) =>
+  [
+    ...(grade?.findings
+      ? [
+          `${grade.findings.length} verified finding(s), ${grade.findings.filter((f) => f.severity === "defect").length} defect(s)`,
+        ]
+      : []),
+    ...(grade?.mutation
+      ? [
+          `${grade.mutation.survived} of ${grade.mutation.survived + grade.mutation.killed} mutant(s) survived`,
+        ]
+      : []),
+  ].join(", ");
+
 const time = (at) => (at ? `${at.slice(0, 16).replace("T", " ")} UTC` : "n/a");
 const clock = (at) => (at ? at.slice(11, 16) : "");
 /** A card's outcome, marked when the card is partial or of an older version. */
@@ -87,7 +102,7 @@ export function outcomeLines(card) {
       grade
         ? grade.error
           ? `the grader failed: ${grade.error}`
-          : `${grade.passed} passed, ${grade.failed} failed, ${grade.unknown} unknown of ${grade.criteria.length} criteria at ${grade.commit.slice(0, 12)} (${grade.graderVersion})${gradeMetrics(grade) ? `; ${gradeMetrics(grade)}` : ""}`
+          : `${grade.passed} passed, ${grade.failed} failed, ${grade.unknown} unknown of ${grade.criteria.length} criteria at ${grade.commit.slice(0, 12)} (${grade.graderVersion})${gradeMetrics(grade) ? `; ${gradeMetrics(grade)}` : ""}${gradeReview(grade) ? `; ${gradeReview(grade)}` : ""}`
         : `not graded: ${gradeGap?.reason ?? "no grade"}`,
     ],
     [
@@ -108,7 +123,7 @@ export function outcomeLines(card) {
     [
       "Stage escapes",
       String(escapes.total),
-      `${escapes.finalReviewRefusals} final-review refusal(s), ${escapes.handFixesAfterFinalReview} hand fix(es) after final review, ${escapes.graderFailedPassed ?? "n/a"} criteria the grader failed that final review passed`,
+      `${escapes.finalReviewRefusals} final-review refusal(s), ${escapes.handFixesAfterFinalReview} hand fix(es) after final review, ${escapes.graderFailedPassed ?? "n/a"} criteria the grader failed that final review passed, ${escapes.graderDefects ?? "n/a"} verified defect(s) in the result final review passed`,
     ],
     [
       "Cost",
@@ -473,6 +488,25 @@ ${
         ]),
         [1],
       )
+    : ""
+}
+${
+  grade?.findings
+    ? `<h3>Verified findings</h3>
+<p class="meta">Problems the grader's reviewers reported and its verifier reproduced on the graded commit: a <b>defect</b> violates a criterion the Objective states. ${grade.mutation ? esc(`${grade.mutation.survived} of ${grade.mutation.survived + grade.mutation.killed} mutants of the changed lines survived the delivered tests.`) : ""}</p>
+${
+  grade.findings.length
+    ? table(
+        ["Finding", "Severity", "Evidence", "Reproduce"],
+        grade.findings.map((f) => [
+          `<b>${esc(f.id)}</b>${f.title ? ` ${esc(f.title)}` : ""}`,
+          `<span class="${f.severity === "defect" ? "worse" : "unknown"}">${esc(f.severity)}</span>`,
+          esc(evidence(f.evidence)),
+          esc(evidence(f.reproduce)),
+        ]),
+      )
+    : "<p>None.</p>"
+}`
     : ""
 }
 </section>
@@ -864,6 +898,17 @@ export function runMarkdown(card, cards, definition) {
             ([label, big, small]) => `| ${label} | ${big} | ${small} |`,
           ),
           "",
+          ...(card.grade?.findings?.length
+            ? [
+                "Verified findings:",
+                "",
+                ...card.grade.findings.map(
+                  (f) =>
+                    `- **${f.severity}** ${f.id}${f.title ? `: ${f.title}` : ""}`,
+                ),
+                "",
+              ]
+            : []),
         ]
       : [`**Scorecard version ${card.schemaVersion}.** ${RESCORE_NOTE}`, ""]),
     "| Diagnostic | This run |",

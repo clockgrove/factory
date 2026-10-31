@@ -14,6 +14,7 @@ bench/
   run.mjs                     follow the run to its end, applying the operator policy; stop or start its service
   score.mjs                   score a run, or any Objective, into the results
   report.mjs                  run reports, the history page, the hill-climb decision, the judge's calibration
+  grade-auto.mjs              a generic grader of any Objective's result, and its roles' prompts in grade-auto/
   examples/acme-widgets-42.json  an invented definition (schema below)
   lib/                        what the commands share
 ```
@@ -153,12 +154,14 @@ node bench/score.mjs --benchmark acme-widgets-42 --state-dir ... --issue 42 --ru
 
 `--grade-tree DIR` is a clone of the run repository. It is only read: the grader runs in a fresh checkout that shares its objects. Without `--grade-commit`, its `origin` default branch at the end is graded. `--grade-only` grades an existing card again (the run's card in the results, or `--out FILE`) and rewrites its `grade` and `escapes`, scoring nothing else: after a grader fix, or for a card scored before the grader existed. An older card is scored again (score it, then it is graded): its state and run logs give every v3 number.
 
-| `score.mjs` exits | When                                                                                    |
-| ----------------- | --------------------------------------------------------------------------------------- |
-| 0                 | scored, and graded where the definition has a grader and there is a repository to grade |
-| 64                | usage: a missing flag, a bad definition, no card for `--grade-only`, an older card      |
-| 65                | the Objective hasn't ended: a partial card isn't written into the results               |
-| 70                | the grader failed or timed out: the card is written, with `grade.error`                 |
+`--grade-file FILE` attaches a grade written outside the harness, such as the [auto-grader](#auto-grader)'s standalone output, in place of running the definition's grader. It is checked as a grader's output is, and grades the commit the file names; a `--grade-commit` that differs is refused. It works with `--grade-only` too, and needs no grader in the definition.
+
+| `score.mjs` exits | When                                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------------- |
+| 0                 | scored, and graded where the definition has a grader and there is a repository to grade                  |
+| 64                | usage: a missing flag, a bad definition, no card for `--grade-only`, an older card, a bad `--grade-file` |
+| 65                | the Objective hasn't ended: a partial card isn't written into the results                                |
+| 70                | the grader failed or timed out: the card is written, with `grade.error`                                  |
 
 ### 4. Report and compare
 
@@ -169,7 +172,7 @@ node bench/report.mjs calibrate --benchmark acme-widgets-42 \
   --pair widgets-0.5.8-1 widgets-0.6.0-1 --intent B --quality tie --by "a widgets maintainer"
 ```
 
-A run report is one self-contained HTML file (inline CSS and SVG, no network assets, light and dark) plus a Markdown summary, written to the bench home's `reports/<id>/` (or `--out DIR`). The outcomes come first: grade, human effort, time to delivery, waste, stage escapes and cost, then the diagnostics. It has the comparison with the baseline's spread (outcomes, then diagnostics), the grader's verdict per criterion and its own metrics, every operator touch with its weight, waste by cause and by Work Item, cost per model, tokens per Work Item, a timeline with the excluded time and holds, holds by kind, every operator decision, telemetry, and the checks against Factory's diagnostics. The history page plots each metric per run, outcomes first, grouped by Factory build, with each group's median and min-to-max band, and each metric the grader reported, such as `mutationScore`, after the outcomes.
+A run report is one self-contained HTML file (inline CSS and SVG, no network assets, light and dark) plus a Markdown summary, written to the bench home's `reports/<id>/` (or `--out DIR`). The outcomes come first: grade, human effort, time to delivery, waste, stage escapes and cost, then the diagnostics. It has the comparison with the baseline's spread (outcomes, then diagnostics), the grader's verdict per criterion and its own metrics (with a reviewing grader's verified findings and surviving mutants, such as the [auto-grader](#auto-grader)'s), every operator touch with its weight, waste by cause and by Work Item, cost per model, tokens per Work Item, a timeline with the excluded time and holds, holds by kind, every operator decision, telemetry, and the checks against Factory's diagnostics. The history page plots each metric per run, outcomes first, grouped by Factory build, with each group's median and min-to-max band, and each metric the grader reported, such as `mutationScore`, after the outcomes.
 
 With a judge in the definition, `compare` also runs the blind pairwise review ([Pairwise judge](#pairwise-judge)) and prints it after the metrics: each pair's choices, unblinded, the candidate's win rates, and the judge's agreement with the person's calibration choices. A run's tree is found through its run directory, which a harness run's card names; for a card scored before cards named it, give `--bench-root DIR`, the host profile's `benchRoot`. `calibrate` records a person's choice between two runs' trees into the definition's `judgeCalibration` ([Calibration](#calibration)).
 
@@ -266,7 +269,7 @@ A definition written before scorecard v3, without the optional fields, still loa
 
 In priority order. Each is read from the run log's events, the state and the run repository's history, never from the text of a finding or a question (`bench/lib/outcomes.mjs`, `bench/lib/grade.mjs`).
 
-1. **`grade`: correct delivery, judged independently.** The grader's verdict on each of the Objective's criteria, on a fresh checkout of the run repository's default branch at the Objective's end commit (`endCommit`: the last first-parent commit made by `endedAt`): `{ graderVersion, commit, passed, failed, unknown, passRate, criteria[], metrics }`, each criterion `{ id, text, verdict, method, evidence }` as the grader wrote it, and `metrics` the grader's own numbers by name, such as `mutationScore` (#2224), `{}` when it reports none. `passRate` is `passed` over all criteria: an unknown verdict is not a pass. A grader that fails, times out or writes anything else records `grade.error`, with every number null: never a made-up rate. No grader, or nothing to grade: `grade` is null and `unavailable` says why.
+1. **`grade`: correct delivery, judged independently.** The grader's verdict on each of the Objective's criteria, on a fresh checkout of the run repository's default branch at the Objective's end commit (`endCommit`: the last first-parent commit made by `endedAt`): `{ graderVersion, commit, passed, failed, unknown, passRate, criteria[], metrics }`, each criterion `{ id, text, verdict, method, evidence }` as the grader wrote it, and `metrics` the grader's own numbers by name, such as `mutationScore` (#2224), `{}` when it reports none; a reviewing grader's `findings`, `mutation`, `cost` and `durationMs` when it reports them ([Grader](#grader)). `passRate` is `passed` over all criteria: an unknown verdict is not a pass. A grader that fails, times out or writes anything else records `grade.error`, with every number null: never a made-up rate. No grader, or nothing to grade: `grade` is null and `unavailable` says why.
 2. **`human`: human effort.** Every operator touch, weighted:
 
    | Touch      | Weight | What                                                                                                                                                  |
@@ -283,7 +286,7 @@ In priority order. Each is read from the run log's events, the state and the run
    - `hedge`: one of a hedged pair, aborted as `hedged` because the other answered first.
    - `amendment`: a call of an amendment the plan rejected or left unchanged (the state's `amend:<id>` record).
    - `superseded`: a call of a result that a later attempt of the same step made again. A step's attempts up to one that ends `done` make one result; it is superseded when the step ends `done` again with no `repair` outcome sending work back to that step in between. A repair builds on the result it repairs (the worker's conversation and branch go on), so a repaired result is no waste; a review of a result its step then reviewed again, or an amendment's plan its review sent back, is.
-5. **`escapes`: stage escapes.** Defects caught later than the stage meant to catch them: `finalReviewRefusals` (final review refused the integrated result: an `objective-review` event `refused`), `handFixesAfterFinalReview` (hand fixes made after final review first started), and `graderFailedPassed` (criteria the grader failed although final review passed the result, by `totals.final.reviewPassed`; null until graded). `total` sums them.
+5. **`escapes`: stage escapes.** Defects caught later than the stage meant to catch them: `finalReviewRefusals` (final review refused the integrated result: an `objective-review` event `refused`), `handFixesAfterFinalReview` (hand fixes made after final review first started), `graderFailedPassed` (criteria the grader failed although final review passed the result, by `totals.final.reviewPassed`; null until graded), and `graderDefects` (the grader's verified findings of severity `defect`, each violating a stated criterion, in a result final review passed; null until graded by a grader that reports findings, such as the [auto-grader](#auto-grader)). `total` sums them.
 6. **`cost`, a guard.** Each call's uncached input, cached input and output tokens (child threads included; reasoning is output) at its model's price from `definition.prices`: `{ usd, byModel, unpriced, unknownCalls }`. Null without prices; `usd` is null when any model has no price, never a partial sum.
 
 ### Diagnostics
@@ -324,18 +327,55 @@ The rest of the card, unchanged from version 2: shown after the outcomes, never 
 - **`operator`.** Every hold with its kind, step, asked and answered times, answer, `by` and `as`. Also the other operator actions: pause, resume, decline-discovery.
 - **`telemetry`.** The critical path, hedges, Factory's time breakdown, retries, validation commands, GitHub requests and cache rate per Work Item.
 - **`checks`.** The scorecard's totals against Factory's diagnostics: tokens, child threads, calls, model time, holds, hold waits and repairs. Each one must agree.
+- **`quality.verifiedFindings`, `quality.mutantsSurvived`.** Metric ids read from the grade, for a grader that reviews as well as grades ([Auto-grader](#auto-grader)): how many findings its verifier confirmed (`grade.findings`), and how many mutants of the changed lines the delivered tests let survive (`grade.mutation.survived`). Null for a grader that reports neither. `compare` and the history show them with the other diagnostics.
 
 ## Grader
 
 The benchmark's own judgment of the merged result, frozen with the benchmark, never Factory's reviewers. The grader and its private checks live in the bench home (`graders/`), outside this repository, like the definition. `definition.grader = { command, timeoutMinutes }`:
 
 - The command runs in a shell, with its working directory in a fresh checkout of the run repository's default branch at the Objective's end commit (a clone sharing the repository's objects, so nothing is fetched; LFS files are pointers, and a grader that needs them runs `git lfs pull`).
-- Its environment has `BENCH_TREE` (the checkout), `BENCH_COMMIT` (the commit), `BENCH_DEFINITION` (the definition file, so `$(dirname "$BENCH_DEFINITION")/../graders/...` finds the grader in the bench home) and `BENCH_OUT`.
+- Its environment has `BENCH_TREE` (the checkout), `BENCH_COMMIT` (the commit), `BENCH_DEFINITION` (the definition file, so `$(dirname "$BENCH_DEFINITION")/../graders/...` finds the grader in the bench home) and `BENCH_OUT`. A harness run's grader also gets `BENCH_OBJECTIVE`, the Objective as the run filed it (its `objective.md`).
 - It writes `{ graderVersion, criteria: [{ id, text, verdict, method, evidence }], metrics }` to `BENCH_OUT`, each `verdict` `pass`, `fail` or `unknown`.
 - `metrics` is optional: a name → number map of whatever else the grader measures, recorded in the card as `grade.metrics`, shown with the grade in the run report and graphed in the history. For example `mutationScore`: the share of bounded, deterministic mutants of the files the Objective changed that the delivered tests kill. Metrics are shown, never deciding; which way is better is the grader's to say.
-- It is killed at `timeoutMinutes`, with everything it started. A non-zero exit, a timeout, or output without a `graderVersion`, criteria, or a valid verdict for each, or with a metric that isn't a number, is `grade.error`.
+- A grader that reviews as well as grades, such as the [auto-grader](#auto-grader), may also write `findings` (each `{ id, severity, title, evidence, reproduce }`, `severity` `defect`, `quality` or `minor`: a defect violates a criterion the Objective states), `mutation` (`{ survived, killed, examples }`), `cost` (`{ usd, ... }`) and `durationMs`. They are recorded in the card's `grade`; findings decide `escapes.graderDefects`.
+- It is killed at `timeoutMinutes`, with everything it started. A non-zero exit, a timeout, or output without a `graderVersion`, criteria, or a valid verdict for each, or with a metric that isn't a number, or with any of the optional fields malformed, is `grade.error`.
 
 The harness never interprets criteria itself. The checkout is removed after grading.
+
+## Auto-grader
+
+A benchmark's own grader takes days to write and calibrate, and grades one Objective. `bench/grade-auto.mjs` grades any Objective, a small one or a live one on a real repository, from its acceptance, the sources it cites in the checkout and the change from the base commit to the graded commit (#2273). Run it standalone:
+
+```sh
+node bench/grade-auto.mjs --repo ~/work/widgets --commit <graded> --base <base> \
+  --objective objective.md --out widgets-42.grade.json
+node bench/score.mjs --benchmark acme-widgets-42 --state-dir ... --issue 42 --run-id ... --label ... \
+  --grade-file widgets-42.grade.json
+```
+
+or as a definition's `grader.command`, such as `node bench/grade-auto.mjs --evidence ~/bench-home/evidence/acme-widgets-42`, under the [grader contract](#grader): the checkout, commit, output and Objective come from `BENCH_TREE`, `BENCH_COMMIT`, `BENCH_OUT` and `BENCH_OBJECTIVE` (a backfill's grader has none: give `--objective FILE`), and the base and the declared checks from the definition's `source.base` and `factory.requiredCommands`. A flag wins over each. Set `grader.timeoutMinutes` above the auto-grader's own `--timeout-minutes`.
+
+Four roles, each a separate headless agent, Claude Code's CLI by default (`claude -p --output-format stream-json --verbose --json-schema ...`, its transcript the stream). Each answers as a JSON schema says, and the harness checks the answer against it; an answer out of its schema counts as none. The roles' prompts are `bench/grade-auto/<role>.md`, repository-neutral.
+
+1. **Grader.** Splits the acceptance into criteria and gives each `pass`, `partial`, `fail` or `unknown` with `file:line` evidence, after running the repository's declared checks. It votes 3 times (`--votes`), independently: the first vote to answer splits the criteria, and the others grade that list at once. A criterion's verdict is a strict majority of all the votes: `pass` with a majority of passes, `fail` with a majority of fails and partials (a partial is not a pass), and `unknown` otherwise.
+2. **Quality.** Reviews the change for design, the repository's conventions, test economy, dead code, duplication and docs accuracy, and mutates the changed lines: `mutation` counts the mutants killed and survived, with each survivor, and `metrics.mutationScore` is the share killed.
+3. **Adversary.** Writes throwaway probes that try to break each guarantee the acceptance states, and reports each break with a reproduce snippet.
+4. **Verifier.** Reproduces the non-minor findings of 2 and 3, claimed defects first, at most 20 (`--max-findings`), and classifies each it confirms as `defect` (it violates a stated criterion), `quality` or `minor`. A finding it doesn't confirm, or never answers, is dropped: the default is rejected. Minor findings and those over the cap aren't verified, so they are dropped too; `verification` counts each.
+
+Quality and adversary run beside the grader's votes, and the verifier after them. Each role works in its own scratch checkout of the graded commit (a clone sharing the repository's objects, with no remote, so nothing can be pushed), after the repository's install command (`--install CMD`) when there is one. The original tree is only read; a change to it while grading is named in `warnings`. Each role's web tools are off; its network otherwise is the host's, so run it where the repository's install is the only network it needs. Each role's prompt, transcript and answer are kept in the evidence directory (`--evidence DIR`, by default beside the output as `<out>.evidence/`: in a grader's `BENCH_OUT` directory, which the harness removes, so a definition's command gives `--evidence`).
+
+Each role is bounded by `--role-timeout-minutes` and the whole run by `--timeout-minutes`, 30 minutes each by default. A role that times out, fails or answers out of its schema is unknown, never a fail: a grader vote is unknown on every criterion, a reviewer reports nothing, and a verifier confirms nothing. With no grader vote to split the acceptance there is nothing to grade: the output has `error` and no criteria, and it exits 1, which the harness records as `grade.error`.
+
+| Flag                                              | What                                                                    |
+| ------------------------------------------------- | ----------------------------------------------------------------------- |
+| `--repo`, `--commit`, `--base`, `--objective`     | The checkout, the graded and base commits, the Objective's text         |
+| `--out`, `--evidence`                             | The output file, and the directory of each role's transcript            |
+| `--cli PATH`, `--model NAME`, `--effort LEVEL`    | The agent CLI (`claude`), its model (`opus`) and effort (the CLI's own) |
+| `--install CMD`, `--check CMD ...`                | The repository's install command and its declared checks                |
+| `--votes N`, `--max-findings N`                   | Grader votes per criterion (3), findings the verifier reproduces (20)   |
+| `--timeout-minutes N`, `--role-timeout-minutes N` | The whole run's and each role's wall-clock bound (30 each)              |
+
+The output is the grader contract's, plus `commit` and `base`; `findings` (each verified one `{ id, role, title, severity, reported, evidence, reproduce }`, `reported` the reporter's severity); `mutation`; `verification`; the grader's `checks`; `cost` (`{ usd, byRole }`, each role's `total_cost_usd`, `usd` null when any is unknown); `durationMs`; each role's `status`, time and cost; and `graderVersion`, which names the auto-grader's version, a digest of its prompts, the CLI, the model, the effort and the votes. It exits 0 when graded, 1 with no criteria and 64 on a usage error.
 
 ## Pairwise judge
 

@@ -415,12 +415,14 @@ test("grade: the stand-in grader's mixed verdicts on a fresh checkout at the end
     evidence: { file: "src/api/export.ts", looked: "quote" },
   });
   // Final review refused once, the operator fixed it after final review,
-  // and final review passed the row limit the grader fails.
+  // and final review passed the row limit the grader fails. The stand-in
+  // reports no findings, so it looked for no defects.
   assert.deepEqual(card.escapes, {
     total: 3,
     finalReviewRefusals: 1,
     handFixesAfterFinalReview: 1,
     graderFailedPassed: 1,
+    graderDefects: null,
   });
   assert.ok(!card.unavailable.some((gap) => gap.metric === "grade"));
 });
@@ -472,6 +474,7 @@ test("escapes: final review passed by its step, not its last logged review", asy
       finalReviewRefusals: 1,
       handFixesAfterFinalReview: 1,
       graderFailedPassed: 1,
+      graderDefects: null,
     },
   ]);
   // Final review never passed (the Objective ended on its refusal): what
@@ -483,6 +486,7 @@ test("escapes: final review passed by its step, not its last logged review", asy
     finalReviewRefusals: 1,
     handFixesAfterFinalReview: 1,
     graderFailedPassed: 0,
+    graderDefects: null,
   });
 });
 

@@ -129,6 +129,29 @@ test("a multi-capability item is sent back to split, and a cohesive one with its
     started: new Set(["stream"]),
   });
   assert.deepEqual(started.findings, []);
+  // Nor an unstarted item a plan accepted under the old signal keeps as it
+  // was, while one whose acceptance or reason the amendment changes is.
+  const amended = { amended: started.plan.items };
+  assert.deepEqual(decodePlan(answer(sprawling), facts, amended).findings, []);
+  const grown = {
+    ...sprawling,
+    acceptance: [...sprawling.acceptance.slice(0, -1), "Replay is idempotent."],
+  };
+  assert.deepEqual(
+    decodePlan(answer(grown), facts, amended).findings.map((f) => f.message),
+    [SPLIT],
+  );
+  const reasoned = decodePlan(
+    answer({ ...sprawling, oneOutcomeReason: "One delivery contract." }),
+    facts,
+  );
+  assert.deepEqual(reasoned.findings, []);
+  assert.deepEqual(
+    decodePlan(answer(sprawling), facts, {
+      amended: reasoned.plan.items,
+    }).findings.map((f) => f.message),
+    [SPLIT],
+  );
 
   // Six entries of one rule, with the reason: no finding, and the reason
   // reaches the brief.

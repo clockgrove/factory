@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { ProfileWorker } from "../providers/selection.js";
 import { errorMessage } from "../text.js";
 import {
@@ -51,10 +52,14 @@ export interface WireOptions {
   /** The installation configures reviewArtifacts selectors, so validation captures. */
   reviewArtifacts?: boolean;
   /**
-   * In an amendment, the items the started-item rule binds: their planner
-   * cannot restate the acceptance accepted under an earlier, higher entry
-   * signal (#2282), so the entry-signal lint does not judge them.
+   * In an amendment, the plan being amended's items, and of those the ones
+   * the started-item rule binds. The entry-signal lint judges only what the
+   * amendment adds or changes (#2282): a plan accepted under an earlier,
+   * higher signal keeps an item whose acceptance and oneOutcomeReason are
+   * as that plan has them, and a started one, whose planner cannot restate
+   * them.
    */
+  amended?: readonly WorkItem[];
   started?: ReadonlySet<string>;
 }
 
@@ -205,20 +210,30 @@ export const COMPILER_READINESS_GUIDANCE =
 const LINE_REFERENCE =
   /(?<![:/\w.-])[\w.-]+(?:\/[\w.-]+)*\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|hpp|swift|sh|sql|css|scss|vue|svelte|md|ya?ml|toml|json|html)`?(?::\d+\b|#L\d+\b)/i;
 
+/** What precedes an item's oneOutcomeReason in its decoded brief. */
+const ONE_OUTCOME = "\n\nOne outcome: ";
+
+/** The oneOutcomeReason a decoded brief carries, or null. */
+function outcomeOf(brief: string): string | null {
+  const at = brief.lastIndexOf(ONE_OUTCOME);
+  return at < 0 ? null : brief.slice(at + ONE_OUTCOME.length);
+}
+
 /**
  * The plan standard's deterministic lint, run before paid review on each
- * item the planner defined: an item above the entry signal, unless started,
- * states why it is one outcome, and no acceptance entry cites a line.
+ * item the planner defined: an item above the entry signal, unless an
+ * amendment keeps it (`WireOptions.amended`), states why it is one outcome,
+ * and no acceptance entry cites a line.
  */
 function planStandardLint(
   item: ObjectValue,
   reason: string | null,
-  started: boolean,
+  kept: boolean,
 ): string[] {
   if (!Array.isArray(item.acceptance)) return [];
   const findings: string[] = [];
   if (
-    !started &&
+    !kept &&
     item.acceptance.length > WORK_ITEM_ENTRY_SIGNAL &&
     reason === null
   )
@@ -672,6 +687,9 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     itemSchema,
     kindSchemas,
     profiles: options.profiles,
+    amended: options.amended
+      ? new Map(options.amended.map((item) => [item.id, item]))
+      : undefined,
     started: options.started,
     proofForms,
     modes,
@@ -1191,20 +1209,22 @@ function decodeItem(wire: Contract, raw: unknown, lint: Finding[]): WorkItem {
   const reason = item.oneOutcomeReason;
   if (reason !== null && (typeof reason !== "string" || !reason.trim()))
     throw new Refusal("Planner oneOutcomeReason must be null or text", id);
-  for (const message of planStandardLint(
-    item,
-    reason,
-    wire.started?.has(id) === true,
-  ))
+  const brief =
+    reason !== null
+      ? `${item.brief as string}${ONE_OUTCOME}${reason.trim()}`
+      : (item.brief as string);
+  const before = wire.amended?.get(id);
+  const kept =
+    wire.started?.has(id) === true ||
+    (before !== undefined &&
+      isDeepStrictEqual(before.acceptance, item.acceptance) &&
+      outcomeOf(before.brief) === outcomeOf(brief));
+  for (const message of planStandardLint(item, reason, kept))
     lint.push({
       source: "check",
       message: `Plan standard: ${message}`,
       itemId: id,
     });
-  const brief =
-    reason !== null
-      ? `${item.brief as string}\n\nOne outcome: ${reason.trim()}`
-      : (item.brief as string);
   const list = (field: string) => strings(item[field], `${id} ${field}`);
   if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
     throw new Refusal("Work Item priority must be an integer", id);

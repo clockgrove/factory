@@ -70,7 +70,7 @@ jobs:
             test-files.txt
             test-durations.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           overwrite: true
 
   # The single required check for main; it passes only when every job above

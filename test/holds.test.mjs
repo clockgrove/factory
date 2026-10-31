@@ -7,6 +7,7 @@ import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { stalled } from "./helpers/service.mjs";
 import {
   cli,
   closedPort,
@@ -21,7 +22,6 @@ import {
   refusal,
   seed,
   serve,
-  silentServer,
   stateOf,
   status,
   stopped,
@@ -31,9 +31,7 @@ import {
 
 test("a step past its deadline retries, then holds after three", async () => {
   const inst = installation();
-  configured(inst, `http://127.0.0.1:${await silentServer()}`, {
-    FACTORY_DEADLINE_MS: "300",
-  });
+  await stalled(inst, {}, { FACTORY_DEADLINE_MS: "300" });
   seed(inst, 21);
   const service = serve(inst);
   await until(() => stateOf(inst, 21).holds.length, "hold");

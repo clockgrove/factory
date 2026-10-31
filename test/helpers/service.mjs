@@ -18,11 +18,11 @@ export const recordOf = (inst) => {
  * that starts stays running. Each start still gives up on the Project's
  * repositories and starts unchecked, after 200 ms rather than 5 s.
  */
-export async function stalled(inst, fields = {}) {
+export async function stalled(inst, fields = {}, env = {}) {
   configured(
     inst,
     `http://127.0.0.1:${await silentServer()}`,
-    { FACTORY_PROJECT_START_MS: "200" },
+    { FACTORY_PROJECT_START_MS: "200", ...env },
     fields,
   );
 }

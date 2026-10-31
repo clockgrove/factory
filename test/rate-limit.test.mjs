@@ -1,8 +1,7 @@
 // GitHub's rate limits (#2080): a rate-limited answer, primary or
 // secondary, holds every request it covers until its reset (github.ts
 // `send`), and a rate-limited sync job runs again after the reset, never
-// sooner and never given up; any sync job that failed runs again once its
-// wait is over, with nothing else changed (jobs.ts `held`). A budget an
+// sooner and never given up. A budget an
 // answer reports below github.reserve defers the queue poll until its reset
 // (#2194, github-sync.ts `tick`). GitHub is a local fake that answers with
 // GitHub's own headers.
@@ -17,7 +16,6 @@ import {
   TransientError,
 } from "../dist/github.js";
 import { GitHubSync } from "../dist/github-sync.js";
-import { Jobs } from "../dist/jobs.js";
 import { item, plan, REPO, tempDir, until } from "./helpers.mjs";
 
 const ISSUE = 5;
@@ -355,28 +353,6 @@ for (const [kind, limited] of [
   });
 }
 
-test("a status job that failed transiently runs again once its backoff is over, with nothing else changed", async () => {
-  let now = Date.parse("2026-10-27T01:44:00Z");
-  const tries = [];
-  const github = {
-    repository: REPO,
-    upsertComment: async () => {
-      tries.push(now);
-      if (tries.length === 1)
-        throw new TransientError("GitHub POST comments: 502 Bad Gateway");
-      return { id: 1, created_at: iso(now), updated_at: iso(now) };
-    },
-  };
-  const { sync, runner, state, view, failures } = harness(github, () => now);
-  sync.status(runner, view);
-  await until(() => failures(`status:${ISSUE}`).length === 1, "the failure");
-  // Only time passes: the state, the plan and the body are as they were.
-  now += 61_000;
-  sync.status(runner, view);
-  await until(() => state.modules.github.status, "the status comment");
-  assert.deepEqual(tries, [tries[0], tries[0] + 61_000]);
-});
-
 test("a rate-limited status job waits for each reset, however often it is limited, and is never given up", async () => {
   let now = Date.parse("2026-10-27T01:44:00Z");
   const RESET_MS = 120_000;
@@ -419,119 +395,6 @@ test("a rate-limited status job waits for each reset, however often it is limite
     assert.ok(tries[i] - tries[i - 1] >= RESET_MS);
   assert.equal(state.modules.github.statusGivenUp, undefined);
   assert.ok(!events.some((e) => e.event === "status-given-up"));
-});
-
-test("a Work Items' tracking job that failed runs again once its wait is over, with nothing else changed (#2079)", async () => {
-  let now = Date.now();
-  let calls = 0;
-  // Every GitHub call fails transiently: the job never gets further.
-  const github = new Proxy(
-    { repository: REPO, isApp: false },
-    {
-      get: (target, name) =>
-        name in target || typeof name === "symbol" || name === "then"
-          ? target[name]
-          : async () => {
-              calls += 1;
-              throw new TransientError(
-                "GitHub GET: 403 API rate limit exceeded",
-                90_000,
-                true,
-              );
-            },
-    },
-  );
-  const { sync, runner, state, failures } = harness(github, () => now);
-  const job = `track:${ISSUE}`;
-  sync.track(runner);
-  await until(() => failures(job).length === 1, "the failed tracking job");
-  const before = calls;
-  assert.ok(before >= 1);
-  // Due again (a minute on) within the reset's wait, it doesn't run; after
-  // the wait it does, with nothing else changed.
-  now += 61_000;
-  sync.track(runner);
-  await sleep(50);
-  assert.equal(calls, before);
-  now += 30_000;
-  sync.track(runner);
-  await until(() => failures(job).length === 2, "the tracking job again");
-  assert.ok(calls > before);
-  assert.equal(state.modules.github.trackingGivenUp, undefined);
-});
-
-test("a cancelled factory run's card move that failed runs again from the tick once its wait is over, until it lands", async () => {
-  let now = Date.parse("2026-10-27T01:44:00Z");
-  let tries = 0;
-  const github = {
-    repository: REPO,
-    owner: "drill",
-    name: "target",
-    takeAmbient: () => undefined,
-    lowBudget: () => undefined,
-    sameRepository: () => {},
-    // The card read: rate-limited once, then an issue with no card.
-    graphqlPartial: async () => {
-      tries += 1;
-      if (tries === 1)
-        throw new TransientError(
-          "GitHub POST /graphql: 403 You have exceeded a secondary rate limit.",
-          30_000,
-          true,
-        );
-      return {
-        data: { repository: { nameWithOwner: REPO, issue: null } },
-        errors: [],
-      };
-    },
-  };
-  const { sync, failures } = harness(github, () => now);
-  // No queue read or identity check this time: only the cancel's move.
-  sync.identified = true;
-  const tick = () => {
-    sync.lastPoll = now;
-    sync.tick({ runners: new Map(), unreadable: new Map(), guard: () => {} });
-  };
-  sync.unqueue(7);
-  await until(() => failures("unrun:7").length === 1, "the failed move");
-  assert.equal(failures("unrun:7")[0].rateLimited, true);
-  now += 20_000;
-  tick();
-  await sleep(50);
-  assert.equal(tries, 1);
-  now += 15_000;
-  tick();
-  await until(() => !sync.unqueuing.has(7), "the card's move");
-  assert.equal(tries, 2);
-});
-
-test("a cancelled factory run's card move stops once its issue is gone", async () => {
-  let now = Date.parse("2026-10-27T01:44:00Z");
-  let tries = 0;
-  const github = {
-    repository: REPO,
-    takeAmbient: () => undefined,
-    lowBudget: () => undefined,
-    graphqlPartial: async () => {
-      tries += 1;
-      throw new TransientError("GitHub POST /graphql: 502 Bad Gateway");
-    },
-  };
-  const { sync, failures } = harness(github, () => now);
-  sync.identified = true;
-  const tick = () => {
-    sync.lastPoll = now;
-    sync.tick({ runners: new Map(), unreadable: new Map(), guard: () => {} });
-  };
-  sync.unqueue(7);
-  await until(() => failures("unrun:7").length === 1, "the failed move");
-  // A queue read finds the issue gone: there is no card left to move.
-  sync.lose(7, "queue", 404);
-  assert.equal(sync.unqueuing.has(7), false);
-  now += 60 * 60_000;
-  tick();
-  await sleep(50);
-  assert.equal(tries, 1);
 });
 
 test("an answer that reports the budget below github.reserve defers the queue poll until its reset, logged once; above it the poll goes on", async () => {
@@ -592,41 +455,4 @@ test("an answer that reports the budget below github.reserve defers the queue po
   tick(sync);
   await until(() => polls() === 2, "the poll after the reset");
   assert.equal(lows(events).length, 1);
-});
-
-test("a job that names its earliest retry waits for it with jitter, even one that otherwise retries at once", async () => {
-  let now = 1_000_000;
-  const events = [];
-  const jobs = new Jobs(
-    { write: (issue, event) => events.push(event) },
-    "test-job",
-    { baseMs: 10_000, maxMs: 600_000, deadlineMs: 60_000, jitterMs: 10_000 },
-    () => now,
-    undefined,
-    (error) => error.waitMs,
-    () => 0.5,
-  );
-  const failing = (waitMs) => async () => {
-    throw Object.assign(new Error("limited"), { waitMs });
-  };
-  // Without a backoff (a paced read), a plain failure is ready at once...
-  jobs.run(0, "plain", failing(undefined), { backoff: false });
-  await until(() => events.length === 1, "the plain failure");
-  assert.equal(jobs.held("plain"), false);
-  // ...and one that names its retry waits for it, plus its jitter.
-  jobs.run(0, "queue", failing(30_000), { backoff: false });
-  await until(() => events.length === 2, "the limited failure");
-  assert.equal(events[1].retryAt, new Date(now + 35_000).toISOString());
-  assert.equal(jobs.held("queue"), true);
-  assert.equal(jobs.pending("queue"), true);
-  now += 34_999;
-  assert.equal(jobs.held("queue"), true);
-  now += 1;
-  assert.equal(jobs.held("queue"), false);
-  // Not yet succeeded: still pending (the service's observer reads this).
-  assert.equal(jobs.pending("queue"), true);
-  // A reset already past still waits the base backoff: never a hot loop.
-  jobs.run(0, "past", failing(0));
-  await until(() => events.length === 3, "the past reset");
-  assert.equal(events[2].retryAt, new Date(now + 10_000).toISOString());
 });

@@ -45,7 +45,7 @@ export function appKey(root: string): string | undefined {
  * A JWT that authenticates as App `id` (RS256): issued 60 s in the past for
  * clock drift and expiring 9 min from now, inside GitHub's 10 min limit.
  */
-export function appJwt(id: number, key: string, now = Date.now()): string {
+function appJwt(id: number, key: string, now = Date.now()): string {
   const seconds = Math.floor(now / 1000);
   const part = (value: unknown) =>
     Buffer.from(JSON.stringify(value)).toString("base64url");

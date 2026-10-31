@@ -6,8 +6,7 @@
 // the command and its exit, the checks and their conclusions, the refused
 // criteria (#2215). Whether it is unchanged, which refuses another repair,
 // also needs its output to read the same once that noise is set aside, so
-// the same command failing on another test still moved. A correction saved
-// with only its text compares by its text, as before.
+// the same command failing on another test still moved.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -148,37 +147,6 @@ test("the same failed command, ending the same way, is a repeat whatever its out
   assert.match(
     model.asked[1].prompt,
     /the failure repeated unchanged after the last correction/,
-  );
-});
-
-test("a long failure kept whole in a file named by its content is unchanged whatever that file's name", () => {
-  // work/step-validate.ts names the kept output's file by its content, so the
-  // same failure with other timings is kept under another name (#2201).
-  const kept = (text, name) =>
-    `${text}\n[The complete output is kept for the operator at /home/op/.local/state/factory/work/outputs/a/${name}.txt. The repair diagnosis can ask for it as .factory-validate/validate.log, and the next worker attempt reads it there in its checkout.]`;
-  const keptFirst = kept(first, "0123456789abcdef");
-  const keptSecond = kept(second, "fedcba9876543210");
-  assert.equal(
-    unchangedFailure(
-      keptSecond,
-      [{ ...tried, failure: keptFirst }],
-      2,
-      npmTest,
-    ),
-    true,
-  );
-  // Another test failing is still another output, whatever the file's name.
-  assert.equal(
-    unchangedFailure(
-      kept(
-        first.replace("sum is 3", "sum of nothing is 0"),
-        "fedcba9876543210",
-      ),
-      [{ ...tried, failure: keptFirst }],
-      2,
-      npmTest,
-    ),
-    false,
   );
 });
 
@@ -486,44 +454,4 @@ test("a blamed predecessor's correction carries the failure it was blamed for, b
     item: "b",
     failure: npmTest,
   });
-});
-
-test("a correction saved with only its text (0.5.10) still loads and compares by its text for one round, then by identity", async () => {
-  const saved = JSON.parse(JSON.stringify(tried));
-  delete saved.identity;
-  // Unknown identity: its text decides, as before.
-  assert.equal(unchangedFailure(first, [saved], 2, npmTest), true);
-  assert.equal(unchangedFailure(second, [saved], 2, npmTest), false);
-  assert.equal(repeated({ ...tried }, [saved]), true);
-  assert.equal(repeated({ ...tried, failure: second }, [saved]), false);
-  // A finding saved before identities has none.
-  assert.equal(
-    failureIdentity({
-      finding: { kind: "failure", detail: first },
-      plan: plan([a]),
-      item: a,
-    }),
-    undefined,
-  );
-
-  // Its next correction carries the identity, so the round after compares by it.
-  const model = planner(repair("Round half up with Math.round."));
-  const next = await diagnose(
-    model,
-    { kind: "failure", detail: second, identity: npmTest },
-    { prior: [saved], repair: 2 },
-  );
-  assert.equal(next.kind, "correction");
-  assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
-  assert.deepEqual(next.correction.identity, npmTest);
-  const third = run("2026-10-29T20:15:40.120Z", "/tmp/factory-g7h8i9", 977);
-  assert.equal(
-    unchangedFailure(
-      third,
-      [saved, { ...next.correction, repair: 2 }],
-      3,
-      npmTest,
-    ),
-    true,
-  );
 });

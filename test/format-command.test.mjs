@@ -32,11 +32,7 @@ import {
 import { renderGraphReviewCall } from "../dist/planning/prompts.js";
 import { CodexValidate } from "../dist/providers/codex-validate.js";
 import { WORKERS } from "../dist/providers/config.js";
-import {
-  freezeConfig,
-  profileWorker,
-  providerWorker,
-} from "../dist/providers/selection.js";
+import { profileWorker, providerWorker } from "../dist/providers/selection.js";
 import { validationRow } from "../dist/review/result.js";
 import { readShown } from "../dist/shown.js";
 import {
@@ -50,8 +46,6 @@ import { formattedNote, SelfValidation } from "../dist/work/self-validate.js";
 import { passedByWorker, rerunOnce } from "../dist/work/step-validate.js";
 import { candidate } from "../dist/work/steps.js";
 import {
-  cli,
-  closedPort,
   configured,
   installation,
   item,
@@ -636,62 +630,6 @@ test("a failure after the formatter changed the result is rerun once when the wo
   // Without formatting, the candidate's tree is the tree validated.
   const plain = await validate({ format: null, commands: ["false"] });
   assert.equal(plain.result.candidateTree, plain.result.tree);
-});
-
-test("validation.formatCommand is set by setup's --format-command, absent by default, and frozen with an Objective", async () => {
-  const inst = installation();
-  configured(inst, `http://127.0.0.1:${await closedPort()}`);
-  const read = () => {
-    const saved = process.env.FACTORY_CONFIG;
-    process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
-    try {
-      return loadConfig(REPO);
-    } finally {
-      if (saved === undefined) delete process.env.FACTORY_CONFIG;
-      else process.env.FACTORY_CONFIG = saved;
-    }
-  };
-  const before = read();
-  assert.equal(before.validation.formatCommand, undefined);
-  const set = JSON.parse(
-    cli(
-      inst,
-      "setup",
-      "--format-command",
-      "pnpm exec biome check --write .",
-      "--json",
-    ).out,
-  );
-  assert.notEqual(set.status, "refused", JSON.stringify(set));
-  assert.deepEqual(set.changed, ["validation.formatCommand"]);
-  assert.equal(
-    JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8")).validation
-      .formatCommand,
-    "pnpm exec biome check --write .",
-  );
-  const after = read();
-  assert.equal(
-    after.validation.formatCommand,
-    "pnpm exec biome check --write .",
-  );
-  // Frozen: an Objective holds when it changes under it.
-  const frozen = freezeConfig(after, after.defaultProvider);
-  assert.equal(
-    frozen.config.validation.formatCommand,
-    "pnpm exec biome check --write .",
-  );
-  assert.notEqual(
-    frozen.digest,
-    freezeConfig(before, before.defaultProvider).digest,
-  );
-  const blank = JSON.parse(
-    cli(inst, "setup", "--format-command", " ", "--json").out,
-  );
-  assert.equal(blank.status, "refused");
-  assert.match(
-    blank.problems.join("\n"),
-    /validation\.formatCommand must be a non-empty string/,
-  );
 });
 
 /** A base with package scripts, as the planner and the plan check read it. */

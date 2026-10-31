@@ -22,7 +22,7 @@ export interface ContextBounds {
   maxProviderCalls: number;
 }
 
-export const DEFAULT_BOUNDS: Readonly<ContextBounds> = Object.freeze({
+const DEFAULT_BOUNDS: Readonly<ContextBounds> = Object.freeze({
   maxRounds: 4,
   maxRequestsPerRound: 8,
   maxResults: 64,

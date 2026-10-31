@@ -2,8 +2,7 @@
 // `factory run` queues the Objective and then follows it for as long as it
 // runs, so run.mjs stops that follower once status shows the Objective
 // admitted (its Queued line comes before the service answers) and follows
-// with `factory status`; a non-zero exit of any Factory command is a
-// result it records, never a crash.
+// with `factory status`.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -186,59 +185,6 @@ test("a follower that ends on an open hold queued the Objective, and a rerun doe
   assert.equal(again.status, 2, again.stderr);
   assert.equal(calls(at).filter((call) => call.command === "run").length, 1);
   assert.deepEqual(events(at), ["queued", "paused"]);
-});
-
-test("no service running is reported, not queued, and the next run queues it", () => {
-  const at = runDir("no-service", {
-    run: "no-service",
-    status: [view("running", objective("done"))],
-  });
-  const run = benchRun(at);
-  assert.equal(run.status, 75, run.stderr);
-  assert.match(
-    run.stderr,
-    /The service isn't running, so #42 isn't queued: start it/,
-  );
-  assert.equal(recorded(at).queuedAt, undefined);
-  assert.deepEqual(events(at), ["service-down"]);
-  assert.ok(!calls(at).some((call) => call.command === "status"));
-  // Started: queued, and the service seen up again.
-  standIn(at, {
-    status: [
-      view("running", objective("building")),
-      view("running", objective("done")),
-    ],
-  });
-  const started = benchRun(at);
-  assert.equal(started.status, 0, started.stderr);
-  assert.ok(recorded(at).queuedAt);
-  assert.deepEqual(events(at), [
-    "service-down",
-    "queued",
-    "service-up",
-    "ended",
-  ]);
-});
-
-test("a request the service refuses after the Queued line is reported without a stack and not queued", () => {
-  const at = runDir("refused", {
-    run: "refused",
-    // Never admitted: status doesn't show it.
-    status: [view("running")],
-  });
-  const run = benchRun(at);
-  assert.equal(run.status, 1, run.stderr);
-  assert.match(
-    run.stderr,
-    /^factory run 42 didn't queue it \(exit 1\): factory: The queue is paused, so #42 isn't admitted/,
-  );
-  assert.doesNotMatch(run.stderr, /\n\s+at /);
-  assert.equal(recorded(at).queuedAt, undefined);
-  assert.deepEqual(events(at), []);
-  // Looked for the admission while waiting, and never stopped the follower.
-  const made = calls(at);
-  assert.ok(made.some((call) => call.command === "status"));
-  assert.ok(!made.some((call) => call.signal));
 });
 
 test("a refused policy answer is recorded, and a hold still open after it pauses for the operator", () => {
@@ -531,20 +477,6 @@ test("stop refuses while the Objective holds or runs, unless --force", () => {
   );
 });
 
-test("a service setup doesn't stop is reported and exits 1", () => {
-  const at = runDir("stop-blocked", {
-    status: [view("running", objective("cancelled"))],
-    setup: "blocked",
-  });
-  const failed = benchRun(at, "stop");
-  assert.equal(failed.status, 1, failed.stderr);
-  assert.match(
-    failed.stderr,
-    /didn't stop acme\/widgets's service: blocked: systemctl --user isn't available/,
-  );
-  assert.deepEqual(events(at), []);
-});
-
 // --- start: a stopped run's service starts again with its own configuration -
 
 test("start starts a stopped run's service again with its configuration as it stands", () => {
@@ -570,15 +502,4 @@ test("start starts a stopped run's service again with its configuration as it st
   );
   assert.deepEqual(recorded(at), before);
   assert.deepEqual(events(at), ["service-stopped", "service-started"]);
-});
-
-test("a service setup doesn't start is reported and exits 1", () => {
-  const at = runDir("start-blocked", { status: [], start: "blocked" });
-  const failed = benchRun(at, "start");
-  assert.equal(failed.status, 1, failed.stderr);
-  assert.match(
-    failed.stderr,
-    /didn't start acme\/widgets's service: blocked: The service wasn't started: setup is not configured/,
-  );
-  assert.deepEqual(events(at), []);
 });

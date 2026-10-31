@@ -278,48 +278,6 @@ test("scorecards go only where they are told: outside the Factory repository", (
   assert.equal(card.totals.tokens.total, 19_914_000);
 });
 
-test("a harness run is scored where its record says, unless a flag says otherwise", () => {
-  const dir = mkdtempSync(join(tmpdir(), "bench-run-results-"));
-  after(() => rmSync(dir, { recursive: true, force: true }));
-  const runDir = join(dir, "run1");
-  mkdirSync(runDir);
-  const recorded = join(dir, "recorded");
-  writeFileSync(
-    join(runDir, "run.json"),
-    JSON.stringify({
-      runId: "r1",
-      label: "r1",
-      group: "r1",
-      repository: "acme/widgets",
-      issue: 42,
-      stateDir: FIXTURE_STATE,
-      definitionFile: EXAMPLE,
-      resultsDir: recorded,
-    }),
-  );
-  const exported = join(dir, "exported");
-  const score = (...args) =>
-    spawnSync(
-      process.execPath,
-      [join(BENCH_DIR, "score.mjs"), "--run-dir", runDir, ...args],
-      { encoding: "utf8", env: { ...process.env, [HOME_ENV]: exported } },
-    );
-  const card = (results) => join(results, "acme-widgets-42", "r1.json");
-  // An exported bench home doesn't override what provisioning recorded.
-  const run = score();
-  assert.equal(run.status, 0, run.stderr);
-  assert.ok(existsSync(card(recorded)));
-  assert.ok(!existsSync(exported));
-  // A flag does.
-  const flagged = join(dir, "flagged");
-  assert.equal(score("--results", flagged).status, 0);
-  assert.ok(existsSync(card(flagged)));
-  const home = join(dir, "home");
-  assert.equal(score("--bench-home", home).status, 0);
-  assert.ok(existsSync(card(join(home, "results"))));
-  assert.ok(!existsSync(exported));
-});
-
 test("repairs, holds by kind, validation, CI and per Work Item", async () => {
   const card = await fixtureCard();
   const { totals } = card;

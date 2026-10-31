@@ -27,7 +27,7 @@ import { POLICIES } from "./scripted.mjs";
 export const BENCH_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** A definition that doesn't hold: every problem, each with its field. */
-export class DefinitionError extends Error {
+class DefinitionError extends Error {
   constructor(file, problems) {
     super(
       `${file} is not a valid benchmark definition:\n${problems.map((p) => `- ${p}`).join("\n")}`,

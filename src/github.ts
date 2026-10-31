@@ -68,7 +68,7 @@ const TRY_AGAIN = [
 ];
 
 /** Whether GitHub answered `error` for a passing failure that asks to try again (`TryAgain`). */
-export function tryAgain(error: GraphQLError): boolean {
+function tryAgain(error: GraphQLError): boolean {
   return TRY_AGAIN.some((start) => error.message.startsWith(start));
 }
 

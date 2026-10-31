@@ -83,7 +83,7 @@ export const hasMiseConfig = (checkout: string): boolean =>
   MISE_CONFIGS.some((name) => existsSync(join(checkout, name)));
 
 /** Whether mise manages the checkout: it has a mise configuration, and mise is on the PATH. */
-export function miseManages(checkout: string): boolean {
+function miseManages(checkout: string): boolean {
   return hasMiseConfig(checkout) && !!executable("mise");
 }
 

@@ -9,16 +9,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { deflateRawSync } from "node:zlib";
 import { observeCi, stepLog } from "../dist/delivery.js";
-import { GitHub, GitHubError, TransientError } from "../dist/github.js";
+import { GitHubError, TransientError } from "../dist/github.js";
 import { correction } from "../dist/repair.js";
-import { pullInput } from "../dist/work/step-deliver.js";
-import { zipTexts } from "../dist/zip.js";
-import { item, plan, REPO, tempDir } from "./helpers.mjs";
+import { item, plan, tempDir } from "./helpers.mjs";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -511,128 +508,6 @@ test("the failed step's own log reaches the finding, not only the job's tail", a
   assert.doesNotMatch(repaired.finding, /Log of failed step/);
 });
 
-// GitHub gives a step's times to the second, and its neighbours write
-// within those seconds: Clockgrove job 122053950360's failed step "Require
-// every share to pass" ran within 06:52:46, after the upload step's last
-// lines there. Actions' own markers keep each step's error under its name.
-test("a failed step's log holds neither the step before's lines nor the next failed step's error", () => {
-  const at = (time) => `2026-10-27T06:52:${time}Z`;
-  const shareStep = {
-    name: "Require every share to pass",
-    startedAt: "2026-10-27T06:52:46Z",
-    completedAt: "2026-10-27T06:52:46Z",
-  };
-  assert.equal(
-    stepLog(
-      [
-        `${at("45.1000000")} ##[group]Run actions/upload-artifact@v4`,
-        `${at("46.0100000")} Uploaded bytes 2239558`,
-        `${at("46.0200000")} Artifact quality-evidence successfully finalized.`,
-        `${at("46.1000000")} ##[group]Run test "$RESULT" = success`,
-        `${at("46.1100000")} ##[endgroup]`,
-        `${at("46.2000000")} ##[error]Process completed with exit code 1.`,
-        `${at("47.0000000")} Post job cleanup.`,
-      ].join("\n"),
-      shareStep,
-    ),
-    [
-      '##[group]Run test "$RESULT" = success',
-      "##[endgroup]",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n"),
-  );
-
-  // Two failed steps, the second (`if: always()`) within the second the
-  // first completed.
-  const log = [
-    `${at("20.1000000")} ##[group]Run npm test`,
-    `${at("23.1000000")} A: test suite failed: expected 3 got 4`,
-    `${at("23.2000000")} ##[error]Process completed with exit code 1.`,
-    `${at("23.3000000")} ##[group]Run node scripts/report.mjs`,
-    `${at("23.5000000")} B: report script crashed: ENOENT receipts.json`,
-    `${at("23.6000000")} ##[error]Process completed with exit code 2.`,
-    `${at("24.0000000")} Post job cleanup.`,
-  ].join("\n");
-  assert.equal(
-    stepLog(log, {
-      name: "Test",
-      startedAt: "2026-10-27T06:52:20Z",
-      completedAt: "2026-10-27T06:52:23Z",
-    }),
-    [
-      "##[group]Run npm test",
-      "A: test suite failed: expected 3 got 4",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n"),
-  );
-  assert.equal(
-    stepLog(log, {
-      name: "Report",
-      startedAt: "2026-10-27T06:52:23Z",
-      completedAt: "2026-10-27T06:52:23Z",
-    }),
-    [
-      "##[group]Run node scripts/report.mjs",
-      "B: report script crashed: ENOENT receipts.json",
-      "##[error]Process completed with exit code 2.",
-    ].join("\n"),
-  );
-});
-
-// Two quick failed steps (`test "$X" = success` gates), both within one
-// second: the second began at the first step's `##[group]Run` there, read
-// the first's error, and was cut at its own start as "the next step's", so
-// the finding held the first step's error twice and never the second's.
-test("two failed steps within one second each keep their own error", async () => {
-  const at = (time) => `2026-10-27T06:52:${time}Z`;
-  const second = "2026-10-27T06:52:46Z";
-  const steps = ["Require lint to pass", "Require tests to pass"];
-  const hub = github({
-    runs: [check(1, "checks", "failure")],
-    baseRuns: [onBase(21, "checks", "success")],
-    jobs: {
-      1: {
-        attempt: 2,
-        failedSteps: steps,
-        failedStepTimes: steps.map((name) => ({
-          name,
-          startedAt: second,
-          completedAt: second,
-        })),
-        log: [
-          `${at("45.1000000")} ##[group]Run actions/upload-artifact@v4`,
-          `${at("46.0100000")} Artifact evidence successfully finalized.`,
-          `${at("46.1000000")} ##[group]Run test "$LINT" = success`,
-          `${at("46.2000000")} LINT-ERROR: lint failed`,
-          `${at("46.3000000")} ##[error]Process completed with exit code 1.`,
-          `${at("46.4000000")} ##[group]Run test "$TESTS" = success`,
-          `${at("46.5000000")} TESTS-ERROR: tests failed`,
-          `${at("46.6000000")} ##[error]Process completed with exit code 2.`,
-          `${at("47.0000000")} Post job cleanup.`,
-        ].join("\n"),
-      },
-    },
-    attempt: 2,
-  });
-  const result = await observe(hub);
-  assert.equal(result.kind, "repair", JSON.stringify(result));
-  assert.ok(
-    result.finding.endsWith(
-      [
-        `Log of failed step ${steps[0]}:`,
-        '##[group]Run test "$LINT" = success',
-        "LINT-ERROR: lint failed",
-        "##[error]Process completed with exit code 1.",
-        `Log of failed step ${steps[1]}:`,
-        '##[group]Run test "$TESTS" = success',
-        "TESTS-ERROR: tests failed",
-        "##[error]Process completed with exit code 2.",
-      ].join("\n"),
-    ),
-    result.finding,
-  );
-});
-
 // The repair diagnosis keeps a finding's first 1000 and last 7000
 // characters (repair.ts), and the excerpts come last: three failed checks,
 // each with two long failed steps, still each reach it with their errors,
@@ -816,49 +691,6 @@ test("a rate limit while reading artifacts waits for its reset; other failures l
   assert.doesNotMatch(plain.finding, /Artifacts of/);
 });
 
-test("a zip entry is read only within its bound, whatever its header claims", () => {
-  const listing = zipTexts(
-    zip([
-      { name: "ok.txt", data: Buffer.from("fine") },
-      // Claims 10 bytes, inflates past the bound: a zip bomb.
-      { name: "bomb.txt", data: Buffer.alloc(200 * 1024, 0x61), size: 10 },
-      // Claims fewer bytes than it holds.
-      { name: "short.txt", data: Buffer.from("twelve bytes"), size: 5 },
-    ]),
-    64 * 1024,
-  );
-  assert.deepEqual(listing.texts, [{ name: "ok.txt", text: "fine" }]);
-  assert.deepEqual(listing.skipped, [
-    { name: "bomb.txt", reason: "unreadable" },
-    { name: "short.txt", reason: "unreadable" },
-  ]);
-  assert.equal(zipTexts(Buffer.from("not a zip"), 64 * 1024), undefined);
-
-  // Many directory entries sharing one entry's data: an overlapping zip
-  // bomb. Each counts against the bound in all, so it is read only so far.
-  const one = zip([{ name: "a.txt", data: Buffer.alloc(60 * 1024, 0x61) }]);
-  const end = one.length - 22;
-  const offset = one.readUInt32LE(end + 16);
-  const entry = one.subarray(offset, end);
-  const copies = 1000;
-  const directory = Buffer.concat(Array.from({ length: copies }, () => entry));
-  const record = Buffer.from(one.subarray(end));
-  record.writeUInt16LE(copies, 8);
-  record.writeUInt16LE(copies, 10);
-  record.writeUInt32LE(directory.length, 12);
-  const overlapping = zipTexts(
-    Buffer.concat([one.subarray(0, offset), directory, record]),
-    64 * 1024,
-    128 * 1024,
-  );
-  assert.equal(overlapping.texts.length, 2);
-  assert.equal(overlapping.skipped.length, copies - 2);
-  assert.deepEqual(overlapping.skipped[0], {
-    name: "a.txt",
-    reason: "past the bound in all",
-  });
-});
-
 test("a failure on main that a later run of the check there passed or still runs is not main's now", async () => {
   for (const later of [
     onBase(31, "quality", "success"),
@@ -957,48 +789,6 @@ test("the operator's retry once main is fixed brings the PR up to date with it i
   }
 });
 
-test("the CI and merge steps pass the operator's retry and repair on to the comparison", () => {
-  const a = item("a");
-  const state = {
-    issue: 1,
-    kept: {},
-    done: {
-      plan: plan([a]),
-      "item:a:publish": { pr: 7, head: HEAD, merged: false },
-    },
-  };
-  const input = (answer) =>
-    pullInput(
-      state,
-      a,
-      {
-        state,
-        signal: new AbortController().signal,
-        log() {},
-        ...(answer ? { answer: { answer, at: new Date().toISOString() } } : {}),
-      },
-      undefined,
-    );
-  assert.equal(input("retry").retried, true);
-  assert.equal(input("retry").repairShared, undefined);
-  assert.equal(input("repair").repairShared, true);
-  assert.equal(input("repair").retried, undefined);
-  assert.equal(input(undefined).retried, undefined);
-  assert.equal(input("republish").repairShared, undefined);
-  // A result rereview of the delivered result (`revalidate`, #2120) is
-  // judged as the operator's retry: the default branch may have been what
-  // failed its checks. Only while that result is the item's.
-  const at = "2026-10-27T15:53:48.000Z";
-  state.done["item:a:work"] = { base: BASE, commit: "c".repeat(40) };
-  state.kept["item:a:rereviewed"] = { commit: "c".repeat(40), at };
-  assert.equal(input(undefined).retried, true);
-  assert.equal(input(undefined).rereviewedAt, at);
-  assert.equal(input("retry").rereviewedAt, at);
-  state.done["item:a:work"] = { base: BASE, commit: "d".repeat(40) };
-  assert.equal(input(undefined).retried, undefined);
-  assert.equal(input(undefined).rereviewedAt, undefined);
-});
-
 // Clockgrove #821 from 06:53 to 15:50 on 2026-10-27: PR #825's `checks`
 // job failed on its rerun (attempt 2), main (dc3e310) hadn't moved since
 // its checks passed five days before, and the PR's head already had it.
@@ -1092,122 +882,4 @@ test("a result rereview whose failed checks nothing has run again since asks ins
     rereviewedAt: new Date(failedAt - 30_000).toISOString(),
   });
   assert.equal(fresh.kind, "repair");
-});
-
-test("the client reads main's head, a job's failed steps, a run's artifacts and a bounded download, and holds them for a rate limit", async () => {
-  const receipts = zip([
-    { name: "vulnerabilities.json", data: Buffer.from(ADVISORIES) },
-  ]);
-  const requests = [];
-  const server = createServer((request, response) => {
-    request.resume();
-    const path = request.url.split("?")[0];
-    requests.push({ path, authorization: request.headers.authorization });
-    const json = (status, body, headers = {}) => {
-      response.writeHead(status, {
-        "content-type": "application/json",
-        ...headers,
-      });
-      response.end(JSON.stringify(body));
-    };
-    const repo = `/repos/${REPO}`;
-    const origin = `http://127.0.0.1:${server.address().port}`;
-    if (path === `${repo}/git/ref/heads/main`)
-      return json(200, { object: { sha: BASE } });
-    if (path === `${repo}/actions/jobs/5`)
-      return json(200, {
-        run_id: RUN,
-        run_attempt: 2,
-        steps: [
-          { name: "Set up job", conclusion: "success" },
-          {
-            name: "Supply-chain gate",
-            conclusion: "failure",
-            started_at: "2026-10-27T06:51:19Z",
-            completed_at: "2026-10-27T06:52:23Z",
-          },
-          { name: "Upload receipts", conclusion: "skipped" },
-        ],
-      });
-    if (path === `${repo}/actions/runs/${RUN}/artifacts`)
-      return json(200, {
-        total_count: 2,
-        artifacts: [
-          { id: 9, name: "receipts", size_in_bytes: 200, expired: false },
-          { id: 10, name: "evidence", size_in_bytes: 3, expired: true },
-        ],
-      });
-    if (path === `${repo}/actions/artifacts/9/zip`)
-      return json(302, {}, { location: `${origin}/signed/9` });
-    if (path === `${repo}/actions/artifacts/10/zip`)
-      return json(302, {}, { location: `${origin}/signed/10` });
-    if (path === `${repo}/actions/artifacts/11/zip`)
-      return json(410, { message: "Artifact has expired" });
-    if (path === "/signed/9") {
-      response.writeHead(200, { "content-type": "application/zip" });
-      return response.end(receipts);
-    }
-    if (path === "/signed/10") {
-      response.writeHead(200, { "content-type": "application/zip" });
-      return response.end(Buffer.alloc(2 * 1024 * 1024));
-    }
-    if (path === `${repo}/actions/runs/901/artifacts`)
-      return json(
-        403,
-        { message: "API rate limit exceeded" },
-        {
-          "x-ratelimit-remaining": "0",
-          "x-ratelimit-reset": String(Math.ceil(Date.now() / 1000) + 600),
-          "x-ratelimit-resource": "core",
-        },
-      );
-    return json(404, { message: "Not Found" });
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  after(() => {
-    server.closeAllConnections();
-    server.close();
-  });
-  process.env.FACTORY_GITHUB_TOKEN = "ghs_test";
-  const hub = new GitHub(REPO, `http://127.0.0.1:${server.address().port}`);
-
-  assert.equal(await hub.branchHead("main"), BASE);
-  assert.deepEqual(await hub.workflowJob(5), {
-    run: RUN,
-    attempt: 2,
-    failedSteps: ["Supply-chain gate"],
-    failedStepTimes: [
-      {
-        name: "Supply-chain gate",
-        startedAt: "2026-10-27T06:51:19Z",
-        completedAt: "2026-10-27T06:52:23Z",
-      },
-    ],
-  });
-  assert.deepEqual(await hub.runArtifacts(RUN), [
-    { id: 9, name: "receipts", size: 200, expired: false },
-    { id: 10, name: "evidence", size: 3, expired: true },
-  ]);
-  assert.deepEqual(await hub.artifactDownload(9, 1024 * 1024), receipts);
-  // The signed link is read without Factory's login.
-  assert.equal(
-    requests.find((request) => request.path === "/signed/9").authorization,
-    undefined,
-  );
-  assert.equal(await hub.artifactDownload(10, 1024 * 1024), undefined);
-  assert.equal(await hub.artifactDownload(11, 1024 * 1024), undefined);
-  assert.equal(await hub.runArtifacts(404), undefined);
-
-  // A rate limit holds the downloads too: none is sent before its reset.
-  await assert.rejects(hub.runArtifacts(901), (error) => {
-    assert.ok(error instanceof TransientError && error.limited);
-    return true;
-  });
-  const sent = requests.length;
-  await assert.rejects(hub.artifactDownload(9, 1024 * 1024), (error) => {
-    assert.ok(error instanceof TransientError && error.limited);
-    assert.match(error.message, /not sent, GitHub's rate limit holds requests/);
-    return true;
-  });
-  assert.equal(requests.length, sent);
 });

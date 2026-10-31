@@ -191,7 +191,7 @@ const OPEN_CHOICE =
  * applied it there refused a new test file as an invented name and `test/`
  * as too broad, which left a planned test no valid owner (#2108).
  */
-export const OWNED_NEW_FILES =
+const OWNED_NEW_FILES =
   'The rule is for acceptance and briefs, not ownedPaths: an item owns each new file it creates, a new test file included, by the literal path the planner chooses for it, or by a directory prefix ending in "/" where the ownership rule allows one, and neither is a new-identifier finding.';
 
 /** Check 8: the worker names what is new. */

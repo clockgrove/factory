@@ -28,7 +28,7 @@ const NAME_LIMIT = 214;
 /** The longest range Factory looks up. */
 const RANGE_LIMIT = 128;
 /** The newest published versions a repair names. */
-export const NEWEST_SHOWN = 10;
+const NEWEST_SHOWN = 10;
 /**
  * A version a repair may name: a release, `major.minor.patch` and nothing
  * else (semver's canonical form has already dropped build metadata). A

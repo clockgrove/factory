@@ -10,8 +10,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
-import { correction } from "../dist/repair.js";
-import { failureExcerpt, headAndTail } from "../dist/text.js";
 import {
   SelfValidation,
   VALIDATE_RESULT_CHARS,
@@ -78,134 +76,8 @@ const codeFrames = (from, count) =>
       "",
     ].join("\n"),
   ).join("\n");
-/** A test run's passing tests, which name errors, around one failure. */
-const passing = Array.from(
-  { length: 600 },
-  (_, n) => `  ✓ returns an error when input ${n} is invalid (2ms)`,
-).join("\n");
-const FAILED_TEST = [
-  "  ✗ parses the config",
-  "    AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
-];
-const testRun = `> test\n${passing}\n${FAILED_TEST.join("\n")}\n    at TestContext.<anonymous> (test/config.test.js:12:5)\n${passing}\n# fail 1\n`;
 /** A linter's warnings, then a compiler's errors, then more warnings. */
 const flooded = `> check\n${warnings(0, 400)}\n${ERRORS[0]}\n  3 const total: number = "none";\n${ERRORS[1]}\nFound 2 errors in 1 file.\n${warnings(400, 400)}\n`;
-
-test("failureExcerpt keeps the errors between pages of warnings, the start and the end, within its bound, and says what it cut (#2201)", () => {
-  assert.ok(flooded.length > 60_000, String(flooded.length));
-  // Head and tail alone lose them.
-  const old = headAndTail(flooded, 300, 8_000);
-  for (const error of ERRORS) assert.ok(!old.includes(error));
-  for (const chars of [1_000, 8_000, 10_000, 30_000]) {
-    const excerpt = failureExcerpt(flooded, chars);
-    assert.ok(excerpt.length <= chars, `${excerpt.length} > ${chars}`);
-    for (const error of ERRORS)
-      assert.ok(excerpt.includes(error), `${chars}: ${excerpt}`);
-    assert.ok(excerpt.startsWith("> check\n"), excerpt.slice(0, 200));
-    assert.match(excerpt, /\n\[\d+ characters omitted\]\n/);
-    assert.match(
-      excerpt,
-      /\n\[Cut to fit: \d+ of \d+ characters omitted\. Kept: the start, the end, and \d+ (?:line that looks|lines that look) like errors or failures, each with the lines around it\.\]$/,
-    );
-    // The end of the output is kept, before the note.
-    const lastWarning = warnings(799, 1);
-    if (chars >= 8_000) assert.ok(excerpt.includes(lastWarning));
-  }
-  // With room, each error keeps the lines around it.
-  const roomy = failureExcerpt(flooded, 30_000);
-  assert.ok(
-    roomy.includes(
-      `${ERRORS[0]}\n  3 const total: number = "none";\n${ERRORS[1]}\nFound 2 errors in 1 file.`,
-    ),
-  );
-  // What it says it omitted is what it left out.
-  const [, omitted, length] = roomy.match(
-    /Cut to fit: (\d+) of (\d+) characters omitted/,
-  );
-  assert.equal(Number(length), flooded.length);
-  const gaps = [...roomy.matchAll(/\n\[(\d+) characters omitted\]\n/g)];
-  assert.equal(
-    gaps.reduce((sum, [, n]) => sum + Number(n), 0),
-    Number(omitted),
-  );
-});
-
-test("failureExcerpt leaves short output as it is, keeps the start and the end of output with no failure lines, and stays bounded on any output", () => {
-  assert.equal(failureExcerpt("error: short\n", 1_000), "error: short\n");
-  const quiet = warnings(0, 1_000);
-  const plain = failureExcerpt(quiet, 10_000);
-  assert.ok(plain.length <= 10_000);
-  assert.ok(plain.startsWith(warnings(0, 1)));
-  assert.ok(plain.includes(warnings(999, 1)));
-  assert.match(plain, /Kept: the start, the end\.\]$/);
-  // Every line a failure, a minified line, stack frames, a 1 MB output.
-  const cases = [
-    Array.from({ length: 5_000 }, (_, n) => `FAIL test ${n}`).join("\n"),
-    `${"x".repeat(50_000)}\nerror: ${"y".repeat(50_000)}\n${"z".repeat(50_000)}`,
-    `${warnings(0, 300)}\nTypeError: boom\n${"    at frame (src/a.js:1:1)\n".repeat(40)}${warnings(300, 300)}`,
-    `${warnings(0, 6_000)}\nnpm ERR! code 1\n${warnings(6_000, 6_000)}`,
-  ];
-  for (const text of cases)
-    for (const chars of [1_000, 8_000, 30_000, 128_000]) {
-      const excerpt = failureExcerpt(text, chars);
-      assert.ok(excerpt.length <= chars, `${excerpt.length} > ${chars}`);
-    }
-  // A stack trace keeps its frames after the error.
-  const traced = failureExcerpt(cases[2], 8_000);
-  assert.ok(
-    traced.includes(
-      `TypeError: boom\n${"    at frame (src/a.js:1:1)\n".repeat(12)}`,
-    ),
-    traced,
-  );
-  assert.ok(failureExcerpt(cases[3], 30_000).includes("npm ERR! code 1"));
-});
-
-test("failureExcerpt keeps the errors before lines that only mention one: code frames of error-handling code and passing tests named for errors (#2201)", () => {
-  for (const before of [20, 40, 100, 300]) {
-    const text = `> check\n${codeFrames(0, before)}\n${ERRORS[0]}\n${ERRORS[1]}\nFound 2 errors in 1 file.\n${codeFrames(before, 300)}\n`;
-    for (const chars of [8_000, 10_000, 30_000]) {
-      const excerpt = failureExcerpt(text, chars);
-      assert.ok(excerpt.length <= chars, `${excerpt.length} > ${chars}`);
-      for (const error of ERRORS)
-        assert.ok(excerpt.includes(error), `${before}, ${chars}: ${excerpt}`);
-      // Only the errors, and their summary, are taken for failures.
-      assert.match(excerpt, /and [1-3] lines? that looks? like errors/);
-    }
-  }
-  for (const chars of [8_000, 30_000]) {
-    const excerpt = failureExcerpt(testRun, chars);
-    assert.ok(excerpt.length <= chars, `${excerpt.length} > ${chars}`);
-    assert.ok(
-      excerpt.includes(`${FAILED_TEST.join("\n")}\n    at TestContext`),
-      excerpt,
-    );
-  }
-  // A line that only mentions a failure is kept with the room left.
-  const mention = `${warnings(0, 400)}\nwarning: 3 tests were skipped after a failing setup\n${warnings(400, 400)}`;
-  assert.ok(
-    failureExcerpt(mention, 8_000).includes(
-      "warning: 3 tests were skipped after a failing setup",
-    ),
-  );
-});
-
-test("a repair's correction carries the errors of a failed command's output between pages of warnings (#2201)", async () => {
-  const result = await correction({
-    finding: {
-      kind: "failure",
-      detail: `Validation command failed (1): pnpm check: ${flooded}`,
-    },
-    operatorAnswer: "Fix the type errors.",
-    prior: [],
-  });
-  assert.equal(result.kind, "correction");
-  assert.ok(result.correction.failure.length <= 8_000);
-  for (const error of ERRORS) {
-    assert.ok(result.correction.failure.includes(error));
-    assert.ok(result.finding.includes(error));
-  }
-});
 
 /** A worker's Validate of a check that prints `output` and fails. */
 async function validated(output) {

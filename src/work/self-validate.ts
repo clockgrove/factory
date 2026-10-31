@@ -115,7 +115,7 @@ export function validationTargets(
  * note names the earlier commands a targeted run of it would skip; after a
  * targeted run, the ones it skipped, if any.
  */
-function targetedNote(
+export function targetedNote(
   commands: readonly string[],
   index: number,
   targeted?: readonly number[],

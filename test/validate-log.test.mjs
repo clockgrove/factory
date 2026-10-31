@@ -311,3 +311,56 @@ test("the validate step keeps a failed command's complete output, and the next w
   );
   assert.equal(existsSync(join(worktree, ".factory-validate")), false);
 });
+
+/** Numbered stdout lines, 64 bytes each with their newlines. */
+const outLines = (from, count) =>
+  Array.from(
+    { length: count },
+    (_, index) =>
+      `stdout line ${String(from + index).padStart(6, "0")} ${"x".repeat(44)}`,
+  ).join("\n");
+
+test("the validate step's kept output is the command's own, past the run's stream bounds and with its streams in the order they arrived (#2201)", async () => {
+  // Over 1 MiB of stdout, so the run's in-memory output (sandbox.ts,
+  // about 512 KiB of each stream's head and tail) loses its middle, with
+  // stderr written between its halves and after it.
+  const first = outLines(0, 12_000);
+  const second = outLines(12_000, 12_000);
+  const step = failingStep({
+    "first.txt": `${first}\n`,
+    "second.txt": `${second}\n`,
+    "check.sh": [
+      "cat first.txt",
+      "sleep 0.5",
+      "echo 'stderr: between the halves' >&2",
+      "sleep 0.5",
+      "cat second.txt",
+      "sleep 0.5",
+      "echo 'stderr: after stdout' >&2",
+      "exit 1",
+      "",
+    ].join("\n"),
+  });
+  const outcome = await step.run(1);
+  assert.equal(outcome.kind, "repair", JSON.stringify(outcome));
+  const finding = outcome.keep["item:a:finding"];
+  const kept = readFileSync(finding.output, "utf8");
+  assert.ok(
+    kept.startsWith("Validation command failed (1): sh check.sh\n"),
+    kept.slice(0, 200),
+  );
+  // Every stdout line, the middle ones too, and each stderr line where it
+  // arrived.
+  assert.ok(
+    kept.endsWith(
+      `\n${first}\nstderr: between the halves\n${second}\nstderr: after stdout\n`,
+    ),
+    kept.slice(-400),
+  );
+  assert.ok(!kept.includes("omitted"), "within the log's bound, nothing cut");
+
+  // The same failure again is kept in the same file: the finding is unchanged.
+  const again = await step.run(2);
+  assert.equal(again.kind, "repair", JSON.stringify(again));
+  assert.equal(again.keep["item:a:finding"].output, finding.output);
+});

@@ -16,6 +16,7 @@ import {
   renderPlanningInstructions,
 } from "../dist/planning/prompts.js";
 import { ENGINEERING_STANDARD } from "../dist/planning/rubric.js";
+import { REVIEW_GUIDANCE } from "../dist/review/result.js";
 import { readShown } from "../dist/shown.js";
 import { PROOF_ECONOMY, prepareWorkPrompt } from "../dist/work/prompt.js";
 import { item, plan, tempDir } from "./helpers.mjs";
@@ -133,6 +134,25 @@ test("graph review flags one claim proved by two items and a harness each item b
   }).prompt;
   assert.ok(planner.includes(CLAIM_ONCE));
   assert.ok(planner.includes(`- Shared harness. ${SHARED_HARNESS}`));
+});
+
+test("the engineering standard and the review's verification standard bound proof to one test per claim (#2241)", () => {
+  assert.ok(
+    ENGINEERING_STANDARD.includes(
+      "- Test economy: prove each claim once, through the strongest existing or added integration test; extend an existing test or harness in your owned paths before adding one, and import one you don't own instead of copying it; don't re-prove a claim that a dependency's merged test already proves. Apply the repository's cited testing policy on test kind, count, reuse and budget.\n",
+    ),
+  );
+  // Result and final review share it; proof strength stays.
+  const { findings } = REVIEW_GUIDANCE;
+  for (const rule of [
+    "a criterion is proven by the strongest test that establishes it by this standard, a dependency's merged test the review base already holds included (in base/, or unchanged in candidate/), so a claim such a test proves needs no second test;",
+    "the enumerated items of one sentence may share one table-driven assertion that checks each item's exact value;",
+    "a prohibition on behaviour the candidate does not implement is proven by source evidence, over its complete scope, that no such path exists, cited in place of a mutation;",
+    "a missing-verification finding asks for the smallest assertion that proves the omitted fact, added to an existing test within the candidate's accepted ownership that covers that behaviour where one does.",
+    "A verification deliverable proves a sub-clause only when its assertion would fail if that sub-clause were wrong",
+    "when you cannot name one, the criterion lacks verification: refuse it as missing verification, naming the surviving mutation.",
+  ])
+    assert.ok(findings.includes(rule), rule);
 });
 
 test("the worker adds missing proof inside existing tests and leaves budget headroom, first and in repair (#2241)", async () => {

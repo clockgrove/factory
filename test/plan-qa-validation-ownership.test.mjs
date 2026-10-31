@@ -10,8 +10,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles, buildFacts } from "../dist/planning/facts.js";
+import {
+  renderCompilationCall,
+  renderGraphReviewCall,
+} from "../dist/planning/prompts.js";
 import { readShown } from "../dist/shown.js";
 import { tempDir } from "./helpers.mjs";
+
+const EXEMPTION =
+  "A read-only QA item owns no paths by design: its commands check the integrated result of the items it depends on, so it is never flagged for owning no paths or for running a whole-repository command.";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -49,6 +56,28 @@ async function objective(script) {
   assert.ok(built.facts, JSON.stringify(built.problems));
   return { checkout, base, facts: built.facts };
 }
+
+test("the planner and the graph reviewer limit validation ownership to work items and exempt read-only QA", async () => {
+  const { facts } = await objective("node --test");
+  const planner = renderCompilationCall({
+    facts,
+    data: {},
+    revising: false,
+    lookups: { open: false, bodies: [] },
+  }).prompt;
+  const reviewer = renderGraphReviewCall({
+    facts,
+    draft: { items: [] },
+    evidence: [],
+    decisions: [],
+    finalCommands: [],
+    controllerCapabilities: {},
+  }).prompt;
+  for (const prompt of [planner, reviewer]) {
+    assert.ok(prompt.includes(EXEMPTION));
+    assert.doesNotMatch(prompt, /owns files that command checks/);
+  }
+});
 
 test("the plan check passes a zero-path QA item that runs npm test, whether the test script is scoped or not", async () => {
   for (const script of ["node --test", "cd test && node --test"]) {

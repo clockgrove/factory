@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const READ_ONLY = new Set(["qa", "aggregate"]);
 
 /** [base, top, solo] from p_items' lines, or undefined when the plan doesn't fit. */
-export function scopeRoles(text) {
+function scopeRoles(text) {
   const rows = text
     .split("\n")
     .map((line) => line.trim().split(/\s+/))

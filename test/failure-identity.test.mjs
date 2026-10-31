@@ -19,6 +19,7 @@ import {
   sameFailure,
   unchangedFailure,
 } from "../dist/repair.js";
+import { validationIdentity } from "../dist/work/step-validate.js";
 import { item, plan, tempDir } from "./helpers.mjs";
 
 const a = item("a", {
@@ -171,6 +172,57 @@ test("the same command failing on another test moved: it is the same failure for
     "Return 0 for no inputs in src/a.js.",
   );
   assert.doesNotMatch(model.asked[0].prompt, /"failureRepeatedUnchanged"/);
+});
+
+test("a formatter that fails the same way twice, its timings aside, is unchanged; its identity comes from the kept validation", () => {
+  const biome = (ms) =>
+    `The repository's formatter failed (1): biome check --write .: \nsrc/a.js format ━━━━━━━━━━\n  × File content differs from formatting output\nChecked 12 files in ${ms}ms. No fixes applied.\nFound 1 error.`;
+  const kept = (ms) => ({
+    kind: "failed",
+    detail: biome(ms),
+    formatter: "biome check --write .",
+    exit: "1",
+  });
+  const identity = validationIdentity(kept(34));
+  assert.deepEqual(identity, {
+    kind: "format",
+    command: "biome check --write .",
+    exit: "1",
+  });
+  const formatted = {
+    source: "diagnosis",
+    failure: biome(34),
+    identity,
+    diagnosis: "src/a.js is not formatted.",
+    path: "src/a.js",
+    correction: "Format src/a.js.",
+    repair: 1,
+  };
+  assert.equal(
+    unchangedFailure(biome(41), [formatted], 2, validationIdentity(kept(41))),
+    true,
+  );
+  // Another formatter ending, or another command, is another failure.
+  assert.equal(
+    unchangedFailure(biome(41), [formatted], 2, { ...identity, exit: "2" }),
+    false,
+  );
+  assert.deepEqual(
+    validationIdentity({
+      ...kept(34),
+      command: "npm test",
+      formatter: undefined,
+    }),
+    { kind: "validation", command: "npm test", exit: "1" },
+  );
+  // A pin, a refused formatter change, or a result kept before 0.5.10.
+  assert.equal(
+    validationIdentity({
+      kind: "failed",
+      detail: "the formatter changed b.js",
+    }),
+    undefined,
+  );
 });
 
 test("another command, or the same command ending another way, is not the same failure", async () => {

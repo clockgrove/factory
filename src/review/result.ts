@@ -377,7 +377,9 @@ export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
  * row: what such a check demands is the repository's enforced convention,
  * so review never refuses the change made to pass it.
  */
-function checkFailureRows(failures: readonly string[]): ResultEvidence[] {
+export function checkFailureRows(
+  failures: readonly string[],
+): ResultEvidence[] {
   if (!failures.length) return [];
   return [
     {

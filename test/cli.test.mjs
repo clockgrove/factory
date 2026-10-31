@@ -1,5 +1,5 @@
-// The operator's commands against the real service: answers, the run log
-// and status.
+// The operator's commands against the real service: answers, the run log,
+// status, and crashes at the deadline's and the reset's points.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
@@ -16,6 +16,7 @@ import {
   CLI,
   children,
   cli,
+  closedPort,
   configured,
   installation,
   item,
@@ -62,6 +63,28 @@ test("an answer or retry bound to a question that changed is refused", async () 
   assert.equal(status(inst).objectives[0].status, "holding");
   await stopped(service);
 });
+
+for (const point of [
+  "engine:deadline:before-cancel",
+  "engine:deadline:cancelled",
+])
+  test(`crash at ${point}, restart, cancel once at the deadline`, async () => {
+    const inst = installation();
+    seed(inst, 63, "checking", {
+      deadline: new Date(Date.now() - 1000).toISOString(),
+    });
+    const death = await serve(inst, point).exit;
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    const service = serve(inst);
+    await until(
+      () => stateOf(inst, 63).done["cancel:cleanup"] === true,
+      "cleanup after restart",
+    );
+    await stopped(service);
+    const state = stateOf(inst, 63);
+    assert.equal(state.status, "cancelled");
+    assert.equal(state.ended.by, "deadline");
+  });
 
 test("the run log: tail, follow, and status reads its end", async () => {
   const inst = installation();
@@ -883,3 +906,72 @@ test("status: one model, the Work Item table, the full --json and the list view"
   );
   assert.equal(refusal(cli(inst, "status", "55", "--issue", "101")), "usage");
 });
+
+// A reset saves a resetting record at once (the old state kept inside it),
+// and its one step, `rebuild`, reads GitHub. A crash at any point reruns the
+// rebuild, which only reads; with GitHub down it waits like any step;
+// cancel (either form) replaces it, and its request is answered
+// `superseded`. Creating an Objective is an admission: refused while the
+// queue isn't running.
+for (const point of ["reset:recorded", "engine:rebuild:started"])
+  test(`crash at ${point}, restart, the rebuild waits while GitHub is down, cancel replaces it`, async () => {
+    const inst = installation();
+    configured(inst, `http://127.0.0.1:${await closedPort()}`);
+    const control = { mode: "paused", by: "op", at: new Date().toISOString() };
+    seed(inst, 56, "building", {
+      control,
+      done: { check: {}, plan: plan() },
+    });
+    const before = stateOf(inst, 56);
+    // Sent while stopped: the reset applies before any step of #56 starts.
+    assert.match(cli(inst, "reset", "56").out, /isn't running/);
+    const crashing = serve(inst, point);
+    const death = await crashing.exit;
+    assert.equal(death.signal, "SIGKILL", death.stderr);
+    const recorded = stateOf(inst, 56);
+    assert.equal(recorded.status, "resetting");
+    assert.deepEqual(recorded.control, control, "the pause carries over");
+    assert.deepEqual(recorded.kept.reset.old.done, before.done);
+
+    const service = serve(inst);
+    await until(
+      () => stateOf(inst, 56).retries.rebuild?.attempts >= 1,
+      "the rebuild waits on GitHub after the restart",
+    );
+    const [row] = status(inst).objectives;
+    assert.equal(row.status, "resetting");
+    assert.ok(row.reset, "status shows the reset");
+    assert.match(row.waiting[0].lastError, /GitHub/);
+    const pending = readdirSync(inst.requests).filter((n) =>
+      n.endsWith(".json"),
+    );
+    assert.equal(pending.length, 1, "the reset is answered when it lands");
+    // A second reset is refused while this one rebuilds, and a control
+    // sent meanwhile applies to the live record (the rebuild carries the
+    // live record's controls over when it lands).
+    const again = cli(inst, "reset", "56");
+    assert.equal(again.code, 1);
+    assert.equal(refusal(again), "reset_in_progress");
+    assert.equal(cli(inst, "drain", "56").code, 0);
+    assert.equal(stateOf(inst, 56).control.mode, "draining");
+    // Creating an Objective is an admission: not while the queue drains.
+    assert.equal(cli(inst, "queue", "drain").code, 0);
+    assert.equal(refusal(cli(inst, "reset", "77")), "queue_not_running");
+    // The question's own `cancel` answer replaces the reset.
+    assert.equal(
+      cli(inst, "answer", "56", "cancel", "--question", "any").code,
+      0,
+    );
+    await until(() => stateOf(inst, 56).status === "cancelled", "cancelled");
+    await until(
+      () => readdirSync(inst.requests).every((n) => !n.endsWith(".json")),
+      "no request left",
+    );
+    const reset = pending[0].replace(/\.json$/, "");
+    assert.equal(
+      stateOf(inst, 56).appliedRequests.find((r) => r.id === reset)?.code,
+      "superseded",
+    );
+    assert.equal(status(inst).objectives[0].reset, undefined);
+    await stopped(service);
+  });

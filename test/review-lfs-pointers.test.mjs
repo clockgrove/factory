@@ -8,7 +8,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { LFS_GUIDANCE, reviewResult } from "../dist/review/result.js";
+import {
+  LFS_GUIDANCE,
+  REVIEW_GUIDANCE,
+  reviewResult,
+} from "../dist/review/result.js";
 import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
@@ -32,6 +36,15 @@ function commit(directory, message) {
   );
   return git(directory, "rev-parse", "HEAD");
 }
+
+test("result and final review are told that Git LFS pointers in the evidence root stand for the bytes validation read", () => {
+  assert.equal(
+    LFS_GUIDANCE,
+    'Git LFS files are exported as Git stores them, as pointers. A file in candidate/ or base/ at a path the tree\'s .gitattributes routes through Git LFS (filter=lfs), whose text is a Git LFS pointer (a "version https://git-lfs.github.com/spec/v1" line, then "oid sha256:" and "size" lines), stands for the object it names, whose sha256 and byte count those lines give; its patch in changes/ changes those lines, and the exact-tree inventory gives the pointer\'s byte size, not the object\'s. Every validation command ran on the real bytes of such a file, which Factory restores in each validation checkout before any command runs, so its pointer text in the evidence root is never a defect and never shows that a command or test read a pointer. Judge its content from the validation that passed on this tree and from any digest-checked copy of its bytes Factory supplies, such as a candidate set member\'s reviewCopy under media-sets/. Pointer text at a path .gitattributes does not route through Git LFS is that file\'s real content, and validation read it as it is.',
+  );
+  // Result, QA and final review all give the evidence-root guidance.
+  assert.ok(REVIEW_GUIDANCE.evidenceRoot.includes(LFS_GUIDANCE));
+});
 
 test("a result review's candidate/ holds an LFS file's pointer, and its prompt says validation read the bytes", async () => {
   const checkout = tempDir("factory-review-lfs-");

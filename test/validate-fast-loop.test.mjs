@@ -27,6 +27,7 @@ import { runOrder } from "../dist/validate.js";
 import {
   FinishRequests,
   SelfValidation,
+  targetedNote,
   VALIDATION_TOOL_INPUT,
   validateRequest,
   validationTargets,
@@ -169,6 +170,26 @@ test("a run keeps the declared order and the exact install, each command once", 
   assert.deepEqual(runOrder(installed, [3]), [0, 3]);
   assert.deepEqual(runOrder(installed, [3, 1]), [0, 1, 3]);
   assert.deepEqual(runOrder(installed), [0, 1, 2, 3]);
+});
+
+test("a failure says what a targeted run of it would skip, and a targeted failure what it skipped", () => {
+  const commands = [BOOTSTRAP, "sh build.sh", "sh lint.sh", "sh test.sh"];
+  // After a full run: the earlier commands a targeted run would leave out,
+  // never the install, which always runs.
+  assert.equal(
+    targetedNote(commands, 3),
+    "That is command 3: while you fix it, a targeted run (`commands: [3]`) reruns only it after the install, without commands 1, 2 declared before it, so add the index of any it needs, such as a build or code generation; finish only after a full run passes.",
+  );
+  assert.equal(
+    targetedNote(commands, 1),
+    "That is command 1: while you fix it, a targeted run (`commands: [1]`) reruns only it after the install; finish only after a full run passes.",
+  );
+  // After a targeted run: the earlier ones it skipped, if any.
+  assert.equal(
+    targetedNote(commands, 3, [1, 3]),
+    "This targeted run skipped command 2, declared before it: if `sh test.sh` needs what it makes, such as a build or generated code, add its index to `commands`, or run a full run.",
+  );
+  assert.equal(targetedNote(commands, 2, [1, 2]), "");
 });
 
 test("every worker's Validate takes the targeted commands' indices, or none", () => {

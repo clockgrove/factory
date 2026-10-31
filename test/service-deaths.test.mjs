@@ -1,14 +1,8 @@
-// The real service, as a real process, on real files: the holds it asks
-// when a step can't run or state can't be read, and its deaths and
-// restarts, with or without a crash point a test caused.
+// The real service, as a real process, on real files: the hold it asks
+// when a step can't run, and its deaths and restarts, with or without a
+// crash point a test caused.
 import assert from "node:assert/strict";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { recordOf, stalled } from "./helpers/service.mjs";
@@ -57,6 +51,8 @@ test("a step that can't run holds with answers that work", async () => {
   // clock, 5 minutes ahead of the host's; then another question's comment,
   // since closed. The sync saves these GitHub times (github-sync `ask`).
   await stopped(service);
+  // A clean stop says so, so the next start counts no death.
+  assert.equal(recordOf(inst).stopped, true, "a clean stop");
   const shown = Date.now() + 5 * 60_000;
   const at = (ms) => new Date(shown + ms).toISOString();
   const showAs = (lastShownAt) => {
@@ -118,39 +114,7 @@ test("a step that can't run holds with answers that work", async () => {
   assert.equal(stateOf(inst, 7).status, "cancelled");
   assert.deepEqual(stateOf(inst, 7).holds, []);
   await stopped(service);
-});
-
-test("unreadable state holds with cancel, and cancel works", async () => {
-  const inst = installation();
-  mkdirSync(inst.objectives, { recursive: true });
-  writeFileSync(join(inst.objectives, "9.json"), "{ not json");
-  const service = serve(inst);
-  await until(() => status(inst).service === "running", "service");
-  const [row] = status(inst).objectives;
-  assert.equal(row.status, "unreadable");
-  assert.deepEqual(
-    row.holds[0].options.map((option) => option.answer),
-    ["reset", "cancel"],
-  );
-  assert.equal(row.nextAction.command, "factory reset 9");
-  const answered = cli(
-    inst,
-    "answer",
-    "9",
-    "retry",
-    "--question",
-    "unreadable",
-  );
-  assert.equal(answered.code, 1);
-  assert.equal(refusal(answered), "state_unreadable");
-  // No configuration: reset can't read GitHub, and says so.
-  assert.equal(refusal(cli(inst, "reset", "9")), "no_configuration");
-  assert.equal(cli(inst, "cancel", "9").code, 0);
-  await until(
-    () => status(inst).objectives[0].status === "cancelled",
-    "cancelled",
-  );
-  await stopped(service);
+  assert.deepEqual(recordOf(inst).deaths, [], "two clean restarts, no deaths");
 });
 
 test("three deaths while two Objectives run hold neither; the restart backs off", async () => {

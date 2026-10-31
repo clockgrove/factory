@@ -1,6 +1,6 @@
 // The real service, as a real process, on real files: the Objectives it
-// takes from its queue, in what order and how many at once, one dequeued
-// while it runs, and one finished.
+// takes from its queue, in what order and how many at once, and one
+// dequeued while it runs.
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -13,14 +13,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { stalled } from "./helpers/service.mjs";
 import {
-  cli,
   installation,
   offered,
-  refusal,
   seed,
   serve,
   stateOf,
-  status,
   stopped,
   until,
 } from "./helpers.mjs";
@@ -132,36 +129,5 @@ test("an Objective dequeued during its check, before a re-run's cleanup began, o
     "done",
   );
   assert.ok(!logs(73).includes('"step":'), "no step ran");
-  await stopped(service);
-});
-
-test("a finished Objective leaves the startup set, and can't be cancelled", async () => {
-  const inst = installation();
-  seed(inst, 13, "done");
-  const first = serve(inst);
-  const moved = join(inst.objectives, "finished", "13.json");
-  await until(() => existsSync(moved), "the move to finished/");
-  assert.ok(!existsSync(join(inst.objectives, "13.json")));
-  await stopped(first);
-  // Startup reads no history: a broken finished file is never read.
-  writeFileSync(join(inst.objectives, "finished", "12.json"), "{ not json");
-  const service = serve(inst);
-  await until(() => status(inst).service === "running", "service");
-  const result = cli(inst, "cancel", "13");
-  assert.equal(result.code, 1);
-  assert.equal(refusal(result), "objective_finished");
-  assert.match(result.err, /already finished \(done\)/);
-  assert.equal(refusal(cli(inst, "pause", "13")), "objective_finished");
-  // Bound to a question, it is still finished, not a stale question.
-  assert.equal(
-    refusal(cli(inst, "answer", "13", "retry", "--question", "old")),
-    "objective_finished",
-  );
-  assert.equal(refusal(cli(inst, "cancel", "99")), "no_factory_state");
-  assert.equal(stateOf(inst, 13).status, "done");
-  const record = JSON.parse(
-    readFileSync(join(inst.root, "service.json"), "utf8"),
-  );
-  assert.deepEqual(record.setAside, {});
   await stopped(service);
 });

@@ -24,6 +24,7 @@ import { BENCH_DIR, loadDefinition } from "../bench/lib/definition.mjs";
 import {
   gradeCard,
   runBase,
+  runCommand,
   runGrader,
   setGrade,
 } from "../bench/lib/grade.mjs";
@@ -502,7 +503,7 @@ const alive = (pid) => {
   }
 };
 
-test("stopped by the grader contract's timeout, it kills every role it started and removes their checkouts", async () => {
+test("stopped by SIGTERM, as the grader contract's timeout sends it, it kills every role it started and removes their checkouts", async () => {
   const pids = join(dir, "stopped-pids.txt");
   writeFileSync(pids, "");
   const env = {
@@ -512,28 +513,44 @@ test("stopped by the grader contract's timeout, it kills every role it started a
     }),
     STAND_IN_AGENT_PIDS: pids,
   };
-  const definition = definitionWith(
-    "stopped",
+  // The stop comes once the roles and their children have started, not at
+  // a fixed time that a loaded host could pass first.
+  const groups = new Set();
+  const started = () => readFileSync(pids, "utf8").split("\n").filter(Boolean);
+  const run = runCommand(
     autoCommand(
+      "--repo",
+      JSON.stringify(repo.dir),
+      "--commit",
+      repo.commit,
       "--base",
       repo.base,
+      "--objective",
+      JSON.stringify(objective),
+      "--out",
+      JSON.stringify(join(dir, "stopped-grade.json")),
       "--evidence",
       JSON.stringify(join(dir, "stopped-evidence")),
     ),
-    0.05,
+    { cwd: dir, env: { ...process.env, ...env }, timeoutMs: 120_000, groups },
   );
-  const grade = await withEnv(env, () =>
-    runGrader(definition, { repo: repo.dir, commit: repo.commit, objective }),
-  );
-  assert.match(grade.error, /^the grader timed out after 0\.05 min/);
+  let exited = false;
+  run.then(() => {
+    exited = true;
+  });
+  const ready = Date.now() + 60_000;
   // Each sleeping stand-in and the child it started, in its own process group.
-  const started = readFileSync(pids, "utf8").split("\n").filter(Boolean);
-  assert.equal(started.length, 6, "three roles, each with its child");
-  const until = Date.now() + 5_000;
-  while (started.some((pid) => alive(Number(pid))) && Date.now() < until)
+  while (started().length < 6 && !exited && Date.now() < ready)
+    await new Promise((done) => setTimeout(done, 50));
+  assert.equal(started().length, 6, "three roles, each with its child");
+  for (const pid of groups) process.kill(-pid, "SIGTERM");
+  const stopped = await run;
+  assert.equal(stopped.signal, "SIGTERM");
+  const gone = Date.now() + 5_000;
+  while (started().some((pid) => alive(Number(pid))) && Date.now() < gone)
     await new Promise((done) => setTimeout(done, 100));
   assert.deepEqual(
-    started.filter((pid) => alive(Number(pid))),
+    started().filter((pid) => alive(Number(pid))),
     [],
     "nothing it started outlived it",
   );

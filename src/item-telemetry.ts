@@ -565,7 +565,7 @@ function rows(
     {
       label: "Worker",
       value: activity
-        ? `${plural(activity.turns, "turn")}, ${plural(activity.commands, "command")} (${activity.commandsFailed} failed), ${plural(activity.edits, "edit")} by edit tools (shell edits not counted), ${plural(activity.compactions, "compaction")}`
+        ? `${plural(activity.turns, "turn")}, ${plural(activity.commands, "command")} (${activity.commandsFailed} failed), ${plural(activity.edits, "edit")}, ${plural(activity.compactions, "compaction")}`
         : "not reported",
     },
     {

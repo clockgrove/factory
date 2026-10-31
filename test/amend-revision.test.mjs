@@ -2474,6 +2474,20 @@ const NO_GAP = {
     "test/cube.test.js reads assets/cube.glb, which is absent until selection, so no plan can make npm test pass in the worker's checkout.",
   change: "Move the test into an item after materialization.",
 };
+test("the amendment planner is told to fit within an owner-exception policy and recommend only that (#2303)", async () => {
+  const { checkout, state } = await discovered();
+  const { planner, asked } = scripted(revision());
+  assert.equal(
+    (await step(state, depsOf(checkout, planner, []))).outcome.kind,
+    "done",
+  );
+  assert.ok(
+    asked[0].prompt.includes(
+      "plan the change to fit within the policy, or recommend that answer when you ask the operator. You may offer the exception as an option, but never recommend it unless the sources show the policy can't be met",
+    ),
+  );
+});
+
 test("a cannotPlan resting on a missing selected set is sent back to answer with no change, and an unchanged round settles the amendment as continued (#2116)", async () => {
   const { checkout, state } = await discovered();
   const { planner, asked } = scripted(

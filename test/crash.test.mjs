@@ -3,19 +3,25 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { connect } from "node:net";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
+import { AttemptServices } from "../dist/work/services.js";
 import {
+  children,
   cli,
   closedPort,
   configured,
   exited,
   githubOrigin,
   installation,
+  KV_SERVICE,
   seed,
   serve,
+  spawnNode,
   stateOf,
   stopped,
+  tempDir,
   until,
 } from "./helpers.mjs";
 
@@ -180,5 +186,102 @@ for (const point of HOLDER_POINTS) {
     if (takeover) assert.notEqual(holder(), firstId, "the take-over holds");
     assert.equal((await stopped(restarted)).code, 0);
     assert.equal(record(), "", "a clean stop frees the repository");
+  });
+}
+
+// A worker attempt's services (work/services.ts) at their crash points: a
+// service's sandbox dies with Factory, so a crash leaves none running, and
+// the next attempt starts its own.
+for (const point of ["worker:service:before", "worker:service:after"]) {
+  test(`crash at ${point}, no service outlives it`, async () => {
+    const temporary = tempDir("factory-services-crash-");
+    const config = {
+      required: true,
+      network: "off",
+      readOnlyPaths: [],
+      environment: {},
+      services: { kv: KV_SERVICE(await closedPort()) },
+      limits: {
+        tmpMiB: 64,
+        homeMiB: 64,
+        checkoutMiB: 64,
+        files: 4096,
+        candidateMiB: 16,
+        candidateFiles: 1024,
+        processes: 4096,
+      },
+    };
+    const module = new URL("../dist/work/services.js", import.meta.url).href;
+    const child = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `import { AttemptServices } from ${JSON.stringify(module)};
+await AttemptServices.start(JSON.parse(process.env.CONFIG), "off", AbortSignal.timeout(60_000), () => {});
+process.exit(3);`,
+      ],
+      {
+        env: {
+          PATH: `${dirname(process.execPath)}:/bin:/usr/bin`,
+          TMPDIR: temporary,
+          FACTORY_CRASH_AT: point,
+          CONFIG: JSON.stringify(config),
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    children.add(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const exit = new Promise((resolve) =>
+      child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
+    );
+    const death = await exited(
+      { child, exit, stderr: () => stderr },
+      `services set to crash at ${point}`,
+    );
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    const [root] = readdirSync(temporary);
+    const socket = join(temporary, root, "kv", "kv.sock");
+    assert.equal(existsSync(socket), point === "worker:service:after");
+    // The socket stays; nothing listens on it once the sandbox is gone.
+    const refused = () =>
+      new Promise((resolve) => {
+        const probe = connect(socket);
+        probe.once("connect", () => {
+          probe.destroy();
+          resolve(false);
+        });
+        probe.once("error", (error) => resolve(error.code === "ECONNREFUSED"));
+      });
+    const deadline = Date.now() + 10_000;
+    while (existsSync(socket) && !(await refused())) {
+      assert.ok(
+        Date.now() < deadline,
+        "the service outlived its crashed parent",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // The next attempt's start removes the crashed process's directory,
+    // never a live process's.
+    const live = join(temporary, `factory-services-${process.pid}-live`);
+    mkdirSync(live);
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = temporary;
+    try {
+      const next = await AttemptServices.start(
+        { ...config, services: undefined },
+        "off",
+        AbortSignal.timeout(10_000),
+        () => {},
+      );
+      await next.stop();
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+    assert.deepEqual(readdirSync(temporary), [basename(live)]);
   });
 }

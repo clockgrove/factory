@@ -46,6 +46,11 @@ import {
   selectedMediaNote,
   validateFailed,
 } from "../work/self-validate.js";
+import {
+  AttemptServices,
+  servicesHold,
+  servicesNote,
+} from "../work/services.js";
 import { COLLECTED_RESULT, shellDependencies } from "../work/validate-tool.js";
 import {
   ACTIVITY_INTERVAL_MS,
@@ -162,6 +167,8 @@ export function codexShellNote(
   network: boolean,
   validating: boolean,
   item: WorkItem,
+  /** The attempt's services: only with the network (CodexWorker `services`). */
+  services: Pick<SandboxConfig, "services"> = {},
 ): string {
   const reach = network
     ? "It shares the host's network."
@@ -169,7 +176,7 @@ export function codexShellNote(
   const check = validating
     ? `Your Validate tool runs this Work Item's declared validation commands as Factory will: the exact locked install, then each command, in Factory's validation sandbox, on a commit of your current files made as Factory collects them. It is how you check your work: use it instead of installing dependencies or running those commands in your shell, fix what it reports, and finish only after it passes on your final files. ${CODEX_VALIDATE_CALL}`
     : "You have no tool that runs the declared validation: Factory runs it after you finish.";
-  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${shellDependencies(network)} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp. ${COLLECTED_RESULT} ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? "check with Validate instead" : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}\n\n${CODEX_EDIT_CALL}`;
+  return `\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment. ${reach} ${shellDependencies(network)} Your checkout's .git is read-only. You have a private writable $TMPDIR but no /tmp or /var/tmp; Factory's validation has a writable /tmp.${servicesNote(services)} ${COLLECTED_RESULT} ${check} If Factory's validation fails after you finish, the failure comes back to you with the command's output. When a command fails in your shell only because of this environment (no network, no installed dependencies, no /tmp, a read-only .git), it is no defect: do not change files, propose ownership or ask for another environment for that alone; ${validating ? "check with Validate instead" : "report the command and why"}. Factory's validation still decides.${validating ? selectedMediaNote(item) : ""}\n\n${CODEX_EDIT_CALL}`;
 }
 
 const real = (path: string) => realpathSync(path);
@@ -246,7 +253,8 @@ ${set.length ? `\n[shell_environment_policy.set]\n${set.join("\n")}\n` : ""}`;
  * permission profile and a link to the operator's subscription login.
  * Shell commands see only the platform paths Codex calls `:minimal`, the
  * Codex runtime, the PATH's toolchains, sandbox.readOnlyPaths and the
- * worktree's own git metadata read-only, the private HOME and TMPDIR, and the worktree with its `.git`
+ * worktree's own git metadata read-only, the private HOME and TMPDIR, the
+ * attempt's services directory read-only, and the worktree with its `.git`
  * entry read-only. Not the operator's HOME, logins, SSH keys or gh config,
  * Factory's state, nor the rest of the checkout's git directory. Throws a
  * setup problem; the caller holds with it. The worker, readiness's probe
@@ -261,6 +269,8 @@ export function codexWorkerHome(
   root?: string,
   /** Validate's MCP server registration (codex-validate.ts CodexValidate.config). */
   mcp = "",
+  /** The attempt's services (work/services.ts): their directory read, their variables set. */
+  services?: Pick<AttemptServices, "root" | "environment">,
 ): WorkerHome {
   const workspace = real(worktree);
   const source: NodeJS.ProcessEnv = {
@@ -286,11 +296,25 @@ export function codexWorkerHome(
         ].map((directory) => `${path(directory)} = "read"`),
         `${path(home)} = "write"`,
         `${path(temporary)} = "write"`,
+        // A socket in a directory read takes connections; nothing is written there.
+        ...(services ? [`${path(services.root)} = "read"`] : []),
       ];
       // Name resolution: /etc/resolv.conf often links outside `:minimal`
       // (systemd-resolved under /run, WSL under /mnt/wsl).
       if (network && existsSync("/etc/resolv.conf"))
         grants.push(`${path(realpathSync("/etc/resolv.conf"))} = "read"`);
+      const policy = shellPolicy(
+        source,
+        network,
+        { ...sandbox.environment, ...services?.environment },
+        [
+          "HOME",
+          "PATH",
+          "TMPDIR",
+          "CODEX_HOME",
+          ...Object.keys(packageCacheEnvironment(join(home, ".cache"))),
+        ],
+      );
       // As planning's configuration (codex.ts): web search, apps, plugins,
       // hooks, memories, browser and computer use, image generation, skill
       // search and instructions, tool suggestions and sleep are off. The
@@ -323,13 +347,7 @@ ${grants.join("\n")}
 
 [permissions.factory.network]
 enabled = ${network}
-${shellPolicy(source, network, sandbox.environment, [
-  "HOME",
-  "PATH",
-  "TMPDIR",
-  "CODEX_HOME",
-  ...Object.keys(packageCacheEnvironment(join(home, ".cache"))),
-])}${mcp}`;
+${policy}${mcp}`;
     },
     finish: ({ root, home, env }) => {
       // Package caches stay in the private HOME, never in the worktree.
@@ -622,6 +640,17 @@ export class CodexWorker implements Worker {
       this.options.validation &&
       (await CodexValidate.start(input, this.options.validation));
     if (validation && !(validation instanceof CodexValidate)) return validation;
+    let services: Awaited<ReturnType<CodexWorker["services"]>>;
+    try {
+      services = await this.services(input);
+    } catch (error) {
+      await validation?.close();
+      throw error;
+    }
+    if (services && "problem" in services) {
+      await validation?.close();
+      return outcome(new PlannerError("hold", servicesHold(services.problem)));
+    }
     input.log({
       event: "worker-start",
       provider: "codex",
@@ -631,10 +660,29 @@ export class CodexWorker implements Worker {
       validate: Boolean(validation?.tool),
     });
     try {
-      return await this.converse(input, record, Codex, validation);
+      return await this.converse(input, record, Codex, validation, services);
     } finally {
+      await services?.stop();
       await validation?.close();
     }
+  }
+
+  /**
+   * The attempt's throwaway services (work/services.ts), on the host's
+   * network, only when the shell has it: with the network off, Codex's
+   * sandbox refuses every socket connection, a Unix socket's too.
+   */
+  private async services(
+    input: WorkerInput,
+  ): Promise<AttemptServices | { problem: string } | undefined> {
+    if (this.options.network !== "host" || !this.options.sandbox.services)
+      return undefined;
+    return AttemptServices.start(
+      this.options.sandbox,
+      "host",
+      input.signal,
+      input.log,
+    );
   }
 
   private async converse(
@@ -642,6 +690,7 @@ export class CodexWorker implements Worker {
     record: Record<string, unknown>,
     Codex: typeof import("@openai/codex-sdk").Codex,
     validation: CodexValidate | undefined,
+    services: AttemptServices | undefined,
   ): Promise<WorkerResult> {
     const validating = Boolean(validation?.tool);
     const keep = this.options.allowedSecretNames ?? [];
@@ -669,6 +718,7 @@ export class CodexWorker implements Worker {
         this.options.sandbox,
         conversation && codexHomeOf(conversation.dir),
         validation?.config(),
+        services,
       );
     } catch (error) {
       return outcome(
@@ -775,7 +825,12 @@ export class CodexWorker implements Worker {
         );
       let request =
         turn.prompt +
-        codexShellNote(this.options.network === "host", validating, input.item);
+        codexShellNote(
+          this.options.network === "host",
+          validating,
+          input.item,
+          services ? this.options.sandbox : {},
+        );
       // Codex runs the commands, so a scripted rewrite that changed nothing
       // is told in the next request, before the result is taken (#2283).
       const rewrites = new HeadRewrites(input.worktree, watchdog.signal);

@@ -113,6 +113,21 @@ export function codexAppServer(home, cwd) {
   };
 }
 
+/**
+ * A small real key-value server as a `sandbox.services` entry
+ * (work/services.ts): `set KEY VALUE` and `get KEY` on a Unix socket in its
+ * directory, and `outside`, whether it reaches a listener on the host's
+ * loopback `port`.
+ */
+export const KV_SERVICE = (port) => ({
+  start: `exec node -e 'const net=require("net");const store=new Map();net.createServer((socket)=>socket.once("data",(line)=>{const [command,key,value]=String(line).trim().split(" ");if(command==="outside"){const probe=net.connect(Number(process.env.KV_HOST_PORT),"127.0.0.1");probe.on("connect",()=>{probe.destroy();socket.end("reached")});probe.on("error",()=>socket.end("refused"));return}if(command==="set")store.set(key,value);socket.end(store.get(key)??"none")})).listen(process.env.FACTORY_SERVICE_DIR+"/kv.sock")'`,
+  ready: 'test -S "$FACTORY_SERVICE_DIR/kv.sock"',
+  environment: {
+    KV_SOCKET: "$" + "{FACTORY_SERVICE_DIR}/kv.sock",
+    KV_HOST_PORT: String(port),
+  },
+});
+
 /** A new directory under tmpdir(), removed when the test file ends. */
 export function tempDir(prefix) {
   const dir = mkdtempSync(join(tmpdir(), prefix));

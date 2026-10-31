@@ -368,6 +368,22 @@ factory reset N                           # rebuild its state from GitHub: its p
 ## Sandbox and security
 
 - **The sandbox.** Every command a worker causes (validation, setup and probes) runs in bubblewrap: a read-only host, a private HOME and /tmp, no host credentials or sockets, and no network. The exception is the dependency install, which reaches the network when `sandbox.network` is `package-install`. Where validation needs a service on the host (a database, a browser), `sandbox.network: host` (`factory setup --sandbox-network host`) runs every sandboxed command, a Claude worker's shell included, on the host's network; [Security](reference/security.md) lists what that exposes. A Codex worker's own shell runs in Codex's sandbox under the same limits, with network `off` or `host`, and no installed dependencies. Every local worker (Claude, Copilot and Codex) checks its result with its own `Validate`, which runs the exact locked install and then the item's commands in this sandbox, as Factory's validation will; a Claude worker has it when its settings grant `Validate`, a Copilot worker when its tools list it.
+- **Worker services.** A worker can get throwaway services for its own shell, such as a PostgreSQL its tests use, so it runs a database test itself instead of through `Validate`. Name each under `sandbox.services` in the configuration file: `start` runs the server in the foreground, `ready` exits zero once it accepts connections, and `environment` holds the variables the worker's commands get, where `${FACTORY_SERVICE_DIR}` is the service's own empty directory. For example:
+
+  ```json
+  "sandbox": {
+    "services": {
+      "postgres": {
+        "start": "initdb -D \"$FACTORY_SERVICE_DIR/data\" -U postgres -A trust >/dev/null && exec postgres -D \"$FACTORY_SERVICE_DIR/data\" -k \"$FACTORY_SERVICE_DIR\" -c listen_addresses=",
+        "ready": "pg_isready -h \"$FACTORY_SERVICE_DIR\" -U postgres",
+        "environment": { "PGHOST": "${FACTORY_SERVICE_DIR}", "PGUSER": "postgres" }
+      }
+    }
+  }
+  ```
+
+  Each worker attempt starts its own, empty, before the model starts, and stops it when the attempt ends; nothing is shared between attempts or Work Items. A service runs in the same sandbox and on the same network as the worker's commands (a Claude worker's `run_command`: `sandbox.network`; a Codex worker: its `worker.network`), sees only its own directory, and is reached through what it puts there, such as a Unix socket: with the network off every sandbox has its own loopback, so listen on a socket, not a TCP port. Its socket path must stay under 108 bytes; the directory is short, under the host's temporary directory. A Codex worker gets services only with `worker.network: host`, since Codex's sandbox refuses every socket connection with the network off. Factory's validation and `Validate` don't get them. A service that exits or isn't ready within a minute holds the Work Item with its output; fix the entry, restart Factory's service and answer `retry`.
+
 - **Opting out.** `sandbox.required: false`, written by hand in the configuration, is your explicit choice to run without the sandbox on a host without bubblewrap: validation commands (a Work Item's validation, final validation, QA and a Claude, Copilot or Codex worker's Validate) then run unsandboxed with your file access, and setup warns. The same setting lets Factory run as root, except a Claude worker's own shell, which never runs without the sandbox or as root. Leave it unset unless the host can't have bubblewrap.
 - **Credentials stay with the service.** Workers never see them. Only the variables in `policy.allowedSecretNames` reach a worker, and their values are redacted from everything Factory writes.
 - **Checked before every push.** Every blob a result adds is searched for those secret values. A match pushes nothing and holds.

@@ -172,7 +172,7 @@ const OWNERSHIP =
  * item's seven capabilities, so each failure hid the next.
  */
 const ONE_OUTCOME =
-  "Items split by independently verifiable capability, never by layer, and each includes its own tests and documentation. Flag an item that delivers more than one outcome, naming the outcomes to split it into; settled shared interfaces, data meanings and files do not make one outcome. Flag an item whose distinct capabilities are all proved by one new test file or one test, asking for a test per capability or a split, and an item one worker could not plausibly get green in a handful of validation cycles.";
+  "Items split by independently verifiable capability, never by layer, and each includes its own tests and documentation. Flag an item that delivers more than one outcome, naming the outcomes to split it into; settled shared interfaces, data meanings and files do not make one outcome. Flag an item whose distinct capabilities are all proved by one new test file or one test, asking for a test per capability or a split, and an item one worker could not plausibly get green in a handful of validation cycles. Where the request lists the measured cost of this installation's past Work Items, judge that cost against it: an item likely to need far more validation runs, repairs or time than their median, as the longest listed did, is too big. The figures are facts about past items, not limits.";
 
 /** Check 4: when an item's acceptance is judged. */
 const PHASES =

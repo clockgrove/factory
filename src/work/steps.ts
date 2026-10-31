@@ -52,8 +52,6 @@ export interface BuildDeps extends PlanningDeps {
     blocks: readonly ObjectiveBlock[],
     profile?: string,
   ): Worker;
-  /** The installation's run log directory: a PR body sums its item's telemetry from it (item-telemetry.ts); absent, it shows none. */
-  logs?: string;
 }
 
 /*

@@ -1392,6 +1392,8 @@ export interface FactsArgs {
   playbook?: string;
   /** The target's curated playbook's path (planning.playbook). */
   playbookPath?: string;
+  /** What this installation's past Work Items cost (item-costs.ts). */
+  itemCosts?: string;
   /** The operator's media.localAssetRoots. */
   localAssetRoots?: readonly string[];
   signal?: AbortSignal;
@@ -1458,6 +1460,7 @@ export async function buildFacts(
     coverageObligations: coverageObligations(args.shown.blocks),
     playbook: args.playbook ?? "",
     ...(args.playbookPath ? { playbookPath: args.playbookPath } : {}),
+    ...(args.itemCosts ? { itemCosts: args.itemCosts } : {}),
     localAssetRoots: args.localAssetRoots ?? [],
     lfsRules: await lfsRules(files),
     unlistedProtectedPaths: unlistedProtectedPaths(

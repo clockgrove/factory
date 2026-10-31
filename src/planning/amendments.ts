@@ -2294,7 +2294,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       }
       const inputs = amendmentInputs(state);
       const files = new BaseFiles(config.checkout, inputs.base, signal);
-      const built = await planningFacts(state, inputs, files, config);
+      const built = await planningFacts(state, inputs, files, config, deps);
       if ("problems" in built)
         return done({ rejected: built.problems.join("; ") });
       const { facts } = built;
@@ -2766,6 +2766,7 @@ function amendReviewStep(
         inputs,
         new BaseFiles(config.checkout, inputs.base, signal),
         config,
+        deps,
       );
       if ("problems" in built)
         return done({

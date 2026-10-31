@@ -405,16 +405,20 @@ function reported(value: Reported, calls: number, show = count): string {
 const plural = (n: number, one: string, many = `${one}s`) =>
   `${n} ${n === 1 ? one : many}`;
 
+/** A token count in a few characters: `13.0M`, `950K`, `812`. */
+export function shortCount(sum: number): string {
+  return sum >= 1_000_000
+    ? `${(sum / 1_000_000).toFixed(1)}M`
+    : sum >= 1_000
+      ? `${Math.round(sum / 1_000)}K`
+      : String(sum);
+}
+
 /** Tokens in a few characters, for a table cell: `13.0M`, `950K`, `812`. */
 export function shortTokens(item: ItemTelemetry): string {
   const { sum, calls } = item.tokens.total;
   if (!calls) return item.calls ? "not reported" : "-";
-  const short =
-    sum >= 1_000_000
-      ? `${(sum / 1_000_000).toFixed(1)}M`
-      : sum >= 1_000
-        ? `${Math.round(sum / 1_000)}K`
-        : String(sum);
+  const short = shortCount(sum);
   return calls < item.calls ? `${short}+` : short;
 }
 

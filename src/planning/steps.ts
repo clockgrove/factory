@@ -43,6 +43,7 @@ import {
   objectiveCommandProblems,
   sectionText,
 } from "./facts.js";
+import { itemCostSummary, pastItems } from "./item-costs.js";
 import { forgetting, lookupsKey, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
@@ -115,6 +116,8 @@ export interface PlanningDeps {
   workDir(issue: number): string;
   /** This installation's Objective state directory: a predecessor's record is read from it. */
   objectives: string;
+  /** The installation's run log directory: a PR body sums its item's telemetry from it (item-telemetry.ts) and planning summarizes past items' cost (item-costs.ts); absent, each shows none. */
+  logs?: string;
 }
 
 /**
@@ -441,7 +444,7 @@ function planRoundStep(
         inputs = fresh.inputs;
       } else inputs = generationInputs(state, g);
       const files = new BaseFiles(config.checkout, inputs.base, signal);
-      const built = await planningFacts(state, inputs, files, config);
+      const built = await planningFacts(state, inputs, files, config, deps);
       if ("problems" in built)
         return objectiveProblemsHold(built.problems, "replan");
       const { facts } = built;
@@ -628,6 +631,7 @@ function reviewStep(
         inputs,
         new BaseFiles(config.checkout, inputs.base, signal),
         config,
+        deps,
       );
       if ("problems" in built)
         return objectiveProblemsHold(built.problems, "replan");
@@ -1549,6 +1553,7 @@ export async function planningFacts(
   inputs: ObjectiveInputs,
   files: BaseFiles,
   config: CoreConfig,
+  past?: Pick<PlanningDeps, "objectives" | "logs">,
 ): ReturnType<typeof buildFacts> {
   return buildFacts({
     objective: state.issue,
@@ -1572,8 +1577,22 @@ export async function planningFacts(
       playbook: (await files.text(config.planning.playbook)) ?? "",
     }),
     playbookPath: config.planning.playbook,
+    itemCosts: pastCosts(past),
     ...(files.signal ? { signal: files.signal } : {}),
   });
+}
+
+/**
+ * The summary of past Work Items' cost (item-costs.ts). Advisory, as memory
+ * is: history that can't be read gives none and never stops planning.
+ */
+function pastCosts(past?: Pick<PlanningDeps, "objectives" | "logs">): string {
+  if (!past?.logs) return "";
+  try {
+    return itemCostSummary(pastItems(past.objectives, past.logs));
+  } catch {
+    return "";
+  }
 }
 
 export function localExecutables(

@@ -31,9 +31,9 @@ jobs:
   # balanced by the seconds each file took in test/timings.json and the
   # name order node --test starts them in. Refresh the timings from a run's
   # test-durations.json files (scripts/test-timings.mjs) when the shards
-  # drift apart. Four shards beat three by about 12 s on runner-sized CPUs;
-  # package.test.mjs alone takes about a minute, so more would gain
-  # little. Each shard builds for itself: tsc takes under 10 s,
+  # drift apart. package.test.mjs packs and installs the 427 MB bundled
+  # Codex runtime, about 50 s on its own: with five shards it gets one to
+  # itself, free of the other files' CPU, and the rest finish beside it. Each shard builds for itself: tsc takes under 10 s,
   # and a build job would put its own runner, setup, build and artifact
   # upload ahead of every shard.
   tests:
@@ -43,7 +43,7 @@ jobs:
       # Report every shard's failures, as one unsharded run would.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup

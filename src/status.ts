@@ -18,6 +18,7 @@ import {
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
 import { currentPlan, decisionsOf, retiredLines } from "./planning/plan.js";
+import type { IgnoredPredecessor } from "./planning/predecessors.js";
 import { planningRevisions } from "./planning/steps.js";
 import type { ItemKind, Plan } from "./planning/types.js";
 import { RESET, type ResetRecord } from "./reset.js";
@@ -49,6 +50,7 @@ import {
 } from "./state.js";
 import type { Tracking } from "./tracking.js";
 import { type SkippedCheck, skippedLines } from "./validate.js";
+import { fact } from "./work/facts.js";
 import type { FinalResult } from "./work/finish.js";
 import { mergeOf } from "./work/merged.js";
 import { objectiveWorkflow } from "./workflow.js";
@@ -125,6 +127,8 @@ export interface ObjectiveView {
   finalSkipped: SkippedCheck[];
   /** The operator's `accept <n>` and `refuse <n>` of single criteria under the current plan, with their reasons. */
   decisions: CriterionDecision[];
+  /** The predecessors the operator answered `ignore` to, which stand across replans (planning/predecessors.ts); absent when none. */
+  ignoredPredecessors?: IgnoredPredecessor[];
   /**
    * The latest questions that closed, newest last (at most
    * RECENT_DECISIONS): each with how it closed (its answer, who gave it,
@@ -444,6 +448,7 @@ export function statusOf(
   const { state } = loaded;
   const reset = state.kept?.[RESET] as ResetRecord | undefined;
   const plan = currentPlan(state);
+  const ignoredPredecessors = fact(state, "predecessors:ignored") ?? [];
   const view: ObjectiveView = {
     issue,
     status: state.status,
@@ -473,6 +478,7 @@ export function statusOf(
     flakyRerun: flakyReruns(state),
     finalSkipped: (state.done.final as FinalResult | undefined)?.skipped ?? [],
     decisions: decisionsOf(state),
+    ...(ignoredPredecessors.length ? { ignoredPredecessors } : {}),
     recentDecisions: recentDecisions(state),
     allowances: {
       planningRevisions: planningRevisions(state),
@@ -916,6 +922,10 @@ function objectiveText(row: ObjectiveView): string[] {
     );
   for (const line of decisionLines(row.decisions, displayTime))
     lines.push(`  Decided: ${line}`);
+  for (const ignored of row.ignoredPredecessors ?? [])
+    lines.push(
+      `  Ignoring predecessor ${ignored.ref} (${decisionLine(ignored.reason)}; ${ignored.by}, ${displayTime(ignored.at)}): stands across replans while its link and state are unchanged`,
+    );
   if (row.recentDecisions.length)
     lines.push(
       "  Recent decisions:",

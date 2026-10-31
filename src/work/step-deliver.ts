@@ -879,7 +879,8 @@ export function correctsMedia(
  * `replan` after the plan was accepted (workflow.ts `replan`): forget the
  * plan and the build, and check the Objective again from the issue and
  * the default branch. Merged work is on the default branch, so the new
- * plan starts from it.
+ * plan starts from it. Only the operator's `ignore` of a predecessor
+ * stands (planning/predecessors.ts).
  */
 export function replanOutcome(state: ObjectiveState): Outcome {
   // Every item step, done or running: the engine stops the running ones.
@@ -895,7 +896,11 @@ export function replanOutcome(state: ObjectiveState): Outcome {
       ]),
     ],
     keep: {
-      ...Object.fromEntries(Object.keys(state.kept).map((key) => [key, null])),
+      ...Object.fromEntries(
+        Object.keys(state.kept)
+          .filter((key) => key !== "predecessors:ignored")
+          .map((key) => [key, null]),
+      ),
       ...facts({ [RERUN]: true }),
     },
   };

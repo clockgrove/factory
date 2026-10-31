@@ -60,6 +60,7 @@ import {
 } from "./package-network.js";
 import { forceRemove, openParent, within } from "./paths.js";
 import {
+  BOOTSTRAP_BASE_FILES,
   LOCKFILE_RESOLUTION,
   PINNED_NPM_BOOTSTRAP,
   PINNED_PNPM_BOOTSTRAP,
@@ -2639,7 +2640,7 @@ async function checkPins(
     // that resolves from the configured registries alone, Factory resolves
     // a stale one under the base's unchanged .npmrc, and the scripts it
     // runs stay pinned below. Both stay tracked, and no workspaces appear.
-    for (const path of ["package.json", "package-lock.json"]) {
+    for (const path of BOOTSTRAP_BASE_FILES.npm) {
       if (!(await git.bytes(base, path))?.length)
         throw configuration(
           `Package script validation blocked: npm bootstrap needs tracked ${path} at the accepted base`,

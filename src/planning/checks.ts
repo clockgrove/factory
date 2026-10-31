@@ -16,6 +16,7 @@ import {
   commandRuns,
   commandScope,
   listCommands,
+  missingBootstrapFiles,
   namedBase,
   networkToolOfCommand,
   PACKAGE_SCRIPT_FORMS,
@@ -79,6 +80,7 @@ export async function checkPlan(
   commandOrderFindings(items, found);
   await exportPathFindings(items, files, found);
   protectedPathFindings(items, facts, found, accepted, started);
+  await bootstrapFindings(items, files, found);
   await boundaryFindings(items, facts, files, found);
   graphLint(draft, facts.packageCommands, found);
   integratedBaseFindings(draft, facts.base, found);
@@ -179,6 +181,28 @@ function commandFindings(
           `Work Item ${item.id} validation runs ${command}, which runs npm or pnpm outside ${PACKAGE_SCRIPT_FORMS}: validation pins only those root script forms, so it would refuse this command after the work is built. Use one of those forms (root package scripts: ${listCommands(facts.packageCommands)}), or run the tool directly without npm or pnpm`,
           item.id,
         );
+}
+
+/**
+ * A package install (npm ci or pnpm install, script-disabled) needs its
+ * manager's lockfile tracked at the base: validation holds the item at
+ * its first command otherwise (validate.ts), after the work is built.
+ */
+async function bootstrapFindings(
+  items: readonly WorkItem[],
+  files: BaseFiles,
+  found: Found,
+): Promise<void> {
+  for (const item of items)
+    for (const { command } of item.validation) {
+      const manager = packageBootstrap(command);
+      const missing = manager && (await missingBootstrapFiles(manager, files));
+      if (missing?.length)
+        found(
+          `Work Item ${item.id} validation runs ${command}, which needs ${missing.join(" and ")} tracked at the base, and the base doesn't track ${missing.length > 1 ? "them" : "it"}: validation would hold the item at that command. Drop the install command when the item's other commands need no installed dependencies; when they do, the repository must track ${missing.join(" and ")} first, which only the operator can decide, so ask through decisionRequired`,
+          item.id,
+        );
+    }
 }
 
 /**

@@ -354,6 +354,28 @@ export const LOCKFILE_RESOLUTION = {
   },
 } as const;
 
+/**
+ * What a bootstrap needs tracked and non-empty at the accepted base:
+ * validate.ts refuses an npm bootstrap without these, and the plan check
+ * refuses the command before it is planned (`missingBootstrapFiles`). A
+ * pnpm frozen install fails without its lockfile too.
+ */
+export const BOOTSTRAP_BASE_FILES = {
+  npm: ["package.json", LOCKFILE_RESOLUTION.npm.lockfile],
+  pnpm: [LOCKFILE_RESOLUTION.pnpm.lockfile],
+} as const;
+
+/** The files `manager`'s bootstrap needs that the base doesn't track. */
+export async function missingBootstrapFiles(
+  manager: "npm" | "pnpm",
+  files: BaseFiles,
+): Promise<string[]> {
+  const missing: string[] = [];
+  for (const path of BOOTSTRAP_BASE_FILES[manager])
+    if (!(await files.blob(path))?.length) missing.push(path);
+  return missing;
+}
+
 /** Exact script-disabled root installs; this classification grants no authority. */
 export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
   if (command.trim() === PINNED_NPM_BOOTSTRAP) return "npm";
@@ -938,11 +960,20 @@ function ciOnlyInstructions(
 function packageCommandInstructions(
   commands: readonly string[],
   scopes: ReadonlyMap<string, string> = new Map(),
+  lockfiles: readonly string[] = [],
 ): string {
   const scoped = commands.flatMap((command) =>
     scopes.has(command) ? [`\`${command}\` (${scopes.get(command)})`] : [],
   );
-  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself. Besides the script-disabled install, one that runs npm or pnpm must be exactly ${PACKAGE_SCRIPT_FORMS} (no \`--\`, no flags), since validation keeps that script fixed; a command without npm or pnpm runs as written.${scoped.length ? `\nThese check only one directory; use one only for a work item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
+  return `\n\nRoot package scripts at the base (pnpm forms work too): ${commands.length ? listCommands(commands) : "none"}. Write each validation command yourself. Besides the script-disabled install, one that runs npm or pnpm must be exactly ${PACKAGE_SCRIPT_FORMS} (no \`--\`, no flags), since validation keeps that script fixed; a command without npm or pnpm runs as written. Lockfiles tracked at the base: ${lockfiles.length ? lockfiles.join(", ") : "none"}. The install is allowed only when its manager's lockfile is tracked there; otherwise validate with commands that need no installed dependencies.${scoped.length ? `\nThese check only one directory; use one only for a work item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
+}
+
+/** The bootstrap lockfiles the base tracks. */
+async function trackedLockfiles(files: BaseFiles): Promise<string[]> {
+  const tracked: string[] = [];
+  for (const { lockfile } of Object.values(LOCKFILE_RESOLUTION))
+    if ((await files.blob(lockfile))?.length) tracked.push(lockfile);
+  return tracked;
 }
 
 /** The CI-only and package-script notes for the planner request, in that order. */
@@ -963,6 +994,7 @@ export async function commandInstructions(
     packageCommandInstructions(
       facts.packageCommands,
       scopedCommands(facts.packageCommands, scripts),
+      await trackedLockfiles(files),
     ) +
     (await finalProofInstructions(facts, files))
   );

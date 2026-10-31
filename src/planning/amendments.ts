@@ -2066,6 +2066,7 @@ function amendmentRules(
           `This amendment is for Work Item ${prerequisite.itemId}'s failure, which its repair diagnosis traced to a missing prerequisite that Work Item ${prerequisite.provider} provides (prerequisite): name ${prerequisite.itemId} in ${prerequisite.provider}'s enables entry.`,
         ]
       : []),
+    "When the discovery is a failure of a repository policy whose exceptions need an owner's decision (a budget or limit with a recorded allowance, waiver or exception), plan the change to fit within the policy, or recommend that answer when you ask the operator. You may offer the exception as an option, but never recommend it unless the sources show the policy can't be met, and then say why.",
     "An independent review judges a cannotPlan answer before Factory asks the operator, and sends it back to you when a rule or the evidence allows a plan.",
   ].join(" ");
 }

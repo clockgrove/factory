@@ -184,6 +184,11 @@ test("the worker adds missing proof inside existing tests and leaves budget head
       "The enumerated items of one sentence may share one table-driven assertion that checks each item's exact value.",
     ),
   );
+  assert.ok(
+    first.prompt.includes(
+      "A command that checks a repository budget (such as test lines against production lines) applies from your first edit",
+    ),
+  );
   assert.equal(first.prompt.includes("add whatever is missing"), false);
   // Economy stays inside ownership and never removes an existing test.
   for (const rule of [

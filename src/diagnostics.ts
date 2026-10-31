@@ -788,6 +788,8 @@ export interface SummaryReport {
   /** Walking back from the step that ended last, each time to the step that ended last before it started. */
   criticalPath: StepSpan[];
   criticalPathMs: number;
+  /** The Work Items' steps added up: against the critical path, what running them in parallel saved (#2293). */
+  itemStepMs: number;
   slowest: StepSpan[];
 }
 
@@ -939,6 +941,9 @@ class Summary {
       holdWaitMs: holds.reduce((sum, hold) => sum + (hold.waitMs ?? 0), 0),
       criticalPath: path,
       criticalPathMs: path.reduce((sum, span) => sum + span.ms, 0),
+      itemStepMs: this.spans
+        .filter((span) => itemOf(span.step))
+        .reduce((sum, span) => sum + span.ms, 0),
       slowest: [...this.spans].sort((a, b) => b.ms - a.ms).slice(0, SLOWEST),
     };
   }
@@ -1084,7 +1089,7 @@ export function summaryText(report: SummaryReport): string {
     ),
   );
   section(
-    `Critical path (${duration(report.criticalPathMs)} of steps; walking back from the last step to end):`,
+    `Critical path (${duration(report.criticalPathMs)} of steps, against ${duration(report.itemStepMs)} for all the Work Items' steps added up; walking back from the last step to end):`,
     report.criticalPath.map((span) => `  ${spanText(span)}`),
   );
   section(

@@ -211,8 +211,13 @@ function applyEvent(
     case "worker-validate":
       row.progressAt = event.at;
       if (event.passed === false) row.failingSince ??= event.at;
-      // One command passing isn't the run passing; a whole Validate is.
-      else if (event.event === "worker-validate" && event.passed === true)
+      // One command passing isn't the run passing; a whole Validate is,
+      // never a targeted one (#2281).
+      else if (
+        event.event === "worker-validate" &&
+        event.passed === true &&
+        event.targeted === undefined
+      )
         delete row.failingSince;
       if (!row.phase && step) row.phase = phaseOf(step);
       row.state ||= "running";

@@ -7,10 +7,12 @@
  * streams to a Unix socket Factory listens on in-process. Codex starts its
  * MCP servers itself, outside the shell's sandbox; the socket's directory is
  * private (0700) under the host's temporary directory, which the worker's
- * shell is never granted, so only Codex reaches it. The tool takes no
- * arguments, as the Claude and Copilot workers' Validate: only the item's
- * declared commands run. Its result is bounded as theirs is, below the
- * tool output Codex keeps (self-validate.ts `VALIDATE_RESULT_CHARS`).
+ * shell is never granted, so only Codex reaches it. The tool takes what
+ * the Claude and Copilot workers' Validate takes: at most the indices of
+ * declared commands for a targeted run (self-validate.ts
+ * `VALIDATION_TOOL_INPUT`, #2281), so only the item's declared commands
+ * run. Its result is bounded as theirs is, below the tool output Codex
+ * keeps (self-validate.ts `VALIDATE_RESULT_CHARS`).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -21,6 +23,8 @@ import { validationDeadlineMs } from "../validate.js";
 import {
   type SelfValidateOptions,
   SelfValidation,
+  VALIDATION_TOOL_INPUT,
+  validationTargets,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -46,7 +50,7 @@ export const CODEX_VALIDATION_TOOL_ID = `mcp__${CODEX_VALIDATION_SERVER.replaceA
  * `omit_tools_from = ["deferred"]` (codexMcpServerConfig) lists it in
  * exec's description, and the worker is also given the exact call.
  */
-export const CODEX_VALIDATE_CALL = `Validate is the MCP tool ${VALIDATION_TOOL_NAME} of Factory's server ${CODEX_VALIDATION_SERVER}, id ${CODEX_VALIDATION_TOOL_ID}, and takes no arguments. Inside exec, call it as \`const result = await tools.${CODEX_VALIDATION_TOOL_ID}({}); text(result.content.map((part) => part.text).join(""));\`; where your tools list ${VALIDATION_TOOL_NAME} directly, call it there.`;
+export const CODEX_VALIDATE_CALL = `Validate is the MCP tool ${VALIDATION_TOOL_NAME} of Factory's server ${CODEX_VALIDATION_SERVER}, id ${CODEX_VALIDATION_TOOL_ID}. Inside exec, call it as \`const result = await tools.${CODEX_VALIDATION_TOOL_ID}({}); text(result.content.map((part) => part.text).join(""));\` for a full run, or with \`{ commands: [2] }\` for a targeted run of only those declared commands (by index, 0 the first, with any earlier one they need, such as a build) after the install, which never counts as validating your result; where your tools list ${VALIDATION_TOOL_NAME} directly, call it there.`;
 
 /**
  * One Codex worker attempt's Validate: the shared runs (`validator`, whose
@@ -93,7 +97,16 @@ export class CodexValidate {
             destructiveHint: false,
             openWorldHint: false,
           },
-          call: () => validator.call(),
+          inputSchema: VALIDATION_TOOL_INPUT,
+          call: (args) => {
+            const targets = validationTargets(args);
+            return "problem" in targets
+              ? Promise.resolve({
+                  text: `${VALIDATION_TOOL_NAME} did not run: ${targets.problem}`,
+                  isError: true,
+                })
+              : validator.call(targets.commands);
+          },
         });
       } catch (error) {
         return providerOutcome(
@@ -147,8 +160,10 @@ interface McpTool {
   description: string;
   /** MCP tool annotations (readOnlyHint, destructiveHint, openWorldHint). */
   annotations: Record<string, boolean>;
-  /** One call: the result text, and whether it is an error. */
-  call(): Promise<{ text: string; isError: boolean }>;
+  /** Its arguments' JSON Schema. */
+  inputSchema: Readonly<Record<string, unknown>>;
+  /** One call with its arguments: the result text, and whether it is an error. */
+  call(args: unknown): Promise<{ text: string; isError: boolean }>;
 }
 
 /** The MCP version answered when the client names none. */
@@ -282,11 +297,7 @@ class McpSocketServer {
               {
                 name: this.tool.name,
                 description: this.tool.description,
-                inputSchema: {
-                  type: "object",
-                  properties: {},
-                  additionalProperties: false,
-                },
+                inputSchema: this.tool.inputSchema,
                 annotations: this.tool.annotations,
               },
             ],
@@ -301,21 +312,9 @@ class McpSocketServer {
               message: `Unknown tool: ${String(params.name)}`,
             },
           });
-        const args = params.arguments;
-        if (
-          args !== undefined &&
-          args !== null &&
-          (typeof args !== "object" ||
-            Array.isArray(args) ||
-            Object.keys(args).length)
-        )
-          return send(connection, {
-            id,
-            result: toolText(`${this.tool.name} takes no arguments`, true),
-          });
         let result: { text: string; isError: boolean };
         try {
-          result = await this.tool.call();
+          result = await this.tool.call(params.arguments);
         } catch (error) {
           result = {
             text: error instanceof Error ? error.message : String(error),

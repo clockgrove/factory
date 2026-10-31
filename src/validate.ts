@@ -17,8 +17,10 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
@@ -140,6 +142,29 @@ function validationSequence(item: WorkItem): {
   return { preparation: [], commands: item.validation.map((v) => v.command) };
 }
 
+/**
+ * The indices of `sequence` a run takes, always in declared order (#2281):
+ * every one when `only` is absent, else those `only` names, each once. The
+ * exact install, when the sequence starts with one, always runs, since the
+ * commands after it need what it installs. No command runs before one
+ * declared ahead of it, which may make what it needs (a build, codegen).
+ */
+export function runOrder(
+  sequence: readonly string[],
+  only?: readonly number[],
+): number[] {
+  if (!only) return sequence.map((_, index) => index);
+  const chosen = new Set(
+    only.filter(
+      (index) =>
+        Number.isInteger(index) && index >= 0 && index < sequence.length,
+    ),
+  );
+  if (sequence.length && packageBootstrap(sequence[0]!) !== undefined)
+    chosen.add(0);
+  return sequence.map((_, index) => index).filter((index) => chosen.has(index));
+}
+
 export interface ValidateInput {
   /** The target clone; the fresh worktree is linked from it. */
   checkout: string;
@@ -150,18 +175,37 @@ export interface ValidateInput {
    * where the exact install keeps its package store across this item's
    * validations, such as `<item worktree>.packages` (#2169). The install
    * still runs every time, frozen, so each validation proves it works on
-   * the result; it reuses the store only when the last install that wrote
-   * it had the same key (`installKey`: the install command and every
-   * dependency input), else it starts from an empty one. Only sandboxed,
-   * and only without the operator's `sandbox.packageStore`, which every
-   * install shares already. Absent (final validation): each install's
-   * store is its own empty HOME's, as before.
+   * the result; it reuses a store only one of the item's recent installs of
+   * the same key filled (`installKey`: the install command and every
+   * dependency input; `keptStore`), else it starts from an empty one.
+   * Only sandboxed, and only without the operator's
+   * `sandbox.packageStore`, which every install shares already. Absent
+   * (final validation): each install's store is its own empty HOME's, as
+   * before.
    */
   installStore?: string;
+  /**
+   * With `installStore`: where the Objective's items share the exact
+   * install's store (#2280), such as `<workDir>/<issue>/.packages`. An
+   * install whose key is the one the item started from (`base`, else the
+   * plan's) has every dependency input as there, so it uses the store kept
+   * here under that key (`sharedStore`), which the Objective's first such
+   * install filled; one whose inputs the candidate changed keeps
+   * `installStore`, its own. Absent: always `installStore`.
+   */
+  sharedInstallStore?: string;
   /** The exact candidate commit. */
   commit: string;
   /** One Work Item's commands, or, absent, the plan's final commands. */
   item?: WorkItem;
+  /**
+   * The worker's own targeted Validate, with `item` (#2281): the indices of
+   * the only commands that run, in declared order (`runOrder`). The exact
+   * install, when the list starts with one, still runs first, and the
+   * formatter after it; every command's scripts are still pinned.
+   * `commands` in the answer are the ones that ran. Absent: every command.
+   */
+  only?: readonly number[];
   plan: Plan;
   /** The Objective as planned (shown.ts): its Package manager update and Workspace package additions. */
   blocks: readonly ObjectiveBlock[];
@@ -390,6 +434,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
+  // Every command is pinned below; only those of `only` run (#2281).
+  const order = runOrder(sequence, item ? input.only : undefined);
+  const ran = order.map((index) => sequence[index]!);
   const atFinal = checkedAtFinal(plan);
   const { signal } = input;
   let tree = await revParse(checkout, `${commit}^{tree}`, signal);
@@ -446,7 +493,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     return {
       kind: "failed",
       tree,
-      commands: sequence,
+      commands: ran,
       results: [],
       detail: refusal.message,
       output: refusal.message,
@@ -524,7 +571,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       return {
         kind: "failed",
         tree,
-        commands: sequence,
+        commands: ran,
         results: [],
         detail,
         output: detail,
@@ -578,7 +625,8 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       });
     // The repository's formatter runs once, on a Work Item's validation:
     // after the exact install when the sequence starts with one (the
-    // formatter is usually a dependency), else before the first command.
+    // formatter is usually a dependency), else before the first command
+    // (positions in `order`, which keeps the install first).
     const formatter = item ? input.format : undefined;
     const formatAt = formatter
       ? sequence.length && packageBootstrap(sequence[0]!) !== undefined
@@ -625,7 +673,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         return {
           kind: "failed",
           tree,
-          commands: sequence,
+          commands: ran,
           results,
           ...(applied.exit !== undefined && {
             formatter: { command: formatter!.command, exit: applied.exit },
@@ -653,11 +701,12 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       const diff = await boundedDiff(worktree, changes, signal);
       return `Validation command modified the result tree: \`${command}\` ${what}. Validation runs on the result as committed, so each command must leave it unchanged, writing only files Git ignores.${diff ? `\n\n${diff}` : ""}`;
     };
-    for (let index = 0; index < sequence.length; index++) {
-      if (index === formatAt && !formatRan) {
+    for (let position = 0; position < order.length; position++) {
+      if (position === formatAt && !formatRan) {
         const stopped = await format();
         if (stopped) return stopped;
       }
+      const index = order[position]!;
       const command = sequence[index]!;
       const preparing = index < preparation.length;
       // Only Factory's exact script-disabled install, run first (before any
@@ -675,7 +724,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       const online =
         install && input.sandbox.network === "package-install" && !refused;
       // The item's kept package store, for the exact install alone, keyed
-      // by its inputs as this commit has them: the install still runs.
+      // by its inputs as this commit has them: the install still runs. An
+      // install with the inputs the item started from shares the
+      // Objective's store under that key (#2280).
       let store: KeptStore | undefined;
       if (
         install &&
@@ -684,10 +735,18 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         sandboxAvailable().available
       )
         try {
-          store = await keptStore(
-            input.installStore,
-            await installKey(checkout, commit, command, signal),
-          );
+          const key = await installKey(checkout, commit, command, signal);
+          store =
+            input.sharedInstallStore &&
+            key ===
+              (await installKey(
+                checkout,
+                input.base ?? plan.base,
+                command,
+                signal,
+              ))
+              ? await sharedStore(input.sharedInstallStore, key)
+              : await keptStore(input.installStore, key);
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof GitRefusal) throw error;
@@ -702,7 +761,10 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         index,
         command,
         preparing,
-        ...(store && { installStore: store.reused ? "reused" : "new" }),
+        ...(store && {
+          installStore: store.reused ? "reused" : "new",
+          ...(store.shared && { installStoreShared: true }),
+        }),
       });
       const limit = capture ? outputLimit(selectors, command) : undefined;
       // The whole output, as it arrives: what the run keeps of a failure.
@@ -743,7 +805,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         return {
           kind: "failed",
           tree,
-          commands: sequence,
+          commands: ran,
           results,
           failed: { index, command },
           detail,
@@ -763,7 +825,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       if (passed) whole.remove();
       // A store over the disk budget is never kept: the next install of the
       // item starts from an empty one.
-      if (store && run.diskOverflow) await forceRemove(input.installStore!);
+      if (store && run.diskOverflow) await forceRemove(store.directory);
       input.log({
         event: "validation-result",
         index,
@@ -802,7 +864,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           return {
             kind: "failed",
             tree,
-            commands: sequence,
+            commands: ran,
             results,
             detail: changed,
             output: changed,
@@ -834,7 +896,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           return {
             kind: "failed",
             tree,
-            commands: sequence,
+            commands: ran,
             results,
             failed: { index, command },
             detail: captured.detail,
@@ -917,14 +979,14 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           regenerated = { commit, lockfile: resolved.lockfile };
           // The new commit's checkout is clean again with its lockfile.
           baseline = await status(worktree, signal);
-          index = -1;
+          position = -1;
           continue;
         }
         if (resolved.kind === "failed")
           return {
             kind: "failed",
             tree,
-            commands: sequence,
+            commands: ran,
             results,
             failed: { index, command },
             detail: resolved.detail,
@@ -957,7 +1019,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       return {
         kind: "failed",
         tree,
-        commands: sequence,
+        commands: ran,
         results,
         failed: { index, command, exit },
         detail,
@@ -989,7 +1051,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       return {
         kind: "failed",
         tree,
-        commands: sequence,
+        commands: ran,
         results,
         detail,
         output: detail,
@@ -1001,7 +1063,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     return {
       kind: "passed",
       tree,
-      commands: sequence,
+      commands: ran,
       results,
       ...(produced && { produced }),
       ...(capture && { artifacts }),
@@ -1258,6 +1320,10 @@ function dependencyInput(path: string): boolean {
  * old package from a kept store, where an empty one fails the integrity
  * check. So when any dependency input names `file:`, the key covers every
  * path, mode and blob of the commit: only the very same tree reuses it.
+ * `file:` counts only as a protocol (LOCAL_PACKAGE): every pnpm lockfile's
+ * own `excludeLinksFromLockfile:` setting ends in it too, which once keyed
+ * every pnpm install by the whole tree, so a store was reused only on the
+ * very tree it was filled on (#2280).
  */
 export async function installKey(
   checkout: string,
@@ -1285,44 +1351,115 @@ export async function installKey(
       .filter(([, type]) => type === "blob")
       .map(([, , object]) => object!),
   );
-  const local = bodies.some((body) => body.includes("file:"));
+  const local = bodies.some((body) => LOCAL_PACKAGE.test(body.toString()));
   for (const entry of local ? entries : inputs) hash.update(`${entry}\0`);
   return hash.digest("hex");
 }
+
+/**
+ * A package from the checkout: the `file:` protocol, as a manifest's
+ * dependency (`"file:vendor/foo.tgz"`), a lockfile's specifier, version or
+ * tarball (`file:...`, `foo@file:...`) or `git+file:` names it, never a
+ * word ending in "file" before a colon, such as pnpm's
+ * `excludeLinksFromLockfile:`.
+ */
+const LOCAL_PACKAGE = /(?<![A-Za-z0-9])file:/;
 
 /** An item's kept package store, ready for one install. */
 interface KeptStore {
   /** The package-manager store and caches' root, the install's to write. */
   root: string;
+  /** What holds it, removed when the store is not kept. */
+  directory: string;
   /** The last install that wrote it had this one's key. */
   reused: boolean;
+  /** The Objective's store (`sharedStore`), not the item's own. */
+  shared?: true;
 }
 
 /**
+ * How many keys' stores one item keeps (`keptStore`): a candidate whose
+ * lockfile Factory regenerates installs under two keys on every validation,
+ * its own (refused as out of date) and the regenerated one's (#2280).
+ */
+const KEPT_KEYS = 2;
+
+/**
  * The package store kept in `directory` across one item's validations
- * (`installStore`, #2169): its `cache` reused when the `key` beside it is
- * this install's, else emptied first and keyed anew. Only the install
- * writes `cache`, so what a reused one holds is what installs of these very
- * inputs fetched; the key stays outside, where no command reaches.
+ * (`installStore`, #2169): `<directory>/<key>/cache`, reused when it was
+ * made for this install's `key`, else made empty. The stores of the
+ * KEPT_KEYS most recently installed keys stay (`keys`, newest first), so an
+ * item that alternates between two keys reuses both; older ones, and
+ * anything else here, are removed. Only the install writes `cache`, so what
+ * a reused one holds is what installs of these very inputs fetched; the
+ * keys stay outside it, where no command reaches.
  */
 export async function keptStore(
   directory: string,
   key: string,
 ): Promise<KeptStore> {
-  const root = join(directory, "cache");
-  const keyFile = join(directory, "key");
-  let kept: string | undefined;
+  const kept = join(directory, key);
+  const root = join(kept, "cache");
+  const listed = join(directory, "keys");
+  let recent: string[] = [];
   try {
-    kept = readFileSync(keyFile, "utf8");
+    recent = readFileSync(listed, "utf8")
+      .split("\n")
+      .filter((entry) => /^[0-9a-f]{64}$/.test(entry));
   } catch {
     // None yet.
   }
-  if (kept === key && lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
-    return { root, reused: true };
-  await forceRemove(directory);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  writeFileSync(keyFile, key, { mode: 0o600 });
-  return { root, reused: false };
+  const keys = [key, ...recent.filter((entry) => entry !== key)].slice(
+    0,
+    KEPT_KEYS,
+  );
+  const reused =
+    recent.includes(key) &&
+    lstatSync(root, { throwIfNoEntry: false })?.isDirectory() === true;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (const entry of readdirSync(directory))
+    if (entry !== "keys" && !keys.includes(entry))
+      await forceRemove(join(directory, entry));
+  if (!reused) {
+    await forceRemove(kept);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+  }
+  writeFileSync(listed, `${keys.join("\n")}\n`, { mode: 0o600 });
+  return { root, directory: kept, reused };
+}
+
+/**
+ * The store the Objective's items share for installs of one `key`
+ * (`sharedInstallStore`, #2280): `<directory>/<key>/cache`. Never emptied
+ * for another key, since each key has its own; a new one is made whole
+ * under a temporary name and renamed into place, so installs of one key
+ * at once never remove the store another is filling, and both write it as
+ * a package manager's shared store is written. Only the exact install
+ * writes `cache`, only with this key's inputs, so what an item reads there
+ * is what installs of its very inputs fetched, whichever item ran them; the
+ * key is the directory's name, outside what the install may write.
+ */
+export async function sharedStore(
+  directory: string,
+  key: string,
+): Promise<KeptStore> {
+  const kept = join(directory, key);
+  const root = join(kept, "cache");
+  const store = { root, directory: kept, shared: true as const };
+  if (lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
+    return { ...store, reused: true };
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const made = await mkdtemp(join(directory, ".new-"));
+  try {
+    mkdirSync(join(made, "cache"), { mode: 0o700 });
+    renameSync(made, kept);
+  } catch (error) {
+    await forceRemove(made);
+    // Another install of this key made it first: this one shares it.
+    if (!lstatSync(root, { throwIfNoEntry: false })?.isDirectory()) throw error;
+    return { ...store, reused: true };
+  }
+  return { ...store, reused: false };
 }
 
 // ---------------------------------------------------------------------------

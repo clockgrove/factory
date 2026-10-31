@@ -59,7 +59,9 @@ import {
   SelfValidation,
   selectedMediaNote,
   UNOWNED_FIX,
+  VALIDATION_TOOL_INPUT,
   validateFailed,
+  validationTargets,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -312,6 +314,20 @@ const text = (value: string, isError = false): ToolText => ({
   content: [{ type: "text", text: value }],
   ...(isError && { isError }),
 });
+
+/**
+ * Validate's input in Zod, as the Codex and Copilot workers' JSON Schema
+ * (self-validate.ts `VALIDATION_TOOL_INPUT`): a targeted run's command
+ * indices, absent for a full run (#2281).
+ */
+export function validateToolShape(z: Zod) {
+  return {
+    commands: z
+      .array(z.number().int().min(0))
+      .optional()
+      .describe(VALIDATION_TOOL_INPUT.properties.commands.description),
+  };
+}
 
 /** Plain text, cut to its start and end. */
 function returned(output: string): string {
@@ -745,6 +761,7 @@ class Attempt {
 
   private validation(): McpSdkServerConfigWithInstance {
     const { tool, createSdkMcpServer } = this.sdk;
+    const { z } = this;
     return createSdkMcpServer({
       name: VALIDATION_SERVER,
       version: "1.0.0",
@@ -752,9 +769,9 @@ class Attempt {
         tool(
           VALIDATION_TOOL_NAME,
           validationToolDescription(this.input.item),
-          {},
-          async () => {
-            const result = await this.validator.call();
+          validateToolShape(z),
+          async ({ commands }) => {
+            const result = await this.validator.call(commands);
             return text(result.text, result.isError);
           },
           {
@@ -785,10 +802,11 @@ function provenance(server: unknown, name: string): boolean {
 
 /**
  * The one access rule both SDK permission callbacks apply: Factory's own
- * tools only from its in-process servers with exactly their arguments, and
- * file tools only inside the worktree, with bounded globs.
+ * tools only from its in-process servers with exactly their arguments
+ * (Validate's: none, or a targeted run's `commands`, #2281), and file tools
+ * only inside the worktree, with bounded globs.
  */
-function toolAllowed(
+export function toolAllowed(
   attempt: Attempt,
   toolName: string,
   toolInput: unknown,
@@ -801,7 +819,12 @@ function toolAllowed(
   const keys = Object.keys(args).sort().join(",");
   switch (toolName) {
     case VALIDATION_TOOL:
-      return grants.validate && provenance(server, VALIDATION_SERVER) && !keys;
+      return (
+        grants.validate &&
+        provenance(server, VALIDATION_SERVER) &&
+        (!keys ||
+          (keys === "commands" && !("problem" in validationTargets(args))))
+      );
     case SHELL_TOOL:
       return (
         grants.shell &&

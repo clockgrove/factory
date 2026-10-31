@@ -1,26 +1,36 @@
 #!/usr/bin/env node
-// Prints the test files CI's test shard I of N runs, one per line, the
-// longest first:
+// Prints the test files CI's test shard I of N runs, one per line:
 //
-//   node scripts/test-partition.mjs I N
+//   node scripts/test-partition.mjs I N [C]
 //
 // Every test/*.test.mjs file goes to exactly one shard, balanced by the
 // seconds test/timings.json says it took (scripts/test-timings.mjs
-// refreshes it): the longest first, each to the shard with the fewest
-// seconds so far. A file the timings don't list yet counts as their
+// refreshes it): the longest first, each to the shard that would finish
+// soonest with it. A file the timings don't list yet counts as their
 // median. scripts/test-shards.mjs checks that the shards between them ran
 // each file once.
+//
+// A shard finishes when node --test does, and node --test starts a shard's
+// files in name order whatever order they are given in, C at a time (C
+// defaults to its own default, one less than the CPUs, at least one). So a
+// long file that sorts last in a shard of many starts late and runs on
+// alone after the rest; the partition counts that, not only the seconds.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 
-const [i, n] = process.argv.slice(2).map(Number);
+const args = process.argv.slice(2);
+const [i, n, c = Math.max(availableParallelism() - 1, 1)] = args.map(Number);
 if (
-  process.argv.length !== 4 ||
+  args.length < 2 ||
+  args.length > 3 ||
   !Number.isInteger(i) ||
   !Number.isInteger(n) ||
+  !Number.isInteger(c) ||
   i < 1 ||
-  i > n
+  i > n ||
+  c < 1
 ) {
-  console.error("usage: test-partition.mjs I N (1 <= I <= N)");
+  console.error("usage: test-partition.mjs I N [C] (1 <= I <= N, 1 <= C)");
   process.exit(2);
 }
 
@@ -44,21 +54,43 @@ const median = !known.length
 const seconds = (file) =>
   typeof timings[file] === "number" ? timings[file] : median;
 
-// Ties go by name, then to the shard with the fewest files, then to the
-// lowest, so every shard computes the same partition, and files timed at
-// 0 s still spread.
-const shards = Array.from({ length: n }, () => ({ files: [], seconds: 0 }));
+/** The seconds node --test takes to run `shard`: in name order, C at once. */
+function finish(shard) {
+  const running = Array(c).fill(0);
+  for (const file of [...shard].sort()) {
+    const free = running.indexOf(Math.min(...running));
+    running[free] += seconds(file);
+  }
+  return Math.max(...running);
+}
+
+// Ties go by name, then to the shard with the fewest seconds, then the
+// fewest files, then the lowest, so every shard computes the same
+// partition, and files timed at 0 s still spread.
+const shards = Array.from({ length: n }, () => ({
+  files: [],
+  seconds: 0,
+  finish: 0,
+}));
 for (const file of [...files].sort(
   (a, b) => seconds(b) - seconds(a) || a.localeCompare(b),
 )) {
-  const least = shards.reduce((min, shard) =>
-    shard.seconds < min.seconds ||
-    (shard.seconds === min.seconds && shard.files.length < min.files.length)
-      ? shard
-      : min,
-  );
-  least.files.push(file);
-  least.seconds += seconds(file);
+  let best;
+  for (const shard of shards) {
+    const ends = finish([...shard.files, file]);
+    if (
+      !best ||
+      ends < best.ends ||
+      (ends === best.ends &&
+        (shard.seconds < best.shard.seconds ||
+          (shard.seconds === best.shard.seconds &&
+            shard.files.length < best.shard.files.length)))
+    )
+      best = { shard, ends };
+  }
+  best.shard.files.push(file);
+  best.shard.seconds += seconds(file);
+  best.shard.finish = best.ends;
 }
 
 const shard = shards[i - 1];
@@ -67,9 +99,8 @@ if (!shard.files.length) {
   console.error(`shard ${i} of ${n} has no test files: use fewer shards`);
   process.exit(1);
 }
-// Longest first, as node --test starts them: a long file started last
-// would run on alone after the rest.
-for (const file of shard.files) console.log(file);
+// In name order, the order node --test starts them in.
+for (const file of [...shard.files].sort()) console.log(file);
 console.error(
-  `shard ${i} of ${n}: ${shard.files.length} test files, about ${Math.round(shard.seconds)} s`,
+  `shard ${i} of ${n}: ${shard.files.length} test files, about ${Math.round(shard.finish)} s at ${c} at a time`,
 );

@@ -28,11 +28,12 @@ jobs:
       - run: npm run notices:check
 
   # npm test's run, split across the shards by scripts/test-partition.mjs,
-  # balanced by the seconds each file took in test/timings.json. Refresh
-  # that from a run's test-durations.json files (scripts/test-timings.mjs)
-  # when the shards drift apart. Four shards beat three by about 10 s on
-  # runner-sized CPUs; package.test.mjs alone takes about a minute, so more
-  # would gain little. Each shard builds for itself: tsc takes under 10 s,
+  # balanced by the seconds each file took in test/timings.json and the
+  # name order node --test starts them in. Refresh the timings from a run's
+  # test-durations.json files (scripts/test-timings.mjs) when the shards
+  # drift apart. Four shards beat three by about 12 s on runner-sized CPUs;
+  # package.test.mjs alone takes about a minute, so more would gain
+  # little. Each shard builds for itself: tsc takes under 10 s,
   # and a build job would put its own runner, setup, build and artifact
   # upload ahead of every shard.
   tests:

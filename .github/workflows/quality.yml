@@ -31,9 +31,9 @@ jobs:
   # balanced by the seconds each file took in test/timings.json and the
   # name order node --test starts them in. Refresh the timings from a run's
   # test-durations.json files (scripts/test-timings.mjs) when the shards
-  # drift apart. package.test.mjs packs and installs the 427 MB bundled
-  # Codex runtime, about 50 s on its own: with five shards it gets one to
-  # itself, free of the other files' CPU, and the rest finish beside it. Each shard builds for itself: tsc takes under 10 s,
+  # drift apart. Five shards finish in about 41 s of tests each, against
+  # 44 s for four and 38 s for six; cli.test.mjs, about 40 s on its own,
+  # is the floor. Each shard builds for itself: tsc takes under 10 s,
   # and a build job would put its own runner, setup, build and artifact
   # upload ahead of every shard.
   tests:

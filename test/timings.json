@@ -48,7 +48,7 @@
   "test/media.test.mjs": 4.1,
   "test/ownership-paths.test.mjs": 0.4,
   "test/package-network.test.mjs": 6,
-  "test/package.test.mjs": 49.6,
+  "test/package.test.mjs": 1.5,
   "test/plan-evidence-method.test.mjs": 0.3,
   "test/plan-item-size.test.mjs": 0.3,
   "test/plan-lfs-fact.test.mjs": 0.3,

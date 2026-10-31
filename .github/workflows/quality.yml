@@ -27,11 +27,12 @@ jobs:
       - run: npm run format:check
       - run: npm run notices:check
 
-  # npm test's run, split round-robin across the shards by node --test. Four
-  # shards beat two or three on runner-sized CPUs; service.test.mjs alone
-  # takes nearly two minutes, so more would gain little. Each shard builds for
-  # itself: tsc takes under 10 s, and a build job would put its own runner,
-  # setup, build and artifact upload ahead of every shard.
+  # npm test's run, split across the shards by scripts/test-partition.mjs,
+  # balanced by the seconds each file took in test/timings.json. Refresh
+  # that from a run's test-durations.json files (scripts/test-timings.mjs)
+  # when the shards drift apart. Each shard builds for itself: tsc takes
+  # under 10 s, and a build job would put its own runner, setup, build and
+  # artifact upload ahead of every shard.
   tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -46,17 +47,25 @@ jobs:
       - uses: ./.github/actions/bubblewrap
       - run: git lfs version
       - run: npm run build
+      # A step of its own: a partition that fails fails the job, rather than
+      # leave node --test no files, which would run every file again.
+      - run: >-
+          node scripts/test-partition.mjs
+          ${{ matrix.shard }} ${{ strategy.job-total }} > test-shard.txt
       - run: >-
           node --test --test-timeout=120000
-          --test-shard=${{ matrix.shard }}/${{ strategy.job-total }}
           --test-reporter=spec --test-reporter-destination=stdout
           --test-reporter=./scripts/test-files.mjs
           --test-reporter-destination=test-files.txt
-          test/*.test.mjs
+          --test-reporter=./scripts/test-durations.mjs
+          --test-reporter-destination=test-durations.json
+          $(cat test-shard.txt)
       - uses: actions/upload-artifact@v7
         with:
           name: test-files-${{ matrix.shard }}
-          path: test-files.txt
+          path: |
+            test-files.txt
+            test-durations.json
           if-no-files-found: error
           retention-days: 1
           overwrite: true

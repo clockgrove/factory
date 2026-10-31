@@ -61,7 +61,7 @@ npm test
 
 `npm test` builds Factory and runs its CI tests against real temporary Git repositories, processes and files, including the packed CLI installed offline. They use no mocks and no GitHub, need no provider credentials, and take about 3 minutes.
 
-The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus the CI tests, split across parallel shards, on every pull request and on `main`. The required `package-gate` passes only when the checks and every shard succeed and the shards between them ran each test file exactly once. Release also verifies the exact tarball it publishes.
+The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus the CI tests, split across parallel shards, on every pull request and on `main`. The shards are balanced by the seconds each test file took, from `test/timings.json`; a new file counts as the median until the timings are refreshed from a run's shards with `scripts/test-timings.mjs`. The required `package-gate` passes only when the checks and every shard succeed and the shards between them ran each test file exactly once. Release also verifies the exact tarball it publishes.
 
 `npm run lint` uses Biome. `npm run format` applies formatting. Commits do not install hooks or re-stage files; CI enforces the checks.
 

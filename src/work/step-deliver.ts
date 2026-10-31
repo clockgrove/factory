@@ -1,6 +1,7 @@
 import {
   ACCEPT,
   type BaseRerun,
+  candidateChanges,
   type DeliveryContext,
   deleteFactoryBranch,
   itemBranch,
@@ -16,11 +17,13 @@ import {
   type Rerun,
 } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
+import { CHANGES_KEPT, summaryLine, testsOf } from "../item-telemetry.js";
 import type { CandidateSet } from "../media.js";
 import { ownsPath } from "../planning/graph.js";
 import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
 import type { WorkItem } from "../planning/types.js";
 import type { DeliveryUnit } from "../planning/units.js";
+import { RunTally } from "../progress.js";
 import type { RepairFinding } from "../repair.js";
 import { receiptPath } from "../review/result.js";
 import { type Answer, type ObjectiveState, runOf } from "../state.js";
@@ -88,6 +91,12 @@ export async function publishStep(
   const flaky = rerun?.tree === validated.tree ? rerun : undefined;
   const commit = candidate(state, item.id);
   const branch = baseBranch(state.issue, place);
+  // As the item's comment shows it: as of its last finished step (review).
+  const spent = deps.logs
+    ? new RunTally(deps.logs).read(state.issue, state.startedAt ?? "").items[
+        item.id
+      ]
+    : undefined;
   const result = await publish(delivery(context, deps), {
     issue: state.issue,
     item,
@@ -106,6 +115,7 @@ export async function publishStep(
     ...(itemIssueOf(state, item.id)
       ? { itemIssue: itemIssueOf(state, item.id) }
       : {}),
+    ...(spent ? { telemetry: summaryLine(spent) } : {}),
     secrets: deps.config.secrets,
     // The operator's `publish` counts only for the finding it answered:
     // the digest kept when the hold was raised, never the hold's text,
@@ -153,12 +163,32 @@ export async function publishStep(
       },
     );
   if (result.kind !== "published") return result;
-  // What watch and diagnostics name the item's PR by.
+  // What watch and diagnostics name the item's PR by, with what the
+  // candidate changed for the item's comment (item-telemetry.ts). Only
+  // display: a diff that fails leaves the changes out, never the step.
+  const files = await candidateChanges(
+    delivery(context, deps),
+    work.base,
+    commit,
+  ).catch((error: unknown) => {
+    if (context.signal.aborted) throw error;
+    return undefined;
+  });
   context.log({
     event: "published",
     item: item.id,
     pr: result.pr,
     head: result.head,
+    ...(files
+      ? {
+          changes: {
+            commit,
+            count: files.length,
+            files: files.slice(0, CHANGES_KEPT),
+            tests: testsOf(files).slice(0, CHANGES_KEPT),
+          },
+        }
+      : {}),
   });
   const done: PublishResult = {
     pr: result.pr,

@@ -2,12 +2,13 @@
  * A worker's own Validate, shared by the Claude, Copilot and Codex workers: the
  * Work Item's declared commands through `validateTree` on a snapshot commit
  * of the worker's current files, in a fresh checkout, plus the handoff
- * decode collection will apply. The worker names no command: only the
- * declared ones run. Runs are queued one at a time.
+ * decode collection will apply. The worker names no command of its own:
+ * only declared ones run, every one, or in a targeted run those it picks
+ * by index (#2281). Runs are queued one at a time.
  */
 
 import { closeSync, constants } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { SandboxConfig } from "../config.js";
@@ -22,7 +23,7 @@ import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, failureExcerpt } from "../text.js";
 import { type Validation, validateTree } from "../validate.js";
-import { hasGitlink, installStorePath } from "../worktree.js";
+import { hasGitlink, hostGit, installStorePath } from "../worktree.js";
 import {
   type HandoffNote,
   handoffPeers,
@@ -32,6 +33,7 @@ import {
   VALIDATE_STEP_LOG,
   workHandoffSchema,
 } from "./collect.js";
+import { VALIDATION_TOOL_NAME } from "./validate-tool.js";
 import type { WorkerInput, WorkerResult } from "./worker.js";
 
 /** What Validate needs beyond the worker's input. */
@@ -59,7 +61,51 @@ export function formattedNote(formatted: {
 }
 
 export const VALIDATION_TOOL_DESCRIPTION =
-  "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. A failed command's output in the result is an excerpt: its complete output is written to a log under .factory-validate/ in your checkout, which the result names. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.";
+  "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. A failed command's output in the result is an excerpt: its complete output is written to a log under .factory-validate/ in your checkout, which the result names. A full run takes minutes; it runs the command that failed last first, so a repeated failure shows early. Run it after implementing and fix any failure it reports. While you fix a failure, pass `commands`, the indices of the declared commands to run (0 is the first; a failure names its command's index), for a targeted run of just those after the exact install: much faster, but it never counts as validating your result. Run it again with no `commands` after your last edit, including self-review and handoff fixes: finish only after a full run passes on your final files.";
+
+/**
+ * Validate's input, as JSON Schema (the Codex and Copilot workers'; the
+ * Claude worker's is the same in Zod): `commands`, the indices of the
+ * declared commands a targeted run runs (#2281); absent, every one.
+ */
+export const VALIDATION_TOOL_INPUT = {
+  type: "object",
+  properties: {
+    commands: {
+      type: "array",
+      items: { type: "integer", minimum: 0 },
+      description:
+        "Indices of the declared validation commands to run alone, after the exact install (0 is the first). Omit for a full run, the only one that counts before you finish.",
+    },
+  },
+  additionalProperties: false,
+} as const;
+
+/**
+ * A Validate call's arguments as VALIDATION_TOOL_INPUT has them: the
+ * targeted commands' indices, none for a full run, or why they are refused.
+ */
+export function validationTargets(
+  args: unknown,
+): { commands?: number[] } | { problem: string } {
+  if (args === undefined || args === null) return {};
+  if (typeof args !== "object" || Array.isArray(args))
+    return { problem: "its arguments must be an object" };
+  const { commands, ...rest } = args as Record<string, unknown>;
+  if (Object.keys(rest).length)
+    return {
+      problem: `it takes only \`commands\`, not ${Object.keys(rest).join(", ")}`,
+    };
+  if (commands === undefined || commands === null) return {};
+  if (
+    !Array.isArray(commands) ||
+    !commands.every((index) => Number.isInteger(index) && index >= 0)
+  )
+    return {
+      problem: "`commands` must be a list of command indices (0 is the first)",
+    };
+  return { commands: commands as number[] };
+}
 
 /**
  * What a failed check asks of a fix outside the owned paths: the worker's
@@ -295,6 +341,47 @@ export async function stageValidateLog(
   return VALIDATE_STEP_LOG;
 }
 
+/** The most of a result's changed files `lastEdit` reads. */
+const LAST_EDIT_FILES = 2_000;
+
+/**
+ * When the worker last edited its result, for Validate's feedback latency
+ * (#2281): the newest modification time of the worktree's files that the
+ * snapshot `tree` changes from `base`, whichever tool wrote them (a shell
+ * script's edits too). Undefined when none can be read; a measurement,
+ * never a reason for Validate to fail.
+ */
+async function lastEdit(
+  worktree: string,
+  base: string,
+  tree: string,
+  signal: AbortSignal,
+): Promise<number | undefined> {
+  try {
+    const changed = (
+      await hostGit(
+        worktree,
+        ["diff-tree", "-r", "--name-only", "-z", "--no-renames", base, tree],
+        { signal },
+      )
+    )
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean)
+      .slice(0, LAST_EDIT_FILES);
+    let newest: number | undefined;
+    for (const path of changed) {
+      const seen = await lstat(join(worktree, path)).catch(() => undefined);
+      if (seen && (newest === undefined || seen.mtimeMs > newest))
+        newest = seen.mtimeMs;
+    }
+    return newest;
+  } catch {
+    signal.throwIfAborted();
+    return undefined;
+  }
+}
+
 /** A Validate run's log of a failed command: the run, then the command as a file name. */
 function logPath(run: number, command: string): string {
   const slug = command
@@ -408,6 +495,11 @@ export class SelfValidation {
   private readonly failedTrees = new Set<string>();
   /** The commands a run failed and no later run passed, by command. */
   private readonly failing = new Map<string, WorkerValidateFailure>();
+  /**
+   * The index of the command the last run failed at, until a run passes
+   * it: a full run runs it first (#2281).
+   */
+  private lastFailed: number | undefined;
 
   /** `signal` stops a running validation: cancel, or the attempt ending. */
   constructor(
@@ -416,9 +508,30 @@ export class SelfValidation {
     private readonly signal: AbortSignal,
   ) {}
 
-  /** One tool call: the result text, or why validation is unavailable. */
-  async call(): Promise<{ text: string; isError: boolean }> {
-    const result = this.queue.then(() => this.validate());
+  /**
+   * One tool call: the result text, or why validation is unavailable.
+   * `commands`: the indices of the declared commands a targeted run runs,
+   * after the exact install (#2281); absent, empty or every one, a full
+   * run.
+   */
+  async call(
+    commands?: readonly number[],
+  ): Promise<{ text: string; isError: boolean }> {
+    const declared = this.input.item.validation;
+    const unknown = (commands ?? []).filter(
+      (index) =>
+        !Number.isInteger(index) || index < 0 || index >= declared.length,
+    );
+    if (unknown.length)
+      return {
+        text: `Validation did not run: ${unknown.join(", ")} ${unknown.length === 1 ? "is not the index" : "are not indices"} of a declared command. Pass \`commands\` from these, or none for a full run:\n${declared.map((check, index) => `${index}: ${check.command}`).join("\n")}`,
+        isError: true,
+      };
+    // A selection of every declared command is a full run.
+    const chosen = [...new Set(commands ?? [])];
+    const targeted =
+      chosen.length && chosen.length < declared.length ? chosen : undefined;
+    const result = this.queue.then(() => this.validate(targeted));
     this.queue = result.catch(() => undefined);
     try {
       return { text: await result, isError: false };
@@ -438,10 +551,14 @@ export class SelfValidation {
   /**
    * The declared commands on a snapshot commit of the worker's current
    * files, in a fresh checkout, so the worker's files never change and no
-   * build output or other run's temporary files reach the commands.
+   * build output or other run's temporary files reach the commands. A
+   * targeted run (`targeted`) runs only those commands after the install,
+   * and never covers the files for handoff; a full run runs the command
+   * the last run failed at first (#2281).
    */
-  private async validate(): Promise<string> {
+  private async validate(targeted?: readonly number[]): Promise<string> {
     const run = ++this.runs;
+    const started = Date.now();
     const { input, options } = this;
     const signal = this.signal;
     // An earlier run's logs, or the validate step's, describe other files.
@@ -451,6 +568,18 @@ export class SelfValidation {
     if ("problem" in snapped)
       return `Validation failed. Fix this before you finish.\n${snapped.problem}`;
     const { tree, commit } = snapped;
+    const edited = await lastEdit(input.worktree, input.base, tree, signal);
+    const first = this.lastFailed;
+    const order =
+      targeted ??
+      (first === undefined
+        ? undefined
+        : [
+            first,
+            ...input.item.validation
+              .map((_, index) => index)
+              .filter((index) => index !== first),
+          ]);
     const result = await validateTree({
       checkout: input.worktree,
       repository: options.repository,
@@ -462,6 +591,7 @@ export class SelfValidation {
         : {}),
       commit,
       item: input.item,
+      ...(order ? { order } : {}),
       plan: options.plan,
       blocks: options.blocks,
       sandbox: options.sandbox,
@@ -483,14 +613,18 @@ export class SelfValidation {
     if (result.kind === "retry") throw new Error(result.reason);
     if (result.kind === "hold") throw new Error(result.question);
     const passed = result.kind === "passed";
+    const verdictAt = Date.now();
     const logged =
       result.kind === "failed" && result.failed
-        ? `\n${await this.logFailure(run, result, result.failed)}`
+        ? `\n${await this.logFailure(run, result, result.failed)}\nThat is command ${result.failed.index}: while you fix it, a targeted run (\`commands: [${result.failed.index}]\`) reruns only it after the install; finish only after a full run passes.`
         : "";
+    const listed = result.commands.map((command) => `- ${command}`).join("\n");
     const compose = (output: string) => {
       const declared =
         result.kind === "passed"
-          ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
+          ? targeted
+            ? `The ${result.commands.length} commands of this targeted run passed:\n${listed}\nA targeted run never validates your result: run ${VALIDATION_TOOL_NAME} with no \`commands\` on your final files before you finish.`
+            : `All ${result.commands.length} declared validation commands passed:\n${listed}`
           : `Validation failed. Fix this before you finish.\n${output}${logged}\n${UNOWNED_FIX}${selectedMediaNote(input.item)}`;
       const composed = [
         result.produced ? `${declared}\n\n${result.produced}` : declared,
@@ -521,24 +655,25 @@ export class SelfValidation {
                 Buffer.byteLength(compose("").join("\n\n")),
             ),
           );
-    // Self-review follows a passing run, last and within what the result has
-    // left (VALIDATE_RESULT_CHARS), so no worker's harness cuts it.
-    if (passed && handoff.criteria)
+    // Self-review follows a passing full run, last and within what the
+    // result has left (VALIDATE_RESULT_CHARS), so no worker's harness cuts it.
+    if (passed && !targeted && handoff.criteria)
       parts.push(
         handoff.criteria(
           VALIDATE_RESULT_CHARS - parts.join("\n\n").length - "\n\n".length,
         ),
       );
     // The handoff is outside the tree; the final check decodes it again.
-    if (passed) {
+    // Only a full run covers the files for handoff (#2281).
+    if (passed && !targeted) {
       this.passedTrees.add(tree);
       this.failedTrees.delete(tree);
-    } else this.failedTrees.add(tree);
+    } else if (!passed) this.failedTrees.add(tree);
     // A command a later run passed can pass: it is no longer evidence.
-    if (result.kind === "passed") this.failing.clear();
+    if (result.kind === "passed" && !targeted) this.failing.clear();
     else {
       for (const ran of result.results) this.failing.delete(ran.command);
-      if (result.failed)
+      if (result.kind === "failed" && result.failed)
         this.failing.set(result.failed.command, {
           command: result.failed.command,
           ...(result.failed.exit !== undefined
@@ -550,12 +685,29 @@ export class SelfValidation {
           ),
         });
     }
+    if (result.kind === "failed" && result.failed)
+      this.lastFailed = result.failed.index;
+    else if (
+      passed &&
+      (!targeted || (first !== undefined && targeted.includes(first)))
+    )
+      this.lastFailed = undefined;
     input.log({
       event: "worker-validate",
       run,
       passed: passed && handoff.passed,
       tree,
       handoffPassed: handoff.passed,
+      ...(targeted && { targeted: [...targeted] }),
+      ...(!targeted && first !== undefined && { firstCommand: first }),
+      // Feedback latency (#2281): the call's own time, the time from the
+      // worker's last edit to this verdict, and the part of the call its
+      // passing commands took.
+      durationMs: verdictAt - started,
+      ...(edited !== undefined && {
+        sinceEditMs: Math.max(0, Math.round(verdictAt - edited)),
+      }),
+      passedMs: result.results.reduce((sum, ran) => sum + ran.durationMs, 0),
     });
     return parts.join("\n\n");
   }

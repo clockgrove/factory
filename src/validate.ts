@@ -141,6 +141,25 @@ function validationSequence(item: WorkItem): {
   return { preparation: [], commands: item.validation.map((v) => v.command) };
 }
 
+/**
+ * The indices of `sequence` a run takes, in order (`order`, #2281): every
+ * one in declared order when `order` is absent, else `order`'s, each once.
+ * The exact install, when the sequence starts with one, always runs first,
+ * since the commands after it need what it installs.
+ */
+export function runOrder(
+  sequence: readonly string[],
+  order?: readonly number[],
+): number[] {
+  if (!order) return sequence.map((_, index) => index);
+  const chosen = [...new Set(order)].filter(
+    (index) => Number.isInteger(index) && index >= 0 && index < sequence.length,
+  );
+  return sequence.length && packageBootstrap(sequence[0]!) !== undefined
+    ? [0, ...chosen.filter((index) => index !== 0)]
+    : chosen;
+}
+
 export interface ValidateInput {
   /** The target clone; the fresh worktree is linked from it. */
   checkout: string;
@@ -173,6 +192,15 @@ export interface ValidateInput {
   commit: string;
   /** One Work Item's commands, or, absent, the plan's final commands. */
   item?: WorkItem;
+  /**
+   * The worker's own Validate, with `item` (#2281): the indices of its
+   * commands that run, in this order (`runOrder`), such as only the one
+   * that failed last, or every one with that one first. The exact install,
+   * when the list starts with one, still runs first, and the formatter
+   * after it; every command's scripts are still pinned. `commands` in the
+   * answer are the ones that ran. Absent: every command, in declared order.
+   */
+  order?: readonly number[];
   plan: Plan;
   /** The Objective as planned (shown.ts): its Package manager update and Workspace package additions. */
   blocks: readonly ObjectiveBlock[];
@@ -401,6 +429,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
+  // Every command is pinned below; only those of `order` run (#2281).
+  const order = runOrder(sequence, item ? input.order : undefined);
+  const ran = order.map((index) => sequence[index]!);
   const atFinal = checkedAtFinal(plan);
   const { signal } = input;
   let tree = await revParse(checkout, `${commit}^{tree}`, signal);
@@ -457,7 +488,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     return {
       kind: "failed",
       tree,
-      commands: sequence,
+      commands: ran,
       results: [],
       detail: refusal.message,
       output: refusal.message,
@@ -535,7 +566,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       return {
         kind: "failed",
         tree,
-        commands: sequence,
+        commands: ran,
         results: [],
         detail,
         output: detail,
@@ -589,7 +620,8 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       });
     // The repository's formatter runs once, on a Work Item's validation:
     // after the exact install when the sequence starts with one (the
-    // formatter is usually a dependency), else before the first command.
+    // formatter is usually a dependency), else before the first command
+    // (positions in `order`, which keeps the install first).
     const formatter = item ? input.format : undefined;
     const formatAt = formatter
       ? sequence.length && packageBootstrap(sequence[0]!) !== undefined
@@ -636,7 +668,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         return {
           kind: "failed",
           tree,
-          commands: sequence,
+          commands: ran,
           results,
           ...(applied.exit !== undefined && {
             formatter: { command: formatter!.command, exit: applied.exit },
@@ -664,11 +696,12 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       const diff = await boundedDiff(worktree, changes, signal);
       return `Validation command modified the result tree: \`${command}\` ${what}. Validation runs on the result as committed, so each command must leave it unchanged, writing only files Git ignores.${diff ? `\n\n${diff}` : ""}`;
     };
-    for (let index = 0; index < sequence.length; index++) {
-      if (index === formatAt && !formatRan) {
+    for (let position = 0; position < order.length; position++) {
+      if (position === formatAt && !formatRan) {
         const stopped = await format();
         if (stopped) return stopped;
       }
+      const index = order[position]!;
       const command = sequence[index]!;
       const preparing = index < preparation.length;
       // Only Factory's exact script-disabled install, run first (before any
@@ -767,7 +800,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         return {
           kind: "failed",
           tree,
-          commands: sequence,
+          commands: ran,
           results,
           failed: { index, command },
           detail,
@@ -826,7 +859,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           return {
             kind: "failed",
             tree,
-            commands: sequence,
+            commands: ran,
             results,
             detail: changed,
             output: changed,
@@ -858,7 +891,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           return {
             kind: "failed",
             tree,
-            commands: sequence,
+            commands: ran,
             results,
             failed: { index, command },
             detail: captured.detail,
@@ -941,14 +974,14 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
           regenerated = { commit, lockfile: resolved.lockfile };
           // The new commit's checkout is clean again with its lockfile.
           baseline = await status(worktree, signal);
-          index = -1;
+          position = -1;
           continue;
         }
         if (resolved.kind === "failed")
           return {
             kind: "failed",
             tree,
-            commands: sequence,
+            commands: ran,
             results,
             failed: { index, command },
             detail: resolved.detail,
@@ -981,7 +1014,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       return {
         kind: "failed",
         tree,
-        commands: sequence,
+        commands: ran,
         results,
         failed: { index, command, exit },
         detail,
@@ -1013,7 +1046,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       return {
         kind: "failed",
         tree,
-        commands: sequence,
+        commands: ran,
         results,
         detail,
         output: detail,
@@ -1025,7 +1058,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     return {
       kind: "passed",
       tree,
-      commands: sequence,
+      commands: ran,
       results,
       ...(produced && { produced }),
       ...(capture && { artifacts }),

@@ -26,7 +26,9 @@ import {
   type SelfValidateOptions,
   SelfValidation,
   selectedMediaNote,
+  VALIDATION_TOOL_INPUT,
   validateFailed,
+  validationTargets,
   validationToolDescription,
   worktreeGitlinks,
 } from "../work/self-validate.js";
@@ -824,14 +826,17 @@ export class CopilotWorker implements Worker {
           {
             name: VALIDATION_TOOL_NAME,
             description: validationToolDescription(input.item),
-            parameters: {
-              type: "object",
-              properties: {},
-              additionalProperties: false,
-            },
+            parameters: VALIDATION_TOOL_INPUT,
             defer: "never",
-            handler: async () => {
-              const run = await validator.call();
+            handler: async (args: unknown) => {
+              const targets = validationTargets(args);
+              const run =
+                "problem" in targets
+                  ? {
+                      text: `${VALIDATION_TOOL_NAME} did not run: ${targets.problem}`,
+                      isError: true,
+                    }
+                  : await validator.call(targets.commands);
               return run.isError
                 ? { textResultForLlm: run.text, resultType: "failure" }
                 : run.text;

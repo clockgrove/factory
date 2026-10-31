@@ -3,7 +3,8 @@
  * #2273): a tiny tag parser and an Objective of two criteria, with a
  * planted defect. The change splits, trims and lowercases tags, but drops
  * duplicates before lowercasing them, so a tag given twice in different
- * cases appears twice. Its own test never tries that.
+ * cases appears twice. Its own test never tries that, nor an empty text:
+ * the guard for it is the one mutant the test lets survive.
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -82,6 +83,7 @@ export function autoRepository(dir) {
     {
       "src/tags.mjs": [
         "export function parseTags(text) {",
+        '  if (text.trim() === "") return [];',
         '  const tags = text.split(",");',
         "  return [...new Set(tags)].map((tag) => tag.trim().toLowerCase());",
         "}",

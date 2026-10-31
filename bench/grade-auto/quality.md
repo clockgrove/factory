@@ -12,7 +12,7 @@ Your working directory is a scratch checkout of the graded commit, yours alone: 
    - test economy: each test proves something, and none repeats another;
    - dead code, and duplication of what the repository already has;
    - the accuracy of the docs the change touched, or should have.
-2. Test the tests. For each changed source line that carries logic (a condition, a boundary, a constant, a branch, a member of a closed set of values), make one small mutant in your checkout, run the tests that cover it, and undo it. A mutant the tests still pass survived. Keep it bounded: about 40 mutants at most, the most telling first. Count the mutants killed and survived, and give each survivor's location (`file:line`) and mutation.
+2. Read the mutation survivors listed in the inputs. The harness made each mutant by rule from a line the change added and ran the repository's tests on it; a survivor is a mutant they still passed. For each, decide from the code whether the tests miss behaviour that matters (report it as a finding, with the survivor's `file:line` and what a test would need to check) or the mutant changes nothing that matters (report nothing). Don't make mutants of your own.
 3. Report each problem as a finding: a short `title`, a `category`, a `severity`, the `evidence` (`file:line`, and what you saw or ran) and how to `reproduce` it (the commands or snippet that show it). The severity is one of:
    - `defect`: the change violates a criterion the Objective states;
    - `quality`: a real cost to whoever maintains it, such as a test gap a surviving mutant proves, duplication, dead code or a wrong doc;
@@ -22,4 +22,4 @@ Report only what you checked yourself. No praise, and no summary.
 
 ## Answer
 
-Your final answer is the structured output: `findings` and `mutation` (`killed`, `survived`, and `examples`, each surviving mutant's `location` and `mutant`).
+Your final answer is the structured output: `findings`.

@@ -21,6 +21,16 @@
  *   --install CMD               the repository's install command, run in
  *                               each role's scratch checkout
  *   --check CMD ...             the repository's declared checks
+ *   --test CMD ...              the commands each mutant runs (default: the
+ *                               checks); a mutant any of them fails is killed
+ *   --mutants N, --seed S       at most N mutants (default: 40), chosen by S
+ *                               (default: 0)
+ *   --criteria FILE             the criteria to grade, a JSON list of
+ *                               { id, text }. Without it, the Objective's
+ *                               list stored in grade-auto/criteria.json
+ *                               (beside the definition, else beside --out),
+ *                               keyed by a digest of the Objective's text; a
+ *                               run with none makes one and stores it
  *   --votes N                   grader votes per criterion (default: 3)
  *   --max-findings N            findings the verifier reproduces (default: 20)
  *   --timeout-minutes N         the whole run (default: 30)
@@ -31,7 +41,7 @@
  * signal, it kills every role first and dies of it.
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { autoGrade, DEFAULTS } from "./lib/grade-auto.mjs";
 
@@ -48,6 +58,10 @@ const { values } = parseArgs({
     effort: { type: "string" },
     install: { type: "string" },
     check: { type: "string", multiple: true },
+    test: { type: "string", multiple: true },
+    mutants: { type: "string" },
+    seed: { type: "string" },
+    criteria: { type: "string" },
     votes: { type: "string" },
     "max-findings": { type: "string" },
     "timeout-minutes": { type: "string" },
@@ -102,6 +116,19 @@ try {
 } catch (error) {
   usage(`--objective: ${error.message}`);
 }
+let given = null;
+if (values.criteria)
+  try {
+    given = JSON.parse(readFileSync(values.criteria, "utf8"));
+  } catch (error) {
+    usage(`--criteria: ${error.message}`);
+  }
+// Beside the definition when graded for one, else beside the output.
+const store = join(
+  dirname(resolve(env.BENCH_DEFINITION ?? out)),
+  "grade-auto",
+  "criteria.json",
+);
 let output;
 try {
   output = await autoGrade({
@@ -117,6 +144,11 @@ try {
     effort: values.effort ?? DEFAULTS.effort,
     install: values.install ?? null,
     checks: values.check ?? definition?.factory?.requiredCommands ?? [],
+    tests: values.test ?? null,
+    criteria: given,
+    store,
+    mutants: number("mutants", DEFAULTS.mutants),
+    seed: values.seed ?? DEFAULTS.seed,
     votes: number("votes", DEFAULTS.votes),
     maxFindings: number("max-findings", DEFAULTS.maxFindings),
     timeoutMinutes: number("timeout-minutes", DEFAULTS.timeoutMinutes, false),

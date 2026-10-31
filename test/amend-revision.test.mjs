@@ -2711,3 +2711,36 @@ test("a whole plan's refusal keeps no answer, so the round its review sends back
     ["a", "b", "qa"],
   );
 });
+
+// #2282: the entry signal fell from 15 to 5, so a plan accepted before it
+// can hold an unstarted item above it with no oneOutcomeReason. The
+// amendment judges only what it adds or changes: one that leaves the item
+// as it was is not sent back for it, which twice would reject it.
+test("an amendment is not sent back for an unchanged item a plan accepted under an earlier entry signal holds", async () => {
+  const { checkout, state } = await building();
+  const acceptance = Array.from(
+    { length: 8 },
+    (_, at) => `a() returns 1 for input ${at}.`,
+  );
+  const widen = (item) => (item.id === "a" ? { ...item, acceptance } : item);
+  const { answer, draft } = state.done["plan:1:1"];
+  state.done["plan:1:1"] = {
+    answer: { ...answer, items: answer.items.map(widen) },
+    draft: { ...draft, items: draft.items.map(widen) },
+  };
+  state.done.plan = {
+    ...state.done.plan,
+    items: state.done.plan.items.map(widen),
+  };
+  const { planner } = scripted(revision([work("b"), qa(["a", "b"])]));
+  const first = await step(state, depsOf(checkout, planner));
+  assert.equal(first.key, "amend:op-1:plan");
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  assert.equal(state.kept["amend:op-1:revisions"], undefined);
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.rejected, undefined);
+  assert.deepEqual(
+    round.draft.items.find((item) => item.id === "a").acceptance,
+    acceptance,
+  );
+});

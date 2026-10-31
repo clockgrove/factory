@@ -307,6 +307,11 @@ export interface PublishInput {
   run?: { run: string; plan: string };
   /** The Work Item's issue (tracking.ts), once it exists: the PR body closes it on merge. */
   itemIssue?: number;
+  /**
+   * The item's telemetry so far as one line of plain text
+   * (item-telemetry.ts `summaryLine`): the PR body shows it under the changes.
+   */
+  telemetry?: string;
 }
 
 /**
@@ -767,8 +772,8 @@ async function originHold(context: DeliveryContext): Promise<Hold | undefined> {
 
 // ── PR body ─────────────────────────────────────────────────────────────
 
-/** Factory's PR text: the goal, links, changed paths, passing commands and the candidate. No model call. */
-async function pullRequestBody(
+/** Factory's PR text: the goal, links, changed paths, the item's telemetry, passing commands and the candidate. No model call. */
+export async function pullRequestBody(
   context: Pick<DeliveryContext, "github" | "checkout" | "signal">,
   input: PublishInput,
 ): Promise<string> {
@@ -822,6 +827,10 @@ async function pullRequestBody(
             "\n",
           )}${changes.length > 40 ? `\n- ${changes.length - 40} further changed paths.` : ""}`
       : "This candidate has no file changes relative to its delivery base.",
+    // Numbers and words only; its issue's comment keeps the final ones.
+    ...(input.telemetry
+      ? [`Work Item telemetry before publishing: ${input.telemetry}.`]
+      : []),
   );
   const { commands, flaky } = input.validation;
   parts.push(
@@ -845,6 +854,46 @@ async function pullRequestBody(
     ...(input.run ? [runMarks(input.run.run, input.run.plan)] : []),
   );
   return parts.join("\n\n");
+}
+
+/**
+ * The files `commit` changes against `base`, as the PR lists them, with
+ * the lines each adds and removes (null for a binary file): the publish
+ * step logs them for the item's comment (item-telemetry.ts).
+ */
+export async function candidateChanges(
+  context: Pick<DeliveryContext, "checkout" | "signal">,
+  base: string,
+  commit: string,
+): Promise<{ path: string; added: number | null; removed: number | null }[]> {
+  // `-z`: each entry is `added TAB removed TAB path NUL`; `-` for binary.
+  const entries = (
+    await localGit(
+      context,
+      [
+        "diff",
+        "--numstat",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        base,
+        commit,
+        "--",
+      ],
+      { signal: context.signal },
+    )
+  )
+    .toString("utf8")
+    .split("\0");
+  return entries.flatMap((entry) => {
+    const match = /^(\d+|-)\t(\d+|-)\t([\s\S]+)$/.exec(entry);
+    if (!match) return [];
+    const lines = (n: string) => (n === "-" ? null : Number(n));
+    return [
+      { path: match[3]!, added: lines(match[1]!), removed: lines(match[2]!) },
+    ];
+  });
 }
 
 // ── CI ──────────────────────────────────────────────────────────────────

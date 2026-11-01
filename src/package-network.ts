@@ -193,6 +193,32 @@ async function configuredRegistries(
   return origins;
 }
 
+/**
+ * The registry the base's `.npmrc` sets with `registry=`, else the public
+ * one; undefined when Factory can't read it exactly (an environment
+ * reference, a non-http URL). What validation pings after an install
+ * failed for the network (validate.ts, #2340).
+ */
+export async function baseRegistry(
+  worktree: string,
+  base: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const npmrc = await file(worktree, base, ".npmrc", signal);
+  const value = npmrc
+    ?.split(/\r?\n/)
+    .map((line) =>
+      line
+        .trim()
+        .match(/^registry\s*=(.*)$/)?.[1]
+        ?.trim(),
+    )
+    .filter((each) => each !== undefined)
+    .at(-1);
+  if (value === undefined) return DEFAULT_REGISTRY;
+  return origin(value) && !value.includes("${") ? value : undefined;
+}
+
 /** A relative path that, from `from`, stays inside the checkout. */
 function insideCheckout(from: string, target: string): boolean {
   if (!target || target.includes("\0") || posix.isAbsolute(target))

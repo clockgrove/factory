@@ -314,8 +314,8 @@ export async function review({
       phases: {
         scratchPrepareMs: phases?.prepareMs ?? null,
         mutationMs: phases?.mutationMs ?? null,
-        commands: phases?.commands.count ?? 0,
-        commandsMs: phases?.commands.ms ?? 0,
+        commands: phases?.commands?.count ?? 0,
+        commandsMs: phases?.commands?.ms ?? 0,
         proofsMs: phases?.proofsMs ?? 0,
         ...(phases?.protectedMs !== undefined && {
           protectedMs: phases.protectedMs,

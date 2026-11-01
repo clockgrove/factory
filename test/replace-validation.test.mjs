@@ -186,7 +186,7 @@ test("replace-validation to a QA item's refusal proposes an operator's amendment
   // A QA item owns nothing: what it checks is its dependencies' paths.
   assert.deepEqual(proposal.discovery.ownership, a.ownedPaths);
   assert.deepEqual(proposal.discovery.acceptance, [
-    `qa no longer runs ${JSON.stringify(CUT)}; the commands in its place prove what it proved, keeping every assertion it makes.`,
+    `qa no longer runs ${JSON.stringify(CUT)}; the commands in its place prove what it proved, keeping every assertion it makes, unless it re-implements or tightens a repository policy check, which the repository's own command replaces.`,
   ]);
   assert.equal(state.kept["validation:authorized"][0].itemId, "qa");
   // Taken in: the step runs on, on the plan as it stands.
@@ -284,12 +284,15 @@ test("a QA item's validation refusal answered replace-validation proposes the am
   );
 });
 
-test("replace-validation is offered while an unpublished item has a validation command, and a QA refusal names its commands", () => {
+test("replace-validation is offered while an item that hasn't merged has a validation command, and a QA refusal names its commands", () => {
   const state = held();
   assert.equal(replacementOffered(state), true);
-  // Published or merged items run no validation an amendment could change.
+  // A published item can still be repaired on its PR (#2349); merged items
+  // run no validation an amendment could change.
   state.kept["item:a:pushed"] = ["3".repeat(40)];
   state.done["item:qa:merge"] = { settled: "qa" };
+  assert.equal(replacementOffered(state), true);
+  state.done["item:a:merge"] = { merged: true };
   assert.equal(replacementOffered(state), false);
   assert.equal(
     replacementOffered(

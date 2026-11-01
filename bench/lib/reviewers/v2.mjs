@@ -24,9 +24,12 @@
  * inside the model calls' time), the proofs with their refusal checks
  * (`proofsMs`) and the protected-test check (`protectedMs`). `extra`
  * has the suspicions counted (`raised`, `proved`, `dropped`, the proofs'
- * `tokens`) and each one (`suspicionList`, from the build's
- * `result-review-suspicion` events: its criterion, scenario, `outcome`,
- * the `reason` one was dropped, its repro, commands, tokens and time).
+ * `tokens`), each one (`suspicionList`, from the build's
+ * `result-review-suspicion` events: its criterion, `case`, `expected`,
+ * `basis`, `outcome`, the `reason` one was dropped, its repro, commands,
+ * tokens and time) and each criterion's examined scenarios (`scenarios`,
+ * from `result-review-scenarios`: `criterionIndex`, `structural`,
+ * `scenarios` with each one's `verdict`, `holds` or `suspect`).
  *
  * `FIND_ONLY=1` in the environment proves nothing (`review.proofs` 0)
  * and returns each criterion the reviewer suspected as a refusal, its
@@ -240,10 +243,7 @@ export async function review({
             criterionIndex: v.criterionIndex,
             kind: "refuse",
             detail: suspected(v.criterionIndex)
-              .map(
-                (s) =>
-                  `${s.input}: expected ${s.expected}, believed ${s.actual}. ${s.why}`,
-              )
+              .map((s) => `${s.case}: expected ${s.expected}. ${s.basis}`)
               .join("\n"),
           }
         : {
@@ -284,6 +284,9 @@ export async function review({
       },
       suspicions: tally?.suspicions ?? null,
       suspicionList,
+      scenarios: events
+        .filter((e) => e.event === "result-review-scenarios")
+        .map(({ event: _event, step: _step, at: _at, ...entry }) => entry),
       repros: tally?.repros ?? null,
       calls: tally?.calls ?? null,
       mutation: mutation

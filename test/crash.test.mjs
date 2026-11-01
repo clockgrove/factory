@@ -571,7 +571,7 @@ export async function run(input, review, attempt) {
   const signal = AbortSignal.timeout(60_000);
   const workspace = validationWorkspace({ ...input, signal, log: () => {}, runFile: (kind) => log.runFile(1, "item:a:review#" + attempt + "." + kind) }, input.checkout + ".scratch");
   return reviewCandidate({
-    planner: { async answer(call) { await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return call.schema.properties.findings ? { value: { findings: [{ criterionIndex: 0, verdict: "suspect", detail: "b says b", evidenceIndices: [], suspicions: [{ input: "b", expected: "c", actual: "b", why: "b:1 says b" }] }] } } : { value: { outcome: { kind: "reproduced", repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } } } }; } },
+    planner: { async answer(call) { await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return call.schema.properties.findings ? { value: { findings: [{ criterionIndex: 0, verdict: "pass", detail: "b says b", evidenceIndices: [], structural: "", scenarios: [{ case: "b", expected: "c", verdict: "suspect", basis: "b:1 says b" }, { case: "a", expected: "a", verdict: "holds", basis: "a.txt:1" }, { case: "c", expected: "c", verdict: "holds", basis: "c.txt:1" }] }] } } : { value: { outcome: { kind: "reproduced", repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } } } }; } },
     checkout: input.checkout, base: review.base, commit: review.commit, criteria: input.item.acceptance,
     validation: { tree: review.tree, commands: ["test -f b"] }, workspace, itemId: "a",
     mutation: { commands: ["test -f b"], seed: "a" },

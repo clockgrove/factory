@@ -249,6 +249,8 @@ test("a dependent test item's review holds the dependency's selected preview byt
               verdict: "pass",
               evidenceIndices: [1],
               detail: "The test checks the preview's bytes.",
+              structural: "It judges media bytes, not behaviour.",
+              scenarios: [],
             },
           ],
         },

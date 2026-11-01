@@ -968,5 +968,10 @@ test("pruning removes keys by age and by total size, never one in use or used la
   await made("3", 1, 700);
   await sharedStore(directory, key("4"), claims, { days: 7, mib: 1 });
   assert.deepEqual(kept(), [key("3"), key("4"), key("d"), key("e"), key("f")]);
+  // Limits a caller left out never make pruning remove an idle key that
+  // is under the 14-day default.
+  await made("5", 3);
+  await sharedStore(directory, key("6"), claims, {});
+  assert.ok(kept().includes(key("5")));
   claims[Symbol.dispose]();
 });

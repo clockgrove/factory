@@ -46,6 +46,12 @@ export interface Retention {
   mib: number;
 }
 
+/** What a caller without valid limits gets, as `sandbox.limits` defaults. */
+const DEFAULT_RETENTION: Retention = { days: 14, mib: 20_480 };
+
+const valid = (value: number, fallback: number): number =>
+  Number.isFinite(value) && value > 0 ? value : fallback;
+
 /** A shared store, ready for one install. */
 export interface SharedStore {
   /** The package-manager store and caches' root, the install's to write. */
@@ -160,7 +166,11 @@ async function sizes(paths: string[]): Promise<Map<string, number>> {
  * hold at most `retention.mib`, and temporary directories a crash left. A
  * key used within the grace period, or with a live claim, stays.
  */
-async function prune(directory: string, retention: Retention): Promise<void> {
+async function prune(directory: string, given: Retention): Promise<void> {
+  const retention = {
+    days: valid(given.days, DEFAULT_RETENTION.days),
+    mib: valid(given.mib, DEFAULT_RETENTION.mib),
+  };
   const paths = readdirSync(directory)
     .filter((name) => KEY.test(name))
     .map((name) => join(directory, name));

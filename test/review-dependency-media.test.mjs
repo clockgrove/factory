@@ -14,7 +14,7 @@ import { test } from "node:test";
 import { candidateReceipts } from "../dist/media.js";
 import { itemInstructions, reviewResult } from "../dist/review/item.js";
 import { reviewCandidates } from "../dist/work/step-review.js";
-import { tempDir } from "./helpers.mjs";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -271,10 +271,7 @@ test("a dependent test item's review holds the dependency's selected preview byt
     validation: { tree, commands: ["npm test"] },
     sources: [],
     dir: tempDir("factory-dep-media-root-"),
-    scratch: async () => {
-      throw new Error("this review runs no command");
-    },
-    commandMs: 60_000,
+    ...NO_WORKSPACE,
     candidates,
     signal: AbortSignal.timeout(60_000),
     log: (event) => events.push(event),
@@ -286,14 +283,17 @@ test("a dependent test item's review holds the dependency's selected preview byt
   assert.ok(calls[0].prompt.includes("deliveredDependency"));
   assert.ok(
     calls[0].prompt.includes(
-      itemInstructions({
-        unreachable: false,
-        artifacts: false,
-        candidates: true,
-        inputs: false,
-        knowledge: false,
-        memory: false,
-      })
+      itemInstructions(
+        {
+          unreachable: false,
+          artifacts: false,
+          candidates: true,
+          inputs: false,
+          knowledge: false,
+          memory: false,
+        },
+        NO_WORKSPACE.limits,
+      )
         .split("\n")
         .at(-1),
     ),

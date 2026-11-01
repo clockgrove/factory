@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { reviewResult } from "../dist/review/item.js";
-import { tempDir } from "./helpers.mjs";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -102,10 +102,7 @@ function review(repo, item, planner, extra = {}) {
       validation: { tree: repo.tree, commands: ["npm test"] },
       sources: [],
       dir: tempDir("factory-sendback-root-"),
-      scratch: async () => {
-        throw new Error("this review runs no command");
-      },
-      commandMs: 60_000,
+      ...NO_WORKSPACE,
       signal: AbortSignal.timeout(60_000),
       log: (event) => events.push(event),
       ...extra,

@@ -361,14 +361,15 @@ process.exit(3);`,
     });
 
 // A validation's groups of commands (validate.ts `inGroups`) at their
-// checkouts' crash points, and its `use` of the passed checkout (the
-// mutation pass, a review's commands): the next validation of the same
-// directory removes what the crashed one left, runs its groups and its
-// `use` again and passes, leaving no checkout behind.
+// checkouts' crash points, and its `use` of the passed checkout and a copy
+// of it (the mutation pass, a review's commands): the next validation of
+// the same directory removes what the crashed one left, runs its groups
+// and its `use` again and passes, leaving no checkout behind.
 for (const point of [
   "validation:group-checkout:before",
   "validation:group-checkout:after",
   "validation:use:before",
+  "validation:copy:after",
 ]) {
   test(`crash at ${point}, the next validation passes and leaves no checkout`, {
     skip: sandboxAvailable().available
@@ -426,7 +427,7 @@ for (const point of [
         `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
 import { validateTree } from ${JSON.stringify(dist("validate.js"))};
 const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-1", CAPTURE_OFF, []);
-await validateTree({ ...JSON.parse(process.env.INPUT), signal: AbortSignal.timeout(60_000), log: () => {}, runFile: (kind) => log.runFile(1, "item:a:validate#1." + kind), use: async () => {} });
+await validateTree({ ...JSON.parse(process.env.INPUT), signal: AbortSignal.timeout(60_000), log: () => {}, runFile: (kind) => log.runFile(1, "item:a:validate#1." + kind), use: async (passed) => { await passed.copy("one"); } });
 process.exit(3);`,
       ],
       {
@@ -452,8 +453,12 @@ process.exit(3);`,
       `validation set to crash at ${point}`,
     );
     assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    // What the crash left for the next validation to remove.
     assert.ok(
-      existsSync(`${checkout}.validation.groups`) || point.endsWith(":before"),
+      point === "validation:copy:after"
+        ? existsSync(`${checkout}.validation.copies/one`)
+        : existsSync(`${checkout}.validation.groups`) ||
+            point.endsWith(":before"),
     );
 
     const log = new RunLog(
@@ -464,6 +469,7 @@ process.exit(3);`,
     );
     const events = [];
     let used;
+    let copied;
     const result = await validateTree({
       ...input,
       signal: AbortSignal.timeout(60_000),
@@ -471,13 +477,22 @@ process.exit(3);`,
       runFile: (kind) => log.runFile(1, `item:a:validate#2.${kind}`),
       use: async (passed) => {
         used = await passed.run("test -f a && test -f b", 10_000);
+        const copy = await passed.copy("one");
+        copied = await copy.run(
+          "test -f a && test -f b && git status --porcelain",
+          10_000,
+        );
       },
     });
     assert.equal(result.kind, "passed", result.detail);
     assert.ok(events.some((event) => event.event === "validation-groups"));
     assert.equal(used?.exitCode, 0, used?.output);
+    // A clean registered worktree of the same commit.
+    assert.equal(copied?.exitCode, 0, copied?.output);
+    assert.equal(copied.output.trim(), "");
     assert.equal(existsSync(`${checkout}.validation`), false);
     assert.equal(existsSync(`${checkout}.validation.groups`), false);
+    assert.equal(existsSync(`${checkout}.validation.copies`), false);
     assert.equal(git("worktree", "list").split("\n").length, 1);
   });
 }
@@ -548,15 +563,17 @@ for (const point of [
     const dist = (path) => new URL(`../dist/${path}`, import.meta.url).href;
     // The reviewer runs a command, then refuses with a repro that fails.
     const script = `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
-import { reviewCandidate, validationScratch } from ${JSON.stringify(dist("review/item.js"))};
+import { reviewCandidate, validationWorkspace } from ${JSON.stringify(dist("review/item.js"))};
 export async function run(input, review, attempt) {
   const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-" + attempt, CAPTURE_OFF, []);
   const signal = AbortSignal.timeout(60_000);
-  const scratch = validationScratch({ ...input, signal, log: () => {}, runFile: (kind) => log.runFile(1, "item:a:review#" + attempt + "." + kind) }, (name) => input.checkout + "." + name);
+  const workspace = validationWorkspace({ ...input, signal, log: () => {}, runFile: (kind) => log.runFile(1, "item:a:review#" + attempt + "." + kind) }, input.checkout + ".scratch");
   return reviewCandidate({
-    planner: { async answer(call) { await call.commands.run("cat b"); return { value: { findings: [{ criterionIndex: 0, verdict: "refuse", detail: "b says b", evidenceIndices: [], repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } }] } }; } },
+    planner: { async answer(call) { await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return { value: { findings: [{ criterionIndex: 0, verdict: "refuse", detail: "b says b", evidenceIndices: [], repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } }] } }; } },
     checkout: input.checkout, base: review.base, commit: review.commit, criteria: input.item.acceptance,
-    validation: { tree: review.tree, commands: ["test -f b"] }, scratch, itemId: "a", commandMs: 10_000,
+    validation: { tree: review.tree, commands: ["test -f b"] }, workspace, itemId: "a",
+    mutation: { commands: ["test -f b"], seed: "a" },
+    limits: { mutants: 20, mutationMs: 10_000, commands: 20, commandBudgetMs: 10_000, commandMs: 10_000, prepareMs: 60_000 },
     dir: review.dir, signal, log: () => {},
   });
 }`;
@@ -601,7 +618,7 @@ process.exit(3);`,
     delete process.env.LOGS;
     assert.equal(outcome.kind, "refused");
     assert.equal(outcome.refused[0].repro.actual, "says b");
-    for (const left of [".scratch", ".repro"])
+    for (const left of [".scratch", ".scratch.copies"])
       assert.equal(existsSync(`${checkout}${left}`), false, left);
     // The evidence directory keeps no root.
     assert.deepEqual(readdirSync(review.dir), []);

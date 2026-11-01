@@ -9,11 +9,12 @@ import type { WorkItem } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
 import {
   type PriorRefusals,
+  type ReviewLimits,
   reviewNotes,
   reviewResult,
-  type Scratch,
   ScratchUnavailable,
-  validationScratch,
+  validationWorkspace,
+  type Workspace,
 } from "../review/item.js";
 import {
   type CriterionDecision,
@@ -41,6 +42,7 @@ import { addRepros, keptRepros } from "./repros.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaReviewStep } from "./step-qa.js";
+import { ownCommands } from "./step-validate.js";
 import { acceptedNotes, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
@@ -59,10 +61,10 @@ import {
 // review
 
 /**
- * A Work Item's result review (review/item.ts): in scratch checkouts of the
- * candidate made as validation makes its checkout (`reviewScratch`), with
- * the validate step's mutation pass and, after a repair, the refusals the
- * last review confirmed. A refusal keeps its repro for later validations
+ * A Work Item's result review (review/item.ts): in a workspace made as
+ * validation makes its checkout (`reviewWorkspace`), its mutation pass
+ * beside the reviewer, and, after a repair, the refusals the last review
+ * confirmed. A refusal keeps its repro for later validations
  * (repros.ts) and repairs; a pass keeps its notes, for the PR body and
  * final review.
  */
@@ -121,9 +123,15 @@ export async function reviewStep(
       base: work.base,
       commit: candidate(state, item.id),
       validation: validated,
-      ...(validated.mutation ? { mutation: validated.mutation } : {}),
-      scratch: reviewScratch(item, context, deps, worktree),
-      commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
+      workspace: reviewWorkspace(item, context, deps, worktree),
+      mutation: {
+        commands: ownCommands(item),
+        ...(validated.commandsMs !== undefined && {
+          baselineMs: validated.commandsMs,
+        }),
+        seed: item.id,
+      },
+      limits: reviewLimits(deps),
       ...(prior ? { prior } : {}),
       sources: await pinnedSources(state, deps, signal),
       dir: `${worktree}.review`,
@@ -211,21 +219,21 @@ function priorRefusals(
 }
 
 /**
- * Scratch checkouts of the item's candidate for its review: fresh
- * validation checkouts of the reviewed commit beside its worktree
- * (review/item.ts `validationScratch`), as its validation is set up.
+ * The item's review workspace: a fresh validation checkout of the reviewed
+ * commit beside its worktree (review/item.ts `validationWorkspace`), set
+ * up as its validation is, on the item's warm package stores.
  */
-function reviewScratch(
+function reviewWorkspace(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
   worktree: string,
-): Scratch {
+): Workspace {
   const { state, signal } = context;
   const { config } = deps;
   const plan = currentPlan(state)!;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
-  return validationScratch(
+  return validationWorkspace(
     {
       checkout: config.checkout,
       repository: config.repository,
@@ -247,8 +255,21 @@ function reviewScratch(
       log: context.log,
       runFile: context.runFile,
     },
-    (name) => `${worktree}.${name}`,
+    `${worktree}.scratch`,
   );
+}
+
+/** The installation's review bounds, in ms. */
+function reviewLimits(deps: BuildDeps): ReviewLimits {
+  const { review } = deps.config;
+  return {
+    mutants: review.mutants,
+    mutationMs: review.mutationSeconds * 1000,
+    commands: review.commands,
+    commandBudgetMs: review.commandSeconds * 1000,
+    commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
+    prepareMs: commandTimeoutMs(deps) + 5 * MINUTE,
+  };
 }
 
 /** The head an item's PR delivered: its CI step's (GitHub may have updated the branch), else its published one. */

@@ -79,26 +79,28 @@ export class CodexValidate {
     let server: McpSocketServer | undefined;
     if (input.commands.length && !gitlinks)
       try {
-        server = await McpSocketServer.start(CODEX_VALIDATION_SERVER, {
-          name: VALIDATION_TOOL_NAME,
-          description: validationToolDescription(input.item),
-          // It writes only ignored produced files, never the result tree.
-          annotations: {
-            readOnlyHint: false,
-            destructiveHint: false,
-            openWorldHint: false,
+        server = await McpSocketServer.start(CODEX_VALIDATION_SERVER, [
+          {
+            name: VALIDATION_TOOL_NAME,
+            description: validationToolDescription(input.item),
+            // It writes only ignored produced files, never the result tree.
+            annotations: {
+              readOnlyHint: false,
+              destructiveHint: false,
+              openWorldHint: false,
+            },
+            inputSchema: VALIDATION_TOOL_INPUT,
+            call: (args) => {
+              const targets = validationTargets(args);
+              return "problem" in targets
+                ? Promise.resolve({
+                    text: `${VALIDATION_TOOL_NAME} did not run: ${targets.problem}`,
+                    isError: true,
+                  })
+                : validator.call(targets.commands);
+            },
           },
-          inputSchema: VALIDATION_TOOL_INPUT,
-          call: (args) => {
-            const targets = validationTargets(args);
-            return "problem" in targets
-              ? Promise.resolve({
-                  text: `${VALIDATION_TOOL_NAME} did not run: ${targets.problem}`,
-                  isError: true,
-                })
-              : validator.call(targets.commands);
-          },
-        });
+        ]);
       } catch (error) {
         return providerOutcome(
           new PlannerError(
@@ -131,7 +133,7 @@ export class CodexValidate {
       ? codexMcpServerConfig(
           CODEX_VALIDATION_SERVER,
           this.server,
-          VALIDATION_TOOL_NAME,
+          [VALIDATION_TOOL_NAME],
           this.deadlineMs / 1000,
         )
       : "";

@@ -142,13 +142,20 @@ export interface CoreConfig {
     formatCommand?: string;
   };
   /**
-   * The validate step's mutation pass over each Work Item's passed result
-   * (review/mutants.ts, #2344): at most `mutants` mutants of the lines it
-   * added to product files (0 turns the pass off), within
-   * `mutationSeconds`. Its survivors are result review evidence. Frozen
-   * with an Objective.
+   * A Work Item's result review (review/item.ts, #2344): its mutation pass
+   * seeds at most `mutants` mutants of the lines the result added to
+   * product files (0 turns the pass off) and takes at most
+   * `mutationSeconds` of wall time (review/mutants.ts); the reviewer's
+   * `run_command` runs at most `commands` commands in at most
+   * `commandSeconds` in all. Operational: a change applies from the next
+   * review.
    */
-  review: { mutants: number; mutationSeconds: number };
+  review: {
+    mutants: number;
+    mutationSeconds: number;
+    commandSeconds: number;
+    commands: number;
+  };
   finalValidation: {
     /** Commands every Objective's result must pass. */
     requiredCommands: string[];
@@ -782,7 +789,9 @@ export function loadConfig(repository: string): CoreConfig {
       }),
       review: object({
         mutants: whole(0, 20, 1000),
-        mutationSeconds: whole(0, 300, 24 * 60 * 60),
+        mutationSeconds: whole(0, 90, 24 * 60 * 60),
+        commandSeconds: whole(0, 60, 24 * 60 * 60),
+        commands: whole(0, 20, 1000),
       }),
       finalValidation: object({
         requiredCommands: strings,

@@ -115,6 +115,14 @@ export interface ItemTelemetry {
     commands: number;
     tokens: Reported;
     ms: number;
+    /** Each phase's time, summed over the reviews (review/item.ts): the workspace's install, the mutation pass, the reviewer calls, its commands, the repro checks. */
+    phases: {
+      prepareMs: number;
+      mutationMs: number;
+      modelMs: number;
+      commandMs: number;
+      reprosMs: number;
+    };
     mutants: {
       status: string;
       seeded: number;
@@ -314,6 +322,12 @@ export class ItemTelemetries {
         reviewer.questions += num(event.questions) ?? 0;
         reviewer.commands += num(event.commands) ?? 0;
         reviewer.ms += num(event.ms) ?? 0;
+        const phases = of(event.phases);
+        reviewer.phases.prepareMs += num(phases.prepareMs) ?? 0;
+        reviewer.phases.mutationMs += num(phases.mutationMs) ?? 0;
+        reviewer.phases.modelMs += num(phases.modelMs) ?? 0;
+        reviewer.phases.commandMs += num(of(phases.commands).ms) ?? 0;
+        reviewer.phases.reprosMs += num(phases.reprosMs) ?? 0;
         return;
       }
       case "mutation-pass": {
@@ -418,6 +432,13 @@ export class ItemTelemetries {
           commands: 0,
           tokens: reported(),
           ms: 0,
+          phases: {
+            prepareMs: 0,
+            mutationMs: 0,
+            modelMs: 0,
+            commandMs: 0,
+            reprosMs: 0,
+          },
           mutants: null,
         },
         ci: { attempts: 0, polls: 0, reruns: 0 },
@@ -714,7 +735,7 @@ function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
     plural(reviewer.commands, "command"),
     mutants,
     `${reviewer.tokens.calls ? count(reviewer.tokens.sum) : "not reported"} tokens`,
-    duration(reviewer.ms),
+    `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, mutation pass ${duration(reviewer.phases.mutationMs)}, model ${duration(reviewer.phases.modelMs)}, commands ${duration(reviewer.phases.commandMs)}, repros ${duration(reviewer.phases.reprosMs)})`,
   ].join(", ");
 }
 

@@ -23,10 +23,11 @@ Each service run appends to `logs/<issue>/<run id>.jsonl`: step start and end, o
 
 A Work Item's result review (review/item.ts; see Result review in [Steps](steps.md#steps)) logs, besides its model calls:
 
-- `mutation-pass` (the validate step): `status` (`done`, `timeout` or `skipped`), `seeded`, `killed`, `survived` and `ms`, and `error` when it could not run: it is then skipped, and the result's validation stands.
+- `mutation-pass`: `status` (`done`, `timeout` or `skipped`), `seeded`, `killed`, `survived`, `lanes` (the mutants run at once) and `ms`.
 - `result-review-invalid`, with the `reason`, for an answer asked again; `result-review-evidence-sendback` (`criteria`, `paths`) for questions sent back.
+- `result-review-protected`, when the result changed existing tests: `files` (how many), `failed`, `seen` (the reviewer read it through `checks`), `exitCode` and `ms`.
 - `result-review-repro`, one per refusal checked: `criterionIndex`, `confirmed`, the `reason` a dropped one was dropped (`it exited 0`, `it reached its time limit`, `it did not run`, `its output lacks the claimed actual output`), `exitCode` and `ms`. A dropped repro is reported only here.
-- `result-review` when it ends: `outcome` (`pass`, `refused` or `needs-human`), `criteria`, the reviewer's `verdicts` by kind (`pass`, `refuse`, `question`, `note`; a dropped refusal counts as `refuse`), `repros` (`confirmed`, `dropped`), `questions`, `commands` (the reviewer's `run_command` calls), `calls`, `mutants` (the mutation pass's counts) and `ms`.
+- `result-review` when it ends: `outcome` (`pass`, `refused` or `needs-human`), `criteria`, the reviewer's `verdicts` by kind (`pass`, `refuse`, `question`, `note`; a dropped refusal counts as `refuse`), `repros` (`confirmed`, `dropped`), `questions`, `commands` (the reviewer's `run_command` calls; `checks` returns the mutation pass and the protected-test check), `calls`, `mutants` (the mutation pass's counts), `phases` (`prepareMs`, the workspace's install from the review's start; `mutationMs`; `modelMs`, the reviewer calls; `commands`, their `count` and `ms`; `reprosMs`, the refusal checks; `protectedMs`, the protected-test check) and `ms`, the review's wall time. The phases overlap: the workspace, the mutation pass and the first reviewer call start together.
 
 The item's telemetry (item-telemetry.ts) sums them, with the review calls' tokens, as its `reviewer`: `factory status N --item ID` shows the line, and `--json` the fields.
 

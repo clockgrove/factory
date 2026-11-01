@@ -1,10 +1,12 @@
-// clockgrove/factory#2344 R5: the validate step's mutation pass seeds
+// clockgrove/factory#2344 R5: the result review's mutation pass seeds
 // rule-based mutants into the lines a result added to product files and
-// runs the item's commands on each in the passed validation checkout
-// (validate.ts `use`): its counts of mutants seeded, killed and survived
-// are what the item's telemetry and its result review get. A result that
-// changed only tests is skipped, with a note. Real Git, real processes
-// and the real sandbox.
+// runs the item's commands on each, several at once, each in a copy of a
+// passed validation checkout (validate.ts `use`, `ValidatedCheckout.copy`)
+// that installs nothing again: its counts of mutants seeded, killed and
+// survived are what the item's telemetry and its result review get, and
+// the checkout itself is left as validated. A result that changed only
+// tests is skipped, with a note. Real Git, real processes and the real
+// sandbox.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -100,11 +102,12 @@ async function validateWithMutants(repo) {
         commit: "HEAD",
         commands: ["node test/clamp.test.js"],
         limits: { max: config.review.mutants, ms: 60_000 },
+        baselineMs: 1000,
         seed: "a",
         signal: AbortSignal.timeout(120_000),
         log: (event) => events.push(event),
       });
-      // Every mutant's file is back as validated.
+      // The mutants ran in copies: the checkout is as validated.
       assert.equal(
         readFileSync(join(checkout.directory, "src/clamp.js"), "utf8"),
         readFileSync(join(repo.checkout, "src/clamp.js"), "utf8"),
@@ -138,6 +141,7 @@ test("a weak test leaves a survivor, and the counts are logged for the item's te
     [logged.status, logged.seeded, logged.killed, logged.survived],
     ["done", 4, 3, 1],
   );
+  assert.ok(logged.lanes >= 1);
 });
 
 test("a result that changes only tests is skipped, with a note", {

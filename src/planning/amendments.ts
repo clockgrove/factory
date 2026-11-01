@@ -1398,10 +1398,10 @@ export interface AmendmentProgress {
    */
   workerFailures?: ReadonlyMap<string, readonly WorkerValidateFailure[]>;
   /**
-   * By work or QA item that hasn't merged, reattempt item or not, the commands it
-   * still runs that the operator authorized replacing under the plan
-   * accepted now (`authorizeReplacement`, #2199), each with the operator's
-   * reason: the review judges a replacement on it. Absent: none.
+   * By work or QA item that hasn't merged, reattempt item or not, the
+   * commands it still runs that the operator authorized replacing under
+   * the plan accepted now (`authorizeReplacement`, #2199), each with the
+   * operator's reason: the review judges a replacement on it. Absent: none.
    */
   authorized?: ReadonlyMap<string, readonly ValidationAuthorization[]>;
 }
@@ -1709,7 +1709,8 @@ const DRAFT_RULE: StartedItemRule = {
  * authorized), and `rule.restates` come from `next` when `restates` (a
  * reattempt item) and one of those lists grew or its validation was
  * replaced, or when `restatesReplaced` (the operator authorized replacing
- * a command of it) and its validation was replaced; with `rule.schemaFields`, an item keeping its kind has `next`'s
+ * a command of it) and its validation was replaced; with
+ * `rule.schemaFields`, an item keeping its kind has `next`'s
  * field names. The field list comes from the items themselves, so a field
  * either form gains is covered. `fields`: what `next` said that was set
  * back, compared as `view` shows them (a grown list only when `next`

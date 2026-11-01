@@ -1415,7 +1415,12 @@ export async function readObjective(
   const inputs: ObjectiveInputs = {
     shown,
     ...(writer && { writer: true as const }),
-    base: await defaultHead(config.checkout, config.repository, signal),
+    base: await defaultHead(
+      config.checkout,
+      config.repository,
+      signal,
+      context.log,
+    ),
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,
   };

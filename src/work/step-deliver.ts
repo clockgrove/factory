@@ -61,6 +61,7 @@ export function delivery(
     github: deps.github,
     checkout: deps.config.checkout,
     signal: context.signal,
+    log: context.log,
     ...(baseRerun ? { baseRerun } : {}),
   };
 }

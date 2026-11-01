@@ -243,6 +243,8 @@ export interface DeliveryContext {
   /** The operator's checkout; worktrees share its objects. */
   checkout: string;
   signal: AbortSignal;
+  /** The step's log: a fetch logs the stale locks it clears. */
+  log?: (event: Record<string, unknown>) => void;
   /**
    * delivery.baseRerun's workflow: the only one Factory may run on the
    * default branch, for a fresh comparison (freshBase). Absent, Factory
@@ -1716,10 +1718,10 @@ const fetchedHeads = new Map<string, { head: string; at: number }>();
  * per checkout: a renamed job stays renamed, so CI polls need not fetch.
  */
 async function recentDefaultHead(context: DeliveryContext): Promise<string> {
-  const { checkout, github, signal } = context;
+  const { checkout, github, signal, log } = context;
   const known = fetchedHeads.get(checkout);
   if (known && Date.now() - known.at < DEFAULT_HEAD_REUSE_MS) return known.head;
-  const head = await defaultHead(checkout, github.repository, signal);
+  const head = await defaultHead(checkout, github.repository, signal, log);
   fetchedHeads.set(checkout, { head, at: Date.now() });
   return head;
 }
@@ -3147,6 +3149,7 @@ async function integrate(
     context.checkout,
     context.github.repository,
     context.signal,
+    context.log,
   );
   if (!(await isAncestor(context.checkout, mergeSha, tip, context.signal)))
     return lagging(
@@ -3300,9 +3303,14 @@ async function acceptUnit(
   input: PullInput[],
   integrated: string | undefined,
 ): Promise<UnitMergeResult> {
-  const { github, signal } = context;
+  const { github, signal, log } = context;
   const top = input[input.length - 1]!;
-  const tip = await defaultHead(context.checkout, github.repository, signal);
+  const tip = await defaultHead(
+    context.checkout,
+    github.repository,
+    signal,
+    log,
+  );
   const missing: string[] = [];
   const shas: string[] = [];
   for (const [index, layer] of input.entries()) {

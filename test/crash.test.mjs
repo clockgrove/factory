@@ -15,9 +15,9 @@ import {
   exited,
   githubOrigin,
   installation,
-  KV_SERVICE,
   seed,
   serve,
+  servicesSandbox,
   spawnNode,
   stateOf,
   stopped,
@@ -189,99 +189,160 @@ for (const point of HOLDER_POINTS) {
   });
 }
 
-// A worker attempt's services (work/services.ts) at their crash points: a
-// service's sandbox dies with Factory, so a crash leaves none running, and
-// the next attempt starts its own.
-for (const point of ["worker:service:before", "worker:service:after"]) {
-  test(`crash at ${point}, no service outlives it`, async () => {
-    const temporary = tempDir("factory-services-crash-");
-    const config = {
-      required: true,
-      network: "off",
-      readOnlyPaths: [],
-      environment: {},
-      services: { kv: KV_SERVICE(await closedPort()) },
-      limits: {
-        tmpMiB: 64,
-        homeMiB: 64,
-        checkoutMiB: 64,
-        files: 4096,
-        candidateMiB: 16,
-        candidateFiles: 1024,
-        processes: 4096,
-      },
-    };
-    const module = new URL("../dist/work/services.js", import.meta.url).href;
-    const child = spawnNode(
+// A run's services (work/services.ts) at their crash points, a worker
+// attempt's and a validation run's (validate.ts, mid-run: its checkout is
+// made and no command has run): a service's sandbox dies with Factory, so a
+// crash leaves none running, and the next run starts its own.
+const SERVICES_RUNS = {
+  worker: `await AttemptServices.start(config, "off", AbortSignal.timeout(60_000), () => {});`,
+  validation: `const { work, ...target } = JSON.parse(process.env.TARGET);
+await validateTree({
+  checkout: target.checkout,
+  repository: "example/target",
+  directory: target.checkout + ".validation",
+  commit: target.candidate,
+  item: work,
+  plan: { items: [work], coverage: [], finalCommands: [], decisions: [], base: target.base },
+  blocks: [],
+  base: target.base,
+  sandbox: config,
+  commandTimeoutMs: 60_000,
+  signal: AbortSignal.timeout(60_000),
+  log: () => {},
+  runFile: (kind) => new RunLog(target.logs, "2026-01-01T00-00-00-000Z-1").runFile(1, kind),
+});`,
+};
+
+/** A repository with a base and a candidate, validated by `true` as Work Item `a`. */
+function servicesTarget() {
+  const checkout = tempDir("factory-services-crash-target-");
+  const git = (...args) => {
+    const run = spawnSync(
+      "git",
       [
-        "--input-type=module",
-        "-e",
-        `import { AttemptServices } from ${JSON.stringify(module)};
-await AttemptServices.start(JSON.parse(process.env.CONFIG), "off", AbortSignal.timeout(60_000), () => {});
-process.exit(3);`,
+        "-C",
+        checkout,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        ...args,
       ],
-      {
-        env: {
-          PATH: `${dirname(process.execPath)}:/bin:/usr/bin`,
-          TMPDIR: temporary,
-          FACTORY_CRASH_AT: point,
-          CONFIG: JSON.stringify(config),
-        },
-        stdio: ["ignore", "ignore", "pipe"],
-      },
+      { encoding: "utf8" },
     );
-    children.add(child);
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    const exit = new Promise((resolve) =>
-      child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
-    );
-    const death = await exited(
-      { child, exit, stderr: () => stderr },
-      `services set to crash at ${point}`,
-    );
-    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
-    const [root] = readdirSync(temporary);
-    const socket = join(temporary, root, "kv", "kv.sock");
-    assert.equal(existsSync(socket), point === "worker:service:after");
-    // The socket stays; nothing listens on it once the sandbox is gone.
-    const refused = () =>
-      new Promise((resolve) => {
-        const probe = connect(socket);
-        probe.once("connect", () => {
-          probe.destroy();
-          resolve(false);
-        });
-        probe.once("error", (error) => resolve(error.code === "ECONNREFUSED"));
-      });
-    const deadline = Date.now() + 10_000;
-    while (existsSync(socket) && !(await refused())) {
-      assert.ok(
-        Date.now() < deadline,
-        "the service outlived its crashed parent",
-      );
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    // The next attempt's start removes the crashed process's directory,
-    // never a live process's.
-    const live = join(temporary, `factory-services-${process.pid}-live`);
-    mkdirSync(live);
-    const saved = process.env.TMPDIR;
-    process.env.TMPDIR = temporary;
-    try {
-      const next = await AttemptServices.start(
-        { ...config, services: undefined },
-        "off",
-        AbortSignal.timeout(10_000),
-        () => {},
-      );
-      await next.stop();
-    } finally {
-      if (saved === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = saved;
-    }
-    assert.deepEqual(readdirSync(temporary), [basename(live)]);
-  });
+    assert.equal(run.status, 0, run.stderr);
+    return run.stdout.trim();
+  };
+  git("init", "--quiet");
+  git("commit", "--quiet", "--allow-empty", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  git("commit", "--quiet", "--allow-empty", "-m", "candidate");
+  return {
+    checkout,
+    base,
+    candidate: git("rev-parse", "HEAD"),
+    logs: tempDir("factory-services-crash-logs-"),
+    work: {
+      id: "a",
+      title: "a",
+      goal: "a",
+      acceptance: [],
+      nonGoals: [],
+      citations: [],
+      dependencies: [],
+      ownedPaths: [],
+      validation: [{ command: "true" }],
+      brief: "a",
+    },
+  };
 }
+
+for (const [owner, script] of Object.entries(SERVICES_RUNS))
+  for (const point of [`${owner}:service:before`, `${owner}:service:after`])
+    test(`crash at ${point}, no service outlives it`, async () => {
+      const temporary = tempDir("factory-services-crash-");
+      const config = servicesSandbox(await closedPort());
+      const dist = (module) =>
+        JSON.stringify(new URL(`../dist/${module}`, import.meta.url).href);
+      const child = spawnNode(
+        [
+          "--input-type=module",
+          "-e",
+          `import { AttemptServices } from ${dist("work/services.js")};
+import { validateTree } from ${dist("validate.js")};
+import { RunLog } from ${dist("log.js")};
+const config = JSON.parse(process.env.CONFIG);
+${script}
+process.exit(3);`,
+        ],
+        {
+          env: {
+            PATH: `${dirname(process.execPath)}:/bin:/usr/bin`,
+            TMPDIR: temporary,
+            FACTORY_CRASH_AT: point,
+            CONFIG: JSON.stringify(config),
+            TARGET: JSON.stringify(servicesTarget()),
+          },
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      children.add(child);
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const exit = new Promise((resolve) =>
+        child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
+      );
+      const death = await exited(
+        { child, exit, stderr: () => stderr },
+        `services set to crash at ${point}`,
+      );
+      assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+      const services = () =>
+        readdirSync(temporary).filter((entry) =>
+          entry.startsWith("factory-services-"),
+        );
+      const [root] = services();
+      const socket = join(temporary, root, "kv", "kv.sock");
+      assert.equal(existsSync(socket), point.endsWith(":after"));
+      // The socket stays; nothing listens on it once the sandbox is gone.
+      const refused = () =>
+        new Promise((resolve) => {
+          const probe = connect(socket);
+          probe.once("connect", () => {
+            probe.destroy();
+            resolve(false);
+          });
+          probe.once("error", (error) =>
+            resolve(error.code === "ECONNREFUSED"),
+          );
+        });
+      const deadline = Date.now() + 10_000;
+      while (existsSync(socket) && !(await refused())) {
+        assert.ok(
+          Date.now() < deadline,
+          "the service outlived its crashed parent",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      // The next run's start removes the crashed process's directory,
+      // never a live process's.
+      const live = join(temporary, `factory-services-${process.pid}-live`);
+      mkdirSync(live);
+      const saved = process.env.TMPDIR;
+      process.env.TMPDIR = temporary;
+      try {
+        const next = await AttemptServices.start(
+          { ...config, services: undefined },
+          "off",
+          AbortSignal.timeout(10_000),
+          () => {},
+        );
+        await next.stop();
+      } finally {
+        if (saved === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = saved;
+      }
+      assert.deepEqual(services(), [basename(live)]);
+    });

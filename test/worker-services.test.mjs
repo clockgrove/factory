@@ -13,34 +13,12 @@ import { codexWorkerHome } from "../dist/providers/codex-worker.js";
 import { runSandboxed } from "../dist/sandbox.js";
 import { AttemptServices } from "../dist/work/services.js";
 import { validationEnvironment } from "../dist/worktree.js";
-import { codexAppServer, KV_SERVICE, tempDir } from "./helpers.mjs";
+import { codexAppServer, kvAsk, servicesSandbox, tempDir } from "./helpers.mjs";
 
 // The sandbox mounts the PATH's toolchains: this node, not a version shim.
 process.env.PATH = `${dirname(process.execPath)}:/bin:/usr/bin`;
 // No operator login reaches the Codex home, and no model is called.
 process.env.CODEX_HOME = tempDir("factory-no-login-");
-
-/** A sandbox configuration with the key-value service, which reports whether it reaches `port`. */
-const configured = (port) => ({
-  required: true,
-  network: "off",
-  readOnlyPaths: [],
-  environment: {},
-  services: { kv: KV_SERVICE(port) },
-  limits: {
-    tmpMiB: 64,
-    homeMiB: 64,
-    checkoutMiB: 64,
-    files: 4096,
-    candidateMiB: 16,
-    candidateFiles: 1024,
-    processes: 4096,
-  },
-});
-
-/** The worker's command that asks the service: `KV_SOCKET` locates it. */
-const ask = (request) =>
-  `node -e 'const s=require("net").connect(process.env.KV_SOCKET);s.on("connect",()=>s.write(process.argv.slice(1).join(" ")));let d="";s.on("data",(c)=>(d+=c));s.on("end",()=>console.log(d));s.on("error",(e)=>console.log(e.code))' ${request}`;
 
 /** A host listener on loopback, and the port a service must not reach under network off. */
 async function hostListener(t) {
@@ -67,7 +45,7 @@ function attempt(root, name) {
 
 test("each worker attempt's services are its own, reached only through their directory, on the worker's network, and stopped at its end (#2291)", async (t) => {
   const root = tempDir("factory-services-test-");
-  const config = configured(await hostListener(t));
+  const config = servicesSandbox(await hostListener(t));
   const signal = AbortSignal.timeout(120_000);
   const first = attempt(root, "first");
   const second = attempt(root, "second");
@@ -107,19 +85,19 @@ test("each worker attempt's services are its own, reached only through their dir
   assert.notEqual(mine.root, theirs.root);
   assert.equal(mine.environment.KV_SOCKET, join(mine.root, "kv", "kv.sock"));
 
-  assert.deepEqual(await run(first, mine, ask("set x 1")), {
+  assert.deepEqual(await run(first, mine, kvAsk("set x 1")), {
     code: 0,
     out: "1",
   });
-  assert.equal((await run(first, mine, ask("get x"))).out, "1");
+  assert.equal((await run(first, mine, kvAsk("get x"))).out, "1");
   // Another attempt's service is empty, and its directory isn't visible.
-  assert.equal((await run(second, theirs, ask("get x"))).out, "none");
+  assert.equal((await run(second, theirs, kvAsk("get x"))).out, "none");
   assert.equal(
     (
       await run(
         first,
         mine,
-        `KV_SOCKET=${theirs.environment.KV_SOCKET} ${ask("get x")}`,
+        `KV_SOCKET=${theirs.environment.KV_SOCKET} ${kvAsk("get x")}`,
       )
     ).out,
     "ENOENT",
@@ -132,7 +110,7 @@ test("each worker attempt's services are its own, reached only through their dir
   );
   // Under network off the service has a network namespace of its own: the
   // host's loopback is out of its reach.
-  assert.equal((await run(first, mine, ask("outside"))).out, "refused");
+  assert.equal((await run(first, mine, kvAsk("outside"))).out, "refused");
 
   // The attempt's end stops it: a connection held open is closed by its end.
   const held = connect(mine.environment.KV_SOCKET);
@@ -144,12 +122,12 @@ test("each worker attempt's services are its own, reached only through their dir
   await closed;
   // The next attempt starts with an empty one.
   const next = await start();
-  assert.equal((await run(first, next, ask("get x"))).out, "none");
+  assert.equal((await run(first, next, kvAsk("get x"))).out, "none");
 });
 
 test("a Codex worker's shell, on the host's network, gets its attempt's services' variables and reaches them; the service shares that network (#2291)", async (t) => {
   const port = await hostListener(t);
-  const config = configured(port);
+  const config = servicesSandbox(port);
   const worktree = join(tempDir("factory-services-codex-"), "w");
   mkdirSync(worktree);
   const services = await AttemptServices.start(
@@ -188,7 +166,7 @@ test("a Codex worker's shell, on the host's network, gets its attempt's services
     assert.equal(result.exitCode, 0, JSON.stringify(result));
     return result.stdout.trim();
   };
-  assert.equal(await shell(ask("set y 2")), "2");
-  assert.equal(await shell(ask("get y")), "2");
-  assert.equal(await shell(ask("outside")), "reached");
+  assert.equal(await shell(kvAsk("set y 2")), "2");
+  assert.equal(await shell(kvAsk("get y")), "2");
+  assert.equal(await shell(kvAsk("outside")), "reached");
 });

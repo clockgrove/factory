@@ -1,28 +1,31 @@
 /**
- * Throwaway services for one worker attempt (#2291): each of
- * `sandbox.services`, such as a PostgreSQL its tests use, started fresh
- * when the attempt starts and stopped when it ends. Nothing is shared: each
- * attempt has a new services directory, short and private (0700) under the
- * host's temporary directory so socket paths fit, with one empty directory
- * per service in it (`$FACTORY_SERVICE_DIR`).
+ * Throwaway services for one sandboxed run (#2291): each of
+ * `sandbox.services`, such as a PostgreSQL tests use, started fresh when the
+ * run starts and stopped when it ends. A run is a worker attempt's shell, or
+ * one validation run (validate.ts: the validate step's, the worker's
+ * Validate, QA's and final validation's), which starts its own and never
+ * sees a worker's. Nothing is shared: each run has a new services
+ * directory, short and private (0700) under the host's temporary directory
+ * so socket paths fit, with one empty directory per service in it
+ * (`$FACTORY_SERVICE_DIR`).
  *
  * A service runs in the command sandbox (sandbox.ts `runSandboxed`), never
- * unsandboxed, on the network the worker's own commands have: `off` is a
+ * unsandboxed, on the network the run's own commands have: `off` is a
  * network namespace of its own with only its own loopback, `host` the
  * host's. Its sandbox shows it its own directory, writable, and not the
- * worktree. The worker's commands reach it only through that directory,
- * which their sandbox mounts read-only (the Claude worker's run_command,
- * SandboxOptions `services`) or their Codex profile grants read
- * (codex-worker.ts): a socket there still takes connections, and they
- * write nothing beside it. Its readiness check runs in a sandbox like its
- * own.
+ * worktree. The run's commands reach it only through that directory, which
+ * their sandbox mounts read-only (SandboxOptions `services`: the Claude
+ * worker's run_command, validation's commands) or their Codex profile
+ * grants read (codex-worker.ts): a socket there still takes connections,
+ * and they write nothing beside it. Its readiness check runs in a sandbox
+ * like its own.
  *
  * A service's sandbox dies with Factory (bubblewrap's --die-with-parent ends
  * its PID namespace, and every process in it), so a crash at any point
- * leaves none running; the next attempt starts its own. A directory is
- * named for the Factory process that made it, and one whose process is gone
- * (a crash's) is removed when an attempt starts its services: never another
- * live installation's.
+ * leaves none running; the next run starts its own. A directory is named
+ * for the Factory process that made it, and one whose process is gone (a
+ * crash's) is removed when a run starts its services: never another live
+ * installation's.
  */
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -79,26 +82,30 @@ export function servicesNote(config: Pick<SandboxConfig, "services">): string {
       return names.length ? `${name} (${names.join(", ")})` : name;
     })
     .join(", ");
-  return ` Factory started throwaway services for this attempt, yours alone, empty at the start and gone when it ends: ${listed}. Your shell's commands reach them through those variables, which are set for them, so run a test that needs one there directly. Factory's validation and Validate don't get them.`;
+  return ` Factory started throwaway services for this attempt, yours alone, empty at the start and gone when it ends: ${listed}. Your shell's commands reach them through those variables, which are set for them, so run a test that needs one there directly. Validate and Factory's validation start fresh, empty ones of their own for each run, as a fresh checkout would have: they never see what your shell put in yours.`;
 }
 
-/** The question for an attempt whose services didn't start. */
+/** The question for a run whose services didn't start. */
 export const servicesHold = (problem: string) =>
   `${problem}. Fix sandbox.services in the Factory configuration or the host, restart Factory's service (it reads its configuration only at start), then answer retry.`;
 
-/** One attempt's running services. */
+/** Whose run the services are for: it names their crash points, log event and problems. */
+export type ServicesOwner = "worker" | "validation";
+
+/** One run's running services. */
 export class AttemptServices {
-  /** The variables the worker's commands get. */
+  /** The variables the run's commands get. */
   readonly environment: Record<string, string> = {};
   private readonly running: { stop: AbortController; ended: Promise<void> }[] =
     [];
 
   private constructor(
-    /** The attempt's services directory, one directory per service in it. */
+    /** The run's services directory, one directory per service in it. */
     readonly root: string,
     private readonly config: SandboxConfig,
     private readonly network: "host" | "off",
     private readonly signal: AbortSignal,
+    private readonly owner: ServicesOwner,
   ) {
     for (const [name, service] of Object.entries(config.services ?? {}))
       for (const [variable, value] of Object.entries(service.environment))
@@ -112,13 +119,15 @@ export class AttemptServices {
    * Start every configured service and wait until each is ready, on
    * `network`. A problem (one exited, wasn't ready in time, or the sandbox
    * couldn't run it) stops them all and is returned; `signal` aborting
-   * stops them and throws. `log` gets how long they took.
+   * stops them and throws. `log` gets how long they took. `owner`: a
+   * worker attempt, or a validation run.
    */
   static async start(
     config: SandboxConfig,
     network: "host" | "off",
     signal: AbortSignal,
     log: (event: Record<string, unknown>) => void,
+    owner: ServicesOwner = "worker",
   ): Promise<AttemptServices | { problem: string }> {
     const started = Date.now();
     sweep();
@@ -127,13 +136,14 @@ export class AttemptServices {
       config,
       network,
       signal,
+      owner,
     );
     try {
       for (const [name, service] of Object.entries(config.services ?? {})) {
         const problem = await services.launch(name, service);
         if (problem) {
           await services.stop();
-          return { problem: `The worker's service ${name} ${problem}` };
+          return { problem: `The ${owner}'s service ${name} ${problem}` };
         }
       }
     } catch (error) {
@@ -141,7 +151,7 @@ export class AttemptServices {
       throw error;
     }
     log({
-      event: "worker-services",
+      event: `${owner}-services`,
       services: Object.keys(config.services ?? {}),
       ms: Date.now() - started,
     });
@@ -180,7 +190,7 @@ export class AttemptServices {
         timeoutMs,
         outputLimit: OUTPUT_LIMIT,
       });
-    crashPoint("worker:service:before");
+    crashPoint(`${this.owner}:service:before`);
     const stop = new AbortController();
     let exited: SandboxRun | undefined;
     let failed: unknown;
@@ -218,7 +228,7 @@ export class AttemptServices {
         return `was not ready within ${READY_MS / 1_000} seconds: its readiness check last ${ready.timedOut ? "timed out" : `exited ${ready.exitCode ?? "by a signal"}`}: ${tail(ready)}`;
       await sleep(READY_POLL_MS, undefined, { signal: this.signal });
     }
-    crashPoint("worker:service:after");
+    crashPoint(`${this.owner}:service:after`);
     return undefined;
   }
 }

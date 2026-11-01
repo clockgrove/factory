@@ -267,7 +267,7 @@ export const OPERATIONAL: readonly string[] = [
   // The sandbox's resource caps and the package cache's place on the host.
   "sandbox.limits",
   "sandbox.packageStore",
-  // A worker attempt's throwaway services: validation never uses them.
+  // The throwaway services commands run against, like the toolchains: a broken entry is fixed in place.
   "sandbox.services",
   // The host's toolchains on the service's PATH, and the executables readiness looks for.
   "toolchain",

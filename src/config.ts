@@ -800,7 +800,7 @@ export function loadConfig(repository: string): CoreConfig {
         measuredMutants: whole(0, 10, 1000),
         commandSeconds: whole(0, 60, 24 * 60 * 60),
         commands: whole(0, 20, 1000),
-        proofs: whole(0, 10, 1000),
+        proofs: whole(0, 20, 1000),
         proofCommands: whole(0, 8, 1000),
         proofSeconds: whole(0, 120, 24 * 60 * 60),
       }),

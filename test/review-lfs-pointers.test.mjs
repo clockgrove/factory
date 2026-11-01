@@ -1,16 +1,14 @@
 // Review reads Git LFS files as pointers, and is told validation read the
 // bytes. In run 2026-10-27T035432PDT-5093 (#2108) Codex's result reviewer
 // found "LFS pointer text" in candidate/ where validation had read the
-// hydrated model, refused the tests that read it twice and then held. Final
-// review keeps the long guidance; a Work Item's review (review/item.ts) says
-// it in one sentence of its instructions.
+// hydrated model, refused the tests that read it twice and then held.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { itemInstructions, reviewResult } from "../dist/review/item.js";
+import { reviewResult } from "../dist/review/item.js";
 import { LFS_GUIDANCE, REVIEW_GUIDANCE } from "../dist/review/result.js";
 import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
@@ -36,30 +34,13 @@ function commit(directory, message) {
   return git(directory, "rev-parse", "HEAD");
 }
 
-const ITEM_LFS =
-  "Git LFS files there are pointers; validation ran on their real bytes.";
-
 test("result and final review are told that Git LFS pointers in the evidence root stand for the bytes validation read", () => {
   assert.equal(
     LFS_GUIDANCE,
     'Git LFS files are exported as Git stores them, as pointers. A file in candidate/ or base/ at a path the tree\'s .gitattributes routes through Git LFS (filter=lfs), whose text is a Git LFS pointer (a "version https://git-lfs.github.com/spec/v1" line, then "oid sha256:" and "size" lines), stands for the object it names, whose sha256 and byte count those lines give; its patch in changes/ changes those lines, and the exact-tree inventory gives the pointer\'s byte size, not the object\'s. Every validation command ran on the real bytes of such a file, which Factory restores in each validation checkout before any command runs, so its pointer text in the evidence root is never a defect and never shows that a command or test read a pointer. Judge its content from the validation that passed on this tree and from any digest-checked copy of its bytes Factory supplies, such as a candidate set member\'s reviewCopy under media-sets/. Pointer text at a path .gitattributes does not route through Git LFS is that file\'s real content, and validation read it as it is.',
   );
-  // QA and final review give the evidence-root guidance; a Work Item's
-  // review its own sentence.
+  // Result, QA and final review all give the evidence-root guidance.
   assert.ok(REVIEW_GUIDANCE.evidenceRoot.includes(LFS_GUIDANCE));
-  assert.ok(
-    itemInstructions(
-      {
-        unreachable: false,
-        artifacts: false,
-        candidates: false,
-        inputs: false,
-        knowledge: false,
-        memory: false,
-      },
-      NO_WORKSPACE.limits,
-    ).includes(ITEM_LFS),
-  );
 });
 
 test("a result review's candidate/ holds an LFS file's pointer, and its prompt says validation read the bytes", async () => {
@@ -145,5 +126,5 @@ test("a result review's candidate/ holds an LFS file's pointer, and its prompt s
   assert.equal(seen.length, 1);
   // Review exports Git objects: it does not hydrate, so it is told.
   assert.equal(seen[0].exported, pointer);
-  assert.ok(seen[0].prompt.includes(ITEM_LFS));
+  assert.ok(seen[0].prompt.includes(LFS_GUIDANCE));
 });

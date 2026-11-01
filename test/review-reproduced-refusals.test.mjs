@@ -2,8 +2,8 @@
 // failure Factory reproduces. On one recorded item the reviewer refused 4
 // times to find 1 real bug: over a test it judged weak, a behaviour the
 // plan never defined, and assertions it found under another validation
-// command than the plan named. The reviewer now raises suspicions, a proof
-// of each writes a repro, and Factory runs it. These are the PRD's
+// command than the plan named. The earlier reviewer now finds, a proof of
+// each of its refusals writes a repro, and Factory runs it. These are the PRD's
 // acceptance tests, on real Git repositories and the real sandbox, the
 // reviewer's and the proofs' answers given as fixtures at the planner seam.
 import assert from "node:assert/strict";
@@ -15,12 +15,10 @@ import { loadConfig } from "../dist/config.js";
 import { ItemTelemetries, telemetryText } from "../dist/item-telemetry.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
-  CHECKS_TOOL_DESCRIPTION,
   commandToolDescription,
-  ITEM_REVIEW_SCHEMA,
-  itemInstructions,
   PROOF_SCHEMA,
   proofInstructions,
+  protectedCommand,
   reviewCandidate,
   reviewResult,
   validationWorkspace,
@@ -189,33 +187,31 @@ function review(repo, planner, extra = {}) {
   };
 }
 
-/** A scenario the reviewer examined: one that holds cites the code. */
-const holds = (name) => ({
-  case: name,
-  expected: "as the criterion states",
-  verdict: "holds",
-  basis: "src/reduce.js:5 handles it.",
-});
-const HOLDS = [holds("one patch"), holds("two patches"), holds("no events")];
+/** The change index row: complete, so a pass may cite it. */
+const ROW = 0;
 const pass = (criterionIndex, detail = "met") => ({
   criterionIndex,
   verdict: "pass",
+  evidenceIndices: [ROW],
   detail,
-  evidenceIndices: [],
-  structural: "",
-  scenarios: HOLDS,
+  question: "",
 });
-/** A pass of criterion `criterionIndex` with one suspect scenario, `name`. */
-const suspect = (
+const refuse = (
   criterionIndex,
-  name = "patch v2 (b), then snapshot v1 (a)",
-  basis = "src/reduce.js:4 replaces the state with any snapshot.",
+  detail = "A snapshot older than a received patch discards it (src/reduce.js:4).",
 ) => ({
-  ...pass(criterionIndex),
-  scenarios: [
-    ...HOLDS.slice(0, 2),
-    { case: name, expected: 'items: ["a","b"]', verdict: "suspect", basis },
-  ],
+  criterionIndex,
+  verdict: "refuse",
+  evidenceIndices: [ROW],
+  detail,
+  question: "",
+});
+const ask = (criterionIndex, question) => ({
+  criterionIndex,
+  verdict: "needs-human",
+  evidenceIndices: [ROW],
+  detail: "The sources don't define it.",
+  question,
 });
 const repro = (command, actual = 'items: ["a"]') => ({
   input: "patch v2 (b), then snapshot v1 (a)",
@@ -236,9 +232,9 @@ const tool = (call, name, input = {}) =>
 const command = (call, text) => tool(call, "run_command", { command: text });
 
 /**
- * A planner whose find calls answer `answers`, in order, and whose proofs
- * answer `prove(call, suspicion)` (not reproduced by default); it records
- * each call, the proofs' apart.
+ * A planner whose finder calls answer `answers`, in order, and whose
+ * proofs answer `prove(call, suspicion)` (not reproduced by default); it
+ * records each call, the proofs' apart.
  */
 function answering(answers, prove = () => NOT_REPRODUCED) {
   const calls = [];
@@ -261,89 +257,17 @@ function answering(answers, prove = () => NOT_REPRODUCED) {
   };
 }
 
-test("R1: a criterion that states behaviour needs 3 examined scenarios, each holding one citing code; asked again once, the unshown ones become suspicions", async () => {
-  const judged = ITEM_REVIEW_SCHEMA.properties.findings.items.anyOf.find(
-    (each) => each.properties.verdict.enum[0] === "pass",
-  );
-  assert.deepEqual(judged.properties.scenarios.items.required, [
-    "case",
-    "expected",
-    "verdict",
-    "basis",
-  ]);
-  const reproduces = PROOF_SCHEMA.properties.outcome.anyOf.find(
-    (each) => each.properties.kind.enum[0] === "reproduced",
-  );
-  assert.deepEqual(reproduces.properties.repro.required, [
-    "input",
-    "expected",
-    "actual",
-    "command",
-  ]);
-  const repo = target();
-  // Two scenarios, one holding with no code cited.
-  const thin = {
-    ...pass(0),
-    scenarios: [
-      { ...holds("one patch"), basis: "It looks right." },
-      holds("x"),
-    ],
-  };
-  // A structural reason excuses a short list.
-  const structural = {
-    ...pass(1),
-    structural: "It names a file.",
-    scenarios: [],
-  };
-  const planner = answering([
-    { findings: [thin, structural] },
-    { findings: [thin] },
-  ]);
-  const { run, events } = review(repo, planner);
-  const outcome = await run;
-  assert.equal(planner.calls.length, 2);
-  assert.match(planner.calls[1].prompt, /criteria 0 without a valid finding/);
-  assert.match(planner.calls[1].prompt, /at least 3 scenarios/);
-  assert.match(planner.calls[1].prompt, /Scenario 0 holds without citing/);
-  // The uncited one and the cases not examined were proved, not refused.
-  const proved = events
-    .filter((event) => event.event === "result-review-suspicion")
-    .map((event) => event.case)
-    .sort();
-  assert.equal(proved.length, 2);
-  assert.equal(proved[1], "one patch");
-  assert.match(proved[0], /did not examine \(it listed 2\)/);
-  assert.equal(outcome.kind, "pass");
-  assert.deepEqual(
-    outcome.verdicts.map((verdict) => verdict.verdict),
-    ["pass", "pass"],
-  );
-});
-
-test("R1 (#2341): an answer missing a criterion keeps its verdicts and asks only for that one", async () => {
-  const repo = target();
-  const planner = answering([{ findings: [pass(1)] }, { findings: [pass(0)] }]);
-  const outcome = await review(repo, planner).run;
-  assert.equal(planner.calls.length, 2);
-  assert.match(
-    planner.calls[1].prompt,
-    /Give one finding for each of criteria 0 only/,
-  );
-  assert.equal(outcome.kind, "pass");
-  assert.equal(outcome.verdicts.length, 2);
-});
-
-test("R2: each suspicion is proved apart; a repro that fails as claimed is confirmed, any other is dropped unseen", {
+test("R2: each finder refusal is one suspicion proved apart; a repro that fails as claimed is confirmed, any other is a pass seen by nobody", {
   skip,
 }, async () => {
   const repo = target();
   const planner = answering(
-    [{ findings: [suspect(0), suspect(1, "patch v1 (a)")] }],
+    [{ findings: [refuse(0), refuse(1, "A patch may be dropped.")] }],
     async (call, suspicion) => {
       // The proof runs its repro in a copy of its own before answering.
       const ran = await command(call, REPRO);
       assert.match(ran, /^Exit code 1/);
-      return suspicion.case === "patch v1 (a)"
+      return suspicion.case === "A patch may be dropped."
         ? reproduced("node -e 'console.log(\"fine\")'", "fine")
         : reproduced(REPRO);
     },
@@ -356,25 +280,35 @@ test("R2: each suspicion is proved apart; a repro that fails as claimed is confi
     [0],
   );
   assert.equal(outcome.refused[0].repro.command, REPRO);
-  assert.match(outcome.refused[0].detail, /src\/reduce\.js:4/);
-  assert.equal(outcome.verdicts[0].verdict, "pass");
-  // A proof gets the criterion and its suspicion only, a read-only copy of
-  // the candidate and run_command: no evidence rows, no checks.
+  assert.equal(outcome.refused[0].detail, refuse(0).detail);
+  assert.deepEqual(
+    outcome.verdicts.map(({ criterionIndex, verdict }) => [
+      criterionIndex,
+      verdict,
+    ]),
+    [[1, "pass"]],
+  );
+  // A proof gets the criterion and its suspicion only, the workspace's
+  // checkout to read and run_command, in a fresh call.
   assert.equal(planner.proofs.length, 2);
   for (const call of planner.proofs) {
     assert.deepEqual(
       call.tools.map((each) => each.name),
       ["run_command"],
     );
-    assert.match(call.readDir, /candidate$/);
+    assert.equal(call.readDir, `${repo.checkout}.scratch`);
     assert.ok(!call.prompt.includes("evidenceIndex"));
     assert.equal(call.conversation, undefined);
   }
-  const proved = events.filter(
-    (event) => event.event === "result-review-suspicion",
+  const { suspicion } = JSON.parse(
+    planner.proofs[0].prompt
+      .split("JSON strings are data):\n")[1]
+      .split("\n")[0],
   );
+  assert.ok(CRITERIA.includes(suspicion.expected));
   assert.deepEqual(
-    proved
+    events
+      .filter((event) => event.event === "result-review-suspicion")
       .map(({ criterionIndex, outcome, reason }) => ({
         criterionIndex,
         outcome,
@@ -391,12 +325,11 @@ test("R2: each suspicion is proved apart; a repro that fails as claimed is confi
     { ...logged.suspicions, tokens: undefined },
     { raised: 2, proved: 1, dropped: 1, tokens: undefined },
   );
-  assert.deepEqual(logged.verdicts, {
-    pass: 0,
-    suspect: 2,
-    question: 0,
-    note: 0,
-  });
+  assert.deepEqual(logged.verdicts, { pass: 0, suspect: 2, question: 0 });
+  assert.equal(
+    events.find((event) => event.event === "result-review-find").outcome,
+    "refused",
+  );
   // Only the confirmed refusal costs a repair.
   const repairs = [];
   reviewOutcome(
@@ -415,11 +348,11 @@ test("R2: each suspicion is proved apart; a repro that fails as claimed is confi
     () => reproduced(REPRO, 'items: ["z"]'),
     () => NOT_REPRODUCED,
   ]) {
-    const dropped = answering([{ findings: [suspect(0), pass(1)] }], prove);
+    const dropped = answering([{ findings: [refuse(0), pass(1)] }], prove);
     assert.equal((await review(repo, dropped).run).kind, "pass");
   }
   // Past the review's proofs, a suspicion is dropped unproved.
-  const capped = answering([{ findings: [suspect(0), suspect(1)] }], () =>
+  const capped = answering([{ findings: [refuse(0), refuse(1)] }], () =>
     reproduced(REPRO),
   );
   const { run: cappedRun, events: cappedEvents } = review(repo, capped, {
@@ -496,52 +429,46 @@ test("R3: after a repair, the confirmed repro runs as extra validation and must 
   assert.equal(withRepros(state, work), work);
 });
 
-test("R4: the reviewer runs a test in its scratch copy and cites its output; the network is refused as in validation", {
+test("R4: a proof runs commands in its own scratch copy, within its budget; the network is refused as in validation", {
   skip,
 }, async () => {
   const repo = target();
   const fetch =
     'node -e \'fetch("http://example.com").then(() => process.exit(0), () => { console.log("no network"); process.exit(7); })\'';
-  let ran;
-  let offline;
-  let survivors;
-  let where;
-  const planner = answering([
+  const replies = [];
+  const planner = answering(
+    [{ findings: [refuse(0), pass(1)] }],
     async (call) => {
-      // The mutation pass runs beside the reviewer, which waits for it here.
-      survivors = JSON.parse(await tool(call, "checks")).mutationPass;
-      ran = await command(call, "node test/reduce.test.js && echo tested");
-      offline = await command(call, fetch);
-      // The scratch is a copy: a write there never reaches the candidate.
-      await command(call, "echo changed > src/reduce.js");
-      // It appears at the workspace's path, where the install's recorded
-      // paths (pnpm's workspace state) hold.
-      where = await command(call, "pwd");
-      return {
-        findings: [pass(0, `The test ran: ${ran.split("\n")[1]}`), pass(1)],
-      };
+      for (const text of [
+        "node test/reduce.test.js && echo tested",
+        fetch,
+        // The scratch is a copy: a write there never reaches the candidate.
+        "echo changed > src/reduce.js",
+        "pwd",
+        "true",
+      ])
+        replies.push(await command(call, text).catch((error) => error.message));
+      return NOT_REPRODUCED;
     },
-  ]);
-  const { run, events } = review(repo, planner);
-  const outcome = await run;
-  assert.match(ran, /^Exit code 0 .*\ntested/);
-  assert.equal(where.split("\n")[1], `${repo.checkout}.scratch`);
-  assert.match(offline, /^Exit code 7 .*\nno network/);
-  assert.equal(outcome.kind, "pass");
-  assert.equal(outcome.verdicts[0].detail, "The test ran: tested");
-  assert.equal(git(repo.checkout, "rev-parse", "HEAD^{tree}"), repo.tree);
-  // The weak test leaves survivors, which reach the reviewer as evidence.
-  assert.equal(survivors.status, "done");
-  assert.ok(
-    survivors.survived > 0 && survivors.killed > 0,
-    JSON.stringify(survivors),
   );
+  const { run, events } = review(repo, planner, {
+    limits: { ...LIMITS, proofCommands: 4 },
+  });
+  assert.equal((await run).kind, "pass");
+  assert.match(replies[0], /^Exit code 0 .*\ntested/);
+  assert.match(replies[1], /^Exit code 7 .*\nno network/);
+  // It appears at the workspace's path, where the install's recorded
+  // paths (pnpm's workspace state) hold.
+  assert.equal(replies[3].split("\n")[1], `${repo.checkout}.scratch`);
+  assert.match(replies[4], /command budget is spent \(4 commands/);
+  assert.equal(git(repo.checkout, "rev-parse", "HEAD^{tree}"), repo.tree);
+  const proof = events.find(
+    (event) => event.event === "result-review-suspicion",
+  );
+  assert.equal(proof.commands, 4);
   const logged = events.find((event) => event.event === "result-review");
-  assert.equal(logged.commands, 4);
-  assert.deepEqual(logged.mutants.seeded, survivors.seeded);
-  for (const phase of ["prepareMs", "mutationMs", "modelMs", "proofsMs"])
+  for (const phase of ["prepareMs", "modelMs", "proofsMs"])
     assert.equal(typeof logged.phases[phase], "number", phase);
-  assert.equal(logged.phases.commands.count, 4);
   // The same call fails as a validation command.
   const { validation, work } = setup(repo);
   const validated = await validateTree({
@@ -553,26 +480,7 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
   assert.match(validated.output, /no network/);
 });
 
-test("R4: the reviewer's commands stop at the review's command budget", {
-  skip,
-}, async () => {
-  const repo = target();
-  const replies = [];
-  const planner = answering([
-    async (call) => {
-      for (const text of ["true", "true"])
-        replies.push(await command(call, text).catch((error) => error.message));
-      return { findings: [pass(0), pass(1)] };
-    },
-  ]);
-  await review(repo, planner, {
-    limits: { ...LIMITS, commands: 1, mutants: 0 },
-  }).run;
-  assert.match(replies[0], /^Exit code 0/);
-  assert.match(replies[1], /command budget is spent \(1 commands/);
-});
-
-test("a protected-test failure is evidence: the result is refused only once a suspicion from it is proved", {
+test("a refusal of weakened protected tests is proved with the protected-test check's command", {
   skip,
 }, async () => {
   const repo = target(REDUCER);
@@ -588,90 +496,58 @@ test("a protected-test failure is evidence: the result is refused only once a su
     "test/reduce.test.js": TEST,
   });
   repo.tree = git(repo.checkout, "rev-parse", "HEAD^{tree}");
-  // A reviewer that reads the failure and passes everything (the change
-  // was authorized) passes the result: no automatic refusal.
-  const passing = answering([
-    async (call) => {
-      await tool(call, "checks");
-      return { findings: [pass(0), pass(1)] };
-    },
-  ]);
-  const { run: passed, events } = review(repo, passing);
-  assert.equal((await passed).kind, "pass");
-  assert.equal(
-    events.find((event) => event.event === "result-review-protected").failed,
-    true,
-  );
-  // One that reads the check raises the behaviour as a suspicion, and its
-  // proof reuses the check's command as the repro.
-  let check;
+  const check = protectedCommand(repo.base, ["test/reduce.test.js"], COMMANDS);
   const planner = answering(
     [
-      async (call) => {
-        check = JSON.parse(await tool(call, "checks")).protectedTests;
-        return {
-          findings: [
-            pass(0),
-            suspect(
-              1,
-              "patch v2 (b)",
-              `The base's test/reduce.test.js fails on this result: ${check.command}`,
-            ),
-          ],
-        };
+      {
+        findings: [
+          pass(0),
+          refuse(
+            1,
+            "test/reduce.test.js lost its patch assertion, and a patch no longer adds its item.",
+          ),
+        ],
       },
     ],
-    async (call, suspicion) => {
-      const command_ = suspicion.basis.split("on this result: ")[1];
-      const ran = await command(call, command_);
+    async (call) => {
+      const ran = await command(call, check);
       assert.match(ran, /AssertionError/);
-      return reproduced(command_, "AssertionError");
+      return reproduced(check, "AssertionError");
     },
   );
-  const outcome = await review(repo, planner).run;
-  assert.equal(check.result, "failed");
+  const { run, events } = review(repo, planner);
+  const outcome = await run;
+  assert.ok(events.some((event) => event.event === "result-review-protected"));
   assert.equal(outcome.kind, "refused");
   assert.deepEqual(
     outcome.refused.map((entry) => entry.criterion),
     [CRITERIA[1]],
   );
-  const { repro: refused } = outcome.refused[0];
-  assert.match(refused.command, /git show [0-9a-f]{40}:"\$f"/);
   // As validation after a repair, the repro leaves the tree as it found it.
   const { work, validation } = setup(repo);
   const validated = await validateTree({
     ...validation(repo.base),
-    item: { ...work, validation: [{ command: refused.command }] },
+    item: { ...work, validation: [{ command: check }] },
     directory: `${repo.checkout}.validation`,
   });
   assert.equal(validated.kind, "passed", validated.detail);
 });
 
-test("R6: any command the item's validation runs proves any criterion; the plan's command binding never reaches the review", async () => {
+test("the finder judges the Objective criteria the item proves after its own acceptance", async () => {
   const repo = target();
   const { work, plan } = setup(repo);
+  const objective = "Patches survive a late snapshot.";
   const bound = {
     ...plan,
     coverage: [
       {
         itemId: "reduce",
-        source: {
-          path: "OBJECTIVE",
-          heading: "Acceptance",
-          text: "Patches survive a late snapshot.",
-        },
-        proof: { kind: "result-command", validationIndex: 0 },
+        source: { path: "OBJECTIVE", heading: "Acceptance", text: objective },
+        proof: { kind: "result-semantic" },
       },
     ],
   };
-  const planner = answering([
-    {
-      findings: [
-        pass(0, "Asserted under validation command 1, which passed."),
-        pass(1),
-      ],
-    },
-  ]);
+  const planner = answering([{ findings: [pass(0), pass(1), pass(2)] }]);
   const outcome = await reviewResult({
     planner,
     plan: bound,
@@ -687,15 +563,10 @@ test("R6: any command the item's validation runs proves any criterion; the plan'
     log: () => {},
   });
   assert.equal(outcome.kind, "pass");
-  const { prompt } = planner.calls[0];
-  const { criteria } = JSON.parse(
-    prompt.split("\n").find((line) => line.startsWith('{"criteria"')),
-  );
   assert.deepEqual(
-    criteria.map((entry) => entry.criterion),
-    CRITERIA,
+    outcome.verdicts.map((verdict) => verdict.criterion),
+    [...CRITERIA, objective],
   );
-  assert.ok(!prompt.includes("Command-proven"));
 });
 
 test("R7: every review is a fresh call, and a re-review's packet holds the confirmed refusals and the repair's diff", async () => {
@@ -745,21 +616,11 @@ test("R8: behaviour the sources don't define is one question, one hold and no re
   const planner = answering([
     {
       findings: [
-        {
-          criterionIndex: 0,
-          verdict: "question",
-          detail: "The plan doesn't say what a dropped final patch should do.",
-          evidenceIndices: [],
-          question:
-            "Should a missing final patch request recovery, or end at the delivered prefix?",
-        },
-        {
-          criterionIndex: 1,
-          verdict: "question",
-          detail: "Duplicate patches are not defined.",
-          evidenceIndices: [],
-          question: "Should a duplicate patch be applied twice?",
-        },
+        ask(
+          0,
+          "Should a missing final patch request recovery, or end at the delivered prefix?",
+        ),
+        ask(1, "Should a duplicate patch be applied twice?"),
       ],
     },
   ]);
@@ -780,27 +641,11 @@ test("R8: behaviour the sources don't define is one question, one hold and no re
   assert.equal(repaired, false);
 });
 
-test("R9: each call's instructions, with every evidence kind's guidance and its tools' descriptions, fit in 5,000 characters", () => {
-  const all = itemInstructions(
-    {
-      unreachable: true,
-      artifacts: true,
-      candidates: true,
-      inputs: true,
-      knowledge: true,
-      memory: true,
-    },
-    LIMITS,
-  );
-  const tool = commandToolDescription({ ...LIMITS, network: "host" }).length;
-  const size = all.length + tool + CHECKS_TOOL_DESCRIPTION.length;
-  assert.ok(size <= 5000, `${size} characters`);
-  const proof = proofInstructions(LIMITS).length + tool;
+test("R9: a proof's instructions with its tool's description fit in 5,000 characters", () => {
+  const proof =
+    proofInstructions(LIMITS).length +
+    commandToolDescription({ ...LIMITS, network: "host" }).length;
   assert.ok(proof <= 5000, `${proof} characters`);
-  assert.match(
-    all,
-    /the engineering standard, test economy and the design checklist are notes, never suspect scenarios/,
-  );
 });
 
 test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros, mutants, questions, tokens and time, as text and JSON", () => {

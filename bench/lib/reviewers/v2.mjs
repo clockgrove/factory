@@ -31,6 +31,11 @@
  * from `result-review-scenarios`: `criterionIndex`, `structural`,
  * `scenarios` with each one's `verdict`, `holds` or `suspect`).
  *
+ * Verdicts are scored at their criterion's index in the record, by its
+ * text: a build whose reviewer also judges the Objective criteria the item
+ * proves (review/finder.ts) scores those in the objective scope; a
+ * criterion the record doesn't list is left out, in `extra.unmapped`.
+ *
  * `FIND_ONLY=1` in the environment proves nothing (`review.proofs` 0)
  * and returns each criterion the reviewer suspected as a refusal, its
  * suspicions as the detail: the scorecard's recall and precision are
@@ -52,7 +57,7 @@ export const needsTree = false;
 const MINUTE = 60_000;
 
 async function load(build) {
-  const [item, mutants, validate, log, config, selection, facts] =
+  const [item, mutants, validate, log, config, selection, facts, engine] =
     await Promise.all(
       [
         "review/item.js",
@@ -62,9 +67,27 @@ async function load(build) {
         "config.js",
         "providers/selection.js",
         "planning/facts.js",
+        "engine.js",
       ].map((path) => import(join(build, "dist", path))),
     );
-  return { item, mutants, validate, log, config, selection, facts };
+  return { item, mutants, validate, log, config, selection, facts, engine };
+}
+
+/**
+ * The proofs' lanes: each takes a planner slot of the build's host limits,
+ * which the service sets from its capacity and the harness never does, so
+ * the replay gives the process `PROOF_LANES` (32) of them, shared by its
+ * reviews at once.
+ */
+function proofLanes(factory) {
+  const lanes = Number(process.env.PROOF_LANES ?? 32);
+  const { caps, reserveMiB, budgetMiB } = factory.engine.hostLimits.usage();
+  if (caps.planner < lanes)
+    factory.engine.hostLimits.configure({
+      caps: { ...caps, planner: lanes },
+      reserveMiB,
+      budgetMiB,
+    });
 }
 
 /** The installation's configuration in the set, read as Factory reads it. */
@@ -179,6 +202,7 @@ export async function review({
   const factory = await load(build);
   const config = installation(factory, set);
   const findOnly = process.env.FIND_ONLY === "1";
+  proofLanes(factory);
   const events = [];
   const logged = (event) => {
     events.push(event);
@@ -236,36 +260,51 @@ export async function review({
     .map(({ event: _event, step: _step, at: _at, ...entry }) => entry);
   const suspected = (index) =>
     suspicionList.filter((entry) => entry.criterionIndex === index);
+  // The build's criteria may run past the item's own (the Objective
+  // criteria its review proves): each verdict is scored at its criterion's
+  // index in the record, so one on an Objective criterion counts in the
+  // objective scope; one the record doesn't list is left out, in `unmapped`.
+  const unmapped = [];
+  const indexOf = (v) => {
+    const index = record.criteria.indexOf(v.criterion);
+    if (index < 0) unmapped.push({ criterion: v.criterion, kind: v.kind });
+    return index;
+  };
   const verdicts = [
     ...answer.verdicts.map((v) =>
       findOnly && suspected(v.criterionIndex).length
         ? {
-            criterionIndex: v.criterionIndex,
+            criterion: v.criterion,
             kind: "refuse",
             detail: suspected(v.criterionIndex)
-              .map((s) => `${s.case}: expected ${s.expected}. ${s.basis}`)
+              .map((s) => s.case)
               .join("\n"),
           }
         : {
-            criterionIndex: v.criterionIndex,
+            criterion: v.criterion,
             kind: v.verdict === "note" ? "note" : "pass",
             detail: v.detail,
           },
     ),
     ...(answer.kind === "refused"
       ? answer.refused.map((v) => ({
-          criterionIndex: v.criterionIndex,
+          criterion: v.criterion,
           kind: "refuse",
           detail: v.detail,
           ...(v.repro ? { repro: v.repro } : {}),
         }))
       : []),
     ...(answer.kind === "pass" ? [] : answer.questions).map((v) => ({
-      criterionIndex: v.criterionIndex,
+      criterion: v.criterion,
       kind: "question",
       detail: `${v.detail}\n${v.question}`.trim(),
     })),
-  ];
+  ]
+    .map(({ criterion, ...v }) => ({
+      criterionIndex: indexOf({ criterion, kind: v.kind }),
+      ...v,
+    }))
+    .filter((v) => v.criterionIndex >= 0);
   const tally = events.filter((e) => e.event === "result-review").at(-1);
   const mutation = events.filter((e) => e.event === "mutation-pass").at(-1);
   const phases = tally?.phases;
@@ -284,6 +323,7 @@ export async function review({
       },
       suspicions: tally?.suspicions ?? null,
       suspicionList,
+      unmapped,
       scenarios: events
         .filter((e) => e.event === "result-review-scenarios")
         .map(({ event: _event, step: _step, at: _at, ...entry }) => entry),

@@ -77,6 +77,7 @@ import {
 } from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
 import type { Planner } from "./providers/planner.js";
+import { resultCriteria } from "./review/finder.js";
 import {
   type RefusedCriterion,
   type ReviewConversation,
@@ -411,8 +412,8 @@ export function failureIdentity(
 }
 
 /**
- * The criteria a review judges for the item: the result review's, its own
- * acceptance as the worker's Acceptance list numbers it, or with `final`,
+ * The criteria a review judges for the item: the result review's
+ * (review/finder.ts `resultCriteria`), or with `final`,
  * the ones the plan's coverage gives it, whatever proves them.
  */
 function reviewedCriteria(
@@ -423,7 +424,7 @@ function reviewedCriteria(
     ? plan.coverage
         .filter((entry) => entry.itemId === item.id)
         .map(coverageCriterion)
-    : item.acceptance;
+    : resultCriteria(plan, item);
 }
 
 /** `identity` as the failure of a blame of a predecessor by `item`. */

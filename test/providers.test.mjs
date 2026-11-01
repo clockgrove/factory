@@ -86,6 +86,54 @@ test("a provider's hedgeSeconds sets a phase's hedge threshold on every planner 
   );
 });
 
+test("a Codex result review asks for the priority tier unless models.reviewServiceTier sets it; Claude has no tier", async () => {
+  const inst = installation();
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    {
+      providers: {
+        codex: {
+          planner: "codex",
+          worker: { kind: "codex" },
+          models: { reviewServiceTier: { "result-review": "standard" } },
+        },
+        claude: {
+          planner: "claude",
+          worker: { kind: "claude" },
+          models: { reviewServiceTier: { "result-review": "fast" } },
+        },
+      },
+    },
+  );
+  const refused = JSON.parse(cli(inst, "setup", "--json").out);
+  assert.equal(refused.status, "refused");
+  assert.match(
+    refused.problems.join("\n"),
+    /providers\.claude\.models\.reviewServiceTier is not a setting/,
+  );
+  assert.doesNotMatch(refused.problems.join("\n"), /providers\.codex\./);
+
+  const { modelChoice } = await import("../dist/providers/planner.js");
+  const { resolvedProvider } = await import("../dist/providers/selection.js");
+  const tier = (provider, phase) =>
+    modelChoice(resolvedProvider(provider).models, { role: "reviewer", phase })
+      .serviceTier;
+  const codex = { planner: "codex", worker: { kind: "codex" } };
+  assert.equal(tier(codex, "result-review"), "fast");
+  assert.equal(tier(codex, "graph-review"), undefined);
+  const standard = {
+    ...codex,
+    models: { reviewServiceTier: { "result-review": "standard" } },
+  };
+  assert.equal(tier(standard, "result-review"), "standard");
+  assert.equal(
+    tier({ planner: "claude", worker: { kind: "claude" } }, "result-review"),
+    undefined,
+  );
+});
+
 // Offline: the SDK answers from local state, with no model call.
 test("Claude readiness asks the SDK for its login: none is blocked, and so is a service credential it can't read", async () => {
   const inst = installation();

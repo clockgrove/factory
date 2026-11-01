@@ -490,9 +490,8 @@ export interface ValidateInput {
    * Factory's own checks of a passed result (#2344): with every command
    * that ran passed, before cleanup, this runs in the validation checkout
    * while its HOME, TMPDIR and services exist, and its commands run as the
-   * validation's ran (`ValidatedCheckout`): the validate step's mutation
-   * pass (review/mutants.ts), the result review's scratch checkout and
-   * its refusal checks (review/item.ts). Never in a group's checkout: after
+   * validation's ran (`ValidatedCheckout`): the result review's
+   * workspace and its refusal checks (review/item.ts). Never in a group's checkout: after
    * groups, in this run's own, which ran the install. What it throws
    * escapes `validateTree`. Absent: nothing runs after the commands.
    */

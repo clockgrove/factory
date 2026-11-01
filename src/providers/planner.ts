@@ -70,8 +70,8 @@ export interface PlannerCall {
    */
   conversation?: Conversation;
   /**
-   * Factory's own tools for this call (a result review's run_command and
-   * mutants, review/item.ts): every provider offers each by its name, with
+   * Factory's own tools for this call (a result review proof's
+   * run_command, review/item.ts): every provider offers each by its name, with
    * exactly its description and input schema, and never hedges the call,
    * so no two turns share what the tools act on. Absent: none.
    */
@@ -243,22 +243,31 @@ export interface ModelChoice<Effort extends string = string> {
   serviceTier?: "standard" | "fast";
 }
 
-/** Planner and reviewer models, with the reviewer's effort per review phase. */
+/** Planner and reviewer models, with the reviewer's effort and tier per review phase. */
 export interface PlannerModels<Effort extends string = string> {
   planner: ModelChoice<Effort>;
   reviewer: ModelChoice<Effort>;
   /** A review phase's effort; an omitted one uses `reviewer.effort`. */
   reviewEffort?: Partial<Record<ReviewPhase, Effort>>;
+  /** A review phase's tier (Codex); an omitted one uses `reviewer.serviceTier`. */
+  reviewServiceTier?: Partial<
+    Record<ReviewPhase, NonNullable<ModelChoice["serviceTier"]>>
+  >;
 }
 
-/** The model a call uses: the planner, or the reviewer at its phase's effort. */
+/** The model a call uses: the planner, or the reviewer at its phase's effort and tier. */
 export function modelChoice<Effort extends string>(
   models: PlannerModels<Effort>,
   call: Pick<PlannerCall, "role" | "phase">,
 ): ModelChoice<Effort> {
   if (call.role === "planner") return models.planner;
   const effort = models.reviewEffort?.[call.phase as ReviewPhase];
-  return effort ? { ...models.reviewer, effort } : models.reviewer;
+  const serviceTier = models.reviewServiceTier?.[call.phase as ReviewPhase];
+  return {
+    ...models.reviewer,
+    ...(effort && { effort }),
+    ...(serviceTier && { serviceTier }),
+  };
 }
 
 /** A bounded provider detail for a reason or the log. */

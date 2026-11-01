@@ -78,6 +78,8 @@ export type CodexEffort = ModelReasoningEffort;
 export const DEFAULT_CODEX_MODELS: PlannerModels<CodexEffort> = {
   planner: { model: "gpt-6.1-sol", effort: "high" },
   reviewer: { model: "gpt-6.1-sol", effort: "medium" },
+  // The result review's finder and proofs are on every Work Item's path.
+  reviewServiceTier: { "result-review": "fast" },
 };
 
 /** Exec JSON emits no reasoning deltas: a healthy answer can be silent this long. */

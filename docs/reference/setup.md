@@ -74,7 +74,7 @@ Provider options need `--provider NAME`. They add the provider or change it:
 
 - `--planner codex|claude|copilot` and `--worker codex|claude|copilot`. Changing a kind drops that kind's settings.
 - `--default`. The first provider is the default until `--default` moves it.
-- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`. One given alone keeps the other half of the choice in effect, or the planner kind's default.
+- Model choices: `--planner-model`, `--planner-effort`, `--reviewer-model` and `--reviewer-effort`. One given alone keeps the other half of the choice in effect, or the planner kind's default. A Codex planner's result review (its finder and proofs) asks for the priority service tier by default; the configuration file's `models.reviewServiceTier` changes it (`{ "result-review": "standard" }`, say), and a phase's entry there wins over `models.reviewer.serviceTier` (see [Providers](../USER-GUIDE.md#providers)). Claude and Copilot have no service tier, so their reviews are unchanged.
 - Codex worker settings: `--codex-network`, `--codex-model`, `--codex-effort` and `--codex-service-tier`.
 - Claude worker settings: `--claude-model`, `--claude-effort`, `--claude-max-turns`, `--claude-tools`, `--claude-allowed-tools`, `--claude-permission-mode` and `--claude-setting-sources`.
 - Copilot worker settings: `--copilot-model`, `--copilot-effort`, `--copilot-tools` and `--copilot-timeout-seconds` (`worker.idleSeconds`, how long a turn may be silent).

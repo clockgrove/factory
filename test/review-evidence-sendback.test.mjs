@@ -1,5 +1,5 @@
-// A needs-human question about what the evidence root holds goes back to
-// the reviewer once before it reaches the operator (#2124). In 0.5.4
+// A Work Item review's question about what the evidence root holds goes
+// back to the reviewer once before it reaches the operator (#2124). In 0.5.4
 // qualification a low-effort Codex reviewer asked the operator what
 // `sharedQwfwq("ab")` returns when a conflict repair had kept main's
 // src/sharedQwfwq.js (so the change index listed only the test; run
@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewResult } from "../dist/review/result.js";
+import { reviewResult } from "../dist/review/item.js";
 import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
@@ -102,6 +102,10 @@ function review(repo, item, planner, extra = {}) {
       validation: { tree: repo.tree, commands: ["npm test"] },
       sources: [],
       dir: tempDir("factory-sendback-root-"),
+      scratch: async () => {
+        throw new Error("this review runs no command");
+      },
+      commandMs: 60_000,
       signal: AbortSignal.timeout(60_000),
       log: (event) => events.push(event),
       ...extra,
@@ -112,13 +116,13 @@ function review(repo, item, planner, extra = {}) {
 /** A complete controller row's index: the change index, after the design row. */
 const CHANGE_INDEX_ROW = 1;
 
-function finding(criterionIndex, verdict, question = "") {
+function finding(criterionIndex, verdict, question) {
   return {
     criterionIndex,
     verdict,
     evidenceIndices: [CHANGE_INDEX_ROW],
     detail: `${verdict} detail`,
-    question,
+    ...(verdict === "question" && { question }),
   };
 }
 
@@ -139,7 +143,7 @@ test("a question about an unchanged source file the evidence root holds goes bac
             findings: [
               finding(
                 0,
-                "needs-human",
+                "question",
                 'Can you provide current-tree source evidence showing what `sharedQwfwq("ab")` returns?',
               ),
               finding(1, "pass"),
@@ -159,7 +163,7 @@ test("a question about an unchanged source file the evidence root holds goes bac
   assert.ok(note.includes("candidate/src/sharedQwfwq.js"));
   assert.ok(note.includes("candidate/test/sharedQwfwq.test.js"));
   assert.ok(note.includes("Give one finding for each of criteria 0,"));
-  // One paragraph: a continuing conversation sends it as the delta.
+  // One paragraph after the packet.
   assert.ok(!note.trim().includes("\n\n"));
   assert.ok(!note.includes("README.md"));
   assert.equal(outcome.kind, "pass");
@@ -193,7 +197,7 @@ test("a question still asked after the send-back reaches the operator, once", as
           findings: [
             finding(
               0,
-              "needs-human",
+              "question",
               calls === 1
                 ? "What does `sharedQwfwq` return?"
                 : "Is doubling the intended product behaviour for empty input?",
@@ -227,7 +231,7 @@ test("an invalid answer to the send-back keeps the reviewer's question for the o
         ? {
             value: {
               findings: [
-                finding(0, "needs-human", "What does src/sharedQwfwq.js do?"),
+                finding(0, "question", "What does src/sharedQwfwq.js do?"),
               ],
             },
           }
@@ -259,7 +263,7 @@ test("a question that names nothing the evidence root holds reaches the operator
           findings: [
             finding(
               0,
-              "needs-human",
+              "question",
               "Has the product owner approved doubling, per docs/decisions/doubling.md?",
             ),
           ],
@@ -337,7 +341,7 @@ test("a question about a selected media member's bytes goes back naming its dige
             calls.length === 1
               ? finding(
                   0,
-                  "needs-human",
+                  "question",
                   "Can the selected GLB's hydrated bytes or a digest-checked review copy be made available?",
                 )
               : finding(0, "pass"),
@@ -415,7 +419,7 @@ test("the send-back keeps the file a question names by its path when more than 1
             calls.length === 1
               ? finding(
                   0,
-                  "needs-human",
+                  "question",
                   "What does packages/zeta/src/index.ts export?",
                 )
               : finding(0, "pass"),
@@ -474,7 +478,7 @@ test("the send-back keeps the file a question names by its exact path when more 
         value: {
           findings: [
             calls.length === 1
-              ? finding(0, "needs-human", "What does src/index.ts export?")
+              ? finding(0, "question", "What does src/index.ts export?")
               : finding(0, "pass"),
           ],
         },
@@ -510,12 +514,8 @@ test("a refusal in the answer to the send-back never replaces a question that wa
           findings:
             calls.length === 1
               ? [
-                  finding(0, "needs-human", "What does `sharedQwfwq` return?"),
-                  finding(
-                    1,
-                    "needs-human",
-                    "Has product approved the wording?",
-                  ),
+                  finding(0, "question", "What does `sharedQwfwq` return?"),
+                  finding(1, "question", "Has product approved the wording?"),
                 ]
               : [
                   finding(0, "pass"),
@@ -547,7 +547,7 @@ test("a refusal in the answer to the send-back never replaces a question that wa
   );
 });
 
-test("a refusal in the answer to the send-back replaces an earlier pass of a criterion that was not sent back", async () => {
+test("the answer to the send-back counts only for the criteria sent back: its refusal of another criterion is ignored", async () => {
   const repo = sharedMain();
   const item = workItem(
     "SharedQwfwq",
@@ -566,7 +566,7 @@ test("a refusal in the answer to the send-back replaces an earlier pass of a cri
           findings:
             calls.length === 1
               ? [
-                  finding(0, "needs-human", "What does `sharedQwfwq` return?"),
+                  finding(0, "question", "What does `sharedQwfwq` return?"),
                   finding(1, "pass"),
                 ]
               : [
@@ -585,14 +585,10 @@ test("a refusal in the answer to the send-back replaces an earlier pass of a cri
       ?.criteria,
     [0],
   );
-  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.kind, "pass");
   assert.deepEqual(
-    outcome.refused.map((refused) => refused.criterionIndex),
-    [1],
-  );
-  assert.deepEqual(
-    outcome.verdicts.map((verdict) => verdict.criterionIndex),
-    [0],
+    outcome.verdicts.map((verdict) => verdict.criterionIndex).sort(),
+    [0, 1],
   );
 });
 
@@ -736,7 +732,7 @@ function rowIndex(prompt, prefix) {
 function colourQuestion(indices) {
   return {
     criterionIndex: 0,
-    verdict: "needs-human",
+    verdict: "question",
     evidenceIndices: indices,
     detail:
       "The controller receipt establishes two complete captured sets, but says only the preview-image bytes differ; both sets have identical model bytes. The alternative's colour cannot be inferred from the receipt's digest or size.",
@@ -771,7 +767,6 @@ test("a question citing the candidate receipt, naming no file, goes back with ev
               verdict: "pass",
               evidenceIndices: [receipt],
               detail: "The two previews differ: red and blue.",
-              question: "",
             },
           ],
         },
@@ -826,7 +821,6 @@ test("a cited receipt adds only the copies the evidence root holds, after the fi
               verdict: "pass",
               evidenceIndices: [receipt],
               detail: "Set a's preview is red; set b's differs by its digest.",
-              question: "",
             },
           ],
         },

@@ -141,6 +141,14 @@ export interface CoreConfig {
      */
     formatCommand?: string;
   };
+  /**
+   * The validate step's mutation pass over each Work Item's passed result
+   * (review/mutants.ts, #2344): at most `mutants` mutants of the lines it
+   * added to product files (0 turns the pass off), within
+   * `mutationSeconds`. Its survivors are result review evidence. Frozen
+   * with an Objective.
+   */
+  review: { mutants: number; mutationSeconds: number };
   finalValidation: {
     /** Commands every Objective's result must pass. */
     requiredCommands: string[];
@@ -771,6 +779,10 @@ export function loadConfig(repository: string): CoreConfig {
       validation: object({
         commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
         formatCommand: optional(text()),
+      }),
+      review: object({
+        mutants: whole(0, 20, 1000),
+        mutationSeconds: whole(0, 300, 24 * 60 * 60),
       }),
       finalValidation: object({
         requiredCommands: strings,

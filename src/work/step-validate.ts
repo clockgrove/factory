@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { Outcome, StepContext } from "../engine.js";
 import { runningBuild } from "../log.js";
 import { type SelectedMember, validationMembers } from "../media.js";
+import { packageBootstrap } from "../planning/facts.js";
 import {
   ACCEPTED_AT,
   acceptedInputs,
@@ -12,6 +13,7 @@ import {
 } from "../planning/plan.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
+import { type MutationPass, mutationPass } from "../review/mutants.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt } from "../text.js";
@@ -35,6 +37,7 @@ import {
 import { factoryCommit, VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import type { MergeResult } from "./merged.js";
+import { withRepros } from "./repros.js";
 import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { integrated, objectiveMerges } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
@@ -72,6 +75,8 @@ export async function validateStep(
   const commit = candidate(state, item.id);
   const blocks = acceptedInputs(state).shown.blocks;
   const media = validationMembers(plan, item, selection(state));
+  // Its confirmed refusals' repro commands run after its own (repros.ts).
+  const checked = withRepros(state, item);
   // The Objective's merges since this item started, which its candidate
   // doesn't hold: its commands run again on top of them (#2240). A native
   // stack's layer builds on the layer below and merges with its unit.
@@ -81,7 +86,8 @@ export async function validateStep(
   const key = validationKey({
     commit,
     plan: state.kept[ACCEPTED_AT] ?? null,
-    validation: item.validation,
+    validation: checked.validation,
+    mutation: config.review,
     blocks,
     base: work.base,
     planBase: plan.base,
@@ -100,6 +106,7 @@ export async function validateStep(
     return reusedValidation(item, context, place, kept, plan);
   // A run that ends without a result leaves no kept one behind it.
   context.keep(facts({ validation: null }, item.id));
+  let mutation: MutationPass | undefined;
   const result = await validateTree({
     checkout: config.checkout,
     repository: config.repository,
@@ -108,7 +115,7 @@ export async function validateStep(
     installStore: installStorePath(worktree),
     sharedInstallStore: sharedInstallStorePath(workDir),
     commit,
-    item,
+    item: checked,
     plan,
     blocks,
     base: work.base,
@@ -141,6 +148,23 @@ export async function validateStep(
     signal,
     log: context.log,
     runFile: context.runFile,
+    // The mutation pass, on the passed result in its checkout.
+    use: async (validated) => {
+      mutation = await mutationPass({
+        checkout: validated,
+        repo: validated.directory,
+        base: work.base,
+        commit: "HEAD",
+        commands: ownCommands(item),
+        limits: {
+          max: config.review.mutants,
+          ms: config.review.mutationSeconds * 1000,
+        },
+        seed: item.id,
+        signal,
+        log: context.log,
+      });
+    },
   });
   switch (result.kind) {
     case "passed": {
@@ -150,6 +174,7 @@ export async function validateStep(
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
         ...(result.formatted ? { formatted: result.formatted } : {}),
+        ...(mutation ? { mutation } : {}),
       };
       const integrated = earlier.length
         ? await integratedValidation({
@@ -223,6 +248,17 @@ export async function validateStep(
     default:
       return result;
   }
+}
+
+/**
+ * The item's own commands a mutant runs: its validation without the
+ * exact install it may start with, which the checkout ran already.
+ */
+function ownCommands(item: WorkItem): string[] {
+  const commands = item.validation.map((check) => check.command);
+  return commands.length && packageBootstrap(commands[0]!) !== undefined
+    ? commands.slice(1)
+    : commands;
 }
 
 /**

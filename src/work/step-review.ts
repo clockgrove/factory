@@ -1,11 +1,20 @@
 import { ACCEPT } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateRecord, InputRecord } from "../media.js";
+import { validationMembers } from "../media.js";
 import { ancestors } from "../planning/graph.js";
-import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
+import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
+import {
+  type PriorRefusals,
+  reviewNotes,
+  reviewResult,
+  type Scratch,
+  ScratchUnavailable,
+  validationScratch,
+} from "../review/item.js";
 import {
   type CriterionDecision,
   type DeliveryPosition,
@@ -13,7 +22,6 @@ import {
   decides,
   type RefusedCriterion,
   type ResultReview,
-  reviewResult,
 } from "../review/result.js";
 import {
   ALL,
@@ -21,16 +29,24 @@ import {
   type HoldOption,
   type ObjectiveState,
 } from "../state.js";
-import { hostGitExit, worktreePath } from "../worktree.js";
+import {
+  hostGitExit,
+  installStorePath,
+  sharedInstallStorePath,
+  worktreePath,
+} from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { mergeOf } from "./merged.js";
+import { addRepros, keptRepros } from "./repros.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaReviewStep } from "./step-qa.js";
-import { acceptedNotes, retained, secondLook, withKeep } from "./step-work.js";
+import { acceptedNotes, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
   candidate,
+  commandTimeoutMs,
+  MINUTE,
   type PublishResult,
   type StackPlace,
   selection,
@@ -42,6 +58,14 @@ import {
 // ---------------------------------------------------------------------------
 // review
 
+/**
+ * A Work Item's result review (review/item.ts): in scratch checkouts of the
+ * candidate made as validation makes its checkout (`reviewScratch`), with
+ * the validate step's mutation pass and, after a repair, the refusals the
+ * last review confirmed. A refusal keeps its repro for later validations
+ * (repros.ts) and repairs; a pass keeps its notes, for the PR body and
+ * final review.
+ */
 export async function reviewStep(
   item: WorkItem,
   context: StepContext,
@@ -78,13 +102,6 @@ export async function reviewStep(
     deps,
     work.base,
   );
-  const conversation = retained(
-    state,
-    deps,
-    `review-${item.id}`,
-    item,
-    secondLook(context) ? undefined : fact(state, "reviewSession", item.id),
-  );
   const dependencies = await dependencyResults(
     state,
     item,
@@ -93,46 +110,144 @@ export async function reviewStep(
     signal,
   );
   const candidates = reviewCandidates(state, plan.items, item, dependencies);
-  const review = await reviewResult({
-    planner: deps.planner,
-    plan,
-    item,
-    ...(conversation ? { conversation } : {}),
-    checkout: deps.config.checkout,
-    base: work.base,
-    commit: candidate(state, item.id),
-    validation: validated,
-    sources: await pinnedSources(state, deps, signal),
-    dir: `${worktree}.review`,
-    notes: JSON.stringify(work.notes),
-    ...(candidates.length ? { candidates } : {}),
-    inputs: workerInputs(state, [item.id]),
-    peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
-    ...(memory ? { memory } : {}),
-    ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
-    checkFailures: fact(state, "checkFailures", item.id) ?? [],
-    decisions: decided.decisions,
-    ...(decided.earlier ? { earlier: decided.earlier } : {}),
-    delivery: position,
-    dependencies,
-    signal,
-    log: context.log,
-  });
-  if (conversation?.kept !== undefined)
-    context.keep(facts({ reviewSession: conversation.kept }, item.id));
+  const prior = priorRefusals(state, item.id);
+  let review: ResultReview;
+  try {
+    review = await reviewResult({
+      planner: deps.planner,
+      plan,
+      item,
+      checkout: deps.config.checkout,
+      base: work.base,
+      commit: candidate(state, item.id),
+      validation: validated,
+      ...(validated.mutation ? { mutation: validated.mutation } : {}),
+      scratch: reviewScratch(item, context, deps, worktree),
+      commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
+      ...(prior ? { prior } : {}),
+      sources: await pinnedSources(state, deps, signal),
+      dir: `${worktree}.review`,
+      notes: JSON.stringify(work.notes),
+      ...(candidates.length ? { candidates } : {}),
+      inputs: workerInputs(state, [item.id]),
+      peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
+      ...(memory ? { memory } : {}),
+      ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
+      checkFailures: fact(state, "checkFailures", item.id) ?? [],
+      decisions: decided.decisions,
+      ...(decided.earlier ? { earlier: decided.earlier } : {}),
+      delivery: position,
+      dependencies,
+      signal,
+      log: context.log,
+    });
+  } catch (error) {
+    if (error instanceof ScratchUnavailable)
+      return withKeep(error.outcome, decided.keep);
+    throw error;
+  }
   const held = (asked: ResultReview | null) => facts({ held: asked }, item.id);
-  return withKeep(
-    reviewOutcome(review, held, REFUSES_ITEM, (refusal) =>
-      repairOutcome(
-        item,
-        "review",
-        { kind: "review", tree: refusal.tree, refused: refusal.refused },
-        context.state,
-        place,
-        { keep: held(null) },
-      ),
+  const outcome = reviewOutcome(review, held, REFUSES_ITEM, (refusal) =>
+    repairOutcome(
+      item,
+      "review",
+      { kind: "review", tree: refusal.tree, refused: refusal.refused },
+      context.state,
+      place,
+      {
+        keep: {
+          ...held(null),
+          ...facts(
+            {
+              repros: addRepros(
+                state,
+                item.id,
+                refusal.refused.flatMap(({ criterion, detail, repro }) =>
+                  repro
+                    ? [{ criterion, tree: refusal.tree, detail, repro }]
+                    : [],
+                ),
+              ),
+            },
+            item.id,
+          ),
+        },
+      },
     ),
+  );
+  const notes = reviewNotes(review);
+  return withKeep(
+    outcome.kind === "done" && notes.length
+      ? { ...outcome, result: { ...(outcome.result as object), notes } }
+      : outcome,
     decided.keep,
+  );
+}
+
+/** A Work Item's review step result: the tree it passed, and its notes. */
+export interface ReviewResult {
+  tree: string;
+  /** Each met criterion's non-blocking suggestion (review/item.ts `reviewNotes`). */
+  notes?: { criterion: string; note: string }[];
+}
+
+/**
+ * The re-review packet's refusals: those the item's latest refusing review
+ * confirmed, on the tree it refused (absent: none kept).
+ */
+function priorRefusals(
+  state: ObjectiveState,
+  itemId: string,
+): PriorRefusals | undefined {
+  const kept = keptRepros(state, itemId);
+  const tree = kept.at(-1)?.tree;
+  if (!tree) return undefined;
+  return {
+    tree,
+    refused: kept
+      .filter((entry) => entry.tree === tree)
+      .map(({ criterion, detail, repro }) => ({ criterion, detail, repro })),
+  };
+}
+
+/**
+ * Scratch checkouts of the item's candidate for its review: fresh
+ * validation checkouts of the reviewed commit beside its worktree
+ * (review/item.ts `validationScratch`), as its validation is set up.
+ */
+function reviewScratch(
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+  worktree: string,
+): Scratch {
+  const { state, signal } = context;
+  const { config } = deps;
+  const plan = currentPlan(state)!;
+  const work = state.done[stepKey(item.id, "work")] as WorkResult;
+  return validationScratch(
+    {
+      checkout: config.checkout,
+      repository: config.repository,
+      installStore: installStorePath(worktree),
+      sharedInstallStore: sharedInstallStorePath(
+        deps.workDir(state.issue),
+        state.issue,
+      ),
+      commit: candidate(state, item.id),
+      item,
+      plan,
+      blocks: acceptedInputs(state).shown.blocks,
+      base: work.base,
+      ...(work.base !== plan.base ? { predecessor: work.base } : {}),
+      media: validationMembers(plan, item, selection(state)),
+      sandbox: config.sandbox,
+      commandTimeoutMs: commandTimeoutMs(deps),
+      signal,
+      log: context.log,
+      runFile: context.runFile,
+    },
+    (name) => `${worktree}.${name}`,
   );
 }
 

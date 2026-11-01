@@ -387,7 +387,7 @@ test("the same tree gets the same mutants, bounded and seeded, and the same scor
     chooseMutants(repo.dir, repo.base, repo.commit, options);
   // Mutants of the added lines of the source, not the test, by rule.
   assert.deepEqual(
-    choose({ max: 40, seed: "0" }).map((m) => [m.file, m.line, m.rule]),
+    (await choose({ max: 40, seed: "0" })).map((m) => [m.file, m.line, m.rule]),
     [
       ["src/tags.mjs", 2, "=== to !=="],
       ["src/tags.mjs", 2, "negate if"],
@@ -396,16 +396,16 @@ test("the same tree gets the same mutants, bounded and seeded, and the same scor
     ],
   );
   assert.deepEqual(
-    choose({ max: 2, seed: "0" }),
-    choose({ max: 2, seed: "0" }),
+    await choose({ max: 2, seed: "0" }),
+    await choose({ max: 2, seed: "0" }),
   );
-  assert.equal(choose({ max: 2, seed: "0" }).length, 2);
+  assert.equal((await choose({ max: 2, seed: "0" })).length, 2);
   // Another seed picks other mutants.
   const picked = new Set(
-    ["0", "1", "2", "3", "4", "5"].map((seed) =>
-      choose({ max: 2, seed })
-        .map((m) => m.id)
-        .join(),
+    await Promise.all(
+      ["0", "1", "2", "3", "4", "5"].map(async (seed) =>
+        (await choose({ max: 2, seed })).map((m) => m.id).join(),
+      ),
     ),
   );
   assert.ok(picked.size > 1);

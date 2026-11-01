@@ -44,7 +44,12 @@ import { workerEnvironment } from "../worktree.js";
 import { ACTIVE_TOOL_IDLE_MS } from "./claude.js";
 import { COPILOT_SECRETS } from "./config.js";
 import {
+  COMMAND_TOOL_INPUT,
+  COMMAND_TOOL_NAME,
+  type CommandTool,
   callImages,
+  commandInputProblem,
+  commandRunner,
   detail,
   freshOnOverflow,
   IdleWatchdog,
@@ -285,9 +290,10 @@ async function bounded(operation: Promise<unknown>): Promise<void> {
 
 /**
  * A turn's answer to each permission request: Factory's own tools (`custom`)
- * called with no arguments, or Validate with a targeted run's `commands`
- * (#2281), and file reads, or writes when `writes`, inside `root` alone.
- * Anything else is refused.
+ * called with no arguments, Validate with a targeted run's `commands`
+ * (#2281), or a review's `run_command` with its command
+ * (`PlannerCall.commands`), and file reads, or writes when `writes`, inside
+ * `root` alone. Anything else is refused.
  */
 export function copilotPermission(
   root: string,
@@ -295,15 +301,18 @@ export function copilotPermission(
   custom: ReadonlySet<string>,
 ) {
   return (request: PermissionRequest) => {
-    // Factory's own tools name no command: Validate takes at most the
-    // indices of declared ones, and any other tool no arguments.
+    // Factory's own tools: Validate takes at most the indices of declared
+    // commands, run_command its command (it runs in Factory's scratch
+    // checkout, never here), and any other tool no arguments.
     if (request.kind === "custom-tool")
       return !request.managedApprovalRequired &&
         custom.has(request.toolName) &&
         (request.args === undefined ||
           (isObject(request.args) && !Object.keys(request.args).length) ||
           (request.toolName === VALIDATION_TOOL_NAME &&
-            !("problem" in validationTargets(request.args))))
+            !("problem" in validationTargets(request.args))) ||
+          (request.toolName === COMMAND_TOOL_NAME &&
+            commandInputProblem(request.args) === undefined))
         ? { kind: "approve-once" as const }
         : {
             kind: "reject" as const,
@@ -629,7 +638,36 @@ function replacing(
   };
 }
 
-/** Planning and review through Copilot, with read-only tools over `readDir`. */
+/**
+ * A call's `commands` as the Copilot custom tool its session gets: named
+ * `COMMAND_TOOL_NAME`, with the tool's own description and
+ * `COMMAND_TOOL_INPUT`, run through `commandRunner`.
+ */
+export function copilotCommandTool(commands: CommandTool): Tool {
+  const run = commandRunner(commands);
+  return {
+    name: COMMAND_TOOL_NAME,
+    description: commands.description,
+    parameters: COMMAND_TOOL_INPUT,
+    defer: "never",
+    handler: async (args: unknown) => {
+      const reply = await run(args);
+      return reply.error
+        ? { textResultForLlm: reply.text, resultType: "failure" }
+        : reply.text;
+    },
+  };
+}
+
+/** The message a Copilot planning call sends: the prompt, then the answer's schema, which Copilot has no structured output for. */
+export function copilotPlanningPrompt(
+  prompt: string,
+  schema: Record<string, unknown>,
+): string {
+  return `${prompt}\n\nAnswer with only one JSON object that matches this JSON Schema, with no other text:\n${JSON.stringify(schema)}`;
+}
+
+/** Planning and review through Copilot, with read-only tools over `readDir`, and `commands` as a custom tool. */
 export class CopilotPlanner implements Planner {
   constructor(
     private readonly models: PlannerModels = DEFAULT_COPILOT_MODELS,
@@ -659,8 +697,16 @@ export class CopilotPlanner implements Planner {
           choice,
           directory: call.readDir ?? empty!,
           tools: call.readDir ? COPILOT_READ_TOOLS : [],
+          ...(call.commands && {
+            custom: [copilotCommandTool(call.commands)],
+            // A running command may be quiet for as long as it may take.
+            toolIdleMs: call.commands.limitMs,
+          }),
           writes: false,
-          prompt: `${turn?.prompt ?? call.prompt}\n\nAnswer with only one JSON object that matches this JSON Schema, with no other text:\n${JSON.stringify(call.schema)}`,
+          prompt: copilotPlanningPrompt(
+            turn?.prompt ?? call.prompt,
+            call.schema,
+          ),
           images,
           record,
           idleMs: PLANNER_IDLE_MS,

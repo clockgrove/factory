@@ -13,6 +13,7 @@ import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
 import type { MergeResult } from "./merged.js";
 import type { RepairContext } from "./prompt.js";
+import type { ConfirmedRepro } from "./repros.js";
 import type { WorkerValidateFailure } from "./self-validate.js";
 import type { ValidateResult } from "./steps.js";
 import type { WorkerSpend } from "./worker.js";
@@ -86,6 +87,13 @@ export interface ItemFacts {
   workerValidateFailed: { plan: string; failures: WorkerValidateFailure[] };
   /** The result review that asked the operator, while its questions are answered. */
   held: ResultReview;
+  /**
+   * The repro command of each refusal of this item's results that review
+   * confirmed under the plan accepted at `plan` (review/item.ts), with the
+   * criterion and the tree it was refused on: each runs again as extra
+   * validation of every later result, which must pass it (repros.ts).
+   */
+  repros: { plan: string; entries: ConfirmedRepro[] };
   /** The operator's `accept <n>` and `refuse <n>` at this item's reviews and refusals (planning/plan.ts `decisionsOf`). */
   decisions: CriterionDecision[];
   /** Every commit pushed to the item's branch, for lease pushes. */
@@ -140,8 +148,6 @@ export interface ItemFacts {
   enabled: { amendment: string; providers: string[] };
   /** The worker's retained conversation, which a repair continues (providers/session.ts); `fresh` forgets it. */
   workSession: Session;
-  /** The result reviewer's retained conversation, which a re-review continues. */
-  reviewSession: Session;
   /** The repair diagnosis's retained conversation, which its re-asks and the item's next diagnosis continue. */
   diagnosisSession: Session;
   /**

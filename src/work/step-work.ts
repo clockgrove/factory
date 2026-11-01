@@ -51,6 +51,7 @@ import { fact, facts, written } from "./facts.js";
 import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
+import { withRepros } from "./repros.js";
 import {
   removeKeptValidation,
   stageValidateLog,
@@ -417,13 +418,15 @@ export async function workStep(
       profile === undefined
         ? undefined
         : config.execution.profiles?.[profile]?.instructions;
+    // Its results are validated with its confirmed repros too (repros.ts).
+    const checked = withRepros(state, item);
     const prepared = await prepareWorkPrompt({
       checkout: config.checkout,
       worktree,
       objective: state.issue,
       objectiveBody: body,
       plan,
-      item,
+      item: checked,
       base,
       conventions: (await repositoryView(config.checkout, base, false, signal))
         .conventions,
@@ -505,8 +508,8 @@ export async function workStep(
         ...(conversation
           ? { conversation: { ...conversation, prompt: prepared.prompt } }
           : {}),
-        item,
-        commands: item.validation.map((v) => v.command),
+        item: checked,
+        commands: checked.validation.map((v) => v.command),
         base,
         sharedInstallStore: sharedInstallStorePath(workDir),
         signal,

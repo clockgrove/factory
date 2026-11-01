@@ -68,6 +68,8 @@ An option marked `...` repeats, and the values given replace the whole list. `--
 
 `--format-command CMD` names the repository's formatter, such as `pnpm exec biome check --write .` (off by default: nothing is formatted). Factory runs it on every Work Item's result before validation and commits what it changes, so no model formats by hand (see [Steps](steps.md)). Name the tool itself rather than a package script: a script is read from the result, so the worker could change what it runs. It is frozen with each Objective: a change holds a running one once, as any frozen key does (see [Frozen configuration](state.md#frozen-configuration)).
 
+The mutation pass over each Work Item's passed result (see [Steps](steps.md)) has two keys in the configuration file and no option: `review.mutants`, the most mutants it seeds (20 by default; 0 turns it off), and `review.mutationSeconds`, the most time it takes (300 by default). Both are operational: a change applies from the next validation of a running Objective.
+
 Provider options need `--provider NAME`. They add the provider or change it:
 
 - `--planner codex|claude|copilot` and `--worker codex|claude|copilot`. Changing a kind drops that kind's settings.

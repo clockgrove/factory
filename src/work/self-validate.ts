@@ -24,7 +24,6 @@ import { packageBootstrap } from "../planning/facts.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan, ValidationCommand, WorkItem } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
-import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, failureExcerpt } from "../text.js";
 import {
@@ -844,7 +843,7 @@ export class SelfValidation {
     const { item, worktree } = this.input;
     const { plan } = this.options;
     // The criteria its review judges, as its contract numbers them.
-    const criteria = resultCriteria(plan, item);
+    const criteria = item.acceptance;
     const count = criteria.length;
     const notes = await readHandoffNotes(worktree, plan, item);
     if (notes && "problem" in notes)

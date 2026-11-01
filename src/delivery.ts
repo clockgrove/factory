@@ -314,6 +314,8 @@ export interface PublishInput {
    * (item-telemetry.ts `summaryLine`): the PR body shows it under the changes.
    */
   telemetry?: string;
+  /** The result review's notes: non-blocking suggestions on met criteria (review/item.ts). */
+  reviewNotes?: readonly { criterion: string; note: string }[];
 }
 
 /**
@@ -832,6 +834,18 @@ export async function pullRequestBody(
     // Numbers and words only; its issue's comment keeps the final ones.
     ...(input.telemetry
       ? [`Work Item telemetry before publishing: ${input.telemetry}.`]
+      : []),
+    // The reviewer's words: inert, as the goal is.
+    ...(input.reviewNotes?.length
+      ? [
+          `Review notes (non-blocking suggestions; the criteria are met):\n\n${input.reviewNotes
+            .slice(0, 20)
+            .map(
+              ({ criterion, note }) =>
+                `- ${prose(inert(safe(criterion).slice(0, 300)))}: ${prose(inert(safe(note).slice(0, 1200)))}`,
+            )
+            .join("\n")}`,
+        ]
       : []),
   );
   const { commands, flaky } = input.validation;

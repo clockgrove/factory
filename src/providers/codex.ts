@@ -30,6 +30,7 @@ import {
 } from "../sandbox.js";
 import { writeAtomic } from "../state.js";
 import { errorMessage } from "../text.js";
+import { codexMcpServerConfig, McpSocketServer } from "./codex-mcp.js";
 import { CodexStderr, withStderr } from "./codex-stderr.js";
 import {
   addCodexTelemetry,
@@ -46,7 +47,11 @@ import {
   turnTokens,
 } from "./codex-telemetry.js";
 import {
+  COMMAND_TOOL_INPUT,
+  COMMAND_TOOL_NAME,
+  type CommandTool,
   callImages,
+  commandRunner,
   detail,
   freshOnOverflow,
   IdleWatchdog,
@@ -405,13 +410,55 @@ export function codexHomeOf(conversationDir: string): string {
   return join(conversationDir, "codex");
 }
 
+/** The MCP server a Codex call's `commands` is offered through (codex-mcp.ts). */
+const COMMAND_SERVER = "factory-review";
+
+/**
+ * `COMMAND_TOOL_NAME` as a code-mode model calls it: `tools.<id>` inside an
+ * exec script, `mcp__<server>__<tool>` with the server's `-` read as `_`.
+ */
+export const CODEX_COMMAND_TOOL_ID = `mcp__${COMMAND_SERVER.replaceAll("-", "_")}__${COMMAND_TOOL_NAME}`;
+
+/**
+ * How a Codex model calls the command tool, in the call's base
+ * instructions (the review prompt is every provider's): Codex's production
+ * models see only `exec`, and call an MCP tool from inside it, as a Codex
+ * worker calls Validate (codex-validate.ts `CODEX_VALIDATE_CALL`).
+ */
+const CODEX_COMMAND_CALL = `${COMMAND_TOOL_NAME} is the MCP tool ${COMMAND_TOOL_NAME} of Factory's server ${COMMAND_SERVER}, id ${CODEX_COMMAND_TOOL_ID}. Inside exec, call it as \`const result = await tools.${CODEX_COMMAND_TOOL_ID}({ command: "..." }); text(result.content.map((part) => part.text).join(""));\`; where your tools list ${COMMAND_TOOL_NAME} directly, call it there.`;
+
+/** `commands` served for one Codex call: its MCP server, listening until closed. */
+export function codexCommandServer(
+  commands: CommandTool,
+): Promise<McpSocketServer> {
+  const run = commandRunner(commands);
+  return McpSocketServer.start(COMMAND_SERVER, {
+    name: COMMAND_TOOL_NAME,
+    description: commands.description,
+    // It runs commands in a scratch checkout, never the reviewed tree.
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+    inputSchema: COMMAND_TOOL_INPUT,
+    call: async (args) => {
+      const reply = await run(args);
+      return { text: reply.text, isError: reply.error };
+    },
+  });
+}
+
 /**
  * A planning call's home with a working directory. `readDir` turns on the
- * read-only shell and view_image over that directory alone.
+ * read-only shell and view_image over that directory alone; `commands`
+ * registers the call's command tool server, told how to call it, with
+ * each call allowed the tool's limit.
  */
 export function codexHome(
   readDir: string | undefined,
   root: string | undefined,
+  commands?: { server: McpSocketServer; limitMs: number },
 ): {
   root: string;
   workdir: string;
@@ -424,10 +471,25 @@ export function codexHome(
   return privateCodexHome({
     ...(root && { root }),
     ...(readDir && { outside: { directory: readDir, name: "read directory" } }),
-    config: () =>
-      readDir
+    config: () => {
+      const config = readDir
         ? `default_permissions = "factory"\n${CODEX_TREE_REVIEW_CONFIG}\n${permissionProfile()}`
-        : CODEX_PLANNING_CONFIG,
+        : CODEX_PLANNING_CONFIG;
+      if (!commands) return config;
+      const instructions = JSON.stringify(CODEX_READONLY_BASE_INSTRUCTIONS);
+      return `${config.replace(
+        instructions,
+        JSON.stringify(
+          `${CODEX_READONLY_BASE_INSTRUCTIONS}\n\n${CODEX_COMMAND_CALL}`,
+        ),
+      )}${codexMcpServerConfig(
+        COMMAND_SERVER,
+        commands.server,
+        COMMAND_TOOL_NAME,
+        // A minute over the tool's own limit, so its answer comes first.
+        commands.limitMs / 1000 + 60,
+      )}`;
+    },
     finish: ({ root, env }) => {
       const workdir = join(root, "work");
       mkdirSync(workdir, { mode: 0o700 });
@@ -541,7 +603,23 @@ export class CodexPlanner implements Planner {
     }
     const idleMs = codexIdleMs(call.phase, choice.effort);
     // A running read-only command gets the same bound: none would hang it.
-    const watchdog = new IdleWatchdog(idleMs, call.signal, idleMs);
+    // A command of `commands` may be quiet for as long as it may take.
+    const watchdog = new IdleWatchdog(
+      idleMs,
+      call.signal,
+      Math.max(idleMs, call.commands?.limitMs ?? 0),
+    );
+    let commands: McpSocketServer | undefined;
+    if (call.commands)
+      try {
+        commands = await codexCommandServer(call.commands);
+      } catch (error) {
+        watchdog.stop();
+        throw new PlannerError(
+          "hold",
+          `Factory could not serve ${COMMAND_TOOL_NAME} to the Codex reviewer; fix the host's temporary directory, then answer retry (${detail(String(error))})`,
+        );
+      }
     let home: ReturnType<typeof codexHome>;
     let turn: Turn;
     try {
@@ -563,9 +641,11 @@ export class CodexPlanner implements Planner {
       home = codexHome(
         call.readDir,
         call.conversation && codexHomeOf(call.conversation.dir),
+        commands && { server: commands, limitMs: call.commands!.limitMs },
       );
     } catch (error) {
       watchdog.stop();
+      await commands?.close();
       throw new PlannerError(
         "hold",
         `Factory could not set up the Codex planning home (the read-only shell needs the Linux Codex runtime); fix the installation or host, then answer retry (${detail(String(error))})`,
@@ -795,6 +875,7 @@ export class CodexPlanner implements Planner {
         clearTimeout(timer);
       }
       group.end();
+      await commands?.close();
       saveModelsCache(home.env.CODEX_HOME!);
       addCodexTelemetry(record, home.env.CODEX_HOME!, baseline);
       // A retained conversation's home stays for its next turn, unless a

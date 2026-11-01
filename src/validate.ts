@@ -99,7 +99,12 @@ import {
 import { runSandboxed, sandboxAvailable } from "./sandbox.js";
 import { StoreClaims, sharedStore } from "./shared-install-store.js";
 import type { ObjectiveBlock } from "./shown.js";
-import { errorMessage, failureExcerpt, headAndTail } from "./text.js";
+import {
+  BoundedText,
+  errorMessage,
+  failureExcerpt,
+  headAndTail,
+} from "./text.js";
 import { factoryCommit, privateStagingPath } from "./work/collect.js";
 import { AttemptServices, servicesHold } from "./work/services.js";
 import {
@@ -481,7 +486,47 @@ export interface ValidateInput {
    * failed, and its `validation-result` names it by `output`.
    */
   runFile(kind: string): RunFile;
+  /**
+   * Factory's own checks of a passed result (#2344): with every command
+   * that ran passed, before cleanup, this runs in the validation checkout
+   * while its HOME, TMPDIR and services exist, and its commands run as the
+   * validation's ran (`ValidatedCheckout`): the validate step's mutation
+   * pass (review/mutants.ts), the result review's scratch checkout and
+   * its refusal checks (review/item.ts). Never in a group's checkout: after
+   * groups, in this run's own, which ran the install. What it throws
+   * escapes `validateTree`. Absent: nothing runs after the commands.
+   */
+  use?: (checkout: ValidatedCheckout) => Promise<void>;
 }
+
+/** A passed validation's checkout, for `ValidateInput.use`. */
+export interface ValidatedCheckout {
+  /** The checkout of the exact commit validated, its Git LFS files restored and its commands run. */
+  directory: string;
+  /** The commands that passed there (or in its groups), in run order. */
+  results: readonly CommandResult[];
+  /**
+   * Run one command in the checkout as validation runs a command after
+   * the install: in the sandbox, with no network unless `sandbox.network`
+   * is `host`, no secrets, the run's HOME, TMPDIR and services and
+   * FACTORY_BASE_SHA, for at most `timeoutMs`. A command the sandbox
+   * can't run throws.
+   */
+  run(command: string, timeoutMs: number): Promise<CheckoutRun>;
+}
+
+/** How a `ValidatedCheckout` command ended: its output interleaved, start and end kept. */
+export interface CheckoutRun {
+  /** null when a signal ended it, such as the time limit. */
+  exitCode: number | null;
+  timedOut: boolean;
+  output: string;
+  ms: number;
+}
+
+/** What a `ValidatedCheckout` command's output keeps: its start and its end. */
+const CHECKOUT_OUTPUT_HEAD = 16_000;
+const CHECKOUT_OUTPUT_TAIL = 48_000;
 
 export interface CommandResult {
   command: string;
@@ -844,7 +889,7 @@ async function validateCandidate(
     // whatever sandbox.network says (the formatter's).
     const sandboxed = async (
       command: string,
-      whole: RunFile,
+      whole: Pick<RunFile, "append">,
       grant: {
         install: boolean;
         network: boolean;
@@ -852,6 +897,8 @@ async function validateCandidate(
         offline?: true;
         /** The exact install's kept package store (`installStore`). */
         store?: string;
+        /** Its own limit, not `commandTimeoutMs` (`ValidatedCheckout.run`). */
+        timeoutMs?: number;
       },
     ) =>
       runSandboxed(command, {
@@ -881,8 +928,50 @@ async function validateCandidate(
         ...(grant.outputLimit ? { outputLimit: grant.outputLimit } : {}),
         onOutput: (stream, text) => whole.append(text, stream),
         signal: input.signal,
-        timeoutMs: input.commandTimeoutMs,
+        timeoutMs: grant.timeoutMs ?? input.commandTimeoutMs,
       });
+    /**
+     * `input.use` on the passed result, in this checkout: after groups,
+     * with services of its own again (inGroups stopped this run's).
+     */
+    const used = async (
+      passed: Extract<Validation, { kind: "passed" }>,
+    ): Promise<Validation> => {
+      if (!input.use || group) return passed;
+      if (!services) {
+        const up = await validationServices(input);
+        if (up && !(up instanceof AttemptServices)) return up;
+        services = up;
+      }
+      crashPoint("validation:use:before");
+      await input.use({
+        directory: worktree,
+        results: passed.results,
+        run: async (command, timeoutMs) => {
+          const output = new BoundedText(
+            CHECKOUT_OUTPUT_HEAD,
+            CHECKOUT_OUTPUT_TAIL,
+          );
+          const started = Date.now();
+          const ran = await sandboxed(
+            command,
+            { append: (text) => output.add(text) },
+            { install: false, network: false, timeoutMs },
+          );
+          if (ran.kind === "fault")
+            throw new Error(
+              `The command sandbox could not run \`${command}\`: ${ran.detail}. ${ran.fix}.`,
+            );
+          return {
+            exitCode: ran.exitCode,
+            timedOut: ran.timedOut,
+            output: `${output.toString()}${ran.diskOverflow ? `\n${ran.diskOverflow}` : ""}`,
+            ms: Date.now() - started,
+          };
+        },
+      });
+      return passed;
+    };
     // The repository's formatter runs once, on a Work Item's validation:
     // after the exact install when the sequence starts with one (the
     // formatter is usually a dependency), else before the first command
@@ -1178,7 +1267,8 @@ async function validateCandidate(
       if (position === setup && groups.length > 1 && !grouped) {
         grouped = true;
         const decided = await inGroups();
-        if (decided) return decided;
+        if (decided)
+          return decided.kind === "passed" ? await used(decided) : decided;
       }
       const index = order[position]!;
       if (group) group.at = index;
@@ -1633,7 +1723,7 @@ async function validateCandidate(
         ...(formatted && { formatted }),
       };
     }
-    return {
+    return await used({
       kind: "passed",
       tree,
       commands: ran,
@@ -1642,7 +1732,7 @@ async function validateCandidate(
       ...(capture && { artifacts }),
       ...(regenerated && { regenerated }),
       ...(formatted && { formatted }),
-    };
+    });
   } finally {
     await services?.stop();
     await Promise.all(scratch.map((path) => forceRemove(path)));

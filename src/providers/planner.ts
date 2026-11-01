@@ -69,6 +69,95 @@ export interface PlannerCall {
    * Absent: a fresh call that keeps nothing.
    */
   conversation?: Conversation;
+  /**
+   * Commands the model may run (a result review's scratch checkout,
+   * review/item.ts): every provider offers it as the one tool
+   * `COMMAND_TOOL_NAME`, with its description and `COMMAND_TOOL_INPUT`, and
+   * never hedges the call, so no two turns share the checkout. Absent: no
+   * command tool.
+   */
+  commands?: CommandTool;
+}
+
+/** The tool `PlannerCall.commands` is offered as, by every provider. */
+export const COMMAND_TOOL_NAME = "run_command";
+
+/** Its input, as JSON Schema: the command, and its limit in ms. */
+export const COMMAND_TOOL_INPUT = {
+  type: "object",
+  properties: {
+    command: { type: "string", minLength: 1 },
+    timeoutMs: { type: "integer", minimum: 1000 },
+  },
+  required: ["command"],
+  additionalProperties: false,
+} as const;
+
+/** A shell a planning or review call may run commands in. */
+export interface CommandTool {
+  /** What the tool tells the model: identical for every provider. */
+  description: string;
+  /**
+   * Run one command, at most `timeoutMs` (absent: the tool's default):
+   * the text the model gets back, its exit and output. It throws only when
+   * the tool itself can't run one, which the model is told as an error.
+   */
+  run(command: string, timeoutMs: number | undefined): Promise<string>;
+  /** The longest one call may take, so an idle bound waits that long while one runs. */
+  limitMs: number;
+}
+
+/** What a command tool call returns to the model, in every provider. */
+export interface CommandReply {
+  text: string;
+  error: boolean;
+}
+
+/** Why `input` is no `COMMAND_TOOL_INPUT`, or undefined when it is one. */
+export function commandInputProblem(input: unknown): string | undefined {
+  const { command, timeoutMs } = (
+    input !== null && typeof input === "object" ? input : {}
+  ) as Record<string, unknown>;
+  return typeof command !== "string" ||
+    !command.trim() ||
+    (timeoutMs !== undefined &&
+      !(
+        typeof timeoutMs === "number" &&
+        Number.isSafeInteger(timeoutMs) &&
+        timeoutMs >= 1000
+      ))
+    ? `${COMMAND_TOOL_NAME} takes a nonempty command and, optionally, timeoutMs, an integer of at least 1000.`
+    : undefined;
+}
+
+/**
+ * `tool` as one call's providers run it: the model's input checked
+ * (`commandInputProblem`), commands run one at a time in call order (they
+ * share one checkout), and a tool that can't run one answers with the
+ * error instead of failing the turn.
+ */
+export function commandRunner(
+  tool: CommandTool,
+): (input: unknown) => Promise<CommandReply> {
+  let queue: Promise<unknown> = Promise.resolve();
+  return async (input) => {
+    const problem = commandInputProblem(input);
+    if (problem) return { text: `Command not run: ${problem}`, error: true };
+    const { command, timeoutMs } = input as {
+      command: string;
+      timeoutMs?: number;
+    };
+    const ran = queue.then(() => tool.run(command, timeoutMs));
+    queue = ran.catch(() => undefined);
+    try {
+      return { text: await ran, error: false };
+    } catch (error) {
+      return {
+        text: `Command not run: ${error instanceof Error ? error.message : String(error)}`,
+        error: true,
+      };
+    }
+  };
 }
 
 export interface PlannerAnswer {
@@ -532,7 +621,8 @@ export function hedgePolicy(seconds: HedgeSeconds = {}): HedgePolicy {
  * goes silent past the policy, an identical second call starts; the first
  * answer wins and the other is aborted. Each phase has its own threshold
  * (DEFAULT_HEDGE_SECONDS), above its healthy calls' silence; a phase set
- * to 0 isn't hedged, and its call goes straight to the inner planner.
+ * to 0 isn't hedged, nor is a call with commands, and its call goes
+ * straight to the inner planner.
  */
 export class HedgedPlanner implements Planner {
   constructor(
@@ -542,7 +632,9 @@ export class HedgedPlanner implements Planner {
 
   answer(call: PlannerCall): Promise<PlannerAnswer> {
     const silenceMs = this.policy.silenceMs[call.phase] ?? 0;
-    if (silenceMs <= 0) return this.inner.answer(call);
+    // A call with commands runs them in one scratch checkout, which a
+    // second turn must never share.
+    if (silenceMs <= 0 || call.commands) return this.inner.answer(call);
     const wallMs = Math.max(this.policy.wallMs, silenceMs);
     const controllers = [new AbortController(), new AbortController()];
     const started = Date.now();

@@ -82,6 +82,7 @@ import type { QaResult } from "./step-qa.js";
 import {
   criterionDecisions,
   criterionOffers,
+  type ReviewResult,
   reviewOutcome,
   standingRefusals,
   workerInputs,
@@ -514,6 +515,12 @@ export function finalReviewStep(deps: BuildDeps): Step {
         ],
         ...(decided.earlier ? { earlier: decided.earlier } : {}),
         qa,
+        reviewNotes: mergedIds.flatMap((id) =>
+          (
+            (state.done[stepKey(id, "review")] as ReviewResult | undefined)
+              ?.notes ?? []
+          ).map((note) => ({ item: id, ...note })),
+        ),
         signal,
         log: context.log,
       });
@@ -1237,6 +1244,8 @@ export async function removeWorkFiles(
     if (
       !name.endsWith(".shell") &&
       !name.endsWith(".validation") &&
+      !name.endsWith(".scratch") &&
+      !name.endsWith(".repro") &&
       !name.endsWith(".packages")
     )
       await removeWorktree(checkout, join(root, name), signal);

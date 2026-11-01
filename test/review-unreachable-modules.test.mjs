@@ -1,12 +1,13 @@
 // Review is given the files a change left unreachable. In a 0.5.11
 // benchmark run (#2253) a Work Item rewrote a web client's entry point,
-// left four modules nothing imported any more, and both reviews passed.
+// left four modules nothing imported any more, and both reviews passed. A
+// Work Item's review is told such a file is dead code, a note (#2344).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewResult, UNREACHABLE_GUIDANCE } from "../dist/review/result.js";
+import { itemInstructions, reviewResult } from "../dist/review/item.js";
 import { tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
@@ -87,6 +88,10 @@ async function reviewPrompt(specifier, change) {
       },
       sources: [],
       dir: tempDir("factory-review-unreachable-root-"),
+      scratch: async () => {
+        throw new Error("this review runs no command");
+      },
+      commandMs: 60_000,
       signal: AbortSignal.timeout(60_000),
       log: () => {},
     }),
@@ -96,6 +101,19 @@ async function reviewPrompt(specifier, change) {
 }
 
 const ROW = "Files this change left unreachable";
+
+const NONE = {
+  unreachable: false,
+  artifacts: false,
+  candidates: false,
+  inputs: false,
+  knowledge: false,
+  memory: false,
+};
+/** The item review's guidance for unreachable files: the line it adds. */
+const UNREACHABLE_GUIDANCE = itemInstructions({ ...NONE, unreachable: true })
+  .split("\n")
+  .at(-1);
 
 test("a result review lists a file the change left with no importer, and the rule to judge it", async () => {
   const prompt = await reviewPrompt("./b.js", () => {});
@@ -111,6 +129,7 @@ test("a result review lists a file the change left with no importer, and the rul
     .find((entry) => entry?.path === ROW);
   assert.deepEqual(JSON.parse(row.content).paths, ["src/b.ts"]);
   assert.ok(prompt.includes(UNREACHABLE_GUIDANCE));
+  assert.match(UNREACHABLE_GUIDANCE, /dead code: a note/);
 });
 
 test("a file the change deletes, or one imported by a form Factory can't resolve, is not listed", async () => {

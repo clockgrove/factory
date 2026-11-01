@@ -72,6 +72,13 @@ export interface WorkerInput {
    * continue it with only its delta. `prompt` is still the whole request.
    */
   conversation?: Conversation;
+  /**
+   * Asked at each turn boundary with the tokens this call has spent so
+   * far: true once the Objective's or the day's spend is past a limit by
+   * its margin (engine.ts StepContext.overspent). The worker then stops
+   * there with `spendStopped`, its changes kept in the worktree.
+   */
+  overspent?(running: number): boolean;
 }
 
 export type WorkerResult = (
@@ -84,8 +91,18 @@ export type WorkerResult = (
       /** The commands the worker's own Validate failed and no later run passed (self-validate.ts `validateFailed`). */
       validateFailed?: WorkerValidateFailure[];
     }
-  /** Usage or rate limit (`wait`), lost turn; an idle timeout is an error (`wait.kind` "error"). */
-  | { kind: "retry"; reason: string; afterMs?: number; wait?: Wait }
+  /**
+   * Usage or rate limit (`wait`), lost turn; an idle timeout is an error
+   * (`wait.kind` "error"). `progress`: stopped past the spend limit
+   * (`spendStopped`), it goes on at once, to the spend hold.
+   */
+  | {
+      kind: "retry";
+      reason: string;
+      afterMs?: number;
+      wait?: Wait;
+      progress?: boolean;
+    }
   /** Login expired, sandbox unavailable, configuration fault. */
   | {
       kind: "hold";
@@ -135,6 +152,19 @@ export type WorkerActivity =
   | { kind: "context"; tokens: number; window?: number }
   /** The provider compacted the worker's conversation. */
   | { kind: "compaction" };
+
+/**
+ * A worker stopped at a turn boundary past the spend limit's margin
+ * (`WorkerInput.overspent`): what it changed stays in the worktree, as
+ * after any stopped attempt, and the step comes back at once to the
+ * engine's spend check, which holds.
+ */
+export const spendStopped = (): WorkerResult => ({
+  kind: "retry",
+  reason:
+    "Model spend passed a spend limit by its margin: the worker stopped at a turn, its changes kept",
+  progress: true,
+});
 
 /** What a tool call acts on, from its arguments: a file, a command, a pattern or a URL. */
 export function targetOf(fields: Record<string, unknown>): { target?: string } {

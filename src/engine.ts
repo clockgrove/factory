@@ -29,6 +29,7 @@ import {
   type DaySpend,
   dayOf,
   grantSpend,
+  overspent,
   reached,
   spendLimits,
   spendQuestion,
@@ -325,6 +326,13 @@ export interface StepContext {
    * clash), such as a retained conversation's session (providers/session.ts).
    */
   keep(facts: Record<string, unknown>): void;
+  /**
+   * Whether a running worker stops at its turn boundary now: `running`
+   * tokens of its call, not charged yet, take the Objective's or the day's
+   * spend past a limit by its margin (spend.ts `overspent`). False with no
+   * limit set.
+   */
+  overspent?(running: number): boolean;
 }
 
 export interface Step {
@@ -840,7 +848,8 @@ export class ObjectiveRunner {
       }
       // A model step past the spend ceiling asks before it starts
       // (spend.ts): `more` allows one more step beyond the spend. Calls
-      // running finish.
+      // running finish; a worker past the limit's margin stops at its next
+      // turn and comes back here (`overspent`).
       const day =
         (step.resource === "planner" || step.resource === "worker") &&
         !this.state.attempts[step.key] &&
@@ -948,6 +957,9 @@ export class ObjectiveRunner {
       keep: (facts) => {
         kept = { ...kept, ...facts };
       },
+      overspent: (running) =>
+        Object.keys(spendLimits(this.state)).length > 0 &&
+        overspent(this.state, this.today(), running),
     };
     this.log.write(this.state.issue, {
       step: step.key,

@@ -1586,3 +1586,100 @@ test("more after a call overshot the spend limit leaves a full step beyond what 
   assert.equal(objective.state.spend.tokens, 3700);
   assert.match(objective.state.holds.at(-1).question, /3,700 tokens of 3,500/);
 });
+
+test("a worker attempt past the spend limit's margin stops at its next turn, and the spend hold opens", async () => {
+  const { ObjectiveRunner } = await import("../dist/engine.js");
+  const { newObjective } = await import("../dist/state.js");
+  const { DaySpend } = await import("../dist/spend.js");
+  const { spendStopped } = await import("../dist/work/worker.js");
+  const root = tempDir("factory-spend-turns-");
+  const run = {
+    id: "run",
+    finished: 0,
+    resumeAt: 0,
+    spend: new DaySpend(root),
+  };
+  const turns = [];
+  // A plan call spends 900 of the 1,000 allowed; the worker's attempt then
+  // spends 150 tokens a turn over up to 10 turns, asking between them as
+  // the adapters do, and its call is charged when it ends.
+  const objective = new ObjectiveRunner(
+    newObjective(34, new Date(), {
+      provider: "codex",
+      selectedBy: "defaultProvider",
+      digest: "x",
+      config: { autonomy: { spend: { perObjective: { tokens: 1000 } } } },
+    }),
+    {
+      steps: (state) =>
+        ["plan", "item:a:work"]
+          .filter((key) => !state.done[key])
+          .slice(0, 1)
+          .map((key) => ({
+            key,
+            resource: key === "plan" ? "planner" : "worker",
+            deadlineMs: 60_000,
+            run: async (context) => {
+              if (key === "plan") {
+                context.log({ event: "model-usage", tokens: { total: 900 } });
+                return { kind: "done" };
+              }
+              let running = 0;
+              try {
+                for (let turn = 1; turn <= 10; turn++) {
+                  running += 150;
+                  turns.push(turn);
+                  if (context.overspent(running)) return spendStopped();
+                }
+                return { kind: "done" };
+              } finally {
+                context.log({
+                  event: "model-usage",
+                  tokens: { total: running },
+                });
+              }
+            },
+          })),
+      status: () => "working",
+    },
+    root,
+    { write() {} },
+    run,
+  );
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  for (let i = 0; i < 3; i++) {
+    objective.tick();
+    await settle();
+  }
+  // Turn 1 crossed the limit (1,050 of 1,000) and went on; turn 2 passed
+  // it by the margin, a tenth of its step (1,200 >= 1,100), and stopped.
+  assert.deepEqual(turns, [1, 2]);
+  assert.equal(objective.state.spend.tokens, 1200);
+  const [held] = objective.state.holds;
+  assert.equal(held.step, "item:a:work");
+  assert.match(
+    held.question,
+    /this Objective's 1,200 tokens of 1,000 tokens .*`more` allows 1,000 tokens more, to 2,200 tokens\)/,
+  );
+  assert.deepEqual(
+    held.options.map((option) => option.answer),
+    ["more", "cancel"],
+  );
+  // After `more` the attempt runs again, and stops again only past the
+  // full step granted plus the margin (2,400 >= 2,300).
+  assert.equal(
+    objective.transact(() =>
+      objective.answer("more", undefined, "op", undefined, held.id),
+    ),
+    null,
+  );
+  for (let i = 0; i < 2; i++) {
+    objective.tick();
+    await settle();
+  }
+  assert.deepEqual(turns.slice(2), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(objective.state.spend.tokens, 2400);
+  assert.equal(objective.state.holds.at(-1).step, "item:a:work");
+});

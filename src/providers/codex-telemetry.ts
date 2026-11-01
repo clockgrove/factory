@@ -493,7 +493,8 @@ export function addCodexTelemetry(
     typeof record.thread === "string" ? record.thread : undefined,
     baseline?.size,
   );
-  if (record.tokens) record.tokenSource = "sdk";
+  // A worker that stopped before `turn.completed` set its own (native).
+  if (record.tokens) record.tokenSource ??= "sdk";
   if (!native) return;
   record.nativeToolActivity = native.nativeToolActivity;
   record.nativeTools = native.nativeTools;
@@ -628,8 +629,9 @@ const LIVE_BYTES = 8 * 1024 * 1024;
  * A running thread's context and compactions, read from its session record
  * as it grows: each call reads what was appended since the last one and
  * returns the last `token_count`'s context (its last request's input
- * tokens and the model's window) and the compactions it saw. Best effort:
- * a missing or unreadable record gives nothing.
+ * tokens and the model's window), the thread's cumulative counts then
+ * (`total`), and the compactions it saw. Best effort: a missing or
+ * unreadable record gives nothing.
  */
 export function codexLiveRecord(
   codexHome: string,
@@ -637,6 +639,8 @@ export function codexLiveRecord(
   from = 0,
 ): (thread: string) => {
   context?: { tokens: number; window?: number };
+  /** The thread's counts at the last `token_count` read, cumulative over its turns. */
+  total?: Tokens;
   compactions: number;
   /** Model responses since the last read (one `token_count` each). */
   responses: number;
@@ -651,6 +655,7 @@ export function codexLiveRecord(
     let compactions = 0;
     let responses = 0;
     let context: { tokens: number; window?: number } | undefined;
+    let total: Tokens | undefined;
     file ??= sessionRecords(join(codexHome, "sessions")).find((path) =>
       path.endsWith(`${thread}.jsonl`),
     );
@@ -697,18 +702,33 @@ export function codexLiveRecord(
         continue;
       compacting = false;
       const info = payload.info as Record<string, unknown> | null | undefined;
+      const counted = info?.total_token_usage as
+        | Record<string, unknown>
+        | undefined;
+      if (counted && typeof counted === "object")
+        total = tokens({
+          input: counted.input_tokens as number,
+          output: counted.output_tokens as number,
+          cached: counted.cached_input_tokens as number,
+          reasoning: counted.reasoning_output_tokens as number,
+        });
       const last = info?.last_token_usage as
         | Record<string, unknown>
         | undefined;
-      const tokens = last?.input_tokens;
-      if (typeof tokens !== "number") continue;
+      const input = last?.input_tokens;
+      if (typeof input !== "number") continue;
       responses += 1;
       const window = info?.model_context_window;
       context = {
-        tokens,
+        tokens: input,
         ...(typeof window === "number" ? { window } : {}),
       };
     }
-    return { ...(context ? { context } : {}), compactions, responses };
+    return {
+      ...(context ? { context } : {}),
+      ...(total ? { total } : {}),
+      compactions,
+      responses,
+    };
   };
 }

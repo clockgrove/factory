@@ -103,6 +103,16 @@ function validationInput(factory, config, record, at, signal, log) {
   };
 }
 
+/** The recorded validation's time for `commands` (`validated.commandsMs` in production), when it has their results. */
+function baselineMs(validation, commands) {
+  const results = (validation.results ?? []).filter(
+    (result) => commands.includes(result.command) && result.passed,
+  );
+  return results.length
+    ? results.reduce((sum, result) => sum + (result.durationMs ?? 0), 0)
+    : undefined;
+}
+
 /** The item's own commands a mutant runs: its validation without the exact install (step-validate.ts). */
 function ownCommands(factory, item) {
   const commands = item.validation.map((check) => check.command);
@@ -175,7 +185,14 @@ export async function review({
       validationInput(factory, config, record, at, signal, logged),
       join(dir, "scratch"),
     ),
-    mutation: { commands: ownCommands(factory, item), seed: item.id },
+    mutation: {
+      commands: ownCommands(factory, item),
+      // As production passes the validate step's `commandsMs`.
+      ...(baselineMs(validation, ownCommands(factory, item)) !== undefined && {
+        baselineMs: baselineMs(validation, ownCommands(factory, item)),
+      }),
+      seed: item.id,
+    },
     limits: {
       mutants: config.review.mutants,
       mutationMs: config.review.mutationSeconds * 1000,
@@ -190,22 +207,27 @@ export async function review({
     signal,
     log: logged,
   });
+  // Factory's protected-test criterion, scored as the item's scope.
+  const index = (v) =>
+    v.criterion === factory.item.PROTECTED_CRITERION
+      ? "protected"
+      : v.criterionIndex;
   const verdicts = [
     ...answer.verdicts.map((v) => ({
-      criterionIndex: v.criterionIndex,
+      criterionIndex: index(v),
       kind: v.verdict === "note" ? "note" : "pass",
       detail: v.detail,
     })),
     ...(answer.kind === "refused"
       ? answer.refused.map((v) => ({
-          criterionIndex: v.criterionIndex,
+          criterionIndex: index(v),
           kind: "refuse",
           detail: v.detail,
           ...(v.repro ? { repro: v.repro } : {}),
         }))
       : []),
     ...(answer.kind === "pass" ? [] : answer.questions).map((v) => ({
-      criterionIndex: v.criterionIndex,
+      criterionIndex: index(v),
       kind: "question",
       detail: `${v.detail}\n${v.question}`.trim(),
     })),

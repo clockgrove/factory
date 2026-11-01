@@ -963,6 +963,9 @@ async function validateCandidate(
     ) =>
       runSandboxed(command, {
         cwd: grant.at?.cwd ?? worktree,
+        // A copy appears at this checkout's path: the absolute paths the
+        // install recorded (pnpm's workspace state) hold in it as here.
+        ...(grant.at && { at: worktree }),
         home: grant.install
           ? await made("factory-install-home-")
           : (grant.at?.home ?? home),
@@ -1055,6 +1058,30 @@ async function validateCandidate(
         copies.add(directory);
         await mkdir(copiesRoot, { recursive: true });
         await addWorktree(checkout, directory, commit, signal, input.log);
+        // Its tracked files keep this checkout's times, so they are no
+        // newer than the install: a package manager that checks its
+        // install against its manifests' times (pnpm's
+        // verify-deps-before-run) finds it current, as here.
+        const tracked = (
+          await hostGit(worktree, ["ls-files", "-z"], { signal })
+        )
+          .toString("utf8")
+          .split("\0")
+          .filter(Boolean);
+        for (let at = 0; at < tracked.length; at += 500)
+          await execFileAsync(
+            "cp",
+            [
+              "-a",
+              "--attributes-only",
+              "--parents",
+              "-t",
+              directory,
+              "--",
+              ...tracked.slice(at, at + 500),
+            ],
+            { cwd: worktree, signal, maxBuffer: 1 << 24 },
+          );
         // What the checkout holds that its commit doesn't: the install's
         // output, restored LFS bytes and anything else Git ignores.
         const listed = (

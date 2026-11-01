@@ -14,18 +14,27 @@ import { loadConfig } from "../dist/config.js";
 import { ItemTelemetries, telemetryText } from "../dist/item-telemetry.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
+  CHECKS_TOOL_DESCRIPTION,
   commandToolDescription,
   ITEM_REVIEW_SCHEMA,
   itemInstructions,
+  PROTECTED_CRITERION,
   reviewCandidate,
   reviewResult,
-  validationScratch,
+  validationWorkspace,
 } from "../dist/review/item.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
 import { validateTree } from "../dist/validate.js";
 import { withRepros } from "../dist/work/repros.js";
 import { REFUSES_ITEM, reviewOutcome } from "../dist/work/step-review.js";
-import { configured, installation, item, REPO, tempDir } from "./helpers.mjs";
+import {
+  configured,
+  installation,
+  item,
+  NO_WORKSPACE,
+  REPO,
+  tempDir,
+} from "./helpers.mjs";
 
 const skip = sandboxAvailable().available
   ? false
@@ -136,14 +145,20 @@ function setup(repo) {
   return { work, plan, sandbox, validation };
 }
 
+/** The review's bounds: the installation's defaults, the test's command limit. */
+const LIMITS = {
+  mutants: 20,
+  mutationMs: 90_000,
+  commands: 20,
+  commandBudgetMs: 60_000,
+  commandMs: 60_000,
+  prepareMs: 60_000,
+};
+
 /** One review of the candidate with `planner`, its events logged. */
 function review(repo, planner, extra = {}) {
   const { work, validation } = setup(repo);
   const events = [];
-  const scratch = validationScratch(
-    validation(repo.head),
-    (name) => `${repo.checkout}.${name}`,
-  );
   return {
     events,
     run: reviewCandidate({
@@ -153,9 +168,13 @@ function review(repo, planner, extra = {}) {
       commit: repo.head,
       criteria: work.acceptance,
       validation: { tree: repo.tree, commands: COMMANDS },
-      scratch,
+      workspace: validationWorkspace(
+        validation(repo.head),
+        `${repo.checkout}.scratch`,
+      ),
+      mutation: { commands: COMMANDS, seed: "reduce" },
+      limits: LIMITS,
       itemId: work.id,
-      commandMs: 60_000,
       dir: tempDir("factory-repro-review-"),
       signal: AbortSignal.timeout(120_000),
       log: (event) => events.push({ step: "item:reduce:review", ...event }),
@@ -182,6 +201,11 @@ const refuse = (criterionIndex, command, actual) => ({
     command,
   },
 });
+
+/** Run the call's Factory tool `name` on `input`. */
+const tool = (call, name, input = {}) =>
+  call.tools.find((each) => each.name === name).run(input);
+const command = (call, text) => tool(call, "run_command", { command: text });
 
 /** A planner whose answers are `answers`, in order; it records each call. */
 function answering(...answers) {
@@ -352,11 +376,14 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
     'node -e \'fetch("http://example.com").then(() => process.exit(0), () => { console.log("no network"); process.exit(7); })\'';
   let ran;
   let offline;
+  let survivors;
   const planner = answering(async (call) => {
-    ran = await call.commands.run("node test/reduce.test.js && echo tested");
-    offline = await call.commands.run(fetch);
+    // The mutation pass runs beside the reviewer, which waits for it here.
+    survivors = JSON.parse(await tool(call, "checks")).mutationPass;
+    ran = await command(call, "node test/reduce.test.js && echo tested");
+    offline = await command(call, fetch);
     // The scratch is a copy: a write there never reaches the candidate.
-    await call.commands.run("echo changed > src/reduce.js");
+    await command(call, "echo changed > src/reduce.js");
     return {
       findings: [pass(0, `The test ran: ${ran.split("\n")[1]}`), pass(1)],
     };
@@ -368,10 +395,18 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
   assert.equal(outcome.kind, "pass");
   assert.equal(outcome.verdicts[0].detail, "The test ran: tested");
   assert.equal(git(repo.checkout, "rev-parse", "HEAD^{tree}"), repo.tree);
-  assert.equal(
-    events.find((event) => event.event === "result-review").commands,
-    3,
+  // The weak test leaves survivors, which reach the reviewer as evidence.
+  assert.equal(survivors.status, "done");
+  assert.ok(
+    survivors.survived > 0 && survivors.killed > 0,
+    JSON.stringify(survivors),
   );
+  const logged = events.find((event) => event.event === "result-review");
+  assert.equal(logged.commands, 3);
+  assert.deepEqual(logged.mutants.seeded, survivors.seeded);
+  for (const phase of ["prepareMs", "mutationMs", "modelMs", "reprosMs"])
+    assert.equal(typeof logged.phases[phase], "number", phase);
+  assert.equal(logged.phases.commands.count, 3);
   // The same call fails as a validation command.
   const { validation, work } = setup(repo);
   const validated = await validateTree({
@@ -381,6 +416,66 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
   });
   assert.equal(validated.kind, "failed");
   assert.match(validated.output, /no network/);
+});
+
+test("R4: the reviewer's commands stop at the review's command budget", {
+  skip,
+}, async () => {
+  const repo = target();
+  const replies = [];
+  const planner = answering(async (call) => {
+    for (const text of ["true", "true"])
+      replies.push(await command(call, text).catch((error) => error.message));
+    return { findings: [pass(0), pass(1)] };
+  });
+  await review(repo, planner, {
+    limits: { ...LIMITS, commands: 1, mutants: 0 },
+  }).run;
+  assert.match(replies[0], /^Exit code 0/);
+  assert.match(replies[1], /command budget is spent \(1 commands/);
+});
+
+test("a result that deletes an existing assertion is refused by the protected-test check, with no judgement of the failure", {
+  skip,
+}, async () => {
+  const repo = target(REDUCER);
+  // The base's test checks patches; the candidate drops that assertion
+  // and the behaviour it guarded.
+  const guarded = `${TEST}assert.deepEqual(reduce([{ kind: "patch", version: 2, item: "b" }]).items, ["b"]);\n`;
+  repo.base = repo.commit({ "test/reduce.test.js": guarded });
+  repo.head = repo.commit({
+    "src/reduce.js": REDUCER.replace(
+      "[...state.items, event.item]",
+      "state.items",
+    ),
+    "test/reduce.test.js": TEST,
+  });
+  repo.tree = git(repo.checkout, "rev-parse", "HEAD^{tree}");
+  // The reviewer passes everything and never looks at the check.
+  const planner = answering({ findings: [pass(0), pass(1)] });
+  const { run, events } = review(repo, planner);
+  const outcome = await run;
+  assert.ok(planner.calls[0].prompt.includes(PROTECTED_CRITERION));
+  assert.equal(outcome.kind, "refused");
+  assert.deepEqual(
+    outcome.refused.map((entry) => entry.criterion),
+    [PROTECTED_CRITERION],
+  );
+  const { repro } = outcome.refused[0];
+  assert.match(repro.command, /git show [0-9a-f]{40}:"\$f"/);
+  assert.match(repro.actual, /AssertionError/);
+  assert.equal(
+    events.find((event) => event.event === "result-review-protected").failed,
+    true,
+  );
+  // As validation after a repair, the repro leaves the tree as it found it.
+  const { work, validation } = setup(repo);
+  const validated = await validateTree({
+    ...validation(repo.base),
+    item: { ...work, validation: [{ command: repro.command }] },
+    directory: `${repo.checkout}.validation`,
+  });
+  assert.equal(validated.kind, "passed", validated.detail);
 });
 
 test("R6: any command the item's validation runs proves any criterion; the plan's command binding never reaches the review", async () => {
@@ -415,10 +510,7 @@ test("R6: any command the item's validation runs proves any criterion; the plan'
     commit: repo.head,
     validation: { tree: repo.tree, commands: COMMANDS },
     sources: [],
-    scratch: async () => {
-      throw new Error("this review runs no command");
-    },
-    commandMs: 60_000,
+    ...NO_WORKSPACE,
     dir: tempDir("factory-repro-review-"),
     signal: AbortSignal.timeout(60_000),
     log: () => {},
@@ -452,9 +544,7 @@ test("R7: every review is a fresh call, and a re-review's packet holds the confi
       tree: git(repo.checkout, "rev-parse", "HEAD^{tree}"),
       commands: COMMANDS,
     },
-    scratch: async () => {
-      throw new Error("this review runs no command");
-    },
+    ...NO_WORKSPACE,
     itemId: work.id,
     prior: {
       tree: repo.tree,
@@ -466,7 +556,6 @@ test("R7: every review is a fresh call, and a re-review's packet holds the confi
         },
       ],
     },
-    commandMs: 60_000,
     dir: tempDir("factory-repro-review-"),
     signal: AbortSignal.timeout(60_000),
     log: () => {},
@@ -518,16 +607,22 @@ test("R8: behaviour the sources don't define is one question, one hold and no re
   assert.equal(repaired, false);
 });
 
-test("R9: the assembled instructions, with every evidence kind's guidance and the command tool, fit in 5,000 characters", () => {
-  const all = itemInstructions({
-    unreachable: true,
-    artifacts: true,
-    candidates: true,
-    inputs: true,
-    knowledge: true,
-    memory: true,
-  });
-  const size = all.length + commandToolDescription(1_800_000).length;
+test("R9: the assembled instructions, with every evidence kind's guidance and both tools' descriptions, fit in 5,000 characters", () => {
+  const all = itemInstructions(
+    {
+      unreachable: true,
+      artifacts: true,
+      candidates: true,
+      inputs: true,
+      knowledge: true,
+      memory: true,
+    },
+    LIMITS,
+  );
+  const size =
+    all.length +
+    commandToolDescription(LIMITS).length +
+    CHECKS_TOOL_DESCRIPTION.length;
   assert.ok(size <= 5000, `${size} characters`);
   assert.match(
     all,
@@ -565,6 +660,13 @@ test("R11: the item's telemetry shows the reviews' verdicts, repros, mutants, qu
       repros: { confirmed: 1, dropped: 1 },
       questions: 0,
       commands: 3,
+      phases: {
+        prepareMs: 12_000,
+        mutationMs: 60_000,
+        modelMs: 90_000,
+        commands: { count: 3, ms: 30_000 },
+        reprosMs: 8000,
+      },
       ms: 4000,
       at,
     },
@@ -578,6 +680,7 @@ test("R11: the item's telemetry shows the reviews' verdicts, repros, mutants, qu
       mutants: item.reviewer.mutants,
       tokens: item.reviewer.tokens.sum,
       ms: item.reviewer.ms,
+      phases: item.reviewer.phases,
     },
     {
       verdicts: { pass: 1, refuse: 2, question: 0, note: 1 },
@@ -585,6 +688,13 @@ test("R11: the item's telemetry shows the reviews' verdicts, repros, mutants, qu
       mutants: { status: "done", seeded: 6, killed: 4, survived: 2 },
       tokens: 1200,
       ms: 4000,
+      phases: {
+        prepareMs: 12_000,
+        mutationMs: 60_000,
+        modelMs: 90_000,
+        commandMs: 30_000,
+        reprosMs: 8000,
+      },
     },
   );
   assert.match(

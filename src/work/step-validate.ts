@@ -13,10 +13,9 @@ import {
 } from "../planning/plan.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
-import { type MutationPass, mutationPass } from "../review/mutants.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
-import { errorMessage, failureExcerpt } from "../text.js";
+import { failureExcerpt } from "../text.js";
 import {
   formatRef,
   laterScriptChanges,
@@ -87,7 +86,6 @@ export async function validateStep(
     commit,
     plan: state.kept[ACCEPTED_AT] ?? null,
     validation: checked.validation,
-    mutation: config.review,
     blocks,
     base: work.base,
     planBase: plan.base,
@@ -106,7 +104,6 @@ export async function validateStep(
     return reusedValidation(item, context, place, kept, plan);
   // A run that ends without a result leaves no kept one behind it.
   context.keep(facts({ validation: null }, item.id));
-  let mutation: MutationPass | undefined;
   const result = await validateTree({
     checkout: config.checkout,
     repository: config.repository,
@@ -148,48 +145,6 @@ export async function validateStep(
     signal,
     log: context.log,
     runFile: context.runFile,
-    // The mutation pass, on the passed result in its checkout.
-    // It is evidence for the review, so one that can't run is a note,
-    // never the result's failure.
-    use: async (validated) => {
-      const started = Date.now();
-      try {
-        mutation = await mutationPass({
-          checkout: validated,
-          repo: validated.directory,
-          base: work.base,
-          commit: "HEAD",
-          commands: ownCommands(item),
-          limits: {
-            max: config.review.mutants,
-            ms: config.review.mutationSeconds * 1000,
-          },
-          seed: item.id,
-          signal,
-          log: context.log,
-        });
-      } catch (error) {
-        signal.throwIfAborted();
-        mutation = {
-          status: "skipped",
-          note: `The mutation pass could not run: ${errorMessage(error)}`,
-          seeded: 0,
-          killed: 0,
-          survived: 0,
-          survivors: [],
-          ms: Date.now() - started,
-        };
-        context.log({
-          event: "mutation-pass",
-          status: "skipped",
-          seeded: 0,
-          killed: 0,
-          survived: 0,
-          ms: mutation.ms,
-          error: errorMessage(error),
-        });
-      }
-    },
   });
   switch (result.kind) {
     case "passed": {
@@ -199,7 +154,7 @@ export async function validateStep(
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
         ...(result.formatted ? { formatted: result.formatted } : {}),
-        ...(mutation ? { mutation } : {}),
+        commandsMs: ownCommandsMs(item, result.results),
       };
       const integrated = earlier.length
         ? await integratedValidation({
@@ -276,14 +231,30 @@ export async function validateStep(
 }
 
 /**
- * The item's own commands a mutant runs: its validation without the
- * exact install it may start with, which the checkout ran already.
+ * The item's own commands a mutant runs (review/mutants.ts): its
+ * validation without the exact install it may start with, which the
+ * review's checkout ran already, and without its repros.
  */
-function ownCommands(item: WorkItem): string[] {
+export function ownCommands(item: WorkItem): string[] {
   const commands = item.validation.map((check) => check.command);
   return commands.length && packageBootstrap(commands[0]!) !== undefined
     ? commands.slice(1)
     : commands;
+}
+
+/** How long the item's own commands took in a passed run: what bounds each mutant. */
+function ownCommandsMs(
+  item: WorkItem,
+  results: readonly {
+    command: string;
+    durationMs: number;
+    preparation?: true;
+  }[],
+): number {
+  const own = new Set(ownCommands(item));
+  return results
+    .filter((result) => !result.preparation && own.has(result.command))
+    .reduce((sum, result) => sum + result.durationMs, 0);
 }
 
 /**

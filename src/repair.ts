@@ -77,6 +77,7 @@ import {
 } from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
 import type { Planner } from "./providers/planner.js";
+import { PROTECTED_CRITERION } from "./review/item.js";
 import {
   type RefusedCriterion,
   type ReviewConversation,
@@ -412,7 +413,8 @@ export function failureIdentity(
 
 /**
  * The criteria a review judges for the item: the result review's, its own
- * acceptance as the worker's Acceptance list numbers it, or with `final`,
+ * acceptance as the worker's Acceptance list numbers it and Factory's
+ * protected-test criterion (review/item.ts), or with `final`,
  * the ones the plan's coverage gives it, whatever proves them.
  */
 function reviewedCriteria(
@@ -423,7 +425,7 @@ function reviewedCriteria(
     ? plan.coverage
         .filter((entry) => entry.itemId === item.id)
         .map(coverageCriterion)
-    : item.acceptance;
+    : [...item.acceptance, PROTECTED_CRITERION];
 }
 
 /** `identity` as the failure of a blame of a predecessor by `item`. */
@@ -593,7 +595,7 @@ function reviewFindingsCorrection(
   if (prior.some((tried) => tried.source === source)) return undefined;
   // Numbered as the worker's Acceptance list numbers them.
   const numbered = item.acceptance;
-  const reviewed = finding.final ? reviewedCriteria(input, true) : numbered;
+  const reviewed = reviewedCriteria(input, finding.final === true);
   const identity = failureIdentity(input);
   if (
     !finding.refused.length ||

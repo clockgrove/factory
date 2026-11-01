@@ -1245,7 +1245,7 @@ export async function removeWorkFiles(
       !name.endsWith(".shell") &&
       !name.endsWith(".validation") &&
       !name.endsWith(".scratch") &&
-      !name.endsWith(".repro") &&
+      !name.endsWith(".copies") &&
       !name.endsWith(".packages")
     )
       await removeWorktree(checkout, join(root, name), signal);

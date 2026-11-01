@@ -47,11 +47,8 @@ import {
   turnTokens,
 } from "./codex-telemetry.js";
 import {
-  COMMAND_TOOL_INPUT,
-  COMMAND_TOOL_NAME,
-  type CommandTool,
+  type CallTool,
   callImages,
-  commandRunner,
   detail,
   freshOnOverflow,
   IdleWatchdog,
@@ -65,6 +62,8 @@ import {
   PlannerError,
   type PlannerModels,
   type PlannerPhase,
+  toolRunner,
+  toolsLimitMs,
 } from "./planner.js";
 import { openTurn, overflowed, type Turn, turnFields } from "./session.js";
 import {
@@ -410,55 +409,65 @@ export function codexHomeOf(conversationDir: string): string {
   return join(conversationDir, "codex");
 }
 
-/** The MCP server a Codex call's `commands` is offered through (codex-mcp.ts). */
-const COMMAND_SERVER = "factory-review";
+/** The MCP server a Codex call's `tools` are offered through (codex-mcp.ts). */
+const TOOL_SERVER = "factory-review";
 
 /**
- * `COMMAND_TOOL_NAME` as a code-mode model calls it: `tools.<id>` inside an
+ * A call tool's name as a code-mode model calls it: `tools.<id>` inside an
  * exec script, `mcp__<server>__<tool>` with the server's `-` read as `_`.
  */
-export const CODEX_COMMAND_TOOL_ID = `mcp__${COMMAND_SERVER.replaceAll("-", "_")}__${COMMAND_TOOL_NAME}`;
+export function codexToolId(name: string): string {
+  return `mcp__${TOOL_SERVER.replaceAll("-", "_")}__${name}`;
+}
 
 /**
- * How a Codex model calls the command tool, in the call's base
- * instructions (the review prompt is every provider's): Codex's production
- * models see only `exec`, and call an MCP tool from inside it, as a Codex
- * worker calls Validate (codex-validate.ts `CODEX_VALIDATE_CALL`).
+ * How a Codex model calls Factory's tools, in the call's base instructions
+ * (the review prompt is every provider's): Codex's production models see
+ * only `exec`, and call an MCP tool from inside it, as a Codex worker
+ * calls Validate (codex-validate.ts `CODEX_VALIDATE_CALL`).
  */
-const CODEX_COMMAND_CALL = `${COMMAND_TOOL_NAME} is the MCP tool ${COMMAND_TOOL_NAME} of Factory's server ${COMMAND_SERVER}, id ${CODEX_COMMAND_TOOL_ID}. Inside exec, call it as \`const result = await tools.${CODEX_COMMAND_TOOL_ID}({ command: "..." }); text(result.content.map((part) => part.text).join(""));\`; where your tools list ${COMMAND_TOOL_NAME} directly, call it there.`;
+function codexToolCall(names: readonly string[]): string {
+  const ids = names.map((name) => `${name} as tools.${codexToolId(name)}`);
+  return `Factory's tools are MCP tools of its server ${TOOL_SERVER}. Inside exec, call each by its id with its input object: ${ids.join(", ")}, as in \`const result = await tools.${codexToolId(names[0]!)}({ ... }); text(result.content.map((part) => part.text).join(""));\`; where your tools list one directly, call it there.`;
+}
 
-/** `commands` served for one Codex call: its MCP server, listening until closed. */
-export function codexCommandServer(
-  commands: CommandTool,
+/** `tools` served for one Codex call: their MCP server, listening until closed. */
+export function codexToolServer(
+  tools: readonly CallTool[],
 ): Promise<McpSocketServer> {
-  const run = commandRunner(commands);
-  return McpSocketServer.start(COMMAND_SERVER, {
-    name: COMMAND_TOOL_NAME,
-    description: commands.description,
-    // It runs commands in a scratch checkout, never the reviewed tree.
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      openWorldHint: false,
-    },
-    inputSchema: COMMAND_TOOL_INPUT,
-    call: async (args) => {
-      const reply = await run(args);
-      return { text: reply.text, isError: reply.error };
-    },
-  });
+  return McpSocketServer.start(
+    TOOL_SERVER,
+    tools.map((tool) => {
+      const run = toolRunner(tool);
+      return {
+        name: tool.name,
+        description: tool.description,
+        // They act on Factory's scratch checkouts, never the reviewed tree.
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: false,
+        },
+        inputSchema: tool.input,
+        call: async (args: unknown) => {
+          const reply = await run(args);
+          return { text: reply.text, isError: reply.error };
+        },
+      };
+    }),
+  );
 }
 
 /**
  * A planning call's home with a working directory. `readDir` turns on the
- * read-only shell and view_image over that directory alone; `commands`
- * registers the call's command tool server, told how to call it, with
- * each call allowed the tool's limit.
+ * read-only shell and view_image over that directory alone; `tools`
+ * registers the call's tool server, told how to call each, with each call
+ * allowed the longest tool's limit.
  */
 export function codexHome(
   readDir: string | undefined,
   root: string | undefined,
-  commands?: { server: McpSocketServer; limitMs: number },
+  tools?: { server: McpSocketServer; names: string[]; limitMs: number },
 ): {
   root: string;
   workdir: string;
@@ -475,19 +484,19 @@ export function codexHome(
       const config = readDir
         ? `default_permissions = "factory"\n${CODEX_TREE_REVIEW_CONFIG}\n${permissionProfile()}`
         : CODEX_PLANNING_CONFIG;
-      if (!commands) return config;
+      if (!tools) return config;
       const instructions = JSON.stringify(CODEX_READONLY_BASE_INSTRUCTIONS);
       return `${config.replace(
         instructions,
         JSON.stringify(
-          `${CODEX_READONLY_BASE_INSTRUCTIONS}\n\n${CODEX_COMMAND_CALL}`,
+          `${CODEX_READONLY_BASE_INSTRUCTIONS}\n\n${codexToolCall(tools.names)}`,
         ),
       )}${codexMcpServerConfig(
-        COMMAND_SERVER,
-        commands.server,
-        COMMAND_TOOL_NAME,
-        // A minute over the tool's own limit, so its answer comes first.
-        commands.limitMs / 1000 + 60,
+        TOOL_SERVER,
+        tools.server,
+        tools.names,
+        // A minute over the longest tool's own limit, so its answer comes first.
+        tools.limitMs / 1000 + 60,
       )}`;
     },
     finish: ({ root, env }) => {
@@ -603,21 +612,21 @@ export class CodexPlanner implements Planner {
     }
     const idleMs = codexIdleMs(call.phase, choice.effort);
     // A running read-only command gets the same bound: none would hang it.
-    // A command of `commands` may be quiet for as long as it may take.
+    // A Factory tool may be quiet for as long as it may take.
     const watchdog = new IdleWatchdog(
       idleMs,
       call.signal,
-      Math.max(idleMs, call.commands?.limitMs ?? 0),
+      Math.max(idleMs, toolsLimitMs(call.tools)),
     );
     let commands: McpSocketServer | undefined;
-    if (call.commands)
+    if (call.tools?.length)
       try {
-        commands = await codexCommandServer(call.commands);
+        commands = await codexToolServer(call.tools);
       } catch (error) {
         watchdog.stop();
         throw new PlannerError(
           "hold",
-          `Factory could not serve ${COMMAND_TOOL_NAME} to the Codex reviewer; fix the host's temporary directory, then answer retry (${detail(String(error))})`,
+          `Factory could not serve its tools to the Codex reviewer; fix the host's temporary directory, then answer retry (${detail(String(error))})`,
         );
       }
     let home: ReturnType<typeof codexHome>;
@@ -641,7 +650,11 @@ export class CodexPlanner implements Planner {
       home = codexHome(
         call.readDir,
         call.conversation && codexHomeOf(call.conversation.dir),
-        commands && { server: commands, limitMs: call.commands!.limitMs },
+        commands && {
+          server: commands,
+          names: call.tools!.map((tool) => tool.name),
+          limitMs: toolsLimitMs(call.tools),
+        },
       );
     } catch (error) {
       watchdog.stop();

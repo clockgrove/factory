@@ -27,7 +27,7 @@ import {
   reviewOutcome,
 } from "../dist/work/step-review.js";
 import { withKeep } from "../dist/work/step-work.js";
-import { item, plan, tempDir } from "./helpers.mjs";
+import { item, NO_WORKSPACE, plan, tempDir } from "./helpers.mjs";
 
 const KEY = "item:a:review";
 const BASE = "b".repeat(40);
@@ -95,10 +95,7 @@ function reviewStep(reviews, asked) {
             validation: { tree: TREE, commands: [] },
             sources: [],
             dir: "/nonexistent",
-            scratch: async () => {
-              throw new Error("the reviewer ran a command");
-            },
-            commandMs: 60_000,
+            ...NO_WORKSPACE,
             decisions: decided.decisions,
             earlier: decided.earlier,
             signal: AbortSignal.timeout(60_000),

@@ -8,7 +8,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { itemInstructions, reviewResult } from "../dist/review/item.js";
-import { tempDir } from "./helpers.mjs";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -88,10 +88,7 @@ async function reviewPrompt(specifier, change) {
       },
       sources: [],
       dir: tempDir("factory-review-unreachable-root-"),
-      scratch: async () => {
-        throw new Error("this review runs no command");
-      },
-      commandMs: 60_000,
+      ...NO_WORKSPACE,
       signal: AbortSignal.timeout(60_000),
       log: () => {},
     }),
@@ -111,7 +108,10 @@ const NONE = {
   memory: false,
 };
 /** The item review's guidance for unreachable files: the line it adds. */
-const UNREACHABLE_GUIDANCE = itemInstructions({ ...NONE, unreachable: true })
+const UNREACHABLE_GUIDANCE = itemInstructions(
+  { ...NONE, unreachable: true },
+  NO_WORKSPACE.limits,
+)
   .split("\n")
   .at(-1);
 

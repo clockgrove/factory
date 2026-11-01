@@ -7,7 +7,6 @@ import type { PlanningDeps } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
-import type { MutationPass } from "../review/mutants.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import {
@@ -120,10 +119,12 @@ export interface ValidateResult {
    */
   formatted?: AppliedFormatter;
   /**
-   * The mutation pass over the passed result (review/mutants.ts), whose
-   * survivors the result review gets. Absent before 0.5.14.
+   * How long the item's own commands took on this tree (not the install
+   * or its repros, work/step-validate.ts `ownCommands`): the result
+   * review's mutation pass gives each mutant three times this, and 30 s.
+   * Absent on results from before 0.5.14.
    */
-  mutation?: MutationPass;
+  commandsMs?: number;
 }
 
 export interface PublishResult {
@@ -426,21 +427,21 @@ export function itemStep(
                 deps.config.validation.formatCommand !== undefined,
               ) +
               // A Work Item's confirmed refusals' repro commands
-              // (repros.ts), one a criterion, and its mutation pass
-              // (review/mutants.ts); its commands may run again on the
-              // Objective's merges it was built without (step-validate.ts,
-              // #2240).
+              // (repros.ts), one a criterion; its commands may run again
+              // on the Objective's merges it was built without
+              // (step-validate.ts, #2240).
               (item.kind === "qa"
                 ? 0
                 : item.acceptance.length * commandTimeoutMs(deps) +
-                  deps.config.review.mutationSeconds * 1000 +
                   (place ? 0 : item.validation.length * commandTimeoutMs(deps)))
             : phase === "review"
-              ? // The reviewer's scratch checkout and each refusal check
-                // install and run a command (review/item.ts).
+              ? // One warm install for the review's checkout, whose copies
+                // run the mutation pass, the reviewer's commands and the
+                // refusal checks at once (review/item.ts).
                 45 * MINUTE +
-                (1 + item.acceptance.length) *
-                  (2 * commandTimeoutMs(deps) + 15 * MINUTE) +
+                2 * commandTimeoutMs(deps) +
+                15 * MINUTE +
+                deps.config.review.mutationSeconds * 1000 +
                 (revalidates
                   ? validationDeadlineMs(item, commandTimeoutMs(deps))
                   : 0)

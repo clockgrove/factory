@@ -10,9 +10,9 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ITEM_REVIEW_INSTRUCTIONS, reviewResult } from "../dist/review/item.js";
+import { itemInstructions, reviewResult } from "../dist/review/item.js";
 import { LFS_GUIDANCE, REVIEW_GUIDANCE } from "../dist/review/result.js";
-import { tempDir } from "./helpers.mjs";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -47,7 +47,19 @@ test("result and final review are told that Git LFS pointers in the evidence roo
   // QA and final review give the evidence-root guidance; a Work Item's
   // review its own sentence.
   assert.ok(REVIEW_GUIDANCE.evidenceRoot.includes(LFS_GUIDANCE));
-  assert.ok(ITEM_REVIEW_INSTRUCTIONS.includes(ITEM_LFS));
+  assert.ok(
+    itemInstructions(
+      {
+        unreachable: false,
+        artifacts: false,
+        candidates: false,
+        inputs: false,
+        knowledge: false,
+        memory: false,
+      },
+      NO_WORKSPACE.limits,
+    ).includes(ITEM_LFS),
+  );
 });
 
 test("a result review's candidate/ holds an LFS file's pointer, and its prompt says validation read the bytes", async () => {
@@ -124,10 +136,7 @@ test("a result review's candidate/ holds an LFS file's pointer, and its prompt s
       validation: { tree, commands: ["npm test"] },
       sources: [],
       dir: tempDir("factory-review-lfs-root-"),
-      scratch: async () => {
-        throw new Error("this review runs no command");
-      },
-      commandMs: 60_000,
+      ...NO_WORKSPACE,
       signal: AbortSignal.timeout(60_000),
       log: () => {},
     }),

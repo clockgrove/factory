@@ -17,18 +17,23 @@
  * At most `max` mutants run: the ones whose hash with the seed sorts first,
  * which depends on the mutant and the seed only, so adding a line elsewhere
  * doesn't move the others. Each runs the commands in a checkout that
- * passed them unmutated; the first command to fail, or the mutant timing
- * out (an endless loop), kills it.
+ * passed them unmutated, several at once in checkouts of their own; the
+ * first command to fail, or the mutant timing out (an endless loop), kills
+ * it.
  */
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ValidatedCheckout } from "../validate.js";
+import { hostLimits } from "../engine.js";
+import type { CheckoutCopy, ValidatedCheckout } from "../validate.js";
 import { hostGit } from "../worktree.js";
 
 const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|cs|php|c|cc|cpp|h|hpp)$/;
 const TEST =
   /(?:^|\/)(?:tests?|__tests__|spec)\/|\.(?:test|spec)\.|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
+
+/** Whether `path` is a test file by its path: in a test directory, or named as a test. */
+export const isTestPath = (path: string) => TEST.test(path);
 
 /** `[from, to]` operators, each flipped where it stands between spaces. */
 const SWAPS = [
@@ -262,49 +267,71 @@ export type MutantResult = Mutant & {
   by?: string;
 };
 
+/** Where mutants run: a checkout of the measured commit, and how a command runs there. */
+export interface MutantLane {
+  tree: string;
+  /** `signal`, when given, stops the command, which then rejects. */
+  run(
+    command: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<MutantRun>;
+}
+
 /**
- * Run `mutants` in `tree` (a scratch checkout of the measured commit),
- * each against the `tests` commands through `run`. The tests must pass
- * unmutated: `baselineMs` is how long they took when the caller knows
- * they passed; absent, they run once first. A mutant gets three times
- * that long, and 30 s, before it counts as an endless loop and is killed.
- * Returns `done`, `failing` (a test command fails on the commit, so
- * nothing is measured, with that `command`) or `timeout` (`deadline`, a
- * time in ms, came first), with the mutants measured so far.
+ * Run `mutants` against the `tests` commands, the lanes at once, each
+ * taking the next mutant, writing it in its own checkout, running the
+ * commands until the first that fails (which kills it), and restoring the
+ * file. The tests must pass unmutated: with `passing` the caller knows
+ * they do (validation passed them), else they run once first in the first
+ * lane. A mutant gets three times `baselineMs` (or the first run's time),
+ * and 30 s, before it counts as an endless loop and is killed; with
+ * `passing` and no `baselineMs`, only the deadline bounds it. Returns
+ * `done`, `failing` (a test command fails on the commit, so nothing is
+ * measured, with that `command`) or `timeout` (`deadline`, a time in ms,
+ * came first) or `stopped` (`signal` aborted: its running commands are
+ * stopped and their mutants not counted), with the mutants measured so
+ * far, in mutant order.
  */
 export async function runMutants(
-  tree: string,
+  lanes: readonly MutantLane[],
   mutants: readonly Mutant[],
   {
     tests,
     deadline,
-    run,
     baselineMs,
+    passing = false,
+    signal,
   }: {
     tests: readonly string[];
     deadline: number;
-    run(command: string, timeoutMs: number): Promise<MutantRun>;
     baselineMs?: number;
+    passing?: boolean;
+    signal?: AbortSignal;
   },
 ): Promise<{
-  status: "done" | "failing" | "timeout";
+  status: "done" | "failing" | "timeout" | "stopped";
   results: MutantResult[];
   command?: string;
 }> {
-  /** The first command to fail within `ms`, or null. */
-  const failure = async (ms: number) => {
+  /** The first command to fail in `lane` within `ms`, or null. */
+  const failure = async (lane: MutantLane, ms: number) => {
     const end = Date.now() + ms;
     for (const command of tests) {
-      const step = await run(command, Math.max(end - Date.now(), 1));
+      const step = await lane.run(
+        command,
+        Math.max(end - Date.now(), 1),
+        signal,
+      );
       if (step.exitCode !== 0 || step.timedOut)
         return { command, timedOut: step.timedOut };
     }
     return null;
   };
   let baseline = baselineMs;
-  if (baseline === undefined) {
+  if (baseline === undefined && !passing) {
     const started = Date.now();
-    const unmutated = await failure(deadline - started);
+    const unmutated = await failure(lanes[0]!, deadline - started);
     if (unmutated)
       return {
         status: Date.now() >= deadline ? "timeout" : "failing",
@@ -313,30 +340,53 @@ export async function runMutants(
       };
     baseline = Date.now() - started;
   }
-  const limit = 3 * baseline + 30_000;
-  const results: MutantResult[] = [];
-  for (const mutant of mutants) {
-    if (Date.now() >= deadline) return { status: "timeout", results };
-    const path = join(tree, mutant.file);
-    const original = await readFile(path, "utf8");
-    const lines = original.split("\n");
-    lines[mutant.line - 1] = mutant.text;
-    await writeFile(path, lines.join("\n"));
-    let failed: Awaited<ReturnType<typeof failure>>;
-    try {
-      failed = await failure(Math.min(limit, deadline - Date.now()));
-    } finally {
-      await writeFile(path, original);
+  const limit =
+    baseline === undefined ? Number.POSITIVE_INFINITY : 3 * baseline + 30_000;
+  const measured = new Map<Mutant, MutantResult>();
+  let next = 0;
+  let late = false;
+  const lane = async (at: MutantLane) => {
+    while (next < mutants.length) {
+      if (signal?.aborted) return;
+      if (Date.now() >= deadline) {
+        late = true;
+        return;
+      }
+      const mutant = mutants[next++]!;
+      const path = join(at.tree, mutant.file);
+      const original = await readFile(path, "utf8");
+      const lines = original.split("\n");
+      lines[mutant.line - 1] = mutant.text;
+      await writeFile(path, lines.join("\n"));
+      let failed: Awaited<ReturnType<typeof failure>>;
+      try {
+        failed = await failure(at, Math.min(limit, deadline - Date.now()));
+      } catch (error) {
+        // Stopped: this mutant isn't measured.
+        if (signal?.aborted) return;
+        throw error;
+      } finally {
+        await writeFile(path, original);
+      }
+      if (failed?.timedOut && Date.now() >= deadline) {
+        late = true;
+        return;
+      }
+      measured.set(mutant, {
+        ...mutant,
+        result: failed ? "killed" : "survived",
+        ...(failed ? { by: failed.command } : {}),
+      });
     }
-    if (failed?.timedOut && Date.now() >= deadline)
-      return { status: "timeout", results };
-    results.push({
-      ...mutant,
-      result: failed ? "killed" : "survived",
-      ...(failed ? { by: failed.command } : {}),
-    });
-  }
-  return { status: "done", results };
+  };
+  await Promise.all(lanes.map(lane));
+  return {
+    status: signal?.aborted ? "stopped" : late ? "timeout" : "done",
+    results: mutants.flatMap((mutant) => {
+      const result = measured.get(mutant);
+      return result ? [result] : [];
+    }),
+  };
 }
 
 /** A surviving mutant, as a result review sees it: the mutated line. */
@@ -349,8 +399,12 @@ export interface Survivor {
 
 /** A Work Item's mutation pass over its passed result (`mutationPass`). */
 export interface MutationPass {
-  /** `skipped`: nothing to mutate, or the pass is off; `timeout`: its time ran out first. */
-  status: "done" | "timeout" | "skipped";
+  /**
+   * `skipped`: nothing to mutate, or the pass is off; `timeout`: its time
+   * ran out first; `stopped`: its caller stopped it (the review had its
+   * verdicts), with the mutants measured so far.
+   */
+  status: "done" | "timeout" | "skipped" | "stopped";
   /** Why it was skipped or cut short, for the review. */
   note?: string;
   /** Mutants chosen, and of those measured, killed and survived. */
@@ -362,12 +416,20 @@ export interface MutationPass {
 }
 
 /**
- * The validate step's mutation pass over a passed result: at most
+ * The result review's mutation pass over a passed result: at most
  * `limits.max` mutants of the lines `base`..`commit` added to product
  * files, each run against `commands` (the item's own, after the exact
- * install) in the validation checkout, which passed them, within
- * `limits.ms`. Each mutant's file is restored after its run. Skipped, with
- * a note, when the result changed no product file or the pass is off.
+ * install) within `limits.ms` of wall time. Mutants never install again:
+ * they run in copies of `checkout`, which validation's install filled
+ * (validate.ts `ValidatedCheckout.copy`), one lane a copy: one always, and
+ * one more for each validation slot free on the host (engine.ts
+ * `hostLimits`), taken without waiting and released at the end, at most
+ * one a mutant; a run with throwaway services has one lane, since its
+ * copies share them. `baselineMs`, the commands' time when validation
+ * passed them, bounds each mutant (`runMutants`). Skipped, with a note,
+ * when the result changed no product file or the pass is off. An abort of
+ * `signal` stops it promptly, every running command with it: it resolves
+ * `stopped`, with what it measured, and its copies are still removed.
  */
 export async function mutationPass(input: {
   checkout: ValidatedCheckout;
@@ -376,11 +438,13 @@ export async function mutationPass(input: {
   commit: string;
   commands: readonly string[];
   limits: { max: number; ms: number };
+  baselineMs?: number;
   seed: string;
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
 }): Promise<MutationPass> {
   const started = Date.now();
+  let lanes = 1;
   const done = (pass: Omit<MutationPass, "ms">): MutationPass => {
     const result = { ...pass, ms: Date.now() - started };
     input.log({
@@ -389,6 +453,7 @@ export async function mutationPass(input: {
       seeded: result.seeded,
       killed: result.killed,
       survived: result.survived,
+      lanes,
       ms: result.ms,
     });
     return result;
@@ -406,12 +471,14 @@ export async function mutationPass(input: {
       note: "The item has no validation command to run mutants against.",
       ...none,
     });
-  const added = await addedLines(
-    input.repo,
-    input.base,
-    input.commit,
-    input.signal,
-  );
+  const stopped = () =>
+    done({
+      status: "stopped",
+      note: "The review had its verdicts before the pass began.",
+      ...none,
+    });
+  if (input.signal.aborted) return stopped();
+  const added = await addedLines(input.repo, input.base, input.commit);
   if (!added.length)
     return done({
       status: "skipped",
@@ -431,27 +498,46 @@ export async function mutationPass(input: {
       note: "No line the result added to a product file could be mutated.",
       ...none,
     });
-  const commands = new Set(input.commands);
-  const baselineMs = input.checkout.results
-    .filter((result) => commands.has(result.command))
-    .reduce((sum, result) => sum + result.durationMs, 0);
-  const ran = await runMutants(input.checkout.directory, mutants, {
-    tests: input.commands,
-    deadline: started + input.limits.ms,
-    baselineMs,
-    run: async (command, timeoutMs) => {
-      input.signal.throwIfAborted();
-      return input.checkout.run(command, timeoutMs);
-    },
-  });
+  const wanted = input.checkout.services ? 1 : mutants.length;
+  while (lanes < wanted && hostLimits.acquire("cpu")) lanes += 1;
+  const copies: CheckoutCopy[] = [];
+  let ran: Awaited<ReturnType<typeof runMutants>>;
+  try {
+    for (let lane = 0; lane < lanes && !input.signal.aborted; lane++)
+      copies.push(await input.checkout.copy(`mutant-${lane}`));
+    if (input.signal.aborted) return stopped();
+    ran = await runMutants(
+      copies.map((copy) => ({
+        tree: copy.directory,
+        run: (command, timeoutMs, signal) =>
+          copy.run(command, timeoutMs, signal),
+      })),
+      mutants,
+      {
+        tests: input.commands,
+        deadline: started + input.limits.ms,
+        passing: true,
+        signal: input.signal,
+        ...(input.baselineMs !== undefined && {
+          baselineMs: input.baselineMs,
+        }),
+      },
+    );
+  } finally {
+    for (let lane = 1; lane < lanes; lane++) hostLimits.release("cpu");
+    await Promise.all(copies.map((copy) => copy.remove()));
+  }
   const survivors = ran.results
     .filter((result) => result.result === "survived")
     .map(({ file, line, rule, text }) => ({ file, line, rule, text }));
   const killed = ran.results.length - survivors.length;
   return done({
-    status: ran.status === "timeout" ? "timeout" : "done",
+    status: ran.status === "failing" ? "done" : ran.status,
     ...(ran.status === "timeout" && {
       note: `The pass ran out of its ${Math.round(input.limits.ms / 1000)} s before the last mutant: ${ran.results.length} of ${mutants.length} were measured.`,
+    }),
+    ...(ran.status === "stopped" && {
+      note: `The review had its verdicts first: ${ran.results.length} of ${mutants.length} mutants were measured.`,
     }),
     seeded: mutants.length,
     killed,

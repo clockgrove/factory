@@ -19,9 +19,8 @@ export { chooseMutants };
  * Factory's runMutants answers.
  */
 export function runMutants(tree, mutants, { tests, env, deadline, groups }) {
-  return runFactoryMutants(tree, mutants, {
-    tests,
-    deadline,
+  const lane = {
+    tree,
     run: async (command, timeoutMs) => {
       const step = await runCommand(command, {
         cwd: tree,
@@ -31,5 +30,6 @@ export function runMutants(tree, mutants, { tests, env, deadline, groups }) {
       });
       return { exitCode: step.code, timedOut: step.timedOut };
     },
-  });
+  };
+  return runFactoryMutants([lane], mutants, { tests, deadline });
 }

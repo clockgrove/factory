@@ -7,14 +7,14 @@
  * outside the shell's sandbox; the socket's directory is private (0700)
  * under the host's temporary directory, which no Codex shell is granted, so
  * only Codex reaches it. A worker's Validate (codex-validate.ts) and a
- * review's run_command (codex.ts) are each one such server.
+ * review's tools (codex.ts) are each one such server.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** One tool the server offers. */
+/** A tool the server offers. */
 export interface McpTool {
   name: string;
   description: string;
@@ -47,7 +47,7 @@ type Message = {
 
 /**
  * A minimal MCP server (newline-delimited JSON-RPC, the stdio transport)
- * offering one tool, on a private Unix socket: `initialize`, `ping`,
+ * offering its tools, on a private Unix socket: `initialize`, `ping`,
  * `tools/list` and `tools/call`; notifications are read and ignored.
  */
 export class McpSocketServer {
@@ -59,13 +59,16 @@ export class McpSocketServer {
     readonly socket: string,
     private readonly server: Server,
     private readonly serverName: string,
-    private readonly tool: McpTool,
+    private readonly tools: readonly McpTool[],
   ) {
     server.on("connection", (connection) => this.serve(connection));
   }
 
-  /** A listening server for `tool`, named `name` to clients. */
-  static async start(name: string, tool: McpTool): Promise<McpSocketServer> {
+  /** A listening server for `tools`, named `name` to clients. */
+  static async start(
+    name: string,
+    tools: readonly McpTool[],
+  ): Promise<McpSocketServer> {
     // mkdtemp makes it 0700: only this user reaches the socket.
     const directory = mkdtempSync(join(tmpdir(), "factory-mcp-"));
     const socket = join(directory, "socket");
@@ -82,7 +85,7 @@ export class McpSocketServer {
       rmSync(directory, { recursive: true, force: true });
       throw error;
     }
-    return new McpSocketServer(directory, socket, server, name, tool);
+    return new McpSocketServer(directory, socket, server, name, tools);
   }
 
   /** Stop listening, end every connection, and remove the socket. */
@@ -153,18 +156,17 @@ export class McpSocketServer {
         return send(connection, {
           id,
           result: {
-            tools: [
-              {
-                name: this.tool.name,
-                description: this.tool.description,
-                inputSchema: this.tool.inputSchema,
-                annotations: this.tool.annotations,
-              },
-            ],
+            tools: this.tools.map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+              annotations: tool.annotations,
+            })),
           },
         });
       case "tools/call": {
-        if (params.name !== this.tool.name)
+        const tool = this.tools.find((each) => each.name === params.name);
+        if (!tool)
           return send(connection, {
             id,
             error: {
@@ -174,7 +176,7 @@ export class McpSocketServer {
           });
         let result: { text: string; isError: boolean };
         try {
-          result = await this.tool.call(params.arguments);
+          result = await tool.call(params.arguments);
         } catch (error) {
           result = {
             text: error instanceof Error ? error.message : String(error),
@@ -212,7 +214,7 @@ function send(connection: Socket, message: Record<string, unknown>): void {
  * The CODEX_HOME configuration that registers `server` as MCP server `name`
  * for Codex 0.160: the relay as its stdio command, required (a server that
  * doesn't start fails the turn, rather than leaving a worker told it has
- * Validate without it), its one tool enabled and approved (the worker runs
+ * Validate without it), its tools enabled and approved (the worker runs
  * with approval policy never), a call allowed `toolTimeoutSeconds`
  * (Codex's default is 60 s; a validation takes minutes), and the tool never
  * deferred: `omit_tools_from` (`code_mode`, `deferred` or `direct`) keeps it
@@ -231,7 +233,7 @@ function send(connection: Socket, message: Record<string, unknown>): void {
 export function codexMcpServerConfig(
   name: string,
   server: McpSocketServer,
-  toolName: string,
+  toolNames: readonly string[],
   toolTimeoutSeconds: number,
 ): string {
   const timeout = Math.ceil(toolTimeoutSeconds);
@@ -242,7 +244,7 @@ args = ${JSON.stringify(["-e", MCP_RELAY, server.socket])}
 required = true
 startup_timeout_sec = 30
 tool_timeout_sec = ${timeout}
-enabled_tools = ${JSON.stringify([toolName])}
+enabled_tools = ${JSON.stringify(toolNames)}
 default_tools_approval_mode = "approve"
 omit_tools_from = ["deferred"]
 

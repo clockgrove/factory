@@ -102,7 +102,13 @@ export async function workStep(
   // branch), else its published one. It keeps that base across repairs.
   const below = layerBelow(place);
   const start = async () => {
-    if (!below) return defaultHead(config.checkout, config.repository, signal);
+    if (!below)
+      return defaultHead(
+        config.checkout,
+        config.repository,
+        signal,
+        context.log,
+      );
     const delivered = (phase: Phase) =>
       (state.done[stepKey(below.id, phase)] as { head: string } | undefined)
         ?.head;

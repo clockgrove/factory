@@ -77,7 +77,12 @@ export async function qaValidateStep(
   const replacing = qaReplacement(item, context, qaRefusalOffers(item));
   if (replacing) return replacing;
   const plan = currentPlan(state)!;
-  const head = await defaultHead(config.checkout, config.repository, signal);
+  const head = await defaultHead(
+    config.checkout,
+    config.repository,
+    signal,
+    context.log,
+  );
   const problem = await integrationProblem(state, plan, head, deps, signal);
   if (problem) return problem;
   const checks: NamedCheck[] = [];

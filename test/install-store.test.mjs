@@ -26,7 +26,11 @@ import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
 import { StoreClaims, sharedStore } from "../dist/shared-install-store.js";
 import { installKey, keptStore, validateTree } from "../dist/validate.js";
-import { SelfValidation } from "../dist/work/self-validate.js";
+import {
+  keptValidationPath,
+  removeKeptValidation,
+  SelfValidation,
+} from "../dist/work/self-validate.js";
 import { qaValidateStep, validateStep } from "../dist/work/steps.js";
 import {
   addWorktree,
@@ -74,6 +78,9 @@ if (lock.includes("broken")) {
 }
 const store = process.env.pnpm_config_store_dir;
 mkdirSync(store, { recursive: true });
+// What it installed, where a later command finds it.
+mkdirSync("node_modules", { recursive: true });
+writeFileSync("node_modules/.installed", lock);
 let reused = 0;
 let downloaded = 0;
 for (const name of lock.split("\\n").filter((line) => line.includes("@"))) {
@@ -327,65 +334,100 @@ test("an item whose installs alternate between two keys reuses both stores", {
   });
 });
 
-test("a worker's own Validate keeps the store beside its worktree, the one the validate step reuses", {
+test("a worker's own Validate keeps its checkout and installed dependencies across the attempt's runs, while the validate step's checkout is fresh", {
   skip,
 }, async () => {
-  // Every provider's Validate is this one (Claude's, Copilot's, and
-  // Codex's through codex-validate.ts).
-  const { inst, sandbox } = sandboxConfig();
-  const log = new RunLog(
-    inst.logs,
-    "2026-01-01T00-00-00-000Z-1",
-    CAPTURE_OFF,
-    [],
-  );
-  const { checkout: worktree, base } = target();
-  writeFileSync(join(worktree, "src/index.js"), "export const a = 1;\n");
+  // #2352: each worker Validate run made a fresh checkout, so it ran the
+  // install again and every tool cache started empty. The attempt now
+  // keeps one, brought to each snapshot: what Git ignores stays, and the
+  // install is skipped while its key is unchanged. `cached` needs the
+  // install's files, counts its runs in an ignored cache, and makes an
+  // untracked file while src/plant.js is there (a failure: it changes the
+  // result tree), and passes only where neither is.
+  const cached =
+    "mkdir -p .cache && test -f node_modules/.installed && echo hit >> .cache/runs && if test -e src/plant.js; then touch stray; else test ! -e stray; fi && wc -l < .cache/runs";
+  const configured = sandboxConfig();
+  const { checkout, base } = target();
   const work = item("a", {
     ownedPaths: ["src/**"],
-    validation: [{ command: BOOTSTRAP }],
+    validation: [{ command: BOOTSTRAP }, { command: cached }],
   });
-  const signal = AbortSignal.timeout(120_000);
+  const accepted = plan([work], { base });
+  const state = {
+    issue: 7,
+    done: { check: { shown: { blocks: [] } }, plan: accepted },
+    kept: {},
+  };
   const events = [];
+  const { workDir, deps, context } = stepRun(
+    { ...configured, checkout },
+    state,
+    events,
+  );
+  const worktree = worktreePath(workDir, state.issue, work.id);
+  await addWorktree(checkout, worktree, base, context.signal);
+  writeFileSync(join(worktree, ".gitignore"), "node_modules\n.cache\n");
+  writeFileSync(join(worktree, "src/plant.js"), "export {};\n");
+  // Every provider's Validate is this one (Claude's, Copilot's, and
+  // Codex's through codex-validate.ts).
   const validator = new SelfValidation(
+    { ...context, worktree, item: work, base },
     {
-      worktree,
-      item: work,
-      base,
-      signal,
-      log: (event) => events.push(event),
-      runFile: (kind) => log.runFile(1, `item:a:work#1.${kind}`),
-    },
-    {
-      sandbox,
-      plan: { base, items: [work], coverage: [], finalCommands: [] },
+      sandbox: configured.sandbox,
+      plan: accepted,
       blocks: [],
       repository: REPO,
       commandTimeoutMs: 60_000,
     },
-    signal,
+    context.signal,
   );
-  for (let run = 0; run < 2; run++) {
-    const answer = await validator.call();
-    assert.equal(answer.isError, false, answer.text);
-    assert.ok(answer.text.startsWith("All 1 declared"), answer.text);
-  }
+  const first = await validator.call();
+  assert.match(first.text, /modified the result tree: .*stray/, first.text);
+  // The worker deletes a file and changes another; the install's inputs
+  // keep their key.
+  rmSync(join(worktree, "src/plant.js"));
+  writeFileSync(join(worktree, "src/index.js"), "export const a = 1;\n");
+  const second = await validator.call();
+  assert.ok(second.text.startsWith("All 2 declared"), second.text);
+  const kept = keptValidationPath(worktree);
+  assert.equal(readFileSync(join(kept, ".cache/runs"), "utf8"), "hit\nhit\n");
   assert.deepEqual(
     events
-      .filter((event) => event.event === "validation-command")
-      .map((event) => event.installStore),
-    ["new", "reused"],
+      .filter((event) => event.event === "worker-validate")
+      .map(({ checkout, installSkipped }) => ({ checkout, installSkipped })),
+    [
+      { checkout: "fresh", installSkipped: false },
+      { checkout: "kept", installSkipped: true },
+    ],
   );
-  assert.equal(
-    readdirSync(join(keptRoot(`${worktree}.packages`), "pnpm-store")).length,
-    2,
-  );
-  // The validate step, on the worker's collected result: the same inputs.
+  // The install ran once; `cached` saw its count grow.
+  const ran = () =>
+    events
+      .filter((event) => event.event === "validation-result")
+      .map((event) =>
+        event.index ? `cached ${event.tail.trim()}` : "install",
+      );
+  assert.deepEqual(ran(), ["install", "cached 1", "cached 2"]);
+
+  // The validate step, on the collected result: a fresh checkout, which
+  // runs the install and has no cache.
   const collected = commit(worktree, {});
-  assert.equal(
-    install(await validate(worktree, base, collected)).installStore,
-    "reused",
-  );
+  state.done["item:a:work"] = {
+    base,
+    commit: collected,
+    tree: git(worktree, "rev-parse", "HEAD^{tree}"),
+    notes: [],
+    sets: [],
+  };
+  events.length = 0;
+  const outcome = await validateStep(work, context, deps, undefined);
+  assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
+  assert.deepEqual(ran(), ["install", "cached 1"]);
+  assert.equal(existsSync(`${worktree}.validation`), false);
+  // The attempt's end removes its checkout, registration and all.
+  await removeKeptValidation(checkout, worktree);
+  assert.equal(existsSync(kept), false);
+  assert.doesNotMatch(git(checkout, "worktree", "list"), /worker-validation/);
 });
 
 test("only the install writes the kept store: a later command can't reach it", {

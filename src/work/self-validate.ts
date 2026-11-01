@@ -1,10 +1,14 @@
 /**
  * A worker's own Validate, shared by the Claude, Copilot and Codex workers: the
  * Work Item's declared commands through `validateTree` on a snapshot commit
- * of the worker's current files, in a fresh checkout, plus the handoff
- * decode collection will apply. The worker names no command of its own:
- * only declared ones run, every one, or in a targeted run those it picks
- * by index (#2281). Runs are queued one at a time.
+ * of the worker's current files, plus the handoff decode collection will
+ * apply. The worker names no command of its own: only declared ones run,
+ * every one, or in a targeted run those it picks by index (#2281). Runs are
+ * queued one at a time, in one checkout the attempt keeps between them
+ * (validate.ts `KeptCheckout`, #2352): each run brings it to its snapshot,
+ * keeping only what Git ignores (installed dependencies, tool caches), and
+ * skips the install while its inputs are unchanged. Validate is feedback:
+ * the validate step still decides the result in a fresh checkout.
  */
 
 import { closeSync, constants } from "node:fs";
@@ -24,6 +28,8 @@ import { resultCriteria } from "../review/result.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { errorMessage, failureExcerpt } from "../text.js";
 import {
+  type KeptCheckout,
+  removeKeptCheckout,
   runOrder,
   skippedPrerequisites,
   type Validation,
@@ -535,10 +541,29 @@ export async function worktreeGitlinks(
   }
 }
 
+/** Where a worker attempt's Validate keeps its checkout, beside the item's `worktree` (#2352). */
+export const keptValidationPath = (worktree: string) =>
+  `${worktree}.worker-validation`;
+
+/**
+ * Remove the kept Validate checkout beside `worktree` (`keptValidationPath`):
+ * the work step's, before its worker starts (what a crashed attempt left)
+ * and after it ends.
+ */
+export function removeKeptValidation(
+  checkout: string,
+  worktree: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return removeKeptCheckout(checkout, keptValidationPath(worktree), signal);
+}
+
 /** One attempt's Validate: its runs and the trees that passed. */
 export class SelfValidation {
   private queue: Promise<unknown> = Promise.resolve();
   private runs = 0;
+  /** The attempt's checkout, kept between its runs. */
+  private readonly kept: KeptCheckout = {};
   private readonly passedTrees = new Set<string>();
   /** Trees whose last run failed. */
   private readonly failedTrees = new Set<string>();
@@ -602,15 +627,15 @@ export class SelfValidation {
 
   /**
    * The declared commands on a snapshot commit of the worker's current
-   * files, in a fresh checkout, so the worker's files never change and no
-   * build output or other run's temporary files reach the commands. A
-   * targeted run (`targeted`) runs only those commands, and the earlier
-   * ones they declare they need, after the install, and never covers the
-   * files for handoff (#2281). A full run after a failure starts with the
-   * failed command and what it needs (`first`, #2290): each run is a fresh
-   * checkout that stops at its first failure, so it fails fast where the
-   * last one did. A command that declares nothing needs every earlier
-   * one, so its full run keeps the declared order.
+   * files, in the attempt's kept checkout, so the worker's files never
+   * change and only files Git ignores (installed dependencies, caches)
+   * carry from one run to the next (#2352). A targeted run (`targeted`)
+   * runs only those commands, and the earlier ones they declare they need,
+   * after the install, and never covers the files for handoff (#2281). A
+   * full run after a failure starts with the failed command and what it
+   * needs (`first`, #2290): each run stops at its first failure, so it
+   * fails fast where the last one did. A command that declares nothing
+   * needs every earlier one, so its full run keeps the declared order.
    */
   private async validate(targeted?: readonly number[]): Promise<string> {
     const run = ++this.runs;
@@ -629,7 +654,8 @@ export class SelfValidation {
     const result = await validateTree({
       checkout: input.worktree,
       repository: options.repository,
-      directory: `${input.worktree}.validation`,
+      directory: keptValidationPath(input.worktree),
+      keep: this.kept,
       // The validate step keeps the same stores (step-validate.ts).
       installStore: installStorePath(input.worktree),
       ...(input.sharedInstallStore
@@ -775,6 +801,13 @@ export class SelfValidation {
         sinceEditMs: Math.round(verdictAt - Math.min(edited, started)),
       }),
       passedMs: result.results.reduce((sum, ran) => sum + ran.durationMs, 0),
+      // Its checkout (#2352): the attempt's kept one brought to this tree,
+      // or made fresh, how long that took, and whether the install ran.
+      ...(this.kept.last && {
+        checkout: this.kept.last.kept ? "kept" : "fresh",
+        checkoutMs: this.kept.last.checkoutMs,
+        installSkipped: this.kept.last.installSkipped,
+      }),
     });
     return parts.join("\n\n");
   }

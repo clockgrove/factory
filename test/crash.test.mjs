@@ -15,7 +15,7 @@ import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
-import { validateTree } from "../dist/validate.js";
+import { removeKeptCheckout, validateTree } from "../dist/validate.js";
 import { AttemptServices } from "../dist/work/services.js";
 import {
   children,
@@ -471,6 +471,118 @@ process.exit(3);`,
     assert.ok(events.some((event) => event.event === "validation-groups"));
     assert.equal(existsSync(`${checkout}.validation`), false);
     assert.equal(existsSync(`${checkout}.validation.groups`), false);
+    assert.equal(git("worktree", "list").split("\n").length, 1);
+  });
+}
+
+// A worker attempt's kept Validate checkout (validate.ts `KeptCheckout`,
+// #2352) at its refresh's crash points, on the attempt's second run: the
+// next attempt makes its own fresh, reusing nothing the crashed one left,
+// and removing it at the attempt's end leaves no checkout.
+for (const point of [
+  "validation:kept-checkout:before",
+  "validation:kept-checkout:after",
+]) {
+  test(`crash at ${point}, the next attempt's Validate starts fresh and leaves no checkout`, {
+    skip: sandboxAvailable().available
+      ? false
+      : "needs the command sandbox (bubblewrap)",
+  }, async () => {
+    const checkout = tempDir("factory-kept-crash-");
+    const git = (...args) =>
+      spawnSync(
+        "git",
+        [
+          "-C",
+          checkout,
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@example.com",
+          ...args,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+    git("init", "--quiet");
+    writeFileSync(join(checkout, "a"), "a\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "base");
+    const base = git("rev-parse", "HEAD");
+    const inst = installation();
+    configured(inst, "http://127.0.0.1:1");
+    process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+    const { sandbox } = loadConfig(REPO);
+    delete process.env.FACTORY_CONFIG;
+    const work = item("a", { validation: [{ command: "test -f a" }] });
+    const directory = `${checkout}.worker-validation`;
+    const input = {
+      checkout,
+      repository: REPO,
+      directory,
+      commit: base,
+      item: work,
+      plan: plan([work], { base }),
+      blocks: [],
+      sandbox,
+      commandTimeoutMs: 60_000,
+    };
+    const dist = (path) => new URL(`../dist/${path}`, import.meta.url).href;
+    const child = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
+import { validateTree } from ${JSON.stringify(dist("validate.js"))};
+const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-1", CAPTURE_OFF, []);
+const keep = {};
+for (const run of [1, 2])
+  await validateTree({ ...JSON.parse(process.env.INPUT), keep, signal: AbortSignal.timeout(60_000), log: () => {}, runFile: (kind) => log.runFile(1, "item:a:work#1." + run + "." + kind) });
+process.exit(3);`,
+      ],
+      {
+        env: {
+          ...process.env,
+          FACTORY_CRASH_AT: point,
+          INPUT: JSON.stringify(input),
+          LOGS: inst.logs,
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    children.add(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const exit = new Promise((resolve) =>
+      child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
+    );
+    const death = await exited(
+      { child, exit, stderr: () => stderr },
+      `validation set to crash at ${point}`,
+    );
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    assert.ok(existsSync(directory));
+
+    const log = new RunLog(
+      inst.logs,
+      "2026-01-01T00-00-00-000Z-2",
+      CAPTURE_OFF,
+      [],
+    );
+    const keep = {};
+    const result = await validateTree({
+      ...input,
+      keep,
+      signal: AbortSignal.timeout(60_000),
+      log: () => {},
+      runFile: (kind) => log.runFile(1, `item:a:work#2.${kind}`),
+    });
+    assert.equal(result.kind, "passed", result.detail);
+    assert.equal(keep.last.kept, false);
+    assert.equal(existsSync(directory), true);
+    await removeKeptCheckout(checkout, directory);
+    assert.equal(existsSync(directory), false);
     assert.equal(git("worktree", "list").split("\n").length, 1);
   });
 }

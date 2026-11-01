@@ -478,7 +478,7 @@ Each run is scored apart, then summarized (mean, min and max over the runs); see
 
 A recorded refusal is real when its label says so: the label judges its reason. A replayed refusal is real when the record has a labelled defect whose `criteria` include it; the harness doesn't read its reason, so `unmatched` lists the rest for a person, and a replayed refusal of a defect's criterion for another reason still counts. A defect is caught when a real refusal maps to it.
 
-Results go to `<set>/results/<label>/`: `runs/<n>/<record id>.json` per review, reused by a later invocation (so an interrupted replay carries on) unless `--fresh`, and `scorecard.json`. The label defaults to the reviewer, provider, model and effort.
+Results go to `<set>/results/<label>/`: `runs/<n>/<record id>.json` per review, reused by a later invocation (so an interrupted replay carries on) unless `--fresh`, except a review that failed, which runs again; and `scorecard.json`. The label defaults to the reviewer, provider, model and effort.
 
 | Flag                                | What                                                                  |
 | ----------------------------------- | --------------------------------------------------------------------- |

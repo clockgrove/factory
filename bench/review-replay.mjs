@@ -28,7 +28,8 @@
  *   --fresh                     review again what earlier results hold
  *
  * Results go to <set>/results/<label>/: runs/<n>/<record id>.json, one
- * per review, reused by a later invocation unless --fresh, and
+ * per review, reused by a later invocation unless --fresh (one that
+ * failed runs again), and
  * scorecard.json. Exit codes: 0 scored (a review that failed is counted
  * in `errors`); 64 usage.
  */
@@ -168,7 +169,7 @@ if (!replayed.length) usage("no record to replay");
 const scratch = scratchRepository(values.repo, setDir);
 process.on("exit", scratch.dispose);
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
-  process.on(signal, () => {
+  process.once(signal, () => {
     scratch.dispose();
     process.kill(process.pid, signal);
   });
@@ -185,10 +186,12 @@ async function worker() {
   while (next < pairs.length) {
     const { run, record } = pairs[next++];
     const file = join(out, "runs", String(run), `${record.id}.json`);
-    let result;
-    if (!values.fresh && existsSync(file))
-      result = JSON.parse(readFileSync(file, "utf8"));
-    else {
+    // An earlier result is reused, but not an error: that review runs again.
+    let result =
+      !values.fresh && existsSync(file)
+        ? JSON.parse(readFileSync(file, "utf8"))
+        : null;
+    if (!result || result.error) {
       const problem = candidateProblem(scratch.clone, record);
       result = problem
         ? {

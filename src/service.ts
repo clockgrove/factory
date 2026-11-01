@@ -280,13 +280,20 @@ export async function serve(options: ServeOptions): Promise<number> {
   /**
    * The Objective's run: in memory, else read from disk (which may find it
    * unreadable). A read that fails (EMFILE, EIO) throws; nothing is
-   * decided on it, and the caller tries again later.
+   * decided on it, and the caller tries again later. A finished
+   * Objective's record that can't be read holds as unreadable only once
+   * its card is queued again (`queued`): until then nothing runs for it,
+   * and a request on it is refused as a finished one's is
+   * (`finishedUnreadable`).
    */
-  const find = (issue: number): ObjectiveRunner | undefined => {
+  const find = (issue: number, queued = false): ObjectiveRunner | undefined => {
     const known = runners.get(issue);
     if (known || unreadable.has(issue)) return known;
     const loaded = findState(paths.objectives, issue);
-    if (loaded?.kind === "unreadable")
+    if (
+      loaded?.kind === "unreadable" &&
+      (queued || loaded.finishedAt === undefined)
+    )
       unreadable.set(issue, {
         error: loaded.error,
         incident: loaded.incident,
@@ -294,6 +301,16 @@ export async function serve(options: ServeOptions): Promise<number> {
     if (loaded?.kind !== "ok") return undefined;
     workflow.resumed?.(loaded.state);
     return open(loaded.state);
+  };
+  /** The refusal of a request on a finished Objective whose record can't be read, as a finished one's (engine.ts `finishedRefusal`). */
+  const finishedUnreadable = (issue: number): RequestResult | undefined => {
+    const loaded = findState(paths.objectives, issue);
+    return loaded?.kind === "unreadable" && loaded.finishedAt !== undefined
+      ? refused(
+          "objective_finished",
+          `#${issue} has already finished, and its record can't be read (${loaded.error}); nothing runs for it. Queue it again to run it again.`,
+        )
+      : undefined;
   };
   /** State files not read yet because the read failed: tried every tick. */
   const unloaded = new Set<number>();
@@ -725,9 +742,12 @@ export async function serve(options: ServeOptions): Promise<number> {
       return { message: "ok" };
     }
     if (!runner)
-      return refused(
-        "no_factory_state",
-        `Factory has no Objective #${request.issue}.`,
+      return (
+        finishedUnreadable(request.issue) ??
+        refused(
+          "no_factory_state",
+          `Factory has no Objective #${request.issue}.`,
+        )
       );
     const seen = runner.state.appliedRequests.find((r) => r.id === stored.id);
     if (seen) return seen;
@@ -1096,12 +1116,13 @@ export async function serve(options: ServeOptions): Promise<number> {
       },
       queue,
       logs: paths.logs,
-      find,
+      // The sync reads a state for a queued card.
+      find: (issue: number) => find(issue, true),
       admit: (issue: number, github: GitHubModule) => {
         // A paused or draining queue admits nothing new; the card stays
         // queued and is admitted on a read after resume.
         if (queue.mode !== "running") return;
-        const previous = find(issue);
+        const previous = find(issue, true);
         if (unreadable.has(issue)) return; // never over an unreadable file
         // Never over an unfinished run, nor one whose cleanup still runs.
         if (previous && !previous.settled) return;

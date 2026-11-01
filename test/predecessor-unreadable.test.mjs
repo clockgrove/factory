@@ -11,7 +11,16 @@ import { after, test } from "node:test";
 import { GitHub } from "../dist/github.js";
 import { predecessorsStep } from "../dist/planning/predecessors.js";
 import { newObjective } from "../dist/state.js";
-import { installation, REPO, status } from "./helpers.mjs";
+import {
+  cli,
+  installation,
+  REPO,
+  refusal,
+  serve,
+  status,
+  stopped,
+  until,
+} from "./helpers.mjs";
 
 const recorded = JSON.parse(
   readFileSync(new URL("fixtures/reset-394.json", import.meta.url), "utf8"),
@@ -112,4 +121,15 @@ test("a predecessor finished under the previous state version is decided by GitH
     { phase: row.phase, holds: row.holds, next: row.nextAction.command },
     { phase: "finished, its record unreadable", holds: [], next: null },
   );
+  // A cancel is refused, as a done one's is: nothing is written over it.
+  const service = serve(inst);
+  try {
+    await until(() => status(inst).service === "running", "service");
+    assert.equal(
+      refusal(cli(inst, "cancel", String(BLOCKER))),
+      "objective_finished",
+    );
+  } finally {
+    await stopped(service);
+  }
 });

@@ -382,7 +382,7 @@ test("a targeted run runs only its commands, in declared order, and never counts
 test("a command that needs an earlier one's output passes the full run once fixed, and a targeted run with that one", {
   skip,
 }, async () => {
-  const { validator, events, state } = workerValidate({
+  const { validator, events, state, input, options } = workerValidate({
     validated: dependent,
     scripts: BUILT,
   });
@@ -399,12 +399,21 @@ test("a command that needs an earlier one's output passes the full run once fixe
     passed.text.startsWith("All 3 declared validation commands passed:"),
     passed.text,
   );
-  // The check alone fails without the build, and says what it skipped;
-  // with the build named too, it passes.
-  const alone = await validator.call([1]);
+  // The check alone, in the attempt's kept checkout, finds what the last
+  // full run built there (#2352).
+  const kept = await validator.call([1]);
+  assert.ok(
+    kept.text.startsWith("The 1 commands of this targeted run passed:"),
+    kept.text,
+  );
+  // A new attempt's checkout is fresh: there the check alone fails without
+  // the build, and says what it skipped; with the build named too, it
+  // passes.
+  const next = new SelfValidation(input, options, input.signal);
+  const alone = await next.call([1]);
   assert.ok(alone.text.startsWith("Validation failed."), alone.text);
   assert.match(alone.text, /This targeted run skipped command 0, declared/);
-  const built = await validator.call([1, 0]);
+  const built = await next.call([1, 0]);
   assert.ok(
     built.text.startsWith(
       "The 2 commands of this targeted run passed:\n- sh build.sh\n- sh check.sh\n",
@@ -413,7 +422,7 @@ test("a command that needs an earlier one's output passes the full run once fixe
   );
   assert.deepEqual(
     runs(events).map(({ ran }) => ran),
-    [[0, 1], [0, 1, 2], [1], [0, 1]],
+    [[0, 1], [0, 1, 2], [1], [1], [0, 1]],
   );
 });
 

@@ -52,6 +52,7 @@ import { prepareWorkPrompt } from "./prompt.js";
 import { refusedOf, refusedResult, refusedTreeFor } from "./refused.js";
 import { repairContext } from "./repair-context.js";
 import {
+  removeKeptValidation,
   stageValidateLog,
   type WorkerValidateFailure,
 } from "./self-validate.js";
@@ -487,6 +488,9 @@ export async function workStep(
         changes: () => workerChanges(worktree, signal),
       },
     );
+    // The attempt's Validate checkout is its own: none a crashed one left
+    // is reused, and its own goes when it ends (#2352).
+    await removeKeptValidation(config.checkout, worktree, signal);
     const { spend, session, ...result } = await worker
       .run({
         worktree,
@@ -512,6 +516,10 @@ export async function workStep(
         // What the worktree holds at the end, shell edits included.
         await activity.sample();
         activity.close();
+        // Cancelled too: nothing waits on it, and cleanup takes what's left.
+        await removeKeptValidation(config.checkout, worktree).catch(
+          () => undefined,
+        );
       });
     if (conversation)
       context.keep(facts({ workSession: session ?? null }, item.id));

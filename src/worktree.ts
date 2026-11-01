@@ -633,6 +633,36 @@ export async function addWorktree(
 }
 
 /**
+ * Bring `worktree`, a linked worktree kept between validations, to `commit`
+ * as a fresh checkout of it has it, apart from the files Git ignores
+ * (#2352): HEAD and the index at `commit`, every tracked file as committed
+ * there (one it deletes is gone) and no untracked file Git doesn't ignore.
+ * False when it can't be: an incomplete worktree, Git failing or refusing
+ * (a command rewrote its `.git`), or a status still not clean. The caller
+ * then makes it fresh.
+ */
+export async function refreshWorktree(
+  worktree: string,
+  commit: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    if (!(await completeWorktree(worktree, signal))) return false;
+    await hostGit(worktree, ["reset", "--quiet", "--hard", commit], { signal });
+    await hostGit(worktree, ["clean", "-ffdq"], { signal });
+    const status = await hostGit(
+      worktree,
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      { signal },
+    );
+    return status.length === 0;
+  } catch {
+    signal?.throwIfAborted();
+    return false;
+  }
+}
+
+/**
  * A linked worktree with HEAD and an index: `worktree add --no-checkout`
  * writes no index, so its absence means the checkout never finished. A
  * refusal (a changed `.git` or a planted program) is not an incomplete

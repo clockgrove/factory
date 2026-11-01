@@ -6,11 +6,14 @@
  * pinned to the accepted base. A Work Item's commands whose `after` puts
  * them in groups that need nothing of each other run at once after the
  * install, each group in a checkout of its own, as far as validation slots
- * are free (`inGroups`, #2290). The answer is data: per-command results, or a
- * classified problem the step turns into an outcome. A failed command is the
- * candidate's (repair); a failed install whose inputs match the base is the
- * environment's (retry); an install that ran offline for the host's lack of
- * network, or a configuration fault, is the operator's (hold).
+ * are free (`inGroups`, #2290). A worker's own Validate keeps its checkout
+ * between the runs of one attempt instead, brought to each snapshot, with
+ * the files Git ignores (`keep`, #2352). The answer is data: per-command
+ * results, or a classified problem the step turns into an outcome. A failed
+ * command is the candidate's (repair); a failed install whose inputs match
+ * the base is the environment's (retry); an install that ran offline for
+ * the host's lack of network, or a configuration fault, is the operator's
+ * (hold).
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -105,6 +108,7 @@ import {
   hasGitlink,
   hostGit,
   hostGitExit,
+  refreshWorktree,
   removeWorktree,
   validationEnvironment,
 } from "./worktree.js";
@@ -292,11 +296,60 @@ interface Group {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * A worker attempt's kept Validate checkout (`ValidateInput.keep`, #2352).
+ * Its first run makes the checkout fresh; each later one brings it to that
+ * run's commit in place (worktree.ts `refreshWorktree`): its tracked and
+ * untracked files as a fresh checkout has them, and every file Git ignores
+ * (installed dependencies, tool caches) as the last run left it. The exact
+ * install is skipped while its `installKey` is that of the last install
+ * that passed there. After a run that can't refresh it, goes over the disk
+ * budget, or ends in a retry, a hold or an error, the next run makes it
+ * fresh. Only memory says the checkout is the attempt's, so a later
+ * attempt, or the restart after a crash, makes its own. The attempt
+ * removes it when it ends (`removeKeptCheckout`). Acceptance never runs
+ * here: the validate step, QA and final validation use fresh checkouts.
+ */
+export interface KeptCheckout {
+  /** The checkout at `directory` is this attempt's: one of its runs made it. */
+  made?: true;
+  /** The `installKey` of the last install that passed in it since it was made. */
+  installed?: string;
+  /** The first command group's own (`inGroups`), at `keptGroup(directory)`. */
+  group?: KeptCheckout;
+  /** The last run's: whether it refreshed the checkout or made it fresh, in how long, and whether it skipped the install. */
+  last?: { kept: boolean; checkoutMs: number; installSkipped: boolean };
+}
+
+/** Where the first command group of a kept checkout at `directory` keeps its own (`inGroups`). */
+const keptGroup = (directory: string) => `${directory}.kept-group`;
+
+/**
+ * Remove a kept checkout at `directory` (`KeptCheckout`), its first
+ * group's and what its groups left: when its attempt starts, what a
+ * crashed one left, and when it ends.
+ */
+export async function removeKeptCheckout(
+  checkout: string,
+  directory: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await forceRemove(`${directory}.groups`);
+  for (const path of [directory, keptGroup(directory)])
+    await removeWorktree(checkout, path, signal);
+}
+
 export interface ValidateInput {
   /** The target clone; the fresh worktree is linked from it. */
   checkout: string;
-  /** Where the fresh worktree goes, such as `<item worktree>.validation`. Replaced, then removed. */
+  /** Where the fresh worktree goes, such as `<item worktree>.validation`. Replaced, then removed; with `keep`, kept. */
   directory: string;
+  /**
+   * A worker's own Validate (#2352): the attempt's checkout at `directory`,
+   * kept between its runs (`KeptCheckout`). Absent (the validate step, QA
+   * and final validation): a fresh checkout, removed at the end.
+   */
+  keep?: KeptCheckout;
   /**
    * A Work Item's validation, the validate step's and the worker's own:
    * where the exact install keeps its package store across this item's
@@ -547,7 +600,23 @@ export type Validation =
  * restore, or LFS files over the bound are media's hold (hydrateTree).
  */
 export async function validateTree(input: ValidateInput): Promise<Validation> {
-  const result = await validateCandidate(input);
+  const { keep } = input;
+  // A run that stops before its checkout (a pin refused) has none.
+  delete keep?.last;
+  // A run with no verdict may have left its kept checkouts in any state.
+  const forget = () => {
+    if (keep)
+      for (const field of ["made", "installed", "group"] as const)
+        delete keep[field];
+  };
+  let result: Validation;
+  try {
+    result = await validateCandidate(input);
+  } catch (error) {
+    forget();
+    throw error;
+  }
+  if (result.kind === "retry" || result.kind === "hold") forget();
   if (result.kind !== "failed") return result;
   // `tree` is Factory's last commit's when it made one; the rerun of a
   // tree the worker's Validate passed compares the candidate's own.
@@ -652,13 +721,36 @@ async function validateCandidate(
       output: refusal.message,
     };
   const worktree = input.directory;
+  const { keep } = input;
   // The groups' checkouts an earlier run of this one left (`inGroups`).
   const groupsRoot = `${worktree}.groups`;
+  const checkoutStarted = Date.now();
+  // A kept checkout holds files earlier runs produced: only this run's go back.
+  const producedSince = keep ? checkoutStarted : undefined;
   try {
     if (group) crashPoint("validation:group-checkout:before");
     else await forceRemove(groupsRoot);
-    await removeWorktree(checkout, worktree, input.signal);
-    await addWorktree(checkout, worktree, commit, input.signal, input.log);
+    // The attempt's kept checkout, brought to this commit in place; one
+    // that can't be is made fresh, with nothing it held.
+    let kept = false;
+    if (keep?.made) {
+      crashPoint("validation:kept-checkout:before");
+      kept = await refreshWorktree(worktree, commit, signal);
+      crashPoint("validation:kept-checkout:after");
+    }
+    if (!kept) {
+      if (keep)
+        for (const field of ["made", "installed"] as const) delete keep[field];
+      await removeWorktree(checkout, worktree, input.signal);
+      await addWorktree(checkout, worktree, commit, input.signal, input.log);
+      if (keep) keep.made = true;
+    }
+    if (keep)
+      keep.last = {
+        kept,
+        checkoutMs: Date.now() - checkoutStarted,
+        installSkipped: false,
+      };
     if (group) crashPoint("validation:group-checkout:after");
   } catch (error) {
     input.signal.throwIfAborted();
@@ -918,7 +1010,14 @@ async function validateCandidate(
         const run = [...order.slice(0, setup), ...commands];
         return { number, order: run, commit, home, at: run[0]! };
       });
-      const directory = (lane: Group) => join(groupsRoot, String(lane.number));
+      // Beside a kept checkout the first group keeps its own (#2352);
+      // every other group's is fresh.
+      const keptLane = (lane: Group) => keep !== undefined && lane.number === 0;
+      if (keep) keep.group ??= {};
+      const directory = (lane: Group) =>
+        keptLane(lane)
+          ? keptGroup(worktree)
+          : join(groupsRoot, String(lane.number));
       const stop = new AbortController();
       const laneSignal = AbortSignal.any([signal, stop.signal]);
       const outcomes = new Map<Group, Validation>();
@@ -933,6 +1032,7 @@ async function validateCandidate(
                 {
                   ...input,
                   directory: directory(running),
+                  keep: keptLane(running) ? keep!.group : undefined,
                   returnTo: undefined,
                   // The lockfile is resolved: `commit` is Factory's.
                   lockfile: undefined,
@@ -979,6 +1079,7 @@ async function validateCandidate(
               input.returnTo,
               item,
               signal,
+              producedSince,
             );
             if (report) reports.push(report);
           }
@@ -1059,10 +1160,14 @@ async function validateCandidate(
           () => undefined,
         );
         await forceRemove(groupsRoot);
+        // The first group's kept checkout, stopped mid-command or never
+        // run, is made fresh next time.
+        if (keep && !outcomes.has(lanes[0]!)) delete keep.group;
         for (const each of lanes)
-          await removeWorktree(checkout, directory(each), signal).catch(
-            () => undefined,
-          );
+          if (!keptLane(each))
+            await removeWorktree(checkout, directory(each), signal).catch(
+              () => undefined,
+            );
       }
     };
     for (let position = 0; position < order.length; position++) {
@@ -1099,28 +1204,32 @@ async function validateCandidate(
       // installation's store under that key (#2280, #2353).
       let store: KeptStore | undefined;
       using claims = new StoreClaims();
-      if (
+      const storing =
         install &&
         input.installStore &&
         !input.sandbox.packageStore &&
-        sandboxAvailable().available
-      )
+        sandboxAvailable().available;
+      let key: string | undefined;
+      if (storing || (install && keep))
         try {
-          const key = await installKey(checkout, commit, command, signal);
-          store =
-            input.sharedInstallStore &&
-            key ===
-              (await installKey(
-                checkout,
-                input.base ?? plan.base,
-                command,
-                signal,
-              ))
-              ? await sharedStore(input.sharedInstallStore, key, claims, {
-                  days: input.sandbox.limits.installStoreDays,
-                  mib: input.sandbox.limits.installStoreMiB,
-                })
-              : await keptStore(input.installStore, key);
+          key = await installKey(checkout, commit, command, signal);
+          // A kept checkout whose last install that passed had this key
+          // holds what this one installs (#2352): skipped, below.
+          if (storing && keep?.installed !== key)
+            store =
+              input.sharedInstallStore &&
+              key ===
+                (await installKey(
+                  checkout,
+                  input.base ?? plan.base,
+                  command,
+                  signal,
+                ))
+                ? await sharedStore(input.sharedInstallStore!, key, claims, {
+                    days: input.sandbox.limits.installStoreDays,
+                    mib: input.sandbox.limits.installStoreMiB,
+                  })
+                : await keptStore(input.installStore!, key);
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof GitRefusal) throw error;
@@ -1129,6 +1238,27 @@ async function validateCandidate(
             reason: `The install's package store could not be made at ${input.installStore}: ${errorMessage(error)}. Free disk space and keep Factory's work directory writable.`,
           };
         }
+      if (key !== undefined && keep?.installed === key) {
+        if (keep!.last) keep!.last.installSkipped = true;
+        input.log({
+          event: "validation-command",
+          index,
+          command,
+          preparing,
+          ...(group && { group: group.number }),
+          installSkipped: true,
+        });
+        results.push({
+          command,
+          ...(preparing && { preparation: true as const }),
+          exitCode: 0,
+          durationMs: 0,
+          tail: INSTALL_SKIPPED,
+        });
+        continue;
+      }
+      // Until it passes, the checkout's dependencies are no install's.
+      if (keep && install) delete keep.installed;
       const started = Date.now();
       input.log({
         event: "validation-command",
@@ -1242,6 +1372,8 @@ async function validateCandidate(
       // A store over the disk budget is never kept: the next install of the
       // item starts from an empty one.
       if (store && run.diskOverflow) await forceRemove(store.directory);
+      // Nor is a kept checkout: the next run makes it fresh.
+      if (keep && run.diskOverflow) delete keep.made;
       input.log({
         event: "validation-result",
         index,
@@ -1271,6 +1403,7 @@ async function validateCandidate(
           tail: output.slice(-PASSED_OUTPUT_TAIL),
         });
         const changed = await treeChange(command);
+        if (keep && key !== undefined && !changed) keep.installed = key;
         if (changed) {
           if (input.returnTo && item)
             produced = await returnProduced(
@@ -1278,6 +1411,7 @@ async function validateCandidate(
               input.returnTo,
               item,
               signal,
+              producedSince,
             );
           return {
             kind: "failed",
@@ -1442,7 +1576,13 @@ async function validateCandidate(
       )
         return { kind: "retry", reason: detail };
       if (input.returnTo && item)
-        produced = await returnProduced(worktree, input.returnTo, item, signal);
+        produced = await returnProduced(
+          worktree,
+          input.returnTo,
+          item,
+          signal,
+          producedSince,
+        );
       return {
         kind: "failed",
         tree,
@@ -1463,7 +1603,13 @@ async function validateCandidate(
       if (stopped) return stopped;
     }
     if (input.returnTo && item)
-      produced = await returnProduced(worktree, input.returnTo, item, signal);
+      produced = await returnProduced(
+        worktree,
+        input.returnTo,
+        item,
+        signal,
+        producedSince,
+      );
     // Every command's changes were checked as it passed (`treeChange`).
     // Hydrated files are left out of the status comparison, so their
     // bytes are checked against their pointers instead.
@@ -1500,7 +1646,7 @@ async function validateCandidate(
   } finally {
     await services?.stop();
     await Promise.all(scratch.map((path) => forceRemove(path)));
-    if (!group)
+    if (!group && !keep)
       await removeWorktree(checkout, worktree, input.signal).catch(
         () => undefined,
       );
@@ -1568,6 +1714,9 @@ const sourceDeclared = (items: readonly WorkItem[]) =>
  * (step-validate.ts), cut the same way.
  */
 const FAILED_OUTPUT_CHARS = 10_000;
+/** A skipped install's result: its kept checkout has what it installs (`KeptCheckout`). */
+const INSTALL_SKIPPED =
+  "Skipped: this checkout's last install that passed had the same inputs (the command, every lockfile, manifest and package configuration), so its dependencies are installed. Factory's own validation runs it in a fresh checkout.";
 /** What a passing command keeps of its output. */
 const PASSED_OUTPUT_TAIL = 2_000;
 /** pnpm's and npm's errors for a package an offline install cannot fetch. */
@@ -3504,15 +3653,18 @@ function safeRelative(path: string): boolean {
  * checkout, which the worker otherwise cannot read. Only regular files the
  * worker's checkout ignores are copied, so they stay out of the result
  * unless the ignore rules change. A file this run produced replaces the
- * worker's copy at that path. Tracked or unignored changes are reported,
- * not copied. Returns the report, or "" when nothing was produced under
- * owned paths. Never throws: a failure is reported instead.
+ * worker's copy at that path; in a kept checkout (`since`, the run's
+ * start), only a file modified since counts as this run's. Tracked or
+ * unignored changes are reported, not copied. Returns the report, or ""
+ * when nothing was produced under owned paths. Never throws: a failure is
+ * reported instead.
  */
 async function returnProduced(
   validationCopy: string,
   worktree: string,
   item: WorkItem,
   signal: AbortSignal,
+  since?: number,
 ): Promise<string> {
   try {
     return await copyProduced(
@@ -3520,6 +3672,7 @@ async function returnProduced(
       worktree,
       item.ownedPaths,
       signal,
+      since,
     );
   } catch (error) {
     if (error instanceof GitRefusal) throw error;
@@ -3533,6 +3686,7 @@ async function copyProduced(
   worktree: string,
   scopes: string[],
   signal: AbortSignal,
+  since?: number,
 ): Promise<string> {
   if (!scopes.length) return "";
   // Pinned Git pathspecs are literal. `matching` lists an ignored directory
@@ -3567,7 +3721,12 @@ async function copyProduced(
     if (!safeRelative(plain) || !ownsPath(path, scopes)) continue;
     if (code !== "!!") changed.push(path);
     else if (path.endsWith("/")) directories.push(path);
-    else candidates.push(path);
+    else if (
+      since === undefined ||
+      (lstatSync(join(validationCopy, path), { throwIfNoEntry: false })
+        ?.mtimeMs ?? since) >= since
+    )
+      candidates.push(path);
   }
   const ignored = await ignoredInWorktree(worktree, candidates, signal);
   const root = realpathSync(validationCopy);

@@ -51,12 +51,14 @@
  * escapes as `ScratchUnavailable` with the outcome to take.
  */
 import { rm } from "node:fs/promises";
+import type { SandboxConfig } from "../config.js";
 import { crashPoint } from "../crash.js";
 import { hostLimits, type Outcome } from "../engine.js";
 import { isRecord } from "../planning/graph.js";
 import type { WorkItem } from "../planning/types.js";
 import type { CallTool, Planner } from "../providers/planner.js";
 import { logRefused } from "../providers/usage.js";
+import { shellNetwork } from "../sandbox.js";
 import { errorMessage, failureExcerpt, headAndTail } from "../text.js";
 import {
   type CheckoutRun,
@@ -163,6 +165,8 @@ export interface ReviewLimits {
   commandMs: number;
   /** The longest the workspace's install may take (a validation command's limit). */
   prepareMs: number;
+  /** The sandbox's network setting, which the commands follow as validation's do; absent: off. */
+  network?: SandboxConfig["network"];
 }
 
 /**
@@ -813,9 +817,9 @@ type EvidenceKinds = Awaited<ReturnType<typeof gatherEvidence>>["kinds"];
 
 /** What `run_command` tells the reviewer. */
 export function commandToolDescription(
-  limits: Pick<ReviewLimits, "commandMs">,
+  limits: Pick<ReviewLimits, "commandMs" | "network">,
 ): string {
-  return `Run a shell command (sh -c) in your scratch copy of the candidate: the exact result with its dependencies installed, under Factory's validation sandbox (no network, no secrets, nothing else on the host). You may write files there; the candidate itself never changes. Returns the exit code and the output (long output keeps its start and end). Commands run one at a time, each for at most timeoutMs (default ${Math.min(DEFAULT_COMMAND_MS, limits.commandMs)}, at most ${limits.commandMs}), within the review's command budget.`;
+  return `Run a shell command (sh -c) in your scratch copy of the candidate: the exact result with its dependencies installed, under Factory's validation sandbox (${shellNetwork({ network: limits.network ?? "off" })}; no secrets, nothing else on the host). You may write files there; the candidate itself never changes. Returns the exit code and the output (long output keeps its start and end). Commands run one at a time, each for at most timeoutMs (default ${Math.min(DEFAULT_COMMAND_MS, limits.commandMs)}, at most ${limits.commandMs}), within the review's command budget.`;
 }
 
 /** What `checks` tells the reviewer. */

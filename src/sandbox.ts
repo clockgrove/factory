@@ -556,6 +556,12 @@ function probeSandbox(): SandboxAvailability {
   };
 }
 
+/** A sandboxed shell's network, as a model is told it: validation's, after the install. */
+export const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
+  sandbox.network === "host"
+    ? "it shares the host's network, so services on the host's loopback are reachable"
+    : "the network is off and only loopback works";
+
 /**
  * Under a root controller bubblewrap's user namespace maps to the host's
  * root, which owns root-only files (`/etc/shadow`, SSH host keys): dropped

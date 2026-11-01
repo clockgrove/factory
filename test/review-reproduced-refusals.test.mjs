@@ -621,7 +621,7 @@ test("R9: the assembled instructions, with every evidence kind's guidance and bo
   );
   const size =
     all.length +
-    commandToolDescription(LIMITS).length +
+    commandToolDescription({ ...LIMITS, network: "host" }).length +
     CHECKS_TOOL_DESCRIPTION.length;
   assert.ok(size <= 5000, `${size} characters`);
   assert.match(

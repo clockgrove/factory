@@ -8,3 +8,11 @@ Add a 3D model of a unit cube for the demo scene, with a small preview image: th
 - `assets/cube{{ID}}-preview.png` is a 64x64 PNG preview of the cube.
 - Both are stored in Git LFS.
 - `npm test` passes.
+
+## Context
+
+The model is written with the repository's GLB library, not by hand: `writeGlb(positions, indices)` in `scripts/glb.mjs` returns the bytes of a valid GLB, and `readGlb(bytes)` parses one. Supply the cube's vertex data; the test reads the delivered model with `readGlb`.
+
+## Sources
+
+- `scripts/glb.mjs`

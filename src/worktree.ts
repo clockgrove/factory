@@ -637,7 +637,11 @@ export async function addWorktree(
  * as a fresh checkout of it has it, apart from the files Git ignores
  * (#2352): HEAD and the index at `commit`, every tracked file as committed
  * there (one it deletes is gone) and no untracked file Git doesn't ignore.
- * False when it can't be: an incomplete worktree, Git failing or refusing
+ * Untracked files go first too: checkout falls back to a `.gitattributes`
+ * in the worktree, so one a command left would change how tracked files
+ * are written. Host Git here is pinned as everywhere (`hostGitExit`): the
+ * `.git` must still name the registered admin directory, and no program
+ * the repository configures runs. False when it can't be: an incomplete worktree, Git failing or refusing
  * (a command rewrote its `.git`), or a status still not clean. The caller
  * then makes it fresh.
  */
@@ -648,6 +652,7 @@ export async function refreshWorktree(
 ): Promise<boolean> {
   try {
     if (!(await completeWorktree(worktree, signal))) return false;
+    await hostGit(worktree, ["clean", "-ffdq"], { signal });
     await hostGit(worktree, ["reset", "--quiet", "--hard", commit], { signal });
     await hostGit(worktree, ["clean", "-ffdq"], { signal });
     const status = await hostGit(

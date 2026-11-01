@@ -20,11 +20,11 @@
  * Each review's `phases` are the build's own `result-review` event's: the
  * workspace's install (`scratchPrepareMs`) and the proofs with their
  * refusal checks (`proofsMs`). `extra` has the suspicions counted
- * (`raised`, `proved`, `questions`, `notes`, `dropped`, the proofs'
+ * (`raised`, `proved`, `dropped`, the proofs'
  * `tokens`) and each one (`suspicionList`, from the build's
  * `result-review-suspicion` events: its criterion, `case`, `expected`,
- * `basis`, `outcome`, the `reason` one was dropped, its repro, question or
- * note, commands, tokens and time).
+ * `basis`, `outcome`, the `reason` one was dropped, its repro, commands,
+ * tokens and time).
  *
  * Verdicts are scored at their criterion's index in the record, by its
  * text: the finder also judges the Objective criteria the item proves

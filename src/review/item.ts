@@ -1,8 +1,8 @@
 /**
  * A Work Item's result review (#2344, variant B): its only path back to the
- * worker is a reproduced failure of behaviour the criterion requires. The
- * earlier result reviewer finds; each of its refusals is then proved by its
- * own task before it can cost a repair. Two things start at once:
+ * worker is a reproduced failure. The earlier result reviewer finds; each
+ * of its refusals is then proved by its own task before it can cost a
+ * repair. Two things start at once:
  *
  * - the review's workspace (`Workspace`): one checkout of the candidate,
  *   its exact install from the item's warm package store, under
@@ -20,29 +20,24 @@
  * Each criterion the finder refused becomes one suspicion: its detail the
  * case, the criterion the expectation. Up to `proofs` a review, each is
  * proved by its own task: a fresh call that gets only the criterion, the
- * Objective's pinned sources, the suspicion, the workspace's checkout to
- * read and `run_command` in a copy of its own, with a small budget, as
- * many at once as the host has planner slots free. It answers
- * `not-behaviour` (test economy, placement, style or design: a note for
- * the PR and final review), `undefined` (the criterion and sources don't
- * say what the product must do there: the operator's question),
- * `reproduced` with a repro (input, expected, actual and a command that
- * exits non-zero on the candidate) and the requirement quoted verbatim
- * from the criterion or a source, or `not-reproduced`. The refusal check
- * then runs the repro in a fresh copy: confirmed when it exits non-zero by
- * itself (not 126, 127 or at its limit) and its output holds the claimed
- * actual output. A confirmed refusal stands, with its repro; one not
- * reproduced becomes a pass, logged (`result-review-suspicion`) and seen
- * by nobody. The finder's passes and questions stand.
+ * suspicion, the workspace's checkout to read and `run_command` in a copy
+ * of its own, with a small budget, as many at once as the host has
+ * planner slots free. It answers with a repro (input, expected, actual and
+ * a command that exits non-zero on the candidate) or none. The refusal
+ * check then runs the repro in a fresh copy: confirmed when it exits
+ * non-zero by itself (not 126, 127 or at its limit) and its output holds
+ * the claimed actual output. A confirmed refusal stands, with its repro;
+ * any other becomes a pass, logged (`result-review-suspicion`) and seen by
+ * nobody. The finder's passes and questions stand.
  *
  * Confirmed refusals go to repair with their repros (work/repros.ts keeps
  * their commands as extra validation); otherwise the questions ask the
- * operator in one hold; otherwise the item is accepted, its notes to the
- * PR body and final review. A re-review gets the refusals confirmed on the
- * item's previous result and the repair's diff, never a conversation. The
- * `result-review` event times each phase and counts the suspicions.
- * Provider failures escape as `PlannerError`; a workspace Factory can't
- * make escapes as `ScratchUnavailable` with the outcome to take.
+ * operator in one hold; otherwise the item is accepted. A re-review gets
+ * the refusals confirmed on the item's previous result and the repair's
+ * diff, never a conversation. The `result-review` event times each phase
+ * and counts the suspicions. Provider failures escape as `PlannerError`; a
+ * workspace Factory can't make escapes as `ScratchUnavailable` with the
+ * outcome to take.
  */
 import type { SandboxConfig } from "../config.js";
 import { crashPoint } from "../crash.js";
@@ -72,13 +67,11 @@ import {
   deliveryRows,
   type EvidenceInput,
   type PassedValidation,
-  type RefusedCriterion,
   type Repro,
   type ResultEvidence,
   type ResultReview,
   type ResultReviewInput,
   type ReviewedCriterion,
-  type ReviewQuestion,
   runReview,
   settledBy,
   workItemDesign,
@@ -278,14 +271,7 @@ export async function reviewCandidate(
   const started = Date.now();
   const tally: Tally = {
     verdicts: { pass: 0, suspect: 0, question: 0 },
-    suspicions: {
-      raised: 0,
-      proved: 0,
-      questions: 0,
-      notes: 0,
-      dropped: 0,
-      tokens: 0,
-    },
+    suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
     repros: { confirmed: 0, dropped: 0 },
     calls: 0,
   };
@@ -485,10 +471,8 @@ const REFUSAL_BASIS =
  * The finder's review with each of its own refusals proved: each is one
  * suspicion (its detail the case, its criterion the expectation), proved
  * as `proveSuspicions` does, reading the workspace's checkout. A confirmed
- * one stays a refusal, with its repro; one the criterion and sources don't
- * define is the operator's question; one about something other than the
- * product's behaviour is a note; any other is a pass, seen in the run log
- * only. Operator refusals, passes and questions stand.
+ * one stays a refusal, with its repro; any other is a pass, seen in the
+ * run log only. Operator refusals, passes and questions stand.
  */
 async function proveRefusals(
   input: CandidateReview,
@@ -523,64 +507,32 @@ async function proveRefusals(
     findings,
     model.map((entry) => entry.criterionIndex),
   );
-  const proved = (entry: RefusedCriterion) => findings[entry.criterionIndex]!;
+  const repro = (index: number) => findings[index]?.repro;
   const refused = found.refused.flatMap((entry) =>
     entry.source !== "model"
       ? [entry]
-      : proved(entry).repro
-        ? [{ ...entry, repro: proved(entry).repro! }]
+      : repro(entry.criterionIndex)
+        ? [{ ...entry, repro: repro(entry.criterionIndex)! }]
         : [],
   );
-  const questions: ReviewQuestion[] = [
-    ...found.questions,
-    ...model.flatMap((entry) => {
-      const { repro, question } = proved(entry);
-      return !repro && question
-        ? [
-            {
-              criterionIndex: entry.criterionIndex,
-              criterion: entry.criterion,
-              detail: question.detail,
-              question: question.question,
-            },
-          ]
-        : [];
-    }),
-  ];
   const verdicts: ReviewedCriterion[] = [
     ...found.verdicts,
-    ...model.flatMap((entry) => {
-      const { repro, question, note } = proved(entry);
-      if (repro || question) return [];
-      return [
-        {
-          criterionIndex: entry.criterionIndex,
-          criterion: entry.criterion,
-          verdict: note ? ("note" as const) : ("pass" as const),
-          detail: note ?? "The reviewer's refusal of it did not reproduce.",
-          evidence: entry.evidence,
-        },
-      ];
-    }),
-  ];
-  const order = <T extends { criterionIndex: number }>(entries: T[]) =>
-    entries.sort((a, b) => a.criterionIndex - b.criterionIndex);
+    ...model
+      .filter((entry) => !repro(entry.criterionIndex))
+      .map((entry) => ({
+        criterionIndex: entry.criterionIndex,
+        criterion: entry.criterion,
+        verdict: "pass" as const,
+        detail: "The reviewer's refusal of it did not reproduce.",
+        evidence: entry.evidence,
+      })),
+  ].sort((a, b) => a.criterionIndex - b.criterionIndex);
+  const { questions } = found;
   if (refused.length)
-    return {
-      kind: "refused",
-      tree,
-      refused,
-      verdicts: order(verdicts),
-      questions: order(questions),
-    };
+    return { kind: "refused", tree, refused, verdicts, questions };
   if (questions.length)
-    return {
-      kind: "needs-human",
-      tree,
-      questions: order(questions),
-      verdicts: order(verdicts),
-    };
-  return { kind: "pass", tree, verdicts: order(verdicts) };
+    return { kind: "needs-human", tree, questions, verdicts };
+  return { kind: "pass", tree, verdicts };
 }
 
 // ---------------------------------------------------------------------------
@@ -626,21 +578,17 @@ const DEFAULT_COMMAND_MS = 60_000;
 
 /**
  * A proof's instructions, which every provider gets verbatim (R10),
- * within 5,000 characters with its tool (R9): classify the suspicion
- * (not the product's behaviour: a note; behaviour the criterion and
- * sources leave undefined: a question), else show it with a repro the
- * refusal check confirms, quoting the requirement, or say it doesn't
- * reproduce.
+ * within 5,000 characters with its tool (R9): show the one suspicion with
+ * a repro the refusal check confirms, or say it doesn't reproduce.
  */
 export function proofInstructions(
   limits: Pick<ReviewLimits, "proofCommands" | "proofBudgetMs">,
 ): string {
   return [
-    "You check one suspicion about a Work Item's result for Factory. The request gives the acceptance criterion, the Objective's pinned sources, and the suspicion: a case, what a reviewer expects there, and its basis. Your working directory is a read-only copy of the candidate.",
-    "First decide what the suspicion is. Only a behaviour of the product that the criterion or a pinned source requires can be refused. A suspicion about test economy, test placement, style or design is not-behaviour: give a one-line note for the PR. When the criterion and the sources don't say what the product must do in this case, the reviewer's expectation is a guess: answer undefined with one specific question for the operator, and never show a failure of behaviour nobody required.",
-    `Otherwise write a self-contained repro: a shell command that runs the product on that case (inline any script: node -e, python3 -c, a heredoc; build only what it needs; write only temporary files), prints the output and exits non-zero because that output breaks the requirement. Run it with run_command (${limits.proofCommands} commands, ${Math.round(limits.proofBudgetMs / 1000)} s in all). You may vary the case's input to reach the failure the suspicion describes, but a repro of another behaviour, or of a test rather than the product, is no proof.`,
-    "reproduced: it failed that way. requirement quotes, verbatim, the words of the criterion or a pinned source that require the expected behaviour; Factory checks they are there. Give input, expected, actual (copied verbatim from its output) and command. Factory runs the command again in a fresh copy and confirms it only when it exits non-zero (not 126, 127 or at its limit) with actual in its output. After a repair it runs as validation, so it must pass on a correct result.",
-    "not-reproduced: the product does what the requirement says there, or you could not show the failure within the budget; say what you saw.",
+    "You check one suspicion about a Work Item's result for Factory: show the failure with a command, or report that it doesn't reproduce. The request gives the acceptance criterion and the suspicion: a case, what the criterion requires there, and the reviewer's basis for suspecting it. Your working directory is a read-only copy of the candidate.",
+    `Write a self-contained repro: a shell command that runs the product on that case (inline any script: node -e, python3 -c, a heredoc; build only what it needs; write only temporary files), prints the output and exits non-zero because that output is wrong. Run it with run_command (${limits.proofCommands} commands, ${Math.round(limits.proofBudgetMs / 1000)} s in all). You may vary the case's input to reach the failure the suspicion describes, but a repro of another behaviour, or of a test rather than the product, is no proof.`,
+    "reproduced: it failed that way. Give input, expected, actual (copied verbatim from its output) and command. Factory runs the command again in a fresh copy and confirms it only when it exits non-zero (not 126, 127 or at its limit) with actual in its output. After a repair it runs as validation, so it must pass on a correct result.",
+    "not-reproduced: the candidate behaves as the criterion requires there, or you could not show the failure within the budget; say what you saw.",
   ].join("\n");
 }
 
@@ -775,24 +723,14 @@ export interface Suspicion {
   basis: string;
 }
 
-/** A criterion being proved: its suspicions, then what the proofs found. */
+/** A criterion being proved: its suspicions, then its first confirmed repro. */
 interface Finding {
   detail: string;
   suspicions?: Suspicion[];
-  /** Its first confirmed repro. */
   repro?: Repro;
-  /** The criterion and sources don't define the case: the operator's question. */
-  question?: { detail: string; question: string };
-  /** About something other than the product's behaviour: a note for the PR. */
-  note?: string;
+  /** None of its suspicions was confirmed. */
+  dropped?: true;
 }
-
-/** What one proof found. */
-type Proved =
-  | { kind: "confirmed"; repro: Repro }
-  | { kind: "question"; detail: string; question: string }
-  | { kind: "note"; note: string }
-  | { kind: "dropped" };
 
 const text = (description?: string) => ({
   type: "string",
@@ -811,16 +749,13 @@ interface Tally {
   /** The finder's verdicts; `suspect`: a criterion it refused, a suspicion. */
   verdicts: { pass: number; suspect: number; question: number };
   /**
-   * Suspicions raised; of those, proved (their repro confirmed), made the
-   * operator's questions (the sources don't define the case), made notes
-   * (not the product's behaviour) and dropped (not reproduced, not
-   * confirmed, or past the review's proofs); the proofs' tokens.
+   * Suspicions raised; of those, proved (their repro confirmed) and
+   * dropped (not reproduced, not confirmed, or past the review's proofs);
+   * the proofs' tokens.
    */
   suspicions: {
     raised: number;
     proved: number;
-    questions: number;
-    notes: number;
     dropped: number;
     tokens: number;
   };
@@ -835,51 +770,44 @@ const NOT_RUN = new Set([126, 127]);
 
 const REPRO_FIELDS = ["input", "expected", "actual", "command"] as const;
 
-/** The shortest quotation that can name a requirement. */
-const REQUIREMENT_CHARS = 12;
-
-/** One variant of a proof's outcome, every field required. */
-const outcome = (kind: string, fields: Record<string, unknown>) => ({
-  type: "object",
-  properties: { kind: { type: "string", enum: [kind] }, ...fields },
-  required: ["kind", ...Object.keys(fields)],
-  additionalProperties: false,
-});
-
-/** A proof's answer: the repro it ran, the operator's question, a note, or what it saw. */
+/** A proof's answer: the repro it ran, or what it saw instead. */
 export const PROOF_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
     outcome: {
       anyOf: [
-        outcome("reproduced", {
-          requirement: text(
-            "The words of the criterion or a pinned source that require the expected behaviour, quoted verbatim.",
-          ),
-          repro: {
-            type: "object",
-            properties: {
-              input: text(),
-              expected: text(),
-              actual: text(
-                "Text the command prints on this candidate, verbatim.",
-              ),
-              command: text(
-                "A self-contained shell command that exits non-zero on this candidate.",
-              ),
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["reproduced"] },
+            repro: {
+              type: "object",
+              properties: {
+                input: text(),
+                expected: text(),
+                actual: text(
+                  "Text the command prints on this candidate, verbatim.",
+                ),
+                command: text(
+                  "A self-contained shell command that exits non-zero on this candidate.",
+                ),
+              },
+              required: [...REPRO_FIELDS],
+              additionalProperties: false,
             },
-            required: [...REPRO_FIELDS],
-            additionalProperties: false,
           },
-        }),
-        outcome("not-reproduced", { detail: text() }),
-        outcome("undefined", {
-          detail: text("What the criterion and sources leave open."),
-          question: text("One specific question for the operator."),
-        }),
-        outcome("not-behaviour", {
-          note: text("A one-line note for the PR and final review."),
-        }),
+          required: ["kind", "repro"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["not-reproduced"] },
+            detail: text(),
+          },
+          required: ["kind", "detail"],
+          additionalProperties: false,
+        },
       ],
     },
   },
@@ -887,48 +815,16 @@ export const PROOF_SCHEMA: Record<string, unknown> = {
   additionalProperties: false,
 };
 
-/** Text with its runs of whitespace as one space, for comparing output. */
-const squeezed = (text: string) => text.replace(/\s+/g, " ").trim();
-
-/**
- * A proof's answer decoded: a repro, the requirement quoted verbatim from
- * `required` (the criterion and the pinned sources) and at least
- * REQUIREMENT_CHARS long, or the whole criterion when it is shorter; a
- * question; a note; none; or why it is invalid.
- */
+/** A proof's answer decoded: its repro, none, or why the answer is invalid. */
 function decodeProof(
   value: unknown,
-  required: { criterion: string; sources: string },
-):
-  | { repro: Repro }
-  | { question: string; detail: string }
-  | { note: string }
-  | { detail: string }
-  | { invalid: string } {
+): { repro: Repro } | { detail: string } | { invalid: string } {
   const outcome = isRecord(value) ? value.outcome : undefined;
-  if (!isRecord(outcome))
-    return {
-      invalid:
-        'The answer must be {"outcome": {...}}, its kind reproduced, not-reproduced, undefined or not-behaviour.',
-    };
-  if (outcome.kind === "reproduced") {
+  if (isRecord(outcome) && outcome.kind === "reproduced") {
     if (!complete(outcome.repro, REPRO_FIELDS))
       return {
         invalid:
           "A reproduced outcome needs a repro: input, expected, actual and command.",
-      };
-    const quoted =
-      typeof outcome.requirement === "string"
-        ? squeezed(outcome.requirement)
-        : "";
-    if (
-      quoted.length <
-        Math.min(REQUIREMENT_CHARS, squeezed(required.criterion).length) ||
-      !squeezed(`${required.criterion}\n${required.sources}`).includes(quoted)
-    )
-      return {
-        invalid:
-          "requirement must quote, verbatim, the words of the criterion or a pinned source that require the expected behaviour. If none does, answer undefined with a question for the operator.",
       };
     const repro = outcome.repro as Record<string, unknown>;
     return {
@@ -937,18 +833,15 @@ function decodeProof(
       ) as unknown as Repro,
     };
   }
-  if (outcome.kind === "undefined" && complete(outcome, ["detail", "question"]))
-    return {
-      detail: String(outcome.detail),
-      question: String(outcome.question),
-    };
-  if (outcome.kind === "not-behaviour" && complete(outcome, ["note"]))
-    return { note: String(outcome.note) };
-  if (outcome.kind === "not-reproduced" && complete(outcome, ["detail"]))
-    return { detail: String(outcome.detail) };
+  if (
+    isRecord(outcome) &&
+    outcome.kind === "not-reproduced" &&
+    typeof outcome.detail === "string"
+  )
+    return { detail: outcome.detail };
   return {
     invalid:
-      "The outcome's kind must be reproduced, not-reproduced, undefined or not-behaviour, with every field its kind needs.",
+      'The answer must be {"outcome": {"kind": "reproduced", "repro": {...}}} or {"outcome": {"kind": "not-reproduced", "detail": "..."}}.',
   };
 }
 
@@ -964,17 +857,17 @@ interface ProofContext {
 }
 
 /**
- * Prove the suspicions of the findings among `indices`, at most the
- * review's `proofs` in all, taken in turn across the criteria (each
+ * Prove the suspicions of the suspect findings among `indices`, at most
+ * the review's `proofs` in all, taken in turn across the criteria (each
  * criterion's first, then each one's second, …), each in its own task as
  * many at once as the host has planner slots free (`atOnce`). Each finding
- * gets its first confirmed repro (the others confirmed in its detail);
- * with none, its first question; with none, its first note.
+ * becomes a refusal with its first confirmed repro (the others confirmed
+ * in its detail), or, with none, stays as the reviewer gave it.
  */
 async function proveSuspicions(
   input: Pick<
     CandidateReview,
-    "planner" | "criteria" | "context" | "limits" | "base" | "signal" | "log"
+    "planner" | "criteria" | "limits" | "base" | "signal" | "log"
   >,
   context: ProofContext,
   findings: (Finding | undefined)[],
@@ -1017,54 +910,46 @@ async function proveSuspicions(
     proveOne(input, context, entry, signal),
   );
   for (const index of suspect) {
-    const found = taken.flatMap((entry, n) =>
-      entry.criterionIndex === index ? [proved[n]!] : [],
+    const finding = findings[index]!;
+    const confirmed = taken.flatMap((entry, n) =>
+      entry.criterionIndex === index && proved[n]
+        ? [{ suspicion: entry.suspicion, repro: proved[n] }]
+        : [],
     );
-    const repros = found.flatMap((each) =>
-      each.kind === "confirmed" ? [each.repro] : [],
-    );
-    const question = found.find((each) => each.kind === "question");
-    const note = found.find((each) => each.kind === "note");
-    const { suspicions: _suspicions, ...rest } = findings[index]!;
-    findings[index] = {
-      ...rest,
-      ...(repros.length && {
-        repro: repros[0]!,
-        detail: [
-          rest.detail,
-          ...repros
-            .slice(1)
-            .map(
-              (repro) =>
+    const [first, ...more] = confirmed;
+    const { suspicions: _suspicions, ...rest } = finding;
+    findings[index] = first
+      ? {
+          ...rest,
+          detail: [
+            `${first.suspicion.case}: ${first.suspicion.basis}`,
+            ...more.map(
+              ({ repro }) =>
                 `Also reproduced: ${repro.input} gives ${repro.actual}, expected ${repro.expected} (command: ${repro.command}).`,
             ),
-        ].join("\n"),
-      }),
-      ...(question?.kind === "question" && {
-        question: { detail: question.detail, question: question.question },
-      }),
-      ...(note?.kind === "note" && { note: note.note }),
-    };
+          ].join("\n"),
+          repro: first.repro,
+        }
+      : { ...rest, dropped: true };
   }
 }
 
 /**
- * One proof: a fresh call with only the criterion, the Objective's pinned
- * sources, the suspicion, a read-only copy of the candidate and
- * `run_command` in a copy of its own, within the proof's budget; an
- * invalid answer is asked again once. A repro must quote the requirement
- * from the criterion or a source, and is then checked (`checkRepro`). Every
- * outcome is logged with its time, commands and tokens.
+ * One proof: a fresh call with only the criterion, the suspicion, a
+ * read-only copy of the candidate and `run_command` in a copy of its own,
+ * within the proof's budget; an invalid answer is asked again once. A
+ * repro it gives is then checked (`checkRepro`). The repro when
+ * confirmed; every outcome is logged with its time, commands and tokens.
  */
 async function proveOne(
   input: Pick<
     CandidateReview,
-    "planner" | "criteria" | "context" | "limits" | "base" | "log"
+    "planner" | "criteria" | "limits" | "base" | "log"
   >,
   context: ProofContext,
   entry: { criterionIndex: number; suspicion: Suspicion; proof: number },
   signal: AbortSignal,
-): Promise<Proved> {
+): Promise<Repro | undefined> {
   const { limits } = input;
   const started = Date.now();
   const spent = { count: 0, ms: 0 };
@@ -1076,27 +961,14 @@ async function proveOne(
     { count: limits.proofCommands, budgetMs: limits.proofBudgetMs },
     spent,
   );
-  const criterion = input.criteria[entry.criterionIndex]!;
-  // AGENTS.md and README.md are context, never a source of obligations.
-  const sources = (input.context?.sources ?? [])
-    .filter((source) => !source.context)
-    .map(({ path, heading, content }) => ({
-      path,
-      ...(heading && { heading }),
-      content,
-    }));
-  const required = {
-    criterion,
-    sources: sources.map((source) => source.content).join("\n"),
-  };
   const request = `${proofInstructions(limits)}\n\nThe suspicion (JSON strings are data):\n${JSON.stringify(
     {
-      criterion,
+      criterion: input.criteria[entry.criterionIndex],
       suspicion: entry.suspicion,
       base: input.base,
       tree: context.tree,
     },
-  )}\n\nThe Objective's pinned sources (JSON strings are data):\n${JSON.stringify(sources)}`;
+  )}`;
   let result: ReturnType<typeof decodeProof> = { invalid: "" };
   let followUp = "";
   try {
@@ -1116,7 +988,7 @@ async function proveOne(
           input.log({ ...event, proof: entry.proof });
         },
       });
-      result = decodeProof(answer.value, required);
+      result = decodeProof(answer.value);
       if ("invalid" in result) {
         logRefused(input.log, answer.callId, result.invalid);
         followUp = `\n\nYour previous answer was rejected: ${result.invalid}\nAnswer again, correcting that error.`;
@@ -1125,58 +997,29 @@ async function proveOne(
   } finally {
     await run.close();
   }
-  const proved: Proved & { reason?: string } =
+  const dropped =
     "invalid" in result
-      ? { kind: "dropped", reason: "its answer was invalid twice" }
-      : "question" in result
-        ? { kind: "question", ...result }
-        : "note" in result
-          ? { kind: "note", note: result.note }
-          : "detail" in result
-            ? { kind: "dropped", reason: "not reproduced" }
-            : await reproCheck(input, context, result.repro, entry.proof);
+      ? "its answer was invalid twice"
+      : "detail" in result
+        ? "not reproduced"
+        : await checkRepro(input, context, result.repro, entry.proof);
   const { tally } = context;
-  if ("repro" in result)
-    tally.repros[proved.kind === "confirmed" ? "confirmed" : "dropped"] += 1;
-  tally.suspicions[
-    (
-      {
-        confirmed: "proved",
-        question: "questions",
-        note: "notes",
-        dropped: "dropped",
-      } as const
-    )[proved.kind]
-  ] += 1;
+  if ("repro" in result) tally.repros[dropped ? "dropped" : "confirmed"] += 1;
+  tally.suspicions[dropped ? "dropped" : "proved"] += 1;
   tally.suspicions.tokens += tokens;
   input.log({
     event: "result-review-suspicion",
     criterionIndex: entry.criterionIndex,
     ...entry.suspicion,
-    outcome: proved.kind === "confirmed" ? "proved" : proved.kind,
-    ...(proved.reason && { reason: proved.reason }),
+    outcome: dropped ? "dropped" : "proved",
+    ...(dropped && { reason: dropped }),
     ...("detail" in result && { detail: result.detail }),
-    ...("question" in result && { question: result.question }),
-    ...("note" in result && { note: result.note }),
     ...("repro" in result && { repro: result.repro }),
     commands: spent.count,
     tokens,
     ms: Date.now() - started,
   });
-  return proved;
-}
-
-/** The refusal check of a proof's repro, as what the proof found. */
-async function reproCheck(
-  input: Pick<CandidateReview, "limits" | "log">,
-  context: Pick<ProofContext, "workspace">,
-  repro: Repro,
-  proof: number,
-): Promise<Proved & { reason?: string }> {
-  const dropped = await checkRepro(input, context, repro, proof);
-  return dropped
-    ? { kind: "dropped", reason: dropped }
-    : { kind: "confirmed", repro };
+  return dropped || !("repro" in result) ? undefined : result.repro;
 }
 
 /**
@@ -1262,6 +1105,9 @@ async function atOnce<T, R>(
   }
   return results;
 }
+
+/** Text with its runs of whitespace as one space, for comparing output. */
+const squeezed = (text: string) => text.replace(/\s+/g, " ").trim();
 
 // ---------------------------------------------------------------------------
 // Outcome

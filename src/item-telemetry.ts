@@ -103,8 +103,8 @@ export interface ItemTelemetry {
   reviews: Record<string, number>;
   /**
    * The result reviews' own telemetry (#2344), summed over them: the
-   * finder's verdicts by kind; the suspicions raised, and of those proved,
-   * made questions or notes, and dropped, with the proofs' tokens; the
+   * finder's verdicts by kind; the suspicions raised, and of those proved
+   * and dropped, with the proofs' tokens; the
    * proofs' repros confirmed or dropped by the refusal check; questions;
    * the review calls' tokens (the proofs' among them) and the reviews' time.
    */
@@ -114,8 +114,6 @@ export interface ItemTelemetry {
     suspicions: {
       raised: number;
       proved: number;
-      questions: number;
-      notes: number;
       dropped: number;
       tokens: number;
     };
@@ -314,14 +312,7 @@ export class ItemTelemetries {
           reviewer.verdicts[kind] =
             (reviewer.verdicts[kind] ?? 0) + (num(n) ?? 0);
         const suspicions = of(event.suspicions);
-        for (const key of [
-          "raised",
-          "proved",
-          "questions",
-          "notes",
-          "dropped",
-          "tokens",
-        ] as const)
+        for (const key of ["raised", "proved", "dropped", "tokens"] as const)
           reviewer.suspicions[key] += num(suspicions[key]) ?? 0;
         reviewer.repros.confirmed += num(of(event.repros).confirmed) ?? 0;
         reviewer.repros.dropped += num(of(event.repros).dropped) ?? 0;
@@ -420,14 +411,7 @@ export class ItemTelemetries {
         reviewer: {
           reviews: 0,
           verdicts: {},
-          suspicions: {
-            raised: 0,
-            proved: 0,
-            questions: 0,
-            notes: 0,
-            dropped: 0,
-            tokens: 0,
-          },
+          suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
           repros: { confirmed: 0, dropped: 0 },
           questions: 0,
           tokens: reported(),
@@ -719,7 +703,7 @@ function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
   return [
     plural(reviewer.reviews, "review"),
     `verdicts ${verdicts}`,
-    `suspicions ${suspicions.raised} raised, ${suspicions.proved} proved, ${suspicions.questions} questions, ${suspicions.notes} notes, ${suspicions.dropped} dropped (proofs ${count(suspicions.tokens)} tokens)`,
+    `suspicions ${suspicions.raised} raised, ${suspicions.proved} proved, ${suspicions.dropped} dropped (proofs ${count(suspicions.tokens)} tokens)`,
     `repros ${reviewer.repros.confirmed} confirmed, ${reviewer.repros.dropped} dropped`,
     plural(reviewer.questions, "question"),
     `${reviewer.tokens.calls ? count(reviewer.tokens.sum) : "not reported"} tokens`,

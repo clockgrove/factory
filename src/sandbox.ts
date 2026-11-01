@@ -1164,8 +1164,8 @@ export interface SandboxOptions {
   /**
    * A worker attempt's or validation run's services directory
    * (work/services.ts), Factory's own under the host's temporary
-   * directory, mounted read-only: the
-   * command connects to the sockets in it and writes nothing there.
+   * directory, mounted read-only: the command connects to the sockets in
+   * it and writes nothing there.
    */
   services?: string;
   /**

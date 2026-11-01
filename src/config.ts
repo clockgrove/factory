@@ -310,8 +310,8 @@ export interface SandboxService {
   /**
    * Starts the service in the foreground (`sh -c`, so `exec` the server):
    * it is stopped when the run (a worker attempt, a validation) ends, and
-   * its exit before then is a failure. `$FACTORY_SERVICE_DIR` is its private directory, where it
-   * keeps its data and its socket.
+   * its exit before then is a failure. `$FACTORY_SERVICE_DIR` is its
+   * private directory, where it keeps its data and its socket.
    */
   start: string;
   /** Exits zero once the service is ready; run until it does, for at most a minute. */

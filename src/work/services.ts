@@ -94,7 +94,7 @@ export type ServicesOwner = "worker" | "validation";
 
 /** One run's running services. */
 export class AttemptServices {
-  /** The variables the worker's commands get. */
+  /** The variables the run's commands get. */
   readonly environment: Record<string, string> = {};
   private readonly running: { stop: AbortController; ended: Promise<void> }[] =
     [];

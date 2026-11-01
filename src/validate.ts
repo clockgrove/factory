@@ -38,7 +38,7 @@ import { crashPoint } from "./crash.js";
 import { hold, hostLimits, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal, readBlobs } from "./git.js";
 import type { CommitAuthor } from "./github.js";
-import { installOutage } from "./install-outage.js";
+import { installOutage, registryAnswers } from "./install-outage.js";
 import type { RunFile } from "./log.js";
 import {
   hydrateTree,
@@ -58,6 +58,7 @@ import {
 } from "./missing-version.js";
 import { declaration, onlyEntry } from "./objective.js";
 import {
+  baseRegistry,
   configurationRefusal,
   installNetworkRefusal,
   type NetworkRefusal,
@@ -1180,6 +1181,20 @@ async function validateCandidate(
         whole.remove();
         await sleep(wait, undefined, { signal });
       }
+      // The window ended on the network: a registry that answers its ping
+      // was reachable, so the failure is the result's after all (pnpm 12
+      // gives a metadata 404 the network's code); one that doesn't, or
+      // one Factory can't read, is the outage.
+      let registry: "answered" | "unreachable" | "unknown" | undefined;
+      if (outage) {
+        const url = await baseRegistry(checkout, plan.base, signal);
+        registry =
+          url === undefined
+            ? "unknown"
+            : (await registryAnswers(url, signal))
+              ? "answered"
+              : "unreachable";
+      }
       if (run.kind === "fault") whole.remove();
       if (run.kind === "fault")
         return objectiveWide(
@@ -1231,6 +1246,7 @@ async function validateCandidate(
         ...(group && { group: group.number }),
         exitCode: run.exitCode,
         durationMs,
+        ...(registry && { registry }),
         // A failed command keeps what its repair sees: its head and tail,
         // and the whole output in its attempt file.
         tail: passed ? output.slice(-PASSED_OUTPUT_TAIL) : failedOutput(output),
@@ -1316,10 +1332,10 @@ async function validateCandidate(
       // Still the network when the retry window ended: the host's outage,
       // whatever the candidate changed. The environment's wait, which
       // charges no repair and asks only after its own time (#2340).
-      if (outage)
+      if (outage && registry !== "answered")
         return {
           kind: "retry",
-          reason: `${failed}${outage}, and still did ${Math.round((Date.now() - started) / 1000)} s after its first run, retried with backoff: the registry is out of reach from this host:\n${failedOutput(output)}`,
+          reason: `${failed}${outage}, and still did ${Math.round((Date.now() - started) / 1000)} s after its first run, retried with backoff, and ${registry === "unreachable" ? "the registry does not answer its ping from this host" : "Factory can't read the base's registry to ping it"}:\n${failedOutput(output)}`,
         };
       // An install that would have had the network, ran offline and found
       // packages missing from the store (the package managers' offline
@@ -1404,7 +1420,9 @@ async function validateCandidate(
       const offlineBecause =
         refused && offlineMissing
           ? `the install ran offline, because ${refused.reason}, and the package store lacks packages it needs:\n`
-          : "";
+          : outage
+            ? `${outage}, though the registry answers its ping:\n`
+            : "";
       const detail = `${failed}${offlineBecause}${overflow ?? failedOutput(output)}`;
       // The dependency install is the controller's own bootstrap step. When
       // the candidate left every manifest and lockfile as at the accepted

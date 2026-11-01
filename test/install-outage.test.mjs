@@ -49,10 +49,16 @@ const tarball = readFileSync(join(source, packed.stdout.trim()));
 
 /**
  * The registry: it closes the connection of the first `down` tarball
- * requests (Infinity: every one), then serves the tarball.
+ * requests (Infinity: every one), then serves the tarball. Its ping
+ * (`/-/ping`) answers with `ping`, else closes the connection too.
  */
-const registry = { down: 0, requests: 0 };
+const registry = { down: 0, requests: 0, ping: false };
 const server = createServer((request, response) => {
+  if (request.url === "/-/ping") {
+    if (registry.ping) response.end("{}");
+    else request.socket.destroy();
+    return;
+  }
   if (!request.url.endsWith(".tgz")) {
     response.statusCode = 404;
     response.end("{}");
@@ -177,6 +183,10 @@ async function validateCandidate() {
 
 const retries = (events) =>
   events.filter((event) => event.event === "validation-install-retry");
+const result = (events) =>
+  events.find(
+    (event) => event.event === "validation-result" && event.index === 0,
+  );
 const ran = (events) =>
   events
     .filter((event) => event.event === "validation-command")
@@ -185,7 +195,7 @@ const ran = (events) =>
 test("an install the registry dropped twice runs again and the item validates", {
   skip,
 }, async () => {
-  Object.assign(registry, { down: 2, requests: 0 });
+  Object.assign(registry, { down: 2, requests: 0, ping: false });
   const { outcome, events } = await validateCandidate();
   assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
   assert.equal(registry.requests, 3);
@@ -199,15 +209,31 @@ test("an install the registry dropped twice runs again and the item validates", 
 test("a registry down past the retry window is the environment's wait, not a repair", {
   skip,
 }, async () => {
-  Object.assign(registry, { down: Infinity, requests: 0 });
+  Object.assign(registry, { down: Infinity, requests: 0, ping: false });
   const { outcome, events } = await validateCandidate();
   assert.equal(outcome.kind, "retry", JSON.stringify(outcome).slice(0, 1500));
   assert.equal(outcome.wait, undefined);
   assert.match(
     outcome.reason,
-    /^Validation command failed \(1\): npm ci --ignore-scripts: npm failed with ECONNRESET, and still did \d+ s after its first run, retried with backoff: the registry is out of reach from this host:\n/,
+    /^Validation command failed \(1\): npm ci --ignore-scripts: npm failed with ECONNRESET, and still did \d+ s after its first run, retried with backoff, and the registry does not answer its ping from this host:\n/,
   );
   assert.ok(retries(events).length >= 2, JSON.stringify(retries(events)));
+  assert.equal(result(events).registry, "unreachable");
   // Nothing ran on the half-installed tree.
+  assert.deepEqual(ran(events), [0]);
+});
+
+test("a registry that answers its ping after the window makes the install's failure the result's", {
+  skip,
+}, async () => {
+  // Reachable, but every tarball request breaks off: no outage of the host.
+  Object.assign(registry, { down: Infinity, requests: 0, ping: true });
+  const { outcome, events } = await validateCandidate();
+  assert.equal(outcome.kind, "repair", JSON.stringify(outcome).slice(0, 1500));
+  assert.match(
+    outcome.finding,
+    /^Validation command failed \(1\): npm ci --ignore-scripts: npm failed with ECONNRESET, though the registry answers its ping:\n/,
+  );
+  assert.equal(result(events).registry, "answered");
   assert.deepEqual(ran(events), [0]);
 });

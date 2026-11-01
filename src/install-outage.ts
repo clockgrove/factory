@@ -11,7 +11,8 @@
  * the lockfile wants, while a package it skipped for the platform stays in
  * it. npm 11 drops such a package too, but records nothing that tells the
  * drop from a platform skip, so an npm install that exits 0 counts as
- * passed.
+ * passed. When the retry window ends on the network, the registry's ping
+ * (`registryAnswers`) decides whose the failure is.
  */
 import { isAbsolute } from "node:path";
 import { parse } from "yaml";
@@ -110,3 +111,32 @@ const snapshots = (lockfile: unknown): string[] | undefined =>
   record(lockfile) && record(lockfile.snapshots)
     ? Object.keys(lockfile.snapshots)
     : undefined;
+
+/** How long the registry's ping may take to answer. */
+const PING_TIMEOUT_MS = 10_000;
+
+/**
+ * Whether the registry answers its ping (`GET <registry>/-/ping`) from the
+ * host: any HTTP status at all. Once the retry window ended on the network,
+ * an answer says the outage is over or never was, so the install's failure
+ * is the result's (pnpm 12 gives a metadata 404 the same code as a
+ * connection failure); no answer (DNS, connection, timeout) is the outage.
+ */
+export async function registryAnswers(
+  registry: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    const response = await fetch(
+      new URL("-/ping", registry.replace(/\/?$/, "/")),
+      {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(PING_TIMEOUT_MS)]),
+      },
+    );
+    await response.body?.cancel();
+    return true;
+  } catch {
+    signal.throwIfAborted();
+    return false;
+  }
+}

@@ -30,6 +30,7 @@ import {
 import { cp, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
@@ -37,6 +38,7 @@ import { crashPoint } from "./crash.js";
 import { hold, hostLimits, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal, readBlobs } from "./git.js";
 import type { CommitAuthor } from "./github.js";
+import { installOutage } from "./install-outage.js";
 import type { RunFile } from "./log.js";
 import {
   hydrateTree,
@@ -110,6 +112,17 @@ const MINUTE = 60_000;
 
 /** `validation.commandTimeoutSeconds` when the configuration leaves it out. */
 export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 30 * 60;
+
+/**
+ * How long validation retries an install that failed for the network
+ * (install-outage.ts), from its first run: waits of 1/24 of it, doubling,
+ * so 5 s to 40 s. Tests shorten it (`FACTORY_INSTALL_RETRY_MS`).
+ */
+const installRetryMs = () =>
+  Number(process.env.FACTORY_INSTALL_RETRY_MS) || 2 * MINUTE;
+
+/** The most of a lockfile Factory reads after an install. */
+const LOCKFILE_BYTES = 64 * 1024 ** 2;
 
 /** Room in a validation deadline for the checkout, Git LFS, pins and capture. */
 const VALIDATION_MARGIN_MS = 15 * MINUTE;
@@ -1124,22 +1137,49 @@ async function validateCandidate(
         }),
       });
       const limit = capture ? outputLimit(selectors, command) : undefined;
-      // The whole output, as it arrives: what the run keeps of a failure.
-      const whole = input.runFile(`validation-${index}`);
+      // An install with the network that failed for it (install-outage.ts)
+      // runs again, with backoff, until the retry window ends; then it is
+      // the host's outage, below (#2340). No later command runs before.
+      const manager = install ? packageBootstrap(command) : undefined;
+      const networked = online || (install && input.sandbox.network === "host");
+      const window = installRetryMs();
+      let outage: string | undefined;
+      let whole: RunFile;
       let run: Awaited<ReturnType<typeof runSandboxed>>;
-      try {
-        run = await sandboxed(command, whole, {
-          install,
-          network: online,
-          ...(limit ? { outputLimit: limit } : {}),
-          ...(store && { store: store.root }),
-        });
-      } catch (error) {
-        // Cancelled or past its deadline: nothing names its output.
+      for (let wait = window / 24; ; wait *= 2) {
+        // The whole output, as it arrives: what the run keeps of a failure.
+        whole = input.runFile(`validation-${index}`);
+        try {
+          run = await sandboxed(command, whole, {
+            install,
+            network: online,
+            ...(limit ? { outputLimit: limit } : {}),
+            ...(store && { store: store.root }),
+          });
+        } catch (error) {
+          // Cancelled or past its deadline: nothing names its output.
+          whole.remove();
+          throw error;
+        }
+        whole.close();
+        outage =
+          manager &&
+          networked &&
+          run.kind === "ran" &&
+          !run.timedOut &&
+          !run.diskOverflow
+            ? installOutage(manager, run, (path) => {
+                const read = readProduced(worktree, path, LOCKFILE_BYTES);
+                return Buffer.isBuffer(read)
+                  ? read.toString("utf8")
+                  : undefined;
+              })
+            : undefined;
+        if (!outage || Date.now() - started + wait > window) break;
+        input.log({ event: "validation-install-retry", index, outage, wait });
         whole.remove();
-        throw error;
+        await sleep(wait, undefined, { signal });
       }
-      whole.close();
       if (run.kind === "fault") whole.remove();
       if (run.kind === "fault")
         return objectiveWide(
@@ -1178,7 +1218,7 @@ async function validateCandidate(
         (run.timedOut
           ? `the command ran longer than ${Math.round(input.commandTimeoutMs / 1000)} s and was stopped`
           : undefined);
-      const passed = run.exitCode === 0 && !overflow;
+      const passed = run.exitCode === 0 && !overflow && !outage;
       if (passed) whole.remove();
       // A store over the disk budget is never kept: the next install of the
       // item starts from an empty one.
@@ -1273,6 +1313,14 @@ async function validateCandidate(
           ? "time limit"
           : String(run.exitCode);
       const failed = `Validation command failed (${exit}): ${command}: `;
+      // Still the network when the retry window ended: the host's outage,
+      // whatever the candidate changed. The environment's wait, which
+      // charges no repair and asks only after its own time (#2340).
+      if (outage)
+        return {
+          kind: "retry",
+          reason: `${failed}${outage}, and still did ${Math.round((Date.now() - started) / 1000)} s after its first run, retried with backoff: the registry is out of reach from this host:\n${failedOutput(output)}`,
+        };
       // An install that would have had the network, ran offline and found
       // packages missing from the store (the package managers' offline
       // error codes).
@@ -1310,7 +1358,6 @@ async function validateCandidate(
       // matches them: no worker has the network to resolve one. Factory
       // does, once, as the install runs, and starts the sequence again on
       // its commit of the result (#2095).
-      const manager = packageBootstrap(command);
       if (
         install &&
         manager &&

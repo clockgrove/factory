@@ -28,17 +28,23 @@ jobs:
       - run: npm run notices:check
 
   # npm test's run, split across the shards by scripts/test-partition.mjs,
-  # balanced by the seconds each file took in test/timings.json and the
-  # name order node --test starts them in. Refresh the timings from a run's
-  # test-durations.json files (scripts/test-timings.mjs) when the shards
-  # drift apart. Five shards finish in about 41 s of tests each, against
-  # 44 s for four and 38 s for six; cli.test.mjs, about 40 s on its own,
-  # is the floor. Each shard builds for itself: tsc takes under 10 s,
-  # and a build job would put its own runner, setup, build and artifact
-  # upload ahead of every shard.
+  # balanced by the seconds each file took and the name order node --test
+  # starts them in. The seconds come from the newest merge queue run that
+  # had finished when this run was created, so new and grown test files
+  # count without a commit; every shard, and a rerun of one, picks that same
+  # run and so the same split. Without one (no such run, or the API fails),
+  # the committed test/timings.json, the same for every shard. package-gate
+  # checks that the shards ran every file exactly once either way. Five
+  # shards finish in about 41 s of tests each, against 44 s for four and
+  # 38 s for six. Each shard builds for itself: tsc takes under 10 s, and a
+  # build job would put its own runner, setup, build and artifact upload
+  # ahead of every shard.
   tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
     strategy:
       # Report every shard's failures, as one unsharded run would.
       fail-fast: false
@@ -50,6 +56,22 @@ jobs:
       - uses: ./.github/actions/bubblewrap
       - run: git lfs version
       - run: npm run build
+      - name: Take test timings from the newest finished merge queue run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api() { for try in 1 2 3; do gh api "$@" && return; sleep 2; done; return 1; }
+          if created="$(api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)" &&
+            source="$(api "repos/$GITHUB_REPOSITORY/actions/workflows/quality.yml/runs?event=merge_group&status=success&per_page=30" \
+              --jq "[.workflow_runs[] | select(.updated_at < \"$created\")][0].id // empty")" &&
+            [ -n "$source" ] &&
+            gh run download "$source" --pattern 'test-files-*' --dir "$RUNNER_TEMP/durations" &&
+            node scripts/test-timings.mjs "$RUNNER_TEMP"/durations/*/test-durations.json; then
+            echo "Test timings from run $source"
+          else
+            git checkout -- test/timings.json
+            echo "Test timings from the committed test/timings.json"
+          fi
       # A step of its own: a partition that fails fails the job, rather than
       # leave node --test no files, which would run every file again.
       - run: >-

@@ -67,7 +67,18 @@ async function queueCommand(
     }
     const state = loaded?.kind === "ok" ? loaded.state : undefined;
     const finished = state && TERMINAL.includes(state.status);
-    if (loaded?.kind === "unreadable")
+    // A finished Objective's unreadable record holds only once queued again.
+    if (
+      loaded?.kind === "unreadable" &&
+      loaded.finishedAt !== undefined &&
+      card.option !== queuedOption
+    )
+      candidates.push({
+        issue: card.issue,
+        option: card.option,
+        status: "finished, its record unreadable",
+      });
+    else if (loaded?.kind === "unreadable")
       inert.push({
         issue: card.issue,
         option: card.option,

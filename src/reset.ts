@@ -603,8 +603,27 @@ export async function rebuildState(
   const card = read.items.find((item) => item.issue === issue);
   const self = await github.login(signal);
   const comments = await github.comments(issue, undefined, signal);
+  const pulls = await pullsOf(
+    github,
+    pullBranches(record, comments, self),
+    signal,
+  );
+  return rebuildFrom(
+    record,
+    { open, ...(card ? { card } : {}), self, comments, pulls },
+    config,
+    ended,
+  );
+}
+
+/** The PRs whose head is each of `branches`, every merged one with its merge commit. */
+async function pullsOf(
+  github: GitHub,
+  branches: string[],
+  signal: AbortSignal,
+): Promise<GitHubRead["pulls"]> {
   const pulls: GitHubRead["pulls"] = {};
-  for (const branch of pullBranches(record, comments, self)) {
+  for (const branch of branches) {
     pulls[branch] = await github.pullsByHead(branch, signal);
     for (const pull of pulls[branch])
       if (pull.merged_at && !pull.merge_commit_sha) {
@@ -618,12 +637,57 @@ export async function rebuildState(
         pull.merge_commit_sha = sha;
       }
   }
-  return rebuildFrom(
-    record,
-    { open, ...(card ? { card } : {}), self, comments, pulls },
-    config,
-    ended,
+  return pulls;
+}
+
+/** What GitHub alone shows Factory delivered for an Objective (`deliveredOnGitHub`). */
+export interface Delivered {
+  /** The newest run Factory's own comments name. */
+  run?: string;
+  /** That run's report is posted: a reported run is done. */
+  reported: boolean;
+  /** That run's plan, from its plan comment, when it can be read. */
+  plan?: Plan;
+  /** The PR each of the plan's Work Items merged with in that run. */
+  merged: Rebuilt["merged"];
+}
+
+/**
+ * What Factory delivered for `issue`, read from GitHub as a reset with no
+ * readable state reads it (`rebuildFrom`), for a reader that has no
+ * readable state of it (planning/predecessors.ts): its newest run, that
+ * run's report and plan comment, and each item's merged PR of that run
+ * and plan, by its fixed branch. It only reads; a failed read throws.
+ */
+export async function deliveredOnGitHub(
+  github: GitHub,
+  issue: number,
+  signal: AbortSignal,
+): Promise<Delivered> {
+  const self = await github.login(signal);
+  const mine = own({
+    comments: await github.comments(issue, undefined, signal),
+    self,
+  });
+  const { run, plan } = findRun(issue, mine, undefined);
+  const reported =
+    run !== undefined &&
+    mine.some((comment) => comment.body.startsWith(mark(issue, "report", run)));
+  if (!run || typeof plan !== "object") return { run, reported, merged: {} };
+  const pulls = await pullsOf(
+    github,
+    plan.plan.items.map((item) => `factory/${issue}/${item.id}`),
+    signal,
   );
+  const { merged } = rebuiltOf(
+    issue,
+    run,
+    plan,
+    mine,
+    { pulls, self },
+    undefined,
+  );
+  return { run, reported, plan: plan.plan, merged };
 }
 
 /** A rebuild's result: the state, a question for the operator, or a refusal. */
@@ -648,7 +712,12 @@ export function pullBranches(
   self: string,
 ): string[] {
   const issue = record.issue;
-  const { plan } = findRun(issue, own({ comments, self }), record);
+  const { plan } = findRun(
+    issue,
+    own({ comments, self }),
+    (record.kept[RESET] as ResetRecord).old,
+    record.startedAt,
+  );
   if (typeof plan !== "object") return [];
   return plan.plan.items.map((item) => `factory/${issue}/${item.id}`);
 }
@@ -701,7 +770,7 @@ export function rebuildFrom(
   const { old, hadState, requestedAt } = record.kept[RESET] as ResetRecord;
   const mine = own(read);
   const options = config.queue.options;
-  const { run, plan, edited } = findRun(issue, mine, record);
+  const { run, plan, edited } = findRun(issue, mine, old, record.startedAt);
   // Only a card queued under this configuration admits an Objective
   // Factory has no state for; a candidate or inert card doesn't.
   if (!hadState && !run && read.card?.option !== options.queued)
@@ -856,7 +925,7 @@ export function rebuildFrom(
  * readable, else the newest run Factory's own comments name, by their
  * order on the issue (its live status comment, report or cancel
  * comment), or the plan comment's when no such comment names that run and
- * it is the later run. The resetting record's own run (`record`) is never
+ * it is the later run. The resetting record's own run (`resetRun`) is never
  * one: it is no run of GitHub's. The plan is the plan comment's when it
  * names that run, its data matches the digest it carries (else `edited`),
  * and the old state (when readable) had accepted a plan or kept a rebuilt
@@ -865,13 +934,13 @@ export function rebuildFrom(
 export function findRun(
   issue: number,
   mine: IssueComment[],
-  record: ObjectiveState,
+  old: ObjectiveState | undefined,
+  resetRun?: string,
 ): {
   run?: string;
   plan?: { plan: Plan; accepted: string } | string;
   edited?: { plan: true };
 } {
-  const { old } = record.kept[RESET] as ResetRecord;
   const marker = `<!-- factory:${issue}:plan -->`;
   const planned = mine.find((comment) =>
     comment.body.startsWith(`${marker}\n`),
@@ -884,7 +953,7 @@ export function findRun(
       const found = new RegExp(
         `^<!-- factory:${issue}:(?:status|report|cancelled):(\\S+) -->`,
       ).exec(comment.body);
-      return found && found[1] !== record.startedAt ? [found[1]!] : [];
+      return found && found[1] !== resetRun ? [found[1]!] : [];
     });
     run = runs.at(-1);
     if (named && !runs.includes(named.run) && (!run || named.run > run))

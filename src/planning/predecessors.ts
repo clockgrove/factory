@@ -20,7 +20,9 @@ import type { PlanningDeps } from "./steps.js";
  * (docs/reference/queue.md#Predecessors). The `predecessors` step runs before the check:
  * while a blocker is open, or its Objective isn't done, the Objective
  * waits with no question, and takes no slot. A blocker that ended without
- * being done holds; a dependency cycle holds, naming it. Once every
+ * being done holds; a dependency cycle holds, naming it. A closed blocker
+ * whose Factory record can't be read (an older state version, say) is
+ * decided by what GitHub shows Factory delivered (`fromGitHub`). Once every
  * predecessor is done, their accepted results are the planner's and the
  * plan review's evidence, checked against the base planning reads
  * (`predecessorsOnBase`).
@@ -32,15 +34,19 @@ const MINUTE = 60_000;
 /** Issues read while looking for a cycle, per run of the step. */
 const CYCLE_READS = 50;
 
-/** What a done predecessor delivered, as its Factory record shows it. */
+/**
+ * What a done predecessor delivered, as its Factory record shows it, or,
+ * when the record can't be read, as GitHub shows it: then without the
+ * accepted commit, tree and commands, which only the record has.
+ */
 export interface PredecessorEvidence {
   issue: number;
   title: string;
   /** The default-branch commit its final validation and final review passed on, and that commit's tree. */
-  commit: string;
-  tree: string;
+  commit?: string;
+  tree?: string;
   /** Its final validation commands. */
-  commands: string[];
+  commands?: string[];
   /** Its Work Items: the PR and merge commit of each delivered one. */
   items: { id: string; title: string; pr?: number; merged?: string }[];
 }
@@ -163,7 +169,7 @@ export function predecessorsStep(deps: PlanningDeps): Step {
         return {
           ...objectiveWide(
             hold(
-              `Objective #${state.issue} is blocked by ${ended.length === 1 ? "an issue that ended" : "issues that ended"} without delivering:\n\n${ended.map((b) => `- ${b.ref}: ${b.why}`).join("\n")}\n\n\`replan\` reads the issue and its blocked-by links again once you have edited them; \`ignore <n> <reason>\` (\`owner/repo#n\` for another repository's issue) goes on without that predecessor; or cancel.`,
+              `Objective #${state.issue} is blocked by ${ended.length === 1 ? "an issue that ended" : "issues that ended"} without a result Factory can build on:\n\n${ended.map((b) => `- ${b.ref}: ${b.why}`).join("\n")}\n\n\`replan\` reads the issue and its blocked-by links again once you have edited them; \`ignore <n> <reason>\` (\`owner/repo#n\` for another repository's issue) goes on without that predecessor; or cancel.`,
               [
                 {
                   answer: "replan",
@@ -243,7 +249,7 @@ async function classify(
     };
   const loaded = findState(deps.objectives, issue);
   if (loaded?.kind === "unreadable")
-    return { ref, kind: "waiting", why: "its Factory state can't be read" };
+    return fromGitHub(deps.github, blocker, ref, loaded.error, signal);
   const previous = loaded?.state;
   if (!previous)
     return {
@@ -309,6 +315,61 @@ async function classify(
 }
 
 /**
+ * A blocker closed as completed whose Factory record can't be read:
+ * GitHub decides, as a reset reads it (reset.ts `deliveredOnGitHub`). It
+ * is done when Factory's report of its newest run is posted and that run
+ * merged Work Items; its evidence is then its title and those merges. With
+ * no accepted record, there is no accepted issue text to compare. Else it
+ * ended, naming what GitHub shows. A failed GitHub read throws: the step
+ * runs again.
+ */
+async function fromGitHub(
+  github: GitHub,
+  blocker: IssueSummary,
+  ref: string,
+  error: string,
+  signal: AbortSignal,
+): Promise<Blocker> {
+  const issue = blocker.number;
+  // reset.ts imports planning, which imports this module: it is loaded
+  // here, once every module is.
+  const { deliveredOnGitHub } = await import("../reset.js");
+  const { run, reported, plan, merged } = await deliveredOnGitHub(
+    github,
+    issue,
+    signal,
+  );
+  if (reported && plan && Object.keys(merged).length)
+    return {
+      ref,
+      kind: "done",
+      evidence: {
+        issue,
+        title: blocker.title,
+        items: plan.items.map((item) => ({
+          id: item.id,
+          title: item.title,
+          ...(merged[item.id]
+            ? { pr: merged[item.id]!.pr, merged: merged[item.id]!.mergeSha }
+            : {}),
+        })),
+      },
+    };
+  const shows = !run
+    ? "no Factory run of it"
+    : !reported
+      ? `no Factory report of its run ${run}`
+      : !plan
+        ? `Factory's report of run ${run}, but no plan comment of that run it can read`
+        : `Factory's report of run ${run}, but no merged Work Item PR of that run`;
+  return {
+    ref,
+    kind: "ended",
+    why: `its Factory record can't be read (${error.slice(0, 300)}), and GitHub shows ${shows}`,
+  };
+}
+
+/**
  * The shortest cycle of open blocked-by links through `self`, as the
  * issues along it from `self` back to `self`; undefined when none is found
  * within CYCLE_READS reads. A link it can't read is passed over: the wait
@@ -349,7 +410,8 @@ async function cycleThrough(
  * Why the predecessors' accepted results aren't on `base`, the default
  * branch commit planning reads; undefined when they are. Each accepted
  * commit must be in Git with the tree Factory accepted, and it and every
- * merge it delivered must be on `base`.
+ * merge it delivered must be on `base` (only the merges, for one GitHub
+ * decided).
  */
 export async function predecessorsOnBase(
   checkout: string,
@@ -360,17 +422,20 @@ export async function predecessorsOnBase(
   const at = base.slice(0, 12);
   for (const predecessor of evidence) {
     const name = `Predecessor #${predecessor.issue}`;
-    const tree = await hostGitExit(
-      checkout,
-      ["rev-parse", "--verify", "--quiet", `${predecessor.commit}^{tree}`],
-      { signal, timeoutMs: MINUTE },
-    );
-    if (tree.code !== 0)
-      return `${name}'s accepted commit ${predecessor.commit.slice(0, 12)} isn't in Git`;
-    if (tree.stdout.toString("utf8").trim() !== predecessor.tree)
-      return `${name}'s accepted tree ${predecessor.tree.slice(0, 12)} isn't the tree Git has for its commit ${predecessor.commit.slice(0, 12)}`;
+    const { commit } = predecessor;
+    if (commit) {
+      const tree = await hostGitExit(
+        checkout,
+        ["rev-parse", "--verify", "--quiet", `${commit}^{tree}`],
+        { signal, timeoutMs: MINUTE },
+      );
+      if (tree.code !== 0)
+        return `${name}'s accepted commit ${commit.slice(0, 12)} isn't in Git`;
+      if (tree.stdout.toString("utf8").trim() !== predecessor.tree)
+        return `${name}'s accepted tree ${predecessor.tree?.slice(0, 12)} isn't the tree Git has for its commit ${commit.slice(0, 12)}`;
+    }
     for (const sha of [
-      predecessor.commit,
+      ...(commit ? [commit] : []),
       ...predecessor.items.flatMap((item) =>
         item.merged ? [item.merged] : [],
       ),

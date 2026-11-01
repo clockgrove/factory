@@ -361,7 +361,7 @@ factory reset N                           # rebuild its state from GitHub: its p
 - **Pause from a phone.** Comment `/factory queue pause` on any running Objective's issue (it needs write access to the repository) and the whole queue pauses within one queue poll: no new step starts, running calls finish, and nothing is lost. `/factory queue resume` there, or `factory queue resume` on the machine, resumes it; the latest pause or resume from either place wins. While it is paused, each running Objective's status comment says so and who paused it.
 - **Restarting is always safe.** A step that was running restarts from its last save.
 - **Crash loops.** If the service keeps dying, interrupted steps resume after a growing delay. A step that was running at three deaths in a row, while other steps finished between them, holds with `retry` and `cancel`.
-- **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it.
+- **Unreadable state.** An Objective whose state can't be read holds with `cancel`, and `factory reset N` rebuilds it. A finished one asks nothing: status shows it finished, with its record unreadable.
 - **A new machine.** `factory reset N` needs no local state: it rebuilds the Objective from GitHub alone. A delivered one comes back done. One still building checks its plan again and sends it through plan review before any work runs; merged Work Items stay merged and open PRs are reused. Repair counts and the Objective deadline start again, and open questions are asked again ([State](reference/state.md#state)).
 - **Never edit Factory's files.** Don't edit or delete files under the state directory: the service is their only writer, and a hand edit breaks its crash recovery.
 

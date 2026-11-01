@@ -226,16 +226,31 @@ const tool = (call, name, input = {}) =>
 const command = (call, text) => tool(call, "run_command", { command: text });
 
 /**
- * A planner whose finder calls answer `answers`, in order, and whose
- * proofs answer `prove(call, suspicion)` (not reproduced by default); it
- * records each call, the proofs' apart.
+ * A planner whose finder calls answer `answers`, whole-review answers in
+ * order: each criterion's own call (review/item.ts, one per criterion) gets
+ * that criterion's finding from the answer for its `n`th call, numbered as
+ * its packet numbers it. Its proofs answer `prove(call, suspicion)` (not
+ * reproduced by default). It records each call, the proofs' apart.
  */
 function answering(answers, prove = () => NOT_REPRODUCED) {
   const calls = [];
   const proofs = [];
+  const judged = (call) => {
+    const lines = call.prompt.split("\n");
+    const { criterion } = JSON.parse(
+      lines.find((line) => line.startsWith('{"criteria"')),
+    ).criteria[0];
+    const all = JSON.parse(
+      lines
+        .find((line) => line.startsWith("This call judges one criterion"))
+        .split("here): ")[1],
+    );
+    return all.indexOf(criterion);
+  };
   return {
     calls,
     proofs,
+    asked: (index) => calls.filter((call) => judged(call) === index),
     async answer(call) {
       if (call.schema === PROOF_SCHEMA) {
         proofs.push(call);
@@ -244,9 +259,18 @@ function answering(answers, prove = () => NOT_REPRODUCED) {
         );
         return { value: await prove(call, suspicion) };
       }
+      const index = judged(call);
+      const n = calls.filter((each) => judged(each) === index).length;
       calls.push(call);
-      const next = answers[calls.length - 1];
-      return { value: typeof next === "function" ? await next(call) : next };
+      const next = answers[Math.min(n, answers.length - 1)];
+      const whole = typeof next === "function" ? await next(call) : next;
+      return {
+        value: {
+          findings: whole.findings
+            .filter((each) => each.criterionIndex === index)
+            .map((each) => ({ ...each, criterionIndex: 0 })),
+        },
+      };
     },
   };
 }
@@ -352,9 +376,17 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
     const dropped = answering([{ findings: [refuse(0), pass(1)] }], prove);
     assert.equal((await review(repo, dropped).run).kind, "pass");
   }
-  // Past the review's proofs, a suspicion is dropped unproved.
-  const capped = answering([{ findings: [refuse(0), refuse(1)] }], () =>
-    reproduced(REPRO),
+  // Past the review's proofs, a suspicion is dropped unproved: proofs are
+  // taken as their criteria's finder calls return, here criterion 0's first.
+  const capped = answering(
+    [
+      async (call) => {
+        if (call.prompt.includes(`"criterion":${JSON.stringify(CRITERIA[1])}`))
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        return { findings: [refuse(0), refuse(1)] };
+      },
+    ],
+    () => reproduced(REPRO),
   );
   const { run: cappedRun, events: cappedEvents } = review(repo, capped, {
     limits: { ...LIMITS, proofs: 1 },
@@ -372,26 +404,37 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
   );
 });
 
-test("no silent pass: a criterion the finder leaves without a verdict beside a refusal is asked again alone, once, then is the operator's question", {
+test("one finder call per criterion, all at once; a criterion its call leaves without a verdict is asked again once, then is the operator's question, never a pass", {
   skip,
 }, async () => {
   const repo = target();
-  // The first answer refuses criterion 0 and omits criterion 1; asked
-  // again for criterion 1 alone, it answers nothing valid.
-  const planner = answering([{ findings: [refuse(0)] }, { findings: [] }]);
+  // Criterion 0's call refuses; criterion 1's answers nothing valid, twice.
+  let running = 0;
+  let most = 0;
+  const planner = answering([
+    async () => {
+      running += 1;
+      most = Math.max(most, running);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      running -= 1;
+      return { findings: [refuse(0)] };
+    },
+    { findings: [] },
+  ]);
   const { run, events } = review(repo, planner);
   const outcome = await run;
-  assert.equal(planner.calls.length, 2);
-  const asked = (call) =>
-    JSON.parse(
+  // Each call judges one criterion, with every criterion as context, and
+  // the first calls run side by side.
+  assert.equal(most, 2);
+  for (const call of planner.calls) {
+    const { criteria } = JSON.parse(
       call.prompt.split("\n").find((line) => line.startsWith('{"criteria"')),
-    ).criteria.map((entry) => entry.criterion);
-  assert.deepEqual(asked(planner.calls[0]), CRITERIA);
-  assert.deepEqual(asked(planner.calls[1]), [CRITERIA[1]]);
-  assert.deepEqual(
-    events.find((event) => event.event === "result-review-missing").criteria,
-    [1],
-  );
+    );
+    assert.equal(criteria.length, 1);
+    assert.match(call.prompt, /for context only/);
+  }
+  assert.equal(planner.asked(0).length, 1);
+  assert.equal(planner.asked(1).length, 2);
   // The refusal didn't reproduce: criterion 0 passes, and criterion 1 is
   // a question in one hold, never a pass.
   assert.equal(outcome.kind, "needs-human");
@@ -412,8 +455,24 @@ test("no silent pass: a criterion the finder leaves without a verdict beside a r
     },
   );
   assert.equal(held.kind, "hold");
+  // Each criterion's call is timed, and its proof started once it returned.
+  const logged = events.find((event) => event.event === "result-review");
+  assert.deepEqual(
+    logged.finders.map(({ criterionIndex, outcome }) => [
+      criterionIndex,
+      outcome,
+    ]),
+    [
+      [0, "refused"],
+      [1, "needs-human"],
+    ],
+  );
+  assert.equal(
+    logged.phases.slowestFinderMs,
+    Math.max(...logged.finders.map((each) => each.ms)),
+  );
+  assert.ok(logged.phases.firstProofMs >= logged.finders[0].ms);
 });
-
 test("a proof can't confirm a guess: behaviour the sources don't define is a question, a repro must quote its requirement, and a non-behaviour finding is a note", {
   skip,
 }, async () => {
@@ -779,7 +838,13 @@ test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros,
       suspicions,
       repros: { confirmed: 1, dropped: 1 },
       questions: 1,
-      phases: { prepareMs: 12_000, modelMs: 90_000, proofsMs: 8000 },
+      phases: {
+        prepareMs: 12_000,
+        modelMs: 90_000,
+        slowestFinderMs: 80_000,
+        firstProofMs: 50_000,
+        proofsMs: 8000,
+      },
       ms: 4000,
       at,
     },
@@ -801,7 +866,13 @@ test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros,
       repros: { confirmed: 1, dropped: 1 },
       tokens: 1200,
       ms: 4000,
-      phases: { prepareMs: 12_000, modelMs: 90_000, proofsMs: 8000 },
+      phases: {
+        prepareMs: 12_000,
+        modelMs: 90_000,
+        slowestFinderMs: 80_000,
+        firstProofMs: 50_000,
+        proofsMs: 8000,
+      },
     },
   );
   assert.match(

@@ -64,9 +64,18 @@ export function defaultModels(planner: string): PlannerModels {
  */
 export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
   const worker = provider.worker;
+  const models = { ...defaultModels(provider.planner), ...provider.models };
   return {
     ...provider,
-    models: { ...defaultModels(provider.planner), ...provider.models },
+    models:
+      provider.planner === "codex"
+        ? // Review calls are on the result review's critical path, so a
+          // Codex reviewer asks for priority unless its tier is set.
+          {
+            ...models,
+            reviewer: { serviceTier: "fast" as const, ...models.reviewer },
+          }
+        : models,
     worker:
       worker.kind === "claude"
         ? {

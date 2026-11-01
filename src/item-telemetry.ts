@@ -123,8 +123,19 @@ export interface ItemTelemetry {
     questions: number;
     tokens: Reported;
     ms: number;
-    /** Each phase's time, summed over the reviews (review/item.ts): the workspace's install, the finder, the proofs. */
-    phases: { prepareMs: number; modelMs: number; proofsMs: number };
+    /**
+     * Each phase's time, summed over the reviews (review/item.ts): the
+     * workspace's install, the finder calls (their wall time and the
+     * slowest criterion's call), the time from their start to the first
+     * proof's, and the proofs.
+     */
+    phases: {
+      prepareMs: number;
+      modelMs: number;
+      slowestFinderMs: number;
+      firstProofMs: number;
+      proofsMs: number;
+    };
   };
   /** CI step attempts, its polls (retries while checks run) and the failed jobs it reran. */
   ci: { attempts: number; polls: number; reruns: number };
@@ -330,6 +341,8 @@ export class ItemTelemetries {
         const phases = of(event.phases);
         reviewer.phases.prepareMs += num(phases.prepareMs) ?? 0;
         reviewer.phases.modelMs += num(phases.modelMs) ?? 0;
+        reviewer.phases.slowestFinderMs += num(phases.slowestFinderMs) ?? 0;
+        reviewer.phases.firstProofMs += num(phases.firstProofMs) ?? 0;
         reviewer.phases.proofsMs += num(phases.proofsMs) ?? 0;
         return;
       }
@@ -432,7 +445,13 @@ export class ItemTelemetries {
           questions: 0,
           tokens: reported(),
           ms: 0,
-          phases: { prepareMs: 0, modelMs: 0, proofsMs: 0 },
+          phases: {
+            prepareMs: 0,
+            modelMs: 0,
+            slowestFinderMs: 0,
+            firstProofMs: 0,
+            proofsMs: 0,
+          },
         },
         ci: { attempts: 0, polls: 0, reruns: 0 },
         changes: null,
@@ -723,7 +742,7 @@ function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
     `repros ${reviewer.repros.confirmed} confirmed, ${reviewer.repros.dropped} dropped`,
     plural(reviewer.questions, "question"),
     `${reviewer.tokens.calls ? count(reviewer.tokens.sum) : "not reported"} tokens`,
-    `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, finder ${duration(reviewer.phases.modelMs)}, proofs ${duration(reviewer.phases.proofsMs)})`,
+    `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, finder ${duration(reviewer.phases.modelMs)}, slowest criterion ${duration(reviewer.phases.slowestFinderMs)}, first proof after ${duration(reviewer.phases.firstProofMs)}, proofs ${duration(reviewer.phases.proofsMs)})`,
   ].join(", ");
 }
 

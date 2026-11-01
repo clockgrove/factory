@@ -123,6 +123,34 @@ function finding(criterionIndex, verdict, question = "") {
   };
 }
 
+/**
+ * A planner answering each criterion's own finder call (review/item.ts):
+ * `answer(index, n, call)` is criterion `index`'s finding, in the item's
+ * numbering, on its `n`th call, or none. `asked(index)` is its calls.
+ */
+function perCriterion(item, answer) {
+  const calls = [];
+  const judged = (call) =>
+    item.acceptance.indexOf(
+      JSON.parse(
+        call.prompt.split("\n").find((line) => line.startsWith('{"criteria"')),
+      ).criteria[0].criterion,
+    );
+  return {
+    calls,
+    asked: (index) => calls.filter((call) => judged(call) === index),
+    async answer(call) {
+      const index = judged(call);
+      const n = calls.filter((each) => judged(each) === index).length;
+      calls.push(call);
+      const found = await answer(index, n, call);
+      return {
+        value: { findings: found ? [{ ...found, criterionIndex: 0 }] : [] },
+      };
+    },
+  };
+}
+
 test("a question about an unchanged source file the evidence root holds goes back to the reviewer, naming the file, and its pass stands", async () => {
   const repo = sharedMain();
   const item = workItem(
@@ -130,32 +158,24 @@ test("a question about an unchanged source file the evidence root holds goes bac
     ['`sharedQwfwq("ab")` returns `"abab"`.', "The test runs under npm test."],
     ["test/sharedQwfwq.test.js"],
   );
-  const calls = [];
-  const planner = {
-    async answer(call) {
-      calls.push(call);
-      if (calls.length === 1)
-        return {
-          value: {
-            findings: [
-              finding(
-                0,
-                "needs-human",
-                'Can you provide current-tree source evidence showing what `sharedQwfwq("ab")` returns?',
-              ),
-              finding(1, "pass"),
-            ],
-          },
-        };
-      // The send-back names the unchanged source, which the root holds.
-      assert.ok(existsSync(join(call.readDir, "candidate/src/sharedQwfwq.js")));
-      return { value: { findings: [finding(0, "pass")] } };
-    },
-  };
+  const planner = perCriterion(item, (index, n, call) => {
+    if (index === 1) return finding(1, "pass");
+    if (n === 0)
+      return finding(
+        0,
+        "needs-human",
+        'Can you provide current-tree source evidence showing what `sharedQwfwq("ab")` returns?',
+      );
+    // The send-back names the unchanged source, which the root holds.
+    assert.ok(existsSync(join(call.readDir, "candidate/src/sharedQwfwq.js")));
+    return finding(0, "pass");
+  });
   const { run, events } = review(repo, item, planner);
   const outcome = await run;
-  assert.equal(calls.length, 2);
-  const note = calls[1].prompt.slice(calls[0].prompt.length);
+  const [first, second] = planner.asked(0);
+  assert.equal(planner.asked(0).length, 2);
+  assert.equal(planner.asked(1).length, 1);
+  const note = second.prompt.slice(first.prompt.length);
   assert.match(note, /^\n\nEvidence check: /);
   assert.ok(note.includes("candidate/src/sharedQwfwq.js"));
   assert.ok(note.includes("candidate/test/sharedQwfwq.test.js"));
@@ -492,7 +512,7 @@ test("the send-back keeps the file a question names by its exact path when more 
   assert.equal(outcome.kind, "pass");
 });
 
-test("a refusal in the answer to the send-back never replaces a question that was not sent back", async () => {
+test("one criterion's question goes back while another's, naming nothing held, reaches the operator", async () => {
   const repo = sharedMain();
   const item = workItem(
     "SharedQwfwq",
@@ -502,37 +522,22 @@ test("a refusal in the answer to the send-back never replaces a question that wa
     ],
     ["test/sharedQwfwq.test.js"],
   );
-  const calls = [];
-  const planner = {
-    async answer(call) {
-      calls.push(call);
-      return {
-        value: {
-          findings:
-            calls.length === 1
-              ? [
-                  finding(0, "needs-human", "What does `sharedQwfwq` return?"),
-                  finding(
-                    1,
-                    "needs-human",
-                    "Has product approved the wording?",
-                  ),
-                ]
-              : [
-                  finding(0, "pass"),
-                  finding(1, "refuse", "No approval is recorded."),
-                ],
-        },
-      };
-    },
-  };
+  const planner = perCriterion(item, (index, n) =>
+    index === 1
+      ? finding(1, "needs-human", "Has product approved the wording?")
+      : n === 0
+        ? finding(0, "needs-human", "What does `sharedQwfwq` return?")
+        : finding(0, "pass"),
+  );
   const { run, events } = review(repo, item, planner);
   const outcome = await run;
-  assert.equal(calls.length, 2);
+  assert.equal(planner.asked(0).length, 2);
+  assert.equal(planner.asked(1).length, 1);
   assert.deepEqual(
-    events.find((event) => event.event === "result-review-evidence-sendback")
-      ?.criteria,
-    [0],
+    events
+      .filter((event) => event.event === "result-review-evidence-sendback")
+      .map((event) => event.criteria),
+    [[0]],
   );
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(
@@ -548,7 +553,7 @@ test("a refusal in the answer to the send-back never replaces a question that wa
   );
 });
 
-test("a refusal in the answer to the send-back replaces an earlier pass of a criterion that was not sent back, as a suspicion to prove", async () => {
+test("a criterion's refusal beside another's sent-back question is a suspicion to prove", async () => {
   const repo = sharedMain();
   const item = workItem(
     "SharedQwfwq",
@@ -558,39 +563,24 @@ test("a refusal in the answer to the send-back replaces an earlier pass of a cri
     ],
     ["test/sharedQwfwq.test.js"],
   );
-  const calls = [];
-  const planner = {
-    async answer(call) {
-      calls.push(call);
-      return {
-        value: {
-          findings:
-            calls.length === 1
-              ? [
-                  finding(0, "needs-human", "What does `sharedQwfwq` return?"),
-                  finding(1, "pass"),
-                ]
-              : [
-                  finding(0, "pass"),
-                  finding(1, "refuse", "The test never calls it with ''."),
-                ],
-        },
-      };
-    },
-  };
+  const planner = perCriterion(item, (index, n) =>
+    index === 1
+      ? finding(1, "refuse", "The test never calls it with ''.")
+      : n === 0
+        ? finding(0, "needs-human", "What does `sharedQwfwq` return?")
+        : finding(0, "pass"),
+  );
   // Find only: the refusal is a suspicion no proof confirms.
   const { run, events } = review(repo, item, planner, {
     limits: { ...NO_WORKSPACE.limits, proofs: 0 },
   });
   const outcome = await run;
-  assert.equal(calls.length, 2);
-  assert.deepEqual(
-    events.find((event) => event.event === "result-review-evidence-sendback")
-      ?.criteria,
-    [0],
-  );
+  assert.equal(planner.calls.length, 3);
   assert.equal(
-    events.find((event) => event.event === "result-review-find")?.outcome,
+    events.find(
+      (event) =>
+        event.event === "result-review-find" && event.criterionIndex === 1,
+    )?.outcome,
     "refused",
   );
   assert.deepEqual(
@@ -615,17 +605,7 @@ test("a question an earlier review of the same tree asked, which the operator is
     detail: "earlier",
     question: "What does `sharedQwfwq` return?",
   };
-  let calls = 0;
-  const planner = {
-    async answer() {
-      calls += 1;
-      return {
-        value: {
-          findings: [finding(0, "pass"), finding(1, "pass")],
-        },
-      };
-    },
-  };
+  const planner = perCriterion(item, (index) => finding(index, "pass"));
   const outcome = await review(repo, item, planner, {
     earlier: {
       kind: "needs-human",
@@ -635,7 +615,10 @@ test("a question an earlier review of the same tree asked, which the operator is
     },
   }).run;
   // Criterion 0 stays the earlier question; only criterion 1 was judged.
-  assert.equal(calls, 1);
+  assert.deepEqual(
+    planner.calls.map((call) => planner.asked(1).includes(call)),
+    [true],
+  );
   assert.equal(outcome.kind, "needs-human");
   assert.deepEqual(outcome.questions, [question]);
 });

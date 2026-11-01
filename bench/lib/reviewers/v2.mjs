@@ -18,8 +18,11 @@
  * Objective's blocks from the record's `inputs`.
  *
  * Each review's `phases` are the build's own `result-review` event's: the
- * workspace's install (`scratchPrepareMs`) and the proofs with their
- * refusal checks (`proofsMs`). `extra` has the suspicions counted
+ * workspace's install (`scratchPrepareMs`), the finder calls' wall time
+ * (`finderMs`) and the slowest criterion's call (`slowestFinderMs`), the
+ * time from their start to the first proof's (`firstProofMs`), and the
+ * proofs with their refusal checks (`proofsMs`); `extra.finders` has each
+ * criterion's finder call (`criterionIndex`, `ms`, `outcome`). `extra` has the suspicions counted
  * (`raised`, `proved`, `questions`, `notes`, `dropped`, the proofs'
  * `tokens`) and each one (`suspicionList`, from the build's
  * `result-review-suspicion` events: its criterion, `case`, `expected`,
@@ -264,8 +267,12 @@ export async function review({
     extra: {
       phases: {
         scratchPrepareMs: phases?.prepareMs ?? null,
+        finderMs: phases?.modelMs ?? null,
+        slowestFinderMs: phases?.slowestFinderMs ?? null,
+        firstProofMs: phases?.firstProofMs ?? null,
         proofsMs: phases?.proofsMs ?? 0,
       },
+      finders: tally?.finders ?? null,
       suspicions: tally?.suspicions ?? null,
       suspicionList,
       unmapped,

@@ -564,12 +564,6 @@ export async function runReview(
       criteria: readonly string[];
       /** The fixed instructions; guidance for supplied evidence kinds follows. */
       instructions: readonly string[];
-      /**
-       * This call already asks again (review/item.ts `find`): an invalid
-       * answer isn't asked again, and the criteria it leaves without a
-       * valid verdict are the operator's questions, beside any refusal.
-       */
-      lastChance?: true;
     },
 ): Promise<ResultReview> {
   const { criteria, phase } = run;
@@ -639,12 +633,8 @@ export async function runReview(
     let decoded = await ask();
     let review = judge(criteria, decoded, evidence, settled, tree, false);
     const first = invalidReason(decoded, criteria, settled);
-    const retry =
-      !run.lastChance && review.kind !== "refused" && first !== undefined;
-    const final = retry || (run.lastChance === true && first !== undefined);
-    if (final && !retry)
-      review = judge(criteria, decoded, evidence, settled, tree, true);
-    if (retry) {
+    const final = review.kind !== "refused" && first !== undefined;
+    if (final) {
       run.log({ event: `${phase}-invalid`, reason: first });
       decoded = await ask(
         `Your previous answer was rejected: ${first}\nAnswer again, correcting that error.`,

@@ -8,18 +8,19 @@
  *   its exact install from the item's warm package store, under
  *   validation's sandbox. Every other checkout of the review is a copy of
  *   it (validate.ts `ValidatedCheckout.copy`), so nothing installs twice;
- * - the finder (review/finder.ts): the earlier result reviewer, in a fresh
- *   session, with its own instructions, criteria (the item's acceptance,
- *   then the Objective criteria it proves) and evidence (result.ts
- *   `runReview`, which also settles operator decisions, asks again once
- *   and sends questions about held evidence back). A criterion its answer
- *   leaves without a valid verdict, even beside a refusal, is asked again
- *   alone once, and one still without a verdict is the operator's
- *   question: never a pass (`find`).
+ * - the finder (review/finder.ts): the earlier result reviewer, its
+ *   instructions and evidence, as one fresh call per criterion (the
+ *   item's acceptance, then the Objective criteria it proves), each with
+ *   the whole list as context and an evidence root of its own, as many at
+ *   once as the host has planner slots free (result.ts `runReview`, which
+ *   also settles operator decisions, asks again once and sends questions
+ *   about held evidence back). A criterion still without a valid verdict
+ *   is the operator's question: never a pass (`find`).
  *
  * Each criterion the finder refused becomes one suspicion: its detail the
  * case, the criterion the expectation. Up to `proofs` a review, each is
- * proved by its own task: a fresh call that gets only the criterion, the
+ * proved by its own task, which starts as soon as its criterion's finder
+ * call returns: a fresh call that gets only the criterion, the
  * Objective's pinned sources, the suspicion, the workspace's checkout to
  * read and `run_command` in a copy of its own, with a small budget, as
  * many at once as the host has planner slots free. It answers
@@ -44,6 +45,8 @@
  * Provider failures escape as `PlannerError`; a workspace Factory can't
  * make escapes as `ScratchUnavailable` with the outcome to take.
  */
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { SandboxConfig } from "../config.js";
 import { crashPoint } from "../crash.js";
 import { hostLimits, type Outcome } from "../engine.js";
@@ -263,9 +266,13 @@ function designRows(input: ItemReviewInput, item: WorkItem): ResultEvidence[] {
 interface Phases {
   /** From the start to the workspace's install done; absent: never ready. */
   prepareMs?: number;
-  /** The finder's time, its calls and evidence, both rounds. */
+  /** The finder calls' wall time: from their start to the last one's end. */
   modelMs: number;
-  /** The proofs' wall time, their refusal checks inside. */
+  /** The slowest criterion's finder call. */
+  slowestFinderMs: number;
+  /** From the finder calls' start to the first proof's; absent: no proof. */
+  firstProofMs?: number;
+  /** From the first proof's start to the last one's end, their refusal checks inside; 0: none. */
   proofsMs: number;
 }
 
@@ -289,7 +296,8 @@ export async function reviewCandidate(
     repros: { confirmed: 0, dropped: 0 },
     calls: 0,
   };
-  const phases: Phases = { modelMs: 0, proofsMs: 0 };
+  const phases: Phases = { modelMs: 0, slowestFinderMs: 0, proofsMs: 0 };
+  const finders: { criterionIndex: number; ms: number; outcome: string }[] = [];
   const done = (review: ResultReview) => {
     input.log({
       event: "result-review",
@@ -297,6 +305,7 @@ export async function reviewCandidate(
       criteria: criteria.length,
       ...tally,
       questions: review.kind === "pass" ? 0 : review.questions.length,
+      finders,
       phases,
       ms: Date.now() - started,
     });
@@ -307,9 +316,19 @@ export async function reviewCandidate(
     input.itemId,
     tree,
   );
+  const indices = criteria.map((_, index) => index);
   // Settled criteria need no model and no workspace.
-  if (criteria.every(settled)) return done(await find(input, tally));
-  // The workspace starts installing beside the finder; only the proofs use it.
+  if (criteria.every(settled))
+    return done(
+      combine(
+        tree,
+        await Promise.all(
+          indices.map((index) => find(input, index, tally, input.signal)),
+        ),
+      ),
+    );
+  // The workspace starts installing beside the finder calls; only the
+  // proofs use it.
   const workspace = openWorkspace(input.workspace);
   void workspace.ready.then(
     () => {
@@ -317,48 +336,68 @@ export async function reviewCandidate(
     },
     () => undefined,
   );
+  const context: Omit<ProofContext, "readDir"> = {
+    workspace,
+    tree,
+    tally,
+    proofs: { next: 0 },
+    timing: {},
+  };
   try {
     const finding = Date.now();
-    const found = await find(input, tally).finally(() => {
-      phases.modelMs = Date.now() - finding;
-    });
-    const proving = Date.now();
-    const review = await proveRefusals(input, found, {
-      workspace,
-      tree,
-      tally,
-      proofs: { next: 0 },
-    }).finally(() => {
-      phases.proofsMs = Date.now() - proving;
-    });
-    return done(review);
+    // One finder call per criterion, as many at once as the host has
+    // planner slots free; a criterion's proofs start once its call returns.
+    const reviews = await atOnce(
+      indices,
+      "planner",
+      input.signal,
+      async (index, signal) => {
+        const called = Date.now();
+        const found = await find(input, index, tally, signal);
+        finders.push({
+          criterionIndex: index,
+          ms: Date.now() - called,
+          outcome: found.kind,
+        });
+        phases.modelMs = Math.max(phases.modelMs, Date.now() - finding);
+        return proveRefusals(input, found, context);
+      },
+    );
+    phases.slowestFinderMs = Math.max(0, ...finders.map((each) => each.ms));
+    const { first, last } = context.timing;
+    if (first !== undefined) {
+      phases.firstProofMs = first - finding;
+      phases.proofsMs = (last ?? first) - first;
+    }
+    finders.sort((a, b) => a.criterionIndex - b.criterionIndex);
+    return done(combine(tree, reviews));
   } finally {
     await workspace.close();
   }
 }
 
 /**
- * The finder (review/finder.ts): the earlier result reviewer, fresh, on
- * the same evidence, with the re-review packet after it, as result.ts
- * `runReview` runs it. A criterion its answers leave without a valid
- * verdict is never met: it is asked again, alone with the others left so,
- * once, and one still without a verdict is the operator's question. Its
- * own `result-review` events are logged as `result-review-find`, and its
- * calls are counted.
+ * One criterion's finder call (review/finder.ts): the earlier result
+ * reviewer, fresh, on the same evidence, with the re-review packet after
+ * it, as result.ts `runReview` runs it, judging criterion `index` alone
+ * with the whole list as context, in an evidence root of its own. An
+ * invalid answer is asked again once (runReview); a criterion still
+ * without a valid verdict is the operator's question, never met. Its own
+ * `result-review` event is logged as `result-review-find`, and its calls
+ * are counted.
  */
 async function find(
   input: CandidateReview,
+  index: number,
   tally: Tally,
+  signal: AbortSignal,
 ): Promise<ResultReview> {
   const { criteria, validation } = input;
   const tree = validation.tree;
-  const after =
-    input.prior && input.prior.tree !== tree
-      ? [await priorRow(input, input.prior)]
-      : [];
-  const own = input.itemCriteria ?? criteria.length;
-  const ask = (asked: readonly number[], lastChance?: true) =>
-    runReview({
+  const criterion = criteria[index]!;
+  const dir = join(input.dir, `criterion-${index}`);
+  try {
+    const found = await runReview({
       ...input.context,
       sources: input.context?.sources ?? [],
       design: input.context?.design ?? [],
@@ -369,78 +408,77 @@ async function find(
       base: input.base,
       commit: input.commit,
       validation,
-      dir: input.dir,
+      dir,
       ...(input.earlier && { earlier: input.earlier }),
       itemId: input.itemId,
-      criteria: asked.map((index) => criteria[index]!),
-      instructions: finderInstructions(
-        asked.filter((index) => index < own).length,
-        asked.map((index) => criteria[index]!),
-        (input.commandProofs ?? []).flatMap((proof) =>
-          asked.includes(proof.criterionIndex)
-            ? [
-                {
-                  ...proof,
-                  criterionIndex: asked.indexOf(proof.criterionIndex),
-                },
-              ]
-            : [],
+      criteria: [criterion],
+      instructions: [
+        ...finderInstructions(
+          index < (input.itemCriteria ?? criteria.length) ? 1 : 0,
+          [criterion],
+          (input.commandProofs ?? []).flatMap((proof) =>
+            proof.criterionIndex === index
+              ? [{ ...proof, criterionIndex: 0 }]
+              : [],
+          ),
         ),
-      ),
-      after,
-      ...(lastChance && { lastChance }),
-      signal: input.signal,
+        `This call judges one criterion of the Work Item's review, the packet's criterion 0. Every criterion of the review, for context only (judge and cite none of the others here): ${JSON.stringify(criteria)}`,
+      ],
+      after:
+        input.prior && input.prior.tree !== tree
+          ? [await priorRow(input, input.prior)]
+          : [],
+      signal,
       log: (event: Record<string, unknown>) => {
         if (event.event === "model-usage") tally.calls += 1;
         input.log(
           event.event === "result-review"
-            ? { ...event, event: "result-review-find" }
+            ? { ...event, event: "result-review-find", criterionIndex: index }
             : event,
         );
       },
-    }).then((review) => renumber(review, asked));
-  const all = criteria.map((_, index) => index);
-  const first = await ask(all);
-  const missing = all.filter((index) => !judged(first, index));
-  if (!missing.length) return first;
-  input.log({ event: "result-review-missing", criteria: missing });
-  const again = await ask(missing, true);
-  const still = missing.filter((index) => !judged(again, index));
-  const merged = [first, again];
-  const verdicts = merged.flatMap((review) => review.verdicts);
-  const refused = merged.flatMap((review) =>
-    review.kind === "refused" ? review.refused : [],
-  );
-  const questions = [
-    ...merged.flatMap((review) =>
-      review.kind === "pass" ? [] : review.questions,
-    ),
-    ...still.map((criterionIndex) => ({
-      criterionIndex,
-      criterion: criteria[criterionIndex]!,
-      detail: "The independent reviewer gave no valid verdict for it, twice.",
-      question:
-        "The independent reviewer could not give a valid answer for this criterion twice. Inspect the evidence and accept or refuse it.",
-    })),
-  ];
+    });
+    const review = renumber(found, [index]);
+    if (judged(review, index)) return review;
+    // Never met without a verdict.
+    const questions = [
+      ...(review.kind === "pass" ? [] : review.questions),
+      {
+        criterionIndex: index,
+        criterion,
+        detail: "The independent reviewer gave no valid verdict for it, twice.",
+        question:
+          "The independent reviewer could not give a valid answer for this criterion twice. Inspect the evidence and accept or refuse it.",
+      },
+    ];
+    return review.kind === "refused"
+      ? { ...review, questions }
+      : { kind: "needs-human", tree, questions, verdicts: review.verdicts };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** One review of the criteria from each criterion's own. */
+function combine(tree: string, reviews: readonly ResultReview[]): ResultReview {
   const order = <T extends { criterionIndex: number }>(entries: T[]) =>
     entries.sort((a, b) => a.criterionIndex - b.criterionIndex);
+  const verdicts = order(reviews.flatMap((review) => review.verdicts));
+  const refused = order(
+    reviews.flatMap((review) =>
+      review.kind === "refused" ? review.refused : [],
+    ),
+  );
+  const questions = order(
+    reviews.flatMap((review) =>
+      review.kind === "pass" ? [] : review.questions,
+    ),
+  );
   if (refused.length)
-    return {
-      kind: "refused",
-      tree,
-      refused: order(refused),
-      verdicts: order(verdicts),
-      questions: order(questions),
-    };
+    return { kind: "refused", tree, refused, verdicts, questions };
   if (questions.length)
-    return {
-      kind: "needs-human",
-      tree,
-      questions: order(questions),
-      verdicts: order(verdicts),
-    };
-  return { kind: "pass", tree, verdicts: order(verdicts) };
+    return { kind: "needs-human", tree, questions, verdicts };
+  return { kind: "pass", tree, verdicts };
 }
 
 /** Whether `review` gave criterion `index` a verdict, a refusal or a question. */
@@ -961,11 +999,14 @@ interface ProofContext {
   tally: Tally;
   /** The proofs started so far, which numbers each one's copies. */
   proofs: { next: number };
+  /** When the first proof started and the last one ended. */
+  timing: { first?: number; last?: number };
 }
 
 /**
  * Prove the suspicions of the findings among `indices`, at most the
- * review's `proofs` in all, taken in turn across the criteria (each
+ * review's `proofs` in all, as they come (each criterion's finder call
+ * proves its own as it returns), in turn across the criteria given (each
  * criterion's first, then each one's second, …), each in its own task as
  * many at once as the host has planner slots free (`atOnce`). Each finding
  * gets its first confirmed repro (the others confirmed in its detail);
@@ -1067,6 +1108,7 @@ async function proveOne(
 ): Promise<Proved> {
   const { limits } = input;
   const started = Date.now();
+  context.timing.first ??= started;
   const spent = { count: 0, ms: 0 };
   let tokens = 0;
   const run = commandTool(
@@ -1163,6 +1205,7 @@ async function proveOne(
     tokens,
     ms: Date.now() - started,
   });
+  context.timing.last = Math.max(context.timing.last ?? 0, Date.now());
   return proved;
 }
 

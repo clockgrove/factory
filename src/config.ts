@@ -335,6 +335,15 @@ export interface SandboxLimits {
   /** The most a worker's candidate may stage, in MiB (GitHub's limit for one push). */
   candidateMiB: number;
   candidateFiles: number;
+  /**
+   * The installation's shared install store (`<work root>/.packages`, one
+   * directory per `installKey`): a key unused for this many days is pruned,
+   * and, once the keys hold more than `installStoreMiB` MiB in all, the
+   * least recently used until they fit. A key used in the last hour or
+   * with an install running is never pruned.
+   */
+  installStoreDays: number;
+  installStoreMiB: number;
   /** RLIMIT_NPROC: processes the operator's account may have while a command runs. */
   processes: number;
 }
@@ -346,6 +355,8 @@ const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
   files: 1_000_000,
   candidateMiB: 2048,
   candidateFiles: 100_000,
+  installStoreDays: 14,
+  installStoreMiB: 20_480,
   processes: 4096,
 };
 
@@ -356,6 +367,8 @@ const SANDBOX_LIMIT_MINIMUMS: SandboxLimits = {
   files: 1024,
   candidateMiB: 16,
   candidateFiles: 1024,
+  installStoreDays: 1,
+  installStoreMiB: 256,
   processes: 64,
 };
 

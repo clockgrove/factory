@@ -24,7 +24,6 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   writeFileSync,
 } from "node:fs";
 import { cp, mkdtemp } from "node:fs/promises";
@@ -95,6 +94,7 @@ import {
   selectorsFor,
 } from "./review/artifacts.js";
 import { runSandboxed, sandboxAvailable } from "./sandbox.js";
+import { StoreClaims, sharedStore } from "./shared-install-store.js";
 import type { ObjectiveBlock } from "./shown.js";
 import { errorMessage, failureExcerpt, headAndTail } from "./text.js";
 import { factoryCommit, privateStagingPath } from "./work/collect.js";
@@ -312,12 +312,12 @@ export interface ValidateInput {
    */
   installStore?: string;
   /**
-   * With `installStore`: where the Objective's items share the exact
-   * install's store (#2280), such as `<workDir>/<issue>/.packages`. An
-   * install whose key is the one the item started from (`base`, else the
+   * With `installStore`: where the installation's Objectives share the
+   * exact install's store (#2280, #2353), such as `<work root>/.packages`.
+   * An install whose key is the one the item started from (`base`, else the
    * plan's) has every dependency input as there, so it uses the store kept
-   * here under that key (`sharedStore`), which the Objective's first such
-   * install filled; one whose inputs the candidate changed keeps
+   * here under that key (`sharedStore`), which the first such install of
+   * any Objective filled; one whose inputs the candidate changed keeps
    * `installStore`, its own. Absent: always `installStore`.
    */
   sharedInstallStore?: string;
@@ -1096,8 +1096,9 @@ async function validateCandidate(
       // The item's kept package store, for the exact install alone, keyed
       // by its inputs as this commit has them: the install still runs. An
       // install with the inputs the item started from shares the
-      // Objective's store under that key (#2280).
+      // installation's store under that key (#2280, #2353).
       let store: KeptStore | undefined;
+      using claims = new StoreClaims();
       if (
         install &&
         input.installStore &&
@@ -1115,7 +1116,10 @@ async function validateCandidate(
                 command,
                 signal,
               ))
-              ? await sharedStore(input.sharedInstallStore, key)
+              ? await sharedStore(input.sharedInstallStore, key, claims, {
+                  days: input.sandbox.limits.installStoreDays,
+                  mib: input.sandbox.limits.installStoreMiB,
+                })
               : await keptStore(input.installStore, key);
         } catch (error) {
           signal.throwIfAborted();
@@ -1827,7 +1831,7 @@ interface KeptStore {
   directory: string;
   /** The last install that wrote it had this one's key. */
   reused: boolean;
-  /** The Objective's store (`sharedStore`), not the item's own. */
+  /** The installation's store (`sharedStore`), not the item's own. */
   shared?: true;
 }
 
@@ -1880,40 +1884,6 @@ export async function keptStore(
   }
   writeFileSync(listed, `${keys.join("\n")}\n`, { mode: 0o600 });
   return { root, directory: kept, reused };
-}
-
-/**
- * The store the Objective's items share for installs of one `key`
- * (`sharedInstallStore`, #2280): `<directory>/<key>/cache`. Never emptied
- * for another key, since each key has its own; a new one is made whole
- * under a temporary name and renamed into place, so installs of one key
- * at once never remove the store another is filling, and both write it as
- * a package manager's shared store is written. Only the exact install
- * writes `cache`, only with this key's inputs, so what an item reads there
- * is what installs of its very inputs fetched, whichever item ran them; the
- * key is the directory's name, outside what the install may write.
- */
-export async function sharedStore(
-  directory: string,
-  key: string,
-): Promise<KeptStore> {
-  const kept = join(directory, key);
-  const root = join(kept, "cache");
-  const store = { root, directory: kept, shared: true as const };
-  if (lstatSync(root, { throwIfNoEntry: false })?.isDirectory())
-    return { ...store, reused: true };
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const made = await mkdtemp(join(directory, ".new-"));
-  try {
-    mkdirSync(join(made, "cache"), { mode: 0o700 });
-    renameSync(made, kept);
-  } catch (error) {
-    await forceRemove(made);
-    // Another install of this key made it first: this one shares it.
-    if (!lstatSync(root, { throwIfNoEntry: false })?.isDirectory()) throw error;
-    return { ...store, reused: true };
-  }
-  return { ...store, reused: false };
 }
 
 // ---------------------------------------------------------------------------

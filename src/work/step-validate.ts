@@ -106,7 +106,7 @@ export async function validateStep(
     directory: `${worktree}.validation`,
     // The worker's Validate keeps the same stores (self-validate.ts).
     installStore: installStorePath(worktree),
-    sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
+    sharedInstallStore: sharedInstallStorePath(workDir),
     commit,
     item,
     plan,
@@ -162,7 +162,7 @@ export async function validateStep(
             earlier,
             directory: `${worktree}.validation`,
             installStore: installStorePath(worktree),
-            sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
+            sharedInstallStore: sharedInstallStorePath(workDir),
             blocks,
             media,
           })
@@ -700,7 +700,7 @@ export async function validateBeforeMerge(
         earlier,
         directory: `${worktree}.validation`,
         installStore: installStorePath(worktree),
-        sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
+        sharedInstallStore: sharedInstallStorePath(workDir),
         blocks: acceptedInputs(state).shown.blocks,
         media: validationMembers(plan, item, selection(state)),
       })

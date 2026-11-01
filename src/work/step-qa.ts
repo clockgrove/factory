@@ -117,7 +117,7 @@ export async function qaValidateStep(
     repository: config.repository,
     directory: `${worktreePath(workDir, state.issue, item.id)}.validation`,
     installStore: installStorePath(worktreePath(workDir, state.issue, item.id)),
-    sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
+    sharedInstallStore: sharedInstallStorePath(workDir),
     commit: head,
     item,
     plan,

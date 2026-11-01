@@ -190,6 +190,7 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
   assert.equal(scores.refusalPrecision, 0.5);
   assert.equal(scores.recall, 1);
   assert.equal(scores.tokens, 2000);
+  assert.equal(card.concurrency, 1);
   const broken = JSON.parse(
     readFileSync(
       join(set, "results", "recorded", "runs", "1", "42-tokenizer-r3.json"),

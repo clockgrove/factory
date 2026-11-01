@@ -149,10 +149,13 @@ export function checkoutTree(clone, record, dir) {
 
 /**
  * Review one record with `adapter`: returns `{ id, run, verdicts, error,
- * tokens, calls, ms, models, extra? }`, the verdicts each `{
- * criterionIndex, kind, detail, repro? }` and `extra` what else the
- * adapter reports (such as its repro checks). `cache` is the record's
- * directory for what its runs share (such as a mutation pass). Tokens are the reviewer's own model calls, as
+ * tokens, calls, ms, reviewers, phases, extra? }`, the verdicts each `{
+ * criterionIndex, kind, detail, repro? }`, `reviewers` the provider, model
+ * and effort each model call reported (`reportedModel`), `phases` the
+ * model calls' time and what the adapter times itself, and `extra` what
+ * else it reports. `cache.record` is the record's directory for what its
+ * runs share, `cache.shared` what every replay shares (install stores),
+ * and `prepared` what the adapter's `prepare` returned for the record. Tokens are the reviewer's own model calls, as
  * the build logs them (`model-usage`), and time its wall clock, unless the
  * adapter reports its own (`recorded` reports the recorded review's).
  */
@@ -161,6 +164,7 @@ export async function reviewOnce({
   build,
   set,
   cache,
+  prepared,
   record,
   run,
   clone,
@@ -183,7 +187,8 @@ export async function reviewOnce({
     answer = await adapter.review({
       build,
       set,
-      cache: join(cache, record.id),
+      cache,
+      prepared,
       record,
       checkout: clone,
       tree,
@@ -223,14 +228,26 @@ export async function reviewOnce({
       usage.reduce((sum, e) => sum + (e.tokens?.total ?? 0), 0),
     calls: usage.length,
     ms: answer.ms ?? Date.now() - started,
-    ...(answer.extra ? { extra: answer.extra } : {}),
-    models: [
-      ...new Set(
-        usage.map((e) =>
-          `${e.reportedModel ?? e.model} ${e.effort ?? ""}`.trim(),
-        ),
-      ),
+    // What the provider reported running, call by call, distinct.
+    reviewers: answer.reviewers ?? [
+      ...new Map(
+        usage.map((e) => {
+          const reviewer = {
+            provider: e.provider ?? null,
+            model: e.model ?? null,
+            effort: e.effort ?? null,
+            reportedModel: e.reportedModel ?? null,
+          };
+          return [JSON.stringify(reviewer), reviewer];
+        }),
+      ).values(),
     ],
+    phases: {
+      modelCalls: usage.length,
+      modelMs: usage.reduce((sum, e) => sum + (e.ms ?? 0), 0),
+      ...answer.extra?.phases,
+    },
+    ...(answer.extra ? { extra: answer.extra } : {}),
   };
 }
 

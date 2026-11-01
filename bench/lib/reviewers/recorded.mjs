@@ -15,7 +15,18 @@ const KIND = { pass: "pass", refuse: "refuse", "needs-human": "question" };
 
 export async function review({ record }) {
   const { recorded } = record;
-  const cost = { tokens: recorded.tokens ?? 0, ms: recorded.durationMs ?? 0 };
+  const cost = {
+    tokens: recorded.tokens ?? 0,
+    ms: recorded.durationMs ?? 0,
+    reviewers: [
+      {
+        provider: recorded.provider ?? null,
+        model: recorded.model ?? null,
+        effort: recorded.effort ?? null,
+        reportedModel: null,
+      },
+    ],
+  };
   if (recorded.verdicts)
     return {
       ...cost,

@@ -18,7 +18,13 @@
  *   --model NAME, --effort LEVEL     the reviewer's model and effort
  *                               (default: the build's for the provider)
  *   --runs N                    reviews of each record (default: 1)
- *   --jobs N                    reviews at once (default: 4)
+ *   --concurrency N             reviews at once (default: 1, so reviews
+ *                               don't stretch each other's wall time;
+ *                               more only within the host's share)
+ *   --cache DIR                 what replays share across sets and
+ *                               labels, such as each item's warm install
+ *                               store (default: ~/.cache/factory-bench/
+ *                               review-replay)
  *   --seeded                    add the seeded records (seeded/records/),
  *                               reviewed once each and scored apart
  *   --only ID ...               only these records
@@ -35,6 +41,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -67,7 +74,8 @@ const { values } = parseArgs({
     model: { type: "string" },
     effort: { type: "string" },
     runs: { type: "string" },
-    jobs: { type: "string" },
+    concurrency: { type: "string" },
+    cache: { type: "string" },
     seeded: { type: "boolean" },
     only: { type: "string", multiple: true },
     label: { type: "string" },
@@ -128,6 +136,8 @@ if (!["codex", "claude", "copilot"].includes(provider.planner))
   usage("--provider takes codex, claude or copilot");
 
 let adapter;
+/** The reviewer setting asked for: the flags, else the build's default for the provider. */
+let setting = null;
 if (values.reviewer === "recorded") adapter = recorded;
 else {
   const result = await import(join(build, "dist/review/result.js"));
@@ -143,10 +153,36 @@ else {
     );
   if (!adapter.fits(result, build))
     usage(`adapter ${adapter.id} doesn't fit ${build}'s reviewer`);
+  const { defaultModels } = await import(
+    join(build, "dist/providers/selection.js")
+  );
+  const defaults = defaultModels(provider.planner);
+  setting = {
+    provider: provider.planner,
+    model: provider.model ?? defaults.reviewer.model,
+    effort:
+      provider.effort ??
+      defaults.reviewEffort?.["result-review"] ??
+      defaults.reviewer.effort,
+    from:
+      provider.model && provider.effort
+        ? "flags"
+        : provider.model || provider.effort
+          ? "flags, the rest the build's default"
+          : "the build's default",
+  };
 }
 
 const runs = adapter === recorded ? 1 : number("runs", 1);
-const jobs = number("jobs", 4);
+const concurrency = number("concurrency", 1);
+const shared = resolve(
+  values.cache ??
+    join(
+      process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"),
+      "factory-bench",
+      "review-replay",
+    ),
+);
 const timeoutMs = number("timeout-minutes", 20) * 60_000;
 const label =
   values.label ??
@@ -175,58 +211,102 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
     process.kill(process.pid, signal);
   });
 
+/** Run `task` over `items`, `concurrency` at a time. */
+async function pool(items, task) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await task(items[next++]);
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, worker),
+  );
+}
+
+// Each record's preparation, once, before any review: what its runs
+// share, such as a warm install store and a mutation pass. It isn't
+// review time, so it is timed apart.
+const prepared = new Map();
+if (adapter.prepare)
+  await pool(
+    replayed.filter((record) => !candidateProblem(scratch.clone, record)),
+    async (record) => {
+      const started = Date.now();
+      try {
+        const value = await adapter.prepare({
+          build,
+          set: setDir,
+          cache: { record: join(out, "cache", record.id), shared },
+          record,
+          checkout: scratch.clone,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        prepared.set(record.id, { value, ms: Date.now() - started });
+        process.stderr.write(
+          `prepared ${record.id} in ${Math.round((Date.now() - started) / 1000)} s\n`,
+        );
+      } catch (error) {
+        prepared.set(record.id, {
+          error: String(error?.message ?? error),
+          ms: Date.now() - started,
+        });
+        process.stderr.write(
+          `prepare ${record.id}: error: ${error?.message ?? error}\n`,
+        );
+      }
+    },
+  );
+
 // Each (run, record) pair once; a seeded record is reviewed in run 1 only.
 const pairs = [];
 for (let run = 1; run <= runs; run++)
   for (const record of replayed)
     if (run === 1 || !record.seeded) pairs.push({ run, record });
 const results = [];
-let next = 0;
 let done = 0;
-async function worker() {
-  while (next < pairs.length) {
-    const { run, record } = pairs[next++];
-    const file = join(out, "runs", String(run), `${record.id}.json`);
-    // An earlier result is reused, but not an error: that review runs again.
-    let result =
-      !values.fresh && existsSync(file)
-        ? JSON.parse(readFileSync(file, "utf8"))
-        : null;
-    if (!result || result.error) {
-      const problem = candidateProblem(scratch.clone, record);
-      result = problem
-        ? {
-            id: record.id,
-            run,
-            verdicts: null,
-            error: problem,
-            tokens: 0,
-            calls: 0,
-            ms: 0,
-            models: [],
-          }
-        : await reviewOnce({
-            adapter,
-            build,
-            set: setDir,
-            cache: join(out, "cache"),
-            record,
-            run,
-            clone: scratch.clone,
-            provider,
-            timeoutMs,
-          });
-      writeJson(file, result);
-    }
-    results.push(result);
-    done++;
-    const refused = result.verdicts?.filter((v) => v.kind === "refuse").length;
-    process.stderr.write(
-      `[${done}/${pairs.length}] run ${run} ${record.id}: ${result.error ? `error: ${result.error}` : `${refused} refused, ${result.tokens} tokens, ${Math.round(result.ms / 1000)} s`}\n`,
-    );
+await pool(pairs, async ({ run, record }) => {
+  const file = join(out, "runs", String(run), `${record.id}.json`);
+  // An earlier result is reused, but not an error: that review runs again.
+  let result =
+    !values.fresh && existsSync(file)
+      ? JSON.parse(readFileSync(file, "utf8"))
+      : null;
+  if (!result || result.error) {
+    const ready = prepared.get(record.id);
+    const problem =
+      candidateProblem(scratch.clone, record) ??
+      (ready?.error ? `its preparation failed: ${ready.error}` : null);
+    result = problem
+      ? {
+          id: record.id,
+          run,
+          verdicts: null,
+          error: problem,
+          tokens: 0,
+          calls: 0,
+          ms: 0,
+          reviewers: [],
+        }
+      : await reviewOnce({
+          adapter,
+          build,
+          set: setDir,
+          cache: { record: join(out, "cache", record.id), shared },
+          prepared: ready?.value,
+          record,
+          run,
+          clone: scratch.clone,
+          provider,
+          timeoutMs,
+        });
+    writeJson(file, result);
   }
-}
-await Promise.all(Array.from({ length: Math.min(jobs, pairs.length) }, worker));
+  results.push(result);
+  done++;
+  const refused = result.verdicts?.filter((v) => v.kind === "refuse").length;
+  process.stderr.write(
+    `[${done}/${pairs.length}] run ${run} ${record.id}: ${result.error ? `error: ${result.error}` : `${refused} refused, ${result.tokens} tokens, ${Math.round(result.ms / 1000)} s`}\n`,
+  );
+});
 
 const section = (subset) => {
   const ids = new Set(subset.map((r) => r.id));
@@ -251,9 +331,23 @@ const scorecard = {
   reviewer: adapter.id,
   build,
   buildCommit: buildCommit(build),
-  provider,
-  models: [...new Set(results.flatMap((r) => r.models))],
+  // What was asked for, and what the provider reported it ran.
+  setting,
+  reported: [
+    ...new Map(
+      results
+        .flatMap((r) => r.reviewers ?? [])
+        .map((r) => [JSON.stringify(r), r]),
+    ).values(),
+  ],
   runs,
+  concurrency,
+  prepare: Object.fromEntries(
+    [...prepared].map(([id, entry]) => [
+      id,
+      { ms: entry.ms, ...(entry.error ? { error: entry.error } : {}) },
+    ]),
+  ),
   notReplayed: records
     .filter((r) => r.replay === false)
     .map((r) => ({ id: r.id, why: r.why ?? null })),

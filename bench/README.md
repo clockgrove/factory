@@ -455,13 +455,13 @@ A record holds what the review saw and what it decided:
 
 ### Reviewers
 
-The reviewer is the build's own, driven through its review entry point by an adapter per reviewer generation, in `bench/lib/reviewers/`. An adapter exports `id`, `fits(result)` (whether it drives this build's `dist/review/result.js`), `needsTree` (whether it wants a fresh checkout of the candidate tree, given as `tree`) and `review({ build, set, cache, record, checkout, tree, dir, provider, signal, log })`, which returns `{ verdicts, extra? }`: one verdict per criterion, each `{ criterionIndex, kind, detail, repro? }`, `kind` `pass`, `refuse`, `question` or `note`, and `extra`, what else it reports, kept in the result. `cache` is the record's directory for what its runs share. `--reviewer auto` (the default) takes the first that fits the build, newest first.
+The reviewer is the build's own, driven through its review entry point by an adapter per reviewer generation, in `bench/lib/reviewers/`. An adapter exports `id`, `fits(result, build)` (whether it drives this build, given its `dist/review/result.js`), `needsTree` (whether it wants a fresh checkout of the candidate tree, given as `tree`), optionally `prepare({ build, set, cache, record, checkout, signal })`, run once per record before any review and timed apart (what production has ready before a review, such as a warm install store), and `review({ build, set, cache, prepared, record, checkout, tree, dir, provider, signal, log })`, which returns `{ verdicts, extra? }`: one verdict per criterion, each `{ criterionIndex, kind, detail, repro? }`, `kind` `pass`, `refuse`, `question` or `note`, and `extra`, what else it reports, kept in the result (its `phases` join the result's). `prepared` is what `prepare` returned; `cache.record` is the record's directory for what its runs share, and `cache.shared` (`--cache DIR`, by default `~/.cache/factory-bench/review-replay`, outside the set) what every replay shares, such as install stores. `--reviewer auto` (the default) takes the first that fits the build, newest first.
 
 - `v1`: the reviewer up to #2344. It calls the build's `reviewResult` with the build's planner for the provider (`providerPlanner`), fresh: no retained conversation, no operator decisions, no earlier verdicts, no repository memory. It judges every criterion of the record.
-- `v2`: the reviewer of #2344, in the build's `dist/review/item.js`. It calls the build's `reviewResult` there with the item's own acceptance (the first `itemCriteria` criteria, so indices match), the build's scratch checkouts (`validationScratch`) for the reviewer's commands and the refusal check, and the item's mutation pass (`mutationPass`), which, as in Factory's validate step, runs in a validation of the candidate (`validateTree`), once per record, kept in `cache`. The installation's sandbox, validation and review settings come from the set's `config.json`, read with the build's `loadConfig`. Its refusals are the confirmed ones; `extra` has the repros confirmed and dropped, the commands it ran and the mutation pass. It validates as Factory does, so run it with the service's `PATH` (the runtime, the package manager and any toolchain the repository's commands need).
+- `v2`: the reviewer of #2344, in the build's `dist/review/item.js`. It calls the build's `reviewResult` there with the item's own acceptance (the first `itemCriteria` criteria, so indices match), the build's scratch checkouts (`validationScratch`) for the reviewer's commands and the refusal check, and the item's mutation pass (`mutationPass`), which, as in Factory's validate step, runs in a validation of the candidate (`validateTree`). Its `prepare` gives each item a warm install store, as the validate step keeps one per item and one per Objective (#2280): one install fills it, and every validation, scratch checkout and repro check gets it after that. The mutation pass runs there too, once per record, kept in `cache.record`. The installation's sandbox, validation and review settings come from the set's `config.json`, read with the build's `loadConfig`. Its refusals are the confirmed ones; `extra` has the repros confirmed and dropped and the mutation pass, and its `phases` the mutation pass's time (`mutationMs`), making scratch checkouts (`scratchCheckouts`, `scratchPrepareMs`), the reviewer's commands (`commands`, `commandsMs`, inside the model calls' time) and the repro checks (`repros`, `reprosMs`). It validates as Factory does, so run it with the service's `PATH` (the runtime, the package manager and any toolchain the repository's commands need).
 - `recorded`: no model. The recorded verdicts, scored like a replay, with the recorded tokens and time: the baseline the history itself sets.
 
-Each review is bounded by `--timeout-minutes` (20). Tokens are the reviewer's own model calls, from the build's `model-usage` log events; time is the review's wall clock.
+Each review is bounded by `--timeout-minutes` (20). Tokens are the reviewer's own model calls, from the build's `model-usage` log events; time is the review's wall clock, with `phases.modelCalls` and `phases.modelMs` the calls' count and time. Each result's `reviewers` are the provider, model and effort its calls ran on, with the model the provider reported (`reportedModel`); the scorecard's `setting` is what was asked for, `from` the flags or the build's default (Codex's reviewer is `gpt-6.1-sol` at `medium`), and `reported` what the calls reported. Reviews run one at a time by default (`--concurrency`, recorded in the scorecard), so one doesn't stretch another's wall time; run more only within the host's share of CPUs.
 
 ### Scores
 
@@ -482,17 +482,18 @@ A recorded refusal is real when its label says so: the label judges its reason. 
 
 Results go to `<set>/results/<label>/`: `runs/<n>/<record id>.json` per review, reused by a later invocation (so an interrupted replay carries on) unless `--fresh`, except a review that failed, which runs again; and `scorecard.json`. The label defaults to the reviewer, provider, model and effort.
 
-| Flag                                | What                                                                  |
-| ----------------------------------- | --------------------------------------------------------------------- |
-| `--bench-home DIR`, `--set DIR`     | The bench home (its `review-replay/`), or the set itself              |
-| `--repo DIR`                        | A clone of the reviewed repository                                    |
-| `--build DIR`                       | The Factory checkout whose reviewer runs (its `dist/`; this checkout) |
-| `--reviewer auto\|v1\|recorded`     | The adapter                                                           |
-| `--provider`, `--model`, `--effort` | The planner kind (`codex`), and the reviewer's model and effort       |
-| `--runs N`, `--jobs N`              | Reviews of each record (1), and reviews at once (4)                   |
-| `--seeded`, `--only ID ...`         | Add the seeded records; only these records                            |
-| `--label NAME`, `--fresh`           | The results' name; review again what earlier results hold             |
-| `--timeout-minutes N`               | Each review's bound (20)                                              |
+| Flag                                | What                                                                   |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `--bench-home DIR`, `--set DIR`     | The bench home (its `review-replay/`), or the set itself               |
+| `--repo DIR`                        | A clone of the reviewed repository                                     |
+| `--build DIR`                       | The Factory checkout whose reviewer runs (its `dist/`; this checkout)  |
+| `--reviewer auto\|v1\|recorded`     | The adapter                                                            |
+| `--provider`, `--model`, `--effort` | The planner kind (`codex`), and the reviewer's model and effort        |
+| `--runs N`, `--concurrency N`       | Reviews of each record (1), and reviews (and preparations) at once (1) |
+| `--cache DIR`                       | What every replay shares, such as install stores                       |
+| `--seeded`, `--only ID ...`         | Add the seeded records; only these records                             |
+| `--label NAME`, `--fresh`           | The results' name; review again what earlier results hold              |
+| `--timeout-minutes N`               | Each review's bound (20)                                               |
 
 ## The example
 

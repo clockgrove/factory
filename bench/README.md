@@ -15,6 +15,7 @@ bench/
   score.mjs                   score a run, or any Objective, into the results
   report.mjs                  run reports, the history page, the hill-climb decision, the judge's calibration
   grade-auto.mjs              a generic grader of any Objective's result, and its roles' prompts in grade-auto/
+  review-replay.mjs           replay recorded result reviews with a build's reviewer, and score it
   examples/acme-widgets-42.json  an invented definition (schema below)
   lib/                        what the commands share
 ```
@@ -414,6 +415,82 @@ A grade says the criteria are met; it doesn't say whether the result is what the
 ### Calibration
 
 A judge that disagrees with the person who owns the intent isn't to be trusted. `definition.judgeCalibration` lists that person's own choices between pairs of runs, each `{ runA, runB, intent, quality, by, at }`, `intent` and `quality` `A` (the run `runA`), `B` or `tie`. Record one with `report.mjs calibrate --benchmark ID --pair RUN_A RUN_B --intent A|B|tie --quality A|B|tie --by NAME`: it checks that both runs have scorecards, replaces the person's earlier choice of the same pair and stamps the time. `compare` judges every calibration pair the same way (blind, and kept), compares the answers as run ids, and reports how many of the person's choices the judge made too, overall, on intent and on quality. Below `scoring.minJudgeAgreement` (0.8 by default) it warns that the judge's verdict isn't to be trusted; with no calibration pair it can judge, it warns that the judge is uncalibrated. A warning doesn't change the decision: whoever reads it decides whether to trust the judge.
+
+## Review replay
+
+A result reviewer ships only after it beats the one before it on recorded history (#2344). `bench/review-replay.mjs` runs a Factory build's result reviewer again on result reviews Factory recorded, several times each, and scores it against hand labels: how many of its refusals have a real defect behind them, how many of the known defects it refuses, how many questions it asks, and what it costs.
+
+```sh
+node bench/review-replay.mjs --bench-home ~/bench-home --repo ~/work/widgets \
+  --build ~/work/factory-candidate --runs 3 --seeded
+```
+
+### The replay set
+
+The set is `review-replay/` in the bench home (or `--set DIR`), private like the rest of a benchmark's data. The harness never builds one; whoever owns the repository extracts it from their Factory installation:
+
+```
+review-replay/
+  records/<id>.json           one recorded result review each
+  seeded/records/<id>.json    an accepted result with one planted defect
+  plans/, sources/            the plans and pinned sources the records name
+  labels.json                 each record's labelled refusals and known defects
+  objects.bundle              optional: the candidate commits, as refs/replay/<id>
+  results/<label>/            written by the harness
+```
+
+A record holds what the review saw and what it decided:
+
+- `id`, `objective`, `item`, `kind` (`work` or `qa`), `attempt`, `at`; `replay: false` with `why` leaves it out (a QA item's review, say, which changes no files).
+- `plan` and `sources`: paths, in the set, of the plan in effect (the plan's JSON, as Factory's plan comment holds it) and the Objective's pinned sources at the plan base.
+- `candidate`: `{ commit, tree, base }`, the exact commit reviewed, its tree and the commit its change starts from.
+- `criteria`, the criteria the reviewer judged, and `itemCriteria`, how many of them, first, are the item's own acceptance; the rest are the Objective criteria the plan gave the item's review.
+- `validation`: `{ tree, commands, formatted?, results }`, Factory's validation of the tree: each command's `index`, `command`, `passed`, `exitCode`, `durationMs` and output `tail`.
+- `notes`: optional, the worker's handoff notes, when they were recorded.
+- `recorded`: the review as it happened: `outcome`, `provider`, `model`, `effort`, `tokens`, `durationMs`, `refused` (each `{ criterionIndex, detail, complete }`; `complete: false` when only a prefix survives) and `verdicts` (every criterion's, when the full answer survives, else null).
+- A seeded record adds `seeded: { from, file, description }` and keeps its labels inline (`labels`, as in `labels.json`); it has no `recorded`.
+
+`labels.json` maps a record id to `{ refusals, defects }`. Each refusal is `{ criterionIndex, defect, defectId?, category?, justification, labelledBy }`: whether the recorded refusal had a real defect behind it, with the evidence. Each defect is `{ id, criteria, description, evidence, labelledBy }`: a defect the candidate has, and the criteria it violates. `labelledBy` says who decided (`draft` until a person confirms it). The candidate commits come from `--repo`, a clone of the reviewed repository, or the set's bundle: the harness clones `--repo` into a scratch directory, sharing its objects, fetches the bundle into it, and checks each record's commit has its recorded tree before reviewing it. Nothing is written to `--repo`.
+
+### Reviewers
+
+The reviewer is the build's own, driven through its review entry point by an adapter per reviewer generation, in `bench/lib/reviewers/`. An adapter exports `id`, `fits(result)` (whether it drives this build's `dist/review/result.js`), `needsTree` (whether it wants a fresh checkout of the candidate tree, given as `tree`) and `review({ build, record, checkout, tree, dir, provider, signal, log })`, which returns `{ verdicts }`, one per criterion, each `{ criterionIndex, kind, detail, repro? }`, `kind` `pass`, `refuse`, `question` or `note`. `--reviewer auto` (the default) takes the first that fits the build.
+
+- `v1`: the reviewer up to #2344. It calls the build's `reviewResult` with the build's planner for the provider (`providerPlanner`), fresh: no retained conversation, no operator decisions, no earlier verdicts, no repository memory. It judges every criterion of the record.
+- `recorded`: no model. The recorded verdicts, scored like a replay, with the recorded tokens and time: the baseline the history itself sets.
+
+Each review is bounded by `--timeout-minutes` (20). Tokens are the reviewer's own model calls, from the build's `model-usage` log events; time is the review's wall clock.
+
+### Scores
+
+Each run is scored apart, then summarized (mean, min and max over the runs); seeded records are reviewed once and scored apart.
+
+| Score                               | What                                                                              |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `refusedReviews`, `reviewPrecision` | Reviews with any refusal, and the share of them with at least one real refusal    |
+| `refusals`, `refusalPrecision`      | Refused criteria, and the share with a real defect behind them                    |
+| `defects`, `caught`, `recall`       | Known defects over the records, and those refused                                 |
+| `distinctDefects`, `distinctCaught` | The same, counting a defect once per item however many of its records have it     |
+| `questions`, `notes`                | Verdicts of those kinds                                                           |
+| `tokens`, `ms` (and per review)     | Cost                                                                              |
+| `errors`                            | Reviews with no verdict: the reviewer failed, or the candidate wasn't found       |
+| `unmatched`                         | Replayed refusals no labelled defect covers, with their details, to label by hand |
+
+A recorded refusal is real when its label says so: the label judges its reason. A replayed refusal is real when the record has a labelled defect whose `criteria` include it; the harness doesn't read its reason, so `unmatched` lists the rest for a person, and a replayed refusal of a defect's criterion for another reason still counts. A defect is caught when a real refusal maps to it.
+
+Results go to `<set>/results/<label>/`: `runs/<n>/<record id>.json` per review, reused by a later invocation (so an interrupted replay carries on) unless `--fresh`, and `scorecard.json`. The label defaults to the reviewer, provider, model and effort.
+
+| Flag                                | What                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| `--bench-home DIR`, `--set DIR`     | The bench home (its `review-replay/`), or the set itself              |
+| `--repo DIR`                        | A clone of the reviewed repository                                    |
+| `--build DIR`                       | The Factory checkout whose reviewer runs (its `dist/`; this checkout) |
+| `--reviewer auto\|v1\|recorded`     | The adapter                                                           |
+| `--provider`, `--model`, `--effort` | The planner kind (`codex`), and the reviewer's model and effort       |
+| `--runs N`, `--jobs N`              | Reviews of each record (1), and reviews at once (4)                   |
+| `--seeded`, `--only ID ...`         | Add the seeded records; only these records                            |
+| `--label NAME`, `--fresh`           | The results' name; review again what earlier results hold             |
+| `--timeout-minutes N`               | Each review's bound (20)                                              |
 
 ## The example
 

@@ -18,8 +18,8 @@ import {
   commandToolDescription,
   PROOF_SCHEMA,
   proofInstructions,
-  protectedCommand,
   reviewCandidate,
+  reviewNotes,
   reviewResult,
   validationWorkspace,
 } from "../dist/review/item.js";
@@ -147,11 +147,6 @@ function setup(repo) {
 
 /** The review's bounds: the installation's defaults, the test's command limit. */
 const LIMITS = {
-  mutants: 20,
-  mutationMs: 90_000,
-  measuredMutants: 1,
-  commands: 20,
-  commandBudgetMs: 60_000,
   commandMs: 60_000,
   prepareMs: 60_000,
   proofs: 10,
@@ -176,7 +171,6 @@ function review(repo, planner, extra = {}) {
         validation(repo.head),
         `${repo.checkout}.scratch`,
       ),
-      mutation: { commands: COMMANDS, seed: "reduce" },
       limits: LIMITS,
       itemId: work.id,
       dir: tempDir("factory-repro-review-"),
@@ -219,8 +213,8 @@ const repro = (command, actual = 'items: ["a"]') => ({
   actual,
   command,
 });
-const reproduced = (command, actual) => ({
-  outcome: { kind: "reproduced", repro: repro(command, actual) },
+const reproduced = (command, actual, requirement = CRITERIA[0]) => ({
+  outcome: { kind: "reproduced", requirement, repro: repro(command, actual) },
 });
 const NOT_REPRODUCED = {
   outcome: { kind: "not-reproduced", detail: "It kept the patch." },
@@ -268,7 +262,7 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
       const ran = await command(call, REPRO);
       assert.match(ran, /^Exit code 1/);
       return suspicion.case === "A patch may be dropped."
-        ? reproduced("node -e 'console.log(\"fine\")'", "fine")
+        ? reproduced("node -e 'console.log(\"fine\")'", "fine", CRITERIA[1])
         : reproduced(REPRO);
     },
   );
@@ -323,7 +317,14 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
   const logged = events.find((event) => event.event === "result-review");
   assert.deepEqual(
     { ...logged.suspicions, tokens: undefined },
-    { raised: 2, proved: 1, dropped: 1, tokens: undefined },
+    {
+      raised: 2,
+      proved: 1,
+      questions: 0,
+      notes: 0,
+      dropped: 1,
+      tokens: undefined,
+    },
   );
   assert.deepEqual(logged.verdicts, { pass: 0, suspect: 2, question: 0 });
   assert.equal(
@@ -356,7 +357,7 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
     reproduced(REPRO),
   );
   const { run: cappedRun, events: cappedEvents } = review(repo, capped, {
-    limits: { ...LIMITS, proofs: 1, mutants: 0 },
+    limits: { ...LIMITS, proofs: 1 },
   });
   assert.deepEqual(
     (await cappedRun).refused.map((entry) => entry.criterionIndex),
@@ -368,6 +369,108 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
         event.event === "result-review-suspicion" && event.criterionIndex === 1,
     ).outcome,
     "unproved",
+  );
+});
+
+test("no silent pass: a criterion the finder leaves without a verdict beside a refusal is asked again alone, once, then is the operator's question", {
+  skip,
+}, async () => {
+  const repo = target();
+  // The first answer refuses criterion 0 and omits criterion 1; asked
+  // again for criterion 1 alone, it answers nothing valid.
+  const planner = answering([{ findings: [refuse(0)] }, { findings: [] }]);
+  const { run, events } = review(repo, planner);
+  const outcome = await run;
+  assert.equal(planner.calls.length, 2);
+  const asked = (call) =>
+    JSON.parse(
+      call.prompt.split("\n").find((line) => line.startsWith('{"criteria"')),
+    ).criteria.map((entry) => entry.criterion);
+  assert.deepEqual(asked(planner.calls[0]), CRITERIA);
+  assert.deepEqual(asked(planner.calls[1]), [CRITERIA[1]]);
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-missing").criteria,
+    [1],
+  );
+  // The refusal didn't reproduce: criterion 0 passes, and criterion 1 is
+  // a question in one hold, never a pass.
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(
+    outcome.questions.map((entry) => entry.criterionIndex),
+    [1],
+  );
+  assert.deepEqual(
+    outcome.verdicts.map((entry) => [entry.criterionIndex, entry.verdict]),
+    [[0, "pass"]],
+  );
+  const held = reviewOutcome(
+    outcome,
+    () => ({}),
+    REFUSES_ITEM,
+    () => {
+      assert.fail("repaired");
+    },
+  );
+  assert.equal(held.kind, "hold");
+});
+
+test("a proof can't confirm a guess: behaviour the sources don't define is a question, a repro must quote its requirement, and a non-behaviour finding is a note", {
+  skip,
+}, async () => {
+  const repo = target();
+  const planner = answering(
+    [
+      {
+        findings: [
+          refuse(0, "A late snapshot should replay the patches it missed."),
+          refuse(1, "The test asserts twice what one assertion proves."),
+        ],
+      },
+    ],
+    (_call, suspicion) =>
+      suspicion.case.startsWith("A late snapshot")
+        ? {
+            outcome: {
+              kind: "undefined",
+              detail:
+                "No criterion says whether a late snapshot replays patches.",
+              question: "Should a late snapshot replay the patches it missed?",
+            },
+          }
+        : {
+            outcome: {
+              kind: "not-behaviour",
+              note: "test/reduce.test.js could share one assertion.",
+            },
+          },
+  );
+  const outcome = await review(repo, planner).run;
+  assert.equal(outcome.kind, "needs-human");
+  assert.deepEqual(
+    outcome.questions.map(({ criterionIndex, question }) => [
+      criterionIndex,
+      question,
+    ]),
+    [[0, "Should a late snapshot replay the patches it missed?"]],
+  );
+  assert.deepEqual(reviewNotes(outcome), [
+    {
+      criterion: CRITERIA[1],
+      note: "test/reduce.test.js could share one assertion.",
+    },
+  ]);
+  // A repro that quotes no requirement the criterion or a source states
+  // is asked again once, then dropped: a failure nobody required.
+  const guessed = answering([{ findings: [refuse(0), pass(1)] }], () =>
+    reproduced(REPRO, undefined, "Late snapshots must replay missed patches."),
+  );
+  const { run, events } = review(repo, guessed);
+  assert.equal((await run).kind, "pass");
+  assert.equal(guessed.proofs.length, 2);
+  assert.match(guessed.proofs[1].prompt, /requirement must quote/);
+  assert.equal(
+    events.find((event) => event.event === "result-review-suspicion").reason,
+    "its answer was invalid twice",
   );
 });
 
@@ -480,7 +583,7 @@ test("R4: a proof runs commands in its own scratch copy, within its budget; the 
   assert.match(validated.output, /no network/);
 });
 
-test("a refusal of weakened protected tests is proved with the protected-test check's command", {
+test("a refusal of weakened protected tests is proved by running the base's test on the result", {
   skip,
 }, async () => {
   const repo = target(REDUCER);
@@ -496,7 +599,8 @@ test("a refusal of weakened protected tests is proved with the protected-test ch
     "test/reduce.test.js": TEST,
   });
   repo.tree = git(repo.checkout, "rev-parse", "HEAD^{tree}");
-  const check = protectedCommand(repo.base, ["test/reduce.test.js"], COMMANDS);
+  // The base's test file, run on the result, then put back.
+  const check = `git show ${repo.base}:test/reduce.test.js > /tmp/base.test.js && cp /tmp/base.test.js test/base.test.js && node test/base.test.js; s=$?; rm -f test/base.test.js; exit $s`;
   const planner = answering(
     [
       {
@@ -512,12 +616,10 @@ test("a refusal of weakened protected tests is proved with the protected-test ch
     async (call) => {
       const ran = await command(call, check);
       assert.match(ran, /AssertionError/);
-      return reproduced(check, "AssertionError");
+      return reproduced(check, "AssertionError", CRITERIA[1]);
     },
   );
-  const { run, events } = review(repo, planner);
-  const outcome = await run;
-  assert.ok(events.some((event) => event.event === "result-review-protected"));
+  const outcome = await review(repo, planner).run;
   assert.equal(outcome.kind, "refused");
   assert.deepEqual(
     outcome.refused.map((entry) => entry.criterion),
@@ -648,20 +750,19 @@ test("R9: a proof's instructions with its tool's description fit in 5,000 charac
   assert.ok(proof <= 5000, `${proof} characters`);
 });
 
-test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros, mutants, questions, tokens and time, as text and JSON", () => {
+test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros, questions, tokens and time, as text and JSON", () => {
   const telemetry = new ItemTelemetries();
   const at = "2026-01-01T00:00:00.000Z";
+  const suspicions = {
+    raised: 4,
+    proved: 1,
+    questions: 1,
+    notes: 1,
+    dropped: 1,
+    tokens: 900,
+  };
   for (const event of [
     { event: "start", step: "item:reduce:review", at },
-    {
-      event: "mutation-pass",
-      step: "item:reduce:validate",
-      status: "done",
-      seeded: 6,
-      killed: 4,
-      survived: 2,
-      at,
-    },
     {
       event: "model-usage",
       step: "item:reduce:review",
@@ -674,18 +775,11 @@ test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros,
       event: "result-review",
       step: "item:reduce:review",
       outcome: "refused",
-      verdicts: { pass: 1, suspect: 2, question: 0, note: 1 },
-      suspicions: { raised: 3, proved: 1, dropped: 2, tokens: 900 },
+      verdicts: { pass: 1, suspect: 4, question: 0 },
+      suspicions,
       repros: { confirmed: 1, dropped: 1 },
-      questions: 0,
-      commands: 3,
-      phases: {
-        prepareMs: 12_000,
-        mutationMs: 60_000,
-        modelMs: 90_000,
-        commands: { count: 3, ms: 30_000 },
-        proofsMs: 8000,
-      },
+      questions: 1,
+      phases: { prepareMs: 12_000, modelMs: 90_000, proofsMs: 8000 },
       ms: 4000,
       at,
     },
@@ -697,29 +791,21 @@ test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros,
       verdicts: item.reviewer.verdicts,
       suspicions: item.reviewer.suspicions,
       repros: item.reviewer.repros,
-      mutants: item.reviewer.mutants,
       tokens: item.reviewer.tokens.sum,
       ms: item.reviewer.ms,
       phases: item.reviewer.phases,
     },
     {
-      verdicts: { pass: 1, suspect: 2, question: 0, note: 1 },
-      suspicions: { raised: 3, proved: 1, dropped: 2, tokens: 900 },
+      verdicts: { pass: 1, suspect: 4, question: 0 },
+      suspicions,
       repros: { confirmed: 1, dropped: 1 },
-      mutants: { status: "done", seeded: 6, killed: 4, survived: 2 },
       tokens: 1200,
       ms: 4000,
-      phases: {
-        prepareMs: 12_000,
-        mutationMs: 60_000,
-        modelMs: 90_000,
-        commandMs: 30_000,
-        proofsMs: 8000,
-      },
+      phases: { prepareMs: 12_000, modelMs: 90_000, proofsMs: 8000 },
     },
   );
   assert.match(
     telemetryText(item, "Work Item reduce"),
-    /Reviewer: 1 review, verdicts 1 pass, 2 suspect, 0 question, 1 note, suspicions 3 raised, 1 proved, 2 dropped \(proofs 900 tokens\), repros 1 confirmed, 1 dropped, 0 questions, 3 commands, 6 mutants seeded, 4 killed, 2 survived, 1,200 tokens/,
+    /Reviewer: 1 review, verdicts 1 pass, 4 suspect, 0 question, suspicions 4 raised, 1 proved, 1 questions, 1 notes, 1 dropped \(proofs 900 tokens\), repros 1 confirmed, 1 dropped, 1 question, 1,200 tokens/,
   );
 });

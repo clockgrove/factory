@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import type { Outcome, StepContext } from "../engine.js";
 import { runningBuild } from "../log.js";
 import { type SelectedMember, validationMembers } from "../media.js";
-import { packageBootstrap } from "../planning/facts.js";
 import {
   ACCEPTED_AT,
   acceptedInputs,
@@ -154,7 +153,6 @@ export async function validateStep(
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
         ...(result.formatted ? { formatted: result.formatted } : {}),
-        commandMs: ownCommandMs(item, result.results),
       };
       const integrated = earlier.length
         ? await integratedValidation({
@@ -228,35 +226,6 @@ export async function validateStep(
     default:
       return result;
   }
-}
-
-/**
- * The item's own commands a mutant runs (review/mutants.ts): its
- * validation without the exact install it may start with, which the
- * review's checkout ran already, and without its repros.
- */
-function ownCommands(item: WorkItem): string[] {
-  const commands = item.validation.map((check) => check.command);
-  return commands.length && packageBootstrap(commands[0]!) !== undefined
-    ? commands.slice(1)
-    : commands;
-}
-
-/** How long each of the item's own commands took in a passed run: what orders and bounds each mutant's. */
-function ownCommandMs(
-  item: WorkItem,
-  results: readonly {
-    command: string;
-    durationMs: number;
-    preparation?: true;
-  }[],
-): Record<string, number> {
-  const own = new Set(ownCommands(item));
-  return Object.fromEntries(
-    results
-      .filter((result) => !result.preparation && own.has(result.command))
-      .map((result) => [result.command, result.durationMs]),
-  );
 }
 
 /**

@@ -440,7 +440,7 @@ export type EvidenceInput = Pick<
   merges?: readonly string[];
   /** Owned-path scopes whose files the change left unreachable are evidence (orphans.ts). */
   unreachableScope?: readonly string[];
-  /** Rows a review adds after the validation row (review/item.ts: its mutation pass and re-review packet). */
+  /** Rows a review adds after the validation row (review/item.ts: its re-review packet). */
   after?: readonly ResultEvidence[];
 };
 
@@ -564,6 +564,12 @@ export async function runReview(
       criteria: readonly string[];
       /** The fixed instructions; guidance for supplied evidence kinds follows. */
       instructions: readonly string[];
+      /**
+       * This call already asks again (review/item.ts `find`): an invalid
+       * answer isn't asked again, and the criteria it leaves without a
+       * valid verdict are the operator's questions, beside any refusal.
+       */
+      lastChance?: true;
     },
 ): Promise<ResultReview> {
   const { criteria, phase } = run;
@@ -633,8 +639,12 @@ export async function runReview(
     let decoded = await ask();
     let review = judge(criteria, decoded, evidence, settled, tree, false);
     const first = invalidReason(decoded, criteria, settled);
-    const final = review.kind !== "refused" && first !== undefined;
-    if (final) {
+    const retry =
+      !run.lastChance && review.kind !== "refused" && first !== undefined;
+    const final = retry || (run.lastChance === true && first !== undefined);
+    if (final && !retry)
+      review = judge(criteria, decoded, evidence, settled, tree, true);
+    if (retry) {
       run.log({ event: `${phase}-invalid`, reason: first });
       decoded = await ask(
         `Your previous answer was rejected: ${first}\nAnswer again, correcting that error.`,

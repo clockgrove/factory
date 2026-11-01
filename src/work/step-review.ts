@@ -16,7 +16,6 @@ import {
   validationWorkspace,
   type Workspace,
 } from "../review/item.js";
-import { mutantCommands } from "../review/mutants.js";
 import {
   type CriterionDecision,
   type DeliveryPosition,
@@ -61,10 +60,10 @@ import {
 // review
 
 /**
- * A Work Item's result review (review/item.ts): in a workspace made as
- * validation makes its checkout (`reviewWorkspace`), its mutation pass
- * beside the reviewer, and, after a repair, the refusals the last review
- * confirmed. A refusal keeps its repro for later validations
+ * A Work Item's result review (review/item.ts): its finder, then the
+ * proofs of its refusals in a workspace made as validation makes its
+ * checkout (`reviewWorkspace`), and, after a repair, the refusals the last
+ * review confirmed. A refusal keeps its repro for later validations
  * (repros.ts) and repairs; a pass keeps its notes, for the PR body and
  * final review.
  */
@@ -124,16 +123,6 @@ export async function reviewStep(
       commit: candidate(state, item.id),
       validation: validated,
       workspace: reviewWorkspace(item, context, deps, worktree),
-      mutation: {
-        commands: mutantCommands(item.validation, validated.commandMs),
-        ...(validated.commandMs && {
-          baselineMs: Object.values(validated.commandMs).reduce(
-            (sum, ms) => sum + ms,
-            0,
-          ),
-        }),
-        seed: item.id,
-      },
       limits: reviewLimits(deps),
       ...(prior ? { prior } : {}),
       sources: await pinnedSources(state, deps, signal),
@@ -263,11 +252,6 @@ function reviewWorkspace(
 function reviewLimits(deps: BuildDeps): ReviewLimits {
   const { review } = deps.config;
   return {
-    mutants: review.mutants,
-    mutationMs: review.mutationSeconds * 1000,
-    measuredMutants: review.measuredMutants,
-    commands: review.commands,
-    commandBudgetMs: review.commandSeconds * 1000,
     proofs: review.proofs,
     proofCommands: review.proofCommands,
     proofBudgetMs: review.proofSeconds * 1000,

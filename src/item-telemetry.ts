@@ -103,11 +103,10 @@ export interface ItemTelemetry {
   reviews: Record<string, number>;
   /**
    * The result reviews' own telemetry (#2344), summed over them: the
-   * reviewer's verdicts by kind, its suspicions raised, proved and dropped
-   * and the proofs' tokens, the proofs' repros confirmed or dropped by the
-   * refusal check, its commands and questions, the review calls' tokens
-   * (the proofs' among them) and the reviews' time; `mutants`: the latest
-   * mutation pass, null before one.
+   * finder's verdicts by kind; the suspicions raised, and of those proved,
+   * made questions or notes, and dropped, with the proofs' tokens; the
+   * proofs' repros confirmed or dropped by the refusal check; questions;
+   * the review calls' tokens (the proofs' among them) and the reviews' time.
    */
   reviewer: {
     reviews: number;
@@ -115,28 +114,17 @@ export interface ItemTelemetry {
     suspicions: {
       raised: number;
       proved: number;
+      questions: number;
+      notes: number;
       dropped: number;
       tokens: number;
     };
     repros: { confirmed: number; dropped: number };
     questions: number;
-    commands: number;
     tokens: Reported;
     ms: number;
-    /** Each phase's time, summed over the reviews (review/item.ts): the workspace's install, the mutation pass, the find calls, their commands, the proofs. */
-    phases: {
-      prepareMs: number;
-      mutationMs: number;
-      modelMs: number;
-      commandMs: number;
-      proofsMs: number;
-    };
-    mutants: {
-      status: string;
-      seeded: number;
-      killed: number;
-      survived: number;
-    } | null;
+    /** Each phase's time, summed over the reviews (review/item.ts): the workspace's install, the finder, the proofs. */
+    phases: { prepareMs: number; modelMs: number; proofsMs: number };
   };
   /** CI step attempts, its polls (retries while checks run) and the failed jobs it reran. */
   ci: { attempts: number; polls: number; reruns: number };
@@ -326,29 +314,23 @@ export class ItemTelemetries {
           reviewer.verdicts[kind] =
             (reviewer.verdicts[kind] ?? 0) + (num(n) ?? 0);
         const suspicions = of(event.suspicions);
-        for (const key of ["raised", "proved", "dropped", "tokens"] as const)
+        for (const key of [
+          "raised",
+          "proved",
+          "questions",
+          "notes",
+          "dropped",
+          "tokens",
+        ] as const)
           reviewer.suspicions[key] += num(suspicions[key]) ?? 0;
         reviewer.repros.confirmed += num(of(event.repros).confirmed) ?? 0;
         reviewer.repros.dropped += num(of(event.repros).dropped) ?? 0;
         reviewer.questions += num(event.questions) ?? 0;
-        reviewer.commands += num(event.commands) ?? 0;
         reviewer.ms += num(event.ms) ?? 0;
         const phases = of(event.phases);
         reviewer.phases.prepareMs += num(phases.prepareMs) ?? 0;
-        reviewer.phases.mutationMs += num(phases.mutationMs) ?? 0;
         reviewer.phases.modelMs += num(phases.modelMs) ?? 0;
-        reviewer.phases.commandMs += num(of(phases.commands).ms) ?? 0;
         reviewer.phases.proofsMs += num(phases.proofsMs) ?? 0;
-        return;
-      }
-      case "mutation-pass": {
-        if (!id) return;
-        this.record(id, event.at).reviewer.mutants = {
-          status: str(event.status) ?? "done",
-          seeded: num(event.seeded) ?? 0,
-          killed: num(event.killed) ?? 0,
-          survived: num(event.survived) ?? 0,
-        };
         return;
       }
       case "published": {
@@ -438,20 +420,19 @@ export class ItemTelemetries {
         reviewer: {
           reviews: 0,
           verdicts: {},
-          suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
+          suspicions: {
+            raised: 0,
+            proved: 0,
+            questions: 0,
+            notes: 0,
+            dropped: 0,
+            tokens: 0,
+          },
           repros: { confirmed: 0, dropped: 0 },
           questions: 0,
-          commands: 0,
           tokens: reported(),
           ms: 0,
-          phases: {
-            prepareMs: 0,
-            mutationMs: 0,
-            modelMs: 0,
-            commandMs: 0,
-            proofsMs: 0,
-          },
-          mutants: null,
+          phases: { prepareMs: 0, modelMs: 0, proofsMs: 0 },
         },
         ci: { attempts: 0, polls: 0, reruns: 0 },
         changes: null,
@@ -730,25 +711,19 @@ function rows(
 
 /** The result reviews' telemetry as one line of numbers and words. */
 function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
-  const mutants = reviewer.mutants
-    ? reviewer.mutants.status === "skipped"
-      ? "mutation pass skipped"
-      : `${reviewer.mutants.seeded} mutants seeded, ${reviewer.mutants.killed} killed, ${reviewer.mutants.survived} survived${reviewer.mutants.status === "timeout" ? " (stopped at its time limit)" : ""}`
-    : "no mutation pass";
-  if (!reviewer.reviews) return mutants;
-  const verdicts = ["pass", "suspect", "question", "note"]
+  if (!reviewer.reviews) return "none";
+  const verdicts = ["pass", "suspect", "question"]
     .map((kind) => `${reviewer.verdicts[kind] ?? 0} ${kind}`)
     .join(", ");
+  const { suspicions } = reviewer;
   return [
     plural(reviewer.reviews, "review"),
     `verdicts ${verdicts}`,
-    `suspicions ${reviewer.suspicions.raised} raised, ${reviewer.suspicions.proved} proved, ${reviewer.suspicions.dropped} dropped (proofs ${count(reviewer.suspicions.tokens)} tokens)`,
+    `suspicions ${suspicions.raised} raised, ${suspicions.proved} proved, ${suspicions.questions} questions, ${suspicions.notes} notes, ${suspicions.dropped} dropped (proofs ${count(suspicions.tokens)} tokens)`,
     `repros ${reviewer.repros.confirmed} confirmed, ${reviewer.repros.dropped} dropped`,
     plural(reviewer.questions, "question"),
-    plural(reviewer.commands, "command"),
-    mutants,
     `${reviewer.tokens.calls ? count(reviewer.tokens.sum) : "not reported"} tokens`,
-    `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, mutation pass ${duration(reviewer.phases.mutationMs)}, model ${duration(reviewer.phases.modelMs)}, commands ${duration(reviewer.phases.commandMs)}, proofs ${duration(reviewer.phases.proofsMs)})`,
+    `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, finder ${duration(reviewer.phases.modelMs)}, proofs ${duration(reviewer.phases.proofsMs)})`,
   ].join(", ");
 }
 

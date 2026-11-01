@@ -571,7 +571,7 @@ export async function autoGrade({
   const changed = git(repo, "diff", "--stat", from, graded);
   const commands = tests ?? checks;
   const mutants = commands.length
-    ? await chooseMutants(repo, from, graded, { max: mutantBound, seed })
+    ? chooseMutants(repo, from, graded, { max: mutantBound, seed })
     : [];
   const scratch = mkdtempSync(join(tmpdir(), "bench-grade-auto-"));
   mkdirSync(evidence, { recursive: true });

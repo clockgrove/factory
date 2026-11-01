@@ -470,13 +470,7 @@ export const NO_WORKSPACE = {
   workspace: async () => {
     throw new Error("this review runs no command");
   },
-  mutation: { commands: [], seed: "test" },
   limits: {
-    mutants: 0,
-    mutationMs: 1000,
-    measuredMutants: 10,
-    commands: 20,
-    commandBudgetMs: 60_000,
     commandMs: 60_000,
     prepareMs: 60_000,
     proofs: 10,

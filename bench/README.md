@@ -433,7 +433,8 @@ The set is `review-replay/` in the bench home (or `--set DIR`), private like the
 review-replay/
   records/<id>.json           one recorded result review each
   seeded/records/<id>.json    an accepted result with one planted defect
-  plans/, sources/            the plans and pinned sources the records name
+  plans/, sources/, inputs/   the plans, pinned sources and Objective inputs the records name
+  config.json                 the installation's Factory configuration, for a reviewer that validates
   labels.json                 each record's labelled refusals and known defects
   objects.bundle              optional: the candidate commits, as refs/replay/<id>
   results/<label>/            written by the harness
@@ -442,7 +443,7 @@ review-replay/
 A record holds what the review saw and what it decided:
 
 - `id`, `objective`, `item`, `kind` (`work` or `qa`), `attempt`, `at`; `replay: false` with `why` leaves it out (a QA item's review, say, which changes no files).
-- `plan` and `sources`: paths, in the set, of the plan in effect (the plan's JSON, as Factory's plan comment holds it) and the Objective's pinned sources at the plan base.
+- `plan`, `sources` and `inputs`: paths, in the set, of the plan in effect (the plan's JSON, as Factory's plan comment holds it), the Objective's pinned sources at the plan base, and the Objective as planned (`{ shown }`, its blocks).
 - `candidate`: `{ commit, tree, base }`, the exact commit reviewed, its tree and the commit its change starts from.
 - `criteria`, the criteria the reviewer judged, and `itemCriteria`, how many of them, first, are the item's own acceptance; the rest are the Objective criteria the plan gave the item's review.
 - `validation`: `{ tree, commands, formatted?, results }`, Factory's validation of the tree: each command's `index`, `command`, `passed`, `exitCode`, `durationMs` and output `tail`.
@@ -450,13 +451,14 @@ A record holds what the review saw and what it decided:
 - `recorded`: the review as it happened: `outcome`, `provider`, `model`, `effort`, `tokens`, `durationMs`, `refused` (each `{ criterionIndex, detail, complete }`; `complete: false` when only a prefix survives) and `verdicts` (every criterion's, when the full answer survives, else null).
 - A seeded record adds `seeded: { from, file, description }` and keeps its labels inline (`labels`, as in `labels.json`); it has no `recorded`.
 
-`labels.json` maps a record id to `{ refusals, defects }`. Each refusal is `{ criterionIndex, defect, defectId?, category?, justification, labelledBy }`: whether the recorded refusal had a real defect behind it, with the evidence. Each defect is `{ id, criteria, description, evidence, labelledBy }`: a defect the candidate has, and the criteria it violates. `labelledBy` says who decided (`draft` until a person confirms it). The candidate commits come from `--repo`, a clone of the reviewed repository, or the set's bundle: the harness clones `--repo` into a scratch directory, sharing its objects, fetches the bundle into it, and checks each record's commit has its recorded tree before reviewing it. Nothing is written to `--repo`.
+`labels.json` maps a record id to `{ refusals, defects }`. Each refusal is `{ criterionIndex, defect, defectId?, category?, justification, labelledBy }`: whether the recorded refusal had a real defect behind it, with the evidence. Each defect is `{ id, criteria, description, evidence, labelledBy }`: a defect the candidate has, and the criteria it violates. `labelledBy` says who decided (`draft` until a person confirms it). The candidate commits come from `--repo`, a clone of the reviewed repository, or the set's bundle: the harness clones `--repo` into a scratch directory, with its own objects and `--repo`'s origin (a reviewer that validates the candidate, as the new one does, reads only the clone, and fetches Git LFS objects from origin), fetches the bundle into it, and checks each record's commit has its recorded tree before reviewing it. Nothing is written to `--repo`.
 
 ### Reviewers
 
-The reviewer is the build's own, driven through its review entry point by an adapter per reviewer generation, in `bench/lib/reviewers/`. An adapter exports `id`, `fits(result)` (whether it drives this build's `dist/review/result.js`), `needsTree` (whether it wants a fresh checkout of the candidate tree, given as `tree`) and `review({ build, record, checkout, tree, dir, provider, signal, log })`, which returns `{ verdicts }`, one per criterion, each `{ criterionIndex, kind, detail, repro? }`, `kind` `pass`, `refuse`, `question` or `note`. `--reviewer auto` (the default) takes the first that fits the build.
+The reviewer is the build's own, driven through its review entry point by an adapter per reviewer generation, in `bench/lib/reviewers/`. An adapter exports `id`, `fits(result)` (whether it drives this build's `dist/review/result.js`), `needsTree` (whether it wants a fresh checkout of the candidate tree, given as `tree`) and `review({ build, set, cache, record, checkout, tree, dir, provider, signal, log })`, which returns `{ verdicts, extra? }`: one verdict per criterion, each `{ criterionIndex, kind, detail, repro? }`, `kind` `pass`, `refuse`, `question` or `note`, and `extra`, what else it reports, kept in the result. `cache` is the record's directory for what its runs share. `--reviewer auto` (the default) takes the first that fits the build, newest first.
 
 - `v1`: the reviewer up to #2344. It calls the build's `reviewResult` with the build's planner for the provider (`providerPlanner`), fresh: no retained conversation, no operator decisions, no earlier verdicts, no repository memory. It judges every criterion of the record.
+- `v2`: the reviewer of #2344, in the build's `dist/review/item.js`. It calls the build's `reviewResult` there with the item's own acceptance (the first `itemCriteria` criteria, so indices match), the build's scratch checkouts (`validationScratch`) for the reviewer's commands and the refusal check, and the item's mutation pass (`mutationPass`), which, as in Factory's validate step, runs in a validation of the candidate (`validateTree`), once per record, kept in `cache`. The installation's sandbox, validation and review settings come from the set's `config.json`, read with the build's `loadConfig`. Its refusals are the confirmed ones; `extra` has the repros confirmed and dropped, the commands it ran and the mutation pass. It validates as Factory does, so run it with the service's `PATH` (the runtime, the package manager and any toolchain the repository's commands need).
 - `recorded`: no model. The recorded verdicts, scored like a replay, with the recorded tokens and time: the baseline the history itself sets.
 
 Each review is bounded by `--timeout-minutes` (20). Tokens are the reviewer's own model calls, from the build's `model-usage` log events; time is the review's wall clock.

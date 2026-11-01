@@ -11,7 +11,7 @@
  *                               objects hold each record's base
  *   --build DIR                 the Factory checkout whose reviewer runs
  *                               (its dist/; default: this checkout)
- *   --reviewer auto|v1|recorded the adapter (bench/lib/reviewers/); auto
+ *   --reviewer auto|v2|v1|recorded the adapter (bench/lib/reviewers/); auto
  *                               picks the one that fits the build, and
  *                               recorded replays the recorded verdicts
  *   --provider codex|claude|copilot  the planner kind (default: codex)
@@ -51,9 +51,10 @@ import {
 } from "./lib/review-replay.mjs";
 import * as recorded from "./lib/reviewers/recorded.mjs";
 import * as v1 from "./lib/reviewers/v1.mjs";
+import * as v2 from "./lib/reviewers/v2.mjs";
 
 /** Every reviewer generation's adapter, newest first; `recorded` is chosen by name only. */
-const ADAPTERS = [v1];
+const ADAPTERS = [v2, v1];
 
 const { values } = parseArgs({
   options: {
@@ -132,7 +133,7 @@ else {
   const result = await import(join(build, "dist/review/result.js"));
   adapter =
     !values.reviewer || values.reviewer === "auto"
-      ? ADAPTERS.find((a) => a.fits(result))
+      ? ADAPTERS.find((a) => a.fits(result, build))
       : ADAPTERS.find((a) => a.id === values.reviewer);
   if (!adapter)
     usage(
@@ -140,7 +141,7 @@ else {
         ? `no reviewer adapter ${values.reviewer}; there are ${ADAPTERS.map((a) => a.id).join(", ")} and recorded`
         : `no adapter in bench/lib/reviewers/ fits ${build}'s reviewer: add one for its generation`,
     );
-  if (!adapter.fits(result))
+  if (!adapter.fits(result, build))
     usage(`adapter ${adapter.id} doesn't fit ${build}'s reviewer`);
 }
 
@@ -207,6 +208,8 @@ async function worker() {
         : await reviewOnce({
             adapter,
             build,
+            set: setDir,
+            cache: join(out, "cache"),
             record,
             run,
             clone: scratch.clone,

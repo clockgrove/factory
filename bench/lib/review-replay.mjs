@@ -11,7 +11,7 @@
  *   objects.bundle             optional: the candidate commits, as refs
  *
  * Each run reviews a record afresh: a scratch clone of the reviewed
- * repository (sharing its objects, with the set's bundle fetched in), the
+ * repository (with the set's bundle fetched in), the
  * record's exact candidate commit, checked by its tree, and the recorded
  * validation evidence. The reviewer is the build's own, driven through an
  * adapter per reviewer generation (bench/lib/reviewers/). Results and the
@@ -76,23 +76,34 @@ export function loadSet(dir, { seeded = false, only } = {}) {
       defects: label.defects ?? [],
       plan: json(join(dir, record.plan)),
       sources: json(join(dir, record.sources)),
+      ...(record.inputs ? { inputs: json(join(dir, record.inputs)) } : {}),
     });
   }
   return records;
 }
 
 /**
- * A scratch clone of `repo` that shares its objects, with the set's
- * bundle fetched in. Removed by `dispose`.
+ * A scratch clone of `repo` with the set's bundle fetched in and `repo`'s
+ * origin. It holds its own objects, not alternates, so a sandboxed
+ * validation of a candidate, which sees only the clone, can read them.
+ * Removed by `dispose`.
  */
 export function scratchRepository(repo, setDir) {
   const root = mkdtempSync(join(tmpdir(), "review-replay-"));
   const clone = join(root, "repo");
   execFileSync(
     "git",
-    ["clone", "--quiet", "--no-checkout", "--shared", resolve(repo), clone],
+    ["clone", "--quiet", "--no-checkout", resolve(repo), clone],
     { stdio: ["ignore", "ignore", "pipe"] },
   );
+  // Its origin is the repository's own, as a Factory checkout's is: a
+  // validation of the candidate fetches Git LFS objects from it.
+  try {
+    const origin = git(resolve(repo), ["remote", "get-url", "origin"]);
+    git(clone, ["remote", "set-url", "origin", origin]);
+  } catch {
+    // A repository with no origin: the clone's stays its path.
+  }
   const bundle = join(setDir, "objects.bundle");
   if (existsSync(bundle))
     git(clone, ["fetch", "--quiet", bundle, "refs/replay/*:refs/replay/*"]);
@@ -138,14 +149,18 @@ export function checkoutTree(clone, record, dir) {
 
 /**
  * Review one record with `adapter`: returns `{ id, run, verdicts, error,
- * tokens, calls, ms, models }`, the verdicts each `{ criterionIndex,
- * kind, detail, repro? }`. Tokens are the reviewer's own model calls, as
+ * tokens, calls, ms, models, extra? }`, the verdicts each `{
+ * criterionIndex, kind, detail, repro? }` and `extra` what else the
+ * adapter reports (such as its repro checks). `cache` is the record's
+ * directory for what its runs share (such as a mutation pass). Tokens are the reviewer's own model calls, as
  * the build logs them (`model-usage`), and time its wall clock, unless the
  * adapter reports its own (`recorded` reports the recorded review's).
  */
 export async function reviewOnce({
   adapter,
   build,
+  set,
+  cache,
   record,
   run,
   clone,
@@ -167,6 +182,8 @@ export async function reviewOnce({
       : undefined;
     answer = await adapter.review({
       build,
+      set,
+      cache: join(cache, record.id),
       record,
       checkout: clone,
       tree,
@@ -206,6 +223,7 @@ export async function reviewOnce({
       usage.reduce((sum, e) => sum + (e.tokens?.total ?? 0), 0),
     calls: usage.length,
     ms: answer.ms ?? Date.now() - started,
+    ...(answer.extra ? { extra: answer.extra } : {}),
     models: [
       ...new Set(
         usage.map((e) =>

@@ -1635,6 +1635,8 @@ interface ServiceRecord {
   stopped?: boolean;
   /** Objectives set aside as unreadable (`setAside`), with why: `status` shows them so. */
   setAside: Record<string, string>;
+  /** Every Objective the service holds as unreadable: `status` shows a finished one's question only then. */
+  unreadable?: number[];
   /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
   problem?: string;
   /** Why queue reads have failed for a while (GitHubSync.intakeProblem); `status` shows it. */
@@ -1782,6 +1784,7 @@ function writeServiceRecord(
       .filter(([, entry]) => entry.setAside)
       .map(([issue, entry]) => [issue, entry.error]),
   );
+  record.unreadable = [...unreadable.keys()];
   if (stopped) record.stopped = true;
   const path = join(root, "service.json");
   try {

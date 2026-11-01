@@ -249,6 +249,8 @@ export interface ServiceView {
   waits: Record<string, { slot: true } | { paths: number }>;
   /** Objectives the service set aside as unreadable, with why (service.ts `setAside`). */
   setAside: Record<string, string>;
+  /** Every Objective the service holds as unreadable (a finished one queued again, say). */
+  unreadable: number[];
 }
 
 /** The installation's setup as status shows it: the default provider and the sandbox. */
@@ -292,7 +294,9 @@ export function readStatus(
   },
 ): StatusView {
   const { only, live } = options;
-  const service = live ? serviceRecord(paths) : { waits: {}, setAside: {} };
+  const service = live
+    ? serviceRecord(paths)
+    : { waits: {}, setAside: {}, unreadable: [] };
   const queue = loadQueueControl(paths.root);
   const day = readDay(paths.root);
   const objectives: ObjectiveView[] = [];
@@ -310,6 +314,11 @@ export function readStatus(
     const setAside = service.setAside[issue];
     if (loaded.kind === "ok" && setAside !== undefined)
       loaded = { kind: "unreadable", issue, error: setAside, incident: "" };
+    // A finished one asks only once the service holds it (queued again).
+    if (loaded.kind === "unreadable" && service.unreadable.includes(issue)) {
+      const { finishedAt: _finished, ...asking } = loaded;
+      loaded = asking;
+    }
     objectives.push(
       statusOf(loaded, {
         issue,
@@ -322,7 +331,12 @@ export function readStatus(
       }),
     );
   }
-  const { waits: _waits, setAside: _setAside, ...record } = service;
+  const {
+    waits: _waits,
+    setAside: _setAside,
+    unreadable: _unreadable,
+    ...record
+  } = service;
   return redactDeep(
     {
       service: live ? "running" : "stopped",
@@ -776,8 +790,8 @@ function nextAction(
  * deaths in a row before this start, and when it resumes interrupted
  * steps; shown until the run has lived 10 min past that time), a problem
  * that pauses its GitHub effects, why it admits nothing from the queue,
- * the Objectives waiting for a slot or on another's paths, and those it
- * set aside as unreadable.
+ * the Objectives waiting for a slot or on another's paths, those it set
+ * aside as unreadable, and every one it holds as unreadable.
  */
 function serviceRecord(paths: Paths): ServiceView {
   try {
@@ -791,6 +805,7 @@ function serviceRecord(paths: Paths): ServiceView {
       capacity?: CapacityUse;
       waits?: ServiceView["waits"];
       setAside?: ServiceView["setAside"];
+      unreadable?: number[];
     };
     return {
       ...(record.resumeAt &&
@@ -809,9 +824,10 @@ function serviceRecord(paths: Paths): ServiceView {
       ...(record.capacity ? { capacity: record.capacity } : {}),
       waits: record.waits ?? {},
       setAside: record.setAside ?? {},
+      unreadable: record.unreadable ?? [],
     };
   } catch {
-    return { waits: {}, setAside: {} };
+    return { waits: {}, setAside: {}, unreadable: [] };
   }
 }
 

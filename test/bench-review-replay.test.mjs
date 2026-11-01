@@ -165,6 +165,13 @@ write("labels.json", {
         labelledBy: "draft",
       },
       {
+        // An existing test weakened: Factory's protected-test check's to catch.
+        id: "weakened-test",
+        criteria: ["protected"],
+        description: "The candidate deleted an existing tokenizer test.",
+        labelledBy: "draft",
+      },
+      {
         id: "no-readme",
         criteria: [2],
         description: "The README doesn't name the tokenizer.",
@@ -196,10 +203,11 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
   assert.equal(scores.refusalPrecision, 0.5);
   // The README defect is the Objective's: the recorded refusal of it was
   // labelled for another reason, so it is missed, and shown apart.
-  assert.equal(scores.recall, 0.5);
-  assert.equal(scores.itemRecall, 1);
+  assert.equal(scores.recall, 1 / 3);
+  assert.equal(scores.itemRecall, 0.5);
   assert.equal(scores.objectiveRecall, 0);
   assert.deepEqual(scores.missed, [
+    { id: "42-tokenizer-r1", defect: "weakened-test", scope: "item" },
     { id: "42-tokenizer-r1", defect: "no-readme", scope: "objective" },
   ]);
   assert.equal(scores.tokens, 2000);
@@ -213,9 +221,10 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
   assert.match(broken.error, /not the recorded/);
 
   // A replay judged by its defects' criteria: refusing the README
-  // criterion catches the Objective's defect, passing criterion 0 misses
-  // the item's (the gate's recall), and a refusal no defect covers is left
-  // to be labelled by hand.
+  // criterion catches the Objective's defect, the protected-test check's
+  // refusal the weakened test, passing criterion 0 misses the item's
+  // last-token defect, and a refusal no defect covers is left to be
+  // labelled by hand.
   const records = loadSet(set, { only: ["42-tokenizer-r1"] });
   const replayed = scoreRun(records, [
     {
@@ -232,12 +241,17 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
           detail: "Tabs aren't separators.",
         },
         { criterionIndex: 2, kind: "refuse", detail: "No README entry." },
+        {
+          criterionIndex: "protected",
+          kind: "refuse",
+          detail: "The deleted test fails on its base version.",
+        },
       ],
     },
   ]);
-  assert.equal(replayed.itemRecall, 0);
+  assert.equal(replayed.itemRecall, 0.5);
   assert.equal(replayed.objectiveRecall, 1);
-  assert.equal(replayed.refusalPrecision, 0.5);
+  assert.equal(replayed.refusalPrecision, 2 / 3);
   assert.deepEqual(
     replayed.unmatched.map((u) => u.criterionIndex),
     [1],

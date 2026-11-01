@@ -33,6 +33,14 @@ import { join, resolve } from "node:path";
 /** Verdict kinds an adapter returns, per criterion. */
 export const KINDS = ["pass", "refuse", "question", "note"];
 
+/**
+ * The criterion a reviewer adds of its own, beyond the record's: Factory's
+ * protected-test check of the existing tests a result changed (#2344). An
+ * adapter gives its verdict this `criterionIndex`, and a label's defect
+ * names it among its `criteria` when that check is what should catch it.
+ */
+export const PROTECTED = "protected";
+
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 function git(dir, args, env = {}) {
@@ -201,9 +209,10 @@ export async function reviewOnce({
     const bad = verdicts.find(
       (v) =>
         !KINDS.includes(v.kind) ||
-        !Number.isSafeInteger(v.criterionIndex) ||
-        v.criterionIndex < 0 ||
-        v.criterionIndex >= record.criteria.length,
+        (v.criterionIndex !== PROTECTED &&
+          (!Number.isSafeInteger(v.criterionIndex) ||
+            v.criterionIndex < 0 ||
+            v.criterionIndex >= record.criteria.length)),
     );
     if (bad) throw new Error(`the adapter returned ${JSON.stringify(bad)}`);
   } catch (caught) {
@@ -285,7 +294,9 @@ const ratio = (part, whole) => (whole ? part / whole : null);
 export function defectScope(record, defect) {
   return (
     defect.scope ??
-    (defect.criteria.some((index) => index < record.itemCriteria)
+    (defect.criteria.some(
+      (index) => index === PROTECTED || index < record.itemCriteria,
+    )
       ? "item"
       : "objective")
   );

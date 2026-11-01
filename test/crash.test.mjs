@@ -498,11 +498,13 @@ process.exit(3);`,
 }
 
 // A result review's scratch checkouts (review/item.ts): killed when the
-// reviewer's scratch opens, or between a repro's run and the next, the
-// next review of the same candidate replaces what the crashed one left,
-// confirms the refusal again and leaves no checkout.
+// workspace opens, when a copy for the reviewer's or a proof's commands is
+// made, or between a repro's run and the next, the next review of the
+// same candidate replaces what the crashed one left, confirms the refusal
+// again and leaves no checkout.
 for (const point of [
   "review:scratch:open",
+  "review:scratch:copy",
   "review:repro:before",
   "review:repro:after",
 ]) {
@@ -561,7 +563,7 @@ for (const point of [
       dir: `${checkout}.review`,
     };
     const dist = (path) => new URL(`../dist/${path}`, import.meta.url).href;
-    // The reviewer runs a command, then refuses with a repro that fails.
+    // The reviewer runs a command and suspects b; the proof runs its repro, which fails.
     const script = `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
 import { reviewCandidate, validationWorkspace } from ${JSON.stringify(dist("review/item.js"))};
 export async function run(input, review, attempt) {
@@ -569,11 +571,11 @@ export async function run(input, review, attempt) {
   const signal = AbortSignal.timeout(60_000);
   const workspace = validationWorkspace({ ...input, signal, log: () => {}, runFile: (kind) => log.runFile(1, "item:a:review#" + attempt + "." + kind) }, input.checkout + ".scratch");
   return reviewCandidate({
-    planner: { async answer(call) { await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return { value: { findings: [{ criterionIndex: 0, verdict: "refuse", detail: "b says b", evidenceIndices: [], repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } }] } }; } },
+    planner: { async answer(call) { await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return call.schema.properties.findings ? { value: { findings: [{ criterionIndex: 0, verdict: "suspect", detail: "b says b", evidenceIndices: [], suspicions: [{ input: "b", expected: "c", actual: "b", why: "b:1 says b" }] }] } } : { value: { outcome: { kind: "reproduced", repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } } } }; } },
     checkout: input.checkout, base: review.base, commit: review.commit, criteria: input.item.acceptance,
     validation: { tree: review.tree, commands: ["test -f b"] }, workspace, itemId: "a",
     mutation: { commands: ["test -f b"], seed: "a" },
-    limits: { mutants: 20, mutationMs: 10_000, commands: 20, commandBudgetMs: 10_000, commandMs: 10_000, prepareMs: 60_000 },
+    limits: { mutants: 20, mutationMs: 10_000, measuredMutants: 10, commands: 20, commandBudgetMs: 10_000, commandMs: 10_000, prepareMs: 60_000, proofs: 10, proofCommands: 8, proofBudgetMs: 10_000 },
     dir: review.dir, signal, log: () => {},
   });
 }`;

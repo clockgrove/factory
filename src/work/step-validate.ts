@@ -154,7 +154,7 @@ export async function validateStep(
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
         ...(result.formatted ? { formatted: result.formatted } : {}),
-        commandsMs: ownCommandsMs(item, result.results),
+        commandMs: ownCommandMs(item, result.results),
       };
       const integrated = earlier.length
         ? await integratedValidation({
@@ -235,26 +235,28 @@ export async function validateStep(
  * validation without the exact install it may start with, which the
  * review's checkout ran already, and without its repros.
  */
-export function ownCommands(item: WorkItem): string[] {
+function ownCommands(item: WorkItem): string[] {
   const commands = item.validation.map((check) => check.command);
   return commands.length && packageBootstrap(commands[0]!) !== undefined
     ? commands.slice(1)
     : commands;
 }
 
-/** How long the item's own commands took in a passed run: what bounds each mutant. */
-function ownCommandsMs(
+/** How long each of the item's own commands took in a passed run: what orders and bounds each mutant's. */
+function ownCommandMs(
   item: WorkItem,
   results: readonly {
     command: string;
     durationMs: number;
     preparation?: true;
   }[],
-): number {
+): Record<string, number> {
   const own = new Set(ownCommands(item));
-  return results
-    .filter((result) => !result.preparation && own.has(result.command))
-    .reduce((sum, result) => sum + result.durationMs, 0);
+  return Object.fromEntries(
+    results
+      .filter((result) => !result.preparation && own.has(result.command))
+      .map((result) => [result.command, result.durationMs]),
+  );
 }
 
 /**

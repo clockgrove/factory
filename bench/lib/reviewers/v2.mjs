@@ -1,8 +1,9 @@
 /**
- * The result reviewer of #2344: the item's own acceptance only, a mutation
- * pass's survivors as evidence, a reviewer that runs commands in a copy of
- * its workspace, a protected-test check, and refusals only with a repro
- * its refusal check confirmed. Driven through the build's own entry point,
+ * The result reviewer of #2344: the item's own acceptance only, Factory's
+ * checks (a mutation pass's survivors, a protected-test check) as
+ * evidence, a find call that raises suspicions, a proof of each that
+ * writes a repro, and refusals only with a repro its refusal check
+ * confirmed. Driven through the build's own entry point,
  * dist/review/item.js `reviewResult`, with the build's planner for the
  * provider and its workspace (`validationWorkspace`), fresh: no earlier
  * review, no prior refusals, no operator decisions. The review runs its
@@ -19,9 +20,18 @@
  *
  * Each review's `phases` are the build's own `result-review` event's: the
  * workspace's install (`scratchPrepareMs`), the mutation pass
- * (`mutationMs`), the reviewer's commands (`commands`, `commandsMs`,
- * inside the model calls' time), the repro checks (`reprosMs`) and the
- * protected-test check (`protectedMs`).
+ * (`mutationMs`), the find calls' commands (`commands`, `commandsMs`,
+ * inside the model calls' time), the proofs with their refusal checks
+ * (`proofsMs`) and the protected-test check (`protectedMs`). `extra`
+ * has the suspicions counted (`raised`, `proved`, `dropped`, the proofs'
+ * `tokens`) and each one (`suspicionList`, from the build's
+ * `result-review-suspicion` events: its criterion, scenario, `outcome`,
+ * the `reason` one was dropped, its repro, commands, tokens and time).
+ *
+ * `FIND_ONLY=1` in the environment proves nothing (`review.proofs` 0)
+ * and returns each criterion the reviewer suspected as a refusal, its
+ * suspicions as the detail: the scorecard's recall and precision are
+ * then the find call's alone.
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -103,14 +113,26 @@ function validationInput(factory, config, record, at, signal, log) {
   };
 }
 
-/** The recorded validation's time for `commands` (`validated.commandsMs` in production), when it has their results. */
-function baselineMs(validation, commands) {
-  const results = (validation.results ?? []).filter(
-    (result) => commands.includes(result.command) && result.passed,
+/**
+ * The mutation pass's input as Factory's review step gives it: the item's
+ * commands fastest first (`mutantCommands`) by the recorded validation's
+ * times, which also bound each mutant.
+ */
+function mutationOf(factory, item, validation) {
+  const own = new Set(ownCommands(factory, item));
+  const ms = Object.fromEntries(
+    (validation.results ?? [])
+      .filter((result) => own.has(result.command) && result.passed)
+      .map((result) => [result.command, result.durationMs ?? 0]),
   );
-  return results.length
-    ? results.reduce((sum, result) => sum + (result.durationMs ?? 0), 0)
-    : undefined;
+  const times = Object.values(ms);
+  return {
+    commands: factory.mutants.mutantCommands(item.validation, ms),
+    ...(times.length && {
+      baselineMs: times.reduce((sum, time) => sum + time, 0),
+    }),
+    seed: item.id,
+  };
 }
 
 /** The item's own commands a mutant runs: its validation without the exact install (step-validate.ts). */
@@ -153,6 +175,7 @@ export async function review({
 }) {
   const factory = await load(build);
   const config = installation(factory, set);
+  const findOnly = process.env.FIND_ONLY === "1";
   const events = [];
   const logged = (event) => {
     events.push(event);
@@ -185,19 +208,17 @@ export async function review({
       validationInput(factory, config, record, at, signal, logged),
       join(dir, "scratch"),
     ),
-    mutation: {
-      commands: ownCommands(factory, item),
-      // As production passes the validate step's `commandsMs`.
-      ...(baselineMs(validation, ownCommands(factory, item)) !== undefined && {
-        baselineMs: baselineMs(validation, ownCommands(factory, item)),
-      }),
-      seed: item.id,
-    },
+    // As production gives the validate step's `commandMs`.
+    mutation: mutationOf(factory, item, validation),
     limits: {
       mutants: config.review.mutants,
       mutationMs: config.review.mutationSeconds * 1000,
+      measuredMutants: config.review.measuredMutants,
       commands: config.review.commands,
       commandBudgetMs: config.review.commandSeconds * 1000,
+      proofs: findOnly ? 0 : config.review.proofs,
+      proofCommands: config.review.proofCommands,
+      proofBudgetMs: config.review.proofSeconds * 1000,
       commandMs: Math.min(
         config.validation.commandTimeoutSeconds * 1000,
         10 * MINUTE,
@@ -207,27 +228,40 @@ export async function review({
     signal,
     log: logged,
   });
-  // Factory's protected-test criterion, scored as the item's scope.
-  const index = (v) =>
-    v.criterion === factory.item.PROTECTED_CRITERION
-      ? "protected"
-      : v.criterionIndex;
+  const suspicionList = events
+    .filter((e) => e.event === "result-review-suspicion")
+    .map(({ event: _event, step: _step, at: _at, ...entry }) => entry);
+  const suspected = (index) =>
+    suspicionList.filter((entry) => entry.criterionIndex === index);
   const verdicts = [
-    ...answer.verdicts.map((v) => ({
-      criterionIndex: index(v),
-      kind: v.verdict === "note" ? "note" : "pass",
-      detail: v.detail,
-    })),
+    ...answer.verdicts.map((v) =>
+      findOnly && suspected(v.criterionIndex).length
+        ? {
+            criterionIndex: v.criterionIndex,
+            kind: "refuse",
+            detail: suspected(v.criterionIndex)
+              .map(
+                (s) =>
+                  `${s.input}: expected ${s.expected}, believed ${s.actual}. ${s.why}`,
+              )
+              .join("\n"),
+          }
+        : {
+            criterionIndex: v.criterionIndex,
+            kind: v.verdict === "note" ? "note" : "pass",
+            detail: v.detail,
+          },
+    ),
     ...(answer.kind === "refused"
       ? answer.refused.map((v) => ({
-          criterionIndex: index(v),
+          criterionIndex: v.criterionIndex,
           kind: "refuse",
           detail: v.detail,
           ...(v.repro ? { repro: v.repro } : {}),
         }))
       : []),
     ...(answer.kind === "pass" ? [] : answer.questions).map((v) => ({
-      criterionIndex: index(v),
+      criterionIndex: v.criterionIndex,
       kind: "question",
       detail: `${v.detail}\n${v.question}`.trim(),
     })),
@@ -243,11 +277,13 @@ export async function review({
         mutationMs: phases?.mutationMs ?? null,
         commands: phases?.commands.count ?? 0,
         commandsMs: phases?.commands.ms ?? 0,
-        reprosMs: phases?.reprosMs ?? 0,
+        proofsMs: phases?.proofsMs ?? 0,
         ...(phases?.protectedMs !== undefined && {
           protectedMs: phases.protectedMs,
         }),
       },
+      suspicions: tally?.suspicions ?? null,
+      suspicionList,
       repros: tally?.repros ?? null,
       calls: tally?.calls ?? null,
       mutation: mutation

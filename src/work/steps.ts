@@ -119,12 +119,14 @@ export interface ValidateResult {
    */
   formatted?: AppliedFormatter;
   /**
-   * How long the item's own commands took on this tree (not the install
-   * or its repros, work/step-validate.ts `ownCommands`): the result
-   * review's mutation pass gives each mutant three times this, and 30 s.
-   * Absent on results from before 0.5.14.
+   * How long each of the item's own commands took on this tree (not the
+   * install or its repros, work/step-validate.ts `ownCommands`), by
+   * command: the result review's mutation pass runs a mutant's commands
+   * fastest first and gives each mutant three times their sum, and 30 s
+   * (review/mutants.ts `mutantCommands`). Absent on results from before
+   * 0.5.14.
    */
-  commandsMs?: number;
+  commandMs?: Record<string, number>;
 }
 
 export interface PublishResult {
@@ -436,12 +438,17 @@ export function itemStep(
                   (place ? 0 : item.validation.length * commandTimeoutMs(deps)))
             : phase === "review"
               ? // One warm install for the review's checkout, whose copies
-                // run the mutation pass, the reviewer's commands and the
-                // refusal checks at once (review/item.ts).
+                // run the mutation pass and the reviewer's commands at once,
+                // then the proofs, each a model call, its commands and its
+                // refusal check, one after another at worst (review/item.ts).
                 45 * MINUTE +
                 2 * commandTimeoutMs(deps) +
                 15 * MINUTE +
                 deps.config.review.mutationSeconds * 1000 +
+                deps.config.review.proofs *
+                  (10 * MINUTE +
+                    deps.config.review.proofSeconds * 1000 +
+                    commandTimeoutMs(deps)) +
                 (revalidates
                   ? validationDeadlineMs(item, commandTimeoutMs(deps))
                   : 0)

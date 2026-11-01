@@ -25,12 +25,55 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hostLimits } from "../engine.js";
+import { packageBootstrap } from "../planning/facts.js";
+import type { ValidationCommand } from "../planning/types.js";
 import type { CheckoutCopy, ValidatedCheckout } from "../validate.js";
 import { hostGit } from "../worktree.js";
 
 const SOURCE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|cs|php|c|cc|cpp|h|hpp)$/;
 const TEST =
   /(?:^|\/)(?:tests?|__tests__|spec)\/|\.(?:test|spec)\.|(?:^|\/)test_[^/]*\.py$|_test\.(?:py|go)$/;
+
+/**
+ * The commands a mutant runs, and in what order: the item's own after the
+ * exact install, each as soon as the earlier commands it needs (its
+ * `after`, or every earlier one when it declares none) have run, the
+ * fastest of those ready first by `ms`, the time each took when
+ * validation passed (one with no time, in declared order, last among the
+ * ready). A mutant stops at its first failing command, so a mutant the
+ * quick tests kill never waits for a slow lint or check.
+ */
+export function mutantCommands(
+  validation: readonly ValidationCommand[],
+  ms: Readonly<Record<string, number>> = {},
+): string[] {
+  const start =
+    validation.length && packageBootstrap(validation[0]!.command) !== undefined
+      ? 1
+      : 0;
+  const needs = (index: number) =>
+    (
+      validation[index]!.after ??
+      validation.slice(0, index).map((_, earlier) => earlier)
+    ).filter((earlier) => earlier >= start);
+  const left = new Set(
+    validation.map((_, index) => index).filter((index) => index >= start),
+  );
+  const order: number[] = [];
+  while (left.size) {
+    const ready = [...left].filter((index) =>
+      needs(index).every((earlier) => !left.has(earlier)),
+    );
+    const next = ready.sort(
+      (a, b) =>
+        (ms[validation[a]!.command] ?? Number.POSITIVE_INFINITY) -
+          (ms[validation[b]!.command] ?? Number.POSITIVE_INFINITY) || a - b,
+    )[0]!;
+    order.push(next);
+    left.delete(next);
+  }
+  return order.map((index) => validation[index]!.command);
+}
 
 /** Whether `path` is a test file by its path: in a test directory, or named as a test. */
 export const isTestPath = (path: string) => TEST.test(path);

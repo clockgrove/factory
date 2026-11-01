@@ -1,5 +1,6 @@
 // Binary glTF (GLB) 2.0 writer and reader for models with one triangle mesh.
-// Positions are a flat [x, y, z, ...] array; indices (optional) are vertex numbers.
+// Positions are a flat [x, y, z, ...] array; indices (optional) are vertex numbers;
+// color (optional) is the material's [r, g, b, a] base colour, each 0 to 1.
 const MAGIC = 0x46546c67; // "glTF"
 const JSON_CHUNK = 0x4e4f534a; // "JSON"
 const BIN_CHUNK = 0x004e4942; // "BIN\0"
@@ -7,7 +8,7 @@ const BIN_CHUNK = 0x004e4942; // "BIN\0"
 const pad4 = (n) => (n + 3) & ~3;
 
 /** Build a GLB file (a Buffer) holding one mesh with the given positions. */
-export function writeGlb(positions, indices) {
+export function writeGlb(positions, indices, color) {
   if (positions.length === 0 || positions.length % 3 !== 0) throw new Error("positions must hold x, y, z triples");
   const pos = Buffer.alloc(positions.length * 4);
   positions.forEach((v, i) => pos.writeFloatLE(v, i * 4));
@@ -21,7 +22,10 @@ export function writeGlb(positions, indices) {
     scene: 0,
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0 }],
-    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, ...(indices ? { indices: 1 } : {}) }] }],
+    meshes: [
+      { primitives: [{ attributes: { POSITION: 0 }, ...(indices ? { indices: 1 } : {}), ...(color ? { material: 0 } : {}) }] },
+    ],
+    ...(color ? { materials: [{ pbrMetallicRoughness: { baseColorFactor: color } }] } : {}),
     accessors: [
       { bufferView: 0, componentType: 5126, count: positions.length / 3, type: "VEC3", min, max },
       ...(indices ? [{ bufferView: 1, componentType: 5123, count: indices.length, type: "SCALAR" }] : []),
@@ -48,7 +52,7 @@ export function writeGlb(positions, indices) {
   return out;
 }
 
-/** Parse a GLB file written by writeGlb: { gltf, positions, indices }. Throws when it is malformed. */
+/** Parse a GLB file written by writeGlb: { gltf, positions, indices, color }. Throws when it is malformed. */
 export function readGlb(buf) {
   if (buf.readUInt32LE(0) !== MAGIC) throw new Error("not a GLB: bad magic");
   if (buf.readUInt32LE(4) !== 2) throw new Error("not glTF 2.0");
@@ -69,5 +73,5 @@ export function readGlb(buf) {
     indexAccessor === undefined
       ? undefined
       : Array.from({ length: gltf.accessors[indexAccessor].count }, (_, i) => bin.readUInt16LE(view(indexAccessor).byteOffset + i * 2));
-  return { gltf, positions, indices };
+  return { gltf, positions, indices, color: gltf.materials?.[0]?.pbrMetallicRoughness?.baseColorFactor };
 }

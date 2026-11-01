@@ -11,7 +11,7 @@ Add a 3D model of a unit cube for the demo scene, with a small preview image: th
 
 ## Context
 
-The model is written with the repository's GLB library, not by hand: `writeGlb(positions, indices)` in `scripts/glb.mjs` returns the bytes of a valid GLB, and `readGlb(bytes)` parses one. Supply the cube's vertex data; the test reads the delivered model with `readGlb`.
+The model is written with the repository's GLB library, not by hand: `writeGlb(positions, indices, color)` in `scripts/glb.mjs` returns the bytes of a valid GLB, with the material's `[r, g, b, a]` base colour when `color` is given, and `readGlb(bytes)` parses one. Supply the cube's vertex data and each candidate's colour; the test reads the delivered model with `readGlb`.
 
 ## Sources
 

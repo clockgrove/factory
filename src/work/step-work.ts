@@ -477,6 +477,9 @@ export async function workStep(
       fact(state, "workSession", item.id),
     );
     const worker = deps.worker(plan, shown.blocks, profile);
+    // The attempt's Validate checkout is its own: none a crashed one left
+    // is reused, and its own goes when it ends (#2352).
+    await removeKeptValidation(config.checkout, worktree, signal);
     // Made last before the run, which always closes it.
     const activity = new ActivityLog(
       item.id,
@@ -488,9 +491,6 @@ export async function workStep(
         changes: () => workerChanges(worktree, signal),
       },
     );
-    // The attempt's Validate checkout is its own: none a crashed one left
-    // is reused, and its own goes when it ends (#2352).
-    await removeKeptValidation(config.checkout, worktree, signal);
     const { spend, session, ...result } = await worker
       .run({
         worktree,

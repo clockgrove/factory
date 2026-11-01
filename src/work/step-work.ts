@@ -506,6 +506,7 @@ export async function workStep(
         runFile: context.runFile,
         ...(spent ? { spend: spent } : {}),
         ...(context.answer ? { answer: context.answer } : {}),
+        ...(context.overspent ? { overspent: context.overspent } : {}),
       })
       .finally(async () => {
         // What the worktree holds at the end, shell edits included.

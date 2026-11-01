@@ -8,6 +8,9 @@
  * day), its child threads and sub-agents included. Reaching a limit holds the Objective before its next model step,
  * and `more` raises each limit reached to what is used plus one more step
  * (the limit's size), so a call that overshot it still leaves a full step.
+ * A running worker asks between its turns (`overspent`): past a limit by
+ * a tenth of its step it stops at that turn, so one long attempt can't
+ * overshoot by more.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -136,6 +139,28 @@ export function reached(state: ObjectiveState, day: Day): Ceiling[] {
   );
 }
 
+/** How far past a limit a running worker goes before it stops at its next turn: this much of the limit's step. */
+export const RUNNING_MARGIN = 0.1;
+
+/**
+ * Whether a running worker stops at this turn: with `running`, the tokens
+ * its call has spent that no `model-usage` event charged yet, a limit is
+ * past by RUNNING_MARGIN of its step. A call's cost is known only when it
+ * ends, so a cost limit counts only what is charged.
+ */
+export function overspent(
+  state: ObjectiveState,
+  day: Day,
+  running: number,
+): boolean {
+  const limits = spendLimits(state);
+  return ceilings(state, day).some(
+    (ceiling) =>
+      ceiling.used + (ceiling.unit === "tokens" ? running : 0) >=
+      ceiling.allowed + RUNNING_MARGIN * limits[ceiling.scope]![ceiling.unit]!,
+  );
+}
+
 /** What `more` makes a reached limit allow: what is used plus one more step. */
 function raisedTo(ceiling: Ceiling, limits: SpendLimits): number {
   return ceiling.used + limits[ceiling.scope]![ceiling.unit]!;
@@ -189,7 +214,7 @@ export function spendQuestion(state: ObjectiveState, day: Day): string {
         : "";
     return `${SCOPE_TEXT[scope]} ${amountText(unit, used)} of ${amountText(unit, allowed)} (${children ? `${children}; ` : ""}autonomy.spend.${scope}.${unit}; \`more\` allows ${amountText(unit, limits[scope]![unit]!)} more, to ${amountText(unit, raisedTo(ceiling, limits))})`;
   });
-  return `Model spend reached ${past.join(" and ")}. Tokens count every call's child threads and sub-agents too (Codex \`spawn_agent\` threads, Claude sub-agents). Calls already running finish; no other model step starts until you answer.\n\nAnswer \`more\` to go on, or cancel.`;
+  return `Model spend reached ${past.join(" and ")}. Tokens count every call's child threads and sub-agents too (Codex \`spawn_agent\` threads, Claude sub-agents). Calls already running finish, but a running worker stops at its next turn once spend passes a limit by a tenth of it; no other model step starts until you answer.\n\nAnswer \`more\` to go on, or cancel.`;
 }
 
 const FILE = "spend.json";

@@ -54,6 +54,7 @@ import {
 import { COLLECTED_RESULT, shellDependencies } from "../work/validate-tool.js";
 import {
   ACTIVITY_INTERVAL_MS,
+  spendStopped,
   type Worker,
   type WorkerInput,
   type WorkerResult,
@@ -106,6 +107,7 @@ import {
   firstToken,
   logUsage,
   Tallies,
+  type Tokens,
   usageRecord,
 } from "./usage.js";
 
@@ -750,12 +752,17 @@ export class CodexWorker implements Worker {
       baseline = codexBaseline(join(home.root, "codex-home"), turn.resumed.id);
     }
     // The SDK stream has no token counts until the turn ends: the session
-    // record gives the context and compactions as they happen.
+    // record gives the context, compactions and counts as they happen.
     const live = codexLiveRecord(join(home.root, "codex-home"), baseline?.size);
+    let counted: Tokens | undefined;
+    // This call's counts so far: a continued thread's less its baseline.
+    const spent = () =>
+      counted && (baseline ? turnTokens(counted, baseline.tokens) : counted);
     const readLive = () => {
       const thread = (record.thread as string | undefined) ?? turn.resumed?.id;
       if (!thread) return;
-      const { context, compactions } = live(thread);
+      const { context, total, compactions } = live(thread);
+      if (total) counted = total;
       if (context) input.activity({ kind: "context", ...context });
       for (let n = 0; n < compactions; n++)
         input.activity({ kind: "compaction" });
@@ -893,6 +900,18 @@ export class CodexWorker implements Worker {
             codexTurnUsage(record, event.usage);
           }
           if (event.type === "turn.failed") return failure(event.error.message);
+          // A completed item is a turn boundary: past the spend limit's
+          // margin, the worker stops here (spendStopped), charged with the
+          // counts so far; its child threads' are added at the end.
+          if (event.type === "item.completed" && input.overspent) {
+            readLive();
+            const tokens = spent();
+            if (tokens?.total != null && input.overspent(tokens.total)) {
+              record.tokens = tokens;
+              record.tokenSource = "native";
+              return spendStopped();
+            }
+          }
           // A stream error can precede a CLI retry; read through to the
           // terminal turn and natural EOF before it counts.
           if (event.type === "error") streamError = event.message;

@@ -34,6 +34,7 @@ import {
 } from "../work/self-validate.js";
 import { VALIDATION_TOOL_NAME } from "../work/validate-tool.js";
 import {
+  spendStopped,
   targetOf,
   type Worker,
   type WorkerInput,
@@ -178,7 +179,12 @@ interface Turn {
   conversation?: SessionTurn;
   /** A session this turn replaces: deleted once this one is open. */
   replaces?: string;
+  /** A worker's spend check at each turn's end (WorkerInput.overspent): true stops the turn there. */
+  overspent?(running: number): boolean;
 }
+
+/** A turn stopped at its end past the spend limit's margin (`Turn.overspent`). */
+class SpendStop extends Error {}
 
 interface TurnResult {
   text: string;
@@ -399,7 +405,7 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     turnFields(turn.record, turn.conversation ?? { number: 1 });
     turn.record.imageOutputs = 0;
     let settle: () => void = () => undefined;
-    let fail: (error: PlannerError) => void = () => undefined;
+    let fail: (error: PlannerError | SpendStop) => void = () => undefined;
     // The turn ends at idle, or at once on a session error (as sendAndWait does).
     const idle = new Promise<void>((done, reject) => {
       settle = done;
@@ -462,7 +468,13 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
               event.type === "assistant.message")
           )
             firstToken(turn.record, sentAt);
-          if (event.type === "assistant.turn_end") tools.response();
+          if (event.type === "assistant.turn_end") {
+            tools.response();
+            // A turn's end is its boundary: past the spend limit's
+            // margin, the call stops here with its counts so far.
+            if (turn.overspent?.(usage.input + usage.output))
+              fail(new SpendStop());
+          }
           if (event.type === "assistant.usage") {
             turn.record.reportedModel = event.data.model;
             const sums = byModel[event.data.model] ?? { responses: 0 };
@@ -553,7 +565,8 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     finished = true;
     return { text, usage, session: session.sessionId };
   } catch (error) {
-    if (error instanceof PlannerError) throw error;
+    if (error instanceof PlannerError || error instanceof SpendStop)
+      throw error;
     const expired = watchdog.expired;
     if (expired) throw new PlannerError("retry", expired.message);
     if (turn.signal.aborted) throw turn.signal.reason ?? error;
@@ -863,6 +876,7 @@ export class CopilotWorker implements Worker {
           input.output(event);
           copilotActivity(input, event, toolNames);
         },
+        ...(input.overspent && { overspent: input.overspent }),
       });
       record.session = result.session;
       captureResponse(record, result.text);
@@ -877,6 +891,11 @@ export class CopilotWorker implements Worker {
         ...withSession(turn?.end(result.session)),
       };
     } catch (error) {
+      // Its tokens so far are the record's already.
+      if (error instanceof SpendStop) {
+        record.outcome = "retry";
+        return spendStopped();
+      }
       if (turn?.resumed && error instanceof PlannerError && error.tooLarge) {
         record.outcome = error.outcome;
         throw new ResumeOverflow();

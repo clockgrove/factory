@@ -76,6 +76,7 @@ import {
   VALIDATION_TOOL_NAME,
 } from "../work/validate-tool.js";
 import {
+  spendStopped,
   targetOf,
   type Worker,
   type WorkerInput,
@@ -127,6 +128,7 @@ import {
   NativeTools,
   providerUsage,
   Tallies,
+  type Tokens,
   tokens,
   usageRecord,
 } from "./usage.js";
@@ -1426,7 +1428,14 @@ export class ClaudeWorker implements Worker {
       record.sessionTurn = (record.sessionTurn as number) + 1;
       turns.send(content);
     };
+    // The running query's responses' counts by id, each the last seen (a
+    // response split over several messages repeats it), main thread and
+    // sub-agents alike: what the spend check counts before its result.
+    let responses = new Map<string, Tokens>();
+    const running = () =>
+      [...responses.values()].reduce(addTokens, spentTokens);
     const start = (prompt: string) => {
+      responses = new Map();
       turns = userTurns();
       controller = new AbortController();
       facts = { initialized: false, modelResponded: false };
@@ -1489,6 +1498,19 @@ export class ClaudeWorker implements Worker {
           }
           // The main thread's context at this request; the SDK gives no window.
           const usage = message.message.usage;
+          if (usage) {
+            const read = usage.cache_read_input_tokens ?? 0;
+            const written = usage.cache_creation_input_tokens ?? 0;
+            responses.set(
+              message.message.id,
+              tokens({
+                input: usage.input_tokens + read + written,
+                output: usage.output_tokens,
+                cached: read,
+                cacheWrite: written,
+              }),
+            );
+          }
           if (message.parent_tool_use_id === null && usage)
             input.activity({
               kind: "context",
@@ -1538,6 +1560,21 @@ export class ClaudeWorker implements Worker {
             message.message.model !== SYNTHETIC_MODEL
           )
             input.activity({ kind: "turn" });
+          // A tool's result is a turn boundary: past the spend limit's
+          // margin, the worker stops here (spendStopped), charged with
+          // its responses' counts so far.
+          if (
+            message.type === "user" &&
+            Array.isArray(content) &&
+            content.some((block) => block.type === "tool_result") &&
+            input.overspent
+          ) {
+            const spent = running();
+            if (spent.total !== null && input.overspent(spent.total)) {
+              record.tokens = spent;
+              return spendStopped();
+            }
+          }
         }
         if (
           message.type === "rate_limit_event" &&

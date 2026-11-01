@@ -119,7 +119,9 @@ function finding(criterionIndex, verdict, question) {
     verdict,
     evidenceIndices: [CHANGE_INDEX_ROW],
     detail: `${verdict} detail`,
-    ...(verdict === "question" && { question }),
+    ...(verdict === "question"
+      ? { question }
+      : { structural: "Fixture: no scenarios.", scenarios: [] }),
   };
 }
 
@@ -764,6 +766,8 @@ test("a question citing the candidate receipt, naming no file, goes back with ev
               verdict: "pass",
               evidenceIndices: [receipt],
               detail: "The two previews differ: red and blue.",
+              structural: "It judges media bytes, not behaviour.",
+              scenarios: [],
             },
           ],
         },
@@ -818,6 +822,8 @@ test("a cited receipt adds only the copies the evidence root holds, after the fi
               verdict: "pass",
               evidenceIndices: [receipt],
               detail: "Set a's preview is red; set b's differs by its digest.",
+              structural: "It judges media bytes, not behaviour.",
+              scenarios: [],
             },
           ],
         },

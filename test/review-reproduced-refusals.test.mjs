@@ -189,28 +189,32 @@ function review(repo, planner, extra = {}) {
   };
 }
 
+/** A scenario the reviewer examined: one that holds cites the code. */
+const holds = (name) => ({
+  case: name,
+  expected: "as the criterion states",
+  verdict: "holds",
+  basis: "src/reduce.js:5 handles it.",
+});
+const HOLDS = [holds("one patch"), holds("two patches"), holds("no events")];
 const pass = (criterionIndex, detail = "met") => ({
   criterionIndex,
   verdict: "pass",
   detail,
   evidenceIndices: [],
+  structural: "",
+  scenarios: HOLDS,
 });
-/** A suspect finding of criterion `criterionIndex`: one scenario, its input `input`. */
+/** A pass of criterion `criterionIndex` with one suspect scenario, `name`. */
 const suspect = (
   criterionIndex,
-  input = "patch v2 (b), then snapshot v1 (a)",
+  name = "patch v2 (b), then snapshot v1 (a)",
+  basis = "src/reduce.js:4 replaces the state with any snapshot.",
 ) => ({
-  criterionIndex,
-  verdict: "suspect",
-  detail: "A late snapshot may discard a received patch.",
-  evidenceIndices: [],
-  suspicions: [
-    {
-      input,
-      expected: 'items: ["a","b"]',
-      actual: 'items: ["a"]',
-      why: "src/reduce.js:4 replaces the state with any snapshot.",
-    },
+  ...pass(criterionIndex),
+  scenarios: [
+    ...HOLDS.slice(0, 2),
+    { case: name, expected: 'items: ["a","b"]', verdict: "suspect", basis },
   ],
 });
 const repro = (command, actual = 'items: ["a"]') => ({
@@ -257,19 +261,16 @@ function answering(answers, prove = () => NOT_REPRODUCED) {
   };
 }
 
-test("R1: a suspicion without its scenario is invalid, asked again once, and ends as a note with no repair", async () => {
-  const variant = (schema, kind) =>
-    schema.properties.findings.items.anyOf.find(
-      (each) => each.properties.verdict.enum[0] === kind,
-    );
-  const suspects = variant(ITEM_REVIEW_SCHEMA, "suspect");
-  assert.deepEqual(suspects.properties.suspicions.items.required, [
-    "input",
+test("R1: a criterion that states behaviour needs 3 examined scenarios, each holding one citing code; asked again once, the unshown ones become suspicions", async () => {
+  const judged = ITEM_REVIEW_SCHEMA.properties.findings.items.anyOf.find(
+    (each) => each.properties.verdict.enum[0] === "pass",
+  );
+  assert.deepEqual(judged.properties.scenarios.items.required, [
+    "case",
     "expected",
-    "actual",
-    "why",
+    "verdict",
+    "basis",
   ]);
-  assert.ok(!variant(ITEM_REVIEW_SCHEMA, "refuse"));
   const reproduces = PROOF_SCHEMA.properties.outcome.anyOf.find(
     (each) => each.properties.kind.enum[0] === "reproduced",
   );
@@ -280,19 +281,42 @@ test("R1: a suspicion without its scenario is invalid, asked again once, and end
     "command",
   ]);
   const repo = target();
-  const bare = { ...suspect(0), suspicions: [{ input: "x" }] };
+  // Two scenarios, one holding with no code cited.
+  const thin = {
+    ...pass(0),
+    scenarios: [
+      { ...holds("one patch"), basis: "It looks right." },
+      holds("x"),
+    ],
+  };
+  // A structural reason excuses a short list.
+  const structural = {
+    ...pass(1),
+    structural: "It names a file.",
+    scenarios: [],
+  };
   const planner = answering([
-    { findings: [bare, pass(1)] },
-    { findings: [bare] },
+    { findings: [thin, structural] },
+    { findings: [thin] },
   ]);
-  const outcome = await review(repo, planner).run;
+  const { run, events } = review(repo, planner);
+  const outcome = await run;
   assert.equal(planner.calls.length, 2);
   assert.match(planner.calls[1].prompt, /criteria 0 without a valid finding/);
-  assert.equal(planner.proofs.length, 0);
+  assert.match(planner.calls[1].prompt, /at least 3 scenarios/);
+  assert.match(planner.calls[1].prompt, /Scenario 0 holds without citing/);
+  // The uncited one and the cases not examined were proved, not refused.
+  const proved = events
+    .filter((event) => event.event === "result-review-suspicion")
+    .map((event) => event.case)
+    .sort();
+  assert.equal(proved.length, 2);
+  assert.equal(proved[1], "one patch");
+  assert.match(proved[0], /did not examine \(it listed 2\)/);
   assert.equal(outcome.kind, "pass");
   assert.deepEqual(
     outcome.verdicts.map((verdict) => verdict.verdict),
-    ["note", "pass"],
+    ["pass", "pass"],
   );
 });
 
@@ -319,7 +343,7 @@ test("R2: each suspicion is proved apart; a repro that fails as claimed is confi
       // The proof runs its repro in a copy of its own before answering.
       const ran = await command(call, REPRO);
       assert.match(ran, /^Exit code 1/);
-      return suspicion.input === "patch v1 (a)"
+      return suspicion.case === "patch v1 (a)"
         ? reproduced("node -e 'console.log(\"fine\")'", "fine")
         : reproduced(REPRO);
     },
@@ -588,23 +612,17 @@ test("a protected-test failure is evidence: the result is refused only once a su
         return {
           findings: [
             pass(0),
-            {
-              ...suspect(1, "patch v2 (b)"),
-              suspicions: [
-                {
-                  input: "patch v2 (b)",
-                  expected: 'items: ["b"]',
-                  actual: "AssertionError",
-                  why: `The base's test/reduce.test.js fails on this result: ${check.command}`,
-                },
-              ],
-            },
+            suspect(
+              1,
+              "patch v2 (b)",
+              `The base's test/reduce.test.js fails on this result: ${check.command}`,
+            ),
           ],
         };
       },
     ],
     async (call, suspicion) => {
-      const command_ = suspicion.why.split("on this result: ")[1];
+      const command_ = suspicion.basis.split("on this result: ")[1];
       const ran = await command(call, command_);
       assert.match(ran, /AssertionError/);
       return reproduced(command_, "AssertionError");
@@ -781,7 +799,7 @@ test("R9: each call's instructions, with every evidence kind's guidance and its 
   assert.ok(proof <= 5000, `${proof} characters`);
   assert.match(
     all,
-    /the engineering standard, test economy and the design checklist are notes, never suspicions/,
+    /the engineering standard, test economy and the design checklist are notes, never suspect scenarios/,
   );
 });
 

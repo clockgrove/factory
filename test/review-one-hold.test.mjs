@@ -13,7 +13,8 @@ import { ObjectiveRunner } from "../dist/engine.js";
 import { closedComment, closingLine } from "../dist/github-sync.js";
 import { observedRecords } from "../dist/knowledge/memory.js";
 import { ACCEPTED_AT } from "../dist/planning/plan.js";
-import { decisionLines, reviewResult } from "../dist/review/result.js";
+import { reviewResult } from "../dist/review/item.js";
+import { decisionLines } from "../dist/review/result.js";
 import { answerList, closingAnswer, newObjective } from "../dist/state.js";
 import { decisionText } from "../dist/status.js";
 import { fact, facts } from "../dist/work/facts.js";
@@ -46,7 +47,7 @@ const QUESTION =
 const RECEIPT =
   "Executed on this exact tree, rebuilt from the Work Item's HEAD with matching tree hashes: the Playwright journey passed.";
 
-/** The reviewer's first answer: it can judge none of `asked` (criterion indices). */
+/** The reviewer's first answer: it asks about each of `asked` (criterion indices). */
 function needsHuman(asked = [0, 1, 2, 3]) {
   return {
     kind: "needs-human",
@@ -64,7 +65,7 @@ function needsHuman(asked = [0, 1, 2, 3]) {
 /**
  * Work Item a's review step as reviewStep builds it: the operator's
  * decisions (criterionDecisions), the review, and its outcome
- * (reviewOutcome). The first review is the reviewer's needs-human answer;
+ * (reviewOutcome). The first review is the reviewer's questions;
  * a review the operator answered runs the real reviewResult, which judges
  * only what nobody settled and so calls no reviewer here (the planner
  * throws if it is called).
@@ -94,6 +95,10 @@ function reviewStep(reviews, asked) {
             validation: { tree: TREE, commands: [] },
             sources: [],
             dir: "/nonexistent",
+            scratch: async () => {
+              throw new Error("the reviewer ran a command");
+            },
+            commandMs: 60_000,
             decisions: decided.decisions,
             earlier: decided.earlier,
             signal: AbortSignal.timeout(60_000),

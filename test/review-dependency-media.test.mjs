@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { candidateReceipts } from "../dist/media.js";
-import { reviewResult } from "../dist/review/result.js";
+import { itemInstructions, reviewResult } from "../dist/review/item.js";
 import { reviewCandidates } from "../dist/work/step-review.js";
 import { tempDir } from "./helpers.mjs";
 
@@ -231,7 +231,7 @@ test("a dependent test item's review holds the dependency's selected preview byt
             findings: [
               {
                 criterionIndex: 0,
-                verdict: "needs-human",
+                verdict: "question",
                 evidenceIndices: [1],
                 detail:
                   "The supplied preview is an LFS pointer (candidate/assets/cubeQazja-preview.png), not the PNG bytes.",
@@ -249,7 +249,6 @@ test("a dependent test item's review holds the dependency's selected preview byt
               verdict: "pass",
               evidenceIndices: [1],
               detail: "The test checks the preview's bytes.",
-              question: "",
             },
           ],
         },
@@ -272,6 +271,10 @@ test("a dependent test item's review holds the dependency's selected preview byt
     validation: { tree, commands: ["npm test"] },
     sources: [],
     dir: tempDir("factory-dep-media-root-"),
+    scratch: async () => {
+      throw new Error("this review runs no command");
+    },
+    commandMs: 60_000,
     candidates,
     signal: AbortSignal.timeout(60_000),
     log: (event) => events.push(event),
@@ -279,9 +282,20 @@ test("a dependent test item's review holds the dependency's selected preview byt
   assert.ok(
     calls[0].prompt.includes("Controller candidate receipt: cube-assets"),
   );
+  // The receipt says whose it is; the guidance how to judge from it.
+  assert.ok(calls[0].prompt.includes("deliveredDependency"));
   assert.ok(
     calls[0].prompt.includes(
-      "a receipt whose workItem is another item's belongs to a dependency whose accepted result the reviewed base holds",
+      itemInstructions({
+        unreachable: false,
+        artifacts: false,
+        candidates: true,
+        inputs: false,
+        knowledge: false,
+        memory: false,
+      })
+        .split("\n")
+        .at(-1),
     ),
   );
   // The question went back once, naming the review copy, and never held.

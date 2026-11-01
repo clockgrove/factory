@@ -178,7 +178,12 @@ export async function finalValidation(
 ): Promise<Outcome> {
   const { state, signal } = context;
   const { config } = deps;
-  const head = await defaultHead(config.checkout, config.repository, signal);
+  const head = await defaultHead(
+    config.checkout,
+    config.repository,
+    signal,
+    context.log,
+  );
   const problem = await integrationProblem(state, plan, head, deps, signal);
   if (problem) return problem;
   const workDir = deps.workDir(state.issue);

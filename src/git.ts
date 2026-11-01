@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { GitHubError, TransientError } from "./github.js";
 import { errorMessage } from "./text.js";
+import { clearStaleLocks } from "./worktree.js";
 
 const run = promisify(execFile);
 const MINUTE = 60_000;
@@ -902,15 +903,18 @@ export async function siblingUrl(
  * value"), so every caller would lose but one. A caller joins the fetch
  * that starts after the running one ends, shared by everyone who asked
  * meanwhile, so the head it gets is never from a fetch that began before
- * it asked. `signal` ends the caller's wait, not the shared fetch.
+ * it asked. `signal` ends the caller's wait, not the shared fetch. A lock
+ * a killed fetch left goes first (clearStaleLocks, logged to `log`): no
+ * later Git removes it, so every fetch would fail on it.
  */
 export async function defaultHead(
   checkout: string,
   repository: string,
   signal: AbortSignal,
+  log?: (event: Record<string, unknown>) => void,
 ): Promise<string> {
   signal.throwIfAborted();
-  const head = sharedFetch(checkout, repository);
+  const head = sharedFetch(checkout, repository, log);
   return await new Promise<string>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
@@ -927,18 +931,26 @@ const flights = new Map<
 >();
 
 /** The next fetch of `checkout` to start: now, or once the running one ends. */
-function sharedFetch(checkout: string, repository: string): Promise<string> {
+function sharedFetch(
+  checkout: string,
+  repository: string,
+  log?: (event: Record<string, unknown>) => void,
+): Promise<string> {
   const flight = flights.get(checkout);
-  if (!flight) return fetchHead(checkout, repository);
+  if (!flight) return fetchHead(checkout, repository, log);
   if (!flight.next) {
-    const start = () => fetchHead(checkout, repository);
+    const start = () => fetchHead(checkout, repository, log);
     flight.next = flight.running.then(start, start);
   }
   return flight.next;
 }
 
-function fetchHead(checkout: string, repository: string): Promise<string> {
-  const running = fetchOnce(checkout, repository);
+function fetchHead(
+  checkout: string,
+  repository: string,
+  log?: (event: Record<string, unknown>) => void,
+): Promise<string> {
+  const running = fetchOnce(checkout, repository, log);
   const flight: { running: Promise<string>; next?: Promise<string> } = {
     running,
   };
@@ -955,8 +967,10 @@ function fetchHead(checkout: string, repository: string): Promise<string> {
 async function fetchOnce(
   checkout: string,
   repository: string,
+  log?: (event: Record<string, unknown>) => void,
 ): Promise<string> {
   try {
+    await clearStaleLocks(checkout, log ? { log } : {});
     await remoteGit(checkout, repository, [
       "fetch",
       "--quiet",

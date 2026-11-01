@@ -258,7 +258,7 @@ case_cancel() {
   local t0 n pr; t0=$(now)
   local HOLD_POLICY="review decide more" lag=""
   local fn; fn="padEnd$(uid)"
-  n=$(new_objective exec "cancel with an open PR" FN="$fn" SPEC="\`$fn(s, width)\` puts spaces after \`s\` until it is \`width\` characters long: \`$fn(\"ab\", 4)\` is \`\"ab  \"\`.") || return
+  n=$(new_objective exec "cancel with an open PR" FN="$fn" SPEC="\`$fn(s, width)\` puts spaces after \`s\` until it is \`width\` characters long: \`$fn(\"ab\", 4)\` is \`\"ab  \"\`. When \`width\` is at most the length of \`s\`, it returns \`s\` unchanged: \`$fn(\"abc\", 2)\` is \`\"abc\"\`.") || return
   if has_feature isolation; then
     # The PR Factory creates for factory/N/... answers 404 to its next two reads.
     prule_add "POST ^/repos/$REPO/pulls\$ body=factory/$n/ lag=2 times=1"; lag=1

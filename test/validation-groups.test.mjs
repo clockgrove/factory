@@ -110,6 +110,8 @@ async function validate(validation, { slots = 2, files } = {}) {
     checkout,
     repository: REPO,
     directory: `${checkout}.validation`,
+    // Each group installs again, on the item's warm store.
+    installStore: `${checkout}.packages`,
     commit: base,
     item: work,
     plan: { base, items: [work], coverage: [], finalCommands: [] },
@@ -150,18 +152,13 @@ test("independent commands run at once after one install, and a dependent one wa
   const [groups] = ran(grouped.events, "validation-groups");
   assert.deepEqual(groups.groups, [[1, 3], [2]]);
   assert.equal(groups.slots, 2);
-  // One install, then each group in its own checkout; the second group's
-  // command starts while the first's runs.
+  // The install, then each group in its own checkout with its own exact
+  // install; the second group's command starts while the first's runs.
   assert.deepEqual(
     ran(grouped.events)
-      .map((event) => [event.index, event.group])
-      .sort((a, b) => a[0] - b[0]),
-    [
-      [0, undefined],
-      [1, 0],
-      [2, 1],
-      [3, 0],
-    ],
+      .map((event) => `${event.index}:${event.group ?? "-"}`)
+      .sort(),
+    ["0:-", "0:0", "0:1", "1:0", "2:1", "3:0"],
   );
   const at = (kind, index) =>
     ran(grouped.events, kind).find((event) => event.index === index).at;

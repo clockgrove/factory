@@ -27,7 +27,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { cp, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
@@ -266,60 +266,17 @@ function commandGroups(
 interface Group {
   /** Its place among the groups: its checkout's name and its log events'. */
   number: number;
-  /** Its commands, by index, in run order. */
+  /** Its commands, by index, in run order, after the exact install when the run starts with one. */
   order: number[];
-  /** The validation checkout after the install and the formatter. */
-  template: string;
-  /** The commit they left: the candidate, or Factory's commit of it. */
+  /** The commit the formatter left: the candidate, or Factory's commit of it. */
   commit: string;
-  /** The HOME they left, which the group starts from a copy of. */
+  /** The HOME the formatter left, which the group starts from a copy of. */
   home: string;
   /** The command it runs, or last ran: where it stopped. */
   at: number;
 }
 
 const execFileAsync = promisify(execFile);
-
-/**
- * What Git ignores in `template` (the install's dependency tree, a cache
- * the formatter wrote), hard-linked at the same paths into `worktree`, a
- * fresh checkout of the same commit, so a group's commands start where
- * the others' do and no install runs again (#2290). Tracked files are
- * each checkout's own, so each group's checks see only its own commands'
- * changes. A command that rewrites an installed file in place rewrites
- * every group's, as it rewrites the package store a pnpm install links
- * from.
- */
-async function linkIgnored(
-  template: string,
-  worktree: string,
-  signal: AbortSignal,
-): Promise<void> {
-  const paths = (
-    await hostGit(
-      template,
-      [
-        "ls-files",
-        "-z",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "--directory",
-      ],
-      { signal },
-    )
-  )
-    .toString("utf8")
-    .split("\0")
-    .filter(Boolean)
-    .map((path) => path.replace(/\/$/, ""));
-  for (let at = 0; at < paths.length; at += 1000)
-    await execFileAsync(
-      "cp",
-      ["-al", "--parents", "-t", worktree, "--", ...paths.slice(at, at + 1000)],
-      { cwd: template, signal },
-    );
-}
 
 export interface ValidateInput {
   /** The target clone; the fresh worktree is linked from it. */
@@ -592,10 +549,10 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
 
 /**
  * With `group`, one group of a Work Item's commands, from the run that
- * made the install and the formatter's commit (`inGroups`, #2290): no
- * pins, install or formatter again, a checkout of `group.commit` that
- * links what they left, and only the group's commands. Its checkout stays
- * for that run, which removes it.
+ * made the formatter's and the lockfile's commits (`inGroups`, #2290): no
+ * pins, formatter or lockfile resolution again; a fresh checkout of
+ * `group.commit`, the exact install (on the warm store) and the group's
+ * commands. Its checkout stays for that run, which removes it.
  */
 async function validateCandidate(
   input: ValidateInput,
@@ -688,10 +645,7 @@ async function validateCandidate(
     else await forceRemove(groupsRoot);
     await removeWorktree(checkout, worktree, input.signal);
     await addWorktree(checkout, worktree, commit, input.signal, input.log);
-    if (group) {
-      await linkIgnored(group.template, worktree, signal);
-      crashPoint("validation:group-checkout:after");
-    }
+    if (group) crashPoint("validation:group-checkout:after");
   } catch (error) {
     input.signal.throwIfAborted();
     // Refused Git is the operator's to fix: the caller holds.
@@ -720,9 +674,9 @@ async function validateCandidate(
       // reads an empty configuration: no credentials.
       temporary = await made("factory-validation-");
       home = await made("factory-home-");
-      // A group starts from what the install and the formatter left there.
+      // A group starts from what the formatter left there.
       if (group)
-        await execFileAsync("cp", ["-a", "-T", group.home, home], { signal });
+        await cp(group.home, home, { recursive: true, verbatimSymlinks: true });
       credentials = await made("factory-gh-");
     } catch (error) {
       return {
@@ -907,22 +861,31 @@ async function validateCandidate(
       order[0] === 0 && packageBootstrap(sequence[0] ?? "") !== undefined
         ? 1
         : 0;
+    // Each group runs the exact install again in its own checkout, so
+    // only where that install reuses a warm store: a Work Item's kept or
+    // shared one, or the operator's sandbox.packageStore.
     const groups =
-      item && !group && sandboxAvailable().available
+      item &&
+      !group &&
+      sandboxAvailable().available &&
+      (!setup || input.installStore || input.sandbox.packageStore)
         ? commandGroups(item.validation, order.slice(setup))
         : [];
     let grouped = false;
     /**
-     * The groups at once, each in a checkout of its own made from this
-     * one after the install and the formatter, and each with its own
-     * HOME, TMPDIR and validation slot. The first group to stop ends the
+     * The groups at once, each in a fresh checkout of the commit the
+     * install and the formatter left, which runs that exact install
+     * again on the warm store, so no group shares a file with another
+     * or with this checkout; and each with its own HOME, TMPDIR,
+     * services and validation slot. The first group to stop ends the
      * others. Its failure is the run's when no command of another group
      * comes before it in run order, so its checkout had every command a
-     * run in that order gives it; any other failure, which an `after`
-     * that leaves out what a command needs could cause, is decided by
-     * the run in that order here, which this checkout still can make
-     * (undefined). Results, artifacts and produced files come back in
-     * run order. Undefined also when no other group gets a slot.
+     * run in that order gives it; any other failure (one an `after` that
+     * leaves out what a command needs could cause, or a group's own
+     * install) is decided by the run in that order here, in this
+     * checkout no group touched, with services of its own (undefined).
+     * Results, artifacts and produced files come back in run order.
+     * Undefined also when no other group gets a slot.
      */
     const inGroups = async (): Promise<Validation | undefined> => {
       // Earlier captures go first, as a capture with none before does.
@@ -934,14 +897,13 @@ async function validateCandidate(
       while (slots < groups.length && hostLimits.acquire("cpu")) slots += 1;
       if (slots === 1) return undefined;
       input.log({ event: "validation-groups", groups, slots });
-      const lanes: Group[] = groups.map((commands, number) => ({
-        number,
-        order: commands,
-        template: worktree,
-        commit,
-        home,
-        at: commands[0]!,
-      }));
+      // The groups' commands use services of their own, never these.
+      await services?.stop();
+      services = undefined;
+      const lanes: Group[] = groups.map((commands, number) => {
+        const run = [...order.slice(0, setup), ...commands];
+        return { number, order: run, commit, home, at: run[0]! };
+      });
       const directory = (lane: Group) => join(groupsRoot, String(lane.number));
       const stop = new AbortController();
       const laneSignal = AbortSignal.any([signal, stop.signal]);
@@ -958,6 +920,8 @@ async function validateCandidate(
                   ...input,
                   directory: directory(running),
                   returnTo: undefined,
+                  // The lockfile is resolved: `commit` is Factory's.
+                  lockfile: undefined,
                   signal: laneSignal,
                   ...(capture && {
                     reviewArtifacts: {
@@ -1010,9 +974,17 @@ async function validateCandidate(
         if (stopped) {
           const outcome = outcomes.get(stopped)!;
           if (outcome.kind !== "failed") return outcome;
-          const before = order.slice(setup, order.indexOf(stopped.at));
-          if (before.some((index) => !stopped.order.includes(index))) {
+          const at = order.indexOf(stopped.at);
+          if (
+            at < setup ||
+            order
+              .slice(setup, at)
+              .some((index) => !stopped.order.includes(index))
+          ) {
             input.log({ event: "validation-groups-rerun", index: stopped.at });
+            const up = await validationServices(input);
+            if (up && !(up instanceof AttemptServices)) return up;
+            services = up;
             return undefined;
           }
           produced = await returned([stopped]);
@@ -1020,7 +992,8 @@ async function validateCandidate(
             ...outcome,
             tree,
             commands: ran,
-            results: [...results, ...outcome.results],
+            // The install's result is this checkout's.
+            results: [...results, ...outcome.results.slice(setup)],
             ...(produced && { produced }),
             ...(regenerated && { regenerated }),
             ...(formatted && { formatted }),
@@ -1040,9 +1013,9 @@ async function validateCandidate(
             ...results,
             ...lanes
               .flatMap((each, n) =>
-                each.order.map((index, at) => ({
+                each.order.slice(setup).map((index, at) => ({
                   index,
-                  result: passed[n]!.results[at]!,
+                  result: passed[n]!.results[setup + at]!,
                 })),
               )
               .sort((a, b) => position(a.index) - position(b.index))
@@ -1052,7 +1025,11 @@ async function validateCandidate(
           ...(capture && {
             artifacts: [
               ...artifacts,
-              ...passed.flatMap((each) => each.artifacts ?? []),
+              ...passed.flatMap((each) =>
+                (each.artifacts ?? []).filter(
+                  (artifact) => position(artifact.commandIndex) >= setup,
+                ),
+              ),
             ].sort(
               (a, b) => position(a.commandIndex) - position(b.commandIndex),
             ),

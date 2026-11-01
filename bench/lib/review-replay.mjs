@@ -276,6 +276,21 @@ function judgeRefusal(record, criterionIndex, recorded) {
 
 const ratio = (part, whole) => (whole ? part / whole : null);
 
+/**
+ * Whose a defect is: `item`, the item's own acceptance, which the result
+ * review owns, or `objective`, an Objective criterion only (from #2344 on,
+ * final review's). A label may say; otherwise a defect with an item
+ * criterion among its `criteria` is the item's.
+ */
+export function defectScope(record, defect) {
+  return (
+    defect.scope ??
+    (defect.criteria.some((index) => index < record.itemCriteria)
+      ? "item"
+      : "objective")
+  );
+}
+
 /** One run's scores over its results (`results`: reviewOnce's, one per record). */
 export function scoreRun(records, results, { recorded = false } = {}) {
   const byId = new Map(records.map((r) => [r.id, r]));
@@ -292,6 +307,11 @@ export function scoreRun(records, results, { recorded = false } = {}) {
     defects: 0,
     caught: 0,
     distinct: new Map(),
+    scopes: {
+      item: { defects: 0, caught: 0, distinct: new Map() },
+      objective: { defects: 0, caught: 0, distinct: new Map() },
+    },
+    missed: [],
     tokens: 0,
     ms: 0,
   };
@@ -329,11 +349,20 @@ export function scoreRun(records, results, { recorded = false } = {}) {
     if (refused.length) score.refusedReviews++;
     if (real) score.realRefusedReviews++;
     for (const defect of record.defects) {
-      score.defects++;
+      const scope = score.scopes[defectScope(record, defect)];
       const hit = caught.has(defect.id);
-      if (hit) score.caught++;
       const key = `${record.objective ?? ""}:${record.item ?? record.id}:${defect.id}`;
-      score.distinct.set(key, (score.distinct.get(key) ?? false) || hit);
+      for (const tally of [score, scope]) {
+        tally.defects++;
+        if (hit) tally.caught++;
+        tally.distinct.set(key, (tally.distinct.get(key) ?? false) || hit);
+      }
+      if (!hit)
+        score.missed.push({
+          id: record.id,
+          defect: defect.id,
+          scope: defectScope(record, defect),
+        });
     }
   }
   const distinct = [...score.distinct.values()];
@@ -350,6 +379,20 @@ export function scoreRun(records, results, { recorded = false } = {}) {
     recall: ratio(score.caught, score.defects),
     distinctDefects: distinct.length,
     distinctCaught: distinct.filter(Boolean).length,
+    // The gate's recall is the item's: the defects the result review owns.
+    ...Object.fromEntries(
+      Object.entries(score.scopes).flatMap(([name, tally]) => {
+        const seen = [...tally.distinct.values()];
+        return [
+          [`${name}Defects`, tally.defects],
+          [`${name}Caught`, tally.caught],
+          [`${name}Recall`, ratio(tally.caught, tally.defects)],
+          [`${name}DistinctDefects`, seen.length],
+          [`${name}DistinctCaught`, seen.filter(Boolean).length],
+        ];
+      }),
+    ),
+    missed: score.missed,
     questions: score.questions,
     notes: score.notes,
     tokens: score.tokens,

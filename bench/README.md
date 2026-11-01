@@ -451,7 +451,7 @@ A record holds what the review saw and what it decided:
 - `recorded`: the review as it happened: `outcome`, `provider`, `model`, `effort`, `tokens`, `durationMs`, `refused` (each `{ criterionIndex, detail, complete }`; `complete: false` when only a prefix survives) and `verdicts` (every criterion's, when the full answer survives, else null).
 - A seeded record adds `seeded: { from, file, description }` and keeps its labels inline (`labels`, as in `labels.json`); it has no `recorded`.
 
-`labels.json` maps a record id to `{ refusals, defects }`. Each refusal is `{ criterionIndex, defect, defectId?, category?, justification, labelledBy }`: whether the recorded refusal had a real defect behind it, with the evidence. Each defect is `{ id, criteria, description, evidence, labelledBy }`: a defect the candidate has, and the criteria it violates. `labelledBy` says who decided (`draft` until a person confirms it). The candidate commits come from `--repo`, a clone of the reviewed repository, or the set's bundle: the harness clones `--repo` into a scratch directory, with its own objects and `--repo`'s origin (a reviewer that validates the candidate, as the new one does, reads only the clone, and fetches Git LFS objects from origin), fetches the bundle into it, and checks each record's commit has its recorded tree before reviewing it. Nothing is written to `--repo`.
+`labels.json` maps a record id to `{ refusals, defects }`. Each refusal is `{ criterionIndex, defect, defectId?, category?, justification, labelledBy }`: whether the recorded refusal had a real defect behind it, with the evidence. Each defect is `{ id, criteria, scope?, description, evidence, labelledBy }`: a defect the candidate has, the criteria it violates, and whose it is: `item` (the item's own acceptance, which the result review owns) or `objective` (an Objective criterion only, which final review owns from #2344 on). Without `scope`, a defect with an item criterion among its `criteria` is the item's. `labelledBy` says who decided (`draft` until a person confirms it). The candidate commits come from `--repo`, a clone of the reviewed repository, or the set's bundle: the harness clones `--repo` into a scratch directory, with its own objects and `--repo`'s origin (a reviewer that validates the candidate, as the new one does, reads only the clone, and fetches Git LFS objects from origin), fetches the bundle into it, and checks each record's commit has its recorded tree before reviewing it. Nothing is written to `--repo`.
 
 ### Reviewers
 
@@ -467,33 +467,36 @@ Each review is bounded by `--timeout-minutes` (20). Tokens are the reviewer's ow
 
 Each run is scored apart, then summarized (mean, min and max over the runs); seeded records are reviewed once and scored apart.
 
-| Score                               | What                                                                              |
-| ----------------------------------- | --------------------------------------------------------------------------------- |
-| `refusedReviews`, `reviewPrecision` | Reviews with any refusal, and the share of them with at least one real refusal    |
-| `refusals`, `refusalPrecision`      | Refused criteria, and the share with a real defect behind them                    |
-| `defects`, `caught`, `recall`       | Known defects over the records, and those refused                                 |
-| `distinctDefects`, `distinctCaught` | The same, counting a defect once per item however many of its records have it     |
-| `questions`, `notes`                | Verdicts of those kinds                                                           |
-| `tokens`, `ms` (and per review)     | Cost                                                                              |
-| `errors`                            | Reviews with no verdict: the reviewer failed, or the candidate wasn't found       |
-| `unmatched`                         | Replayed refusals no labelled defect covers, with their details, to label by hand |
+| Score                               | What                                                                                |
+| ----------------------------------- | ----------------------------------------------------------------------------------- |
+| `refusedReviews`, `reviewPrecision` | Reviews with any refusal, and the share of them with at least one real refusal      |
+| `refusals`, `refusalPrecision`      | Refused criteria, and the share with a real defect behind them                      |
+| `defects`, `caught`, `recall`       | Known defects over the records, and those refused                                   |
+| `distinctDefects`, `distinctCaught` | The same, counting a defect once per item however many of its records have it       |
+| `item…`, `objective…`               | The same five by scope (`itemRecall` is the gate's), so no miss of either is hidden |
+| `missed`                            | Each defect not caught, with its record and scope                                   |
+| `questions`, `notes`                | Verdicts of those kinds                                                             |
+| `tokens`, `ms` (and per review)     | Cost                                                                                |
+| `errors`                            | Reviews with no verdict: the reviewer failed, or the candidate wasn't found         |
+| `unmatched`                         | Replayed refusals no labelled defect covers, with their details, to label by hand   |
 
 A recorded refusal is real when its label says so: the label judges its reason. A replayed refusal is real when the record has a labelled defect whose `criteria` include it; the harness doesn't read its reason, so `unmatched` lists the rest for a person, and a replayed refusal of a defect's criterion for another reason still counts. A defect is caught when a real refusal maps to it.
 
 Results go to `<set>/results/<label>/`: `runs/<n>/<record id>.json` per review, reused by a later invocation (so an interrupted replay carries on) unless `--fresh`, except a review that failed, which runs again; and `scorecard.json`. The label defaults to the reviewer, provider, model and effort.
 
-| Flag                                | What                                                                   |
-| ----------------------------------- | ---------------------------------------------------------------------- |
-| `--bench-home DIR`, `--set DIR`     | The bench home (its `review-replay/`), or the set itself               |
-| `--repo DIR`                        | A clone of the reviewed repository                                     |
-| `--build DIR`                       | The Factory checkout whose reviewer runs (its `dist/`; this checkout)  |
-| `--reviewer auto\|v1\|recorded`     | The adapter                                                            |
-| `--provider`, `--model`, `--effort` | The planner kind (`codex`), and the reviewer's model and effort        |
-| `--runs N`, `--concurrency N`       | Reviews of each record (1), and reviews (and preparations) at once (1) |
-| `--cache DIR`                       | What every replay shares, such as install stores                       |
-| `--seeded`, `--only ID ...`         | Add the seeded records; only these records                             |
-| `--label NAME`, `--fresh`           | The results' name; review again what earlier results hold              |
-| `--timeout-minutes N`               | Each review's bound (20)                                               |
+| Flag                                | What                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| `--bench-home DIR`, `--set DIR`     | The bench home (its `review-replay/`), or the set itself              |
+| `--repo DIR`                        | A clone of the reviewed repository                                    |
+| `--build DIR`                       | The Factory checkout whose reviewer runs (its `dist/`; this checkout) |
+| `--reviewer auto\|v1\|recorded`     | The adapter                                                           |
+| `--provider`, `--model`, `--effort` | The planner kind (`codex`), and the reviewer's model and effort       |
+| `--runs N`, `--concurrency N`       | Reviews of each record (1), and reviews at once (1)                   |
+| `--prepare-concurrency N`           | Preparations at once (as `--concurrency`): not review time            |
+| `--cache DIR`                       | What every replay shares, such as install stores                      |
+| `--seeded`, `--only ID ...`         | Add the seeded records; only these records                            |
+| `--label NAME`, `--fresh`           | The results' name; review again what earlier results hold             |
+| `--timeout-minutes N`               | Each review's bound (20)                                              |
 
 ## The example
 

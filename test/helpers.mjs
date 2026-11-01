@@ -474,9 +474,13 @@ export const NO_WORKSPACE = {
   limits: {
     mutants: 0,
     mutationMs: 1000,
+    measuredMutants: 10,
     commands: 20,
     commandBudgetMs: 60_000,
     commandMs: 60_000,
     prepareMs: 60_000,
+    proofs: 10,
+    proofCommands: 8,
+    proofBudgetMs: 60_000,
   },
 };

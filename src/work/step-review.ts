@@ -16,6 +16,7 @@ import {
   validationWorkspace,
   type Workspace,
 } from "../review/item.js";
+import { mutantCommands } from "../review/mutants.js";
 import {
   type CriterionDecision,
   type DeliveryPosition,
@@ -42,7 +43,6 @@ import { addRepros, keptRepros } from "./repros.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaReviewStep } from "./step-qa.js";
-import { ownCommands } from "./step-validate.js";
 import { acceptedNotes, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
@@ -125,9 +125,12 @@ export async function reviewStep(
       validation: validated,
       workspace: reviewWorkspace(item, context, deps, worktree),
       mutation: {
-        commands: ownCommands(item),
-        ...(validated.commandsMs !== undefined && {
-          baselineMs: validated.commandsMs,
+        commands: mutantCommands(item.validation, validated.commandMs),
+        ...(validated.commandMs && {
+          baselineMs: Object.values(validated.commandMs).reduce(
+            (sum, ms) => sum + ms,
+            0,
+          ),
         }),
         seed: item.id,
       },
@@ -262,8 +265,12 @@ function reviewLimits(deps: BuildDeps): ReviewLimits {
   return {
     mutants: review.mutants,
     mutationMs: review.mutationSeconds * 1000,
+    measuredMutants: review.measuredMutants,
     commands: review.commands,
     commandBudgetMs: review.commandSeconds * 1000,
+    proofs: review.proofs,
+    proofCommands: review.proofCommands,
+    proofBudgetMs: review.proofSeconds * 1000,
     commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
     prepareMs: commandTimeoutMs(deps) + 5 * MINUTE,
     network: deps.config.sandbox.network,

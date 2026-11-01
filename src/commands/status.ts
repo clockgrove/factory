@@ -43,7 +43,7 @@ export const spec: Command = {
     issue: "value",
     item: "value",
   },
-  help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago, --capacity shows the host's slots and memory in use and how the configured capacity fits the host, --issue N (or the issue's URL) shows the Objective that issue N is, or whose Work Item it is, from local state only; ISSUE --item ID shows that Work Item's telemetry this run from the local run log, as its issue's comment does (time per step, model calls, tokens, cost, worker activity, tool calls, validation, repairs, review, the reviewer's verdicts, repros, mutants, questions, tokens and time, CI and its changes)",
+  help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago, --capacity shows the host's slots and memory in use and how the configured capacity fits the host, --issue N (or the issue's URL) shows the Objective that issue N is, or whose Work Item it is, from local state only; ISSUE --item ID shows that Work Item's telemetry this run from the local run log, as its issue's comment does (time per step, model calls, tokens, cost, worker activity, tool calls, validation, repairs, review, the reviewer's verdicts, suspicions, repros, mutants, questions, tokens and time, CI and its changes)",
   check: (args, command) =>
     args.flags.item !== undefined &&
     args.positional[1] === undefined &&

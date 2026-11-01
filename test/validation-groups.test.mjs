@@ -137,8 +137,8 @@ test("independent commands run at once after one install, and a dependent one wa
 }, async () => {
   const validation = [
     { command: BOOTSTRAP },
-    { command: "sh slow.sh a 3" },
-    { command: "sh slow.sh b 3", after: [] },
+    { command: "sh slow.sh a 5" },
+    { command: "sh slow.sh b 5", after: [] },
     { command: "sh check.sh", after: [1] },
   ];
   const grouped = await validate(validation);
@@ -177,13 +177,20 @@ test("independent commands run at once after one install, and a dependent one wa
     ran(sequential.events).map((event) => event.index),
     [0, 1, 2, 3],
   );
+  // From the first command after the install to the last result: one
+  // after another the two 5 s commands take 10 s at least.
+  const span = ({ events }) => {
+    const commands = ran(events).filter((event) => event.index > 0);
+    return (
+      Math.max(...ran(events, "validation-result").map((event) => event.at)) -
+      Math.min(...commands.map((event) => event.at))
+    );
+  };
   console.log(
-    `two 3 s commands and a check: ${grouped.ms} ms in groups, ${sequential.ms} ms one after another`,
+    `two 5 s commands and a check: ${grouped.ms} ms in groups (commands ${span(grouped)} ms), ${sequential.ms} ms one after another (commands ${span(sequential)} ms)`,
   );
-  assert.ok(
-    grouped.ms < sequential.ms - 2000,
-    `${grouped.ms} ms in groups, ${sequential.ms} ms one after another`,
-  );
+  assert.ok(span(sequential) >= 10_000);
+  assert.ok(span(grouped) < 10_000, `${span(grouped)} ms`);
 
   // A failure in the first group, with nothing of the other before it, is
   // the run's, read as in declared order, and stops the other group.

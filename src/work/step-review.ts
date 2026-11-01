@@ -238,10 +238,7 @@ function reviewWorkspace(
       checkout: config.checkout,
       repository: config.repository,
       installStore: installStorePath(worktree),
-      sharedInstallStore: sharedInstallStorePath(
-        deps.workDir(state.issue),
-        state.issue,
-      ),
+      sharedInstallStore: sharedInstallStorePath(deps.workDir(state.issue)),
       commit: candidate(state, item.id),
       item,
       plan,
@@ -269,6 +266,7 @@ function reviewLimits(deps: BuildDeps): ReviewLimits {
     commandBudgetMs: review.commandSeconds * 1000,
     commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
     prepareMs: commandTimeoutMs(deps) + 5 * MINUTE,
+    network: deps.config.sandbox.network,
   };
 }
 

@@ -164,6 +164,12 @@ write("labels.json", {
         description: "The last token is dropped.",
         labelledBy: "draft",
       },
+      {
+        id: "no-readme",
+        criteria: [2],
+        description: "The README doesn't name the tokenizer.",
+        labelledBy: "draft",
+      },
     ],
   },
 });
@@ -188,7 +194,14 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
   assert.equal(scores.reviewPrecision, 1);
   assert.equal(scores.refusals, 2);
   assert.equal(scores.refusalPrecision, 0.5);
-  assert.equal(scores.recall, 1);
+  // The README defect is the Objective's: the recorded refusal of it was
+  // labelled for another reason, so it is missed, and shown apart.
+  assert.equal(scores.recall, 0.5);
+  assert.equal(scores.itemRecall, 1);
+  assert.equal(scores.objectiveRecall, 0);
+  assert.deepEqual(scores.missed, [
+    { id: "42-tokenizer-r1", defect: "no-readme", scope: "objective" },
+  ]);
   assert.equal(scores.tokens, 2000);
   assert.equal(card.concurrency, 1);
   const broken = JSON.parse(
@@ -199,8 +212,10 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
   );
   assert.match(broken.error, /not the recorded/);
 
-  // A replay that refuses the README criterion and passes the defect's
-  // misses the defect, and its refusal is left to be labelled by hand.
+  // A replay judged by its defects' criteria: refusing the README
+  // criterion catches the Objective's defect, passing criterion 0 misses
+  // the item's (the gate's recall), and a refusal no defect covers is left
+  // to be labelled by hand.
   const records = loadSet(set, { only: ["42-tokenizer-r1"] });
   const replayed = scoreRun(records, [
     {
@@ -211,16 +226,20 @@ test("the recorded reviews score by their labels, and a replay by its defects' c
       ms: 5,
       verdicts: [
         { criterionIndex: 0, kind: "pass", detail: "" },
-        { criterionIndex: 1, kind: "question", detail: "Are tabs separators?" },
+        {
+          criterionIndex: 1,
+          kind: "refuse",
+          detail: "Tabs aren't separators.",
+        },
         { criterionIndex: 2, kind: "refuse", detail: "No README entry." },
       ],
     },
   ]);
-  assert.equal(replayed.recall, 0);
-  assert.equal(replayed.refusalPrecision, 0);
-  assert.equal(replayed.questions, 1);
+  assert.equal(replayed.itemRecall, 0);
+  assert.equal(replayed.objectiveRecall, 1);
+  assert.equal(replayed.refusalPrecision, 0.5);
   assert.deepEqual(
     replayed.unmatched.map((u) => u.criterionIndex),
-    [2],
+    [1],
   );
 });

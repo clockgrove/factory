@@ -21,6 +21,9 @@
  *   --concurrency N             reviews at once (default: 1, so reviews
  *                               don't stretch each other's wall time;
  *                               more only within the host's share)
+ *   --prepare-concurrency N     preparations at once (default: as
+ *                               --concurrency); preparation isn't review
+ *                               time
  *   --cache DIR                 what replays share across sets and
  *                               labels, such as each item's warm install
  *                               store (default: ~/.cache/factory-bench/
@@ -75,6 +78,7 @@ const { values } = parseArgs({
     effort: { type: "string" },
     runs: { type: "string" },
     concurrency: { type: "string" },
+    "prepare-concurrency": { type: "string" },
     cache: { type: "string" },
     seeded: { type: "boolean" },
     only: { type: "string", multiple: true },
@@ -175,6 +179,7 @@ else {
 
 const runs = adapter === recorded ? 1 : number("runs", 1);
 const concurrency = number("concurrency", 1);
+const prepareConcurrency = number("prepare-concurrency", concurrency);
 const shared = resolve(
   values.cache ??
     join(
@@ -211,14 +216,14 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
     process.kill(process.pid, signal);
   });
 
-/** Run `task` over `items`, `concurrency` at a time. */
-async function pool(items, task) {
+/** Run `task` over `items`, `width` at a time. */
+async function pool(items, width, task) {
   let next = 0;
   const worker = async () => {
     while (next < items.length) await task(items[next++]);
   };
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, worker),
+    Array.from({ length: Math.min(width, items.length) }, worker),
   );
 }
 
@@ -229,6 +234,7 @@ const prepared = new Map();
 if (adapter.prepare)
   await pool(
     replayed.filter((record) => !candidateProblem(scratch.clone, record)),
+    prepareConcurrency,
     async (record) => {
       const started = Date.now();
       try {
@@ -263,7 +269,7 @@ for (let run = 1; run <= runs; run++)
     if (run === 1 || !record.seeded) pairs.push({ run, record });
 const results = [];
 let done = 0;
-await pool(pairs, async ({ run, record }) => {
+await pool(pairs, concurrency, async ({ run, record }) => {
   const file = join(out, "runs", String(run), `${record.id}.json`);
   // An earlier result is reused, but not an error: that review runs again.
   let result =
@@ -342,6 +348,7 @@ const scorecard = {
   ],
   runs,
   concurrency,
+  prepareConcurrency,
   prepare: Object.fromEntries(
     [...prepared].map(([id, entry]) => [
       id,
@@ -364,7 +371,7 @@ for (const [name, part] of [
   if (!part) continue;
   for (const [index, s] of part.runs.entries())
     process.stdout.write(
-      `${name} run ${index + 1}: ${s.reviews} reviews (${s.errors} errors), ${s.refusedReviews} refused (precision ${pct(s.reviewPrecision)}), ${s.refusals} refusals (precision ${pct(s.refusalPrecision)}), defects caught ${s.caught}/${s.defects} (${s.distinctCaught}/${s.distinctDefects} distinct), ${s.questions} questions, ${s.tokens} tokens, ${Math.round(s.ms / 1000)} s\n`,
+      `${name} run ${index + 1}: ${s.reviews} reviews (${s.errors} errors), ${s.refusedReviews} refused (precision ${pct(s.reviewPrecision)}), ${s.refusals} refusals (precision ${pct(s.refusalPrecision)}), item defects caught ${s.itemCaught}/${s.itemDefects} (${s.itemDistinctCaught}/${s.itemDistinctDefects} distinct), objective defects caught ${s.objectiveCaught}/${s.objectiveDefects}, ${s.questions} questions, ${s.tokens} tokens, ${Math.round(s.ms / 1000)} s\n`,
     );
 }
 process.stdout.write(`${join(out, "scorecard.json")}\n`);

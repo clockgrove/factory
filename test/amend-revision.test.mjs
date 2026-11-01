@@ -37,6 +37,7 @@ import {
   NO_GAP_REFUSAL,
   OPERATOR_AMENDMENT_ANSWERS,
   OPERATOR_CORRECTIONS,
+  POLICY_REPLACEMENT,
   REFUSAL_REVIEW_LATER_ROUND,
   SELECTED_MEDIA_ABSENT,
 } from "../dist/planning/rubric.js";
@@ -1551,7 +1552,7 @@ test("a work item's validation command the operator authorized replacing is repl
   assert.ok(reviewing.prompt.includes(OPERATOR_AMENDMENT_ANSWERS));
   assert.match(
     OPERATOR_AMENDMENT_ANSWERS,
-    /is judged only as FACTORY_AMENDMENT's authorizedValidation says: .*never authorizes dropping or weakening one, so a replacement that does is still a fix finding, whatever its reason says\.$/,
+    /is judged only as FACTORY_AMENDMENT's authorizedValidation says: .*never authorizes dropping or weakening one, so a replacement that does is still a fix finding, whatever its reason says\. The one exception: a command neither the Objective nor a pinned source names that re-implements or tightens a repository policy check/,
   );
   assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
   assert.equal((await step(state, deps)).key, "amend:op-1");
@@ -1647,7 +1648,7 @@ test("a started QA item's validation command the operator authorized replacing i
   assert.ok(
     rule.includes(
       inJson(
-        "such a command of any started item, reattempt item or not, may be replaced",
+        "such a command of any started item, reattempt item or not, published or not, may be replaced",
       ),
     ),
   );
@@ -1665,6 +1666,76 @@ test("a started QA item's validation command the operator authorized replacing i
     checked.validation,
   );
   assert.equal(posted.length, 1);
+});
+
+// #2349: live, a published item's planner-written inline copy of the
+// repository's budget script, stricter than the script, failed a result
+// the repository's own check passed; the operator's `replace-validation`
+// was refused as the item was published, and an amendment that dropped
+// the copy's acceptance had it set back.
+const BUDGET_COPY =
+  "node --input-type=module -e 'const d=process.argv[1];if(d>0)process.exit(1)' \"$(git diff --numstat $FACTORY_BASE_SHA -- test | wc -l)\"";
+const BUDGET_ENTRY = "Its test additions stay within its production additions.";
+const withCopy = {
+  ...accepted,
+  items: [
+    work("a", {
+      acceptance: ["a() returns 1.", BUDGET_ENTRY],
+      validation: checks("npm test", BUDGET_COPY),
+    }),
+    qa(["a"]),
+  ],
+};
+const BUDGET_REASON =
+  "It copies the repository's budget script without its allowance; run the repository's own check.";
+
+test("a published item's planner-written policy copy the operator authorized replacing gives way to the repository's command, its acceptance with it (#2349)", async () => {
+  const { checkout, state } = await discovered({
+    answer: withCopy,
+    kept: { "item:a:pushed": ["3".repeat(40)] },
+  });
+  const { planner, asked } = scripted(
+    revision([work("a", { validation: checks("npm test", "npm run check") })]),
+    { findings: [] },
+  );
+  const deps = depsOf(checkout, planner);
+  // Published, not merged: the authorization is recorded.
+  const answered = await step(
+    state,
+    deps,
+    replaceValidation(`a 1 ${BUDGET_REASON}`),
+  );
+  assert.equal(answered.outcome.kind, "retry", JSON.stringify(answered));
+  assert.equal(state.kept["validation:authorized"][0].command, BUDGET_COPY);
+  // The command is replaced and the entry only it checked is dropped:
+  // nothing is set back.
+  const first = await step(state, deps);
+  assert.equal(first.outcome.kind, "done", JSON.stringify(first.outcome));
+  const round = state.done["amend:op-1:plan"];
+  assert.equal(round.restored, undefined);
+  const a = round.draft.items.find((item) => item.id === "a");
+  assert.deepEqual(a.acceptance, ["a() returns 1."]);
+  assert.deepEqual(
+    a.validation.map((entry) => entry.command),
+    ["npm test", "npm run check"],
+  );
+  // The review is told the copy's assertions go with it.
+  const review = await step(state, deps);
+  assert.ok(asked[1].prompt.includes(POLICY_REPLACEMENT));
+  assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
+  assert.equal((await step(state, deps)).key, "amend:op-1");
+  assert.equal(state.done["amend:op-1"].rejected, undefined);
+
+  // A merged item's validation never runs again: refused, nothing recorded.
+  const merged = await discovered({ answer: withCopy });
+  merged.state.done["item:a:merge"] = { merged: true };
+  const refused = await step(
+    merged.state,
+    depsOf(merged.checkout, scripted().planner),
+    replaceValidation(`a 1 ${BUDGET_REASON}`),
+  );
+  assert.match(refused.outcome.question, /Work Item a has merged/);
+  assert.equal(merged.state.kept["validation:authorized"], undefined);
 });
 
 test("an unauthorized replacement, or one authorized under an earlier plan or for another command, is set back (#2199)", async () => {
@@ -1778,7 +1849,7 @@ test("replace-validation to a rejected amendment records the authorization and t
   assert.ok(prompt.includes(OPERATOR_CORRECTIONS));
   assert.match(
     OPERATOR_CORRECTIONS,
-    /A `replace-validation` authorization is judged only as FACTORY_AMENDMENT's authorizedValidation says: .*never authorizes dropping or weakening one, so a replacement that does is still a fix finding, whatever its reason says\.$/,
+    /A `replace-validation` authorization is judged only as FACTORY_AMENDMENT's authorizedValidation says: .*never authorizes dropping or weakening one, so a replacement that does is still a fix finding, whatever its reason says\. The one exception: a command neither the Objective nor a pinned source names that re-implements or tightens a repository policy check/,
   );
   assert.deepEqual(review.outcome, { kind: "done", result: { round: 1 } });
 });

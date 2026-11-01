@@ -546,7 +546,7 @@ function replacementDiscovery(
 ): WorkDiscovery {
   return {
     scope: "in-scope",
-    reason: `${authorizationText(authorized)}\n\nReplace only these validation commands, each with commands that prove what it was there to prove; every other command and field stays as it is.`,
+    reason: `${authorizationText(authorized)}\n\nReplace only these validation commands, each with commands that prove what it was there to prove; every other command stays as it is, and so does every other field, except the acceptance, brief and non-goals restated to match.`,
     evidence: [
       ...authorized.map(
         (entry) =>
@@ -557,7 +557,7 @@ function replacementDiscovery(
     ownership,
     acceptance: authorized.map(
       (entry) =>
-        `${entry.itemId} no longer runs ${JSON.stringify(entry.command)}; the commands in its place prove what it proved, keeping every assertion it makes.`,
+        `${entry.itemId} no longer runs ${JSON.stringify(entry.command)}; the commands in its place prove what it proved, keeping every assertion it makes, unless it re-implements or tightens a repository policy check, which the repository's own command replaces.`,
     ),
     dependencies: [],
   };

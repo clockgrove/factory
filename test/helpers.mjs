@@ -128,6 +128,28 @@ export const KV_SERVICE = (port) => ({
   },
 });
 
+/** A command that asks the KV_SERVICE `request` through `KV_SOCKET` and prints its answer, or the error's code. */
+export const kvAsk = (request) =>
+  `node -e 'const s=require("net").connect(process.env.KV_SOCKET);s.on("connect",()=>s.write(process.argv.slice(1).join(" ")));let d="";s.on("data",(c)=>(d+=c));s.on("end",()=>console.log(d));s.on("error",(e)=>console.log(e.code))' ${request}`;
+
+/** A sandbox configuration, network off, with the KV_SERVICE, which reports whether it reaches `port`. */
+export const servicesSandbox = (port) => ({
+  required: true,
+  network: "off",
+  readOnlyPaths: [],
+  environment: {},
+  services: { kv: KV_SERVICE(port) },
+  limits: {
+    tmpMiB: 64,
+    homeMiB: 64,
+    checkoutMiB: 64,
+    files: 4096,
+    candidateMiB: 16,
+    candidateFiles: 1024,
+    processes: 4096,
+  },
+});
+
 /** A new directory under tmpdir(), removed when the test file ends. */
 export function tempDir(prefix) {
   const dir = mkdtempSync(join(tmpdir(), prefix));

@@ -90,6 +90,7 @@ import { runSandboxed, sandboxAvailable } from "./sandbox.js";
 import type { ObjectiveBlock } from "./shown.js";
 import { errorMessage, failureExcerpt, headAndTail } from "./text.js";
 import { factoryCommit, privateStagingPath } from "./work/collect.js";
+import { AttemptServices, servicesHold } from "./work/services.js";
 import {
   addWorktree,
   clearStaleLocks,
@@ -584,6 +585,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     };
   }
   const scratch: string[] = [];
+  let services: AttemptServices | undefined;
   let produced: string | undefined;
   try {
     const made = async (prefix: string) => {
@@ -649,13 +651,17 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         output: detail,
       };
     }
+    const up = await validationServices(input);
+    if (up && !(up instanceof AttemptServices)) return up;
+    services = up;
     const results: CommandResult[] = [];
     let artifacts: ReviewArtifact[] = [];
     let regenerated: RegeneratedLockfile | undefined;
     let formatted: AppliedFormatter | undefined;
     // An install gets an empty HOME of its own, so nothing an earlier
-    // command left there configures it. `offline` keeps a command off the
-    // network whatever sandbox.network says (the formatter's).
+    // command left there configures it, and no services: as it never gets
+    // sandbox.environment. `offline` keeps a command off the network
+    // whatever sandbox.network says (the formatter's).
     const sandboxed = async (
       command: string,
       whole: RunFile,
@@ -675,6 +681,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         temporary,
         env: {
           ...validationEnvironment(credentials),
+          ...(!grant.install && services?.environment),
           // Factory fetches by SHA and never moves the checkout's
           // remote-tracking branches, so base-relative checks use this
           // (#1664): the plan's base for a command final validation runs
@@ -690,6 +697,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         packageInstall: grant.install,
         network: grant.network,
         readOnlyFiles: linked.map((file) => file.path),
+        ...(!grant.install && services && { services: services.root }),
         ...(grant.outputLimit ? { outputLimit: grant.outputLimit } : {}),
         onOutput: (stream, text) => whole.append(text, stream),
         signal: input.signal,
@@ -1143,11 +1151,41 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       ...(formatted && { formatted }),
     };
   } finally {
+    await services?.stop();
     await Promise.all(scratch.map((path) => forceRemove(path)));
     await removeWorktree(checkout, worktree, input.signal).catch(
       () => undefined,
     );
   }
+}
+
+/**
+ * The configured `sandbox.services` for one sandboxed sequence of
+ * validation commands (#2291): started fresh and empty for it alone, and
+ * stopped when it ends. Never a worker's, so the commands see what a fresh
+ * checkout's would. On the network its commands have (`host`, else a
+ * namespace of its own); they reach the services only through their
+ * read-only directory. A service that won't start or get ready holds with
+ * its output: a host or configuration problem, the same for every item.
+ * Absent without any configured. A sequence run beside another starts its
+ * own.
+ */
+async function validationServices(
+  input: ValidateInput,
+): Promise<
+  AttemptServices | Extract<Validation, { kind: "hold" }> | undefined
+> {
+  if (!input.sandbox.services) return undefined;
+  const started = await AttemptServices.start(
+    input.sandbox,
+    input.sandbox.network === "host" ? "host" : "off",
+    input.signal,
+    input.log,
+    "validation",
+  );
+  return "problem" in started
+    ? objectiveWide(hold(servicesHold(started.problem)))
+    : started;
 }
 
 /**

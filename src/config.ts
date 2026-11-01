@@ -296,9 +296,10 @@ export interface SandboxConfig {
    */
   environment: Record<string, string>;
   /**
-   * Throwaway services each worker attempt gets, by name (work/services.ts),
-   * such as a PostgreSQL its tests use; absent: none. Operational: they
-   * help a worker check its own work, and validation never uses them.
+   * Throwaway services each worker attempt's shell and each validation run
+   * gets, by name (work/services.ts), such as a PostgreSQL tests use;
+   * absent: none. Operational, as `toolchain`: they are the host's means to
+   * run the commands, so a broken entry is fixed under a running Objective.
    */
   services?: Record<string, SandboxService>;
   limits: SandboxLimits;
@@ -308,15 +309,15 @@ export interface SandboxConfig {
 export interface SandboxService {
   /**
    * Starts the service in the foreground (`sh -c`, so `exec` the server):
-   * it is stopped when the attempt ends, and its exit before then is a
-   * failure. `$FACTORY_SERVICE_DIR` is its private directory, where it
+   * it is stopped when the run (a worker attempt, a validation) ends, and
+   * its exit before then is a failure. `$FACTORY_SERVICE_DIR` is its private directory, where it
    * keeps its data and its socket.
    */
   start: string;
   /** Exits zero once the service is ready; run until it does, for at most a minute. */
   ready: string;
   /**
-   * Variables the worker's commands get, checked as `sandbox.environment`;
+   * Variables the run's commands get, checked as `sandbox.environment`;
    * `${FACTORY_SERVICE_DIR}` in a value is the service's directory.
    */
   environment: Record<string, string>;

@@ -1,13 +1,13 @@
 /**
  * The operating-system sandbox for every command a worker can cause to run
  * on the controller's host: declared validation commands, setup and probe
- * commands, the Claude worker's shell and a worker attempt's services
- * (work/services.ts). Each command runs under
+ * commands, the Claude worker's shell and the services a worker attempt or
+ * a validation run starts (work/services.ts). Each command runs under
  * bubblewrap in new user, PID, IPC, UTS, cgroup and network namespaces. It
  * sees the system read-only, the PATH's toolchains read-only, its checkout
  * (writable, its `.git` entry read-only) and the checkout's git metadata
- * read-only, a private HOME and TMPDIR, a worker attempt's services
- * directory read-only (work/services.ts), and nothing else: not the
+ * read-only, a private HOME and TMPDIR, its run's services directory
+ * read-only (work/services.ts), and nothing else: not the
  * operator's HOME, logins, SSH keys, gh or provider configuration, nor
  * Factory's own configuration, data or state. Network is off; loopback
  * works. A verified package install may get outbound network in its own
@@ -1162,8 +1162,9 @@ export interface SandboxOptions {
   /** Further host directories to mount read-only. */
   readOnly?: string[];
   /**
-   * A worker attempt's services directory (work/services.ts), Factory's
-   * own under the host's temporary directory, mounted read-only: the
+   * A worker attempt's or validation run's services directory
+   * (work/services.ts), Factory's own under the host's temporary
+   * directory, mounted read-only: the
    * command connects to the sockets in it and writes nothing there.
    */
   services?: string;

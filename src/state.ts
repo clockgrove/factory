@@ -8,6 +8,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -843,9 +844,18 @@ export function listObservations(
   return found;
 }
 
-/** The Objective's active state, else its finished one; null when it has neither. */
+/**
+ * The Objective's active state, else its finished one; null when it has
+ * neither. A finished one that can't be read comes with `finishedAt`.
+ */
 export function findState(dir: string, issue: number): Loaded | null {
-  return loadState(dir, issue) ?? loadState(join(dir, FINISHED), issue);
+  const active = loadState(dir, issue);
+  if (active) return active;
+  const finished = join(dir, FINISHED);
+  const loaded = loadState(finished, issue);
+  if (loaded?.kind !== "unreadable") return loaded;
+  const { mtime } = statSync(statePath(finished, issue));
+  return { ...loaded, finishedAt: mtime.toISOString() };
 }
 
 /** Every issue with an active or a finished state file. */
@@ -875,6 +885,12 @@ export type Loaded =
       error: string;
       /** The file's digest: one incident of unreadable state, until the file changes. */
       incident: string;
+      /**
+       * A finished Objective's file (in finished/): when it was last saved,
+       * about when it ended. Nothing runs for it, so nothing asks about it:
+       * readers show it finished, and a predecessor check asks GitHub.
+       */
+      finishedAt?: string;
     };
 
 /**

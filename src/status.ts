@@ -390,6 +390,31 @@ export function statusOf(
   },
 ): ObjectiveView {
   const { issue, lastEvent } = context;
+  // A finished Objective's record that can't be read (an older state
+  // version, say): nothing runs for it, so there is nothing to ask.
+  if (loaded.kind === "unreadable" && loaded.finishedAt !== undefined)
+    return {
+      issue,
+      status: "unreadable",
+      phase: "finished, its record unreadable",
+      mode: "running",
+      holds: [],
+      items: [],
+      waiting: [],
+      waitsOn: null,
+      running: [],
+      flakyRerun: [],
+      finalSkipped: [],
+      decisions: [],
+      recentDecisions: [],
+      endedAt: loaded.finishedAt,
+      nextAction: {
+        command: null,
+        reason: `It finished, and its record can't be read (${loaded.error}), so status shows nothing more of it. Nothing runs for it.`,
+      },
+      lastEvent,
+      error: loaded.error,
+    };
   if (loaded.kind === "unreadable")
     return {
       issue,

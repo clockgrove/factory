@@ -16,7 +16,7 @@ import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
 import { type MutationPass, mutationPass } from "../review/mutants.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
-import { failureExcerpt } from "../text.js";
+import { errorMessage, failureExcerpt } from "../text.js";
 import {
   formatRef,
   laterScriptChanges,
@@ -149,21 +149,46 @@ export async function validateStep(
     log: context.log,
     runFile: context.runFile,
     // The mutation pass, on the passed result in its checkout.
+    // It is evidence for the review, so one that can't run is a note,
+    // never the result's failure.
     use: async (validated) => {
-      mutation = await mutationPass({
-        checkout: validated,
-        repo: validated.directory,
-        base: work.base,
-        commit: "HEAD",
-        commands: ownCommands(item),
-        limits: {
-          max: config.review.mutants,
-          ms: config.review.mutationSeconds * 1000,
-        },
-        seed: item.id,
-        signal,
-        log: context.log,
-      });
+      const started = Date.now();
+      try {
+        mutation = await mutationPass({
+          checkout: validated,
+          repo: validated.directory,
+          base: work.base,
+          commit: "HEAD",
+          commands: ownCommands(item),
+          limits: {
+            max: config.review.mutants,
+            ms: config.review.mutationSeconds * 1000,
+          },
+          seed: item.id,
+          signal,
+          log: context.log,
+        });
+      } catch (error) {
+        signal.throwIfAborted();
+        mutation = {
+          status: "skipped",
+          note: `The mutation pass could not run: ${errorMessage(error)}`,
+          seeded: 0,
+          killed: 0,
+          survived: 0,
+          survivors: [],
+          ms: Date.now() - started,
+        };
+        context.log({
+          event: "mutation-pass",
+          status: "skipped",
+          seeded: 0,
+          killed: 0,
+          survived: 0,
+          ms: mutation.ms,
+          error: errorMessage(error),
+        });
+      }
     },
   });
   switch (result.kind) {

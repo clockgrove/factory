@@ -1,30 +1,29 @@
 /**
  * The result reviewer of #2344: the item's own acceptance only, a mutation
- * pass's survivors as evidence, a reviewer that runs commands in a scratch
- * checkout, and refusals only with a repro its refusal check confirmed.
- * Driven through the build's own entry point, dist/review/item.js
- * `reviewResult`, with the build's planner for the provider, its scratch
- * checkouts (`validationScratch`) and its mutation pass (`mutationPass`),
- * fresh: no earlier review, no prior refusals, no operator decisions.
+ * pass's survivors as evidence, a reviewer that runs commands in a copy of
+ * its workspace, a protected-test check, and refusals only with a repro
+ * its refusal check confirmed. Driven through the build's own entry point,
+ * dist/review/item.js `reviewResult`, with the build's planner for the
+ * provider and its workspace (`validationWorkspace`), fresh: no earlier
+ * review, no prior refusals, no operator decisions. The review runs its
+ * workspace's install, its mutation pass and the reviewer call side by
+ * side, as Factory's review step does.
  *
  * Set up as production is (`prepare`, once per record, before any
  * review): each item has a warm install store, as Factory's validate step
  * keeps one per item and one per Objective (#2280), filled by one install
- * and given to every validation, scratch checkout and repro check after
- * it, so each install there takes what a warm one takes. The mutation
- * pass runs, as the validate step runs it, in a validation of the
- * candidate (`validateTree`, the item's commands), kept per record for its
- * runs. The installation's sandbox, validation and review settings come
- * from the set's `config.json` (read with the build's own `loadConfig`),
- * and the Objective's blocks from the record's `inputs`.
+ * and given to every review workspace after it. The installation's
+ * sandbox, validation and review settings come from the set's
+ * `config.json` (read with the build's own `loadConfig`), and the
+ * Objective's blocks from the record's `inputs`.
  *
- * Each review's `phases`: the mutation pass it is given (`mutationMs`),
- * making its scratch checkouts (`scratchPrepareMs`, `scratchCheckouts`),
- * the reviewer's commands (`commands`, `commandsMs`, which run inside the
- * model call's time) and the repro checks (`repros`, `reprosMs`, each with
- * its checkout).
+ * Each review's `phases` are the build's own `result-review` event's: the
+ * workspace's install (`scratchPrepareMs`), the mutation pass
+ * (`mutationMs`), the reviewer's commands (`commands`, `commandsMs`,
+ * inside the model calls' time), the repro checks (`reprosMs`) and the
+ * protected-test check (`protectedMs`).
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { plannerConfig } from "./v1.mjs";
 
@@ -34,7 +33,7 @@ export const id = "v2";
 export const fits = (_result, build) =>
   existsSync(join(build, "dist/review/item.js"));
 
-/** Its scratch checkouts are its own (`validationScratch`). */
+/** Its checkouts are its own workspace's (`validationWorkspace`). */
 export const needsTree = false;
 
 const MINUTE = 60_000;
@@ -114,91 +113,20 @@ function ownCommands(factory, item) {
 }
 
 /**
- * Before any review of the record: a warm install store (one install-only
- * checkout fills it, or finds it warm), then the mutation pass, kept in
- * `cache.record` across invocations. Returns `{ mutation, installMs }`.
+ * Before any review of the record: a warm install store, which one
+ * install-only checkout fills, or finds warm. Returns `{ installMs }`.
  */
 export async function prepare({ build, set, cache, record, checkout, signal }) {
   const factory = await load(build);
   const config = installation(factory, set);
   const at = { checkout, cache, files: join(cache.record, "files") };
-  const item = record.plan.items.find((entry) => entry.id === record.item);
-  const log = () => undefined;
-  const scratch = factory.item.validationScratch(
-    validationInput(factory, config, record, at, signal, log),
-    (name) => join(cache.record, `prepare-${name}`),
+  const workspace = factory.item.validationWorkspace(
+    validationInput(factory, config, record, at, signal, () => undefined),
+    join(cache.record, "prepare-warm"),
   );
   const installed = Date.now();
-  await scratch("warm", async () => undefined);
-  const installMs = Date.now() - installed;
-  const file = join(cache.record, "mutation.json");
-  if (existsSync(file))
-    return { mutation: JSON.parse(readFileSync(file, "utf8")), installMs };
-  let mutation;
-  const started = Date.now();
-  const validated = await factory.validate.validateTree({
-    ...validationInput(factory, config, record, at, signal, log),
-    directory: join(cache.record, "prepare-validation"),
-    use: async (validatedCheckout) => {
-      mutation = await factory.mutants.mutationPass({
-        checkout: validatedCheckout,
-        repo: validatedCheckout.directory,
-        base: record.candidate.base,
-        commit: "HEAD",
-        commands: ownCommands(factory, item),
-        limits: {
-          max: config.review.mutants,
-          ms: config.review.mutationSeconds * 1000,
-        },
-        seed: item.id,
-        signal,
-        log,
-      });
-    },
-  });
-  mutation ??= {
-    status: "skipped",
-    note: `The candidate's validation didn't pass in the replay (${validated.kind}: ${String(validated.detail ?? validated.reason ?? validated.question ?? "").slice(0, 400)}), so no mutation pass ran.`,
-    seeded: 0,
-    killed: 0,
-    survived: 0,
-    survivors: [],
-    ms: Date.now() - started,
-  };
-  writeFileSync(file, `${JSON.stringify(mutation, null, 2)}\n`);
-  return { mutation, installMs };
-}
-
-/** `scratch`, timing how long each checkout takes to make and each command in it runs. */
-function timedScratch(scratch, phases) {
-  return (name, use) => {
-    const asked = Date.now();
-    return scratch(name, (checkout) => {
-      phases.scratchCheckouts += 1;
-      phases.scratchPrepareMs += Date.now() - asked;
-      const run = async (command, ms) => {
-        const started = Date.now();
-        try {
-          return await checkout.run(command, ms);
-        } finally {
-          const took = Date.now() - started;
-          if (name === "repro") {
-            phases.repros += 1;
-            phases.reprosMs += took;
-          } else {
-            phases.commands += 1;
-            phases.commandsMs += took;
-          }
-        }
-      };
-      return use(
-        new Proxy(checkout, {
-          get: (target, key) =>
-            key === "run" ? run : Reflect.get(target, key, target),
-        }),
-      );
-    });
-  };
+  await workspace(async () => undefined);
+  return { installMs: Date.now() - installed };
 }
 
 export async function review({
@@ -215,29 +143,12 @@ export async function review({
 }) {
   const factory = await load(build);
   const config = installation(factory, set);
-  const { mutation } = prepared;
   const events = [];
   const logged = (event) => {
     events.push(event);
     log(event);
   };
-  const phases = {
-    mutationMs: mutation.ms,
-    scratchCheckouts: 0,
-    scratchPrepareMs: 0,
-    commands: 0,
-    commandsMs: 0,
-    repros: 0,
-    reprosMs: 0,
-  };
   const at = { checkout, cache, files: join(dir, "files") };
-  const scratch = timedScratch(
-    factory.item.validationScratch(
-      validationInput(factory, config, record, at, signal, logged),
-      (name) => join(dir, `scratch-${name}`),
-    ),
-    phases,
-  );
   const item = record.plan.items.find((entry) => entry.id === record.item);
   const { candidate, validation } = record;
   const answer = await factory.item.reviewResult({
@@ -260,12 +171,22 @@ export async function review({
     sources: record.sources,
     dir: join(dir, "review"),
     ...(record.notes ? { notes: record.notes } : {}),
-    scratch,
-    ...(mutation.status === "skipped" && !mutation.seeded ? {} : { mutation }),
-    commandMs: Math.min(
-      config.validation.commandTimeoutSeconds * 1000,
-      10 * MINUTE,
+    workspace: factory.item.validationWorkspace(
+      validationInput(factory, config, record, at, signal, logged),
+      join(dir, "scratch"),
     ),
+    mutation: { commands: ownCommands(factory, item), seed: item.id },
+    limits: {
+      mutants: config.review.mutants,
+      mutationMs: config.review.mutationSeconds * 1000,
+      commands: config.review.commands,
+      commandBudgetMs: config.review.commandSeconds * 1000,
+      commandMs: Math.min(
+        config.validation.commandTimeoutSeconds * 1000,
+        10 * MINUTE,
+      ),
+      prepareMs: config.validation.commandTimeoutSeconds * 1000 + 5 * MINUTE,
+    },
     signal,
     log: logged,
   });
@@ -290,20 +211,33 @@ export async function review({
     })),
   ];
   const tally = events.filter((e) => e.event === "result-review").at(-1);
+  const mutation = events.filter((e) => e.event === "mutation-pass").at(-1);
+  const phases = tally?.phases;
   return {
     verdicts,
     extra: {
-      phases,
+      phases: {
+        scratchPrepareMs: phases?.prepareMs ?? null,
+        mutationMs: phases?.mutationMs ?? null,
+        commands: phases?.commands.count ?? 0,
+        commandsMs: phases?.commands.ms ?? 0,
+        reprosMs: phases?.reprosMs ?? 0,
+        ...(phases?.protectedMs !== undefined && {
+          protectedMs: phases.protectedMs,
+        }),
+      },
       repros: tally?.repros ?? null,
       calls: tally?.calls ?? null,
-      mutation: {
-        status: mutation.status,
-        seeded: mutation.seeded,
-        killed: mutation.killed,
-        survived: mutation.survived,
-        ms: mutation.ms,
-        ...(mutation.note ? { note: mutation.note } : {}),
-      },
+      mutation: mutation
+        ? {
+            status: mutation.status,
+            seeded: mutation.seeded,
+            killed: mutation.killed,
+            survived: mutation.survived,
+            lanes: mutation.lanes,
+            ms: mutation.ms,
+          }
+        : null,
       installMs: prepared.installMs,
     },
   };

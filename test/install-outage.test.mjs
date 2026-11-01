@@ -173,7 +173,7 @@ async function validateCandidate() {
     },
     {
       config: { ...config, sandbox, checkout },
-      workDir: () => workDir,
+      workDir: (issue) => join(workDir, "work", String(issue)),
       github: {},
     },
     undefined,

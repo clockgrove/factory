@@ -43,7 +43,7 @@ export interface WorkerInput {
   /** The commit the worktree started from. */
   base: string;
   /**
-   * The install store the Objective's items share (worktree.ts
+   * The install store the installation shares (worktree.ts
    * `sharedInstallStorePath`), for its own Validate as for the validate
    * step; absent: only the item's own.
    */

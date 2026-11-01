@@ -146,6 +146,8 @@ export const servicesSandbox = (port) => ({
     files: 4096,
     candidateMiB: 16,
     candidateFiles: 1024,
+    installStoreDays: 14,
+    installStoreMiB: 20_480,
     processes: 4096,
   },
 });

@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -23,12 +24,8 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { sandboxAvailable } from "../dist/sandbox.js";
-import {
-  installKey,
-  keptStore,
-  sharedStore,
-  validateTree,
-} from "../dist/validate.js";
+import { StoreClaims, sharedStore } from "../dist/shared-install-store.js";
+import { installKey, keptStore, validateTree } from "../dist/validate.js";
 import { SelfValidation } from "../dist/work/self-validate.js";
 import { qaValidateStep, validateStep } from "../dist/work/steps.js";
 import {
@@ -735,9 +732,11 @@ test("items whose install inputs are their start's share the Objective's store; 
 test("installs of one key at once share one store, neither emptying the other's", async () => {
   const directory = join(tempDir("factory-objective-"), ".packages");
   const key = "c".repeat(64);
+  const claims = new StoreClaims();
+  after(() => claims[Symbol.dispose]());
   const made = await Promise.all([
-    sharedStore(directory, key),
-    sharedStore(directory, key),
+    sharedStore(directory, key, claims),
+    sharedStore(directory, key, claims),
   ]);
   assert.deepEqual(
     made.map((store) => store.root),
@@ -745,7 +744,7 @@ test("installs of one key at once share one store, neither emptying the other's"
   );
   assert.deepEqual(made.map((store) => store.reused).sort(), [false, true]);
   writeFileSync(join(made[0].root, "package"), "fetched");
-  assert.equal((await sharedStore(directory, key)).reused, true);
+  assert.equal((await sharedStore(directory, key, claims)).reused, true);
   assert.ok(existsSync(join(made[0].root, "package")));
   // Nothing half-made is left beside it.
   assert.deepEqual(readdirSync(directory), [key]);
@@ -789,19 +788,20 @@ test("the kept store counts against the install's HOME budget, and one over it i
 });
 
 /** The step context and dependencies a Work Item's steps run with. */
-function stepRun(config, state, events) {
+function stepRun(config, state, events, root = tempDir("factory-work-")) {
   const log = new RunLog(
     config.inst.logs,
     "2026-01-01T00-00-00-000Z-1",
     CAPTURE_OFF,
     [],
   );
-  const workDir = tempDir("factory-work-");
+  // The installation's work root, with an Objective's directory under it.
+  const workDir = join(root, "work", String(state.issue));
   return {
     workDir,
     deps: {
       config: { ...config.config, checkout: config.checkout },
-      workDir: () => workDir,
+      workDir: (issue) => join(root, "work", String(issue)),
       github: {},
     },
     context: {
@@ -847,7 +847,7 @@ test("the validate step reuses the store the worker's Validate filled", {
   // The worker's worktree, where the work step put it, and its Validate
   // with the Objective's shared store, as the work step gives it.
   const worktree = worktreePath(workDir, state.issue, work.id);
-  const shared = sharedInstallStorePath(workDir, state.issue);
+  const shared = sharedInstallStorePath(workDir);
   await addWorktree(checkout, worktree, base, context.signal);
   writeFileSync(join(worktree, "src/index.js"), "export const a = 1;\n");
   const validator = new SelfValidation(
@@ -881,7 +881,7 @@ test("the validate step reuses the store the worker's Validate filled", {
   assert.equal(existsSync(installStorePath(worktree)), false);
 });
 
-test("a QA item's validate step keeps its store, reused when it runs again", {
+test("a second Objective's first install reuses the store the first Objective's install filled", {
   skip,
 }, async () => {
   const configured = sandboxConfig();
@@ -898,28 +898,75 @@ test("a QA item's validate step keeps its store, reused when it runs again", {
     kind: "qa",
     validation: [{ command: BOOTSTRAP }],
   });
-  const state = {
-    issue: 8,
-    done: { check: { shown: { blocks: [] } }, plan: plan([qa], { base }) },
-    kept: {},
-  };
   const events = [];
-  const { workDir, deps, context } = stepRun(
-    { ...configured, checkout },
-    state,
-    events,
-  );
-  for (let run = 0; run < 2; run++) {
+  const work = tempDir("factory-work-");
+  const objectives = [];
+  for (const issue of [8, 9]) {
+    const state = {
+      issue,
+      done: { check: { shown: { blocks: [] } }, plan: plan([qa], { base }) },
+      kept: {},
+    };
+    const { workDir, deps, context } = stepRun(
+      { ...configured, checkout },
+      state,
+      events,
+      work,
+    );
     const outcome = await qaValidateStep(qa, context, deps);
     assert.equal(outcome.kind, "done", JSON.stringify(outcome).slice(0, 1500));
+    objectives.push(workDir);
   }
   assert.deepEqual(installEvents(events), ["new", "reused"]);
-  // The head's install inputs are the base's: the Objective's store.
-  const shared = sharedInstallStorePath(workDir, state.issue);
+  // The head's install inputs are the base's: the installation's store,
+  // beside both Objectives' work directories.
+  const [first, second] = objectives;
+  assert.equal(sharedInstallStorePath(first), sharedInstallStorePath(second));
+  const shared = sharedInstallStorePath(first);
+  assert.equal(shared, join(work, "work", ".packages"));
   const [key] = readdirSync(shared);
   assert.equal(readdirSync(join(shared, key, "cache", "pnpm-store")).length, 2);
-  assert.equal(
-    existsSync(installStorePath(worktreePath(workDir, state.issue, qa.id))),
-    false,
-  );
+  for (const workDir of objectives)
+    assert.equal(
+      existsSync(installStorePath(worktreePath(workDir, 8, qa.id))),
+      false,
+    );
+});
+
+test("pruning removes keys by age and by total size, never one in use or used lately", async () => {
+  const directory = join(tempDir("factory-installation-"), ".packages");
+  const key = (letter) => letter.repeat(64);
+  const DAY = 24 * 60 * 60 * 1000;
+  // A key an install used `daysAgo`, and still holds when `held`.
+  const made = async (letter, daysAgo, kibibytes = 1, held = false) => {
+    const claims = new StoreClaims();
+    const store = await sharedStore(directory, key(letter), claims);
+    writeFileSync(join(store.root, "package"), Buffer.alloc(kibibytes * 1024));
+    const used = new Date(Date.now() - daysAgo * DAY);
+    utimesSync(store.directory, used, used);
+    if (!held) claims[Symbol.dispose]();
+    return claims;
+  };
+  const kept = () => readdirSync(directory).sort();
+  const retention = { days: 7, mib: 1024 };
+  // Old and in use, old and idle, old, and used a few minutes ago.
+  const inUse = await made("a", 30, 1, true);
+  await made("b", 30);
+  await made("c", 10);
+  await made("d", 0);
+  const claims = new StoreClaims();
+  await sharedStore(directory, key("e"), claims, retention);
+  // The idle old ones go; the one in use and the recent one stay.
+  assert.deepEqual(kept(), [key("a"), key("d"), key("e")]);
+  // Once its install ends, the old one goes with the next new key.
+  inUse[Symbol.dispose]();
+  await sharedStore(directory, key("f"), claims, retention);
+  assert.deepEqual(kept(), [key("d"), key("e"), key("f")]);
+  // Over the size cap, the least recently used idle keys go first, until the rest fit.
+  await made("1", 3, 700);
+  await made("2", 2, 700);
+  await made("3", 1, 700);
+  await sharedStore(directory, key("4"), claims, { days: 7, mib: 1 });
+  assert.deepEqual(kept(), [key("3"), key("4"), key("d"), key("e"), key("f")]);
+  claims[Symbol.dispose]();
 });

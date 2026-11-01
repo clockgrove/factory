@@ -498,7 +498,7 @@ export async function workStep(
         item,
         commands: item.validation.map((v) => v.command),
         base,
-        sharedInstallStore: sharedInstallStorePath(workDir, state.issue),
+        sharedInstallStore: sharedInstallStorePath(workDir),
         signal,
         log: context.log,
         activity: activity.report,

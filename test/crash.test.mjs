@@ -2,10 +2,20 @@
 // check that a restart finishes the work exactly once.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { connect } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
+import { loadConfig } from "../dist/config.js";
+import { CAPTURE_OFF, RunLog } from "../dist/log.js";
+import { sandboxAvailable } from "../dist/sandbox.js";
+import { validateTree } from "../dist/validate.js";
 import { AttemptServices } from "../dist/work/services.js";
 import {
   children,
@@ -15,6 +25,9 @@ import {
   exited,
   githubOrigin,
   installation,
+  item,
+  plan,
+  REPO,
   seed,
   serve,
   servicesSandbox,
@@ -346,3 +359,118 @@ process.exit(3);`,
       }
       assert.deepEqual(services(), [basename(live)]);
     });
+
+// A validation's groups of commands (validate.ts `inGroups`) at their
+// checkouts' crash points: the next validation of the same directory
+// removes what the crashed one left, runs its groups again and passes,
+// leaving no checkout behind.
+for (const point of [
+  "validation:group-checkout:before",
+  "validation:group-checkout:after",
+]) {
+  test(`crash at ${point}, the next validation passes and leaves no checkout`, {
+    skip: sandboxAvailable().available
+      ? false
+      : "needs the command sandbox (bubblewrap)",
+  }, async () => {
+    const checkout = tempDir("factory-groups-crash-");
+    const git = (...args) =>
+      spawnSync(
+        "git",
+        [
+          "-C",
+          checkout,
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@example.com",
+          ...args,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+    git("init", "--quiet");
+    writeFileSync(join(checkout, "a"), "a\n");
+    writeFileSync(join(checkout, "b"), "b\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "base");
+    const base = git("rev-parse", "HEAD");
+    const inst = installation();
+    configured(inst, "http://127.0.0.1:1");
+    process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+    const { sandbox } = loadConfig(REPO);
+    delete process.env.FACTORY_CONFIG;
+    const work = item("a", {
+      validation: [
+        { command: "test -f a" },
+        { command: "test -f b", after: [] },
+      ],
+    });
+    const input = {
+      checkout,
+      repository: REPO,
+      directory: `${checkout}.validation`,
+      commit: base,
+      item: work,
+      plan: plan([work], { base }),
+      blocks: [],
+      sandbox,
+      commandTimeoutMs: 60_000,
+    };
+    const dist = (path) => new URL(`../dist/${path}`, import.meta.url).href;
+    const child = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
+import { validateTree } from ${JSON.stringify(dist("validate.js"))};
+const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-1", CAPTURE_OFF, []);
+await validateTree({ ...JSON.parse(process.env.INPUT), signal: AbortSignal.timeout(60_000), log: () => {}, runFile: (kind) => log.runFile(1, "item:a:validate#1." + kind) });
+process.exit(3);`,
+      ],
+      {
+        env: {
+          ...process.env,
+          FACTORY_CRASH_AT: point,
+          INPUT: JSON.stringify(input),
+          LOGS: inst.logs,
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    children.add(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const exit = new Promise((resolve) =>
+      child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
+    );
+    const death = await exited(
+      { child, exit, stderr: () => stderr },
+      `validation set to crash at ${point}`,
+    );
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    assert.ok(
+      existsSync(`${checkout}.validation.groups`) || point.endsWith(":before"),
+    );
+
+    const log = new RunLog(
+      inst.logs,
+      "2026-01-01T00-00-00-000Z-2",
+      CAPTURE_OFF,
+      [],
+    );
+    const events = [];
+    const result = await validateTree({
+      ...input,
+      signal: AbortSignal.timeout(60_000),
+      log: (event) => events.push(event),
+      runFile: (kind) => log.runFile(1, `item:a:validate#2.${kind}`),
+    });
+    assert.equal(result.kind, "passed", result.detail);
+    assert.ok(events.some((event) => event.event === "validation-groups"));
+    assert.equal(existsSync(`${checkout}.validation`), false);
+    assert.equal(existsSync(`${checkout}.validation.groups`), false);
+    assert.equal(git("worktree", "list").split("\n").length, 1);
+  });
+}

@@ -3,12 +3,16 @@
  * Validate tool and final validation all run a candidate's commands here, in
  * a fresh detached worktree of the exact commit, every command through the
  * OS sandbox. Before anything runs, the package scripts the commands use are
- * pinned to the accepted base. The answer is data: per-command results, or a
+ * pinned to the accepted base. A Work Item's commands whose `after` puts
+ * them in groups that need nothing of each other run at once after the
+ * install, each group in a checkout of its own, as far as validation slots
+ * are free (`inGroups`, #2290). The answer is data: per-command results, or a
  * classified problem the step turns into an outcome. A failed command is the
  * candidate's (repair); a failed install whose inputs match the base is the
  * environment's (retry); an install that ran offline for the host's lack of
  * network, or a configuration fault, is the operator's (hold).
  */
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -23,13 +27,14 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { cp, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
-import { hold, type Outcome, objectiveWide } from "./engine.js";
+import { crashPoint } from "./crash.js";
+import { hold, hostLimits, type Outcome, objectiveWide } from "./engine.js";
 import { GitRefusal, readBlobs } from "./git.js";
 import type { CommitAuthor } from "./github.js";
 import type { RunFile } from "./log.js";
@@ -227,6 +232,51 @@ export function skippedPrerequisites(
     .filter((earlier) => !before.has(earlier))
     .sort((a, b) => a - b);
 }
+
+/**
+ * A run's commands after the install and the formatter (`indices`, in run
+ * order), split into groups that need nothing of each other (#2290): a
+ * command is in the group of each earlier command of the run its `after`
+ * lists or, declaring none, of every earlier one. Each group keeps the run
+ * order; the groups go by their first command.
+ */
+function commandGroups(
+  validation: readonly ValidationCommand[],
+  indices: readonly number[],
+): number[][] {
+  const joined = new Map(indices.map((index) => [index, index]));
+  const root = (index: number): number => {
+    const up = joined.get(index)!;
+    return up === index ? index : root(up);
+  };
+  for (const index of indices)
+    for (const earlier of validation[index]!.after ??
+      indices.filter((other) => other < index))
+      if (joined.has(earlier)) joined.set(root(earlier), root(index));
+  const groups = new Map<number, number[]>();
+  for (const index of indices)
+    groups.set(root(index), [...(groups.get(root(index)) ?? []), index]);
+  return [...groups.values()];
+}
+
+/**
+ * One group of a Work Item's commands (`commandGroups`), run beside the
+ * others in a checkout of its own: `validateCandidate`'s `group`.
+ */
+interface Group {
+  /** Its place among the groups: its checkout's name and its log events'. */
+  number: number;
+  /** Its commands, by index, in run order, after the exact install when the run starts with one. */
+  order: number[];
+  /** The commit the formatter left: the candidate, or Factory's commit of it. */
+  commit: string;
+  /** The HOME the formatter left, which the group starts from a copy of. */
+  home: string;
+  /** The command it runs, or last ran: where it stopped. */
+  at: number;
+}
+
+const execFileAsync = promisify(execFile);
 
 export interface ValidateInput {
   /** The target clone; the fresh worktree is linked from it. */
@@ -497,18 +547,30 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
   };
 }
 
-async function validateCandidate(input: ValidateInput): Promise<Validation> {
+/**
+ * With `group`, one group of a Work Item's commands, from the run that
+ * made the formatter's and the lockfile's commits (`inGroups`, #2290): no
+ * pins, formatter or lockfile resolution again; a fresh checkout of
+ * `group.commit`, the exact install (on the warm store) and the group's
+ * commands. Its checkout stays for that run, which removes it.
+ */
+async function validateCandidate(
+  input: ValidateInput,
+  group?: Group,
+): Promise<Validation> {
   const { checkout, plan, item } = input;
   // A regenerated lockfile moves both to Factory's commit on the candidate.
-  let { commit } = input;
+  let commit = group?.commit ?? input.commit;
   const { preparation, commands } = item
     ? validationSequence(item)
     : finalSequence(plan);
   const sequence = [...preparation, ...commands];
   // Every command is pinned below; only those of `only` run (#2281).
-  const order = item
-    ? runOrder(item.validation, { only: input.only, first: input.first })
-    : sequence.map((_, index) => index);
+  const order = group
+    ? group.order
+    : item
+      ? runOrder(item.validation, { only: input.only, first: input.first })
+      : sequence.map((_, index) => index);
   const ran = order.map((index) => sequence[index]!);
   const atFinal = checkedAtFinal(plan);
   const { signal } = input;
@@ -516,7 +578,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
   // Sandboxed commands can write any directory of the checkout. Behind a
   // gitlink, host-side Git would enter a repository they wrote, with its
   // configuration; so no tree with one is validated.
-  if (await hasGitlink(checkout, { commit, signal }))
+  if (!group && (await hasGitlink(checkout, { commit, signal })))
     return objectiveWide(
       hold(
         "Factory does not validate trees that contain submodule gitlinks: host-side Git would enter repositories sandboxed commands can write. Use Factory on a repository without submodules.",
@@ -534,29 +596,33 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       ),
     );
   const selectors = capture ? selectorsFor(capture.configured, item) : [];
-  const refusal = await pinRefusal(
-    new Revisions(checkout, commit, signal),
-    plan.base,
-    commit,
-    sequence,
-    item
-      ? {
-          sourceDeclared: sourceDeclared([item]),
-          workspacePackageAdditions: workspaceAdditions(input.blocks).additions,
-          packageManagerUpdate: packageManagerUpdate(input.blocks),
-          predecessor: input.predecessor,
-          requirePackageManagerUpdate: input.requirePackageManagerUpdate,
-        }
-      : {
-          sourceDeclared: [
-            ...sourceDeclared(plan.items),
-            ...plan.finalCommands,
-          ],
-          workspacePackageAdditions: workspaceAdditions(input.blocks).additions,
-          packageManagerUpdate: packageManagerUpdate(input.blocks),
-          requirePackageManagerUpdate: true,
-        },
-  );
+  const refusal = group
+    ? undefined
+    : await pinRefusal(
+        new Revisions(checkout, commit, signal),
+        plan.base,
+        commit,
+        sequence,
+        item
+          ? {
+              sourceDeclared: sourceDeclared([item]),
+              workspacePackageAdditions: workspaceAdditions(input.blocks)
+                .additions,
+              packageManagerUpdate: packageManagerUpdate(input.blocks),
+              predecessor: input.predecessor,
+              requirePackageManagerUpdate: input.requirePackageManagerUpdate,
+            }
+          : {
+              sourceDeclared: [
+                ...sourceDeclared(plan.items),
+                ...plan.finalCommands,
+              ],
+              workspacePackageAdditions: workspaceAdditions(input.blocks)
+                .additions,
+              packageManagerUpdate: packageManagerUpdate(input.blocks),
+              requirePackageManagerUpdate: true,
+            },
+      );
   if (refusal?.blame === "config")
     return hold(
       `${refusal.message}. The plan's commands or the Objective's declarations need this authority: edit the Objective's Sources or declarations and replan, or cancel.`,
@@ -572,9 +638,14 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       output: refusal.message,
     };
   const worktree = input.directory;
+  // The groups' checkouts an earlier run of this one left (`inGroups`).
+  const groupsRoot = `${worktree}.groups`;
   try {
+    if (group) crashPoint("validation:group-checkout:before");
+    else await forceRemove(groupsRoot);
     await removeWorktree(checkout, worktree, input.signal);
     await addWorktree(checkout, worktree, commit, input.signal, input.log);
+    if (group) crashPoint("validation:group-checkout:after");
   } catch (error) {
     input.signal.throwIfAborted();
     // Refused Git is the operator's to fix: the caller holds.
@@ -603,6 +674,9 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       // reads an empty configuration: no credentials.
       temporary = await made("factory-validation-");
       home = await made("factory-home-");
+      // A group starts from what the formatter left there.
+      if (group)
+        await cp(group.home, home, { recursive: true, verbatimSymlinks: true });
       credentials = await made("factory-gh-");
     } catch (error) {
       return {
@@ -707,7 +781,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
     // after the exact install when the sequence starts with one (the
     // formatter is usually a dependency), else before the first command
     // (positions in `order`, which keeps the install first).
-    const formatter = item ? input.format : undefined;
+    const formatter = item && !group ? input.format : undefined;
     const formatAt = formatter
       ? sequence.length && packageBootstrap(sequence[0]!) !== undefined
         ? 1
@@ -781,12 +855,214 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
       const diff = await boundedDiff(worktree, changes, signal);
       return `Validation command modified the result tree: \`${command}\` ${what}. Validation runs on the result as committed, so each command must leave it unchanged, writing only files Git ignores.${diff ? `\n\n${diff}` : ""}`;
     };
+    // The commands after the install and the formatter, in groups that
+    // need nothing of each other (#2290); one group runs as before.
+    const setup =
+      order[0] === 0 && packageBootstrap(sequence[0] ?? "") !== undefined
+        ? 1
+        : 0;
+    // Each group runs the exact install again in its own checkout, so
+    // only where that install reuses a warm store: a Work Item's kept or
+    // shared one, or the operator's sandbox.packageStore.
+    const groups =
+      item &&
+      !group &&
+      sandboxAvailable().available &&
+      (!setup || input.installStore || input.sandbox.packageStore)
+        ? commandGroups(item.validation, order.slice(setup))
+        : [];
+    let grouped = false;
+    /**
+     * The groups at once, each in a fresh checkout of the commit the
+     * install and the formatter left, which runs that exact install
+     * again on the warm store, so no group shares a file with another
+     * or with this checkout; and each with its own HOME, TMPDIR,
+     * services and validation slot. The first group to stop ends the
+     * others. Its failure is the run's when no command of another group
+     * comes before it in run order, so its checkout had every command a
+     * run in that order gives it; any other failure (one an `after` that
+     * leaves out what a command needs could cause, or a group's own
+     * install) is decided by the run in that order here, in this
+     * checkout no group touched, with services of its own (undefined).
+     * Results, artifacts and produced files come back in run order.
+     * Undefined also when no other group gets a slot.
+     */
+    const inGroups = async (): Promise<Validation | undefined> => {
+      // Earlier captures go first, as a capture with none before does.
+      if (capture && !artifacts.length) await forceRemove(capture.dir);
+      // The step's own reservation runs one group; each other one at the
+      // same time takes a validation slot, only while the host has one
+      // free (engine.ts HostLimiter).
+      let slots = 1;
+      while (slots < groups.length && hostLimits.acquire("cpu")) slots += 1;
+      if (slots === 1) return undefined;
+      input.log({ event: "validation-groups", groups, slots });
+      // The groups' commands use services of their own, never these.
+      await services?.stop();
+      services = undefined;
+      const lanes: Group[] = groups.map((commands, number) => {
+        const run = [...order.slice(0, setup), ...commands];
+        return { number, order: run, commit, home, at: run[0]! };
+      });
+      const directory = (lane: Group) => join(groupsRoot, String(lane.number));
+      const stop = new AbortController();
+      const laneSignal = AbortSignal.any([signal, stop.signal]);
+      const outcomes = new Map<Group, Validation>();
+      const end: { stopped?: Group; error?: unknown } = {};
+      let next = 0;
+      const lane = async (reserved: boolean) => {
+        try {
+          while (next < lanes.length && !stop.signal.aborted) {
+            const running = lanes[next++]!;
+            try {
+              const outcome = await validateCandidate(
+                {
+                  ...input,
+                  directory: directory(running),
+                  returnTo: undefined,
+                  // The lockfile is resolved: `commit` is Factory's.
+                  lockfile: undefined,
+                  signal: laneSignal,
+                  ...(capture && {
+                    reviewArtifacts: {
+                      ...capture,
+                      dir: join(capture.dir, `group-${running.number}`),
+                    },
+                  }),
+                },
+                running,
+              );
+              // Stopped by another group: its answer doesn't count.
+              if (stop.signal.aborted) continue;
+              outcomes.set(running, outcome);
+              if (outcome.kind !== "passed") {
+                end.stopped = running;
+                stop.abort();
+              }
+            } catch (error) {
+              if (!stop.signal.aborted) {
+                end.error = error;
+                stop.abort();
+              }
+            }
+          }
+        } finally {
+          if (reserved) hostLimits.release("cpu");
+        }
+      };
+      try {
+        await Promise.all(
+          Array.from({ length: slots }, (_, slot) => lane(slot > 0)),
+        );
+        signal.throwIfAborted();
+        if (end.error !== undefined) throw end.error;
+        const returned = async (from: readonly Group[]) => {
+          if (!input.returnTo || !item) return undefined;
+          const reports: string[] = [];
+          for (const each of from) {
+            const report = await returnProduced(
+              directory(each),
+              input.returnTo,
+              item,
+              signal,
+            );
+            if (report) reports.push(report);
+          }
+          return reports.join("\n\n") || undefined;
+        };
+        const { stopped } = end;
+        if (stopped) {
+          const outcome = outcomes.get(stopped)!;
+          if (outcome.kind !== "failed") return outcome;
+          const at = order.indexOf(stopped.at);
+          if (
+            at < setup ||
+            order
+              .slice(setup, at)
+              .some((index) => !stopped.order.includes(index))
+          ) {
+            input.log({ event: "validation-groups-rerun", index: stopped.at });
+            const up = await validationServices(input);
+            if (up && !(up instanceof AttemptServices)) return up;
+            services = up;
+            return undefined;
+          }
+          produced = await returned([stopped]);
+          return {
+            ...outcome,
+            tree,
+            commands: ran,
+            // The install's result is this checkout's.
+            results: [...results, ...outcome.results.slice(setup)],
+            ...(produced && { produced }),
+            ...(regenerated && { regenerated }),
+            ...(formatted && { formatted }),
+          };
+        }
+        const position = (index: number) => order.indexOf(index);
+        const passed = lanes.map(
+          (each) =>
+            outcomes.get(each) as Extract<Validation, { kind: "passed" }>,
+        );
+        produced = await returned(lanes);
+        return {
+          kind: "passed",
+          tree,
+          commands: ran,
+          results: [
+            ...results,
+            ...lanes
+              .flatMap((each, n) =>
+                each.order.slice(setup).map((index, at) => ({
+                  index,
+                  result: passed[n]!.results[setup + at]!,
+                })),
+              )
+              .sort((a, b) => position(a.index) - position(b.index))
+              .map(({ result }) => result),
+          ],
+          ...(produced && { produced }),
+          ...(capture && {
+            artifacts: [
+              ...artifacts,
+              ...passed.flatMap((each) =>
+                (each.artifacts ?? []).filter(
+                  (artifact) => position(artifact.commandIndex) >= setup,
+                ),
+              ),
+            ].sort(
+              (a, b) => position(a.commandIndex) - position(b.commandIndex),
+            ),
+          }),
+          ...(regenerated && { regenerated }),
+          ...(formatted && { formatted }),
+        };
+      } finally {
+        // Every group's files at once, then each registration. `rm`
+        // removes a dependency tree many times faster than Node's own;
+        // forceRemove takes what it leaves (a read-only directory).
+        await execFileAsync("rm", ["-rf", "--", groupsRoot]).catch(
+          () => undefined,
+        );
+        await forceRemove(groupsRoot);
+        for (const each of lanes)
+          await removeWorktree(checkout, directory(each), signal).catch(
+            () => undefined,
+          );
+      }
+    };
     for (let position = 0; position < order.length; position++) {
       if (position === formatAt && !formatRan) {
         const stopped = await format();
         if (stopped) return stopped;
       }
+      if (position === setup && groups.length > 1 && !grouped) {
+        grouped = true;
+        const decided = await inGroups();
+        if (decided) return decided;
+      }
       const index = order[position]!;
+      if (group) group.at = index;
       const command = sequence[index]!;
       const preparing = index < preparation.length;
       // Only Factory's exact script-disabled install, run first (before any
@@ -841,6 +1117,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         index,
         command,
         preparing,
+        ...(group && { group: group.number }),
         ...(store && {
           installStore: store.reused ? "reused" : "new",
           ...(store.shared && { installStoreShared: true }),
@@ -911,6 +1188,7 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
         index,
         command,
         passed,
+        ...(group && { group: group.number }),
         exitCode: run.exitCode,
         durationMs,
         // A failed command keeps what its repair sees: its head and tail,
@@ -1153,9 +1431,10 @@ async function validateCandidate(input: ValidateInput): Promise<Validation> {
   } finally {
     await services?.stop();
     await Promise.all(scratch.map((path) => forceRemove(path)));
-    await removeWorktree(checkout, worktree, input.signal).catch(
-      () => undefined,
-    );
+    if (!group)
+      await removeWorktree(checkout, worktree, input.signal).catch(
+        () => undefined,
+      );
   }
 }
 

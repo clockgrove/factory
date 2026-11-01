@@ -414,9 +414,14 @@ async function integratedValidation(input: {
     })),
     signal,
   });
-  const validation = own.filter(
+  const kept = own.filter(
     (check) => !changed.some((entry) => entry.command === check.command),
   );
+  // A command left out shifts the indices `after` names: declared order.
+  const validation =
+    kept.length < item.validation.length
+      ? kept.map(({ command }) => ({ command }))
+      : kept;
   context.log({
     event: "integrated-validation",
     item: item.id,

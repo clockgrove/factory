@@ -11,6 +11,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
+import { hostLimits } from "../dist/engine.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { checkPlan } from "../dist/planning/checks.js";
 import { BaseFiles, buildFacts } from "../dist/planning/facts.js";
@@ -172,6 +173,15 @@ test("a full run starts with the failed command and what it needs; a targeted ru
 const skip = sandboxAvailable().available
   ? false
   : "needs the command sandbox (bubblewrap)";
+
+// No validation slot is free, so each run keeps one checkout and its
+// commands run in the order these tests prove; groups that run at once
+// are validation-groups.test.mjs.
+hostLimits.configure({
+  caps: { worker: 2, cpu: 0, planner: 4, github: 2 },
+  reserveMiB: { worker: 0, cpu: 0, planner: 0, github: 0 },
+  budgetMiB: Number.MAX_SAFE_INTEGER,
+});
 
 // A build, a check of what it built (ignored output, as a build's is), and
 // a lint that needs neither.

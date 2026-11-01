@@ -143,3 +143,37 @@ test("each validation run gets its own fresh services, passes only with them up,
   );
   assert.deepEqual(directories(), []);
 });
+
+test("each group of a validation's independent commands gets its own services (#2290)", async () => {
+  const target = repository();
+  const sandbox = servicesSandbox(await closedPort());
+  const work = item("a", {
+    validation: ["g0", "g1"].map((value, index) => ({
+      command: commands(value).join(" && "),
+      ...(index && { after: [] }),
+    })),
+  });
+  const events = [];
+  const result = await validateTree({
+    checkout: target.checkout,
+    repository: "example/target",
+    directory: join(target.checkout, "..", "groups.validation"),
+    commit: target.candidate,
+    item: work,
+    plan: plan([work], { base: target.base }),
+    blocks: [],
+    base: target.base,
+    sandbox,
+    commandTimeoutMs: 60_000,
+    signal: AbortSignal.timeout(120_000),
+    log: (event) => events.push(event),
+    runFile: (kind) => log.runFile(1, `item:a:validate#2.${kind}`),
+  });
+  // Both groups ran at once, and each found its service empty: one
+  // shared, or the run in declared order, sees the other's value.
+  assert.equal(result.kind, "passed", JSON.stringify(result));
+  const kinds = events.map((event) => event.event);
+  assert.ok(kinds.includes("validation-groups"));
+  assert.ok(!kinds.includes("validation-groups-rerun"));
+  assert.deepEqual(directories(), []);
+});

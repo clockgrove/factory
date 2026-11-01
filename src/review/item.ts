@@ -466,8 +466,19 @@ export async function reviewCandidate(
         for (const index of missing) findings[index] ??= first.unproven[index];
       }
     }
-    if (guard && guarded !== undefined && open.includes(guarded))
-      findings[guarded] = guardFinding(input, await guard, findings[guarded]);
+    if (guard && guarded !== undefined && open.includes(guarded)) {
+      const ran = await guard;
+      input.log({
+        event: "result-review-protected",
+        files: changed.length,
+        failed: ran.failed,
+        ...(ran.error && { error: ran.error }),
+        seen: ran.seen,
+        ...(ran.run && { exitCode: ran.run.exitCode }),
+        ms: ran.ms,
+      });
+      findings[guarded] = guardFinding(input, ran, findings[guarded]);
+    }
     let review = outcome(criteria, findings, settled, tree, evidence, final);
     // A question about what the evidence root holds goes back once.
     const asking = open.flatMap((criterionIndex) => {
@@ -495,17 +506,6 @@ export async function reviewCandidate(
         take(findings, again, indices);
         review = outcome(criteria, findings, settled, tree, evidence, final);
       }
-    }
-    if (guard) {
-      const ran = await guard;
-      input.log({
-        event: "result-review-protected",
-        files: changed.length,
-        failed: ran.failed,
-        seen: ran.seen,
-        ...(ran.run && { exitCode: ran.run.exitCode }),
-        ms: ran.ms,
-      });
     }
     for (const index of open) {
       const finding = findings[index];
@@ -703,30 +703,43 @@ async function protectedCheck(
   } catch (error) {
     return { ...ran, unavailable: error };
   }
-  try {
-    const copy = await checkout.copy("protected");
+  // One that can't finish runs once more, in a fresh copy.
+  for (let attempt = 0; attempt < 2 && !stop.aborted; attempt++) {
+    delete ran.error;
     try {
-      ran.run = await copy.run(command, input.limits.commandMs, stop);
-    } finally {
-      await copy.remove();
+      const copy = await checkout.copy("protected");
+      try {
+        ran.run = await copy.run(command, input.limits.commandMs, stop);
+      } finally {
+        await copy.remove();
+      }
+      const { exitCode, timedOut } = ran.run;
+      if (
+        !timedOut &&
+        exitCode !== null &&
+        exitCode !== 125 &&
+        !NOT_RUN.has(exitCode)
+      ) {
+        ran.failed = exitCode !== 0;
+        ran.ms = Date.now() - started;
+        return ran;
+      }
+      ran.error = timedOut
+        ? `it reached its ${input.limits.commandMs} ms limit`
+        : `it ended with ${exitCode ?? "a signal"} before its tests ran`;
+    } catch (error) {
+      ran.error = errorMessage(error);
     }
-    const { exitCode, timedOut } = ran.run;
-    ran.failed =
-      !timedOut &&
-      exitCode !== null &&
-      exitCode !== 0 &&
-      exitCode !== 125 &&
-      !NOT_RUN.has(exitCode);
-  } catch (error) {
-    ran.error = errorMessage(error);
   }
   ran.ms = Date.now() - started;
   return ran;
 }
 
 /**
- * The protected-test criterion's verdict: met when the base's tests pass
- * (or the check couldn't tell); when they fail, the reviewer's pass, note
+ * The protected-test criterion's verdict: met when the base's tests pass;
+ * a check that couldn't finish twice is never met: the review takes
+ * validation's environment path (a retry, then a hold). When they fail,
+ * the reviewer's pass, note
  * or question of it stands only if it saw that failure (`checks`), and
  * otherwise it is a confirmed refusal with the check's command as its
  * repro: the failure itself needs no judgement.
@@ -737,14 +750,15 @@ function guardFinding(
   reviewed: Finding | undefined,
 ): Finding {
   if (ran.unavailable) throw ran.unavailable;
-  if (!ran.failed || !ran.run)
+  if (ran.error || !ran.run)
+    throw new ScratchUnavailable({
+      kind: "retry",
+      reason: `The protected-test check of ${ran.files.join(", ")} could not finish, twice: ${ran.error ?? "no result"}. It runs again with the review; the host's environment (its toolchains, services or load) is the likely cause.`,
+    });
+  if (!ran.failed)
     return {
       verdict: "pass",
-      detail: ran.run
-        ? ran.run.timedOut
-          ? "The protected-test check reached its time limit."
-          : "The base's version of each changed test passes on the result."
-        : `The protected-test check could not run: ${ran.error ?? "no result"}.`,
+      detail: "The base's version of each changed test passes on the result.",
       evidence: [],
       question: "",
     };
@@ -894,11 +908,17 @@ function reviewTools(
         const { status, note, seeded, killed, survived, survivors } =
           await mutants;
         const ran = await guard;
-        if (ran) ran.seen = true;
+        if (ran && !ran.error) ran.seen = true;
         return JSON.stringify({
           mutationPass: {
             status,
             ...(note && { note }),
+            // Nothing measured is no evidence either way.
+            ...(seeded > 0 &&
+              killed + survived === 0 && {
+                measured:
+                  "No mutant was measured, so the pass shows nothing about the tests' strength.",
+              }),
             seeded,
             killed,
             survived,
@@ -907,7 +927,11 @@ function reviewTools(
           ...(ran && {
             protectedTests: {
               files: ran.files,
-              passed: !ran.failed,
+              result: ran.error
+                ? "unfinished"
+                : ran.failed
+                  ? "failed"
+                  : "passed",
               ...(ran.run && {
                 exitCode: ran.run.exitCode,
                 output: failureExcerpt(ran.run.output, 4000),

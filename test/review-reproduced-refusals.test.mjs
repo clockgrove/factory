@@ -377,6 +377,7 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
   let ran;
   let offline;
   let survivors;
+  let where;
   const planner = answering(async (call) => {
     // The mutation pass runs beside the reviewer, which waits for it here.
     survivors = JSON.parse(await tool(call, "checks")).mutationPass;
@@ -384,6 +385,9 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
     offline = await command(call, fetch);
     // The scratch is a copy: a write there never reaches the candidate.
     await command(call, "echo changed > src/reduce.js");
+    // It appears at the workspace's path, where the install's recorded
+    // paths (pnpm's workspace state) hold.
+    where = await command(call, "pwd");
     return {
       findings: [pass(0, `The test ran: ${ran.split("\n")[1]}`), pass(1)],
     };
@@ -391,6 +395,7 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
   const { run, events } = review(repo, planner);
   const outcome = await run;
   assert.match(ran, /^Exit code 0 .*\ntested/);
+  assert.equal(where.split("\n")[1], `${repo.checkout}.scratch`);
   assert.match(offline, /^Exit code 7 .*\nno network/);
   assert.equal(outcome.kind, "pass");
   assert.equal(outcome.verdicts[0].detail, "The test ran: tested");
@@ -402,11 +407,11 @@ test("R4: the reviewer runs a test in its scratch copy and cites its output; the
     JSON.stringify(survivors),
   );
   const logged = events.find((event) => event.event === "result-review");
-  assert.equal(logged.commands, 3);
+  assert.equal(logged.commands, 4);
   assert.deepEqual(logged.mutants.seeded, survivors.seeded);
   for (const phase of ["prepareMs", "mutationMs", "modelMs", "reprosMs"])
     assert.equal(typeof logged.phases[phase], "number", phase);
-  assert.equal(logged.phases.commands.count, 3);
+  assert.equal(logged.phases.commands.count, 4);
   // The same call fails as a validation command.
   const { validation, work } = setup(repo);
   const validated = await validateTree({
@@ -476,6 +481,30 @@ test("a result that deletes an existing assertion is refused by the protected-te
     directory: `${repo.checkout}.validation`,
   });
   assert.equal(validated.kind, "passed", validated.detail);
+});
+
+test("a protected-test check that can't finish twice is never met: the review takes the environment's retry", {
+  skip,
+}, async () => {
+  const repo = target(REDUCER);
+  // The base holds the test; the candidate changes it.
+  repo.base = repo.head;
+  repo.head = repo.commit({ "test/reduce.test.js": `${TEST}// changed\n` });
+  repo.tree = git(repo.checkout, "rev-parse", "HEAD^{tree}");
+  const planner = answering({ findings: [pass(0), pass(1)] });
+  const { run, events } = review(repo, planner, {
+    mutation: { commands: ["sleep 5"], seed: "reduce" },
+    limits: { ...LIMITS, mutants: 0, commandMs: 1000 },
+  });
+  await assert.rejects(run, (error) => {
+    assert.equal(error.outcome.kind, "retry");
+    assert.match(error.outcome.reason, /could not finish, twice/);
+    return true;
+  });
+  assert.match(
+    events.find((event) => event.event === "result-review-protected").error,
+    /limit/,
+  );
 });
 
 test("R6: any command the item's validation runs proves any criterion; the plan's command binding never reaches the review", async () => {

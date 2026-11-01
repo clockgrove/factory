@@ -34,7 +34,7 @@ import { oneLine } from "../text.js";
 import { declarationProblems } from "../validate.js";
 import { fact, facts as keptFacts } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
-import { observeLocalExecutables } from "./executables.js";
+import { observeLocalExecutables, sandboxProvisioning } from "./executables.js";
 import {
   BaseFiles,
   buildFacts,
@@ -1605,6 +1605,10 @@ export function localExecutables(
     base: inputs.base,
     blocks: inputs.shown.blocks,
     finalCommands: finalCommands(config.finalValidation.requiredCommands),
+    sandbox: sandboxProvisioning(
+      config.sandbox,
+      config.policy.allowedSecretNames,
+    ),
     signal,
   });
 }

@@ -1,10 +1,18 @@
 import { execFile } from "node:child_process";
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { satisfies, validRange } from "semver";
+import type { SandboxConfig } from "../config.js";
+import { within } from "../paths.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { misePinFix } from "../toolchain.js";
 import { BaseFiles } from "./facts.js";
@@ -20,7 +28,10 @@ const run = promisify(execFile);
  * a missing tool or a version mismatch is a problem the operator fixes on the
  * host. Nothing here runs a target command: the only processes started are
  * `--version` probes of host node/npm/pnpm, in an empty directory with no
- * network.
+ * network. The observations also carry the sandbox's provisioning facts:
+ * its read-only mounts and fixed environment, so the planner and reviewer
+ * can tell a tool every sandbox gets from a host path its private HOME
+ * hides (#2337).
  */
 
 export type ExecutableStatus =
@@ -51,6 +62,56 @@ export interface LocalExecutables {
   /** The base's Node pin the host's node must satisfy. */
   node?: NodePin;
   observations: ExecutableObservation[];
+  /** What every sandboxed command is given beyond the PATH; absent when nothing is configured. */
+  sandbox?: SandboxProvisioning;
+}
+
+/**
+ * The sandbox's `readOnlyPaths`, each with whether it exists on this host,
+ * and its `environment` names. A value is shown only when it is an absolute
+ * path, with whether it exists and whether an existing read-only path
+ * mounts it; other values are never shown.
+ */
+export interface SandboxProvisioning {
+  readOnlyPaths: { path: string; exists: boolean }[];
+  environment: {
+    name: string;
+    path?: string;
+    exists?: boolean;
+    mounted?: boolean;
+  }[];
+}
+
+/**
+ * The provisioning facts of a sandbox config, or undefined when it mounts
+ * and sets nothing. A name in `secretNames` (policy.allowedSecretNames) is
+ * left out, whatever its value.
+ */
+export function sandboxProvisioning(
+  sandbox: Pick<SandboxConfig, "readOnlyPaths" | "environment">,
+  secretNames: readonly string[] = [],
+): SandboxProvisioning | undefined {
+  const readOnlyPaths = sandbox.readOnlyPaths.map((path) => ({
+    path,
+    exists: existsSync(path),
+  }));
+  const environment = Object.entries(sandbox.environment)
+    .filter(([name]) => !secretNames.includes(name))
+    .map(([name, value]) =>
+      isAbsolute(value)
+        ? {
+            name,
+            path: value,
+            exists: existsSync(value),
+            mounted: readOnlyPaths.some(
+              (root) => root.exists && within(value, root.path),
+            ),
+          }
+        : { name },
+    );
+  return readOnlyPaths.length || environment.length
+    ? { readOnlyPaths, environment }
+    : undefined;
 }
 
 const VERSION_PROBE_TIMEOUT_MS = 30_000;
@@ -318,9 +379,11 @@ export async function observeLocalExecutables(args: {
   /** The Objective's shown structure: its Package manager update. */
   blocks: readonly ObjectiveBlock[];
   finalCommands: string[];
+  /** The sandbox's provisioning facts (sandboxProvisioning). */
+  sandbox?: SandboxProvisioning;
   signal?: AbortSignal;
 }): Promise<{ observations: LocalExecutables | null; problems: string[] }> {
-  const { checkout, base, blocks, finalCommands, signal } = args;
+  const { checkout, base, blocks, finalCommands, sandbox, signal } = args;
   const problems: string[] = [];
 
   const update = packageManagerUpdate(blocks);
@@ -334,9 +397,15 @@ export async function observeLocalExecutables(args: {
       );
   }
   const policy = update ?? baseline;
-  if (!finalCommands.length) return { observations: null, problems };
-
   const path = process.env.PATH ?? "/usr/bin:/bin";
+  if (!finalCommands.length)
+    return {
+      observations: sandbox
+        ? { base, path, finalCommands, observations: [], sandbox }
+        : null,
+      problems,
+    };
+
   const targetRoot = `${realpath(checkout)}${sep}`;
   const pin = exactPin(policy);
   const node = await nodePin((file) => files.text(file));
@@ -474,6 +543,7 @@ export async function observeLocalExecutables(args: {
       ...(typeof policy === "string" ? { packageManager: policy } : {}),
       ...(node ? { node } : {}),
       observations,
+      ...(sandbox ? { sandbox } : {}),
     },
     problems,
   };

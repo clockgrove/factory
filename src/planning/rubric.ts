@@ -88,6 +88,16 @@ function validationNetworkRule(hostNetwork: boolean): string {
     : "A script that runs a network tool (an init, install, fetch or audit) fails in validation, which has no network: never select one.";
 }
 
+/**
+ * How the planner and the plan reviewers read the sandbox's provisioning
+ * facts (executables.ts `sandboxProvisioning`). Live, the graph reviewer
+ * held every Objective with a real-browser command, asking how validation
+ * gets Chromium, though a read-only mount and the variable naming it were
+ * configured: it saw only the command executables (#2337).
+ */
+export const SANDBOX_PROVISIONING =
+  "Provisioned tools: the controller's local executable observations (FACTORY_LOCAL_EXECUTABLE_OBSERVATIONS in a plan review) hold, under sandbox, the installation's read-only mounts (sandbox.readOnlyPaths), each with whether it exists on this host, and the names of the fixed variables every validation command gets (sandbox.environment), an absolute-path value with whether it exists and whether an existing mount covers it. A tool in an existing mount, located by a variable whose path exists and is mounted (such as PLAYWRIGHT_BROWSERS_PATH naming a browser directory), is provisioned in every validation sandbox although HOME there is private and empty: that is evidence the tool is ready, not a prerequisite to ask about. A tool only a path under the host user's HOME provides (such as a browser cache there) is not visible to validation, a variable whose path is missing or not mounted provisions nothing, and a mount that does not exist stops every sandboxed command until the operator creates it or removes it: those remain operator prerequisites.";
+
 /** What every Work Item contains and leaves out; shared by the planner and the graph reviewer. */
 export function workItemStandard(hostNetwork: boolean): string {
   return `Work Item standard. A plan says what must be true when the work is done and what other items rely on. The worker decides how from the real code, and its result reviewer checks the result against that code. A result is reviewed only against its own item's fields, so each item is complete and checkable on its own.
